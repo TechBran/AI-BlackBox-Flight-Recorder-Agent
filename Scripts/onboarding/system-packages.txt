@@ -1,0 +1,38 @@
+# AI BlackBox System Package Requirements (Ubuntu 24.04)
+# Format: <package> # <bucket> # <reason>
+
+# === MUST_HAVE — system won't start without ===
+python3.12               # MUST_HAVE # Python runtime
+python3.12-venv          # MUST_HAVE # virtualenv creation
+python3-pip              # MUST_HAVE # pip
+build-essential          # MUST_HAVE # cffi/cryptography source builds
+git                      # MUST_HAVE # repo updates
+curl                     # MUST_HAVE # health checks, tailscale install
+ca-certificates          # MUST_HAVE # TLS
+tmux                     # MUST_HAVE # CLI Agent session manager hardcodes
+sudo                     # MUST_HAVE # privileged operations
+python3-dbus             # MUST_HAVE # XDG portal screenshot subprocess
+python3-gi               # MUST_HAVE # GObject introspection for portal
+
+# === SHOULD_HAVE — degraded but functional ===
+chromium-browser         # SHOULD_HAVE # Tauri webview backend, kiosk fallback
+xdotool                  # SHOULD_HAVE # Computer Use input injection
+scrot                    # SHOULD_HAVE # X11 screenshot
+openbox                  # SHOULD_HAVE # CU window management
+x11vnc                   # SHOULD_HAVE # remote desktop CU
+mpg123                   # SHOULD_HAVE # audio playback
+alsa-utils               # SHOULD_HAVE # audio devices
+pulseaudio-utils         # SHOULD_HAVE # PulseAudio control
+
+# === FEATURE_OPTIONAL ===
+docker.io                # FEATURE_OPTIONAL # phone integration (FreeSwitch/Drachtio)
+docker-compose           # FEATURE_OPTIONAL # phone integration
+adb                      # FEATURE_OPTIONAL # Android device pairing routes
+
+# === HARDWARE_OPTIONAL — only if hardware present ===
+modemmanager             # HARDWARE_OPTIONAL # cellular modem
+network-manager          # HARDWARE_OPTIONAL # cellular APN
+# (UGV-stack packages live in docs/ugv-beast/, not installed on mini-PC)
+
+# === DEV_ONLY — for development, not customer install ===
+# (See requirements.dev.txt for Python dev deps)
