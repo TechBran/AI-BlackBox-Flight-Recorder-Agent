@@ -4,7 +4,9 @@
 
 **Goal:** Build a customer-facing first-run onboarding experience for AI BlackBox — a Tauri standalone app that wraps Portal `/onboarding` routes, walks the customer through Tailscale install, BYOK API keys, optional integrations, QR phone pairing, operator setup, and completion handoff. Ships as the first-boot experience on pre-installed mini-PC hardware.
 
-**Architecture:** Tauri (Rust) shell wraps a webview pointing at `http://localhost:9091/onboarding`. Portal's existing FastAPI server hosts the wizard UI as HTML/CSS/JS. Tauri shell provides full-screen branded chrome, taskbar icon, no browser address bar. After completion, app self-disables and Portal becomes the regular kiosk view. Six implementation tracks: Foundation Cleanup → Onboarding Backend → Portal Wizard UI → Tauri Shell → Install Scripts → Customer Docs.
+**Architecture:** Tauri (Rust) shell wraps a webview pointing at `http://localhost:9091/onboarding`. Portal's existing FastAPI server hosts the wizard UI as HTML/CSS/JS. Tauri shell provides full-screen branded chrome, taskbar icon, no browser address bar. After completion, app self-disables and Portal becomes the regular kiosk view. Six implementation tracks executed in dependency order: **Foundation Cleanup → Onboarding Backend → Portal Wizard UI → Tauri Shell → Install Scripts → Customer Docs.** Track 5 (docs) drafts can begin earlier but finalize after Track 2.
+
+> **⚠ Critical-resource serialization rule:** `Orchestrator/app.py` is touched by **at least 5 tasks across Tracks 0/1/2** (router includes, middleware, static mount). NEVER dispatch two `app.py`-touching tasks in parallel. Land each as a small sequential commit with a single owner. This is the most likely merge-conflict surface in the entire plan.
 
 **Tech Stack:** FastAPI (existing), Python 3.12 (existing), HTML/CSS/JS (Portal modules pattern, existing), Tauri 2.x (Rust, new), Cargo (Rust toolchain, new), `qrcode` Python lib (new), `python-dotenv` (existing), systemd (existing), `.desktop` autostart files (new).
 
@@ -44,23 +46,25 @@ These are reasonable defaults baked into this plan. **The audit session may over
 | 1 | Platform support v1 | **Ubuntu 24.04 LTS only** | Matches shipped hardware; keeps Track 0 scope tight. v1.1 can add Debian-likes (Pop!_OS, Mint). |
 | 2 | Idempotency on re-run | **Detect-and-skip with override toggle** | If a step is already configured, show "Already configured ✓ — reconfigure?" toggle. Best UX. |
 | 3 | Migration vs fresh | **v1 = fresh install only** | Migration from existing install is a v1.5 feature. Most customers never migrate. |
-| 4 | Single vs multi-operator setup | **One operator at install (defaults to "Brandon"), "Add operator" deferred to System Menu** | Keeps wizard focused. Multi-operator workflows already exist in `SettingsSheet.kt` post-onboarding. |
-| 5 | Hardening at install time | **Auto-rotate weak default passwords** | Generate cryptographically-random replacements for Drachtio "cymru", FreeSWITCH "ClueCon", TG200 "password". Display once if user wants to record. |
-| 6 | Tier-1 integrations for v1 wizard | **OpenAI, Anthropic, Google, Tailscale, Gmail** | Top-5 most-used. Twilio / ElevenLabs / Asterisk / xAI / Perplexity → v1.1. Cellular + UGV → never in v1 wizard (FEATURE_OPTIONAL / HARDWARE_OPTIONAL). |
+| 4 | Single vs multi-operator setup | **Wizard collects 1+ operator name(s) from the customer; registers them via `/operator/add` so they exist in the system before Portal opens. "Brandon" stays as a code-level technical seed only — never shown as a default to customers.** | Pre-registers real operators so the customer doesn't have to set them up post-onboarding. Multi-name input via "Add another operator" button. The internal Brandon seed is analogous to the "system" operator used for apps — unchanged by wizard. |
+| 5 | Hardening at install time | **DROPPED — defer to v1.1.** Document existing weak defaults (Drachtio "cymru", FreeSWITCH "ClueCon", TG200 "password") in `docs/TROUBLESHOOTING.md` with manual-rotation instructions. | Auto-rotation requires cross-component coordination (Drachtio↔FreeSWITCH share a secret; rotating one without the other silently breaks SIP). Out of scope for v1 — implementation surface is large and the failure mode (broken phone in field) is the worst kind of regression. |
+| 6 | Tier-1 integrations for v1 wizard | **OpenAI, Anthropic, Google, Twilio, Tailscale, Gmail (6 providers).** ElevenLabs / Asterisk / xAI / Perplexity → v1.1. Cellular + UGV → never in v1 wizard. | Phone is a flagship BlackBox capability — Twilio belongs in v1 so the customer's first call works after onboarding without a return trip to System Menu. Validator: `client.api.accounts(sid).fetch()`. |
 | 7 | Hardware spec for shipped mini-PC | **TBD — Track 5 factory-image build is plan-skeletal** | Plan stays hardware-spec-agnostic for v1. When spec lands, fill in Track 5 image-build details. |
-| 8 | Tailscale customer flow | **Each customer owns their tailnet (own auth)** | Simpler architecture — no shared subdomain, no multi-tenancy on Brandon's account. Customer signs into their own Tailscale account during onboarding. |
+| 8 | Tailscale customer flow | **Each customer owns their tailnet (own auth) AND wizard handles "no account yet" path.** | Simpler architecture — no shared subdomain. New-to-Tailscale customers get an explicit "Don't have an account? → tailscale.com/start (~5 min)" branch with brief explainer. Skip → LAN-only remains as escape hatch. |
 
 ---
 
 ## How to Read This Plan
 
-- **Six tracks**, executed roughly in order (Track 0 must come first; 4 + 5 can parallel later tracks; Track 6 is post-v1).
+- **Six tracks**, executed in dependency order. Real critical path: **T0 → T1 → T2 → T3 → T4**. Track 5 (docs) drafts can begin during T2 but finalize after T2.8.1. Track 6 is post-v1 (deferred).
 - **Each track has phases**, each phase has **numbered tasks** (Task X.Y.Z format).
 - **Each task is bite-sized** (2-5 minutes of focused work) per the writing-plans skill convention.
 - **Every task includes:** Files (Create/Modify with absolute paths), Steps (with code where applicable), Test command (with expected output), Commit step.
 - **Commit cadence:** every 3-7 tasks typically; explicit Commit tasks are numbered.
 - **Tasks reference existing files to reuse** rather than inventing new patterns.
 - **Symbols:** `[skippable]` = task can be deferred without breaking later tasks; `[blocking]` = next task depends on this; `[parallel-safe]` = can be done concurrently with siblings.
+
+> **Track 4 sequencing correction (audit 2026-05-10):** Earlier text called Track 4 "parallelizable with Tracks 1+2." That is wrong. Track 4's `install.sh` Step 5 installs `installer/dist/blackbox-setup.deb` which is built in Track 3 (T3.6.1), and Step 4 (systemd unit) is the deferred Bucket B1 work from T0.3.7. Track 4 is the LAST execution track, not parallel.
 
 ---
 
@@ -72,9 +76,9 @@ These are reasonable defaults baked into this plan. **The audit session may over
 **Dependencies:** None — must come first
 **Outcome:** Fresh `git clone + setup` reproduces a working BlackBox; one secret-config import pattern; no hardcoded `/home/ai-black-box-fc/` strings; pairing endpoints in proper file with claim flow.
 
-## Phase 0.1: Pin `requirements.txt` from working venv
+## Phase 0.1: Generate transitive lockfile + system-package manifest
 
-**Background:** `requirements.txt` declares 11 packages; live venv has ~120. Need to capture the actual working set.
+**Background:** `requirements.txt` declares 9 direct packages (6 already pinned with `==`, 3 loose with `>=`). The live venv has ~103 installed packages — meaning ~94 transitive deps with no pinned source of truth. **The real gap is not "sparse pinning of direct deps" but "no transitive lockfile."** Solution: use `pip-compile` (or `uv lock`) to generate a fully-pinned `requirements.lock.txt` that reproduces the exact venv on a fresh install. Then keep `requirements.txt` for direct deps + maintain `system-packages.txt` for apt.
 
 ### Task 0.1.1: Snapshot current venv state
 
@@ -393,7 +397,15 @@ Service restart smoke test passes."
 
 ## Phase 0.3: BLACKBOX_ROOT + path resolver utility
 
-**Background:** 194 hardcoded `/home/ai-black-box-fc/...` references break on any other machine. Solution: one canonical `BLACKBOX_ROOT` env var + a `paths.py` utility every code path uses.
+**Background (re-baselined 2026-05-10 audit):** Earlier framing said "194 hardcoded paths" — that number was a glob across all extensions. Independent grep gives **328 total hits**, but they break down very unevenly:
+- **B3 (Python code): ~13 hits** — small. Real refactor is 1-2 hours. `MCP/blackbox_mcp_server.py` already uses `os.getenv("BLACKBOX_ROOT", ...)` fallback (good template).
+- **B4 (App HTML/JS Tailscale URLs): ~31 hits** — real user impact, breaks on any other machine.
+- **B5 (Markdown docs / examples in prose): ~207 hits** — bulk. Mostly placeholder substitution. **68 of these are inside this plan itself** (descriptive prose, not code requiring change — leave alone).
+- **B1 (systemd units): ~3 files** — handled at Track 4 install-time template substitution.
+- **B2 (config files like `.mcp.json`): ~5 files** — same install-time substitution.
+- **B6 (intentional examples in CLAUDE.md): ~10 hits** — leave alone.
+
+Solution stays the same: one canonical `BLACKBOX_ROOT` env var + a `paths.py` utility every code path uses. Just right-size the work — B3 is small, B5 is the bulk but boring, B1+B2 are deferred to Track 4.
 
 ### Task 0.3.1: Create the paths utility module
 
@@ -546,7 +558,10 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
   2>/dev/null | grep -v -E "venv/|node_modules/|/build/|\.gradle/|/Volume|/Manifest|/Fossils|/Archive|tasks\.db" \
   > /tmp/path-hits-raw.txt
 
-wc -l /tmp/path-hits-raw.txt   # confirm ~194
+wc -l /tmp/path-hits-raw.txt   # ~328 total expected (re-baselined 2026-05-10 audit)
+# Group by extension to confirm bucket sizes:
+awk -F: '{print $1}' /tmp/path-hits-raw.txt | awk -F. '{print $NF}' | sort | uniq -c | sort -rn
+# Expected approx: md=207, json=70, html=31, py=13, sh=4, others
 ```
 
 **Step 2: Categorize each hit into one of these buckets:**
@@ -1202,31 +1217,52 @@ def validate_gmail_oauth(client_id: str, client_secret: str) -> ValidationResult
         url, _ = flow.authorization_url()
         return {"auth_url_prefix": url.split("?")[0]}
     return _measure(_fn)
+
+
+def validate_twilio(account_sid: str, auth_token: str) -> ValidationResult:
+    """Validate Twilio credentials by fetching account metadata (no charge)."""
+    def _fn():
+        from twilio.rest import Client
+        client = Client(account_sid, auth_token)
+        acct = client.api.accounts(account_sid).fetch()
+        return {
+            "friendly_name": acct.friendly_name,
+            "status": acct.status,
+            "type": acct.type,
+        }
+    return _measure(_fn)
 ```
 
 **Step 2: Verify with the actual current keys (sanity check)**
 
 ```bash
 Orchestrator/venv/bin/python -c "
-from Orchestrator.onboarding.validators import validate_openai, validate_anthropic, validate_google, validate_tailscale
-from Orchestrator.config import OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY
+from Orchestrator.onboarding.validators import (
+    validate_openai, validate_anthropic, validate_google, validate_tailscale, validate_twilio
+)
+from Orchestrator.config import (
+    OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
+    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
+)
 print('OpenAI:', validate_openai(OPENAI_API_KEY))
 print('Anthropic:', validate_anthropic(ANTHROPIC_API_KEY))
 print('Google:', validate_google(GOOGLE_API_KEY))
 print('Tailscale:', validate_tailscale())
+print('Twilio:', validate_twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
 "
 ```
 
-Expected: all four print `ValidationResult(ok=True, latency_ms=…, detail={…})`.
+Expected: all five print `ValidationResult(ok=True, latency_ms=…, detail={…})`.
 
 **Step 3: Commit**
 
 ```bash
 git add Orchestrator/onboarding/validators.py
-git commit -m "feat(onboarding): tier-1 per-provider validators (OpenAI/Anthropic/Google/Tailscale/Gmail)
+git commit -m "feat(onboarding): tier-1 per-provider validators (OpenAI/Anthropic/Google/Twilio/Tailscale/Gmail)
 
 Each does a cheap 1-token (or metadata-only) call to confirm the credential works.
-Returns ValidationResult{ok, latency_ms, error?, detail?} for clean wizard UX."
+Returns ValidationResult{ok, latency_ms, error?, detail?} for clean wizard UX.
+Twilio promoted to Tier-1 per audit decision (phone is a flagship capability)."
 ```
 
 ## Phase 1.3: Onboarding routes
@@ -1635,14 +1671,31 @@ app.mount("/onboarding", StaticFiles(directory=str(resolve("Portal", "onboarding
 
 (Note: this mount must come AFTER all `/onboarding/*` API routes are registered, otherwise the static handler swallows them. Adjust ordering carefully — the API router with prefix `/onboarding` registers individual routes; the static mount handles the index. Verify with curl.)
 
-**Step 5: Test**
+**Step 5: Test — HARD-FAIL on mount-ordering bug**
 
 ```bash
 sudo systemctl restart blackbox.service && sleep 70
-curl -sI http://localhost:9091/onboarding/ | head -3
-# Should serve index.html
-curl -s http://localhost:9091/onboarding/state | python3 -m json.tool
-# API still works
+
+# (a) Static index serves
+curl -sI http://localhost:9091/onboarding/ | head -3 | grep -q "200" || { echo "FAIL: index.html not served"; exit 1; }
+
+# (b) CRITICAL: API route MUST still resolve to JSON, not be shadowed by static mount.
+# If StaticFiles is mounted BEFORE the APIRouter, the GET /onboarding/state below
+# will return the index.html instead of JSON. This test must fail loudly if so.
+RESP=$(curl -s http://localhost:9091/onboarding/state)
+echo "$RESP" | python3 -m json.tool >/dev/null 2>&1 || {
+    echo "FAIL: /onboarding/state did not return JSON — static mount is shadowing API routes."
+    echo "Fix: in app.py, register onboarding_routes router BEFORE app.mount('/onboarding', StaticFiles, ...)."
+    echo "Got: $RESP" | head -5
+    exit 1
+}
+
+# (c) POST endpoint also still resolves
+curl -s -X POST http://localhost:9091/onboarding/step/complete \
+  -H "Content-Type: application/json" -d '{"step":"welcome"}' \
+  | python3 -m json.tool >/dev/null || { echo "FAIL: POST /onboarding/step/complete shadowed"; exit 1; }
+
+echo "PASS: index served + API routes still resolve"
 ```
 
 **Step 6: Commit**
@@ -1713,15 +1766,20 @@ git commit -m "feat(portal-ob): welcome step component"
 **Files:**
 - Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/steps/tailscale.js`
 
-**Step 1: Component renders:**
-- Detection: probe `/onboarding/validate` with `{provider:"tailscale"}` on mount
-- If `ok=true`: show "Tailscale already configured ✓ — your hostname: X.tail-net.ts.net" + Continue
-- If `ok=false`:
-  - If `error` mentions "binary not found": show install instructions + copy-button for `curl -fsSL https://tailscale.com/install.sh | sudo sh`
-  - If `error` mentions "BackendState": show "Tailscale installed but not authenticated — run `sudo tailscale up`"
-  - "Re-check" button to re-validate
-  - "Skip for now" → LAN-only mode
-- On success, persist `BLACKBOX_TAILNET_HOSTNAME=<hostname>` via `/onboarding/save`
+**Step 1: Component renders four branches based on validator result:**
+
+- **A. Already configured** — `ok=true`: show "Tailscale already configured ✓ — your hostname: X.tail-net.ts.net" + Continue button. Persist `BLACKBOX_TAILNET_HOSTNAME=<hostname>` via `/onboarding/save`.
+
+- **B. Not installed** — error contains "binary not found": show install instructions + copy-button for `curl -fsSL https://tailscale.com/install.sh | sudo sh`. After they run it, "Re-check" button re-validates.
+
+- **C. Installed but not authenticated** — error contains "BackendState": show "Tailscale installed but not authenticated — run `sudo tailscale up`" with copy-button. "Re-check" button.
+
+- **D. New to Tailscale (no account yet)** — collapsible disclosure under the install instructions: **"Don't have a Tailscale account? It's free for personal use → tailscale.com/start (~5 min)"** with brief explainer:
+  > Tailscale is a private network that lets you reach your BlackBox from any device, anywhere. You'll create an account, install the client on your phone/laptop, and your devices form a secure mesh. Your BlackBox automatically gets a hostname like `mybox.tail-XXXX.ts.net` you can access from anywhere.
+
+  External link to `https://tailscale.com/start`. Returning to the wizard, they re-run install + auth.
+
+- **Always available:** "Skip for now → LAN-only mode" CTA. Skipping is non-destructive — Portal still works on `localhost:9091`; phone pairing requires same-LAN. Wizard records skip via `/onboarding/step/skip`.
 
 **Step 2: Commit**
 
@@ -1730,7 +1788,7 @@ git add Portal/onboarding/steps/tailscale.js
 git commit -m "feat(portal-ob): tailscale step — detect, install instructions, auth, hostname capture"
 ```
 
-### Phase 2.4 — API keys step (BYOK)
+### Phase 2.4 — API keys step (BYOK, Tier-1 = 4 LLM/AI providers)
 
 #### Task 2.4.1: API keys step component
 
@@ -1744,11 +1802,42 @@ git commit -m "feat(portal-ob): tailscale step — detect, install instructions,
 - "Save & continue" button (active when ≥1 provider validated)
 - On save: `POST /onboarding/save` with `{OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY}` (only the validated ones)
 
-**Step 2: Commit**
+**Step 2:** Twilio (phone) is collected in its own dedicated step (Phase 2.4b below) since it requires three fields (SID, Auth Token, Phone Number) and walks through external account setup.
+
+**Step 3: Commit**
 
 ```bash
 git add Portal/onboarding/steps/api_keys.js
 git commit -m "feat(portal-ob): API keys step — BYOK paste/validate/save for OpenAI, Anthropic, Google"
+```
+
+### Phase 2.4b — Phone (Twilio) step — NEW per audit decision
+
+#### Task 2.4b.1: Twilio phone setup step component
+
+**Files:**
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/steps/phone.js`
+- Modify: `Portal/onboarding/onboarding.js` — add `"phone"` between `"api_keys"` and `"optional_integrations"` in the `STEPS` array
+- Modify: `Orchestrator/onboarding/state.py` — add `"phone"` to `StepName` Literal + `ALL_STEPS`
+
+**Step 1: Component renders:**
+- Lede: "Phone integration — make and receive calls/SMS through your BlackBox. Optional but recommended for full functionality."
+- 3 paste fields: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (E.164 format, e.g. `+15551234567`)
+- "Get Twilio credentials →" expandable disclosure with brief walkthrough:
+  > 1. Sign up at twilio.com (~3 min, free trial credit)
+  > 2. Buy a phone number ($1/mo) — Console → Phone Numbers → Buy
+  > 3. Find your Account SID and Auth Token on Console homepage
+  > 4. Paste all three values here
+- "Validate" button → `POST /onboarding/validate` with `{provider:"twilio", credentials:{account_sid, auth_token}}`
+- Show ✓/✗ + account friendly_name on success
+- "Save & continue" → `POST /onboarding/save` with all 3 vars (only if validated)
+- "Skip for now" → records skip; phone integration off until configured later
+
+**Step 2: Commit**
+
+```bash
+git add Portal/onboarding/steps/phone.js Portal/onboarding/onboarding.js Orchestrator/onboarding/state.py
+git commit -m "feat(portal-ob): Twilio phone step — Tier-1 promotion per audit decision"
 ```
 
 ### Phase 2.5 — Optional integrations
@@ -1791,24 +1880,130 @@ git add Portal/onboarding/steps/pair_phone.js
 git commit -m "feat(portal-ob): phone pairing step — QR display + claim polling"
 ```
 
-### Phase 2.7 — Operator setup
+### Phase 2.7 — Operator setup (multi-name registration)
 
-#### Task 2.7.1: Operator step component
+#### Task 2.7.1: Operator step component — REWRITTEN per audit decision
+
+**Background:** Original draft pre-filled "Brandon" as the operator name, which is wrong for a stranger-customer product. Audit decision: the wizard collects the customer's actual operator name(s) and registers them via `/operator/add` so they exist in the system before Portal opens. The internal "Brandon" code-level seed (analogous to the "system" operator used by apps) stays untouched — customers never see it.
 
 **Files:**
 - Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/steps/operator.js`
 
-**Step 1: Component:**
-- Single-input "Your name" (defaults to current `Brandon`)
-- POST `/operator/add` with the name
-- "Add another operator later" — note about System Menu
-- Continue
+**Step 1: Component renders:**
+- Lede: "Who's using this BlackBox? You can add one or more operators — each gets their own conversation history, preferences, and operator-scoped memory. You can add more later from the System Menu."
+- Form starts with one empty `<input>` for primary operator name + placeholder `e.g. Sarah` (validation: non-empty, alphanumeric + underscore + dash, max 32 chars)
+- "+ Add another operator" button appends another input
+- "Remove" button on each row (except the first)
+- "Save & continue" button (disabled until at least one valid name)
 
-**Step 2: Commit**
+**Step 2: On submit:**
+- For each non-empty name field, `POST /operator/add` (existing endpoint, see `Orchestrator/routes/admin_routes.py` or wherever operator-add lives — verify path before implementing)
+- If any POST fails, show inline error per-row, allow user to fix and retry
+- On all-success: `POST /onboarding/save` with `{DEFAULT_OPERATOR: <first-name-entered>}` so Portal opens with that operator selected
+- `POST /onboarding/step/complete` and advance
+
+**Step 3: JS sketch:**
+
+```javascript
+export async function render(container, {next}) {
+    let operatorRows = [{id: 0, name: ""}];
+    let nextId = 1;
+
+    function repaint() {
+        container.innerHTML = `
+            <section class="ob-step ob-operator">
+                <h1 class="ob-step-title">Who's using this BlackBox?</h1>
+                <p class="ob-step-lede">
+                    Add one or more operators. Each gets their own conversation history,
+                    preferences, and memory. You can add more later from System Menu.
+                </p>
+                <div class="ob-operator-rows">
+                    ${operatorRows.map((row, idx) => `
+                        <div class="ob-operator-row" data-id="${row.id}">
+                            <input type="text" class="ob-input ob-operator-name"
+                                   placeholder="e.g. Sarah" value="${row.name}"
+                                   data-id="${row.id}" maxlength="32"
+                                   pattern="[A-Za-z0-9_-]+" />
+                            ${idx > 0 ? `<button class="ob-btn-icon ob-row-remove" data-id="${row.id}">×</button>` : ""}
+                        </div>
+                    `).join("")}
+                </div>
+                <button class="ob-btn ob-btn-text ob-add-op">+ Add another operator</button>
+                <button class="ob-btn ob-btn-primary" id="ob-operator-save">Save & continue →</button>
+                <div id="ob-operator-error" class="ob-error" hidden></div>
+            </section>
+        `;
+        wireHandlers();
+    }
+
+    function wireHandlers() {
+        container.querySelectorAll(".ob-operator-name").forEach(inp => {
+            inp.addEventListener("input", e => {
+                const row = operatorRows.find(r => r.id === Number(e.target.dataset.id));
+                if (row) row.name = e.target.value.trim();
+            });
+        });
+        container.querySelectorAll(".ob-row-remove").forEach(btn => {
+            btn.addEventListener("click", e => {
+                const id = Number(e.target.dataset.id);
+                operatorRows = operatorRows.filter(r => r.id !== id);
+                repaint();
+            });
+        });
+        container.querySelector(".ob-add-op").addEventListener("click", () => {
+            operatorRows.push({id: nextId++, name: ""});
+            repaint();
+        });
+        container.querySelector("#ob-operator-save").addEventListener("click", onSave);
+    }
+
+    async function onSave() {
+        const valid = operatorRows
+            .map(r => r.name.trim())
+            .filter(n => n && /^[A-Za-z0-9_-]+$/.test(n));
+        if (valid.length === 0) {
+            const err = container.querySelector("#ob-operator-error");
+            err.textContent = "Enter at least one operator name (letters, numbers, _ or -).";
+            err.hidden = false;
+            return;
+        }
+        for (const name of valid) {
+            const r = await fetch("/operator/add", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({operator: name}),
+            });
+            if (!r.ok) {
+                const err = container.querySelector("#ob-operator-error");
+                err.textContent = `Failed to add operator '${name}'. Try again.`;
+                err.hidden = false;
+                return;
+            }
+        }
+        await fetch("/onboarding/save", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({secrets: {DEFAULT_OPERATOR: valid[0]}}),
+        });
+        next();
+    }
+
+    repaint();
+}
+```
+
+**Step 4: Verify the `/operator/add` endpoint**
+Before merging, confirm the endpoint actually exists. If not, add it to whichever operator-management routes file is canonical (likely `Orchestrator/routes/admin_routes.py` or `agent_routes.py` — check first). The body is `{"operator": "<name>"}` and it should be idempotent (re-add returns 200 with no change).
+
+**Step 5: Commit**
 
 ```bash
 git add Portal/onboarding/steps/operator.js
-git commit -m "feat(portal-ob): operator step — single-operator setup, multi-op deferred to System Menu"
+git commit -m "feat(portal-ob): operator step — multi-name registration, no Brandon prefill
+
+Customer enters one or more operator names; each is POSTed to /operator/add
+so they exist in the system before Portal opens. First name becomes the
+default operator. Internal 'Brandon' code-level seed is unchanged."
 ```
 
 ### Phase 2.8 — Done / handoff
@@ -2378,23 +2573,68 @@ git commit -m "docs(integrations): <provider> setup walkthrough for onboarding"
 
 # Verification — End-to-End Smoke Test
 
-After Tracks 0-5 ship:
+After Tracks 0-5 ship, run all four scenarios — happy path is necessary but not sufficient:
+
+## Scenario 1 — Happy path (full configuration)
 
 1. **Provision a fresh Ubuntu 24.04 VM** (virt-manager or vagrant)
 2. **Clone the repo:** `git clone https://github.com/TechBran/blackbox-poc.git`
 3. **Run install:** `cd blackbox-poc && ./Scripts/install.sh` (~5-10 min)
 4. **Reboot:** `sudo reboot`
 5. **On boot:** Tauri setup app autostarts; wizard appears
-6. **Walk through wizard:** welcome → tailscale → API keys → optional integrations → phone pairing → operator → done
+6. **Walk through wizard:** welcome → tailscale → API keys (3 providers) → phone (Twilio) → optional integrations (Gmail) → phone pairing (QR) → operator (enter 2 operator names) → done
 7. **Click "Open Portal":** wizard closes; Portal launches; autostart `.desktop` removed
-8. **Verify:** `curl http://localhost:9091/health` returns `ok`; Portal shows chat interface; Brandon (or chosen name) is the operator
+8. **Verify:**
+   - `curl http://localhost:9091/health` returns `ok`
+   - Portal shows chat interface; both customer-entered operators selectable
+   - First operator is the default (matches `DEFAULT_OPERATOR` in `.env`)
+   - Tauri setup app does NOT relaunch on second reboot
 
-**Pass criteria:**
-- Total time from clean OS to working chat: <30 minutes including download
-- Customer never sees a terminal except for the install command itself
-- All keys validated successfully OR explicitly skipped
-- Phone pairs successfully via QR
-- Onboarding state persisted across Tauri app restart (resume mid-flow if interrupted)
+## Scenario 2 — Skip Tailscale (LAN-only mode)
+
+1. Fresh VM, install, reboot
+2. Wizard appears — at Tailscale step click "Skip for now → LAN-only mode"
+3. Continue through rest of wizard
+4. **Verify:**
+   - `BLACKBOX_TAILNET_HOSTNAME` is NOT in `.env` (or empty)
+   - Phone pairing step still works on same-LAN device
+   - `/health` includes `"tailscale_skipped": true` (or equivalent marker)
+   - Portal opens normally; no crashes from missing tailnet hostname
+
+## Scenario 3 — Resume after interrupt
+
+1. Fresh VM, install, reboot, wizard appears
+2. Walk through welcome + tailscale + API keys
+3. **Force-quit Tauri app** (or close laptop lid mid-wizard)
+4. Reopen Tauri app (or reboot)
+5. **Verify:**
+   - `.onboarding_state.json` exists with `current_step: "phone"` (or wherever you stopped)
+   - `.onboarding_complete` does NOT exist
+   - Wizard resumes at the step that was current when interrupted
+   - Previously-validated providers (OpenAI etc.) show as ✓ already-configured
+
+## Scenario 4 — `/onboarding/reset` for re-run
+
+1. After completing onboarding, run:
+   ```bash
+   curl -X POST http://localhost:9091/onboarding/reset
+   rm ~/.config/autostart/blackbox-setup.desktop
+   ```
+2. Reboot
+3. **Verify:**
+   - Tauri setup app launches again on boot
+   - Wizard starts at welcome (state cleared)
+   - Existing `.env` secrets preserved (reset clears progress, not credentials)
+
+## Pass criteria (all four scenarios)
+
+- Total time from clean OS to working chat (Scenario 1): **< 30 minutes** including download
+- Customer never sees a terminal except for the initial `./Scripts/install.sh` command
+- All keys validated successfully OR explicitly skipped (no silent failures)
+- Phone pairs successfully via QR (Scenario 1) and same-LAN (Scenario 2)
+- Onboarding state persisted across Tauri restart (Scenario 3)
+- Reset works without losing already-configured secrets (Scenario 4)
+- After completion, `~/.config/autostart/blackbox-setup.desktop` is removed; Tauri does not relaunch
 
 ---
 
@@ -2402,7 +2642,9 @@ After Tracks 0-5 ship:
 
 - **Track 6 (v2 software-only distribution)** — picks up after v1 ships
 - **Migration flow** — bringing existing snapshots/config/paired devices forward (v1.5)
-- **Tier-2 integrations** (Twilio, ElevenLabs, Asterisk, xAI, Perplexity) — v1.1
+- **Tier-2 integrations** (ElevenLabs, Asterisk, xAI, Perplexity) — v1.1. (Twilio promoted to Tier-1 per audit decision; was previously deferred.)
+- **Auto-rotate weak default passwords** (Drachtio "cymru", FreeSWITCH "ClueCon", TG200 "password") — deferred to v1.1 per audit decision. Cross-component coordination (Drachtio↔FreeSWITCH share secrets) is non-trivial. Document existing weak defaults in `docs/TROUBLESHOOTING.md` (Track 5) with manual-rotation instructions.
+- **Migrate `@app.on_event` → FastAPI lifespan** — `Orchestrator/startup.py` has 11 deprecated `@app.on_event` decorators. T1.3.2's middleware approach works fine in either pattern, so not blocking. Optional cleanup task.
 - **Hardware-spec-dependent tasks in Track 5** — fills in once spec lands
 - **GitHub Actions / CI** — independent of onboarding; can ship anytime
 - **LICENSE file** — independent
