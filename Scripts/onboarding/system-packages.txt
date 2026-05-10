@@ -28,11 +28,16 @@ pulseaudio-utils         # SHOULD_HAVE # PulseAudio control
 docker.io                # FEATURE_OPTIONAL # phone integration (FreeSwitch/Drachtio)
 docker-compose           # FEATURE_OPTIONAL # phone integration
 adb                      # FEATURE_OPTIONAL # Android device pairing routes
+asterisk                 # FEATURE_OPTIONAL # local PBX backend (TELEPHONY_PROVIDER=asterisk, see Orchestrator/asterisk/)
 
 # === HARDWARE_OPTIONAL — only if hardware present ===
 modemmanager             # HARDWARE_OPTIONAL # cellular modem
 network-manager          # HARDWARE_OPTIONAL # cellular APN
+policykit-1              # HARDWARE_OPTIONAL # cellular APN polkit rules (see Scripts/setup-cellular-polkit.sh)
 # (UGV-stack packages live in docs/ugv-beast/, not installed on mini-PC)
 
 # === DEV_ONLY — for development, not customer install ===
-# (See requirements.dev.txt for Python dev deps)
+# Python dev deps: see requirements.dev.txt
+# Tauri build deps (libwebkit2gtk-4.1-dev, libxdo-dev, libssl-dev, libayatana-appindicator3-dev,
+# librsvg2-dev): installed inline by Track 3 Phase 3.1 — end-customer mini-PCs receive a
+# pre-built .deb (see Track 4) and don't need build environment.
