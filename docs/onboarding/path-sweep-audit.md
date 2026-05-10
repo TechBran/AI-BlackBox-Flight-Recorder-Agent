@@ -20,6 +20,19 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
 >
 > The actionable buckets (B1–B4) total **60 hits** across 14 files. B5 (operator-facing docs) is 12 more. Everything else is intentional and stays put.
 
+## Status (Updated 2026-05-10 after Phase 0.3 sweep)
+
+| Bucket | Status | Commit(s) |
+|--------|--------|-----------|
+| B1 (systemd, 3 hits) | **Deferred to Track 4** — install-time template substitution | T4.1.1 |
+| B2 (config files, 9 hits) | **Deferred to Track 4** — install-time template substitution + runtime auto-discovery for devices.json | T4.1.1 |
+| B3 (Python/shell, 17 hits) | Done | `7dcbf90` + `d4ef8ec` |
+| B4 (App HTML, 31 hits) | Done | `4deafbb` |
+| B5 (docs, 12 hits) | Done | `150b94e` |
+| B6 (intentional, 271 hits) | Leave alone (per audit) | — |
+
+**Phase 0.3 actionable work complete.** Track 4 will handle B1+B2 via install.sh template substitution.
+
 ## Summary by Bucket
 
 | Bucket | Hits | Files | Action | Driving Task |
@@ -38,6 +51,8 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
 
 ## B1 — systemd unit files (3 hits, 1 file)
 
+**Status: DEFERRED TO TRACK 4 — see install.sh template substitution.**
+
 **Action:** Render this `.service` from a `.service.in` template at install time. Substitute `${SERVICE_USER}` and `${BLACKBOX_ROOT}` from the installer's environment (which already has `BLACKBOX_ROOT` and gets `SERVICE_USER` from `id -un`).
 
 | File | Line | Pattern | Action |
@@ -51,6 +66,8 @@ grep -rnE "ai-black-box-fc|/home/ai-black-box-fc" \
 ---
 
 ## B2 — Config files (9 hits, 5 files)
+
+**Status: DEFERRED TO TRACK 4 — see install.sh template substitution.**
 
 **Action:** Three sub-strategies:
 - **MCP / Gemini configs** → ship as `.example.json`; installer renders the real file with `${BLACKBOX_ROOT}` substituted. Today the `.example` exists alongside the real one for MCP — fix is to make the installer the single writer.
@@ -217,11 +234,11 @@ This grep is intentionally narrow. The following are NOT covered (out of scope f
 
 ## Bucket → Task Mapping
 
-| Bucket | Driving Task | Estimated Edits |
-|--------|--------------|-----------------|
-| B1 (3 hits, 1 file) | T0.3.7 (installer Track 4) | Convert to `.in` template + render at install |
-| B2 (9 hits, 5 files) | T0.3.7 (installer Track 4) | Convert to `.in` templates + render at install; `devices.json` becomes runtime stub |
-| B3 (17 hits, 11 files) | **T0.3.4 (next task)** | 8 Orchestrator imports + MCP fallback + 8 stale-script self-locating refs |
-| B4 (31 hits, 1 file) | **T0.3.5 (next-next task)** | One sed substitution + manual verification |
-| B5 (12 hits, 2 files) | **T0.3.6 (next-next-next task)** | Placeholder substitution + header note |
-| B6 (271 hits, 28 files) | — | None |
+| Bucket | Driving Task | Status | Commits |
+|--------|--------------|--------|---------|
+| B1 (3 hits, 1 file) | T4.1.1 (installer Track 4) | Deferred | — |
+| B2 (9 hits, 5 files) | T4.1.1 (installer Track 4) | Deferred | — |
+| B3 (17 hits, 11 files) | T0.3.4 | Done | `7dcbf90` + `d4ef8ec` |
+| B4 (31 hits, 1 file) | T0.3.5 | Done | `4deafbb` |
+| B5 (12 hits, 2 files) | T0.3.6 | Done | `150b94e` |
+| B6 (271 hits, 28 files) | — | No action | — |
