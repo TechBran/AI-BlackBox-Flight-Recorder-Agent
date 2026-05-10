@@ -1,8 +1,8 @@
 # AI BlackBox Onboarding Flow Implementation Plan
 
-> **For Claude:** This plan is large (6 tracks, ~6-8 weeks). REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to execute (fresh subagent per task with two-stage review). `superpowers:executing-plans` is the alternative for parallel-session execution.
+> **For Claude:** This plan is large (6 tracks, ~7-9 weeks including manage-mode). REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to execute (fresh subagent per task with two-stage review). `superpowers:executing-plans` is the alternative for parallel-session execution.
 
-**Goal:** Build a customer-facing first-run onboarding experience for AI BlackBox — a Tauri standalone app that wraps Portal `/onboarding` routes, walks the customer through Tailscale install, BYOK API keys, optional integrations, QR phone pairing, operator setup, and completion handoff. Ships as the first-boot experience on pre-installed mini-PC hardware.
+**Goal:** Build a customer-facing first-run onboarding experience for AI BlackBox — a Tauri standalone app that wraps Portal `/onboarding` routes, walks the customer through Tailscale install, BYOK API keys (incl. Twilio for phone), optional integrations, QR phone pairing, operator setup, and completion handoff. **Ships with a paired maintenance UI** (same wizard re-entered via `?mode=manage`) accessible from Portal's System Menu and a persistent desktop launcher — customers can review/update their configuration any time. Ships as the first-boot experience on pre-installed mini-PC hardware.
 
 **Architecture:** Tauri (Rust) shell wraps a webview pointing at `http://localhost:9091/onboarding`. Portal's existing FastAPI server hosts the wizard UI as HTML/CSS/JS. Tauri shell provides full-screen branded chrome, taskbar icon, no browser address bar. After completion, app self-disables and Portal becomes the regular kiosk view. Six implementation tracks executed in dependency order: **Foundation Cleanup → Onboarding Backend → Portal Wizard UI → Tauri Shell → Install Scripts → Customer Docs.** Track 5 (docs) drafts can begin earlier but finalize after Track 2.
 
@@ -1479,6 +1479,297 @@ POST /onboarding/complete — write done sentinel
 POST /onboarding/reset — for testing"
 ```
 
+## Phase 1.4: Maintenance backend (NEW per audit 2026-05-10)
+
+**Background:** The wizard supports two modes: `?mode=setup` (first-run, default) and `?mode=manage` (post-onboarding maintenance). Manage mode needs three backend additions: a redacted config snapshot, a per-key reveal endpoint (for the eye-icon toggle), and a per-key remove endpoint. Plus validation timestamps in `OnboardingState` so the UI can render "validated 3 days ago".
+
+### Task 1.4.1: Track validation timestamps in OnboardingState
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/onboarding/state.py`
+
+**Step 1: Add `validated_at` map to state JSON.** Extend `_load()` default to include:
+
+```python
+return {
+    "started_at": time.time(),
+    "completed_steps": [],
+    "skipped_steps": [],
+    "current_step": "welcome",
+    "validated_at": {},  # NEW: provider name -> unix timestamp of last successful validation
+}
+```
+
+**Step 2: Add a helper:**
+
+```python
+def record_validation(self, provider: str) -> None:
+    """Stamp this provider as freshly validated. Called from /onboarding/validate when ok=true."""
+    self._data.setdefault("validated_at", {})[provider] = time.time()
+    self._save()
+
+def validated_at(self) -> dict[str, float]:
+    return dict(self._data.get("validated_at", {}))
+```
+
+**Step 3: Wire into existing /onboarding/validate endpoint** (modify `Orchestrator/routes/onboarding_routes.py`):
+
+```python
+@router.post("/validate", response_model=ValidateResponse)
+def validate(req: ValidateRequest) -> ValidateResponse:
+    # ... existing validator dispatch ...
+    if result.ok:
+        _state.record_validation(req.provider)
+    return ValidateResponse(**vars(result))
+```
+
+**Step 4: Test**
+
+```bash
+sudo systemctl restart blackbox.service && sleep 70
+curl -X POST http://localhost:9091/onboarding/validate \
+  -H "Content-Type: application/json" \
+  -d "{\"provider\":\"openai\",\"credentials\":{\"api_key\":\"$OPENAI_API_KEY\"}}"
+cat .onboarding_state.json | python3 -m json.tool | grep validated_at
+```
+
+Expected: `validated_at: {"openai": 1747...}` (unix timestamp).
+
+**Step 5: Commit**
+
+```bash
+git add Orchestrator/onboarding/state.py Orchestrator/routes/onboarding_routes.py
+git commit -m "feat(onboarding): track per-provider validation timestamps for manage-mode UI"
+```
+
+### Task 1.4.2: GET /onboarding/current-config endpoint
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/routes/onboarding_routes.py`
+
+**Step 1: Add the endpoint:**
+
+```python
+class CurrentConfigResponse(BaseModel):
+    """Redacted snapshot of what's configured. Sensitive values shown as last-4 only.
+    Use /onboarding/config/{key}?reveal=1 to fetch full value of a single key.
+    """
+    providers: dict[str, dict]  # provider name -> {present, last4, validated_at, ...}
+    operators: list[str]
+    paired_devices: list[dict]
+    tailscale: dict
+    onboarding_state: dict
+
+
+def _redact(value: str | None, keep: int = 4) -> str | None:
+    """Show last N chars only; full mask if shorter than 2*keep."""
+    if not value:
+        return None
+    if len(value) < 2 * keep:
+        return "•" * len(value)
+    return "•" * (len(value) - keep) + value[-keep:]
+
+
+@router.get("/current-config", response_model=CurrentConfigResponse)
+def current_config() -> CurrentConfigResponse:
+    from Orchestrator.config import (
+        OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
+        TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER,
+        GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET,
+    )
+    val_at = _state.validated_at()
+    providers = {
+        "openai": {
+            "present": bool(OPENAI_API_KEY),
+            "last4": _redact(OPENAI_API_KEY),
+            "validated_at": val_at.get("openai"),
+        },
+        "anthropic": {
+            "present": bool(ANTHROPIC_API_KEY),
+            "last4": _redact(ANTHROPIC_API_KEY),
+            "validated_at": val_at.get("anthropic"),
+        },
+        "google": {
+            "present": bool(GOOGLE_API_KEY),
+            "last4": _redact(GOOGLE_API_KEY),
+            "validated_at": val_at.get("google"),
+        },
+        "twilio": {
+            "present": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN),
+            "sid_last4": _redact(TWILIO_ACCOUNT_SID),
+            "phone_number": TWILIO_PHONE_NUMBER or None,  # not secret, full reveal OK
+            "validated_at": val_at.get("twilio"),
+        },
+        "gmail": {
+            "present": bool(GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET),
+            "client_id": GOOGLE_OAUTH_CLIENT_ID or None,  # not secret per Google docs
+            "secret_last4": _redact(GOOGLE_OAUTH_CLIENT_SECRET),
+            "validated_at": val_at.get("gmail"),
+        },
+    }
+    # Tailscale (hostname is not secret)
+    try:
+        from Orchestrator.onboarding.validators import validate_tailscale
+        ts_result = validate_tailscale()
+        tailscale = {"configured": ts_result.ok, "detail": ts_result.detail or {}}
+    except Exception:
+        tailscale = {"configured": False, "detail": {}}
+    # Operators — read from operator registry (location TBD; use the same source ChatScreen reads from)
+    try:
+        from Orchestrator.routes.admin_routes import _list_operators  # or wherever
+        operators = _list_operators()
+    except Exception:
+        operators = []
+    # Paired devices
+    paired_devices: list[dict] = []  # TODO: implement when pairing claim store persists devices
+    return CurrentConfigResponse(
+        providers=providers,
+        operators=operators,
+        paired_devices=paired_devices,
+        tailscale=tailscale,
+        onboarding_state=_state.snapshot(),
+    )
+```
+
+**Step 2: Test**
+
+```bash
+sudo systemctl restart blackbox.service && sleep 70
+curl -s http://localhost:9091/onboarding/current-config | python3 -m json.tool
+```
+
+Expected: JSON with all providers, redacted values (e.g., `"last4": "••••••••sk-...XYZW"`), validated_at timestamps where present.
+
+**Step 3: Commit**
+
+```bash
+git add Orchestrator/routes/onboarding_routes.py
+git commit -m "feat(onboarding): GET /current-config — redacted snapshot for manage-mode UI"
+```
+
+### Task 1.4.3: GET /onboarding/config/{key}?reveal=1 single-key reveal
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/routes/onboarding_routes.py`
+
+**Step 1: Add the endpoint** (loopback-only by design — only callable from the Tauri shell or browser on the same host):
+
+```python
+ALLOWED_REVEAL_KEYS = {
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+    "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
+    "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
+}
+
+
+@router.get("/config/{key}")
+def get_config_value(key: str, request: Request, reveal: int = 0) -> dict:
+    """Return a single config value. With ?reveal=1, returns full cleartext.
+    Loopback-only when revealing — refuses if request not from 127.0.0.1 / ::1.
+    """
+    if key not in ALLOWED_REVEAL_KEYS:
+        raise HTTPException(status_code=403, detail=f"key {key} not in reveal allowlist")
+    if reveal:
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(status_code=403, detail="reveal only permitted from loopback")
+    import os
+    value = os.getenv(key, "")
+    if reveal:
+        return {"key": key, "value": value, "present": bool(value)}
+    return {"key": key, "value": _redact(value), "present": bool(value)}
+```
+
+**Step 2: Test**
+
+```bash
+sudo systemctl restart blackbox.service && sleep 70
+# Redacted by default
+curl -s http://localhost:9091/onboarding/config/OPENAI_API_KEY | python3 -m json.tool
+# Revealed (loopback only — works from same machine)
+curl -s "http://localhost:9091/onboarding/config/OPENAI_API_KEY?reveal=1" | python3 -m json.tool
+```
+
+Expected: redacted variant shows `••••••••XYZW`; reveal variant shows full key.
+
+**Step 3: Commit**
+
+```bash
+git add Orchestrator/routes/onboarding_routes.py
+git commit -m "feat(onboarding): GET /config/{key}?reveal=1 — single-key reveal for masking toggle
+
+Loopback-restricted by design. Refuses reveal from non-127.0.0.1 origins."
+```
+
+### Task 1.4.4: DELETE /onboarding/config/{key} remove endpoint
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/onboarding/secrets_writer.py`
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/routes/onboarding_routes.py`
+
+**Step 1: Add `remove_env_keys()` to secrets_writer.py:**
+
+```python
+def remove_env_keys(keys: list[str]) -> dict:
+    """Atomically blank specified keys in .env. Backup created first."""
+    if not ENV_FILE.exists():
+        return {"backup": None, "removed_keys": []}
+    ts = int(time.time())
+    backup = ENV_FILE.with_suffix(f".backup.{ts}")
+    shutil.copy2(ENV_FILE, backup)
+    lines = ENV_FILE.read_text().splitlines(keepends=True)
+    out: list[str] = []
+    removed: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k in keys:
+                removed.append(k)
+                continue  # drop the line entirely
+        out.append(line)
+    tmp = ENV_FILE.with_suffix(".tmp")
+    tmp.write_text("".join(out))
+    os.replace(tmp, ENV_FILE)
+    return {"backup": str(backup), "removed_keys": removed}
+```
+
+**Step 2: Add the DELETE endpoint:**
+
+```python
+@router.delete("/config/{key}")
+def delete_config_value(key: str) -> dict:
+    if key not in ALLOWED_REVEAL_KEYS:
+        raise HTTPException(status_code=403, detail=f"key {key} not in allowlist")
+    from Orchestrator.onboarding.secrets_writer import remove_env_keys
+    result = remove_env_keys([key])
+    return {"ok": True, **result}
+```
+
+**Step 3: Test**
+
+```bash
+sudo systemctl restart blackbox.service && sleep 70
+# Add a fake key
+echo "TEST_REMOVABLE=should_be_gone" >> .env
+# Skip the allowlist check by adding TEST_REMOVABLE to ALLOWED_REVEAL_KEYS first, OR just verify via existing key
+# (Recommended: test against a key we don't mind clearing temporarily, e.g. PERPLEXITY_API_KEY if unused)
+curl -s -X DELETE http://localhost:9091/onboarding/config/PERPLEXITY_API_KEY | python3 -m json.tool
+grep PERPLEXITY .env  # should be gone
+ls .env.backup.*  # backup created
+```
+
+Expected: `removed_keys: ["PERPLEXITY_API_KEY"]`, line absent from .env, backup file present.
+
+**Step 4: Commit**
+
+```bash
+git add Orchestrator/onboarding/secrets_writer.py Orchestrator/routes/onboarding_routes.py
+git commit -m "feat(onboarding): DELETE /config/{key} — remove a secret with .env backup"
+```
+
+---
+
 ### Task 1.3.2: Add first-run middleware/redirect
 
 **Files:**
@@ -2050,10 +2341,369 @@ git add Portal/onboarding/onboarding.css
 git commit -m "style(portal-ob): apply BlackBox brand — dark glass, accent gradient, smooth transitions"
 ```
 
-### Task 2.9.2: Track 2 checkpoint
+## Phase 2.10: Manage-mode UI (NEW per audit 2026-05-10)
+
+**Goal:** Re-entrant maintenance UI accessible from Portal System Menu and the Tauri desktop launcher. Same wizard codebase + `?mode=manage` URL parameter — each step component supports rendering its current state with reveal/edit/remove controls.
+
+**Design reference (chose by Brandon during audit):**
+- Layout: step-grid landing page with status badges (✓/⚠/⊘) — clicking a step opens its edit UI
+- Sensitive values: full reveal with masking toggle (eye icon) — bullet-mask by default, reveal on click
+- Entry points: (a) Portal System Menu → "Manage Setup" button, (b) Tauri persistent desktop launcher (separate from autostart)
+
+### Task 2.10.1: Mode parameter handling + manage landing page
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/onboarding.js`
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/manage_landing.js`
+
+**Step 1: Read `?mode=` from URL in `onboarding.js`:**
+
+```javascript
+const params = new URLSearchParams(location.search);
+const MODE = params.get("mode") === "manage" ? "manage" : "setup";
+```
+
+**Step 2: In manage mode, replace linear flow with step-grid landing.** At the bottom of the IIFE in `onboarding.js`:
+
+```javascript
+(async () => {
+    if (MODE === "manage") {
+        const r = await fetch("/onboarding/current-config");
+        const config = await r.json();
+        const mod = await import("./manage_landing.js");
+        mod.render(document.getElementById("ob-step-container"), {config, openStep: (name) => {
+            currentStepIdx = STEPS.indexOf(name);
+            renderStep({mode: "manage"});  // step components see mode flag
+        }});
+        return;
+    }
+    // setup mode: existing flow
+    await fetchState();
+    if (state.is_complete) { location.href = "/ui"; return; }
+    await renderStep({mode: "setup"});
+})();
+```
+
+**Step 3: Write `manage_landing.js`:**
+
+```javascript
+export function render(container, {config, openStep}) {
+    const cards = [
+        {step: "tailscale", label: "Tailscale", state: config.tailscale.configured ? "✓" : "⊘",
+         summary: config.tailscale.detail.hostname || "Skipped"},
+        {step: "api_keys", label: "API Keys", state: countConfigured(config.providers, ["openai","anthropic","google"]) > 0 ? "✓" : "⊘",
+         summary: `${countConfigured(config.providers, ["openai","anthropic","google"])} of 3 providers`},
+        {step: "phone", label: "Phone (Twilio)", state: config.providers.twilio.present ? "✓" : "⊘",
+         summary: config.providers.twilio.phone_number || "Not configured"},
+        {step: "optional_integrations", label: "Gmail", state: config.providers.gmail.present ? "✓" : "⊘",
+         summary: config.providers.gmail.client_id ? "OAuth client configured" : "Skipped"},
+        {step: "pair_phone", label: "Paired Devices", state: config.paired_devices.length > 0 ? "✓" : "⊘",
+         summary: config.paired_devices.length ? config.paired_devices.map(d=>d.name).join(", ") : "None"},
+        {step: "operator", label: "Operators", state: config.operators.length > 0 ? "✓" : "⊘",
+         summary: config.operators.length ? config.operators.join(", ") : "None"},
+    ];
+    container.innerHTML = `
+        <section class="ob-step ob-manage-landing">
+            <h1 class="ob-step-title">Setup Status</h1>
+            <p class="ob-step-lede">Click any step to review or update.</p>
+            <div class="ob-manage-grid">
+                ${cards.map(c => `
+                    <button class="ob-manage-card ob-card-${c.state === '✓' ? 'ok' : c.state === '⚠' ? 'warn' : 'empty'}"
+                            data-step="${c.step}">
+                        <div class="ob-card-state">${c.state} ${c.label}</div>
+                        <div class="ob-card-summary">${c.summary}</div>
+                    </button>
+                `).join("")}
+            </div>
+            <button class="ob-btn ob-btn-secondary" id="ob-manage-close">Close</button>
+        </section>
+    `;
+    container.querySelectorAll(".ob-manage-card").forEach(btn => {
+        btn.addEventListener("click", e => openStep(e.currentTarget.dataset.step));
+    });
+    container.querySelector("#ob-manage-close").addEventListener("click", () => {
+        location.href = "/ui";
+    });
+}
+
+function countConfigured(providers, keys) {
+    return keys.filter(k => providers[k]?.present).length;
+}
+```
+
+**Step 4: Hide footer (back/next/skip) in manage mode** — `onboarding.js`:
+
+```javascript
+if (MODE === "manage") {
+    document.querySelector(".ob-footer").style.display = "none";
+    document.querySelector(".ob-progress").style.display = "none";
+}
+```
+
+**Step 5: Test**
 
 ```bash
-git tag -a track2-portal-ui-complete -m "Portal onboarding wizard complete — all 7 steps + branding"
+# Visit /onboarding/?mode=manage in browser; confirm step grid renders with status badges
+# Click "API Keys" card; confirm individual step UI loads (edit mode)
+```
+
+**Step 6: Commit**
+
+```bash
+git add Portal/onboarding/onboarding.js Portal/onboarding/manage_landing.js
+git commit -m "feat(portal-ob): manage-mode landing page — step grid with status badges"
+```
+
+### Task 2.10.2: Per-step manage-mode rendering with current state header
+
+**Files:**
+- Modify: ALL of `Portal/onboarding/steps/*.js` (api_keys.js, tailscale.js, phone.js, optional_integrations.js, pair_phone.js, operator.js)
+
+**Step 1: Each step component's `render(container, {state, next, back, skip, mode, config})` checks `mode` and prepends a current-state header in manage mode.** Example for `api_keys.js`:
+
+```javascript
+export async function render(container, {next, mode = "setup", config}) {
+    const isManage = mode === "manage";
+    const header = isManage ? `
+        <div class="ob-manage-header">
+            <h2>API Keys</h2>
+            ${["openai","anthropic","google"].map(p => `
+                <div class="ob-current-row">
+                    <span class="ob-provider-name">${p.charAt(0).toUpperCase() + p.slice(1)}:</span>
+                    ${config.providers[p].present ? `
+                        <span class="ob-status">✓</span>
+                        <span class="ob-key-mask" data-provider="${p}" data-key-name="${p.toUpperCase()}_API_KEY">
+                            ${config.providers[p].last4 || "••••••••"}
+                        </span>
+                        <button class="ob-btn-icon ob-reveal" data-provider="${p}" data-key-name="${p.toUpperCase()}_API_KEY">👁</button>
+                        <span class="ob-validated">${formatValidated(config.providers[p].validated_at)}</span>
+                        <button class="ob-btn-text ob-revalidate" data-provider="${p}">Re-validate</button>
+                        <button class="ob-btn-text ob-replace" data-provider="${p}">Replace</button>
+                        <button class="ob-btn-text ob-remove" data-provider="${p}" data-key-name="${p.toUpperCase()}_API_KEY">Remove</button>
+                    ` : `
+                        <span class="ob-status">⊘ Not configured</span>
+                        <button class="ob-btn-text ob-add" data-provider="${p}">Add key</button>
+                    `}
+                </div>
+            `).join("")}
+        </div>
+    ` : "";
+    container.innerHTML = header + /* original setup-mode form */;
+    if (isManage) wireManageHandlers(container, config, /* refresh callback */);
+    // ... existing form-wiring
+}
+```
+
+**Step 2: Repeat the pattern for each step component.** Each step knows its own provider keys and current state. The "Replace" button shows the same paste field but pre-filled empty (just collects new value).
+
+**Step 3: Commit (one commit per step component to keep diffs small)**
+
+```bash
+git add Portal/onboarding/steps/api_keys.js
+git commit -m "feat(portal-ob): api_keys step manage-mode rendering with current state header"
+# repeat for tailscale.js, phone.js, etc.
+```
+
+### Task 2.10.3: Reveal/mask toggle component
+
+**Files:**
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/components/reveal_toggle.js`
+
+**Step 1: Write the toggle helper:**
+
+```javascript
+/** Wire eye-icon toggles to fetch full secret on demand and swap mask ↔ cleartext.
+ * Buttons must have data-key-name (env var name) and a sibling .ob-key-mask element.
+ */
+export function wireRevealToggles(container) {
+    container.querySelectorAll(".ob-reveal").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const keyName = btn.dataset.keyName;
+            const maskEl = btn.parentElement.querySelector(".ob-key-mask");
+            const isRevealed = btn.dataset.revealed === "true";
+            if (isRevealed) {
+                // Re-mask
+                maskEl.textContent = maskEl.dataset.masked;
+                btn.textContent = "👁";
+                btn.dataset.revealed = "false";
+            } else {
+                // Reveal — fetch full value
+                const r = await fetch(`/onboarding/config/${keyName}?reveal=1`);
+                if (!r.ok) {
+                    console.error("reveal failed", await r.text());
+                    return;
+                }
+                const data = await r.json();
+                maskEl.dataset.masked = maskEl.textContent;  // remember mask for re-mask
+                maskEl.textContent = data.value;
+                btn.textContent = "🙈";
+                btn.dataset.revealed = "true";
+            }
+        });
+    });
+}
+```
+
+**Step 2: Import + call from each step's wireManageHandlers.**
+
+**Step 3: Test**
+
+```bash
+# In browser at /onboarding/?mode=manage → API Keys
+# Click eye next to OpenAI key — full key shows
+# Click again — mask returns
+```
+
+**Step 4: Commit**
+
+```bash
+git add Portal/onboarding/components/reveal_toggle.js
+git commit -m "feat(portal-ob): reveal toggle — eye icon swaps masked ↔ cleartext on demand"
+```
+
+### Task 2.10.4: Re-validate / Replace / Remove handlers
+
+**Files:**
+- Modify: each step component to wire the per-provider buttons
+
+**Step 1: Re-validate handler:**
+
+```javascript
+async function onRevalidate(provider) {
+    const r = await fetch("/onboarding/validate", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({provider, credentials: {}}),  // server reads from env
+    });
+    const result = await r.json();
+    showInlineToast(result.ok ? `${provider} ✓ ${result.latency_ms}ms` : `${provider} ✗ ${result.error}`);
+}
+```
+
+**Note:** /onboarding/validate currently expects credentials in the body. For manage-mode re-validation with existing-on-disk keys, either: (a) pre-fetch the cleartext via reveal endpoint and pass it; or (b) extend /validate to accept `{provider, use_existing: true}` and read from env on the server side. Option (b) is cleaner — add it as part of this task.
+
+**Step 2: Replace handler** — opens a small modal with the same paste/validate UI as setup mode, then on save POSTs `/onboarding/save` with just that one key.
+
+**Step 3: Remove handler:**
+
+```javascript
+async function onRemove(keyName) {
+    if (!confirm(`Remove ${keyName}? This won't delete the .env backup.`)) return;
+    const r = await fetch(`/onboarding/config/${keyName}`, {method: "DELETE"});
+    const result = await r.json();
+    if (result.ok) {
+        showInlineToast(`Removed ${keyName}`);
+        location.reload();  // refresh manage-landing card states
+    }
+}
+```
+
+**Step 4: Test all three button paths in browser.**
+
+**Step 5: Commit**
+
+```bash
+git add Portal/onboarding/steps/*.js Orchestrator/routes/onboarding_routes.py
+git commit -m "feat(portal-ob): manage-mode re-validate / replace / remove handlers"
+```
+
+### Task 2.10.5: Portal Web — Add "Manage Setup" button to System Menu
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/index.html` (settings modal)
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/modules/ui-setup.js` (settings menu wire-up)
+
+**Step 1: Add a button in the System section of the settings modal:**
+
+```html
+<button id="settings-manage-setup" class="settings-btn">Manage Setup</button>
+```
+
+**Step 2: Wire it in `ui-setup.js`:**
+
+```javascript
+document.getElementById("settings-manage-setup").addEventListener("click", () => {
+    location.href = "/onboarding/?mode=manage";
+});
+```
+
+**Step 3: Test in browser** — open Portal, hamburger → System → Manage Setup → confirms wizard opens in manage mode.
+
+**Step 4: Commit**
+
+```bash
+git add Portal/index.html Portal/modules/ui-setup.js
+git commit -m "feat(portal): System Menu 'Manage Setup' button opens onboarding ?mode=manage"
+```
+
+### Task 2.10.6: Portal Android — Add "Manage Setup" button to System Menu
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/settings/SettingsSheet.kt`
+
+**Step 1: Add a `MenuButton` to the System section:**
+
+```kotlin
+MenuButton("Manage Setup") {
+    val origin = SettingsViewModel.currentOrigin.value ?: "http://localhost:9091"
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?mode=manage"))
+    context.startActivity(intent)
+    onDismiss()
+}
+```
+
+(Open in default browser since the wizard isn't yet a native Android view. Future enhancement: render in WebView inside the Portal app.)
+
+**Step 2: Test on Android** — System → Manage Setup → opens browser to wizard at maintenance landing page.
+
+**Step 3: Commit**
+
+```bash
+git add "AI_BlackBox_Portal_Android_MVP (2)/.../SettingsSheet.kt"
+git commit -m "feat(android): System Menu 'Manage Setup' button opens onboarding ?mode=manage"
+```
+
+### Task 2.10.7: Phase 2.10 acceptance test
+
+**Goal:** End-to-end verification of manage mode after onboarding has been completed (Scenarios 1+ from main verification suite).
+
+```bash
+# Pre-conditions: complete onboarding fully (Scenario 1 from verification)
+# Then:
+
+# (a) Manage UI accessible from /onboarding/?mode=manage
+curl -sI http://localhost:9091/onboarding/?mode=manage | grep "200" || { echo "FAIL: manage URL 404s"; exit 1; }
+
+# (b) /current-config returns expected JSON shape
+curl -s http://localhost:9091/onboarding/current-config | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert 'providers' in d
+assert 'operators' in d
+assert d['providers']['openai']['present']
+assert 'last4' in d['providers']['openai']
+print('OK: /current-config shape valid')
+"
+
+# (c) Reveal endpoint returns full key (loopback OK)
+curl -s "http://localhost:9091/onboarding/config/OPENAI_API_KEY?reveal=1" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert len(d['value']) > 20, 'reveal returned masked value'
+print('OK: reveal works on loopback')
+"
+
+# (d) Manual: Portal Web System → Manage Setup → opens manage landing
+# (e) Manual: Android System → Manage Setup → opens browser to manage landing
+# (f) Manual: Click each card; confirm step UI shows current state header + reveal/edit/remove buttons
+# (g) Manual: Click eye icon; full key reveals. Click again; mask returns.
+# (h) Manual: Click Remove on a non-essential provider (e.g. Perplexity if configured); confirm DELETE works + .env.backup created
+```
+
+### Task 2.10.8: Track 2 final checkpoint
+
+```bash
+git tag -a track2-portal-ui-complete -m "Portal onboarding wizard complete — all 7 steps + branding + manage mode"
 git push origin track2-portal-ui-complete
 ```
 
@@ -2234,20 +2884,24 @@ git add installer/src-tauri/icons/
 git commit -m "chore(installer): icon set — 32, 128, 128@2x for Linux + Mac + Windows"
 ```
 
-## Phase 3.4: Auto-launch wiring
+## Phase 3.4: Auto-launch wiring (autostart + persistent launcher)
 
-### Task 3.4.1: .desktop autostart file
+**Background (refined per audit 2026-05-10):** Two `.desktop` files serve different purposes:
+1. **Autostart .desktop** — placed in `~/.config/autostart/` so the Tauri shell launches automatically on first boot. **Removed when onboarding completes** (T3.5.1) so it doesn't relaunch every boot.
+2. **Persistent launcher .desktop** — placed in `~/.local/share/applications/` (or `/usr/share/applications/` for system-wide). **Stays forever** so user can re-launch the Tauri setup app at any time for maintenance (manage mode).
+
+### Task 3.4.1: Autostart .desktop file (first-boot)
 
 **Files:**
-- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/dist/blackbox-setup.desktop`
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/dist/blackbox-setup-autostart.desktop`
 
-**Step 1: Write the .desktop:**
+**Step 1: Write the autostart .desktop:**
 
 ```ini
 [Desktop Entry]
 Type=Application
 Name=AI BlackBox Setup
-Exec=/usr/local/bin/blackbox-setup
+Exec=/usr/local/bin/blackbox-setup --first-run
 Icon=blackbox-setup
 Comment=First-run setup wizard for AI BlackBox
 Categories=Utility;
@@ -2256,21 +2910,59 @@ Terminal=false
 StartupNotify=true
 ```
 
-**Step 2:** This file is INSTALLED by the Track 4 install script (not auto-deployed); it lives in the installer dist for distribution.
+**Step 2:** Track 4 install script copies this to `~/.config/autostart/blackbox-setup.desktop`. T3.5.1 removes it when onboarding completes.
 
 **Step 3: Commit**
 
 ```bash
-git add installer/dist/blackbox-setup.desktop
-git commit -m "chore(installer): .desktop autostart file for first-boot launch"
+git add installer/dist/blackbox-setup-autostart.desktop
+git commit -m "chore(installer): autostart .desktop for first-boot launch (removed on completion)"
 ```
 
-## Phase 3.5: Self-disable + handoff
+### Task 3.4.2: Persistent desktop launcher (NEW per audit decision)
 
-### Task 3.5.1: Tauri app self-disables after onboarding completes
+**Files:**
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/dist/blackbox-setup.desktop`
+
+**Step 1: Write the persistent launcher .desktop:**
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=BlackBox Setup
+GenericName=AI BlackBox Configuration
+Exec=/usr/local/bin/blackbox-setup
+Icon=blackbox-setup
+Comment=Configure or update your AI BlackBox setup
+Categories=Utility;Settings;
+Keywords=blackbox;setup;configure;manage;
+Terminal=false
+StartupNotify=true
+```
+
+**Step 2:** Track 4 install script copies this to `~/.local/share/applications/blackbox-setup.desktop`. **Never removed** — this is the user's permanent desktop entry to re-launch the wizard for maintenance.
+
+**Step 3: When this entry is invoked** (no `--first-run` flag), the Tauri binary checks `/onboarding/state.is_complete`:
+- If complete: open Tauri window pointing at `/onboarding/?mode=manage` (maintenance mode)
+- If incomplete: open at `/onboarding/?mode=setup` (legitimate first-run, autostart was somehow missed)
+
+This logic lives in `installer/src-tauri/src/main.rs` (see Task 3.5.2).
+
+**Step 4: Commit**
+
+```bash
+git add installer/dist/blackbox-setup.desktop
+git commit -m "chore(installer): persistent desktop launcher — re-launch wizard for maintenance"
+```
+
+## Phase 3.5: Self-disable autostart + manage-mode entry
+
+### Task 3.5.1: Tauri app self-disables AUTOSTART after onboarding completes
 
 **Files:**
 - Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/src-tauri/src/main.rs`
+
+**Important:** This removes the AUTOSTART entry only (`~/.config/autostart/blackbox-setup.desktop`). The PERSISTENT launcher (`~/.local/share/applications/blackbox-setup.desktop`) is left intact so the user can re-launch the wizard for maintenance.
 
 **Step 1: After window closes (i.e., user clicked "Open Portal"), check `/onboarding/state` for `is_complete`:**
 
@@ -2282,11 +2974,12 @@ git commit -m "chore(installer): .desktop autostart file for first-boot launch"
             .and_then(|r| r.json())
             .unwrap_or(serde_json::json!({"is_complete": false}));
         if state["is_complete"].as_bool().unwrap_or(false) {
-            // Remove the autostart .desktop so we don't relaunch on next boot
+            // Remove the AUTOSTART .desktop only — persistent launcher stays
             let autostart = dirs::config_dir()
                 .map(|d| d.join("autostart").join("blackbox-setup.desktop"));
             if let Some(p) = autostart {
                 let _ = std::fs::remove_file(p);
+                eprintln!("[blackbox-setup] removed autostart entry; persistent launcher in ~/.local/share/applications/ remains for re-launch");
             }
         }
     }
@@ -2299,11 +2992,87 @@ git commit -m "chore(installer): .desktop autostart file for first-boot launch"
 
 ```bash
 git add installer/src-tauri/src/main.rs
-git commit -m "feat(installer): self-disable autostart after onboarding completes
+git commit -m "feat(installer): self-disable autostart on completion (persistent launcher stays)
 
 When user clicks 'Open Portal' (window-close), check /onboarding/state.
-If complete: remove ~/.config/autostart/blackbox-setup.desktop so the wizard
-doesn't relaunch on next boot."
+If complete: remove ~/.config/autostart/blackbox-setup.desktop only.
+The ~/.local/share/applications/blackbox-setup.desktop persistent launcher
+remains so user can re-launch wizard from desktop applications menu for
+maintenance (opens manage mode automatically)."
+```
+
+### Task 3.5.2: Mode-aware Tauri shell — first-run vs maintenance
+
+**Files:**
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/src-tauri/src/main.rs`
+- Modify: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/installer/src-tauri/tauri.conf.json`
+
+**Step 1: Detect mode at launch time.** When invoked from autostart, the `--first-run` flag is passed (per the autostart .desktop). When invoked from the persistent launcher (no flag), check `/onboarding/state.is_complete` to decide which mode to open in.
+
+```rust
+fn main() {
+    if !wait_for_server("http://localhost:9091/health", 90) {
+        eprintln!("Orchestrator failed to come up within 90s");
+        std::process::exit(1);
+    }
+
+    // Determine which URL to open based on flag and onboarding state
+    let args: Vec<String> = std::env::args().collect();
+    let first_run = args.iter().any(|a| a == "--first-run");
+    let mode = if first_run {
+        "setup"
+    } else {
+        // No --first-run flag: this is a manual launch from the persistent .desktop entry.
+        // Check /onboarding/state to decide mode.
+        let state: serde_json::Value = reqwest::blocking::get("http://localhost:9091/onboarding/state")
+            .and_then(|r| r.json())
+            .unwrap_or(serde_json::json!({"is_complete": false}));
+        if state["is_complete"].as_bool().unwrap_or(false) { "manage" } else { "setup" }
+    };
+    let url = format!("http://localhost:9091/onboarding/?mode={}", mode);
+    eprintln!("[blackbox-setup] opening {url}");
+
+    tauri::Builder::default()
+        .setup(move |app| {
+            let window = tauri::WindowBuilder::new(
+                app,
+                "main",
+                tauri::WindowUrl::External(url.parse().unwrap()),
+            )
+            .title("AI BlackBox Setup")
+            .inner_size(1280.0, 800.0)
+            .fullscreen(mode == "setup")  // fullscreen for first-run, windowed for manage
+            .decorations(mode == "manage")  // decorations for manage, none for first-run
+            .build()?;
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+**Step 2: Test both invocations:**
+
+```bash
+# Simulate autostart (first-run)
+/usr/local/bin/blackbox-setup --first-run
+# Expect: fullscreen window, no decorations, opens at /onboarding/?mode=setup
+
+# Simulate manual launch from desktop applications menu
+/usr/local/bin/blackbox-setup
+# Expect: windowed (1280x800), decorations on, opens at /onboarding/?mode=manage
+# (assuming onboarding has been completed; otherwise opens setup)
+```
+
+**Step 3: Commit**
+
+```bash
+git add installer/src-tauri/src/main.rs installer/src-tauri/tauri.conf.json
+git commit -m "feat(installer): mode-aware launch — --first-run flag routes setup vs manage
+
+Autostart invocation passes --first-run (fullscreen setup mode).
+Persistent launcher invocation reads /onboarding/state and opens
+in setup or manage mode automatically (windowed with decorations)."
 ```
 
 ## Phase 3.6: Build + package
@@ -2406,11 +3175,20 @@ if [[ -f "$BLACKBOX_ROOT/installer/dist/blackbox-setup.deb" ]]; then
     sudo dpkg -i "$BLACKBOX_ROOT/installer/dist/blackbox-setup.deb" || sudo apt install -fy
 fi
 
-# 6. Autostart .desktop
+# 6a. Autostart .desktop (first-boot launch — removed when onboarding completes)
 mkdir -p "$HOME/.config/autostart"
-cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup.desktop" "$HOME/.config/autostart/"
+cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup-autostart.desktop" \
+   "$HOME/.config/autostart/blackbox-setup.desktop"
+
+# 6b. Persistent desktop launcher (stays forever for re-launch into manage mode)
+mkdir -p "$HOME/.local/share/applications"
+cp "$BLACKBOX_ROOT/installer/dist/blackbox-setup.desktop" \
+   "$HOME/.local/share/applications/blackbox-setup.desktop"
+# Refresh the desktop database so the entry appears in the application menu immediately
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 echo "[install] Done. Reboot to launch BlackBox Setup, or run /usr/local/bin/blackbox-setup now."
+echo "[install] After first-run, find 'BlackBox Setup' in your applications menu to re-open for maintenance."
 ```
 
 **Step 2: Test in a clean Ubuntu 24.04 VM** (via vagrant or virt-manager):
@@ -2625,6 +3403,22 @@ After Tracks 0-5 ship, run all four scenarios — happy path is necessary but no
    - Tauri setup app launches again on boot
    - Wizard starts at welcome (state cleared)
    - Existing `.env` secrets preserved (reset clears progress, not credentials)
+
+## Scenario 5 — Manage-mode round-trip
+
+After Scenario 1 completes (full onboarding):
+
+1. **From applications menu:** click "BlackBox Setup" (the persistent launcher icon, not autostart). Tauri opens windowed (1280×800, decorations on) at `/onboarding/?mode=manage`.
+2. **Step grid renders** with status badges: Tailscale ✓, API Keys ✓, Phone ✓, Gmail ⊘ (or whatever), Pair ✓, Operators ✓.
+3. **Click "API Keys" card** → opens API Keys step in manage mode with 3 provider rows showing redacted keys + Re-validate / Replace / Remove / 👁 buttons each.
+4. **Click 👁 next to OpenAI** → full key reveals; click again → mask returns.
+5. **Click "Re-validate"** → status updates with fresh latency timestamp.
+6. **Click "Replace" on Anthropic** → modal opens with paste field; paste new key; Validate; Save. New key persisted to .env, old backed up to .env.backup.<ts>.
+7. **Click "Remove" on a non-essential provider** (e.g. PERPLEXITY if configured) → confirms; DELETE /onboarding/config/PERPLEXITY_API_KEY succeeds; key removed from .env; manage landing badge flips to ⊘.
+8. **From Portal Web:** open hamburger → System → "Manage Setup" → opens `/onboarding/?mode=manage` in browser tab. Same UI works.
+9. **From Portal Android:** System → "Manage Setup" → launches default browser pointed at manage URL.
+
+**Pass:** All buttons work as labeled, secrets never expose without explicit reveal click, .env backups created on Replace and Remove, Portal entry points reach the manage UI.
 
 ## Pass criteria (all four scenarios)
 
