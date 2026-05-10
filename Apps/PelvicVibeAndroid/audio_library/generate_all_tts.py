@@ -15,7 +15,7 @@ from openai import OpenAI
 client = OpenAI()
 
 # Output directories
-BASE_DIR = Path("/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Apps/PelvicVibeAndroid/audio_library")
+BASE_DIR = Path(__file__).resolve().parent
 FEMALE_DIR = BASE_DIR / "female"
 MALE_DIR = BASE_DIR / "male"
 

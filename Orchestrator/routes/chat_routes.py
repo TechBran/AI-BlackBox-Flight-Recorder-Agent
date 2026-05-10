@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional, List
 import requests
 
 from Orchestrator.utils.async_helpers import run_blocking
+from Orchestrator.utils.paths import blackbox_root
 
 # External library imports
 from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form, Request
@@ -3183,7 +3184,7 @@ async def execute_bash_command(command: str, timeout: int = 120) -> dict:
             env["DISPLAY"] = f":{ACTIVE_DISPLAY}"
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd="/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc",
+            timeout=timeout, cwd=str(blackbox_root()),
             env=env
         )
         output = result.stdout or ""

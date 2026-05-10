@@ -1,5 +1,5 @@
 #!/bin/bash
-S="/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/asterisk/configs"
+S="${BLACKBOX_ROOT:?}/Orchestrator/asterisk/configs"
 D="/etc/asterisk"
 cp "$S/pjsip.conf" "$D/pjsip.conf"
 cp "$S/extensions.conf" "$D/extensions.conf"

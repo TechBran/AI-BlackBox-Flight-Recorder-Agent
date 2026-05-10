@@ -2,8 +2,8 @@
 # Generate TTS audio files using the Orchestrator's /tts endpoint
 # This script uses curl to call the running Orchestrator service
 
-AUDIO_LIB="/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Apps/PelvicVibeAndroid/audio_library"
-UPLOADS_DIR="/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/uploads"
+AUDIO_LIB="$(dirname "$(realpath "$0")")"
+UPLOADS_DIR="${BLACKBOX_ROOT:?}/Portal/uploads"
 TTS_URL="http://localhost:9091/tts"
 
 # Function to generate a single TTS file

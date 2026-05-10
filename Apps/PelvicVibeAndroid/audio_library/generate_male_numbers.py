@@ -13,7 +13,7 @@ from openai import OpenAI
 client = OpenAI()
 
 # Output directory
-output_dir = Path("/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Apps/PelvicVibeAndroid/audio_library/male")
+output_dir = Path(__file__).resolve().parent / "male"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 # Number words to generate

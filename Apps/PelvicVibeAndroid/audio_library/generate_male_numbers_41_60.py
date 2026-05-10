@@ -14,7 +14,7 @@ except ImportError:
     exit(1)
 
 # Configuration
-OUTPUT_DIR = Path("/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Apps/PelvicVibeAndroid/audio_library/male")
+OUTPUT_DIR = Path(__file__).resolve().parent / "male"
 VOICE = "onyx"  # Male voice
 MODEL = "tts-1-hd"  # High quality model
 
@@ -46,7 +46,7 @@ def generate_audio_files():
     """Generate all number audio files."""
     # Load API key from secrets file
     import os
-    env_path = "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/Secrets/.env"
+    env_path = str(Path(__file__).resolve().parent.parent.parent.parent / "Orchestrator" / "Secrets" / ".env")
     if os.path.exists(env_path):
         with open(env_path) as f:
             for line in f:

@@ -23,6 +23,7 @@ from fastapi import WebSocket, WebSocketDisconnect, Request, Form
 from fastapi.responses import Response, PlainTextResponse
 
 from Orchestrator.checkpoint import app
+from Orchestrator.utils.paths import resolve
 from Orchestrator.volume import now_utc_iso
 from Orchestrator.config import (
     PHONE_ENABLED,
@@ -1808,7 +1809,7 @@ async def inject_audio_into_call(audio_request: InjectAudioRequest):
                     file_path = audio_request.file_path
                     if not os.path.exists(file_path):
                         # Try relative to working directory
-                        file_path = os.path.join("/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc", audio_request.file_path.lstrip('/'))
+                        file_path = str(resolve(audio_request.file_path.lstrip('/')))
 
                     if not os.path.exists(file_path):
                         return {"error": f"Audio file not found: {audio_request.file_path}"}

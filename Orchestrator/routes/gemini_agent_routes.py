@@ -29,6 +29,7 @@ from Orchestrator.agent_context import (
 )
 from Orchestrator.checkpoint import app
 from Orchestrator.config import GEMINI_API_KEY, USERS_DEFAULT
+from Orchestrator.utils.paths import blackbox_root
 from Orchestrator.volume import now_utc_iso
 
 
@@ -471,7 +472,7 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
 
             if msg_type == "prompt":
                 operator = data.get("operator", USERS_DEFAULT)
-                default_dir = "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc"
+                default_dir = str(blackbox_root())
                 working_dir = data.get("working_dir") or default_dir
                 prompt_text = data.get("text", "")
                 yolo_mode = data.get("yolo_mode", True)

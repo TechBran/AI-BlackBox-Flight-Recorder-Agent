@@ -22,6 +22,7 @@ from Orchestrator.phone.session import (
     AIBackend,
 )
 from Orchestrator.phone.audio_converter import AudioConverter
+from Orchestrator.utils.paths import blackbox_root
 from Orchestrator.volume import now_utc_iso
 
 # Import existing session models
@@ -2424,7 +2425,7 @@ class PhoneAIBridge:
                     "claude_session_id": passed_session_id,
                     "message_count": self._claude_message_count,
                     "model": "sonnet",
-                    "working_directory": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc",
+                    "working_directory": str(blackbox_root()),
                     "last_activity": "",
                     "last_caller_id": caller_id
                 }
@@ -2473,7 +2474,7 @@ class PhoneAIBridge:
                     "claude_session_id": self._claude_session_id,
                     "message_count": 0,
                     "model": "sonnet",
-                    "working_directory": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc",
+                    "working_directory": str(blackbox_root()),
                     "last_activity": "",
                     "last_caller_id": caller_id
                 }
@@ -2982,7 +2983,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
                 prompt = user_text
 
             # Create Claude CLI process with appropriate flags
-            working_dir = "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc"
+            working_dir = str(blackbox_root())
             process = create_claude_streaming(
                 working_dir=working_dir,
                 prompt=prompt,

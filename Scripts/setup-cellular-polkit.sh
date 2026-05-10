@@ -8,7 +8,7 @@ RULES_DIR="/etc/polkit-1/rules.d"
 RULES_FILE="$RULES_DIR/10-blackbox-networkmanager.rules"
 
 # Get the service user
-SERVICE_USER=$(systemctl show blackbox.service -p User --value 2>/dev/null || echo "ai-black-box-fc")
+SERVICE_USER=$(systemctl show blackbox.service -p User --value 2>/dev/null || id -un)
 
 echo "Creating polkit rule for user: $SERVICE_USER"
 echo "File: $RULES_FILE"

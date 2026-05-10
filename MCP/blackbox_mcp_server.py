@@ -37,7 +37,7 @@ except ImportError:
     sys.exit(1)
 
 # Configuration - paths relative to blackbox root
-BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT", "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc"))
+BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
 # Import web_tools and tool registry
