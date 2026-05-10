@@ -328,6 +328,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", GOOGLE_API_KEY)
 XAI_API_KEY       = os.getenv("XAI_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 
+# Pairing defaults (used by /pair/claim and /pair/qr/{token} response payload).
+# Customers register their own operators in onboarding step T2.7.1; "Brandon" is the system seed.
+DEFAULT_OPERATOR = os.getenv("DEFAULT_OPERATOR", "Brandon")
+DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "http://localhost:9091")
+
 # Configure Gemini for embeddings
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)

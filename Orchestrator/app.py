@@ -110,6 +110,9 @@ app.include_router(contacts_router)
 from Orchestrator.routes.cli_agent_routes import router as cli_agent_router
 app.include_router(cli_agent_router)
 
+from Orchestrator.routes.pairing_routes import router as pairing_router
+app.include_router(pairing_router)
+
 # =============================================================================
 # Entry point verification
 # =============================================================================

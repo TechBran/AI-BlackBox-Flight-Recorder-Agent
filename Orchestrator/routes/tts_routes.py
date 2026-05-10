@@ -305,20 +305,6 @@ async def tts_stitch(chunks: List[UploadFile] = File(...)):
     return StreamingResponse(iter([combined]), media_type="audio/wav")
 
 
-pair_tokens: Dict[str, Dict[str, int]] = {}
-
-def new_pair_token(ttl_seconds=300):
-    import secrets
-    tok = secrets.token_urlsafe(24)
-    exp = int(time.time()) + ttl_seconds
-    pair_tokens[tok] = {"exp": exp}
-    return tok, exp
-
-@app.post("/pair/start")
-def pair_start():
-    tok, exp = new_pair_token(300)
-    return {"type":"pair","token":tok,"exp":exp}
-
 @app.post("/stt")
 async def stt(file: UploadFile = File(...)):
     api_key = OPENAI_API_KEY.strip()
