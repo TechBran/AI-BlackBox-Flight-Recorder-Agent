@@ -2490,7 +2490,7 @@ class PhoneAIBridge:
                 "claude_session_id": self._claude_session_id,
                 "message_count": 0,
                 "model": "sonnet",
-                "working_directory": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc",
+                "working_directory": str(blackbox_root()),
                 "last_activity": "",
                 "last_caller_id": caller_id
             }
