@@ -23,8 +23,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.ui.components.ChatBubble
+import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import kotlinx.coroutines.launch
@@ -59,6 +62,8 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val view = LocalView.current
+
+    var peekSnapId by remember { mutableStateOf<String?>(null) }
 
     // Initialize API client + set base URL for inline media resolution
     LaunchedEffect(origin) {
@@ -107,7 +112,8 @@ fun ChatScreen(
                     ChatBubble(
                         message = message,
                         onSpeak = onSpeak,
-                        onSpeakWithId = onSpeakWithId
+                        onSpeakWithId = onSpeakWithId,
+                        onSnapshotClick = { peekSnapId = it }
                     )
                 }
             }
@@ -143,5 +149,13 @@ fun ChatScreen(
                 }
             }
         }
+    }
+
+    peekSnapId?.let { snapId ->
+        SnapshotPeekSheet(
+            snapId = snapId,
+            origin = origin,
+            onDismiss = { peekSnapId = null }
+        )
     }
 }

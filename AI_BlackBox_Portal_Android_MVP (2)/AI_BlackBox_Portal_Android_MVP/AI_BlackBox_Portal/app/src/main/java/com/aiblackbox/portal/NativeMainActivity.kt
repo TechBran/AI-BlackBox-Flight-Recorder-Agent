@@ -431,7 +431,6 @@ class NativeMainActivity : ComponentActivity() {
                         checkpointTurns = checkpointTurns,
                         isHealthy = isHealthy,
                         onMenuClick = { showSettings = true },
-                        onTimelineClick = { navController.navigate(Routes.TIMELINE) },
                         onOperatorChange = { scope.launch { store.setOperator(it) } },
                         onAddOperator = { name ->
                             scope.launch {

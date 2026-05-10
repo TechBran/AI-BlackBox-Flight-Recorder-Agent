@@ -68,6 +68,7 @@ import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.ClaudeAccent
+import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.components.GeminiAccent
 import com.aiblackbox.portal.ui.components.ProviderBanner
 import com.aiblackbox.portal.ui.components.StatusLine
@@ -612,6 +613,8 @@ fun AgentChatScreen(
     val listState = rememberLazyListState()
     val view = LocalView.current
 
+    var peekSnapId by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(origin, provider) {
         viewModel.initialize(origin, provider)
         com.aiblackbox.portal.ui.components.setChatBaseUrl(origin)
@@ -719,7 +722,10 @@ fun AgentChatScreen(
             contentPadding = PaddingValues(top = 8.dp, bottom = 180.dp)
         ) {
             items(items = messages, key = { it.id }) { message ->
-                ChatBubble(message = message)
+                ChatBubble(
+                    message = message,
+                    onSnapshotClick = { peekSnapId = it }
+                )
             }
         }
     }
@@ -739,6 +745,14 @@ fun AgentChatScreen(
                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.respondPermission(false)
             }
+        )
+    }
+
+    peekSnapId?.let { snapId ->
+        SnapshotPeekSheet(
+            snapId = snapId,
+            origin = origin,
+            onDismiss = { peekSnapId = null }
         )
     }
 }

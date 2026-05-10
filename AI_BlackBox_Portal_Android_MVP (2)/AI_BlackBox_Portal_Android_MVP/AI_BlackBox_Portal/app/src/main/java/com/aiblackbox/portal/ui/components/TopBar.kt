@@ -35,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -73,7 +72,6 @@ fun BlackBoxTopBar(
     checkpointTurns: Int = 0,
     isHealthy: Boolean = true,
     onMenuClick: () -> Unit = {},
-    onTimelineClick: () -> Unit = {},
     onOperatorChange: (String) -> Unit = {},
     onAddOperator: (String) -> Unit = {}
 ) {
@@ -241,34 +239,6 @@ fun BlackBoxTopBar(
                     color = healthColor
                 )
             }
-        }
-
-        // ── Timeline button (top-right) ──
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .glassSurface(
-                    shape = RoundedCornerShape(12.dp),
-                    bg = GlassFloatingBubble,
-                    elevation = 4.dp,
-                    borderOverride = com.aiblackbox.portal.ui.theme.GlassBorderStrong,
-                )
-                .clickable { onTimelineClick() }
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "\uD83D\uDCF8",
-                style = MaterialTheme.typography.labelMedium
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = "Timeline",
-                style = MaterialTheme.typography.labelSmall.copy(
-                    color = BbxAccent,
-                    fontSize = 12.sp
-                )
-            )
         }
     }
 

@@ -45,15 +45,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.model.SnapshotResult
+import com.aiblackbox.portal.ui.components.ClickableSnapshotContent
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -451,78 +449,6 @@ private fun SnapshotDetail(
     }
 }
 
-/**
- * Renders text with clickable SNAP-XXXXX IDs highlighted in purple.
- * Matches Portal makeSnapshotsClickable() — regex: /\b(SNAP-(?:\d{8}-)?\d+)\b/gi
- */
-@Composable
-private fun ClickableSnapshotContent(
-    text: String,
-    onSnapIdClick: (String) -> Unit
-) {
-    val snapPattern = remember { Regex("""\b(SNAP-(?:\d{8}-)?\d+)\b""", RegexOption.IGNORE_CASE) }
-    val matches = remember(text) { snapPattern.findAll(text).toList() }
-
-    if (matches.isEmpty()) {
-        // No snap IDs — render plain monospace text
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace,
-                lineHeight = 20.sp,
-                fontSize = 13.sp
-            ),
-            color = BbxWhite
-        )
-    } else {
-        // Build annotated string with clickable spans
-        val annotated = remember(text) {
-            buildAnnotatedString {
-                var lastEnd = 0
-                matches.forEach { match ->
-                    // Text before this match
-                    if (match.range.first > lastEnd) {
-                        append(text.substring(lastEnd, match.range.first))
-                    }
-                    // The SNAP-ID itself (purple, bold, clickable)
-                    val snapId = match.value
-                    pushStringAnnotation(tag = "SNAP", annotation = snapId)
-                    withStyle(
-                        SpanStyle(
-                            color = HighlightSnapshot,
-                            fontWeight = FontWeight.Bold
-                        )
-                    ) {
-                        append(snapId)
-                    }
-                    pop()
-                    lastEnd = match.range.last + 1
-                }
-                // Remaining text after last match
-                if (lastEnd < text.length) {
-                    append(text.substring(lastEnd))
-                }
-            }
-        }
-
-        @Suppress("DEPRECATION")
-        androidx.compose.foundation.text.ClickableText(
-            text = annotated,
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace,
-                lineHeight = 20.sp,
-                fontSize = 13.sp,
-                color = BbxWhite
-            ),
-            onClick = { offset ->
-                annotated.getStringAnnotations(tag = "SNAP", start = offset, end = offset)
-                    .firstOrNull()?.let { annotation ->
-                        onSnapIdClick(annotation.item)
-                    }
-            }
-        )
-    }
-}
 
 @Composable
 private fun MetaBadge(label: String, value: String, color: Color) {

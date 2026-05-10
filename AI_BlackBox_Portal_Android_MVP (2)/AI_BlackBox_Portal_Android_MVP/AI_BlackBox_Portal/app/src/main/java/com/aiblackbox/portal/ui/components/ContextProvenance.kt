@@ -51,6 +51,7 @@ fun ContextProvenance(
     expanded: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    onSnapshotClick: ((String) -> Unit)? = null,
 ) {
     if (provenance.isEmpty()) return
     Column(modifier = modifier.testTag("context-provenance-root")) {
@@ -85,17 +86,21 @@ fun ContextProvenance(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.padding(top = 4.dp),
             ) {
-                ProvenanceSection("Recent", provenance.recent)
-                ProvenanceSection("Keyword", provenance.keyword)
-                ProvenanceSection("Semantic", provenance.semantic)
-                ProvenanceSection("Checkpoint", provenance.checkpoint)
+                ProvenanceSection("Recent", provenance.recent, onSnapshotClick)
+                ProvenanceSection("Keyword", provenance.keyword, onSnapshotClick)
+                ProvenanceSection("Semantic", provenance.semantic, onSnapshotClick)
+                ProvenanceSection("Checkpoint", provenance.checkpoint, onSnapshotClick)
             }
         }
     }
 }
 
 @Composable
-private fun ProvenanceSection(label: String, ids: List<String>) {
+private fun ProvenanceSection(
+    label: String,
+    ids: List<String>,
+    onSnapshotClick: ((String) -> Unit)? = null,
+) {
     if (ids.isEmpty()) return
     Column {
         Text(
@@ -106,10 +111,18 @@ private fun ProvenanceSection(label: String, ids: List<String>) {
         )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             ids.forEach { id ->
+                val fullId = if (id.startsWith("SNAP-", ignoreCase = true)) id else "SNAP-$id"
                 Box(
                     Modifier
                         .background(Color(0x14FFFFFF), RoundedCornerShape(RadiusMd))
                         .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
+                        .let { base ->
+                            if (onSnapshotClick != null) {
+                                base.clickable { onSnapshotClick(fullId) }
+                            } else {
+                                base
+                            }
+                        }
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) {
                     Text(

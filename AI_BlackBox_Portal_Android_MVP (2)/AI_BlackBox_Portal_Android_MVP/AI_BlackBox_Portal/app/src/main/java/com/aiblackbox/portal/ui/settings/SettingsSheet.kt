@@ -165,12 +165,6 @@ fun SettingsSheet(
                     MenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
                     MenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
                     MenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
-                    MenuButton("Scheduler") { onNavigate("cron"); onDismiss() }
-                    MenuButton("Devices") { onNavigate("devices"); onDismiss() }
-                    MenuButton("Telephony") { onNavigate("telephony"); onDismiss() }
-                    MenuButton("SMS Inbox") { onNavigate("sms_inbox"); onDismiss() }
-                    MenuButton("Contacts") { onNavigate("contacts"); onDismiss() }
-                    MenuButton("Cellular") { onNavigate("cellular"); onDismiss() }
                 }
             }
 
@@ -254,6 +248,12 @@ fun SettingsSheet(
                 MenuButton("Computer Use") { onNavigate("computer_use"); onDismiss() }
                 MenuButton("CLI Agent") { onNavigate("cli_agent"); onDismiss() }
                 MenuButton("Voice Agent") { onNavigate("voice"); onDismiss() }
+                MenuButton("Scheduler") { onNavigate("cron"); onDismiss() }
+                MenuButton("Devices") { onNavigate("devices"); onDismiss() }
+                MenuButton("Telephony") { onNavigate("telephony"); onDismiss() }
+                MenuButton("SMS Inbox") { onNavigate("sms_inbox"); onDismiss() }
+                MenuButton("Contacts") { onNavigate("contacts"); onDismiss() }
+                MenuButton("Cellular") { onNavigate("cellular"); onDismiss() }
             }
 
             Spacer(Modifier.height(20.dp))

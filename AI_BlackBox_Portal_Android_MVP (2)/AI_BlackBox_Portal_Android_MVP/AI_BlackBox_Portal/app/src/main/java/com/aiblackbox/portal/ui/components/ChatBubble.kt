@@ -77,6 +77,7 @@ fun ChatBubble(
     message: UiMessage,
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
+    onSnapshotClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
@@ -320,6 +321,7 @@ fun ChatBubble(
                         provenance = prov,
                         expanded = provenanceExpanded,
                         onToggle = { provenanceExpanded = !provenanceExpanded },
+                        onSnapshotClick = onSnapshotClick,
                     )
                 }
             }

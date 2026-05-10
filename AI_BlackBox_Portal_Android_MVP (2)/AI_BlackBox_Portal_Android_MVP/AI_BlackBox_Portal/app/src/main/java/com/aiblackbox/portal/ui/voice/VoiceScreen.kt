@@ -68,6 +68,7 @@ import com.aiblackbox.portal.data.voice.VoiceClient
 import com.aiblackbox.portal.data.voice.VoiceEvent
 import com.aiblackbox.portal.data.voice.VoiceState
 import com.aiblackbox.portal.ui.components.ContextProvenance
+import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import android.view.HapticFeedbackConstants
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -575,6 +576,7 @@ fun VoiceScreen(
     val error by viewModel.error.collectAsState()
     val isMicActive by viewModel.isMicActive.collectAsState()
     val listState = rememberLazyListState()
+    var peekSnapId by remember { mutableStateOf<String?>(null) }
     // Request mic permission on first open
     val micPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -802,6 +804,7 @@ fun VoiceScreen(
                 provenance = prov,
                 expanded = voiceProvExpanded,
                 onToggle = { voiceProvExpanded = !voiceProvExpanded },
+                onSnapshotClick = { peekSnapId = it },
             )
             Spacer(Modifier.height(8.dp))
         }
@@ -832,5 +835,13 @@ fun VoiceScreen(
                 }
             }
         }
+    }
+
+    peekSnapId?.let { snapId ->
+        SnapshotPeekSheet(
+            snapId = snapId,
+            origin = origin,
+            onDismiss = { peekSnapId = null }
+        )
     }
 }
