@@ -117,6 +117,36 @@ from Orchestrator.routes.onboarding_routes import router as onboarding_router
 app.include_router(onboarding_router)
 
 # =============================================================================
+# First-run middleware: redirect /ui index → /onboarding/ when wizard incomplete
+# =============================================================================
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import RedirectResponse
+from Orchestrator.onboarding import get_state
+
+_onboarding_state = get_state()
+
+
+class FirstRunMiddleware(BaseHTTPMiddleware):
+    """Redirect /ui (Portal index) to /onboarding/ when onboarding is incomplete.
+
+    Only intercepts the three Portal-index paths (/ui, /ui/, /ui/index.html).
+    All other paths — including /ui/uploads/*, /api/*, /onboarding/* itself,
+    and websocket endpoints — pass through untouched.
+
+    The .onboarding_complete sentinel (written by POST /onboarding/complete)
+    is read on every request via OnboardingState.is_complete() — no caching,
+    so completion takes effect immediately without restart.
+    """
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if path in ("/ui", "/ui/", "/ui/index.html") and not _onboarding_state.is_complete():
+            return RedirectResponse(url="/onboarding/", status_code=307)
+        return await call_next(request)
+
+
+app.add_middleware(FirstRunMiddleware)
+
+# =============================================================================
 # Entry point verification
 # =============================================================================
 
