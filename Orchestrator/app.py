@@ -139,8 +139,13 @@ class FirstRunMiddleware(BaseHTTPMiddleware):
     """
     async def dispatch(self, request, call_next):
         path = request.url.path
+        # Update this tuple if Portal's index document is renamed (e.g. main.html, app.html).
         if path in ("/ui", "/ui/", "/ui/index.html") and not _onboarding_state.is_complete():
-            return RedirectResponse(url="/onboarding/", status_code=307)
+            return RedirectResponse(
+                url="/onboarding/",
+                status_code=307,
+                headers={"Cache-Control": "no-store"},
+            )
         return await call_next(request)
 
 
