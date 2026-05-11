@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI BlackBox · Setup</title>
+    <link rel="stylesheet" href="onboarding-tokens.css">
+    <link rel="stylesheet" href="onboarding.css">
+</head>
+<body>
+    <header class="ob-header">
+        <div class="ob-brand">
+            <div class="ob-brand-mark">AI <em>BlackBox</em></div>
+            <div class="ob-brand-meta">First-run setup</div>
+        </div>
+        <div class="ob-header-spacer"></div>
+        <div class="ob-progress">
+            <div class="ob-progress-bar-track">
+                <div class="ob-progress-bar" id="ob-progress-bar-fill"></div>
+            </div>
+            <div class="ob-progress-meta">
+                <span class="ob-progress-step-num">Step <span id="ob-progress-step-num">01</span> / 07</span>
+                <span class="ob-progress-step" id="ob-progress-step">Welcome</span>
+            </div>
+        </div>
+    </header>
+
+    <main id="ob-step-container" class="ob-step-container">
+        <div class="ob-loading">Loading&hellip;</div>
+    </main>
+
+    <footer class="ob-footer">
+        <div>AI BlackBox &middot; v0.9</div>
+        <div class="ob-footer-meta">
+            <span>Hardware: this device</span>
+            <span>Network: detecting&hellip;</span>
+            <span>Build: dev</span>
+        </div>
+    </footer>
+
+    <script type="module" src="onboarding.js"></script>
+</body>
+</html>

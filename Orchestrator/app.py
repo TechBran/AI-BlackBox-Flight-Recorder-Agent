@@ -151,6 +151,22 @@ class FirstRunMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(FirstRunMiddleware)
 
+
+# =============================================================================
+# Onboarding wizard static files mount
+# =============================================================================
+# CRITICAL: this mount MUST be registered AFTER app.include_router(onboarding_router)
+# above. If StaticFiles is mounted first, it shadows the API routes — GET
+# /onboarding/state would return index.html instead of JSON. The HARD-FAIL test
+# in T2.1.1 Step 5 verifies this ordering. Don't reorder these blocks.
+from fastapi.staticfiles import StaticFiles
+from Orchestrator.utils.paths import resolve as _resolve_path
+app.mount(
+    "/onboarding",
+    StaticFiles(directory=str(_resolve_path("Portal", "onboarding")), html=True),
+    name="onboarding",
+)
+
 # =============================================================================
 # Entry point verification
 # =============================================================================

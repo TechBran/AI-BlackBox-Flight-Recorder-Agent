@@ -1,0 +1,604 @@
+/* onboarding.css
+ * Production wizard SHELL — shared design system extracted from the
+ * approved reference mocks at _mocks/welcome.html and _mocks/tailscale.html.
+ *
+ * SCOPE: only chrome + primitives that EVERY step uses. Step-specific
+ * styles (status badges, action cards, disclosures, code blocks, etc.)
+ * stay with their step component CSS landing in Phases 2.2-2.7.
+ *
+ * Tokens come from onboarding-tokens.css (loaded first in index.html).
+ */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+    background: var(--ob-surface-bg);
+    color: var(--ob-text-primary);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-base);
+    font-weight: 400;
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+    position: relative;
+}
+
+/* Subtle atmospheric layer — radial accent glow + film-grain noise.
+ * Sits behind everything at low opacity. Not a card-glow gimmick. */
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 60% 50% at 75% 15%,
+            rgba(204, 0, 0, 0.08) 0%,
+            transparent 60%),
+        radial-gradient(ellipse 80% 60% at 10% 95%,
+            rgba(204, 0, 0, 0.04) 0%,
+            transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+}
+body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    opacity: 0.6;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* ── Header ────────────────────────────────────────────── */
+.ob-header {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--ob-space-8);
+    padding: var(--ob-space-5) var(--ob-space-10);
+    border-bottom: 1px solid var(--ob-surface-border);
+    position: relative;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+.ob-brand {
+    display: flex;
+    align-items: baseline;
+    gap: var(--ob-space-2);
+}
+.ob-brand-mark {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-bold);
+    font-size: var(--ob-text-lg);
+    font-variation-settings: "SOFT" var(--ob-display-soft), "opsz" 24;
+    letter-spacing: -0.02em;
+    color: var(--ob-text-primary);
+}
+.ob-brand-mark em {
+    font-style: italic;
+    color: var(--ob-accent);
+}
+.ob-brand-meta {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    color: var(--ob-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+}
+.ob-header-spacer { /* grid filler */ }
+.ob-progress {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-2);
+    min-width: 200px;
+}
+.ob-progress-bar-track {
+    height: 2px;
+    background: var(--ob-surface-border);
+    position: relative;
+    overflow: hidden;
+}
+.ob-progress-bar {
+    height: 100%;
+    width: 0%;  /* JS sets via #ob-progress-bar-fill style.width */
+    background: var(--ob-accent);
+    box-shadow: var(--ob-accent-glow);
+    transition: width var(--ob-motion-base) var(--ob-ease-out);
+    transform-origin: left center;
+    animation: ob-bar-grow 1100ms var(--ob-ease-out) 100ms backwards;
+}
+@keyframes ob-bar-grow {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+}
+.ob-progress-meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    color: var(--ob-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+}
+.ob-progress-step,
+.ob-progress-step-num {
+    color: var(--ob-text-secondary);
+}
+
+/* ── Step container + step layout ──────────────────────── */
+.ob-step-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    z-index: 1;
+    width: 100%;
+}
+
+.ob-step {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(80px, 0.6fr) minmax(0, 8fr);
+    gap: var(--ob-space-12);
+    max-width: var(--ob-content-wide);
+    width: 100%;
+    margin: 0 auto;
+    padding: var(--ob-space-20) var(--ob-space-10) var(--ob-space-16);
+    position: relative;
+    z-index: 1;
+    min-height: var(--ob-step-min-height);
+}
+
+/* Left gutter sigil — asymmetric anchor */
+.ob-step-sigil {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-3);
+    padding-top: var(--ob-space-4);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 80ms backwards;
+}
+.ob-step-sigil-num {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-light);
+    font-size: 5rem;
+    line-height: 0.9;
+    color: var(--ob-text-primary);
+    font-variation-settings: "opsz" 144, "SOFT" 0, "WONK" 1;
+    letter-spacing: -0.04em;
+}
+.ob-step-sigil-num em {
+    font-style: italic;
+    color: var(--ob-accent);
+    font-weight: var(--ob-display-weight-regular);
+}
+.ob-step-sigil-rule {
+    width: 32px;
+    height: 1px;
+    background: var(--ob-accent);
+    margin-top: var(--ob-space-2);
+}
+.ob-step-sigil-label {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--ob-text-tertiary);
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    margin-top: var(--ob-space-4);
+}
+
+.ob-step-body {
+    display: flex;
+    flex-direction: column;
+}
+.ob-step-eyebrow {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--ob-accent);
+    margin-bottom: var(--ob-space-5);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-3);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 100ms backwards;
+}
+.ob-step-eyebrow::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: var(--ob-accent);
+    border-radius: 50%;
+    box-shadow: 0 0 12px rgba(204, 0, 0, 0.6);
+}
+
+.ob-step-title {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-light);
+    font-size: clamp(2.6rem, 6.5vw, var(--ob-text-4xl));
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+    font-variation-settings: "opsz" 144, "SOFT" var(--ob-display-soft);
+    margin-bottom: var(--ob-space-6);
+    color: var(--ob-text-primary);
+    max-width: 14ch;
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 200ms backwards;
+}
+.ob-step-title em {
+    font-style: italic;
+    color: var(--ob-accent);
+    font-weight: var(--ob-display-weight-regular);
+    font-variation-settings: "opsz" 144, "SOFT" 80, "WONK" 1;
+    display: inline-block;
+    position: relative;
+}
+/* Subtle hand-drawn underline beneath the italic accent word */
+.ob-step-title em::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 6%;
+    bottom: -0.04em;
+    height: 2px;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        var(--ob-accent) 12%,
+        var(--ob-accent) 88%,
+        transparent 100%);
+    opacity: 0.35;
+    transform-origin: left center;
+    animation: ob-underline-grow 700ms var(--ob-ease-out) 1100ms backwards;
+}
+@keyframes ob-underline-grow {
+    from { transform: scaleX(0); opacity: 0; }
+    to   { transform: scaleX(1); opacity: 0.35; }
+}
+
+.ob-step-lede {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-lg);
+    font-weight: 400;
+    line-height: 1.55;
+    color: var(--ob-text-secondary);
+    max-width: var(--ob-content-narrow);
+    margin-bottom: var(--ob-space-16);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 350ms backwards;
+}
+
+.ob-step-helper {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-tertiary);
+    margin-top: var(--ob-space-4);
+    line-height: 1.6;
+}
+
+/* ── Features (brutalist horizontal-rule rows) ───────── */
+.ob-features {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: var(--ob-space-16);
+    border-bottom: 1px solid var(--ob-surface-border);
+}
+.ob-feature {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    gap: var(--ob-space-8);
+    align-items: baseline;
+    padding: var(--ob-space-6) 0;
+    border-top: 1px solid var(--ob-surface-border);
+    position: relative;
+    cursor: default;
+    transition: padding-left var(--ob-motion-fast) var(--ob-ease-out),
+                background var(--ob-motion-fast) var(--ob-ease-out);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) backwards;
+}
+.ob-feature:hover {
+    padding-left: var(--ob-space-3);
+    background: linear-gradient(90deg, var(--ob-accent-soft) 0%, transparent 60%);
+}
+.ob-feature::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 0;
+    height: 1px;
+    background: var(--ob-accent);
+    transition: width var(--ob-motion-base) var(--ob-ease-out);
+}
+.ob-feature:hover::before {
+    width: 90px;
+}
+.ob-feature:nth-child(1) { animation-delay: 500ms; }
+.ob-feature:nth-child(2) { animation-delay: 600ms; }
+.ob-feature:nth-child(3) { animation-delay: 700ms; }
+.ob-feature:nth-child(4) { animation-delay: 800ms; }
+
+.ob-feature-num {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-light);
+    font-size: 3.2rem;
+    line-height: 0.9;
+    color: var(--ob-text-primary);
+    font-variation-settings: "opsz" 60, "SOFT" 0;
+    letter-spacing: -0.03em;
+}
+.ob-feature-num em {
+    color: var(--ob-accent);
+    font-style: italic;
+    font-weight: var(--ob-display-weight-regular);
+}
+.ob-feature-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-2);
+    padding-top: var(--ob-space-2);
+}
+.ob-feature-label {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-medium);
+    font-size: var(--ob-text-xl);
+    line-height: 1.2;
+    color: var(--ob-text-primary);
+    letter-spacing: -0.01em;
+    font-variation-settings: "opsz" 36, "SOFT" var(--ob-display-soft);
+}
+.ob-feature-desc {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    line-height: 1.55;
+    color: var(--ob-text-tertiary);
+    max-width: 38ch;
+}
+.ob-feature-meta {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ob-text-tertiary);
+    text-align: right;
+    padding-top: var(--ob-space-3);
+    white-space: nowrap;
+}
+
+/* ── Buttons: primary CTA, secondary, back, skip ─────── */
+.ob-cta-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ob-space-8);
+    flex-wrap: wrap;
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 950ms backwards;
+}
+.ob-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-4);
+    padding: var(--ob-space-5) var(--ob-space-10);
+    background: var(--ob-accent);
+    color: var(--ob-text-on-accent);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-base);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border: none;
+    cursor: pointer;
+    transition: transform var(--ob-motion-fast) var(--ob-ease-out),
+                box-shadow var(--ob-motion-fast) var(--ob-ease-out);
+    box-shadow:
+        4px 4px 0 var(--ob-text-primary),
+        var(--ob-accent-glow);
+}
+.ob-cta:hover {
+    transform: translate(-2px, -2px);
+    box-shadow:
+        6px 6px 0 var(--ob-text-primary),
+        var(--ob-accent-glow-strong);
+}
+.ob-cta:active {
+    transform: translate(0, 0);
+    box-shadow:
+        2px 2px 0 var(--ob-text-primary),
+        var(--ob-accent-glow);
+}
+.ob-cta-arrow {
+    font-family: var(--ob-font-display);
+    font-style: italic;
+    font-size: 1.2em;
+    font-weight: var(--ob-display-weight-regular);
+    transition: transform var(--ob-motion-fast) var(--ob-ease-out);
+}
+/* Glyph-aware micro-motion: → translates forward, ↻ rotates.
+ * Don't unify into a single transform (see onboarding-tokens.css note). */
+.ob-cta:hover .ob-cta-arrow {
+    transform: translateX(4px);
+}
+
+.ob-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-2);
+    padding: var(--ob-space-3) var(--ob-space-6);
+    background: transparent;
+    color: var(--ob-text-secondary);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--ob-surface-border-emphasis);
+    cursor: pointer;
+    transition: all var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-secondary:hover {
+    color: var(--ob-text-primary);
+    border-color: var(--ob-text-primary);
+}
+
+.ob-back {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-tertiary);
+    text-decoration: none;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-2);
+    transition: color var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-back:hover { color: var(--ob-text-primary); }
+.ob-back::before {
+    content: "\2190";  /* ← */
+    font-family: var(--ob-font-display);
+    font-style: italic;
+    color: var(--ob-accent);
+}
+
+.ob-skip {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-tertiary);
+    text-decoration: none;
+    background: transparent;
+    border: none;
+    padding: 0 0 2px 0;
+    cursor: pointer;
+    border-bottom: 1px solid var(--ob-surface-border-emphasis);
+    transition: color var(--ob-motion-fast) var(--ob-ease-out),
+                border-color var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-skip:hover {
+    color: var(--ob-text-primary);
+    border-color: var(--ob-text-primary);
+}
+.ob-skip-arrow {
+    color: var(--ob-accent);
+    font-style: italic;
+    font-family: var(--ob-font-display);
+    margin-left: var(--ob-space-2);
+}
+
+/* ── Focus visible: keyboard users see where they are ─────────────
+ * CRITICAL — was the I2 a11y fix from T2.0.1 audit. Don't drop. */
+.ob-cta:focus-visible,
+.ob-secondary:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 6px;
+}
+.ob-skip:focus-visible,
+.ob-back:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 3px;
+    border-radius: 2px;
+}
+
+/* ── Loading + error placeholders (shell-level) ─────── */
+.ob-loading {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ob-text-tertiary);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    padding: var(--ob-space-20) var(--ob-space-10);
+    min-height: var(--ob-step-min-height);
+}
+
+.ob-step-missing,
+.ob-step-error {
+    flex: 1;
+    max-width: var(--ob-content-max-width);
+    width: 100%;
+    margin: 0 auto;
+    padding: var(--ob-space-20) var(--ob-space-10) var(--ob-space-16);
+    display: flex;
+    flex-direction: column;
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) backwards;
+}
+
+/* ── Footer ───────────────────────────────────────────── */
+.ob-footer {
+    padding: var(--ob-space-6) var(--ob-space-10);
+    border-top: 1px solid var(--ob-surface-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    color: var(--ob-text-quaternary);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    position: relative;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+}
+.ob-footer-meta {
+    display: flex;
+    gap: var(--ob-space-6);
+}
+.ob-footer-meta span::before {
+    content: "\00B7";  /* · */
+    margin-right: var(--ob-space-3);
+    color: var(--ob-accent);
+}
+.ob-footer-meta span:first-child::before { content: ""; margin-right: 0; }
+
+/* ── Reveal animation ─────────────────────────────────── */
+@keyframes ob-fade-up {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+        filter: blur(2px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+        filter: blur(0);
+    }
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 900px) {
+    .ob-progress {
+        min-width: 180px;
+    }
+    .ob-progress-step-num {
+        display: none; /* Hide "Step 01 / 07"; keep bar + step name visible */
+    }
+}
+@media (max-width: 720px) {
+    .ob-header { padding: var(--ob-space-4) var(--ob-space-6); }
+    .ob-step {
+        grid-template-columns: 1fr;
+        gap: var(--ob-space-6);
+        padding: var(--ob-space-12) var(--ob-space-6);
+    }
+    .ob-step-sigil { flex-direction: row; align-items: baseline; gap: var(--ob-space-4); }
+    .ob-step-sigil-label { writing-mode: horizontal-tb; transform: none; margin: 0; }
+    .ob-step-sigil-rule { display: none; }
+    .ob-feature {
+        grid-template-columns: 60px 1fr;
+        gap: var(--ob-space-4);
+    }
+    .ob-feature-meta { display: none; }
+    .ob-feature-num { font-size: 2.4rem; }
+}
