@@ -116,6 +116,9 @@ def current_config() -> CurrentConfigResponse:
     }
     # Tailscale status — live probe (~10-30ms via subprocess)
     try:
+        # Tailscale live probe: subprocess to `tailscale status --json` with 5s ceiling
+        # (see validators.validate_tailscale). Acceptable for human-driven manage-mode;
+        # do NOT call this from auto-polling UI.
         from Orchestrator.onboarding.validators import validate_tailscale
         ts_result = validate_tailscale()
         tailscale = {
@@ -128,13 +131,12 @@ def current_config() -> CurrentConfigResponse:
         tailscale = {"configured": False, "validated_at": val_at.get("tailscale"), "detail": {}}
     # Operators — read from admin_routes' module-level USERS_LIST
     try:
-        from Orchestrator.routes.admin_routes import USERS_LIST
-        operators = list(USERS_LIST)
+        from Orchestrator.routes import admin_routes
+        operators = list(admin_routes.USERS_LIST)
     except Exception:
         logger.exception("current-config operator list import failed")
         operators = []
-    # Paired devices — TODO: surface from pairing_routes._CLAIMS once claim store gets a public accessor
-    paired_devices: list[dict] = []
+    paired_devices: list[dict] = []  # TODO(Phase 2.10): replace with pairing_routes.list_claims() — expected shape [{token, device_kind, claimed_at, hostname}]
     return CurrentConfigResponse(
         providers=providers,
         operators=operators,
