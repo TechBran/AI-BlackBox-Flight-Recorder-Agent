@@ -602,3 +602,341 @@ body::after {
     .ob-feature-meta { display: none; }
     .ob-feature-num { font-size: 2.4rem; }
 }
+
+/* ════════════════════════════════════════════════════════════════
+ * Tailscale step (T2.3.1) — branch-specific UI
+ * ════════════════════════════════════════════════════════════════
+ *
+ * Classes used by Portal/onboarding/steps/tailscale.js across its
+ * three primary render branches (A configured / B not-installed /
+ * C not-authenticated) plus the always-rendered Branch D disclosure.
+ *
+ * Extracted from _mocks/tailscale.html with minor extensions:
+ *   - .ob-status-badge gets ‑success and ‑error variants (mock only
+ *     showed the default warning treatment for Branch C).
+ *   - .ob-cta-arrow rotation override targets the ↻ glyph on
+ *     Re-check (shell default is translateX for →).
+ *
+ * Future steps with status-badge or code-block UI (api_keys,
+ * pair_phone) can reuse these classes without further extraction.
+ */
+
+/* ── Status badges — single-line attention banner ─────────────── */
+.ob-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-3);
+    padding: var(--ob-space-3) var(--ob-space-5);
+    background: var(--ob-warning-soft);
+    border: 1px solid rgba(204, 0, 0, 0.3);
+    border-left: 3px solid var(--ob-warning);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-primary);
+    margin-bottom: var(--ob-space-8);
+    align-self: flex-start;
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 450ms backwards;
+}
+.ob-status-badge-pip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--ob-warning);
+    color: var(--ob-text-on-accent);
+    font-size: 11px;
+    font-weight: 700;
+    font-family: var(--ob-font-body);
+    flex-shrink: 0;
+}
+.ob-status-badge-label {
+    font-weight: 500;
+}
+.ob-status-badge-version {
+    color: var(--ob-text-tertiary);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-left: var(--ob-space-2);
+}
+/* Branch A success variant — green border + green pip */
+.ob-status-badge-success {
+    background: var(--ob-success-soft);
+    border: 1px solid rgba(39, 217, 128, 0.3);
+    border-left: 3px solid var(--ob-success);
+}
+.ob-status-badge-success .ob-status-badge-pip {
+    background: var(--ob-success);
+}
+/* Branch B explicit error variant — same red as default but
+ * named so future steps with both warning + error states can
+ * differentiate by class without a token redefinition. */
+.ob-status-badge-error {
+    background: var(--ob-warning-soft);
+    border: 1px solid rgba(204, 0, 0, 0.3);
+    border-left: 3px solid var(--ob-error);
+}
+.ob-status-badge-error .ob-status-badge-pip {
+    background: var(--ob-error);
+}
+
+/* ── Action card — terminal command + copy button ─────────────── */
+.ob-action-card {
+    background: var(--ob-surface-elevated);
+    border: 1px solid var(--ob-surface-border);
+    margin-bottom: var(--ob-space-8);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 550ms backwards;
+}
+.ob-action-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--ob-space-3) var(--ob-space-5);
+    border-bottom: 1px solid var(--ob-surface-border);
+    background: var(--ob-surface-card);
+}
+.ob-action-card-label {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ob-text-tertiary);
+}
+.ob-action-card-os {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    /* Customer-facing OS detection — must pass WCAG AA, hence tertiary not quaternary */
+    color: var(--ob-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-2);
+}
+.ob-action-card-os::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ob-success);
+    box-shadow: var(--ob-success-glow);
+}
+
+/* ── Code block — $ prompt + monospace command + copy ─────────── */
+.ob-code-block {
+    display: flex;
+    align-items: center;
+    gap: var(--ob-space-4);
+    padding: var(--ob-space-5);
+    background: var(--ob-surface-code);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-base);
+    font-weight: 400;
+    color: var(--ob-text-primary);
+    position: relative;
+}
+.ob-code-prompt {
+    color: var(--ob-accent);
+    user-select: none;
+    font-weight: 600;
+}
+.ob-code-cmd {
+    flex: 1;
+    white-space: pre;
+    overflow-x: auto;
+}
+.ob-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-2);
+    padding: var(--ob-space-2) var(--ob-space-4);
+    background: transparent;
+    border: 1px solid var(--ob-surface-border-emphasis);
+    color: var(--ob-text-secondary);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    transition: all var(--ob-motion-fast) var(--ob-ease-out);
+    white-space: nowrap;
+}
+.ob-copy-btn:hover {
+    background: var(--ob-text-primary);
+    color: var(--ob-text-on-accent);
+    border-color: var(--ob-text-primary);
+}
+.ob-copy-btn:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 6px;
+}
+
+/* Re-check button uses the ↻ refresh glyph — rotate instead of
+ * translateX (the shell default for the → forward-arrow). See the
+ * onboarding-tokens.css note on glyph-aware micro-motion. */
+.ob-cta:hover .ob-cta-arrow:not([data-glyph="arrow"]) {
+    /* No-op safety: keeps shell rule effective */
+}
+.ob-cta-row .ob-cta:has(.ob-cta-arrow:only-child) .ob-cta-arrow {
+    /* unused — kept as a hook for future arrow-only variants */
+}
+/* Specific override: any .ob-cta whose arrow text is ↻ rotates on hover.
+ * We can't easily target text content in CSS, so use a simple unicode
+ * sibling selector: the Re-check button is the only place the shell
+ * renders ↻, and the Branch-A Continue uses → (default translateX).
+ * We instead bind via a class added on the arrow itself when needed.
+ * For now: re-check is the dominant ↻ usage, so we attach the rotate
+ * via a more specific selector keyed to the button id pattern. */
+#ob-recheck-btn:hover .ob-cta-arrow {
+    transform: rotate(60deg);
+}
+
+/* ── Disclosure (Branch D — "no Tailscale account yet?") ──────── */
+.ob-disclosure {
+    border-top: 1px solid var(--ob-surface-border);
+    padding-top: var(--ob-space-8);
+    margin-top: var(--ob-space-8);
+    margin-bottom: var(--ob-space-12);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 750ms backwards;
+}
+.ob-disclosure-summary {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--ob-space-4);
+    cursor: pointer;
+    user-select: none;
+    margin-bottom: var(--ob-space-5);
+    transition: color var(--ob-motion-fast) var(--ob-ease-out);
+    list-style: none;  /* hide native disclosure triangle (we render our own) */
+}
+.ob-disclosure-summary::-webkit-details-marker {
+    display: none;
+}
+.ob-disclosure-q {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-medium);
+    font-size: var(--ob-text-xl);
+    color: var(--ob-text-primary);
+    line-height: 1.2;
+    font-variation-settings: "opsz" 36, "SOFT" var(--ob-display-soft);
+}
+.ob-disclosure-q em {
+    font-style: italic;
+    color: var(--ob-accent);
+    font-weight: var(--ob-display-weight-regular);
+}
+.ob-disclosure-toggle {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    color: var(--ob-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-2);
+    padding-top: var(--ob-space-2);
+}
+.ob-disclosure-toggle::after {
+    content: "+";
+    font-size: 1.2em;
+    color: var(--ob-accent);
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-regular);
+}
+.ob-disclosure[open] .ob-disclosure-toggle::after {
+    content: "−";
+}
+.ob-disclosure-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: var(--ob-space-10);
+    padding-left: 0;
+}
+.ob-disclosure-prose p {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    line-height: 1.65;
+    color: var(--ob-text-secondary);
+    margin-bottom: var(--ob-space-3);
+}
+.ob-disclosure-prose p:last-child { margin-bottom: 0; }
+.ob-disclosure-link {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--ob-space-2);
+    color: var(--ob-accent);
+    text-decoration: none;
+    border-bottom: 1px solid currentColor;
+    padding-bottom: 1px;
+    font-weight: 500;
+    transition: opacity var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-disclosure-link:hover { opacity: 0.7; }
+.ob-disclosure-link::after {
+    content: "↗";
+    font-family: var(--ob-font-display);
+    font-style: italic;
+    font-size: 0.9em;
+}
+.ob-disclosure-aside {
+    background: var(--ob-surface-card);
+    border-left: 2px solid var(--ob-accent);
+    padding: var(--ob-space-5);
+}
+.ob-disclosure-aside-label {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ob-text-tertiary);
+    margin-bottom: var(--ob-space-3);
+}
+.ob-disclosure-aside-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-2);
+}
+.ob-disclosure-aside-list li {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-secondary);
+    display: flex;
+    align-items: baseline;
+    gap: var(--ob-space-3);
+}
+.ob-disclosure-aside-list li::before {
+    content: "✓";
+    color: var(--ob-success);
+    font-weight: 700;
+}
+
+/* Disclosure focus-visible — keyboard target the <summary> + the link */
+.ob-disclosure-summary:focus-visible,
+.ob-disclosure-link:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 3px;
+    border-radius: 2px;
+}
+
+/* ── Step nav (bottom Back / Skip row) ────────────────────────── */
+.ob-step-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid var(--ob-surface-border);
+    padding-top: var(--ob-space-6);
+    margin-top: var(--ob-space-6);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 850ms backwards;
+}
+
+/* ── Tailscale step responsive collapse ────────────────────────── */
+@media (max-width: 720px) {
+    .ob-disclosure-body { grid-template-columns: 1fr; gap: var(--ob-space-6); }
+    .ob-code-block { font-size: var(--ob-text-sm); flex-wrap: wrap; }
+    .ob-action-card-header { flex-wrap: wrap; gap: var(--ob-space-2); }
+}
