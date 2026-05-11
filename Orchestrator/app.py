@@ -113,6 +113,9 @@ app.include_router(cli_agent_router)
 from Orchestrator.routes.pairing_routes import router as pairing_router
 app.include_router(pairing_router)
 
+from Orchestrator.routes.onboarding_routes import router as onboarding_router
+app.include_router(onboarding_router)
+
 # =============================================================================
 # Entry point verification
 # =============================================================================
