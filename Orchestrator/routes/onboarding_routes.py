@@ -157,12 +157,21 @@ def current_config() -> CurrentConfigResponse:
 
 
 @router.get("/config/{key}")
-def get_config_value(key: str, request: Request, reveal: int = 0) -> dict:
-    """Return a single config value. With ?reveal=1, returns full cleartext.
+def get_config_value(key: str, request: Request, reveal: bool = False) -> dict:
+    """Return a single config value. With ?reveal=true, returns full cleartext.
 
     Loopback-only when revealing — refuses if request not from 127.0.0.1 / ::1.
     Without reveal, returns the same redacted ••••XXXX shape as /current-config.
     Both modes require the key to be in ALLOWED_REVEAL_KEYS.
+
+    Caveats:
+    - The value is read from os.getenv at request time, but Orchestrator.config
+      loads .env once at process start. After /save mutates .env, this endpoint
+      reflects the OLD value until BlackBox restart. Mirror behavior of /save.
+    - The loopback gate inspects request.client.host (immediate ASGI peer). DO
+      NOT enable uvicorn's --proxy-headers without first reworking this check
+      to consult X-Forwarded-For; otherwise any forwarded request would bypass
+      the gate.
     """
     if key not in ALLOWED_REVEAL_KEYS:
         raise HTTPException(
@@ -177,6 +186,7 @@ def get_config_value(key: str, request: Request, reveal: int = 0) -> dict:
                 status_code=403,
                 detail="reveal only permitted from loopback",
             )
+        logger.info("config reveal: key=%s client=%s", key, client_host)
         return {"key": key, "value": value, "present": bool(value)}
     return {"key": key, "value": _redact(value), "present": bool(value)}
 
