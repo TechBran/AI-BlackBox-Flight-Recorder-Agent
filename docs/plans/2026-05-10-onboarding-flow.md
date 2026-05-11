@@ -1817,7 +1817,429 @@ the wizard until /onboarding/complete is called."
 **Dependencies:** Track 1
 **Outcome:** A polished customer-facing wizard with welcome, Tailscale, API keys, optional integrations, phone pairing, operator setup, and done steps.
 
-## Phase 2.1: Routing + base shell
+**Aesthetic direction (locked 2026-05-11):** Portal-adjacent, elevated. Inherit Portal's pure-black + red-accent palette but push hard on distinctive display typography (Fraunces variable serif), monospace body (JetBrains Mono), asymmetric layouts, and choreographed motion for the welcome moment. Customer feels continuity with Portal but the onboarding has its own gravitas. Mood: editorial gravitas + engineer's precision — "your AI infrastructure, treated with the gravity it deserves."
+
+## Phase 2.0: Design system prep (NEW per audit 2026-05-11)
+
+**Goal:** Lock the visual design system BEFORE wiring up the wizard, so each step component inherits a consistent identity rather than getting a polish pass at the end. Produces (a) self-hosted font files (no internet required during customer install — critical, since the wizard IS where the customer sets up Tailscale + API keys), (b) wizard-specific CSS tokens extending Portal's `_variables.css`, and (c) two static reference mocks (welcome + tailscale) Brandon previews in-browser before T2.1.1 dispatches.
+
+### Task 2.0.1: Self-host fonts + tokens + reference mocks
+
+**Files:**
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/fonts/Fraunces-VariableFont_SOFT,WONK,opsz,wght.woff2` (download from Google Fonts variable axes)
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/fonts/JetBrainsMono-VariableFont_wght.woff2` (download from Google Fonts)
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/fonts/LICENSES.md` (font license text from Google Fonts — both SIL OFL 1.1)
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/onboarding-tokens.css`
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/_mocks/welcome.html`
+- Create: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Portal/onboarding/_mocks/tailscale.html`
+
+**Step 1: Download Fraunces and JetBrains Mono variable WOFF2 files.**
+
+```bash
+mkdir -p Portal/onboarding/fonts
+cd Portal/onboarding/fonts
+
+# Fraunces variable (display) — full axes: SOFT, WONK, opsz, wght
+curl -fsSL -o Fraunces.woff2 \
+  "https://github.com/google/fonts/raw/main/ofl/fraunces/Fraunces%5BSOFT%2CWONK%2Copsz%2Cwght%5D.ttf"
+
+# JetBrains Mono variable (body) — wght axis
+curl -fsSL -o JetBrainsMono.woff2 \
+  "https://github.com/JetBrains/JetBrainsMono/raw/master/fonts/variable/JetBrainsMono%5Bwght%5D.ttf"
+```
+
+(If the .ttf-to-.woff2 conversion isn't trivial, accept .ttf for v1 and convert later. Browsers handle .ttf fine; .woff2 is just smaller.)
+
+Write `LICENSES.md` with both fonts' SIL OFL 1.1 license text + attribution.
+
+**Step 2: Write `Portal/onboarding/onboarding-tokens.css`** — extends Portal's `_variables.css` with wizard-specific tokens:
+
+```css
+/* onboarding-tokens.css
+ * Wizard-specific design tokens. Extends Portal's _variables.css with
+ * typography, spacing, motion, and accent treatments tailored to the
+ * customer-facing first-run + manage-mode experience.
+ *
+ * Aesthetic: Portal-adjacent (pure black + red-accent inherited) but
+ * elevated with editorial-grade display typography and engineer-precision
+ * monospace body. Mood: New Yorker meets terminal.
+ */
+
+/* ==== Self-hosted fonts (offline-safe for customer install) ==== */
+
+@font-face {
+    font-family: "Fraunces";
+    src: url("./fonts/Fraunces.woff2") format("woff2-variations"),
+         url("./fonts/Fraunces.ttf") format("truetype-variations");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "JetBrains Mono";
+    src: url("./fonts/JetBrainsMono.woff2") format("woff2-variations"),
+         url("./fonts/JetBrainsMono.ttf") format("truetype-variations");
+    font-weight: 100 800;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* ==== Wizard-specific tokens (extending Portal _variables.css) ==== */
+
+:root {
+    /* Typography stack */
+    --ob-font-display: "Fraunces", Georgia, serif;
+    --ob-font-body: "JetBrains Mono", ui-monospace, monospace;
+
+    /* Type scale (modular, 1.333 ratio anchored at body 16px) */
+    --ob-text-xs: 0.75rem;     /* 12px - meta/labels */
+    --ob-text-sm: 0.875rem;    /* 14px - secondary body */
+    --ob-text-base: 1rem;      /* 16px - body */
+    --ob-text-lg: 1.333rem;    /* 21.3px - emphasis */
+    --ob-text-xl: 1.777rem;    /* 28.4px - small heading */
+    --ob-text-2xl: 2.369rem;   /* 37.9px - step heading */
+    --ob-text-3xl: 3.157rem;   /* 50.5px - welcome display */
+    --ob-text-4xl: 4.209rem;   /* 67.3px - hero display */
+
+    /* Display weight (Fraunces variable axis) */
+    --ob-display-weight-light: 300;
+    --ob-display-weight-regular: 400;
+    --ob-display-weight-bold: 700;
+    --ob-display-soft: 30;     /* Fraunces SOFT axis (0-100) — slight softness */
+
+    /* Spacing scale (more generous than Portal's chat density) */
+    --ob-space-1: 0.25rem;
+    --ob-space-2: 0.5rem;
+    --ob-space-3: 0.75rem;
+    --ob-space-4: 1rem;
+    --ob-space-6: 1.5rem;
+    --ob-space-8: 2rem;
+    --ob-space-12: 3rem;
+    --ob-space-16: 4rem;
+    --ob-space-24: 6rem;
+    --ob-space-32: 8rem;
+
+    /* Motion timings (longer for "moments", faster for confirmations) */
+    --ob-motion-instant: 80ms;
+    --ob-motion-fast: 180ms;
+    --ob-motion-base: 320ms;
+    --ob-motion-slow: 560ms;
+    --ob-motion-moment: 900ms;     /* welcome reveal, step transitions */
+    --ob-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ob-ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+
+    /* Accent treatments */
+    --ob-accent: var(--accent, #ff4a4a);
+    --ob-accent-glow: 0 0 32px rgba(255, 74, 74, 0.18);
+    --ob-success: #27d980;        /* validation success — complement to red */
+    --ob-success-glow: 0 0 24px rgba(39, 217, 128, 0.20);
+    --ob-warning: #ffb84a;
+    --ob-error: #ff4a4a;          /* same as accent — error is the dominant signal */
+
+    /* Surface treatments */
+    --ob-surface-bg: #000000;
+    --ob-surface-elevated: #0a0a0a;
+    --ob-surface-card: #141414;
+    --ob-surface-border: #222222;
+    --ob-surface-border-emphasis: #333333;
+
+    /* Layout constraints */
+    --ob-content-max-width: 56rem;       /* ~896px — wider than Portal's chat */
+    --ob-content-narrow: 36rem;          /* ~576px — for forms */
+    --ob-step-min-height: 60vh;
+}
+```
+
+**Step 3: Write `Portal/onboarding/_mocks/welcome.html`** — STATIC mock of the welcome step in final visual form. Goal: Brandon can open this in a browser and SEE the design before any production code is written.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI BlackBox · Welcome (Mock)</title>
+    <link rel="stylesheet" href="../onboarding-tokens.css">
+    <style>
+        /* Mock-specific reset + welcome-step rendering */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--ob-surface-bg);
+            color: var(--text, #ffffff);
+            font-family: var(--ob-font-body);
+            font-size: var(--ob-text-base);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        /* Header with progress bar */
+        .ob-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: var(--ob-space-6) var(--ob-space-8);
+            border-bottom: 1px solid var(--ob-surface-border);
+        }
+        .ob-brand {
+            font-family: var(--ob-font-display);
+            font-weight: var(--ob-display-weight-bold);
+            font-size: var(--ob-text-lg);
+            font-variation-settings: "SOFT" var(--ob-display-soft);
+            letter-spacing: -0.02em;
+        }
+        .ob-progress {
+            display: flex;
+            flex-direction: column;
+            gap: var(--ob-space-2);
+            min-width: 240px;
+        }
+        .ob-progress-bar-track {
+            height: 2px;
+            background: var(--ob-surface-border);
+            border-radius: 0;
+            overflow: hidden;
+        }
+        .ob-progress-bar {
+            height: 100%;
+            width: 14.3%;  /* 1 of 7 steps */
+            background: var(--ob-accent);
+            box-shadow: var(--ob-accent-glow);
+            transition: width var(--ob-motion-base) var(--ob-ease-out);
+        }
+        .ob-progress-text {
+            font-size: var(--ob-text-xs);
+            color: var(--muted, #c9c9c9);
+            text-align: right;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        /* Welcome step content */
+        .ob-step {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            max-width: var(--ob-content-max-width);
+            margin: 0 auto;
+            padding: var(--ob-space-16) var(--ob-space-8);
+            min-height: var(--ob-step-min-height);
+        }
+        .ob-step-eyebrow {
+            font-family: var(--ob-font-body);
+            font-size: var(--ob-text-xs);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            color: var(--ob-accent);
+            margin-bottom: var(--ob-space-4);
+            animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 100ms backwards;
+        }
+        .ob-step-title {
+            font-family: var(--ob-font-display);
+            font-weight: var(--ob-display-weight-light);
+            font-size: var(--ob-text-4xl);
+            line-height: 1.05;
+            letter-spacing: -0.025em;
+            font-variation-settings: "opsz" 144, "SOFT" var(--ob-display-soft);
+            margin-bottom: var(--ob-space-6);
+            animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 200ms backwards;
+        }
+        .ob-step-title em {
+            font-style: italic;
+            color: var(--ob-accent);
+        }
+        .ob-step-lede {
+            font-family: var(--ob-font-body);
+            font-size: var(--ob-text-lg);
+            line-height: 1.5;
+            color: var(--neutral-900, #cccccc);
+            max-width: var(--ob-content-narrow);
+            margin-bottom: var(--ob-space-12);
+            animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 350ms backwards;
+        }
+        .ob-features {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: var(--ob-space-6);
+            margin-bottom: var(--ob-space-12);
+        }
+        .ob-feature {
+            display: flex;
+            gap: var(--ob-space-4);
+            align-items: flex-start;
+            padding: var(--ob-space-4) 0;
+            border-top: 1px solid var(--ob-surface-border);
+            animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) backwards;
+        }
+        .ob-feature:nth-child(1) { animation-delay: 500ms; }
+        .ob-feature:nth-child(2) { animation-delay: 600ms; }
+        .ob-feature:nth-child(3) { animation-delay: 700ms; }
+        .ob-feature:nth-child(4) { animation-delay: 800ms; }
+        .ob-feature-num {
+            font-family: var(--ob-font-display);
+            font-size: var(--ob-text-xl);
+            font-weight: var(--ob-display-weight-light);
+            color: var(--ob-accent);
+            font-variation-settings: "opsz" 60;
+            line-height: 1;
+            min-width: 2ch;
+        }
+        .ob-feature-body {
+            font-size: var(--ob-text-sm);
+            line-height: 1.5;
+        }
+        .ob-feature-label {
+            color: var(--text);
+            font-weight: 600;
+            display: block;
+            margin-bottom: var(--ob-space-1);
+        }
+        .ob-feature-desc {
+            color: var(--neutral-700, #888888);
+        }
+        /* Primary CTA */
+        .ob-cta {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--ob-space-3);
+            padding: var(--ob-space-4) var(--ob-space-8);
+            background: var(--ob-accent);
+            color: var(--neutral-0);
+            font-family: var(--ob-font-body);
+            font-size: var(--ob-text-base);
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            border: none;
+            cursor: pointer;
+            transition: all var(--ob-motion-fast) var(--ob-ease-out);
+            box-shadow: var(--ob-accent-glow);
+            animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 950ms backwards;
+            align-self: flex-start;
+        }
+        .ob-cta:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 4px 4px 0 var(--neutral-0), 0 0 48px rgba(255, 74, 74, 0.32);
+        }
+        .ob-cta-arrow {
+            font-family: var(--ob-font-display);
+            font-style: italic;
+            transition: transform var(--ob-motion-fast) var(--ob-ease-out);
+        }
+        .ob-cta:hover .ob-cta-arrow {
+            transform: translateX(4px);
+        }
+        /* Reveal animation */
+        @keyframes ob-fade-up {
+            from { opacity: 0; transform: translateY(16px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <header class="ob-header">
+        <div class="ob-brand">AI BlackBox</div>
+        <div class="ob-progress">
+            <div class="ob-progress-bar-track">
+                <div class="ob-progress-bar"></div>
+            </div>
+            <div class="ob-progress-text">Step 1 of 7</div>
+        </div>
+    </header>
+    <main class="ob-step">
+        <div class="ob-step-eyebrow">First-run setup</div>
+        <h1 class="ob-step-title">Welcome to your <em>private</em> AI infrastructure.</h1>
+        <p class="ob-step-lede">
+            Voice, vision, memory, and tools — all running on hardware you own.
+            We'll walk through setup in a few minutes; skip anything you're not
+            ready for and return later.
+        </p>
+        <div class="ob-features">
+            <div class="ob-feature">
+                <div class="ob-feature-num">01</div>
+                <div class="ob-feature-body">
+                    <span class="ob-feature-label">Your data, your hardware</span>
+                    <span class="ob-feature-desc">Conversations, memory, and tools live on your BlackBox — not in someone else's cloud.</span>
+                </div>
+            </div>
+            <div class="ob-feature">
+                <div class="ob-feature-num">02</div>
+                <div class="ob-feature-body">
+                    <span class="ob-feature-label">Reach it from anywhere</span>
+                    <span class="ob-feature-desc">Tailscale gives you a private mesh: phone, laptop, BlackBox — secure access without exposing the public internet.</span>
+                </div>
+            </div>
+            <div class="ob-feature">
+                <div class="ob-feature-num">03</div>
+                <div class="ob-feature-body">
+                    <span class="ob-feature-label">Bring your own keys</span>
+                    <span class="ob-feature-desc">OpenAI, Anthropic, Google — paste in your keys, pay providers directly. No middle-man billing.</span>
+                </div>
+            </div>
+            <div class="ob-feature">
+                <div class="ob-feature-num">04</div>
+                <div class="ob-feature-body">
+                    <span class="ob-feature-label">Your phone is the remote</span>
+                    <span class="ob-feature-desc">Pair your phone with a QR scan. On-the-go voice, vision, and tool access — same memory.</span>
+                </div>
+            </div>
+        </div>
+        <button class="ob-cta">
+            Let's get started <span class="ob-cta-arrow">→</span>
+        </button>
+    </main>
+</body>
+</html>
+```
+
+**Step 4: Write `Portal/onboarding/_mocks/tailscale.html`** — second mock, more complex form layout. Validates the design system handles multi-state forms (validator-ok / not-installed / not-authenticated / no-account-yet branches per Phase 2.3 spec). Use the same tokens + structure as welcome.html but render the "installed but not authenticated" branch as the primary state shown, with the "no account yet" disclosure expanded.
+
+(Implementer: write this with the same visual language as welcome.html — Fraunces display, JetBrains Mono body, accent for primary CTA, success-green for the ✓ when "already configured", asymmetric grid where appropriate. ~200 lines of HTML.)
+
+**Step 5: Test — preview both mocks in browser**
+
+Since the wizard's StaticFiles mount doesn't exist yet (T2.1.1 territory), serve mocks via Python's built-in HTTP server for visual review:
+
+```bash
+cd Portal/onboarding
+python3 -m http.server 8095 &
+sleep 1
+echo "Preview welcome mock at:  http://localhost:8095/_mocks/welcome.html"
+echo "Preview tailscale mock at: http://localhost:8095/_mocks/tailscale.html"
+```
+
+Visit both URLs in a browser. Confirm:
+- Fraunces serif loads (display headings should look distinctly editorial — wedge serifs visible at 64px)
+- JetBrains Mono loads (body text should be monospace with crisp glyphs)
+- Pure-black background, red accent on CTA + eyebrow + feature numbers
+- Welcome step's title fade-up animation plays on page load (staggered reveals)
+- CTA hover lifts 2px and shows offset shadow
+- Layout breathes — generous spacing matches the "editorial gravitas" mood
+
+Brandon signs off on the visual direction by saying "approved" or "tweak X". Iterate within T2.0.1 until sign-off, then commit.
+
+**Step 6: Commit**
+
+```bash
+git add Portal/onboarding/fonts/ Portal/onboarding/onboarding-tokens.css Portal/onboarding/_mocks/
+git commit -m "feat(portal-ob): design system prep — Fraunces + JetBrains Mono fonts, tokens, mocks
+
+Self-hosts variable Fraunces (display) + JetBrains Mono (body) so the
+wizard works offline during customer install (the wizard IS where Tailscale
+gets configured, so internet may not be reliable yet).
+
+onboarding-tokens.css extends Portal's _variables.css with wizard-specific
+typography, spacing, motion, and accent treatments. Aesthetic: Portal-
+adjacent + elevated — editorial gravitas + engineer's precision.
+
+Static reference mocks at Portal/onboarding/_mocks/{welcome,tailscale}.html
+for sign-off before T2.1.1 dispatches. Underscore prefix marks them as
+design artifacts, not production routes."
+```
+
+DO NOT push until Brandon previews + signs off. Reference mocks are sign-off artifacts.
+
+
 
 ### Task 2.1.1: Set up the onboarding directory + index route
 
