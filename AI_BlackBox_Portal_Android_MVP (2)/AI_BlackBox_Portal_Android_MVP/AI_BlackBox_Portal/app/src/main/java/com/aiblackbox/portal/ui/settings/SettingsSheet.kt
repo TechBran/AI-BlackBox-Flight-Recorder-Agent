@@ -726,6 +726,18 @@ fun SettingsSheet(
                         onDismiss = { showPairQr = false }
                     )
                 }
+
+                // Manage Setup — opens the onboarding wizard in manage mode for credential edits.
+                // Single source of truth: same UI used at first-run setup, no Android-side reimplementation.
+                MenuButton("⚙️ Manage Setup") {
+                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    val target = if (origin.isNotBlank()) "$origin/onboarding/?mode=manage"
+                                 else "http://localhost:9091/onboarding/?mode=manage"
+                    val intent = Intent(Intent.ACTION_VIEW, target.toUri())
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    context.startActivity(intent)
+                    onDismiss()
+                }
             }
 
             // Re-pair confirmation dialog
