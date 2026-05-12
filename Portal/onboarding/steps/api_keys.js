@@ -1,9 +1,15 @@
 // API keys step — third screen of the onboarding wizard.
 // Customer pastes OpenAI / Anthropic / Google keys and validates each.
-// Save & continue (active when ≥1 validated) persists keys to .env via
-// /onboarding/save and advances via ctx.next().
+// Save & continue (active when ≥1 validated OR pre-existing config retained)
+// persists keys to .env via /onboarding/save and advances via ctx.next().
 //
-// Pattern: per-provider state object tracks {value, status, result}.
+// Rehydration: on mount we fetch /onboarding/current-config. For each
+// provider already present in .env we render an "Already configured" card
+// with a Replace button instead of an empty paste field. Pre-existing
+// untouched keys are NOT re-posted on save — only newly validated ones.
+//
+// Pattern: per-provider state object tracks
+//   {value, status, result, wasPresent, last4, replacing}.
 // Status: "idle" | "validating" | "ok" | "error"
 // Visual reference: design system extends welcome + tailscale steps.
 
@@ -33,9 +39,17 @@ const PROVIDERS = [
 
 // Per-instance state — reset on each render() call (which fires when wizard
 // re-enters this step, e.g., after back-then-next navigation).
-function makeInitialState() {
+function makeInitialState(currentConfig) {
     return PROVIDERS.reduce((acc, p) => {
-        acc[p.id] = { value: "", status: "idle", result: null };
+        const cfg = currentConfig?.providers?.[p.id];
+        acc[p.id] = {
+            value: "",
+            status: "idle",
+            result: null,
+            wasPresent: !!(cfg && cfg.present),
+            last4: cfg?.last4 || null,
+            replacing: false,
+        };
         return acc;
     }, {});
 }
@@ -43,7 +57,22 @@ function makeInitialState() {
 let busy = false;  // prevents save-button double-fire
 
 export async function render(container, { next, back, skip }) {
-    const state = makeInitialState();
+    // Fetch current config first so we can rehydrate "already configured"
+    // state per provider. Fail-open: empty config means render the original
+    // empty-input flow.
+    let currentConfig = null;
+    try {
+        const r = await fetch("/onboarding/current-config");
+        if (r.ok) {
+            currentConfig = await r.json();
+        }
+    } catch (e) {
+        // Network error — proceed with empty config (acts as if nothing
+        // was pre-configured, customer pastes fresh).
+        currentConfig = null;
+    }
+
+    const state = makeInitialState(currentConfig);
 
     container.innerHTML = `
         <section class="ob-step ob-api-keys">
@@ -67,7 +96,7 @@ export async function render(container, { next, back, skip }) {
                     no middle-man billing on our side.
                 </p>
                 <div class="ob-providers" id="ob-providers">
-                    ${PROVIDERS.map(renderProviderCard).join("")}
+                    ${PROVIDERS.map(p => renderProviderCardForState(p, state)).join("")}
                 </div>
                 <div class="ob-cta-row">
                     <button type="button" class="ob-cta" id="ob-keys-save" disabled>
@@ -88,8 +117,19 @@ export async function render(container, { next, back, skip }) {
 
     wireProviderCards(container, state);
     wireSave(container, state, next);
+    updateSaveButton(container, state);
     document.getElementById("ob-keys-back").addEventListener("click", back);
     document.getElementById("ob-keys-skip").addEventListener("click", skip);
+}
+
+// Dispatcher: pick configured-state card or input-state card based on
+// rehydration state.
+function renderProviderCardForState(p, state) {
+    const s = state[p.id];
+    if (s.wasPresent && !s.replacing) {
+        return renderProviderCardConfigured(p, s);
+    }
+    return renderProviderCard(p);
 }
 
 function renderProviderCard(p) {
@@ -132,37 +172,119 @@ function renderProviderCard(p) {
     `;
 }
 
+function renderProviderCardConfigured(p, s) {
+    // Server returns last4 as a fully-masked string with the real last 4
+    // characters at the end (e.g., "••••••••XYZW"). Trim to the trailing
+    // meaningful suffix so the pill stays readable on narrow widths.
+    const preview = formatLast4Preview(s.last4);
+    return `
+        <div class="ob-provider-card ob-provider-configured" data-provider="${p.id}">
+            <div class="ob-provider-header">
+                <div class="ob-provider-label">${escapeHtml(p.label)}</div>
+                <a class="ob-provider-link" href="${escapeHtml(p.keyUrl)}" target="_blank" rel="noopener">
+                    Get a new key <span aria-hidden="true">↗</span>
+                </a>
+            </div>
+            <div class="ob-provider-configured-row">
+                <span class="ob-status-pill ob-status-pill-ok">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
+                    Already configured &middot; ${escapeHtml(preview)}
+                </span>
+                <button type="button" class="ob-replace-btn" data-provider="${p.id}">Replace</button>
+            </div>
+        </div>
+    `;
+}
+
+// Reduce the server-rendered redacted preview down to a short, readable
+// suffix: 4 leading bullets + the trailing alphanumeric tail (typically the
+// real last 4 characters of the key).
+function formatLast4Preview(raw) {
+    if (!raw) return "set";
+    // Pull off the trailing non-bullet chars (the real last4-ish suffix).
+    const m = String(raw).match(/([A-Za-z0-9_\-]+)$/);
+    const tail = m ? m[1] : "";
+    if (!tail) return "set";
+    return "••••" + tail;
+}
+
 function wireProviderCards(container, state) {
-    PROVIDERS.forEach(p => {
-        const input = container.querySelector(`#ob-input-${p.id}`);
-        const validateBtn = container.querySelector(`#ob-validate-${p.id}`);
-        const revealBtn = container.querySelector(`#ob-reveal-${p.id}`);
-        const statusEl = container.querySelector(`#ob-status-${p.id}`);
+    PROVIDERS.forEach(p => wireSingleProviderCard(container, state, p));
+}
 
-        // Input: track value + enable/disable validate button
-        input.addEventListener("input", () => {
-            state[p.id].value = input.value.trim();
-            // Reset status when user changes the value
-            if (state[p.id].status !== "idle") {
-                state[p.id].status = "idle";
-                state[p.id].result = null;
-                statusEl.dataset.status = "idle";
-                statusEl.innerHTML = "";
-                updateSaveButton(container, state);
-            }
-            validateBtn.disabled = state[p.id].value.length === 0;
-        });
+// Wire a single provider card. If the card is in the configured state, only
+// the Replace button needs wiring. If it's in the input state, the input,
+// reveal, and validate controls need wiring.
+function wireSingleProviderCard(container, state, p) {
+    const s = state[p.id];
 
-        // Reveal toggle
-        revealBtn.addEventListener("click", () => {
-            const isPassword = input.type === "password";
-            input.type = isPassword ? "text" : "password";
-            revealBtn.textContent = isPassword ? "🙈" : "👁";
-        });
+    if (s.wasPresent && !s.replacing) {
+        // Configured-state card: wire Replace button only.
+        const replaceBtn = container.querySelector(
+            `.ob-provider-card[data-provider="${p.id}"] .ob-replace-btn`
+        );
+        if (replaceBtn) {
+            replaceBtn.addEventListener("click", () => startReplacing(p, state, container));
+        }
+        return;
+    }
 
-        // Validate
-        validateBtn.addEventListener("click", () => validateProvider(p, state, container));
+    // Input-state card: wire input + reveal + validate.
+    const input = container.querySelector(`#ob-input-${p.id}`);
+    const validateBtn = container.querySelector(`#ob-validate-${p.id}`);
+    const revealBtn = container.querySelector(`#ob-reveal-${p.id}`);
+    const statusEl = container.querySelector(`#ob-status-${p.id}`);
+
+    if (!input || !validateBtn || !revealBtn || !statusEl) return;
+
+    // Input: track value + enable/disable validate button
+    input.addEventListener("input", () => {
+        state[p.id].value = input.value.trim();
+        // Reset status when user changes the value
+        if (state[p.id].status !== "idle") {
+            state[p.id].status = "idle";
+            state[p.id].result = null;
+            statusEl.dataset.status = "idle";
+            statusEl.innerHTML = "";
+            updateSaveButton(container, state);
+        }
+        validateBtn.disabled = state[p.id].value.length === 0;
     });
+
+    // Reveal toggle
+    revealBtn.addEventListener("click", () => {
+        const isPassword = input.type === "password";
+        input.type = isPassword ? "text" : "password";
+        revealBtn.textContent = isPassword ? "🙈" : "👁";
+    });
+
+    // Validate
+    validateBtn.addEventListener("click", () => validateProvider(p, state, container));
+}
+
+// Swap a card from configured -> input state when Replace is clicked.
+function startReplacing(p, state, container) {
+    state[p.id].replacing = true;
+    state[p.id].wasPresent = false;  // treat as fresh entry going forward
+    state[p.id].last4 = null;
+    state[p.id].status = "idle";
+    state[p.id].result = null;
+    state[p.id].value = "";
+
+    // Re-render this single card in-place
+    const card = container.querySelector(`.ob-provider-card[data-provider="${p.id}"]`);
+    if (card) {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = renderProviderCard(p).trim();
+        const newCard = tmp.firstElementChild;
+        card.replaceWith(newCard);
+        // Re-wire the new card's handlers
+        wireSingleProviderCard(container, state, p);
+        // Focus the input so the user can paste immediately
+        const newInput = container.querySelector(`#ob-input-${p.id}`);
+        if (newInput) newInput.focus();
+    }
+    updateSaveButton(container, state);
 }
 
 async function validateProvider(p, state, container) {
@@ -238,10 +360,24 @@ function formatDetail(providerId, detail) {
     return "";
 }
 
+// Save button is enabled when there is something we can advance with:
+//   - a newly validated key (status === "ok"), OR
+//   - a pre-existing key that the customer chose to keep (wasPresent && !replacing).
+// Label flips between "Save & continue" (something to POST) and "Continue"
+// (everything is already configured and untouched, so save is a no-op).
 function updateSaveButton(container, state) {
     const saveBtn = container.querySelector("#ob-keys-save");
-    const anyOk = PROVIDERS.some(p => state[p.id].status === "ok");
-    saveBtn.disabled = !anyOk;
+    if (!saveBtn) return;
+
+    const anyNewlyValidated = PROVIDERS.some(p => state[p.id].status === "ok");
+    const anyRetainedExisting = PROVIDERS.some(
+        p => state[p.id].wasPresent && !state[p.id].replacing
+    );
+
+    saveBtn.disabled = !(anyNewlyValidated || anyRetainedExisting);
+
+    const label = anyNewlyValidated ? "Save &amp; continue" : "Continue";
+    saveBtn.innerHTML = `${label} <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>`;
 }
 
 function wireSave(container, state, next) {
@@ -254,6 +390,8 @@ function wireSave(container, state, next) {
         const orig = saveBtn.innerHTML;
         saveBtn.innerHTML = "Saving&hellip;";
 
+        // Only POST keys that were newly validated. Pre-existing untouched
+        // keys stay in .env as-is.
         const secrets = {};
         PROVIDERS.forEach(p => {
             if (state[p.id].status === "ok") {
@@ -261,14 +399,19 @@ function wireSave(container, state, next) {
             }
         });
 
+        // If nothing changed, skip the POST entirely and just advance.
+        const nothingToSave = Object.keys(secrets).length === 0;
+
         try {
-            const r = await fetch("/onboarding/save", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ secrets }),
-            });
-            if (!r.ok) {
-                throw new Error(`Save failed: ${r.status}`);
+            if (!nothingToSave) {
+                const r = await fetch("/onboarding/save", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ secrets }),
+                });
+                if (!r.ok) {
+                    throw new Error(`Save failed: ${r.status}`);
+                }
             }
             await next();
         } catch (e) {

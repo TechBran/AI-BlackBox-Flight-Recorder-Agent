@@ -1120,9 +1120,39 @@ body::after {
 /* Focus-visible for new interactive controls */
 .ob-provider-input:focus-visible,
 .ob-reveal-btn:focus-visible,
-.ob-validate-btn:focus-visible {
+.ob-validate-btn:focus-visible,
+.ob-replace-btn:focus-visible {
     outline: 2px solid var(--ob-text-primary);
     outline-offset: 4px;
+}
+
+/* Configured-state variant: rendered when /current-config reports the
+ * provider key is already in .env. Customer can click Replace to swap to
+ * the input form. */
+.ob-provider-configured-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--ob-space-3);
+    flex-wrap: wrap;
+}
+
+.ob-replace-btn {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    background: transparent;
+    color: var(--ob-text-secondary);
+    border: 1px solid var(--ob-surface-border);
+    padding: var(--ob-space-2) var(--ob-space-3);
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: all var(--ob-motion-fast) var(--ob-ease-out);
+}
+
+.ob-replace-btn:hover {
+    border-color: var(--ob-accent);
+    color: var(--ob-accent);
 }
 
 @media (max-width: 720px) {
