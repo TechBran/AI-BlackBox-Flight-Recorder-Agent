@@ -1435,3 +1435,83 @@ body::after {
         height: 220px;
     }
 }
+
+/* ════════════════════════════════════════════════════════════════
+ * Operator setup step (T2.7.1) — multi-name input form
+ * ════════════════════════════════════════════════════════════════ */
+
+.ob-operator-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-3);
+    margin: var(--ob-space-8) 0 var(--ob-space-4);
+}
+
+.ob-operator-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--ob-space-3);
+    align-items: center;
+}
+
+.ob-row-remove {
+    width: 2.5rem;
+    height: 2.5rem;
+    background: transparent;
+    color: var(--ob-text-tertiary);
+    border: 1px solid var(--ob-surface-border);
+    cursor: pointer;
+    font-size: var(--ob-text-lg);
+    line-height: 1;
+    transition: all var(--ob-motion-fast) var(--ob-ease-out);
+}
+
+.ob-row-remove:hover {
+    color: var(--ob-accent);
+    border-color: var(--ob-accent);
+}
+
+.ob-row-remove:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 4px;
+}
+
+.ob-row-remove-spacer {
+    width: 2.5rem;
+    height: 2.5rem;
+    /* Reserves space so the first row's input aligns with subsequent rows */
+}
+
+.ob-add-row {
+    align-self: flex-start;
+    margin-bottom: var(--ob-space-6);
+    background: transparent;
+    color: var(--ob-text-secondary);
+    border: 1px dashed var(--ob-surface-border);
+    padding: var(--ob-space-2) var(--ob-space-4);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    cursor: pointer;
+    transition: all var(--ob-motion-fast) var(--ob-ease-out);
+}
+
+.ob-add-row:hover {
+    color: var(--ob-accent);
+    border-color: var(--ob-accent);
+    border-style: solid;
+}
+
+.ob-add-row:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 4px;
+}
+
+.ob-operator-error {
+    margin-bottom: var(--ob-space-4);
+    padding: var(--ob-space-3) var(--ob-space-4);
+    color: var(--ob-accent);
+    background: var(--ob-accent-soft);
+    border: 1px solid var(--ob-accent);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+}
