@@ -857,3 +857,46 @@ def add_operator(body: dict = Body(...)):
         return {"status": "error", "error": str(e)}
 
 
+@app.delete("/operator/{name}")
+def remove_operator(name: str):
+    """Remove an operator from config.ini and reload USERS_LIST.
+
+    Idempotent: returns 200 with status='removed' if found, status='not_present' if absent.
+    Refuses 400 if attempting to remove the LAST operator (must always have at least one).
+    """
+    if not name or not name.strip():
+        raise HTTPException(status_code=400, detail="Operator name required")
+    name = name.strip()
+
+    global USERS_LIST, CFG
+    current_list = USERS_LIST.copy()
+
+    if name not in current_list:
+        return {
+            "status": "not_present",
+            "message": f"Operator '{name}' not in list",
+            "operators": current_list,
+        }
+
+    if len(current_list) == 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot remove the last operator — at least one must remain",
+        )
+
+    current_list.remove(name)
+
+    config_path = Path("config.ini")
+    CFG.set("users", "list", ", ".join(current_list))
+    with open(config_path, "w") as f:
+        CFG.write(f)
+    CFG.read(config_path)
+    USERS_LIST = [u.strip() for u in CFG.get("users", "list", fallback="Brandon").split(",") if u.strip()]
+
+    return {
+        "status": "removed",
+        "message": f"Operator '{name}' removed",
+        "operators": USERS_LIST,
+    }
+
+

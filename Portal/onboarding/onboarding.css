@@ -1695,6 +1695,38 @@ body::after {
     font-size: var(--ob-text-sm);
 }
 
+/* Existing-operator row (T2.7.2 — read-only display, mirrors live config) */
+.ob-operator-row-existing {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--ob-space-3);
+    align-items: center;
+    padding: var(--ob-space-3) var(--ob-space-4);
+    background: var(--ob-surface-elevated);
+    border: 1px solid var(--ob-surface-border);
+    transition: border-color var(--ob-motion-fast) var(--ob-ease-out);
+}
+
+.ob-operator-row-existing:hover {
+    border-color: var(--ob-surface-border-emphasis);
+}
+
+.ob-operator-name-existing {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-primary);
+    font-weight: 500;
+}
+
+.ob-operator-section-divider {
+    margin: var(--ob-space-4) 0 var(--ob-space-2);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    color: var(--ob-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
 /* ════════════════════════════════════════════════════════════════
  * Done / handoff step (T2.8.1) — summary list + large CTA
  * ════════════════════════════════════════════════════════════════ */
