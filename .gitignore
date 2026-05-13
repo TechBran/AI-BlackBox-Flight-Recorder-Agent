@@ -202,3 +202,8 @@ AI_BlackBox_Portal_Android_MVP*/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Porta
 installer/src-tauri/target/
 installer/node_modules/
 installer/dist/.cache/
+
+# Onboarding state (per-install, never commit)
+.onboarding_state.json
+.onboarding_complete
+.env.backup.*
