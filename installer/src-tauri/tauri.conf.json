@@ -7,14 +7,7 @@
     "beforeBuildCommand": ""
   },
   "app": {
-    "windows": [{
-      "title": "AI BlackBox Setup",
-      "fullscreen": true,
-      "decorations": false,
-      "transparent": false,
-      "alwaysOnTop": true,
-      "skipTaskbar": false
-    }],
+    "windows": [],
     "security": {"csp": null}
   },
   "bundle": {
