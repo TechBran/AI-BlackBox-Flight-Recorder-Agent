@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Track 3: installer/dist/ holds packaging assets we DO want committed
+# (.desktop launchers, install scripts), so override the broad `dist` rule
+# above. Only the .cache subdir (Tauri build artifacts) stays ignored —
+# see root .gitignore line `installer/dist/.cache/`.
+!dist/
+dist/.cache/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

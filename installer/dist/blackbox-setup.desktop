@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=BlackBox Setup
+GenericName=AI BlackBox Configuration
+Exec=/usr/bin/blackbox-setup
+Icon=blackbox-setup
+Comment=Configure or update your AI BlackBox setup
+Categories=Utility;Settings;
+Keywords=blackbox;setup;configure;manage;
+Terminal=false
+StartupNotify=true

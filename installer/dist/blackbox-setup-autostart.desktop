@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AI BlackBox Setup
+Exec=/usr/bin/blackbox-setup --first-run
+Icon=blackbox-setup
+Comment=First-run setup wizard for AI BlackBox
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+Terminal=false
+StartupNotify=true
