@@ -3636,17 +3636,18 @@ grep -E '^[a-zA-Z0-9._+-]+\s+#\s+MUST_HAVE' \
   | awk '{print $1}' \
   | xargs sudo apt install -y
 
-# ── Step 2: Python venv ──
+# ── Step 2: Python venv (audit I1 — run as $REAL_USER so files are user-owned, not root-owned) ──
 echo "[install] Creating Python venv..."
-python3.12 -m venv "$BLACKBOX_ROOT/Orchestrator/venv"
-"$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install --upgrade pip
-"$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install -r "$BLACKBOX_ROOT/requirements.txt"
+sudo -u "$REAL_USER" python3.12 -m venv "$BLACKBOX_ROOT/Orchestrator/venv"
+sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install --upgrade pip
+sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install -r "$BLACKBOX_ROOT/requirements.txt"
 
-# ── Step 3: .env from template (see T4.1.4) ──
+# ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
-    cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"
-    echo "BLACKBOX_ROOT=$BLACKBOX_ROOT" >> "$BLACKBOX_ROOT/.env"
-    echo "[install] Created .env from template"
+    sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"
+    sudo -u "$REAL_USER" bash -c "echo 'BLACKBOX_ROOT=$BLACKBOX_ROOT' >> '$BLACKBOX_ROOT/.env'"
+    chmod 0600 "$BLACKBOX_ROOT/.env"
+    echo "[install] Created .env from template (mode 0600)"
 fi
 
 # ── Step 4: systemd unit (audit M2 + M3 + Q3 + Q4) ──
@@ -3762,6 +3763,8 @@ build_tauri_setup() {
     if ! cargo tauri --version 2>/dev/null | grep -q "^tauri-cli"; then
         cargo install tauri-cli --locked --version "^2.0"
     fi
+    # Pre-clean bundle dir so we always install the freshly-built .deb (audit I4)
+    rm -f "$BLACKBOX_ROOT/installer/src-tauri/target/release/bundle/deb/"*.deb 2>/dev/null || true
     cd "$BLACKBOX_ROOT/installer"
     npm install --no-audit --no-fund > /dev/null 2>&1 || true
     cargo tauri build --bundles deb

@@ -516,4 +516,27 @@ Estimated implementation effort post-audit: **~1 week** (matches plan estimate).
 
 ---
 
-*End of audit. Same shape as Track 3 audit at `docs/plans/2026-05-12-track3-audit.md` for reference.*
+## Post-execution empirical corrections (2026-05-12)
+
+After the pre-execution audit findings landed (Q1–Q4 decisions locked), the subagent pipeline executed and surfaced four additional corrections during the code-quality review of T4.1.1. These were folded back into the master plan and into `Scripts/install.sh` via fix-loop commit `6b3197e`. Documenting here so the audit doc stays the canonical "what we caught and why" record.
+
+| Correction | Severity | Where caught | Fix landed |
+|---|---|---|---|
+| **C1-empirical:** `desktop-file-utils` package missing from `Scripts/onboarding/system-packages.txt` MUST_HAVE bucket | CRITICAL | T4.1.1 code-quality review (Step 6b's `update-desktop-database` call would silently no-op without the package, leaving the persistent menu launcher invisible until next refresh) | system-packages.txt MUST_HAVE addition + plan reference |
+| **I1-empirical:** Step 2 venv + pip ran as root when `install.sh` invoked via sudo, leaving root-owned files in user tree | IMPORTANT | T4.1.1 code-quality review (audit M6 sudo-detection captured `$REAL_USER` but Steps 2/3 didn't use it; Step 6 already used `sudo -u "$REAL_USER"` correctly — inconsistency caught) | All 3 venv+pip commands now prefixed `sudo -u "$REAL_USER"` |
+| **I2-empirical:** Step 3 `.env` created as root; secrets file ended up root-owned 0644 instead of user-owned 0600 | IMPORTANT | T4.1.1 code-quality review | `cp` + `bash -c "echo ... >> ..."` both prefixed `sudo -u "$REAL_USER"`; trailing `chmod 0600` added |
+| **I4-empirical:** `ls "..."*.deb \| head -1` resolves alphabetically, picking stale older `.deb` after version bumps | IMPORTANT | T4.1.1 code-quality review | `rm -f "$BUNDLE_DIR"/*.deb 2>/dev/null \|\| true` added before `cargo tauri build` |
+
+**Pre-T4.1.5 doc cleanup correction (commit `af033fb`):** the implementer's safety check for T4.1.5 found 3 doc-file references to `setup.sh` (CUSTOMER_SETUP.md, Claude.md, AUDIT_REPORT.md). Brandon's call: surgical update CUSTOMER_SETUP.md to point at `Scripts/install.sh`, delete Claude.md (legacy duplicate of canonical CLAUDE.md), leave AUDIT_REPORT.md alone (historical Nov 2025 audit, all past-tense). T4.1.5 then proceeded cleanly at commit `2f37536`.
+
+**Type=notify decision actually taken:** implementer ran `grep -rn "sd_notify\|systemd.daemon" Orchestrator/app.py Orchestrator/startup.py` — no matches found. Per Step 2 BLOCKING audit instructions, downgraded to `Type=simple` and removed the 5-line `WatchdogSec=120` block. Documented in commit `6855738` body. If `sd_notify` gets wired in a future `Orchestrator/app.py` change, revisit and restore Type=notify + WatchdogSec.
+
+**Deferred to post-Track-4 follow-up commit:**
+- I3 (build_tauri_setup `cd` outside subshell + dead `.deb` existence guard after `set -e`)
+- M1–M5 (npm error swallowing, brittle cargo-version grep, apt update no-error-handling, getent failure handling, systemctl restart non-atomic)
+
+These are non-blocking quality nits. Defensible as-is for v1; revisit if any cause real issues during T4.1.2 VM smoke test or post-launch.
+
+---
+
+*End of audit + post-execution corrections. Same shape as Track 3 audit at `docs/plans/2026-05-12-track3-audit.md` for reference.*
