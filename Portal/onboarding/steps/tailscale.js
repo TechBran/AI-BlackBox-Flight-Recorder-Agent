@@ -145,76 +145,156 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
     wireStepNav(statusEl, { back, skip });
 }
 
-// ── Branch B: not installed ──────────────────────────────────────
+// ── Branch B: binary not found ──
+// Per E1, Tailscale is pre-installed by install.sh Step 1b, so this branch
+// is effectively unreachable on a fresh BlackBox. If it DOES fire, customer
+// must have manually uninstalled — surface clear recovery instructions
+// rather than a full install button flow (T6 was skipped per E1).
 function renderBranchB(statusEl, result, { back, skip, recheck }) {
-    const installCmd = "curl -fsSL https://tailscale.com/install.sh | sudo sh";
     statusEl.innerHTML = `
         <div class="ob-status-badge ob-status-badge-error" role="status">
             <span class="ob-status-badge-pip" aria-hidden="true">!</span>
-            <span class="ob-status-badge-label">Tailscale not installed</span>
+            <span class="ob-status-badge-label">Tailscale binary not found on device</span>
         </div>
         <div class="ob-action-card">
-            <div class="ob-action-card-header">
-                <span class="ob-action-card-label">Run on this device</span>
-                <span class="ob-action-card-os">install tailscale</span>
-            </div>
+            <p class="ob-action-card-prose">
+                Tailscale should have been installed during BlackBox setup, but
+                it appears to be missing. This is unusual &mdash; it may have been
+                manually removed.
+            </p>
+            <p class="ob-action-card-prose">
+                To recover, re-run the BlackBox installer from a terminal on
+                this device:
+            </p>
             <div class="ob-code-block">
                 <span class="ob-code-prompt" aria-hidden="true">$</span>
-                <code class="ob-code-cmd">${escapeHtml(installCmd)}</code>
-                <button type="button" class="ob-copy-btn" data-copy="${escapeHtml(installCmd)}">
-                    <span aria-hidden="true">&#9112;</span> Copy
+                <code class="ob-code-cmd">cd ~/Desktop/blackbox-poc-main &amp;&amp; sudo ./Scripts/install.sh</code>
+            </div>
+            <p class="ob-action-card-prose">
+                Then return to this wizard and click <strong>Re-check</strong> below.
+            </p>
+            <div class="ob-cta-row">
+                <button type="button" class="ob-cta" id="ob-recheck-btn">
+                    Re-check status <span class="ob-cta-arrow" aria-hidden="true">&#x21bb;</span>
                 </button>
             </div>
-        </div>
-        <div class="ob-cta-row">
-            <button type="button" class="ob-cta" id="ob-recheck-btn">
-                Re-check status <span class="ob-cta-arrow" aria-hidden="true">&#x21bb;</span>
-            </button>
         </div>
         ${renderDisclosure(true)}
         ${renderStepNav({ showSkip: true })}
     `;
-    wireCopyBtn(statusEl);
     document.getElementById("ob-recheck-btn").addEventListener("click", recheck);
     wireStepNav(statusEl, { back, skip });
 }
 
-// ── Branch C: installed but not authenticated ───────────────────
+// ── Branch C: installed but not authenticated (also re-auth after 180-day expiry) ──
 function renderBranchC(statusEl, result, { back, skip, recheck }) {
-    const authCmd = "sudo tailscale up";
     const errMsg = (result.error || "needs authentication").replace(/^RuntimeError:\s*/, "");
     statusEl.innerHTML = `
         <div class="ob-status-badge" role="status">
             <span class="ob-status-badge-pip" aria-hidden="true">!</span>
             <span class="ob-status-badge-label">
-                Tailscale installed &mdash; not authenticated
+                Tailscale needs authentication
             </span>
             <span class="ob-status-badge-version">${escapeHtml(errMsg)}</span>
         </div>
         <div class="ob-action-card">
-            <div class="ob-action-card-header">
-                <span class="ob-action-card-label">Run on this device</span>
-                <span class="ob-action-card-os">authenticate</span>
-            </div>
-            <div class="ob-code-block">
-                <span class="ob-code-prompt" aria-hidden="true">$</span>
-                <code class="ob-code-cmd">${escapeHtml(authCmd)}</code>
-                <button type="button" class="ob-copy-btn" data-copy="${escapeHtml(authCmd)}">
-                    <span aria-hidden="true">&#9112;</span> Copy
+            <p class="ob-action-card-prose">
+                Click below &mdash; we will open your browser to the Tailscale login page.
+                After you sign in, this screen will auto-detect within a few seconds.
+            </p>
+            <div class="ob-cta-row">
+                <button type="button" class="ob-cta" id="ob-auth-btn">
+                    Authenticate Now <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
                 </button>
             </div>
-        </div>
-        <div class="ob-cta-row">
-            <button type="button" class="ob-cta" id="ob-recheck-btn">
-                Re-check status <span class="ob-cta-arrow" aria-hidden="true">&#x21bb;</span>
-            </button>
+            <div id="ob-auth-status" hidden></div>
         </div>
         ${renderDisclosure(true)}
         ${renderStepNav({ showSkip: true })}
     `;
-    wireCopyBtn(statusEl);
-    document.getElementById("ob-recheck-btn").addEventListener("click", recheck);
+    document.getElementById("ob-auth-btn").addEventListener("click", () => {
+        startAuth(statusEl, { back, skip, recheck });
+    });
     wireStepNav(statusEl, { back, skip });
+}
+
+async function startAuth(statusEl, { back, skip, recheck }) {
+    const btn = document.getElementById("ob-auth-btn");
+    const statusBox = document.getElementById("ob-auth-status");
+    btn.disabled = true;
+    btn.textContent = "Starting...";
+    statusBox.hidden = false;
+
+    let loginUrl;
+    try {
+        const resp = await fetch("/onboarding/tailscale/up", { method: "POST" });
+        const j = await resp.json();
+        if (!resp.ok) {
+            statusBox.innerHTML = `<p class="ob-auth-err">${escapeHtml(j.detail || "failed")}</p>`;
+            btn.disabled = false;
+            btn.textContent = "Try again";
+            return;
+        }
+        loginUrl = j.login_url;
+    } catch (e) {
+        statusBox.innerHTML = `<p class="ob-auth-err">Network error: ${escapeHtml(e.message)}</p>`;
+        btn.disabled = false;
+        btn.textContent = "Try again";
+        return;
+    }
+
+    // I1: always render clickable fallback in case xdg-open didn't work
+    // (e.g., user accessing wizard from a remote browser, not on device)
+    statusBox.innerHTML = `
+        <p class="ob-auth-prompt">
+            Your browser should open automatically. If not:
+        </p>
+        <p class="ob-auth-link-row">
+            <a href="${escapeHtml(loginUrl)}" target="_blank" rel="noopener" class="ob-auth-link">
+                Open Tailscale login &rarr;
+            </a>
+        </p>
+        <p class="ob-auth-waiting">Waiting for authentication...</p>
+    `;
+    btn.textContent = "Waiting...";
+
+    // Poll every 2s. Audit I5: 5 min total, "still waiting?" hint at 3 min.
+    const startedAt = Date.now();
+    const TIMEOUT_MS = 5 * 60 * 1000;
+    const HINT_MS = 3 * 60 * 1000;
+    let hintShown = false;
+    const pollOnce = async () => {
+        const elapsed = Date.now() - startedAt;
+        if (elapsed > TIMEOUT_MS) {
+            statusBox.innerHTML += `<p class="ob-auth-err">Timed out waiting for authentication.</p>`;
+            await fetch("/onboarding/tailscale/cancel", { method: "POST" });
+            btn.disabled = false;
+            btn.textContent = "Try again";
+            return;
+        }
+        if (elapsed > HINT_MS && !hintShown) {
+            hintShown = true;
+            statusBox.insertAdjacentHTML("beforeend", `
+                <p class="ob-auth-hint">
+                    Still waiting? Make sure you completed the login in your browser.
+                    <a href="${escapeHtml(loginUrl)}" target="_blank" rel="noopener">
+                        Re-open login URL
+                    </a>
+                </p>
+            `);
+        }
+        try {
+            const r = await fetch("/onboarding/tailscale/poll");
+            const j = await r.json();
+            if (j.state === "running") {
+                statusBox.innerHTML = `<p class="ob-auth-ok">Authenticated. Loading...</p>`;
+                setTimeout(recheck, 800);
+                return;
+            }
+        } catch (_) { /* transient */ }
+        setTimeout(pollOnce, 2000);
+    };
+    setTimeout(pollOnce, 2000);
 }
 
 // ── Disclosure (Branch D — always rendered, default-open or closed) ──

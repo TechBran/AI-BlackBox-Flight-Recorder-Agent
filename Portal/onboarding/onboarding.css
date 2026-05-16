@@ -1861,3 +1861,35 @@ body::after {
         word-break: break-all;
     }
 }
+
+/* ── T7: Branch C auth-status sub-elements ── */
+.ob-auth-prompt { margin: 1rem 0 0.5rem; color: rgba(255,255,255,0.85); }
+.ob-auth-link-row { margin: 0.5rem 0 1rem; }
+.ob-auth-link {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    background: var(--accent, #4a9eff);
+    color: white;
+    border-radius: var(--radius-md, 8px);
+    text-decoration: none;
+    font-weight: 500;
+}
+.ob-auth-link:hover { opacity: 0.92; text-decoration: none; }
+.ob-auth-waiting { color: rgba(255,255,255,0.6); font-style: italic; }
+.ob-auth-err { color: #ff7878; }
+.ob-auth-ok { color: #78ff9b; }
+
+/* I5: auth-hint shown after 3 min of waiting */
+.ob-auth-hint {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 180, 50, 0.06);
+    border-left: 3px solid rgba(255, 180, 50, 0.5);
+    border-radius: var(--radius-sm, 6px);
+    color: rgba(255,255,255,0.8);
+    font-size: 0.9em;
+}
+.ob-auth-hint a {
+    color: var(--accent, #4a9eff);
+    margin-left: 0.25rem;
+}
