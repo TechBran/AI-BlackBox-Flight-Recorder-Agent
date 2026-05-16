@@ -269,6 +269,41 @@ async def set_accept_dns() -> dict:
     return {"ok": False, "error": stderr.decode("utf-8", errors="replace").strip()}
 
 
+async def setup_serve() -> dict:
+    """Run `tailscale serve --bg --https=443 9091` to set up a persistent
+    HTTPS reverse proxy. Tailscale handles cert + renewal + TLS termination
+    — Portal stays HTTP-only on 9091 internally; Tailscale fronts it with
+    HTTPS on 443. After success, https://<hostname>/ reaches the Portal.
+    Android app pairing requires this (cleartext blocked since Android API 28).
+
+    Port-only `9091` form (not `http://127.0.0.1:9091`) is used because:
+    (1) tailscale 1.98 CLI doesn't accept the `/ <url>` form the audit doc
+        assumed (invalid argument format),
+    (2) port-only avoids unescaped `:` characters in sudoers grammar,
+    (3) tailscale serve interprets bare port as http://127.0.0.1:<port>
+        automatically — same end result.
+
+    Returns:
+       - {ok: true} on success — Portal now HTTPS-accessible
+       - {ok: false, https_disabled: true, admin_url} if tailnet HTTPS toggle off
+       - {ok: false, error: <msg>} otherwise"""
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "/usr/bin/tailscale", "serve",
+        "--bg", "--https=443", "9091",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    out = (stdout + stderr).decode("utf-8", errors="replace")
+
+    if proc.returncode == 0:
+        return {"ok": True}
+    if HTTPS_DISABLED_PATTERN.search(out):
+        return {"ok": False, "https_disabled": True,
+                "admin_url": "https://login.tailscale.com/admin/dns"}
+    return {"ok": False, "error": out.strip()[:500]}
+
+
 # ── E1-reversal: install button resurrected with apt-get (apt repo
 #   was configured by install.sh Step 1b's root-context curl|sh) ──
 

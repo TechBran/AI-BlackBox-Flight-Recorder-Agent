@@ -8,6 +8,9 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/apt-get install -y tailscale
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale up --accept-dns=true --hostname=*
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale set --accept-dns=true
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale cert *
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve --bg --https=443 9091
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve status --json
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale serve reset
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale logout
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl start tailscaled
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl enable tailscaled

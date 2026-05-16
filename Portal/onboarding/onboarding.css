@@ -2061,3 +2061,16 @@ body::after {
     margin: 0 0 1rem;
     color: rgba(255,255,255,0.75);
 }
+
+/* HTTPS Portal serve-success banner — green variant of info banner */
+.ob-banner-success {
+    background: rgba(80, 200, 100, 0.10);
+    border-left: 3px solid rgba(80, 200, 100, 0.6);
+    color: rgba(255,255,255,0.85);
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md, 8px);
+    font-size: 0.9em;
+}
+.ob-banner-success strong { display: block; margin-bottom: 0.25rem; }
+.ob-banner-success p { margin: 0.25rem 0; color: rgba(255,255,255,0.7); }

@@ -408,3 +408,11 @@ async def tailscale_install_stream():
         return StreamingResponse(gen(), media_type="text/event-stream")
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/tailscale/serve")
+async def tailscale_serve_setup():
+    """Set up Tailscale HTTPS reverse proxy on :443 → http://localhost:9091.
+    Replaces v1.1-deferred uvicorn HTTPS plan with Tailscale-handled
+    HTTPS termination. Android app pairing requires this."""
+    return await ts_act.setup_serve()
