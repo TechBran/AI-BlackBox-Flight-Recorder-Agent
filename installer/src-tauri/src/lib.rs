@@ -54,11 +54,22 @@ pub fn run_with_url(url: &str, mode: &str) {
             // External-link interception (Brandon's E6 ask 2026-05-16): WebKitGTK
             // doesn't auto-delegate target=_blank to system browser. on_navigation
             // fires on every navigation attempt; we allow same-origin (the wizard
-            // itself) and delegate everything else to the system default browser
-            // via tauri-plugin-opener. Single point of control — every future
-            // wizard step's external links "just work" with bare <a target=_blank>,
-            // no JS-side wiring needed. Maintainer-blessed pattern per Tauri
-            // GitHub #11479 + #14113.
+            // itself) and delegate everything else to the system default browser.
+            // Single point of control — every future wizard step's external links
+            // "just work" with bare <a target=_blank>. Maintainer-blessed pattern
+            // per Tauri GitHub #11479 + #14113.
+            //
+            // E7 (Brandon hardware test 2026-05-16): tauri-plugin-opener::open_url
+            // on Linux uses xdg-open which on Ubuntu 24.04 GNOME delegates to
+            // `gio open`, which fails with "HTTP Error: Method Not Allowed" for
+            // URL schemes (gio tries to HTTP-fetch the URL instead of dispatching
+            // to a browser). The xdg-open exit code masks the failure so the
+            // opener plugin returns Ok and we never see the error. Workaround:
+            // invoke firefox directly via PATH lookup (always present on Ubuntu
+            // Desktop installs as the snap-transitional /usr/bin/firefox), fall
+            // back to opener plugin if firefox not on PATH. Subprocess inherits
+            // the wizard's DISPLAY/XAUTHORITY/DBUS env so firefox renders cleanly
+            // in the customer's session.
             .on_navigation(|url| {
                 let is_internal = url.scheme() == "http"
                     && url.host_str() == Some("localhost")
@@ -66,8 +77,20 @@ pub fn run_with_url(url: &str, mode: &str) {
                 if is_internal {
                     return true;  // allow in-webview load
                 }
-                if let Err(e) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
-                    eprintln!("[blackbox-setup] failed to open external URL {url}: {e}");
+                let url_str = url.as_str();
+                // Try firefox first (Ubuntu Desktop default; E7 workaround)
+                let firefox_ok = std::process::Command::new("firefox")
+                    .arg(url_str)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .is_ok();
+                if !firefox_ok {
+                    // Fall back to the opener plugin (xdg-open) for non-Ubuntu
+                    // installs where firefox isn't at /usr/bin/firefox.
+                    if let Err(e) = tauri_plugin_opener::open_url(url_str, None::<&str>) {
+                        eprintln!("[blackbox-setup] failed to open external URL {url}: {e}");
+                    }
                 }
                 false  // cancel in-webview load; system browser handles it
             })
