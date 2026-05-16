@@ -109,11 +109,26 @@ async def start_up() -> str:
                     login_url = m.group(0)
                     break
     except TimeoutError:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass  # E3: subprocess may have died (daemon-dead path)
         raise RuntimeError("Timeout waiting for Tailscale login URL")
 
     if not login_url:
-        proc.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass  # E3: subprocess may have died (daemon-dead path)
+        # E3: if subprocess died with rc!=0 and tailscaled is gone,
+        # surface a more useful error so the bare "did not emit" doesn't
+        # mask the actual problem.
+        rc = proc.returncode
+        if rc is not None and rc != 0:
+            raise RuntimeError(
+                "tailscaled daemon not running or unreachable — "
+                "try: sudo systemctl restart tailscaled"
+            )
         raise RuntimeError("Tailscale did not emit a login URL")
 
     _active_up_process = proc
@@ -161,7 +176,10 @@ async def poll_up() -> dict:
                     try:
                         await asyncio.wait_for(_active_up_process.wait(), timeout=2)
                     except (asyncio.TimeoutError, Exception):
-                        _active_up_process.terminate()
+                        try:
+                            _active_up_process.terminate()
+                        except ProcessLookupError:
+                            pass  # E3: subprocess may have died between wait() and terminate()
                     _active_up_process = None
                     _active_up_login_url = None
                 return _poll_response("running", detail=data.get("Self", {}))
@@ -177,11 +195,17 @@ async def poll_up() -> dict:
 async def cancel_up() -> None:
     global _active_up_process, _active_up_login_url
     if _active_up_process is not None:
-        _active_up_process.terminate()
+        try:
+            _active_up_process.terminate()
+        except ProcessLookupError:
+            pass  # E3: subprocess may have already died
         try:
             _active_up_process.wait(timeout=2)
         except Exception:
-            _active_up_process.kill()
+            try:
+                _active_up_process.kill()
+            except ProcessLookupError:
+                pass  # E3: subprocess may have already died
         _active_up_process = None
     _active_up_login_url = None
 
