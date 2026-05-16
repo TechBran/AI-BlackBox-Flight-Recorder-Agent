@@ -29,28 +29,37 @@ let state = null;
 let currentStepIdx = 0;
 let busy = false;
 
-// E7 (Brandon's MSO2 Ultra testing 2026-05-16): target="_blank" links don't
-// trigger Tauri's on_navigation callback because WebKitGTK fires a different
-// signal (decide-policy::new-window-policy vs ::navigation-policy). The
-// on_navigation Rust handler in installer/src-tauri/src/lib.rs DOES fire for
-// current-window navigations. So we intercept target=_blank clicks here at
-// the document level, prevent default, and redirect via location.assign —
-// converting new-window navigation to current-window navigation. The Rust
-// handler then catches it, spawns firefox externally, and returns false
-// (cancels in-webview nav, wizard stays put). One global handler, works for
-// every wizard step. In a plain browser (remote-wizard access via Tailscale),
-// location.assign navigates the current tab — acceptable because the wizard
-// IS the active tab.
+// E7 final (Brandon's MSO2 Ultra testing 2026-05-16): target="_blank" links
+// don't open browser in Tauri's WebKitGTK webview. Multiple Tauri-side attempts
+// (on_navigation, firefox direct-spawn from Rust with explicit env) all failed
+// because Tauri's webview policy / env-stripping fights us. Solution: backend
+// FastAPI (running as bbx user) spawns firefox with the proper user-session
+// env reconstructed from os.getuid(). This document-level click handler
+// intercepts target=_blank anchors at capture phase and POSTs the URL to
+// /onboarding/open-url. Backend handles the rest. Works for every wizard
+// step automatically — no per-anchor JS wiring. Plain-browser (remote-
+// wizard access via Tailscale) gets the same path; browser-spawn-from-server
+// is unusual but the customer's already on the device's tailnet so they ARE
+// the device session — opens firefox on the device, which is what they want
+// for the auth/admin flows they were trying to reach.
 document.addEventListener("click", function (e) {
     const a = e.target.closest && e.target.closest("a[target=\"_blank\"]");
     if (!a || !a.href) return;
-    // Only intercept external links — leave any localhost target=_blank alone.
+    // Only intercept external links — localhost target=_blank passes through.
     try {
         const u = new URL(a.href);
         if (u.host === "localhost" || u.host === "127.0.0.1") return;
     } catch (_) { return; }
     e.preventDefault();
-    window.location.assign(a.href);
+    fetch("/onboarding/open-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: a.href }),
+    }).catch(() => {
+        // Last-resort fallback: navigate current tab so URL is at least visible
+        // in the wizard's webview address handling.
+        window.location.assign(a.href);
+    });
 }, true);  // capture phase — fires before any per-anchor handlers
 
 function escapeHtml(s) {

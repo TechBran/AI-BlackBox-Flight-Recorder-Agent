@@ -416,3 +416,75 @@ async def tailscale_serve_setup():
     Replaces v1.1-deferred uvicorn HTTPS plan with Tailscale-handled
     HTTPS termination. Android app pairing requires this."""
     return await ts_act.setup_serve()
+
+
+# ── E7 final (Brandon's MSO2 Ultra testing 2026-05-16): backend-spawned
+#   browser open. Tauri's on_navigation doesn't fire for target=_blank,
+#   xdg-open delegates to broken gio, Tauri shell can't reliably spawn
+#   firefox from its env-stripped webview. Solution: backend (which runs
+#   as bbx user with full filesystem access to /run/user/<uid>/) spawns
+#   firefox directly with the proper user-session env reconstructed from
+#   the UID. Wizard JS POSTs to this endpoint when it intercepts a
+#   target=_blank click. Works because subprocess.Popen with explicit env
+#   bypasses the inherited-from-systemd env stripping. ──
+
+class OpenUrlRequest(BaseModel):
+    url: str
+
+
+@router.post("/open-url")
+async def open_external_url(req: OpenUrlRequest) -> dict:
+    """Spawn the user's default browser (firefox preferred) with the given URL.
+    Wired up by Portal/onboarding/onboarding.js's document-level click handler
+    that intercepts <a target=_blank> clicks. See E7 audit row."""
+    import subprocess
+    import glob
+
+    url = req.url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="only http(s):// URLs allowed")
+
+    uid = os.getuid()
+    env = os.environ.copy()
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+    env.setdefault("DISPLAY", ":0")
+    # Discover XAUTHORITY: Mutter Xwayland file changes per session;
+    # also fall back to GDM-managed location.
+    if "XAUTHORITY" not in env:
+        candidates = (
+            glob.glob(f"/run/user/{uid}/.mutter-Xwaylandauth.*")
+            + [f"/run/user/{uid}/gdm/Xauthority"]
+        )
+        for cand in candidates:
+            if os.path.exists(cand):
+                env["XAUTHORITY"] = cand
+                break
+
+    logger.info("open-url: spawning firefox for %s (DISPLAY=%s, XAUTHORITY=%s)",
+                url, env.get("DISPLAY"), env.get("XAUTHORITY"))
+    try:
+        subprocess.Popen(
+            ["firefox", url],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return {"ok": True}
+    except FileNotFoundError:
+        logger.warning("open-url: firefox not on PATH, falling back to xdg-open")
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return {"ok": True, "via": "xdg-open"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    except Exception as e:
+        logger.exception("open-url: firefox spawn failed")
+        return {"ok": False, "error": str(e)}
