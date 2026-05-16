@@ -24,6 +24,7 @@
 let recheckBusy = false;
 let _currentAuthAbort = null;
 let _authInFlight = false;
+let _branchAGen = 0;
 
 export async function render(container, { next, back, skip }) {
     // C1: abort any in-flight auth poll loop from a prior render of this step
@@ -99,6 +100,13 @@ export async function render(container, { next, back, skip }) {
 
 // ── Branch A: already configured ────────────────────────────────
 async function renderBranchA(statusEl, result, { next, back, skip }) {
+    // I1: generation token — captured per renderBranchA invocation.
+    // Used to bail post-await DOM mutations if user navigated away
+    // or a Re-check triggered a fresh render. Mirrors T7's
+    // _currentAuthAbort pattern (without needing per-call object refs).
+    _branchAGen++;
+    const myGen = _branchAGen;
+
     const hostname = (result.detail && result.detail.hostname) || "unknown";
     const ip = (result.detail && result.detail.ip) || "unknown";
     const magicdnsEnabled = !!(result.detail && result.detail.magicdns_enabled);
@@ -114,12 +122,11 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
         console.warn("Couldn't persist BLACKBOX_TAILNET_HOSTNAME:", e);
     }
 
-    // N4: Guard against re-firing on Branch A re-render (page nav back-forth)
-    if (!window.__ob_tailscale_cert_attempted) {
-        window.__ob_tailscale_cert_attempted = true;
-        // Fire-and-forget: set --accept-dns=true (device-side, idempotent)
-        fetch("/onboarding/tailscale/accept-dns", { method: "POST" }).catch(() => {});
-    }
+    // Fire-and-forget: set --accept-dns=true (device-side, idempotent).
+    // No re-render guard needed — endpoint is idempotent + cheap; re-firing
+    // on re-check allows recovery if the first attempt raced tailscaled
+    // startup or hit a transient backend issue.
+    fetch("/onboarding/tailscale/accept-dns", { method: "POST" }).catch(() => {});
 
     // M7: Cert flow — render PENDING banner first, swap on resolve.
     // Promise + 60s client-side timeout (cert can be slow on first ACME run).
@@ -176,7 +183,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
     const banners = document.getElementById("ob-tailscale-banners");
     if (!magicdnsEnabled) {
         banners.insertAdjacentHTML("beforeend", magicdnsBanner());
-        wireRecheckBtn(banners);
+        wireRecheckBtn(banners, { next, back, skip });
     }
 
     // Cert pending banner while ACME flow runs (M7)
@@ -184,6 +191,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
         const pendingId = "ob-cert-pending";
         banners.insertAdjacentHTML("beforeend", certPendingBanner(pendingId));
         const result = await certPromise;
+        if (myGen !== _branchAGen) return;  // I1: superseded by re-render
         const pendingEl = document.getElementById(pendingId);
         if (pendingEl) pendingEl.remove();
         if (result.ok) {
@@ -191,11 +199,11 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
         } else if (result.https_disabled) {
             banners.insertAdjacentHTML("beforeend",
                 httpsDisabledBanner(result.admin_url));
-            wireRecheckBtn(banners);
+            wireRecheckBtn(banners, { next, back, skip });
         } else if (result.timed_out) {
             banners.insertAdjacentHTML("beforeend",
                 certTimeoutBanner());
-            wireRecheckBtn(banners);
+            wireRecheckBtn(banners, { next, back, skip });
         }
         // Other errors are silent — cert is non-fatal for v1
     }
@@ -262,9 +270,10 @@ function httpsDisabledBanner(adminUrl) {
 
 function certPendingBanner(id) {
     return `
-        <div class="ob-banner ob-banner-info" id="${escapeHtml(id)}">
+        <div class="ob-banner ob-banner-info" id="${id}">
             <span class="ob-banner-spinner" aria-hidden="true">&#9696;</span>
             Requesting HTTPS certificate from Let's Encrypt&hellip;
+            <span class="ob-banner-spinner-hint">(usually 5-30 seconds)</span>
         </div>
     `;
 }
@@ -292,7 +301,7 @@ function certTimeoutBanner() {
 
 // Re-check wiring: each "Re-check" button re-runs the appropriate probe and
 // re-renders Branch A so banners refresh based on new state.
-function wireRecheckBtn(scope) {
+function wireRecheckBtn(scope, navCallbacks) {
     scope.querySelectorAll(".ob-banner-recheck").forEach(btn => {
         btn.addEventListener("click", async (e) => {
             e.preventDefault();
@@ -301,11 +310,9 @@ function wireRecheckBtn(scope) {
             btn.textContent = "Checking...";
             // Reset cert-attempted guard so it can re-fire
             if (which === "cert") window.__ob_tailscale_cert_done = false;
-            // Force full step re-render via top-level render
+            // Force full step re-render via top-level render — PASS THE REAL CALLBACKS
             const container = scope.closest(".ob-step")?.parentElement || document.body;
-            await render(container, {
-                next: () => {}, back: () => {}, skip: () => {},
-            });
+            await render(container, navCallbacks);
         });
     });
 }
