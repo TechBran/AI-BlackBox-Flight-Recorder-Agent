@@ -22,8 +22,14 @@
 // with the disclosure expanded).
 
 let recheckBusy = false;
+let _currentAuthAbort = null;
+let _authInFlight = false;
 
 export async function render(container, { next, back, skip }) {
+    // C1: abort any in-flight auth poll loop from a prior render of this step
+    if (_currentAuthAbort) _currentAuthAbort.aborted = true;
+    _currentAuthAbort = null;
+
     // Initial loading state
     container.innerHTML = `
         <section class="ob-step ob-tailscale">
@@ -163,15 +169,17 @@ function renderBranchB(statusEl, result, { back, skip, recheck }) {
                 manually removed.
             </p>
             <p class="ob-action-card-prose">
-                To recover, re-run the BlackBox installer from a terminal on
-                this device:
+                To recover, open a terminal on this device, change into the
+                BlackBox install directory, and re-run the installer:
             </p>
             <div class="ob-code-block">
                 <span class="ob-code-prompt" aria-hidden="true">$</span>
-                <code class="ob-code-cmd">cd ~/Desktop/blackbox-poc-main &amp;&amp; sudo ./Scripts/install.sh</code>
+                <code class="ob-code-cmd">sudo ./Scripts/install.sh</code>
             </div>
             <p class="ob-action-card-prose">
-                Then return to this wizard and click <strong>Re-check</strong> below.
+                (If you're not sure where you extracted the BlackBox installer,
+                check your Downloads or Desktop folder.) Then return to this
+                wizard and click <strong>Re-check</strong> below.
             </p>
             <div class="ob-cta-row">
                 <button type="button" class="ob-cta" id="ob-recheck-btn">
@@ -213,17 +221,26 @@ function renderBranchC(statusEl, result, { back, skip, recheck }) {
         ${renderStepNav({ showSkip: true })}
     `;
     document.getElementById("ob-auth-btn").addEventListener("click", () => {
-        startAuth(statusEl, { back, skip, recheck });
+        if (_authInFlight) return;  // C2: prevent double-click parallel pollers
+        _authInFlight = true;
+        startAuth(statusEl, { back, skip, recheck })
+            .finally(() => { _authInFlight = false; });
     });
     wireStepNav(statusEl, { back, skip });
 }
 
 async function startAuth(statusEl, { back, skip, recheck }) {
+    // C1: install a fresh abort token for this auth attempt
+    if (_currentAuthAbort) _currentAuthAbort.aborted = true;
+    const myAbort = { aborted: false };
+    _currentAuthAbort = myAbort;
+
     const btn = document.getElementById("ob-auth-btn");
     const statusBox = document.getElementById("ob-auth-status");
     btn.disabled = true;
     btn.textContent = "Starting...";
     statusBox.hidden = false;
+    statusBox.innerHTML = `<p class="ob-auth-waiting">Contacting Tailscale...</p>`;
 
     let loginUrl;
     try {
@@ -263,10 +280,15 @@ async function startAuth(statusEl, { back, skip, recheck }) {
     const TIMEOUT_MS = 5 * 60 * 1000;
     const HINT_MS = 3 * 60 * 1000;
     let hintShown = false;
+    let consecutivePollFailures = 0;
+    let backendDownShown = false;
     const pollOnce = async () => {
+        if (myAbort.aborted) return;  // C1: superseded — stop polling
         const elapsed = Date.now() - startedAt;
         if (elapsed > TIMEOUT_MS) {
-            statusBox.innerHTML += `<p class="ob-auth-err">Timed out waiting for authentication.</p>`;
+            statusBox.insertAdjacentHTML("beforeend", `
+                <p class="ob-auth-err">Timed out waiting for authentication.</p>
+            `);
             await fetch("/onboarding/tailscale/cancel", { method: "POST" });
             btn.disabled = false;
             btn.textContent = "Try again";
@@ -291,10 +313,21 @@ async function startAuth(statusEl, { back, skip, recheck }) {
                 setTimeout(recheck, 800);
                 return;
             }
-        } catch (_) { /* transient */ }
-        setTimeout(pollOnce, 2000);
+            consecutivePollFailures = 0;
+        } catch (_) {
+            consecutivePollFailures++;
+            if (consecutivePollFailures >= 5 && !backendDownShown) {
+                backendDownShown = true;
+                statusBox.insertAdjacentHTML("beforeend", `
+                    <p class="ob-auth-err">
+                        Cannot reach BlackBox backend. Will keep trying...
+                    </p>
+                `);
+            }
+        }
+        setTimeout(() => { if (!myAbort.aborted) pollOnce(); }, 2000);
     };
-    setTimeout(pollOnce, 2000);
+    setTimeout(() => { if (!myAbort.aborted) pollOnce(); }, 2000);
 }
 
 // ── Disclosure (Branch D — always rendered, default-open or closed) ──
