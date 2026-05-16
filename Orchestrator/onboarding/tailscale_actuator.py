@@ -11,6 +11,7 @@
      stream endpoint needed.
 """
 import asyncio
+import json
 import re
 import shutil
 import socket
@@ -28,6 +29,21 @@ _active_up_process: subprocess.Popen | None = None
 _active_up_login_url: str | None = None
 
 LOGIN_URL_PATTERN = re.compile(r"https://login\.tailscale\.com/a/[a-zA-Z0-9]+")
+
+
+def _poll_response(state: str, *, detail=None, backend_state: str | None = None,
+                   login_url: str | None = None) -> dict:
+    """Normalized poll response shape — consumers can be branch-free.
+
+    Always returns {state, detail, backend_state, login_url}; absent values
+    are None. Reviewer N2.
+    """
+    return {
+        "state": state,
+        "detail": detail,
+        "backend_state": backend_state,
+        "login_url": login_url,
+    }
 
 
 @asynccontextmanager
@@ -53,8 +69,11 @@ async def start_up() -> str:
     global _active_up_process, _active_up_login_url
 
     # Pre-flight: daemon alive? (audit M6)
+    # Reviewer I1: subprocess.run wrapped in asyncio.to_thread so the
+    # 3s timeout can't freeze the uvicorn event loop.
     try:
-        check = subprocess.run(
+        check = await asyncio.to_thread(
+            subprocess.run,
             ["tailscale", "status", "--json"],
             capture_output=True, text=True, timeout=3,
         )
@@ -101,10 +120,13 @@ async def start_up() -> str:
     _active_up_login_url = login_url
 
     # Best-effort: open in default browser (audit I1)
+    # Reviewer I3: start_new_session=True so PID 1 (init) reaps the
+    # xdg-open child — prevents zombie accumulation on long-running uvicorn.
     try:
         subprocess.Popen(["xdg-open", login_url],
                          stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+                         stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     except Exception:
         pass  # UI also renders clickable link
 
@@ -113,34 +135,43 @@ async def start_up() -> str:
 
 async def poll_up() -> dict:
     """Check whether the active `tailscale up` has authenticated.
-    Returns {state: 'running'|'pending'|'failed', detail: ...}"""
+    Returns normalized {state, detail, backend_state, login_url} shape."""
     global _active_up_process, _active_up_login_url
 
     try:
-        result = subprocess.run(
+        # Reviewer I1: subprocess.run wrapped in asyncio.to_thread so the
+        # 3s timeout can't freeze the uvicorn event loop (wizard polls
+        # every 2s — sync call would freeze the entire Portal during auth).
+        result = await asyncio.to_thread(
+            subprocess.run,
             ["tailscale", "status", "--json"],
             capture_output=True, text=True, timeout=3,
         )
         if result.returncode == 0:
-            import json as _json
-            data = _json.loads(result.stdout)
+            data = json.loads(result.stdout)
             backend = data.get("BackendState", "unknown")
             if backend == "Running":
-                # Clean up the up-process
+                # Clean up the up-process.
+                # Reviewer I2: _active_up_process is an asyncio.subprocess.Process
+                # whose .wait() is a coroutine WITHOUT a timeout kwarg.
+                # The previous proc.wait(timeout=2) raised TypeError which the
+                # bare except hid — terminate() was ALWAYS being called.
+                # Use asyncio.wait_for for the timeout instead.
                 if _active_up_process is not None:
                     try:
-                        _active_up_process.wait(timeout=2)
-                    except Exception:
+                        await asyncio.wait_for(_active_up_process.wait(), timeout=2)
+                    except (asyncio.TimeoutError, Exception):
                         _active_up_process.terminate()
                     _active_up_process = None
                     _active_up_login_url = None
-                return {"state": "running", "detail": data.get("Self", {})}
-            return {"state": "pending", "backend_state": backend,
-                    "login_url": _active_up_login_url}
+                return _poll_response("running", detail=data.get("Self", {}))
+            return _poll_response("pending",
+                                  backend_state=backend,
+                                  login_url=_active_up_login_url)
     except Exception as e:
-        return {"state": "failed", "detail": str(e)}
+        return _poll_response("failed", detail=str(e))
 
-    return {"state": "pending", "login_url": _active_up_login_url}
+    return _poll_response("pending", login_url=_active_up_login_url)
 
 
 async def cancel_up() -> None:

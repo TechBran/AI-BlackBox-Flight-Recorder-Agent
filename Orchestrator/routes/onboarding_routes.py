@@ -324,30 +324,51 @@ class TailscaleUpResponse(BaseModel):
 
 @router.post("/tailscale/up", response_model=TailscaleUpResponse)
 async def tailscale_up():
-    """Start `tailscale up` and return login URL for browser launch."""
+    """Start `tailscale up` and return login URL for browser launch.
+
+    Reviewer C2: refactored to acquire-then-try/except with a `released`
+    flag so future code changes can't introduce a lock-leak vector. On
+    the success path the lock STAYS held — /poll releases it when the
+    backend transitions to Running. On any failure path the lock is
+    released exactly once.
+    """
+    # Existing-URL fast path (no lock acquisition needed)
+    if ts_act._up_lock.locked():
+        if ts_act._active_up_login_url:
+            return TailscaleUpResponse(login_url=ts_act._active_up_login_url)
+        raise HTTPException(status_code=409, detail="up already in progress")
+
+    await ts_act._up_lock.acquire()
+    released = False
     try:
-        if ts_act._up_lock.locked():
-            # Already in progress — return existing URL
-            if ts_act._active_up_login_url:
-                return TailscaleUpResponse(login_url=ts_act._active_up_login_url)
-            raise HTTPException(status_code=409, detail="up already in progress")
-        await ts_act._up_lock.acquire()
-        try:
-            url = await ts_act.start_up()
-            return TailscaleUpResponse(login_url=url)
-        except Exception:
-            ts_act._up_lock.release()
-            raise
+        url = await ts_act.start_up()
+        return TailscaleUpResponse(login_url=url)
     except RuntimeError as e:
+        ts_act._up_lock.release()
+        released = True
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        if not released:
+            ts_act._up_lock.release()
+        raise
 
 
 @router.get("/tailscale/poll")
 async def tailscale_poll():
-    """Check authentication progress."""
+    """Check authentication progress.
+
+    Reviewer C1: release() wrapped in try/except RuntimeError because two
+    concurrent /poll calls can both observe Running and race the
+    .locked() check — the second .release() would raise
+    `RuntimeError: Lock is not acquired`.
+    """
     result = await ts_act.poll_up()
-    if result.get("state") == "running" and ts_act._up_lock.locked():
-        ts_act._up_lock.release()
+    if result.get("state") == "running":
+        try:
+            ts_act._up_lock.release()
+        except RuntimeError:
+            # Already released by a concurrent /poll or /cancel — benign.
+            pass
     return result
 
 
