@@ -61,6 +61,13 @@ export async function render(container, { next, back, skip }) {
     }
 
     const gmailCfg = currentConfig?.providers?.gmail || null;
+    // E15 (Brandon 2026-05-17): generate the exact redirect URIs the customer
+    // needs to add to their Google OAuth client. We expose both localhost (for
+    // when the wizard is accessed locally on the BlackBox) and the tailnet
+    // HTTPS form (for when accessed from a remote browser via Tailscale serve).
+    // The tailnet URI is the load-bearing one for production use; localhost is
+    // convenience for sitting-at-the-device flow.
+    const tailnetHostname = currentConfig?.tailscale?.detail?.hostname || "";
     const state = {
         gmail: {
             client_id: "",
@@ -73,6 +80,10 @@ export async function render(container, { next, back, skip }) {
             existingClientId: gmailCfg?.client_id || null,
             secretLast4: gmailCfg?.secret_last4 || null,
             replacing: false,
+            redirectUriLocal: "http://localhost:9091/auth/gmail/callback",
+            redirectUriTailnet: tailnetHostname
+                ? `https://${tailnetHostname}/auth/gmail/callback`
+                : null,
         },
         creds: {
             files: credsResp?.files || [],
@@ -137,7 +148,7 @@ function renderGmailCardForState(p, state) {
     if (s.wasPresent && !s.replacing) {
         return renderGmailCardConfigured(p, s);
     }
-    return renderGmailCard(p);
+    return renderGmailCard(p, s);
 }
 
 // Configured-state Gmail card: shown when GOOGLE_OAUTH_CLIENT_ID +
@@ -183,7 +194,45 @@ function formatSecretPreview(raw) {
     return "••••" + tail;
 }
 
-function renderGmailCard(p) {
+function renderGmailCard(p, s) {
+    // E15 (Brandon 2026-05-17): generate the exact redirect URIs for THIS
+    // machine and surface them with copy buttons. Customer copies → pastes
+    // into Google Cloud Console's Authorized redirect URIs list. Removes
+    // the ambiguity that bit Brandon on MSO2 Ultra ('what URI do I use?').
+    const localUri = s?.redirectUriLocal || "http://localhost:9091/auth/gmail/callback";
+    const tailnetUri = s?.redirectUriTailnet || null;
+    const redirectUrisHtml = `
+        <li>
+            Under <strong>Authorized redirect URIs</strong>, add the URI(s)
+            below for this specific BlackBox. Click Copy to grab each one,
+            then paste into Google's form (click "Add URI" for each):
+            <div class="ob-gmail-uri-list">
+                <div class="ob-gmail-uri-row">
+                    <span class="ob-gmail-uri-label">Local:</span>
+                    <code class="ob-gmail-uri-code">${escapeHtml(localUri)}</code>
+                    <button type="button" class="ob-gmail-uri-copy" data-copy="${escapeHtml(localUri)}">Copy</button>
+                </div>
+                ${tailnetUri ? `
+                <div class="ob-gmail-uri-row">
+                    <span class="ob-gmail-uri-label">Tailnet (HTTPS):</span>
+                    <code class="ob-gmail-uri-code">${escapeHtml(tailnetUri)}</code>
+                    <button type="button" class="ob-gmail-uri-copy" data-copy="${escapeHtml(tailnetUri)}">Copy</button>
+                </div>
+                <p class="ob-gmail-uri-hint">
+                    Add <strong>both</strong>. Local is for OAuth started while sitting at this device;
+                    Tailnet is for OAuth started from a remote browser via your Tailscale connection
+                    (required for the production flow).
+                </p>
+                ` : `
+                <p class="ob-gmail-uri-hint">
+                    Tailscale isn't configured yet on this BlackBox &mdash; only the local URI is
+                    available right now. Complete the Tailscale step first to get the HTTPS tailnet URI
+                    (which you'll want for remote OAuth flows).
+                </p>
+                `}
+            </div>
+        </li>
+    `;
     return `
         <div class="ob-provider-card ob-integration-card" data-provider="${p.id}">
             <div class="ob-provider-header">
@@ -193,7 +242,7 @@ function renderGmailCard(p) {
                 </a>
             </div>
             <p class="ob-integration-desc">${escapeHtml(p.description)}</p>
-            <details class="ob-disclosure ob-walkthrough">
+            <details class="ob-disclosure ob-walkthrough" open>
                 <summary class="ob-disclosure-summary">
                     <span class="ob-disclosure-q">
                         Walk me through <em>Google Cloud OAuth setup</em>
@@ -204,7 +253,7 @@ function renderGmailCard(p) {
                     <ol class="ob-walkthrough-steps">
                         <li>In <a href="${escapeHtml(p.consoleUrl)}" target="_blank" rel="noopener">Google Cloud Console &rarr; Credentials</a>, click <strong>Create Credentials &rarr; OAuth client ID</strong>.</li>
                         <li>Pick <strong>Web application</strong> as the type. Name it something like "AI BlackBox".</li>
-                        <li>Under <strong>Authorized redirect URIs</strong>, add <code>http://localhost:9091/auth/gmail/callback</code>.</li>
+                        ${redirectUrisHtml}
                         <li>Click <strong>Create</strong>. Google shows you a <em>Client ID</em> and <em>Client Secret</em> &mdash; paste both below.</li>
                         <li>Don't forget to enable the <strong>Gmail API</strong> in <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">API Library</a>.</li>
                     </ol>
@@ -522,7 +571,7 @@ function startReplacingGmail(p, state, container) {
     const card = container.querySelector(`.ob-provider-card[data-provider="${p.id}"]`);
     if (card) {
         const tmp = document.createElement("div");
-        tmp.innerHTML = renderGmailCard(p).trim();
+        tmp.innerHTML = renderGmailCard(p, state.gmail).trim();
         const newCard = tmp.firstElementChild;
         card.replaceWith(newCard);
         wireGmailCard(container, state, p);
@@ -539,6 +588,21 @@ function wireGmailCard(container, state, p) {
     const statusEl = container.querySelector("#ob-gmail-status");
 
     if (!idInput || !secretInput || !revealBtn || !validateBtn || !statusEl) return;
+
+    // E15: wire Copy buttons on the per-machine redirect URI list
+    container.querySelectorAll(".ob-gmail-uri-copy").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const text = btn.dataset.copy || "";
+            const orig = btn.textContent;
+            try {
+                await navigator.clipboard.writeText(text);
+                btn.textContent = "Copied ✓";
+            } catch {
+                btn.textContent = "Copy failed";
+            }
+            setTimeout(() => { btn.textContent = orig; }, 1500);
+        });
+    });
 
     function updateValidateButton() {
         validateBtn.disabled = !(state.gmail.client_id && state.gmail.client_secret);
