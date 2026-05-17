@@ -1,3 +1,8 @@
 # BlackBox MCP Server Dependencies
+# Kept in a SEPARATE venv (MCP/venv/) from Orchestrator/venv/ because mcp's
+# transitive starlette>=0.49 conflicts with fastapi 0.118's starlette<0.49
+# upper bound. Two venvs is the cost of isolation.
 mcp>=1.0.0
 httpx>=0.25.0
+requests>=2.31.0          # Orchestrator/web_tools.py imports (re-used by MCP server's web search/fetch tools)
+beautifulsoup4>=4.12.0    # Orchestrator/web_tools.py imports (HTML parsing for web_fetch)

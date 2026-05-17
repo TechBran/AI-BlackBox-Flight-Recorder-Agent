@@ -94,6 +94,77 @@ sudo -u "$REAL_USER" python3.12 -m venv "$BLACKBOX_ROOT/Orchestrator/venv"
 sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install --upgrade pip
 sudo -u "$REAL_USER" "$BLACKBOX_ROOT/Orchestrator/venv/bin/pip" install -r "$BLACKBOX_ROOT/requirements.txt"
 
+# ── Step 2b: BlackBox MCP server venv + per-CLI registration (audit E21) ──
+# MCP server lives in a SEPARATE venv from the Orchestrator because mcp's
+# transitive starlette>=0.49 conflicts with fastapi 0.118's starlette<0.49
+# upper bound — sharing the venv would brick the Orchestrator. Cheap cost:
+# MCP/venv only needs 4 packages (mcp, httpx, requests, beautifulsoup4).
+# Server imports from Orchestrator/web_tools.py + Orchestrator/tools/
+# tool_registry.py — those only need stdlib + requests + bs4.
+#
+# Brandon 2026-05-17 ("MCP Tools server should start on every boot, you know,
+# every new install as well"): MCP is a stdio subprocess spawned on-demand by
+# the CLI when a session starts — not a long-running service. "Starts on every
+# install" really means "registered in every CLI's user-scoped config so it's
+# available in every project, in every session, on every fresh BlackBox".
+#
+# Use each CLI's `mcp add -s user` subcommand so we don't track schema drift.
+# Remove-first (ignore-missing) for idempotent re-install / upgrade semantics.
+echo "[install] Building BlackBox MCP venv + registering server with CLI agents..."
+sudo -u "$REAL_USER" bash -c "
+    set -e
+    BB='${BLACKBOX_ROOT}'
+    MCP_VENV=\"\${BB}/MCP/venv\"
+    MCP_PY=\"\${MCP_VENV}/bin/python\"
+    MCP_SERVER=\"\${BB}/MCP/blackbox_mcp_server.py\"
+
+    if [[ ! -x \"\${MCP_PY}\" ]]; then
+        echo '[install]   Creating MCP venv...'
+        python3 -m venv \"\${MCP_VENV}\"
+    fi
+    \"\${MCP_VENV}/bin/pip\" install --quiet --upgrade pip
+    \"\${MCP_VENV}/bin/pip\" install --quiet -r \"\${BB}/MCP/requirements.txt\"
+    echo \"[install]   MCP venv ready at \${MCP_PY}\"
+
+    # Load nvm so claude/gemini/codex are on PATH
+    export NVM_DIR=\"\$HOME/.nvm\"
+    [[ -s \"\$NVM_DIR/nvm.sh\" ]] && . \"\$NVM_DIR/nvm.sh\"
+
+    # Claude Code: stdio server, user scope, BLACKBOX_URL+ROOT env
+    if command -v claude > /dev/null 2>&1; then
+        claude mcp remove blackbox -s user > /dev/null 2>&1 || true
+        claude mcp add blackbox -s user \
+            -e BLACKBOX_URL=http://localhost:9091 \
+            -e BLACKBOX_ROOT=\"\${BB}\" \
+            -- \"\${MCP_PY}\" \"\${MCP_SERVER}\" > /dev/null \
+          && echo '[install]   claude: registered blackbox MCP (user scope)' \
+          || echo '[install]   claude: registration failed (non-fatal)'
+    fi
+
+    # Gemini CLI: -s user, -e env, command + args positional (no -- needed)
+    if command -v gemini > /dev/null 2>&1; then
+        gemini mcp remove blackbox > /dev/null 2>&1 || true
+        gemini mcp add blackbox -s user \
+            -e BLACKBOX_URL=http://localhost:9091 \
+            -e BLACKBOX_ROOT=\"\${BB}\" \
+            \"\${MCP_PY}\" \"\${MCP_SERVER}\" > /dev/null \
+          && echo '[install]   gemini: registered blackbox MCP (user scope)' \
+          || echo '[install]   gemini: registration failed (non-fatal)'
+    fi
+
+    # Codex: --env not -e, requires -- separator before stdio command. Codex
+    # has only global config (no per-project), so no scope flag.
+    if command -v codex > /dev/null 2>&1; then
+        codex mcp remove blackbox > /dev/null 2>&1 || true
+        codex mcp add blackbox \
+            --env BLACKBOX_URL=http://localhost:9091 \
+            --env BLACKBOX_ROOT=\"\${BB}\" \
+            -- \"\${MCP_PY}\" \"\${MCP_SERVER}\" > /dev/null \
+          && echo '[install]   codex: registered blackbox MCP (global)' \
+          || echo '[install]   codex: registration failed (non-fatal)'
+    fi
+"
+
 # ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"

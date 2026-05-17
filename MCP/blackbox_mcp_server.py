@@ -40,11 +40,25 @@ except ImportError:
 BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
-# Import web_tools and tool registry
+# Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
-sys.path.insert(0, str(BLACKBOX_ROOT))
 from web_tools import perform_web_search, perform_web_fetch
-from Orchestrator.tools.tool_registry import get_mcp_tools
+
+# E21 (2026-05-17): load tool_registry.py as a STANDALONE module to bypass
+# Orchestrator/tools/__init__.py, which re-exports blackbox_tools — and
+# blackbox_tools transitively pulls in aiohttp, Orchestrator.contacts, and
+# the rest of the FastAPI request/response stack. The MCP server only needs
+# get_mcp_tools (metadata generation, returns tool schemas); it never CALLS
+# them locally (execution always hops through HTTP back to the BlackBox API).
+# Loading the file directly via importlib lets MCP/venv stay lean — no
+# aiohttp/fastapi/starlette needed, which sidesteps the mcp-vs-fastapi
+# starlette version conflict that would otherwise force a heavier venv.
+import importlib.util as _ilu
+_tr_path = BLACKBOX_ROOT / "Orchestrator" / "tools" / "tool_registry.py"
+_tr_spec = _ilu.spec_from_file_location("blackbox_tool_registry", str(_tr_path))
+_tr_module = _ilu.module_from_spec(_tr_spec)
+_tr_spec.loader.exec_module(_tr_module)
+get_mcp_tools = _tr_module.get_mcp_tools
 
 # Direct file paths for efficient byte-offset access
 VOLUME_FILE = BLACKBOX_ROOT / "Volumes" / "SNAPSHOT_VOLUME.txt"
