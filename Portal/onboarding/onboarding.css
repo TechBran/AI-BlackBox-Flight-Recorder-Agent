@@ -2382,3 +2382,179 @@ body::after {
     font-size: 0.82em;
     line-height: 1.5;
 }
+
+/* ── E20b (2026-05-17): CLI agents wizard step ──────────────────────
+ * 3-card grid layout for Claude / Gemini / Codex with per-provider
+ * install + auth state. Cards use data-state attribute to switch
+ * accent color (missing=red, needs-auth=amber, ready=green) without
+ * a separate selector for each state.
+ */
+.ob-cli-agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+.ob-cli-agent-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-left-width: 3px;
+    border-radius: var(--radius-md, 8px);
+    padding: 1rem 1.1rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    transition: border-color 200ms, background 200ms;
+}
+.ob-cli-agent-card[data-state="missing"]    { border-left-color: rgba(255, 100, 100, 0.6); }
+.ob-cli-agent-card[data-state="needs-auth"] { border-left-color: rgba(255, 180, 50, 0.7); }
+.ob-cli-agent-card[data-state="ready"]      { border-left-color: rgba(80, 200, 100, 0.7); background: rgba(80, 200, 100, 0.04); }
+
+.ob-cli-agent-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+.ob-cli-agent-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+.ob-cli-agent-name {
+    font-family: var(--ob-font-display, ui-serif, "Fraunces", serif);
+    font-size: 1.15em;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.92);
+}
+.ob-cli-agent-vendor {
+    font-family: var(--ob-font-body, ui-monospace, monospace);
+    font-size: 0.72em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.ob-cli-agent-badge {
+    font-family: var(--ob-font-body, ui-monospace, monospace);
+    font-size: 0.72em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.25rem 0.55rem;
+    border-radius: var(--radius-sm, 6px);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.ob-cli-agent-badge-ok         { background: rgba(80, 200, 100, 0.15);  color: rgba(180, 240, 200, 0.95); }
+.ob-cli-agent-badge-needs-auth { background: rgba(255, 180, 50, 0.15);  color: rgba(255, 220, 150, 0.95); }
+.ob-cli-agent-badge-missing    { background: rgba(255, 100, 100, 0.13); color: rgba(255, 190, 190, 0.95); }
+
+.ob-cli-agent-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.82em;
+    color: rgba(255, 255, 255, 0.7);
+}
+.ob-cli-agent-meta-label {
+    font-family: var(--ob-font-body, ui-monospace, monospace);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.82em;
+    color: rgba(255, 255, 255, 0.45);
+    flex-shrink: 0;
+}
+.ob-cli-agent-bin {
+    font-family: ui-monospace, monospace;
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.75);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 0.15rem 0.4rem;
+    border-radius: var(--radius-sm, 6px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+.ob-cli-agent-actions {
+    margin-top: 0.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.ob-cli-agent-auth-blurb,
+.ob-cli-agent-ready-blurb {
+    margin: 0;
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.65);
+    line-height: 1.45;
+}
+.ob-cli-agent-ready-blurb {
+    color: rgba(180, 240, 200, 0.8);
+}
+
+.ob-cli-agent-action {
+    align-self: flex-start;
+    padding: 0.5rem 1rem;
+    font-size: 0.9em;
+}
+.ob-cli-agent-action-install {
+    background: rgba(255, 100, 100, 0.9);
+    color: #200;
+    box-shadow: 3px 3px 0 var(--ob-text-primary), 0 0 18px rgba(255, 100, 100, 0.2);
+}
+.ob-cli-agent-action-install:hover {
+    box-shadow: 5px 5px 0 var(--ob-text-primary), 0 0 24px rgba(255, 100, 100, 0.35);
+}
+.ob-cli-agent-action-auth {
+    background: rgba(255, 180, 50, 0.95);
+    color: #1a0f00;
+    box-shadow: 3px 3px 0 var(--ob-text-primary), 0 0 18px rgba(255, 180, 50, 0.22);
+}
+.ob-cli-agent-action-auth:hover {
+    box-shadow: 5px 5px 0 var(--ob-text-primary), 0 0 24px rgba(255, 180, 50, 0.4);
+}
+.ob-cli-agent-action:disabled,
+.ob-cli-agent-action[disabled] {
+    background: var(--ob-surface-elevated);
+    color: var(--ob-text-tertiary);
+    box-shadow: none;
+    cursor: progress;
+}
+
+.ob-cli-agent-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0.5rem 0 0.25rem;
+}
+
+.ob-cli-agent-hint {
+    margin: 0.75rem 0 0;
+    padding: 0.6rem 0.9rem;
+    background: rgba(255, 255, 255, 0.04);
+    border-left: 3px solid rgba(80, 180, 240, 0.6);
+    border-radius: var(--radius-sm, 6px);
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 1.45;
+}
+.ob-cli-agent-hint-error {
+    border-left-color: rgba(255, 100, 100, 0.7);
+    color: rgba(255, 200, 200, 0.95);
+}
+
+.ob-cli-agent-error {
+    padding: 1rem;
+    background: rgba(255, 100, 100, 0.06);
+    border-left: 3px solid rgba(255, 100, 100, 0.6);
+    border-radius: var(--radius-md, 8px);
+}
+.ob-cli-agent-error p { margin: 0 0 0.4rem; color: rgba(255, 255, 255, 0.85); }
+.ob-cli-agent-error p:last-child { margin-bottom: 0; }
+
+/* Spin animation reused for the Re-check button's ↻ glyph */
+@keyframes ob-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}

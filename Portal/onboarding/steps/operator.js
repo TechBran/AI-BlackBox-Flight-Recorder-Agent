@@ -57,7 +57,7 @@ function renderShell() {
     return `
         <section class="ob-step ob-operator">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>06</em></div>
+                <div class="ob-step-sigil-num"><em>07</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">OPERATOR</div>
             </aside>

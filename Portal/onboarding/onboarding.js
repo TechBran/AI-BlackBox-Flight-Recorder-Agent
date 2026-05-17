@@ -4,20 +4,21 @@
 
 const STEPS = [
     "welcome", "tailscale", "api_keys",
-    "optional_integrations", "pair_phone", "operator", "done",
+    "optional_integrations", "pair_phone", "cli_agents", "operator", "done",
 ];
 
 // IMPORTANT: if STEPS array changes, update STEP_LABELS to match.
 // (We intentionally don't auto-derive — some labels need custom casing
 // like "TAILNET" not "TAILSCALE" or "EXTRAS" not "OPTIONAL_INTEGRATIONS".)
 // Keep labels short — long values cause header-overflow in the top-right
-// "STEP NN / 07 LABEL" chrome (see T2.5.1 sign-off).
+// "STEP NN / 08 LABEL" chrome (see T2.5.1 sign-off).
 const STEP_LABELS = {
     welcome: "WELCOME",
     tailscale: "TAILNET",
     api_keys: "KEYS",
     optional_integrations: "EXTRAS",
     pair_phone: "PAIR",
+    cli_agents: "AGENTS",
     operator: "OPERATOR",
     done: "DONE",
 };

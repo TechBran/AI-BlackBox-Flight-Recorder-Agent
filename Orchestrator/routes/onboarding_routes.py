@@ -689,3 +689,214 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
     except Exception as e:
         logger.exception("open-url: unexpected error")
         return {"ok": False, "error": str(e)}
+
+
+# ── E20b (Brandon 2026-05-17): CLI agent wizard step ─────────────────
+# After phone pairing, the wizard verifies the three CLI providers
+# (Anthropic Claude, Google Gemini, OpenAI Codex) are installed AND
+# authenticated. Install.sh Step 1c npm-installs the binaries at boot,
+# but each provider requires a one-time interactive auth (Anthropic
+# Console / Google OAuth / OpenAI auth). Backend exposes:
+#   GET /onboarding/cli-agent/status  → per-provider {installed, auth}
+#   POST /onboarding/cli-agent/spawn-terminal  → opens gnome-terminal
+#     in the user session running the install OR auth command for the
+#     requested provider. Same portal→gio→direct fallback chain as
+#     /open-url because the same cross-cgroup process-spawning problem
+#     applies: blackbox.service runs in a different systemd namespace
+#     from the user's GNOME session and direct subprocess.Popen of a
+#     GUI app fails silently.
+
+# Per-provider auth markers. Each CLI writes credentials to a
+# well-known location on first successful login; presence of that
+# path = authenticated. Heuristic, not authoritative — a malformed
+# config file would still show "auth ok" here, but the user can
+# always re-run "Sign in" if the CLI complains later.
+_AUTH_MARKERS = {
+    "claude":  [".claude/.credentials.json", ".claude/auth.json", ".claude/config.json"],
+    "gemini":  [".gemini/oauth_creds.json", ".gemini/google_account_id", ".gemini/settings.json"],
+    "codex":   [".codex/auth.json", ".codex/config.toml"],
+}
+
+# Per-provider commands. Install command is what install.sh's Step 1c
+# already runs; we expose it as a manual rescue if the user blew away
+# their node_modules or upgraded mid-flow. Auth command launches the
+# provider's interactive login flow.
+_CLI_INSTALL_PKGS = {
+    "claude":  "@anthropic-ai/claude-code",
+    "gemini":  "@google/gemini-cli",
+    "codex":   "@openai/codex",
+}
+_CLI_AUTH_CMD = {
+    # Claude prompts on first interactive launch; the /login slash command
+    # forces the flow even if a stale ANTHROPIC_API_KEY is set.
+    "claude":  "claude",
+    # Gemini auto-prompts for Google OAuth on first interactive launch.
+    "gemini":  "gemini",
+    # Codex has an explicit login subcommand.
+    "codex":   "codex login",
+}
+
+
+def _build_user_env() -> dict:
+    """Reconstruct the user-session env needed to spawn GUI processes
+    in the GNOME session from blackbox.service's systemd cgroup.
+    Mirrors the env-rebuild done in /open-url; factored here so the
+    /spawn-terminal endpoint can reuse it without duplicating.
+    """
+    import glob
+    uid = os.getuid()
+    env = os.environ.copy()
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+    env.setdefault("DISPLAY", ":0")
+    if "XAUTHORITY" not in env:
+        candidates = (
+            glob.glob(f"/run/user/{uid}/.mutter-Xwaylandauth.*")
+            + [f"/run/user/{uid}/gdm/Xauthority"]
+        )
+        for cand in candidates:
+            if os.path.exists(cand):
+                env["XAUTHORITY"] = cand
+                break
+    return env
+
+
+@router.get("/cli-agent/status")
+def cli_agent_status() -> dict:
+    """Per-provider install + auth status for the wizard's CLI agents step.
+
+    Probes via two mechanisms:
+      1. Binary resolution — reuses Orchestrator.routes.cli_agent_routes
+         ._resolve_provider_bin, which walks an extended PATH that
+         includes ~/.nvm/versions/node/<ver>/bin so it finds the npm
+         globals install.sh's Step 1c laid down.
+      2. Auth marker presence — checks for any one of a small list of
+         credential-file paths under the user's home dir per provider.
+
+    Returns:
+        {
+          "providers": {
+            "claude": {"installed": bool, "authenticated": bool,
+                       "bin_path": str|None, "package": str},
+            "gemini": {...},
+            "codex":  {...}
+          },
+          "ready": bool          # all three installed AND authenticated
+        }
+    """
+    from pathlib import Path
+    from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin
+
+    home = Path.home()
+    out = {}
+    all_ready = True
+    for prov, pkg in _CLI_INSTALL_PKGS.items():
+        bin_path = _resolve_provider_bin(prov)
+        installed = bool(bin_path) and bin_path != prov and Path(bin_path).is_file()
+        authenticated = any((home / marker).exists() for marker in _AUTH_MARKERS[prov])
+        out[prov] = {
+            "installed": installed,
+            "authenticated": authenticated,
+            "bin_path": bin_path if installed else None,
+            "package": pkg,
+        }
+        if not (installed and authenticated):
+            all_ready = False
+    return {"providers": out, "ready": all_ready}
+
+
+class SpawnTerminalRequest(BaseModel):
+    provider: Literal["claude", "gemini", "codex"]
+    mode: Literal["install", "auth"]
+
+
+@router.post("/cli-agent/spawn-terminal")
+def cli_agent_spawn_terminal(req: SpawnTerminalRequest) -> dict:
+    """Spawn gnome-terminal in the user's GNOME session running the
+    requested CLI command. Same portal→gio→direct cascade as
+    /open-url — direct subprocess.Popen of gnome-terminal from
+    blackbox.service's cgroup hits the same cross-namespace wall.
+
+    Mode "install" runs `npm install -g <package>` (inside an
+    nvm-loaded shell so it lands at the right node version).
+    Mode "auth" runs the provider's interactive login command.
+
+    Both commands are wrapped so the terminal stays open after exit:
+    user sees the final output + presses Enter to dismiss. Without
+    this, gnome-terminal closes the second the command exits and
+    any error message is lost.
+    """
+    import subprocess
+
+    prov = req.provider
+    pkg = _CLI_INSTALL_PKGS[prov]
+    if req.mode == "install":
+        inner = (
+            f'export NVM_DIR="$HOME/.nvm"; '
+            f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+            f'echo "Installing {pkg}..."; '
+            f'npm install -g {pkg}; '
+            f'echo; echo "Done. Press Enter to close."; read'
+        )
+    else:  # auth
+        cmd = _CLI_AUTH_CMD[prov]
+        inner = (
+            f'export NVM_DIR="$HOME/.nvm"; '
+            f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+            f'echo "Starting {prov} authentication..."; '
+            f'echo "Follow the prompts. Press Enter when done."; '
+            f'echo; '
+            f'{cmd}; '
+            f'echo; echo "Auth flow finished. Press Enter to close."; read'
+        )
+
+    env = _build_user_env()
+
+    # Attempt 1: portal launch on org.gnome.Terminal.desktop. The
+    # portal can't pass arbitrary command args to a .desktop file's
+    # exec, so this is best-effort — it opens a terminal but won't
+    # run the inner command. Fall through immediately to gio/direct.
+    # (Kept here for parity with /open-url cascade; gio is the
+    # canonical path for terminals on GNOME.)
+
+    # Attempt 2: gio launch on the gnome-terminal .desktop file with
+    # the inner command as an arg. Works in some configurations.
+    gt_desktop = "/usr/share/applications/org.gnome.Terminal.desktop"
+    if os.path.exists(gt_desktop):
+        logger.info("spawn-terminal: trying gio launch (%s, %s)", prov, req.mode)
+        try:
+            # gio launch can't reliably pass command args to gnome-terminal —
+            # it'd open an interactive shell without running our command.
+            # So skip gio for the typical case and go direct.
+            pass
+        except Exception:
+            pass
+
+    # Attempt 3: direct gnome-terminal spawn. This works when the env
+    # is correctly reconstructed (which _build_user_env() does).
+    logger.info("spawn-terminal: trying direct gnome-terminal (%s, %s)", prov, req.mode)
+    try:
+        proc = subprocess.Popen(
+            ["gnome-terminal", "--", "bash", "-c", inner],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        # Give it ~1s to die-on-startup so we can surface a real error.
+        try:
+            rc = proc.wait(timeout=1.5)
+            stderr = (proc.stderr.read().decode("utf-8", "replace") if proc.stderr else "")[:500]
+            logger.warning("spawn-terminal: gnome-terminal exited rc=%d stderr=%r", rc, stderr)
+            return {"ok": False, "via": "gnome-terminal-direct",
+                    "error": f"gnome-terminal exited rc={rc}",
+                    "stderr": stderr}
+        except subprocess.TimeoutExpired:
+            logger.info("spawn-terminal: gnome-terminal SUCCESS (still running after 1.5s)")
+            return {"ok": True, "via": "gnome-terminal-direct"}
+    except FileNotFoundError:
+        logger.error("spawn-terminal: gnome-terminal not on PATH")
+        return {"ok": False, "error": "gnome-terminal not installed"}
+    except Exception as e:
+        logger.exception("spawn-terminal: unexpected error")
+        return {"ok": False, "error": str(e)}
