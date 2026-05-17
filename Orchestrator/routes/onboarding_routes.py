@@ -111,43 +111,52 @@ def get_onboarding_state() -> StateResponse:
 
 @router.get("/current-config", response_model=CurrentConfigResponse)
 def current_config() -> CurrentConfigResponse:
-    """Return a redacted snapshot of what's configured today. Manage-mode UI reads this."""
-    from Orchestrator.config import (
-        OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
-        XAI_API_KEY, PERPLEXITY_API_KEY,
-        GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET,
-    )
+    """Return a redacted snapshot of what's configured today. Manage-mode UI reads this.
+
+    E8 (Brandon's MSO2 Ultra testing 2026-05-17): API keys ARE saved correctly
+    to .env by the /save endpoint, but reading them via Orchestrator.config.*
+    module-level constants returns STALE values — those are computed once at
+    import time from os.environ and don't refresh when .env is mutated. Customer
+    sees 'all keys empty' on wizard re-entry even though .env has them. Fix:
+    use dotenv_values() to read .env fresh on each call (doesn't pollute
+    os.environ). Bonus: future API key edits via the wizard 'just work' without
+    service restart — matches customer expectation for onboarding flows.
+    """
+    from dotenv import dotenv_values
+    from Orchestrator.onboarding.secrets_writer import ENV_FILE
+    env = dotenv_values(str(ENV_FILE))
+
     val_at = _state.validated_at()
     providers = {
         "openai": {
-            "present": bool(OPENAI_API_KEY),
-            "last4": _redact(OPENAI_API_KEY),
+            "present": bool(env.get("OPENAI_API_KEY")),
+            "last4": _redact(env.get("OPENAI_API_KEY")),
             "validated_at": val_at.get("openai"),
         },
         "anthropic": {
-            "present": bool(ANTHROPIC_API_KEY),
-            "last4": _redact(ANTHROPIC_API_KEY),
+            "present": bool(env.get("ANTHROPIC_API_KEY")),
+            "last4": _redact(env.get("ANTHROPIC_API_KEY")),
             "validated_at": val_at.get("anthropic"),
         },
         "google": {
-            "present": bool(GOOGLE_API_KEY),
-            "last4": _redact(GOOGLE_API_KEY),
+            "present": bool(env.get("GOOGLE_API_KEY")),
+            "last4": _redact(env.get("GOOGLE_API_KEY")),
             "validated_at": val_at.get("google"),
         },
         "xai": {
-            "present": bool(XAI_API_KEY),
-            "last4": _redact(XAI_API_KEY),
+            "present": bool(env.get("XAI_API_KEY")),
+            "last4": _redact(env.get("XAI_API_KEY")),
             "validated_at": val_at.get("xai"),
         },
         "perplexity": {
-            "present": bool(PERPLEXITY_API_KEY),
-            "last4": _redact(PERPLEXITY_API_KEY),
+            "present": bool(env.get("PERPLEXITY_API_KEY")),
+            "last4": _redact(env.get("PERPLEXITY_API_KEY")),
             "validated_at": val_at.get("perplexity"),
         },
         "gmail": {
-            "present": bool(GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET),
-            "client_id": GOOGLE_OAUTH_CLIENT_ID or None,  # public per Google OAuth docs
-            "secret_last4": _redact(GOOGLE_OAUTH_CLIENT_SECRET),
+            "present": bool(env.get("GOOGLE_OAUTH_CLIENT_ID") and env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
+            "client_id": env.get("GOOGLE_OAUTH_CLIENT_ID") or None,  # public per Google OAuth docs
+            "secret_last4": _redact(env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
             "validated_at": val_at.get("gmail"),
         },
     }
@@ -192,9 +201,10 @@ def get_config_value(key: str, request: Request, reveal: bool = False) -> dict:
     Both modes require the key to be in ALLOWED_REVEAL_KEYS.
 
     Caveats:
-    - The value is read from os.getenv at request time, but Orchestrator.config
-      loads .env once at process start. After /save mutates .env, this endpoint
-      reflects the OLD value until BlackBox restart. Mirror behavior of /save.
+    - E8 (2026-05-17): NOW reads .env file fresh via dotenv_values() each call,
+      so /save mutations are immediately visible without service restart. Old
+      behavior (os.getenv stale-since-import) was the root cause of API keys
+      appearing empty on wizard re-entry.
     - The loopback gate inspects request.client.host (immediate ASGI peer). DO
       NOT enable uvicorn's --proxy-headers without first reworking this check
       to consult X-Forwarded-For; otherwise any forwarded request would bypass
@@ -205,7 +215,9 @@ def get_config_value(key: str, request: Request, reveal: bool = False) -> dict:
             status_code=403,
             detail=f"key {key!r} not in reveal allowlist",
         )
-    value = os.getenv(key, "")
+    from dotenv import dotenv_values
+    from Orchestrator.onboarding.secrets_writer import ENV_FILE
+    value = dotenv_values(str(ENV_FILE)).get(key, "") or ""
     if reveal:
         client_host = request.client.host if request.client else ""
         if client_host not in ("127.0.0.1", "::1", "localhost"):
