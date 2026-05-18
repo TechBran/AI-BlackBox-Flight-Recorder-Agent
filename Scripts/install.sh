@@ -26,6 +26,42 @@ if ! [[ "$REAL_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     exit 1
 fi
 
+# ── Step 0a: git-clone bootstrap (audit E23 / T3) ──
+# Update pipeline requires $BLACKBOX_ROOT to be a git checkout so the wizard's
+# Updates panel can `git fetch + reset --hard origin/main` against it. Two
+# cases:
+#   1. Empty $BLACKBOX_ROOT → fresh clone from public repo
+#   2. ZIP install populated $BLACKBOX_ROOT but never ran git → lazy-init:
+#      create .git/ in place with origin pointing at the repo. No checkout —
+#      customer's ZIP files stay in place. The wizard's FIRST update will
+#      detect divergence and ask before stomping (audit M2).
+#
+# Repo is public (Brandon's T10 decision) so HTTPS clone needs no credentials.
+if [[ ! -d "$BLACKBOX_ROOT/.git" ]]; then
+    if [[ -z "$(ls -A "$BLACKBOX_ROOT" 2>/dev/null)" ]]; then
+        echo "[install] $BLACKBOX_ROOT is empty — cloning blackbox-poc..."
+        sudo -u "$REAL_USER" git clone https://github.com/TechBran/blackbox-poc.git "$BLACKBOX_ROOT"
+    else
+        echo "[install] $BLACKBOX_ROOT has ZIP install content — lazy-initializing git..."
+        sudo -u "$REAL_USER" bash -c "
+            set -e
+            cd '$BLACKBOX_ROOT'
+            git init -q
+            git remote add origin https://github.com/TechBran/blackbox-poc.git
+            git fetch -q origin main
+            # Mark main as the working branch but DON'T checkout. Customer ZIP
+            # files stay in place. First update via the wizard does the diff
+            # + consent dance before any reset --hard.
+            git update-ref refs/heads/main FETCH_HEAD
+            git symbolic-ref HEAD refs/heads/main
+            git branch --set-upstream-to=origin/main main 2>/dev/null || true
+            echo '[install] Git initialized; tracking origin/main'
+        "
+    fi
+else
+    echo "[install] $BLACKBOX_ROOT already a git repo (no bootstrap needed)"
+fi
+
 # ── Pre-flight (Phase 4.0) ──
 "$BLACKBOX_ROOT/Scripts/install-preflight.sh"
 
@@ -322,19 +358,16 @@ sudo tee /etc/logrotate.d/blackbox > /dev/null <<EOF
 }
 EOF
 
-# ── Step 4d: helper script (audit M3 carry-forward) ──
-cat > "$BLACKBOX_ROOT/blackbox-status.sh" <<'STATUSEOF'
-#!/usr/bin/env bash
-echo "=== BlackBox Service ==="
-systemctl status blackbox.service --no-pager | head -15
-echo
-echo "=== Recent Logs ==="
-journalctl -u blackbox.service -n 20 --no-pager
-echo
-echo "=== Health ==="
-curl -fsS http://localhost:9091/health 2>&1 | head -5
-STATUSEOF
-chmod +x "$BLACKBOX_ROOT/blackbox-status.sh"
+# ── Step 4d: helper script (T3 — now sourced from tracked file) ──
+# Previously emitted inline via heredoc (audit M3 flagged the resulting
+# $BLACKBOX_ROOT/blackbox-status.sh as untracked + collision-prone).
+# Now lives at Scripts/blackbox-status.sh in repo; install.sh just symlinks
+# so customers can still run `./blackbox-status.sh` from BLACKBOX_ROOT.
+if [[ -L "$BLACKBOX_ROOT/blackbox-status.sh" || -f "$BLACKBOX_ROOT/blackbox-status.sh" ]]; then
+    rm -f "$BLACKBOX_ROOT/blackbox-status.sh"
+fi
+ln -sf "Scripts/blackbox-status.sh" "$BLACKBOX_ROOT/blackbox-status.sh"
+echo "[install] Symlinked blackbox-status.sh → Scripts/blackbox-status.sh"
 
 # ── Step 4e: sudoers grant for runtime tailscale operations ──
 # (Tailscale wizard actuator: bounded NOPASSWD for the specific commands
@@ -349,6 +382,18 @@ if ! sudo visudo -c -f /etc/sudoers.d/blackbox-tailscale > /dev/null; then
     exit 1
 fi
 echo "[install] Sudoers grant written for $REAL_USER (tailscale operations)"
+
+# ── Step 4f1: install root-owned dispatch helpers for update pipeline (T2 / T3) ──
+# Two bounded helper scripts that the update flow's sudoers grants will point at.
+# Replaces wildcard sudo grants for apt-get install + tee /etc/sudoers.d that
+# would otherwise be priv-esc primitives via any MCP-tool prompt injection.
+# T5 lands the actual sudoers grants that point at these.
+for HELPER in blackbox-apt-install blackbox-write-systemd; do
+    sudo install -m 0755 -o root -g root \
+        "$BLACKBOX_ROOT/installer/templates/${HELPER}.sh" \
+        "/usr/local/sbin/${HELPER}"
+    echo "[install] Installed helper: /usr/local/sbin/${HELPER}"
+done
 
 # ── Step 4h: force X11 session via GDM (audit E18b — Computer Use input on Wayland) ──
 # Wayland's Mutter compositor silently drops uinput events for cursor/click from
