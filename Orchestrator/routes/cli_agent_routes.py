@@ -44,11 +44,24 @@ def _resolve_provider_bin(name: str) -> str:
     return found or name
 
 
-PROVIDER_BIN = {
-    "claude": os.getenv("CLI_AGENT_CLAUDE_BIN") or _resolve_provider_bin("claude"),
-    "gemini": os.getenv("CLI_AGENT_GEMINI_BIN") or _resolve_provider_bin("gemini"),
-    "codex":  os.getenv("CLI_AGENT_CODEX_BIN")  or _resolve_provider_bin("codex"),
-}
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "gemini", "codex")
+
+
+def provider_bin(name: str) -> str | None:
+    """Resolve a CLI agent binary path on each call (T0 / audit I5).
+
+    Previously cached as a module-level PROVIDER_BIN dict populated at
+    import. The update pipeline can change the active Node version mid-
+    session (npm install of new CLI versions under nvm), which made
+    cached paths go stale until the service restarted. shutil.which is
+    sub-millisecond; safe to call on every WebSocket connect.
+
+    Returns the absolute path, or None for unknown providers.
+    """
+    if name not in SUPPORTED_PROVIDERS:
+        return None
+    env_override = os.getenv(f"CLI_AGENT_{name.upper()}_BIN")
+    return env_override or _resolve_provider_bin(name)
 
 # Per-provider extra args appended to the spawn command.
 #
@@ -127,7 +140,7 @@ async def ws_cli_agent(
         await websocket.close(code=4003)
         return
 
-    if provider not in PROVIDER_BIN:
+    if provider not in SUPPORTED_PROVIDERS:
         await websocket.close(code=4003)
         return
 
@@ -141,7 +154,7 @@ async def ws_cli_agent(
         info = await asyncio.to_thread(
             mgr.attach_or_create,
             operator=op, provider=provider, app=app,
-            command=[PROVIDER_BIN[provider], *PROVIDER_ARGS.get(provider, [])],
+            command=[provider_bin(provider), *PROVIDER_ARGS.get(provider, [])],
         )
     except WorkspaceViolation:
         await websocket.close(code=4003)

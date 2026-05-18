@@ -36,7 +36,7 @@ _FIELD_SEP = "__"
 #      even if the CLI hasn't finished booting, and runs whenever it
 #      drains. Don't put state-mutating commands here.
 #
-# Keys MUST be a subset of cli_agent_routes.PROVIDER_BIN — adding a hook
+# Keys MUST be a subset of cli_agent_routes.SUPPORTED_PROVIDERS — adding a hook
 # for an unregistered provider is dead code (the route layer rejects it).
 POST_ATTACH_HOOKS: dict[str, list[str]] = {
     "claude": ["/tui fullscreen", "Enter"],

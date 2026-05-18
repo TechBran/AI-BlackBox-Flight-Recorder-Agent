@@ -27,10 +27,10 @@ def test_unknown_provider_post_attach_hook_is_noop():
     assert _post_attach_hook_for("definitely-unknown") is None
 
 
-def test_post_attach_hooks_keys_are_subset_of_provider_bin():
-    from Orchestrator.routes.cli_agent_routes import PROVIDER_BIN
-    assert set(POST_ATTACH_HOOKS.keys()) <= set(PROVIDER_BIN.keys()), (
-        "POST_ATTACH_HOOKS contains a provider not registered in PROVIDER_BIN"
+def test_post_attach_hooks_keys_are_subset_of_supported_providers():
+    from Orchestrator.routes.cli_agent_routes import SUPPORTED_PROVIDERS
+    assert set(POST_ATTACH_HOOKS.keys()) <= set(SUPPORTED_PROVIDERS), (
+        "POST_ATTACH_HOOKS contains a provider not in SUPPORTED_PROVIDERS"
     )
 
 
