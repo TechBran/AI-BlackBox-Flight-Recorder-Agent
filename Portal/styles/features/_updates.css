@@ -1,0 +1,195 @@
+/* Updates panel + SSE log modal (T8). */
+
+/* ── Panel (lives inside #menuModal) ──────────────────────────────────── */
+
+.updates-section {
+    /* inherits .menu-group spacing */
+}
+
+.updates-status-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    font-size: 0.95em;
+    margin: 0.3rem 0 0.6rem;
+}
+
+.updates-status-ok {
+    color: var(--color-success, #50c878);
+    font-weight: 500;
+}
+.updates-status-warn {
+    color: var(--color-warn, #f4a460);
+    font-weight: 500;
+}
+.updates-status-err {
+    color: var(--color-error, #e57373);
+    font-weight: 500;
+}
+.updates-status-info {
+    color: var(--color-info, #6ca0dc);
+    font-weight: 500;
+}
+.updates-status-update {
+    color: var(--color-accent, #cc0000);
+    font-weight: 500;
+}
+.updates-status-progress {
+    color: var(--color-info, #6ca0dc);
+    font-weight: 500;
+    animation: updates-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes updates-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.6; }
+}
+
+.updates-sha {
+    font-family: ui-monospace, monospace;
+    font-size: 0.85em;
+    padding: 0.1rem 0.4rem;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 3px;
+}
+
+.updates-commits-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.4rem 0;
+    border-left: 2px solid rgba(255, 255, 255, 0.1);
+    padding-left: 0.6rem;
+}
+.updates-commits-list li {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    margin: 0.15rem 0;
+    font-size: 0.85em;
+}
+.updates-commit-sha {
+    font-family: ui-monospace, monospace;
+    color: rgba(255, 255, 255, 0.55);
+    flex-shrink: 0;
+    min-width: 4.5rem;
+}
+.updates-commit-subject {
+    color: rgba(255, 255, 255, 0.85);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.updates-commit-more {
+    color: rgba(255, 255, 255, 0.5);
+    font-style: italic;
+}
+
+.updates-categories {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+}
+.updates-cat {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.7);
+}
+.updates-cat-apt        { background: rgba(255, 180, 50, 0.12); color: rgba(255, 220, 150, 0.9); }
+.updates-cat-pip        { background: rgba(80, 200, 100, 0.12); color: rgba(180, 240, 200, 0.9); }
+.updates-cat-mcp_pip    { background: rgba(80, 200, 100, 0.12); color: rgba(180, 240, 200, 0.9); }
+.updates-cat-systemd    { background: rgba(204, 0, 0, 0.15);    color: rgba(255, 180, 180, 0.9); }
+.updates-cat-sudoers    { background: rgba(204, 0, 0, 0.15);    color: rgba(255, 180, 180, 0.9); }
+.updates-cat-helpers    { background: rgba(108, 160, 220, 0.15); color: rgba(180, 220, 255, 0.9); }
+
+.updates-error {
+    background: rgba(229, 115, 115, 0.08);
+    border-left: 3px solid rgba(229, 115, 115, 0.6);
+    padding: 0.5rem 0.7rem;
+    margin: 0.4rem 0;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8em;
+    color: rgba(255, 220, 220, 0.95);
+    white-space: pre-wrap;
+    overflow-x: auto;
+}
+
+.updates-hint {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.8em;
+    margin-top: 0.6rem;
+    line-height: 1.4;
+}
+.updates-hint-inline {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.82em;
+    margin: 0.3rem 0;
+    line-height: 1.4;
+}
+
+/* ── SSE log modal ──────────────────────────────────────────────────── */
+
+.updates-log-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 9000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.updates-log-modal.hide {
+    display: none;
+}
+.updates-log-card {
+    background: var(--color-bg, #0a0a0a);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+    width: min(640px, 92vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+.updates-log-card .modal-head {
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.updates-log-card h3 {
+    margin: 0;
+    font-size: 1em;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+}
+.updates-log-close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 0 0.5rem;
+}
+.updates-log-close:hover {
+    color: rgba(255, 255, 255, 1);
+}
+.updates-log-pre {
+    flex: 1;
+    overflow-y: auto;
+    margin: 0;
+    padding: 1rem;
+    background: rgba(0, 0, 0, 0.4);
+    font-family: ui-monospace, monospace;
+    font-size: 0.82em;
+    line-height: 1.5;
+    color: rgba(220, 255, 220, 0.92);
+    white-space: pre-wrap;
+}

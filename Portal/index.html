@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui263"/> <!-- v260: STT transcribing state spinner -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui264"/> <!-- v264: T8 updates panel + log modal -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -705,6 +705,25 @@
             </label>
           </div>
           <p class="streaming-hint">When enabled, see AI reasoning in real-time with streaming responses</p>
+        </div>
+
+        <!-- Updates Section (T8) -->
+        <div class="menu-group updates-section">
+          <h4>Updates</h4>
+          <div class="updates-status-row" id="updatesStatusRow">
+            <span class="updates-loading">Checking for updates…</span>
+          </div>
+          <div class="updates-commits" id="updatesCommitsList"></div>
+          <div class="menu-grid">
+            <button id="btnCheckUpdates" class="btn" title="Force a fresh git fetch from GitHub">🔄 Check for updates</button>
+            <button id="btnInstallUpdate" class="btn btn-primary" disabled title="Apply available updates (restarts the service)">Install update</button>
+            <button id="btnViewUpdateLog" class="btn" disabled title="Open the most recent journal logs">View last log</button>
+            <button id="btnRollbackUpdate" class="btn btn-warn" disabled title="Revert to the pre-update tag">Rollback last update</button>
+          </div>
+          <p class="updates-hint">
+            Updates preserve your snapshots, media, secrets, paired devices, and operator config.
+            Only application code and dependencies change. Service restarts; expect 60–90 s downtime.
+          </p>
         </div>
 
         <!-- System Controls Section -->

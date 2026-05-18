@@ -780,7 +780,16 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     const addOperatorModal = $("addOperatorModal");
 
     // Menu modal
-    safeSetOnClick("btnMenu", () => menuModal && menuModal.classList.remove("hide"));
+    safeSetOnClick("btnMenu", () => {
+        if (!menuModal) return;
+        menuModal.classList.remove("hide");
+        // T8 — Updates panel fetches /update/status on every menu open.
+        // No cache busting; the backend's own 60s cache (audit M7) keeps
+        // GitHub from being hammered when the user toggles the menu rapidly.
+        import("./updates-manager.js")
+            .then((mod) => mod.initUpdatesPanel())
+            .catch((e) => console.warn("[updates] init failed:", e));
+    });
     safeSetOnClick("btnCloseMenu", () => menuModal && menuModal.classList.add("hide"));
 
     // Advanced Settings Accordion Toggle
