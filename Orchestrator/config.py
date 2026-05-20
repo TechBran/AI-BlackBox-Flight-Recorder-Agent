@@ -357,18 +357,72 @@ OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 
 # OpenAI Realtime API (GPT-4o voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-OPENAI_REALTIME_MODEL = "gpt-realtime"  # GA model - best quality, 20% cheaper than previews
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")  # Newest GA - bumped from "gpt-realtime"
 REALTIME_CONTEXT_MAX_CHARS = 50000    # ~20K tokens budget for initial context
 REALTIME_SNAPSHOT_CHARS_EACH = 8000   # Max chars per snapshot in context
 REALTIME_AUDIO_SAMPLE_RATE = 24000    # PCM16 audio at 24kHz
 
+# OpenAI Realtime model catalog (verified via client.models.list() 2026-05-19).
+# Routes filter category=="chat" when serving the dropdown; specialized variants
+# (translate, transcribe) are exposed via env-var override only.
+OPENAI_REALTIME_MODELS: List[Dict] = [
+    # Conversational variants (UI dropdown)
+    {"id": "gpt-realtime-2", "name": "GPT Realtime 2 (Newest GA)", "default": True, "category": "chat"},
+    {"id": "gpt-realtime", "name": "GPT Realtime (Alias)", "category": "chat"},
+    {"id": "gpt-realtime-1.5", "name": "GPT Realtime 1.5", "category": "chat"},
+    {"id": "gpt-realtime-mini-2025-12-15", "name": "GPT Realtime Mini (Cheap)", "category": "chat"},
+    # Specialized variants (NOT in main dropdown; audit I4)
+    {"id": "gpt-realtime-translate", "name": "GPT Realtime Translate", "category": "translate"},
+    {"id": "gpt-realtime-whisper", "name": "GPT Realtime Whisper (STT-only)", "category": "transcribe"},
+]
+
+# OpenAI Realtime allowlists for server-side validation of client-supplied params.
+OPENAI_REALTIME_VAD_TYPES = ("server_vad", "semantic_vad")
+OPENAI_REALTIME_VAD_EAGERNESS = ("low", "medium", "high", "auto")
+
 # Google Gemini Live API (Gemini 2.5 voice conversations)
 GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"  # Native audio model for Live API
+GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-latest")  # GA-track alias - bumped from -preview-12-2025
 GEMINI_LIVE_INPUT_SAMPLE_RATE = 16000   # PCM16 audio at 16kHz (Gemini input standard)
 GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000  # PCM16 audio at 24kHz (Gemini output)
-GEMINI_LIVE_VOICES = ["Charon", "Puck", "Kore", "Aoede", "Fenrir", "Orus"]  # Available voices
+
+# Gemini Live model catalog (verified via genai.list_models() 2026-05-19).
+GEMINI_LIVE_MODELS: List[Dict] = [
+    {"id": "gemini-2.5-flash-native-audio-latest", "name": "Gemini 2.5 Flash Live (Latest GA-track)", "default": True},
+    {"id": "gemini-3.1-flash-live-preview", "name": "Gemini 3.1 Flash Live (Preview, thinkingLevel)"},
+    {"id": "gemini-2.5-flash-native-audio-preview-12-2025", "name": "Gemini 2.5 Flash Live (Dec 2025 pin)"},
+]
+
+# Gemini Live voices - complete 30-entry catalog.
+# Source: https://ai.google.dev/gemini-api/docs/speech-generation "Voice options"
+# table, fetched 2026-05-19.
+GEMINI_LIVE_VOICES = [
+    "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda",
+    "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus",
+    "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi",
+    "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima",
+    "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+]
+
+# Character descriptors for Gemini Live voices (1:1 mapping with GEMINI_LIVE_VOICES).
+GEMINI_LIVE_VOICE_DESCRIPTORS: Dict[str, str] = {
+    "Zephyr": "Bright",          "Puck": "Upbeat",            "Charon": "Informative",
+    "Kore": "Firm",              "Fenrir": "Excitable",       "Leda": "Youthful",
+    "Orus": "Firm",              "Aoede": "Breezy",           "Callirrhoe": "Easy-going",
+    "Autonoe": "Bright",         "Enceladus": "Breathy",      "Iapetus": "Clear",
+    "Umbriel": "Easy-going",     "Algieba": "Smooth",         "Despina": "Smooth",
+    "Erinome": "Clear",          "Algenib": "Gravelly",       "Rasalgethi": "Informative",
+    "Laomedeia": "Upbeat",       "Achernar": "Soft",          "Alnilam": "Firm",
+    "Schedar": "Even",           "Gacrux": "Mature",          "Pulcherrima": "Forward",
+    "Achird": "Friendly",        "Zubenelgenubi": "Casual",   "Vindemiatrix": "Gentle",
+    "Sadachbia": "Lively",       "Sadaltager": "Knowledgeable", "Sulafat": "Warm",
+}
+
 GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
+
+# Gemini Live allowlists for server-side validation of client-supplied params.
+GEMINI_LIVE_VAD_SENSITIVITIES = ("LOW", "MEDIUM", "HIGH")  # start/end-of-speech sensitivity enum
+GEMINI_LIVE_THINKING_LEVELS = ("minimal", "low", "medium", "high")  # google-genai SDK 1.64.0 ThinkingConfig enum (lowercase)
 
 # xAI Grok Voice Agent API (Grok real-time voice conversations)
 GROK_LIVE_URL = "wss://api.x.ai/v1/realtime"
