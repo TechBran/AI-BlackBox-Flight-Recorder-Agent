@@ -643,11 +643,11 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
         audio_data = data.get("data", "")
         if session.gemini_ws and audio_data:
             realtime_input = {
-                "realtimeInput": {
-                    "mediaChunks": [{
+                "realtime_input": {
+                    "audio": {
                         "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
                         "data": audio_data  # Base64 PCM16 at 16kHz
-                    }]
+                    }
                 }
             }
             await session.gemini_ws.send(json.dumps(realtime_input))
@@ -724,11 +724,11 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
         # Gemini Live API processes video at 1 FPS alongside audio
         if session.gemini_ws:
             realtime_input = {
-                "realtimeInput": {
-                    "mediaChunks": [{
+                "realtime_input": {
+                    "video": {
                         "mimeType": "image/jpeg",
                         "data": data.get("data", "")  # Base64 JPEG frame
-                    }]
+                    }
                 }
             }
             await session.gemini_ws.send(json.dumps(realtime_input))
@@ -1438,11 +1438,11 @@ async def gemini_keepalive_loop(session: GeminiLiveSession):
                     silence_bytes = b'\x00' * 640
                     silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
                     await session.gemini_ws.send(json.dumps({
-                        "realtimeInput": {
-                            "mediaChunks": [{
+                        "realtime_input": {
+                            "audio": {
                                 "mimeType": f"audio/pcm;rate={GEMINI_LIVE_INPUT_SAMPLE_RATE}",
                                 "data": silence_b64
-                            }]
+                            }
                         }
                     }))
             except websockets.exceptions.ConnectionClosed:
