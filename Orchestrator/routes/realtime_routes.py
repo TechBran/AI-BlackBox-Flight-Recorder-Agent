@@ -339,6 +339,14 @@ async def configure_openai_session(
     if vad_eagerness is not None and vad_eagerness not in OPENAI_REALTIME_VAD_EAGERNESS:
         print(f"[REALTIME] WARNING: vad_eagerness {vad_eagerness!r} not in {OPENAI_REALTIME_VAD_EAGERNESS}; ignoring")
         vad_eagerness = None
+    # Server-side clamp on idle_timeout_ms. HTML dropdown enforces min=5000
+    # max=300000, but JS parseInt() strips that constraint — a stale or
+    # hostile client could otherwise send idle_timeout_ms=1 straight to
+    # OpenAI. Range mirrors the HTML UI semantics. (T14 F2)
+    if idle_timeout_ms is not None:
+        if not isinstance(idle_timeout_ms, int) or not (5000 <= idle_timeout_ms <= 300000):
+            print(f"[REALTIME] WARNING: idle_timeout_ms {idle_timeout_ms!r} out of range (5000-300000); ignoring")
+            idle_timeout_ms = None
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake

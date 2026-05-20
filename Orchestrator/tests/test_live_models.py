@@ -193,6 +193,38 @@ async def test_idle_timeout_honored_under_server_vad(stub_fossil_context):
     assert turn_detection.get("idle_timeout_ms") == 45000
 
 
+@pytest.mark.asyncio
+async def test_idle_timeout_out_of_range_rejected(stub_fossil_context, capsys):
+    """Out-of-range idle_timeout values are rejected with a warning, not passed to OpenAI.
+
+    HTML enforces min=5000 max=300000 in the dropdown, but JS parseInt strips
+    that constraint, so a stale or hostile client could send idle_timeout_ms=1
+    straight through. T14 F2 added a server-side clamp matching the HTML range.
+    """
+    session = _make_openai_session()
+
+    await configure_openai_session(
+        session=session,
+        operator="test_operator",
+        voice="ash",
+        vad_type="server_vad",
+        idle_timeout_ms=1,  # way below 5000 minimum
+    )
+
+    payload = _extract_payload(session.openai_ws.send)
+    turn_detection = payload["session"]["turn_detection"]
+
+    # Out-of-range value must not leak into upstream payload
+    assert "idle_timeout_ms" not in turn_detection, (
+        f"out-of-range idle_timeout leaked into payload: {turn_detection}"
+    )
+
+    # And the route should have logged the ignore reason
+    captured = capsys.readouterr()
+    assert "idle_timeout_ms" in captured.out
+    assert "out of range" in captured.out
+
+
 # -----------------------------------------------------------------------------
 # Test 4: Gemini thinkingLevel emitted ONLY for thinking-capable models
 # -----------------------------------------------------------------------------

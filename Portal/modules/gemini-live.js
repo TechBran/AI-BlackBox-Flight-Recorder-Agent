@@ -33,6 +33,17 @@ let sessionId = null;
 /** Selected voice */
 let selectedVoice = 'Charon';
 
+/**
+ * Live-models-v2 config — captured at first connect, replayed on reconnect.
+ * Without this, a network blip silently downgrades the user-selected
+ * model / VAD shape / thinking level to the backend env defaults (T14 F1).
+ * Mirrors the persistence pattern already used for selectedVoice.
+ */
+let currentGeminiModel = null;
+let currentGeminiVadStart = null;
+let currentGeminiVadEnd = null;
+let currentGeminiThinkingLevel = null;
+
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
 
@@ -794,6 +805,14 @@ export async function connect(operator) {
     const thinkingLevel = (selectedModel === 'gemini-3.1-flash-live-preview' && thinkingSelect && thinkingSelect.value)
         ? thinkingSelect.value : undefined;
 
+    // Capture v2 config into module state so reconnect can replay it
+    // (otherwise reconnect rebuilds with only {type, operator, voice} and
+    // the backend silently falls back to env defaults — T14 F1).
+    currentGeminiModel = selectedModel || null;
+    currentGeminiVadStart = vadSensitivityStart || null;
+    currentGeminiVadEnd = vadSensitivityEnd || null;
+    currentGeminiThinkingLevel = thinkingLevel || null;
+
     // Reset session state
     sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
@@ -1164,11 +1183,18 @@ function reconnectToExistingSession() {
     ws.onopen = () => {
         console.log('[GEMINI-LIVE] Reconnect WebSocket opened');
         intentionalDisconnect = false;
-        ws.send(JSON.stringify({
+        // Restore v2 config from module state — prevents silent
+        // server-default downgrade on network blip (T14 F1).
+        const reconnectMsg = {
             type: 'connect',
             operator: currentOperator,
             voice: selectedVoice
-        }));
+        };
+        if (currentGeminiModel) reconnectMsg.model = currentGeminiModel;
+        if (currentGeminiVadStart) reconnectMsg.vad_sensitivity_start = currentGeminiVadStart;
+        if (currentGeminiVadEnd) reconnectMsg.vad_sensitivity_end = currentGeminiVadEnd;
+        if (currentGeminiThinkingLevel) reconnectMsg.thinking_level = currentGeminiThinkingLevel;
+        ws.send(JSON.stringify(reconnectMsg));
     };
 
     ws.onmessage = (event) => {

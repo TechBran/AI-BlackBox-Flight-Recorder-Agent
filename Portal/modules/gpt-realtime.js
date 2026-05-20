@@ -30,6 +30,17 @@ let sessionId = null;
 /** Selected voice */
 let selectedVoice = 'ash';
 
+/**
+ * Live-models-v2 config — captured at first connect, replayed on reconnect.
+ * Without this, a network blip silently downgrades the user-selected
+ * model / VAD shape / idle-timeout to the backend env defaults (T14 F1).
+ * Mirrors the persistence pattern already used for selectedVoice.
+ */
+let currentRealtimeModel = null;
+let currentRealtimeVadType = null;
+let currentRealtimeVadEagerness = null;
+let currentRealtimeIdleTimeoutMs = null;
+
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
 
@@ -1150,6 +1161,14 @@ export async function connect(operator) {
         ? parseInt(idleTimeoutInput.value, 10) : NaN;
     const idleTimeoutMs = Number.isFinite(idleTimeoutRaw) ? idleTimeoutRaw : undefined;
 
+    // Capture v2 config into module state so reconnect can replay it
+    // (otherwise reconnect rebuilds with only {type, operator, voice} and
+    // the backend silently falls back to env defaults — T14 F1).
+    currentRealtimeModel = selectedModel || null;
+    currentRealtimeVadType = vadType || null;
+    currentRealtimeVadEagerness = vadEagerness || null;
+    currentRealtimeIdleTimeoutMs = (idleTimeoutMs !== undefined) ? idleTimeoutMs : null;
+
     sessionId = crypto.randomUUID();
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws/realtime/${sessionId}`;
@@ -1520,11 +1539,18 @@ function reconnectToExistingSession() {
     ws.onopen = () => {
         console.log('[REALTIME] Reconnect WebSocket opened');
         intentionalDisconnect = false;
-        ws.send(JSON.stringify({
+        // Restore v2 config from module state — prevents silent
+        // server-default downgrade on network blip (T14 F1).
+        const reconnectMsg = {
             type: 'connect',
             operator: currentOperator,
             voice: selectedVoice
-        }));
+        };
+        if (currentRealtimeModel) reconnectMsg.model = currentRealtimeModel;
+        if (currentRealtimeVadType) reconnectMsg.vad_type = currentRealtimeVadType;
+        if (currentRealtimeVadEagerness) reconnectMsg.vad_eagerness = currentRealtimeVadEagerness;
+        if (currentRealtimeIdleTimeoutMs !== null) reconnectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
+        ws.send(JSON.stringify(reconnectMsg));
     };
 
     ws.onmessage = (event) => {
