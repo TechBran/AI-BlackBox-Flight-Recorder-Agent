@@ -79,27 +79,17 @@ private val ThinkingBorderColor = BbxAccent.copy(alpha = 0.4f) // rgba(255,74,74
 @Composable
 fun ThinkingIndicator(
     isThinking: Boolean = true,
-    modifier: Modifier = Modifier,
-    liveText: String? = null
+    modifier: Modifier = Modifier
 ) {
     if (!isThinking) return
 
-    // Live mode: Opus 4.7 / Sonnet 4.6 adaptive thinking streams real text into this bubble.
-    // We show the tail of the accumulated thought (recent content is more useful than stale opener)
-    // and fall back to cycling placeholders when no live text has arrived yet.
-    val hasLiveText = !liveText.isNullOrBlank()
-    val displayText = if (hasLiveText) {
-        val tail = liveText!!.takeLast(220)
-        if (liveText.length > 220) "…$tail" else tail
-    } else {
-        null
-    }
-
+    // Animation bubble only — animated dots + cycling placeholder hints.
+    // The model's actual reasoning text lands in its own dedicated thinking
+    // dropdown bubble (a separate UI element); duplicating it here was UX noise.
     var hintIndex by remember { mutableIntStateOf(0) }
 
-    // Cycle placeholders only when we don't have real thinking content yet.
-    LaunchedEffect(isThinking, hasLiveText) {
-        while (isThinking && !hasLiveText) {
+    LaunchedEffect(isThinking) {
+        while (isThinking) {
             delay(2500)
             hintIndex = (hintIndex + 1) % THINKING_MESSAGES.size
         }
@@ -160,27 +150,18 @@ fun ThinkingIndicator(
 
             Spacer(Modifier.width(8.dp))
 
-            // Live thinking text if provided, otherwise cycling placeholder.
-            if (displayText != null) {
+            AnimatedContent(
+                targetState = hintIndex,
+                transitionSpec = {
+                    fadeIn(tween(500)) togetherWith fadeOut(tween(500))
+                },
+                label = "hint"
+            ) { index ->
                 Text(
-                    text = displayText,
+                    text = THINKING_MESSAGES[index],
                     style = MaterialTheme.typography.bodySmall,
                     color = Neutral500
                 )
-            } else {
-                AnimatedContent(
-                    targetState = hintIndex,
-                    transitionSpec = {
-                        fadeIn(tween(500)) togetherWith fadeOut(tween(500))
-                    },
-                    label = "hint"
-                ) { index ->
-                    Text(
-                        text = THINKING_MESSAGES[index],
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Neutral500
-                    )
-                }
             }
         }
     }

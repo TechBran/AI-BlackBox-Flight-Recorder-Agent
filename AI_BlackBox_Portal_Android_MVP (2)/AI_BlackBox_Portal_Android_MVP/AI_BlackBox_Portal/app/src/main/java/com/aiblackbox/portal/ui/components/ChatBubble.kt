@@ -300,7 +300,7 @@ fun ChatBubble(
                     }
                 }
             } else if (message.isStreaming) {
-                ThinkingIndicator(isThinking = true, liveText = message.reasoning)
+                ThinkingIndicator(isThinking = true)
             }
 
             // ── TTS Audio Player (shown when ttsAudioUrl file exists) ──
