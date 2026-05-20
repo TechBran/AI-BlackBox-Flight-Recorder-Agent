@@ -1,0 +1,168 @@
+/* _cli_agents_modal.css
+ * CLI Agents launcher modal — Track 3 of
+ * docs/plans/2026-05-20-portal-tools-section-alignment.md.
+ *
+ * Visual structure mirrors the cron-manager + device-manager modals
+ * (vertical sections inside .modal-body). Terminal pane uses a fixed-
+ * height monospace <pre> with auto-scroll — Brandon-locked first cut,
+ * no xterm.js.
+ */
+
+.cli-agents-card {
+    width: min(780px, 92vw);
+}
+
+.cli-agents-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 4px 0;
+}
+
+/* ── Setup pane ───────────────────────────────────────────── */
+
+.cli-agents-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.cli-agents-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cli-agents-section > label {
+    font-weight: 600;
+    color: var(--neutral-900, #d6d6d6);
+    font-size: 13px;
+}
+
+.cli-agents-select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--neutral-100, #121212);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    font-size: 14px;
+}
+
+.cli-agents-select:focus {
+    outline: none;
+    border-color: rgba(255, 74, 74, 0.6);
+    box-shadow: 0 0 0 3px rgba(255, 74, 74, 0.15);
+}
+
+.cli-agents-hint,
+.cli-agents-footnote {
+    font-size: 12px;
+    color: var(--neutral-700, #888);
+    margin: 0;
+    line-height: 1.5;
+}
+
+.cli-agents-footnote code {
+    background: var(--neutral-200, #1a1a1a);
+    padding: 1px 5px;
+    border-radius: var(--radius-xs, 4px);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+}
+
+.cli-agents-provider-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.cli-agents-radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--neutral-100, #121212);
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    cursor: pointer;
+    font-size: 13px;
+    transition: border-color var(--transition-fast, 0.15s) ease;
+}
+
+.cli-agents-radio:hover {
+    border-color: rgba(255, 74, 74, 0.4);
+}
+
+.cli-agents-radio input[type="radio"] {
+    margin: 0;
+}
+
+/* ── Terminal pane ─────────────────────────────────────────── */
+
+.cli-agents-terminal {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cli-agents-terminal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: var(--neutral-100, #121212);
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    font-size: 12px;
+}
+
+.cli-agents-session-info {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--neutral-800, #aaa);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+    margin-right: 12px;
+}
+
+.cli-agents-output {
+    height: 400px;
+    max-height: 50vh;
+    overflow-y: auto;
+    background: #0a0a0a;
+    color: #d8d8d8;
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    padding: 12px;
+    margin: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cli-agents-input-form {
+    display: flex;
+    gap: 8px;
+}
+
+.cli-agents-input-form input[type="text"] {
+    flex: 1;
+    padding: 10px 12px;
+    background: var(--neutral-100, #121212);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+}
+
+.cli-agents-input-form input[type="text"]:focus {
+    outline: none;
+    border-color: rgba(255, 74, 74, 0.6);
+    box-shadow: 0 0 0 3px rgba(255, 74, 74, 0.15);
+}

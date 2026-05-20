@@ -83,6 +83,7 @@ import { initTelephonyManager } from './telephony-manager.js';
 import { initCellularManager } from './cellular-manager.js';
 import { initSMSInbox, openSMSInbox, pollUnread as pollSMSUnread } from './sms-inbox.js';
 import { initContactsManager } from './contacts-manager.js';
+import { initCLIAgentsModal } from './cli-agents-modal.js';
 import {
     initAgentHandler,
     checkExistingAgentSession
@@ -688,6 +689,12 @@ async function initApp() {
             }
         });
     }
+
+    // CLI Agents Tools button — opens a modal that picks app folder + provider
+    // (Claude / Gemini / Codex) and streams a tmux PTY session into a simple
+    // <pre> output panel. Per docs/plans/2026-05-20-portal-tools-section-alignment.md
+    // Track 3. The init function wires the button click itself.
+    initCLIAgentsModal();
     initMediaManager();
     initAgentHandler();
     initGeminiAgentHandler();

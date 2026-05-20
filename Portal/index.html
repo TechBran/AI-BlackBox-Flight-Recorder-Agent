@@ -626,7 +626,8 @@
             <button id="btnSMSInbox" class="btn">SMS<span id="smsBadge"></span></button>
             <button id="btnContactsManager" class="btn">Contacts</button>
             <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
-            <!-- Tracks 3-5 will add: CLI Agents, Voice Agents, Gmail -->
+            <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
+            <!-- Tracks 4-5 will add: Voice Agents, Gmail -->
           </div>
         </div>
 
@@ -1867,6 +1868,60 @@
           </div>
           <div class="dm-screenshot-body">
               <div id="dmScreenshotContent" class="dm-screenshot-loading">Loading screenshot...</div>
+          </div>
+      </div>
+  </div>
+
+
+  <!-- CLI Agents Modal — Track 3 -->
+  <div id="cliAgentsModal" class="modal hide">
+      <div class="modal-card cli-agents-card">
+          <div class="modal-head">
+              <h3>💻 CLI Agents</h3>
+              <button id="btnCloseCLIAgents" class="btn">&#10005;</button>
+          </div>
+          <div class="modal-body cli-agents-body">
+              <!-- Setup pane (visible until session launches) -->
+              <div class="cli-agents-setup" id="cliAgentsSetup">
+                  <div class="cli-agents-section">
+                      <label for="cliAgentsAppSelect">Working directory (app):</label>
+                      <select id="cliAgentsAppSelect" class="cli-agents-select">
+                          <option value="">-- Loading apps... --</option>
+                      </select>
+                      <p class="cli-agents-hint">Pick <em>Apps root</em> to start in the Apps/ folder, or any registered app to start in its directory.</p>
+                  </div>
+
+                  <div class="cli-agents-section">
+                      <label>Provider:</label>
+                      <div class="cli-agents-provider-row" role="radiogroup" aria-label="CLI provider">
+                          <label class="cli-agents-radio"><input type="radio" name="cliAgentsProvider" value="claude" checked> Claude</label>
+                          <label class="cli-agents-radio"><input type="radio" name="cliAgentsProvider" value="gemini"> Gemini</label>
+                          <label class="cli-agents-radio"><input type="radio" name="cliAgentsProvider" value="codex"> Codex</label>
+                      </div>
+                  </div>
+
+                  <div class="cli-agents-section">
+                      <button id="cliAgentsLaunch" class="btn btn-confirm" type="button">▶ Launch Session</button>
+                  </div>
+
+                  <p class="cli-agents-footnote">
+                      To add a new working directory, create a folder under <code>Apps/</code> on the host
+                      (the backend has no create-directory endpoint yet; this is a known limitation).
+                  </p>
+              </div>
+
+              <!-- Terminal pane (hidden until session launches) -->
+              <div class="cli-agents-terminal" id="cliAgentsTerminal" style="display:none;">
+                  <div class="cli-agents-terminal-header">
+                      <span class="cli-agents-session-info" id="cliAgentsSessionInfo">session-id</span>
+                      <button id="cliAgentsDisconnect" class="btn btn-warn" type="button">⏹ Disconnect</button>
+                  </div>
+                  <pre id="cliAgentsOutput" class="cli-agents-output" aria-live="polite"></pre>
+                  <form id="cliAgentsInputForm" class="cli-agents-input-form">
+                      <input type="text" id="cliAgentsInputField" placeholder="Type a message + Enter" autocomplete="off">
+                      <button type="submit" class="btn">Send</button>
+                  </form>
+              </div>
           </div>
       </div>
   </div>
