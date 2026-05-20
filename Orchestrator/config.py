@@ -432,6 +432,14 @@ GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
 GEMINI_LIVE_VAD_SENSITIVITIES = ("LOW", "MEDIUM", "HIGH")  # start/end-of-speech sensitivity enum
 GEMINI_LIVE_THINKING_LEVELS = ("minimal", "low", "medium", "high")  # google-genai SDK 1.64.0 ThinkingConfig enum (lowercase)
 
+# Model ids that support generationConfig.thinkingConfig.thinkingLevel.
+# Only emit thinkingLevel for members of this set — emitting on non-thinking
+# models would either be silently ignored or trigger upstream API errors.
+# Per google-genai SDK 1.64.0 + 2026-05-19 model catalog research.
+GEMINI_LIVE_THINKING_CAPABLE_MODELS: frozenset = frozenset({
+    "gemini-3.1-flash-live-preview",
+})
+
 # xAI Grok Voice Agent API (Grok real-time voice conversations)
 GROK_LIVE_URL = "wss://api.x.ai/v1/realtime"
 GROK_LIVE_VOICES = ["Ara", "Rex", "Sal", "Eve", "Leo"]  # Available voices

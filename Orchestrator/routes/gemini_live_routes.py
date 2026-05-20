@@ -53,6 +53,7 @@ from Orchestrator.config import (
     GEMINI_LIVE_VOICE_DESCRIPTORS,
     GEMINI_LIVE_VAD_SENSITIVITIES,
     GEMINI_LIVE_THINKING_LEVELS,
+    GEMINI_LIVE_THINKING_CAPABLE_MODELS,
     GEMINI_LIVE_INPUT_SAMPLE_RATE,
     GEMINI_LIVE_OUTPUT_SAMPLE_RATE,
     GEMINI_LIVE_DEFAULT_VOICE,
@@ -242,8 +243,8 @@ async def configure_gemini_session(
         thinking_level: Optional reasoning budget hint — one of "minimal" | "low"
             | "medium" | "high" (LOWERCASE per google-genai SDK 1.64.0
             ThinkingConfig enum — do NOT uppercase). Only emitted when
-            model == "gemini-3.1-flash-live-preview"; ignored otherwise so 2.5
-            sessions don't trip server-side rejects.
+            resolved_model is in GEMINI_LIVE_THINKING_CAPABLE_MODELS (config.py);
+            ignored otherwise so non-thinking sessions don't trip server-side rejects.
 
         All new kwargs default to None to preserve phone bridge call sites at
         phone/bridge.py:1286, 1370 (audit C2 — those sites only pass positional
@@ -468,19 +469,20 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             aad["endOfSpeechSensitivity"] = f"END_SENSITIVITY_{vad_sensitivity_end}"
         print(f"[GEMINI-LIVE] VAD sensitivity override: start={vad_sensitivity_start}, end={vad_sensitivity_end}")
 
-    # thinkingLevel is ONLY valid for the 3.1 preview model. Emitting it on 2.5
-    # would either be silently ignored or trip an upstream reject — gate strictly
-    # on resolved_model. Path is setup.generationConfig.thinkingConfig.thinkingLevel
-    # (under generationConfig, NOT modelConfig — verified against google-genai
-    # SDK 1.64.0 types.py:ThinkingConfig). Value is LOWERCASE (minimal/low/
-    # medium/high) per the same SDK enum.
-    if thinking_level is not None and resolved_model == "gemini-3.1-flash-live-preview":
+    # thinkingLevel is ONLY valid for models in GEMINI_LIVE_THINKING_CAPABLE_MODELS
+    # (currently just gemini-3.1-flash-live-preview). Emitting it on 2.5 would
+    # either be silently ignored or trip an upstream reject — gate strictly on
+    # the capability set so renames/new models in config.py stay in sync. Path is
+    # setup.generationConfig.thinkingConfig.thinkingLevel (under generationConfig,
+    # NOT modelConfig — verified against google-genai SDK 1.64.0 types.py:
+    # ThinkingConfig). Value is LOWERCASE (minimal/low/medium/high) per same SDK enum.
+    if thinking_level is not None and resolved_model in GEMINI_LIVE_THINKING_CAPABLE_MODELS:
         setup_config["generationConfig"]["thinkingConfig"] = {
             "thinkingLevel": thinking_level
         }
-        print(f"[GEMINI-LIVE] thinkingLevel={thinking_level} enabled for gemini-3.1-flash-live-preview")
+        print(f"[GEMINI-LIVE] thinkingLevel={thinking_level} enabled for {resolved_model}")
     elif thinking_level is not None:
-        print(f"[GEMINI-LIVE] thinking_level={thinking_level!r} ignored — only applies to gemini-3.1-flash-live-preview (resolved_model={resolved_model})")
+        print(f"[GEMINI-LIVE] thinking_level={thinking_level!r} ignored — model {resolved_model!r} does not support thinkingConfig (not in GEMINI_LIVE_THINKING_CAPABLE_MODELS)")
 
     setup_message = {"setup": setup_config}
 
