@@ -2,6 +2,8 @@
 
 package com.aiblackbox.portal.ui.settings
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,9 +23,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
@@ -33,9 +38,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import android.content.Intent
@@ -153,18 +160,17 @@ fun SettingsSheet(
                     .border(1.dp, Neutral700, RoundedCornerShape(RadiusLg))
                     .padding(16.dp)
             ) {
-                SectionHeader("\uD83C\uDFA8 Generation", BbxAccent)
-
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                CollapsibleSection(
+                    title = "\uD83C\uDFA8 Generation",
+                    accent = BbxAccent,
                 ) {
-                    MenuButton("Generate Image") { onNavigate("image_gen"); onDismiss() }
-                    MenuButton("Generate Video") { onNavigate("video_gen"); onDismiss() }
-                    MenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
-                    MenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
-                    MenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FullWidthMenuButton("Generate Image") { onNavigate("image_gen"); onDismiss() }
+                        FullWidthMenuButton("Generate Video") { onNavigate("video_gen"); onDismiss() }
+                        FullWidthMenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
+                        FullWidthMenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
+                        FullWidthMenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
+                    }
                 }
             }
 
@@ -173,7 +179,10 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             // Floating Overlay — matches Portal #androidOverlaySection
             // ══════════════════════════════════════════════════════════════
-            SectionHeader("\uD83D\uDCF1 Floating Overlay", Color(0xFF4A9EFF))
+            CollapsibleSection(
+                title = "\uD83D\uDCF1 Floating Overlay",
+                accent = Color(0xFF4A9EFF),
+            ) {
 
             Text(
                 "Launch a floating bubble that works anywhere on your device. Voice agents, screenshots, and AI from any app.",
@@ -230,32 +239,33 @@ fun SettingsSheet(
                     }
                 }
             }
+            } // end CollapsibleSection (Floating Overlay)
 
             Spacer(Modifier.height(20.dp))
 
             // ══════════════════════════════════════════════════════════════
             // Tools Navigation — matches Portal menu items
             // ══════════════════════════════════════════════════════════════
-            SectionHeader("\uD83D\uDE80 Tools", Color(0xFF4A9EFF))
-
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            CollapsibleSection(
+                title = "\uD83D\uDE80 Tools",
+                accent = Color(0xFF4A9EFF),
             ) {
-                MenuButton("Timeline") { onNavigate("timeline"); onDismiss() }
-                MenuButton("Media Browser") { onNavigate("media"); onDismiss() }
-                MenuButton("Computer Use") { onNavigate("computer_use"); onDismiss() }
-                MenuButton("CLI Agent") { onNavigate("cli_agent"); onDismiss() }
-                MenuButton("Voice Agent") { onNavigate("voice"); onDismiss() }
-                MenuButton("Scheduler") { onNavigate("cron"); onDismiss() }
-                MenuButton("Devices") { onNavigate("devices"); onDismiss() }
-                MenuButton("Telephony") { onNavigate("telephony"); onDismiss() }
-                MenuButton("SMS Inbox") { onNavigate("sms_inbox"); onDismiss() }
-                MenuButton("Contacts") { onNavigate("contacts"); onDismiss() }
-                MenuButton("Cellular") { onNavigate("cellular"); onDismiss() }
-                MenuButton("↻  Updates") { onNavigate("updates"); onDismiss() }
-            }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+
+                    FullWidthMenuButton("Timeline") { onNavigate("timeline"); onDismiss() }
+                    FullWidthMenuButton("Media Browser") { onNavigate("media"); onDismiss() }
+                    FullWidthMenuButton("Computer Use") { onNavigate("computer_use"); onDismiss() }
+                    FullWidthMenuButton("CLI Agent") { onNavigate("cli_agent"); onDismiss() }
+                    FullWidthMenuButton("Voice Agent") { onNavigate("voice"); onDismiss() }
+                    FullWidthMenuButton("Scheduler") { onNavigate("cron"); onDismiss() }
+                    FullWidthMenuButton("Devices") { onNavigate("devices"); onDismiss() }
+                    FullWidthMenuButton("Telephony") { onNavigate("telephony"); onDismiss() }
+                    FullWidthMenuButton("SMS Inbox") { onNavigate("sms_inbox"); onDismiss() }
+                    FullWidthMenuButton("Contacts") { onNavigate("contacts"); onDismiss() }
+                    FullWidthMenuButton("Cellular") { onNavigate("cellular"); onDismiss() }
+                    FullWidthMenuButton("↻  Updates") { onNavigate("updates"); onDismiss() }
+                }
+            } // end CollapsibleSection (Tools)
 
             Spacer(Modifier.height(20.dp))
 
@@ -265,7 +275,11 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             val apps by viewModel.apps.collectAsState()
 
-            SectionHeader("\uD83D\uDE80 Running Apps", Color(0xFF4A9EFF))
+            CollapsibleSection(
+                title = "\uD83D\uDE80 Running Apps",
+                accent = Color(0xFF4A9EFF),
+                subtitle = if (apps.isNotEmpty()) "${apps.size} running" else null,
+            ) {
 
             if (apps.isEmpty()) {
                 Text(
@@ -316,14 +330,13 @@ fun SettingsSheet(
                     }
                 }
             }
+            } // end CollapsibleSection (Running Apps)
 
             Spacer(Modifier.height(20.dp))
 
             // ══════════════════════════════════════════════════════════════
             // Gmail — per-operator OAuth connection
             // ══════════════════════════════════════════════════════════════
-            SectionHeader("\uD83D\uDCE7 Gmail", Color(0xFF4A9EFF))
-
             var gmailStatus by remember { mutableStateOf<String?>(null) }
             var gmailEmail by remember { mutableStateOf("") }
             var gmailLoading by remember { mutableStateOf(true) }
@@ -346,6 +359,11 @@ fun SettingsSheet(
                 gmailLoading = false
             }
 
+            CollapsibleSection(
+                title = "📧 Gmail",
+                accent = Color(0xFF4A9EFF),
+                subtitle = gmailEmail.takeIf { gmailStatus == "connected" && it.isNotBlank() },
+            ) {
             if (gmailLoading) {
                 Text("Checking Gmail...", style = MaterialTheme.typography.bodySmall, color = Neutral500)
             } else if (gmailStatus == "connected") {
@@ -401,6 +419,7 @@ fun SettingsSheet(
                     }
                 }
             }
+            } // end CollapsibleSection (Gmail)
 
             Spacer(Modifier.height(20.dp))
 
@@ -819,9 +838,9 @@ private fun SectionHeader(text: String, color: Color = BbxAccent) {
 
 /** Menu grid button — matches Portal .btn.btn-generation */
 @Composable
-private fun MenuButton(label: String, onClick: () -> Unit) {
+private fun MenuButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(RadiusMd))
             .background(Neutral200)
             .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
@@ -833,6 +852,66 @@ private fun MenuButton(label: String, onClick: () -> Unit) {
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
             color = BbxWhite
         )
+    }
+}
+
+/** Full-width MenuButton — used inside CollapsibleSection vertical Columns
+ *  so each item stretches across the dropdown content area (one-per-line UX). */
+@Composable
+private fun FullWidthMenuButton(label: String, onClick: () -> Unit) {
+    MenuButton(label = label, modifier = Modifier.fillMaxWidth(), onClick = onClick)
+}
+
+/** Collapsible section with tappable header (chevron rotates 180° on expand).
+ *  rememberSaveable so expand/collapse survives rotation; no cross-session persistence. */
+@Composable
+private fun CollapsibleSection(
+    title: String,
+    accent: Color = BbxAccent,
+    subtitle: String? = null,
+    initiallyExpanded: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(RadiusMd))
+                .clickable { expanded = !expanded }
+                .padding(vertical = 8.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = accent,
+                modifier = Modifier.weight(1f),
+            )
+            subtitle?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Neutral500,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
+            val rotation by animateFloatAsState(
+                targetValue = if (expanded) 180f else 0f,
+                label = "chevron",
+            )
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                modifier = Modifier.rotate(rotation),
+                tint = accent,
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)) {
+                content()
+            }
+        }
     }
 }
 
