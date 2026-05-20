@@ -1,11 +1,13 @@
 /**
  * cli-agents-modal.js
  * CLI Agents launcher modal — picks app folder + provider, opens terminal session.
- * Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 3.
+ * Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 3 (xterm.js fix).
  *
- * Brandon-locked decisions (2026-05-20):
- *  - Simple <pre> terminal (no xterm.js dependency). First cut. xterm.js is
- *    a future enhancement if the simple form feels primitive in practice.
+ * Brandon-locked decisions (2026-05-20, post hardware test):
+ *  - xterm.js (standard VT100/xterm emulator) — simple <pre> couldn't render
+ *    Claude Code's TUI (cursor escapes, box-drawing, alternate screen buffer).
+ *  - Loaded via jsDelivr CDN as UMD scripts; globals window.Terminal +
+ *    window.FitAddon consumed from this ES module.
  *  - In-modal terminal panel (no separate browser tab).
  *  - Provider radio: Claude / Gemini / Codex (backend supports all 3 per
  *    Orchestrator/routes/cli_agent_routes.py:47 SUPPORTED_PROVIDERS).
@@ -30,6 +32,11 @@ const APPS_ROOT_SLUG = '_root';
 
 let activeSocket = null;       // WebSocket | null
 let activeSessionId = null;    // string | null  (for kill on disconnect)
+
+// xterm.js singleton — created lazily on first launch, reused on subsequent ones.
+let terminal = null;
+let fitAddon = null;
+let resizeListenerAttached = false;
 
 // =============================================================================
 // App list refresh — fills #cliAgentsAppSelect from GET /agent/apps
@@ -103,6 +110,73 @@ function buildSessionName(operator, provider, appSlug) {
 }
 
 // =============================================================================
+// xterm.js lifecycle — lazy init, reused across launches
+// =============================================================================
+
+function ensureTerminal() {
+    if (terminal) return terminal;
+    const container = document.getElementById('cliAgentsTerminal');
+    if (!container) return null;
+    if (!window.Terminal || !window.FitAddon) {
+        console.error('[CLI-AGENTS] xterm.js UMD globals not available — CDN load failed?');
+        return null;
+    }
+    // FitAddon ships as window.FitAddon.FitAddon (UMD namespace wrapper)
+    const FitAddonCtor = window.FitAddon.FitAddon || window.FitAddon;
+    terminal = new window.Terminal({
+        cursorBlink: true,
+        fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, "Courier New", monospace',
+        fontSize: 13,
+        theme: {
+            background: '#0a0a0a',
+            foreground: '#e0e0e0',
+        },
+        convertEol: false,  // PTY emits proper CRLF; let xterm.js handle it natively
+        scrollback: 5000,
+    });
+    fitAddon = new FitAddonCtor();
+    terminal.loadAddon(fitAddon);
+    terminal.open(container);
+    try { fitAddon.fit(); } catch (e) { /* container may not be visible yet */ }
+
+    // Keystroke → WS binary frame. xterm.js calls onData for every keypress
+    // (including arrow keys, ctrl-chords, escape sequences) — no Enter buffering.
+    terminal.onData((data) => {
+        if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+            try {
+                activeSocket.send(new TextEncoder().encode(data));
+            } catch (err) {
+                console.warn('[CLI-AGENTS] send failed:', err);
+            }
+        }
+    });
+
+    // Refit on window resize, and let the backend know about the new dims.
+    if (!resizeListenerAttached) {
+        window.addEventListener('resize', sendResize);
+        resizeListenerAttached = true;
+    }
+
+    return terminal;
+}
+
+function sendResize() {
+    if (!terminal || !fitAddon) return;
+    try { fitAddon.fit(); } catch { return; }
+    if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+        try {
+            activeSocket.send(JSON.stringify({
+                type: 'resize',
+                cols: terminal.cols,
+                rows: terminal.rows,
+            }));
+        } catch (err) {
+            console.warn('[CLI-AGENTS] resize send failed:', err);
+        }
+    }
+}
+
+// =============================================================================
 // Launch — opens WS to /cli-agent/ws/<session_id>?op=X&provider=Y&app=Z
 // =============================================================================
 
@@ -122,13 +196,28 @@ async function launchSession() {
 
     // Swap setup pane → terminal pane
     const setupEl = document.getElementById('cliAgentsSetup');
-    const termEl = document.getElementById('cliAgentsTerminal');
+    const paneEl = document.getElementById('cliAgentsTerminalPane');
     if (setupEl) setupEl.style.display = 'none';
-    if (termEl) termEl.style.display = '';
+    if (paneEl) paneEl.style.display = '';
     const infoEl = document.getElementById('cliAgentsSessionInfo');
     if (infoEl) infoEl.textContent = `${provider} · ${appSlug || 'Apps root'} · ${operator}`;
-    const outEl = document.getElementById('cliAgentsOutput');
-    if (outEl) outEl.textContent = '';
+
+    // Boot xterm.js now that the container is visible. Run fit() twice with
+    // a small delay to handle modal animation lag.
+    const term = ensureTerminal();
+    if (term) {
+        term.clear();                                  // wipe leftovers from prior launch
+        try { fitAddon?.fit(); } catch {}
+        setTimeout(() => { try { fitAddon?.fit(); sendResize(); } catch {} }, 50);
+    } else {
+        toastError('Terminal failed to initialize (xterm.js not loaded)');
+        return;
+    }
+
+    // Read fitted size for the initial WS handshake. Falls back to 80x24
+    // if fit() hasn't completed (e.g. container measured 0×0 mid-animation).
+    const cols = term.cols && term.cols > 0 ? term.cols : 80;
+    const rows = term.rows && term.rows > 0 ? term.rows : 24;
 
     // Build the WS URL — mirrors Android CliAgentWebSocket.buildUrl().
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -136,119 +225,60 @@ async function launchSession() {
         op: operator,
         provider: provider,
         app: appSlug,
-        cols: '80',
-        rows: '24',
+        cols: String(cols),
+        rows: String(rows),
     });
     const wsUrl = `${proto}//${location.host}/cli-agent/ws/${encodeURIComponent(sessionId)}?${params.toString()}`;
 
-    appendOutput(`[connecting to ${provider}…]\n`);
+    term.write(`\x1b[2m[connecting to ${provider}...]\x1b[0m\r\n`);
 
     try {
         activeSocket = new WebSocket(wsUrl);
+        // MUST set binaryType before listeners so message events deliver
+        // ArrayBuffer (not Blob) — avoids the async-decode dance.
         activeSocket.binaryType = 'arraybuffer';
     } catch (err) {
         toastError(`WS connect failed: ${err.message}`);
-        appendOutput(`\n[connect failed: ${err.message}]\n`);
+        term.write(`\r\n\x1b[31m[connect failed: ${err.message}]\x1b[0m\r\n`);
         return;
     }
 
     activeSocket.addEventListener('open', () => {
-        appendOutput('[connected]\n');
+        term.write('\x1b[2m[connected]\x1b[0m\r\n');
+        // Send an authoritative resize once the socket is open — the URL-param
+        // dims are a first guess; this is the real one.
+        sendResize();
     });
 
-    // Decode raw PTY bytes (binary frames) or session_info / error JSON (text frames).
-    const textDecoder = new TextDecoder('utf-8', { fatal: false });
     activeSocket.addEventListener('message', (ev) => {
-        if (typeof ev.data === 'string') {
-            // Text frame — JSON control message (session_info, error, etc.)
+        if (ev.data instanceof ArrayBuffer) {
+            // PTY bytes — raw write. xterm.js owns ANSI/cursor/box-drawing.
+            terminal?.write(new Uint8Array(ev.data));
+        } else if (typeof ev.data === 'string') {
+            // JSON control event — session_info, error, etc.
             try {
                 const msg = JSON.parse(ev.data);
                 if (msg.type === 'session_info') {
-                    appendOutput(`[session ${msg.state || ''}]\n`);
+                    terminal?.write(`\x1b[2m[session ${msg.state || ''}]\x1b[0m\r\n`);
                 } else if (msg.type === 'error') {
-                    appendOutput(`\n[error: ${msg.code || ''} ${msg.message || ''}]\n`);
+                    terminal?.write(`\r\n\x1b[31m[error: ${msg.code || ''} ${msg.message || ''}]\x1b[0m\r\n`);
                 } else {
-                    appendOutput(`\n[${msg.type || 'msg'}: ${ev.data}]\n`);
+                    terminal?.write(`\r\n\x1b[2m[${msg.type || 'msg'}: ${ev.data}]\x1b[0m\r\n`);
                 }
             } catch {
-                appendOutput(ev.data);
+                terminal?.write(ev.data);
             }
-        } else {
-            // Binary frame — raw PTY bytes. Decode UTF-8 + strip terminal escapes
-            // so the <pre> stays human-readable.
-            const text = textDecoder.decode(new Uint8Array(ev.data));
-            appendOutput(stripAnsi(text));
         }
     });
 
     activeSocket.addEventListener('close', (ev) => {
-        appendOutput(`\n[disconnected: code=${ev.code}${ev.reason ? ' ' + ev.reason : ''}]\n`);
+        terminal?.write(`\r\n\x1b[33m[disconnected: code=${ev.code}${ev.reason ? ' ' + ev.reason : ''}]\x1b[0m\r\n`);
         activeSocket = null;
     });
 
     activeSocket.addEventListener('error', () => {
         // The 'close' event will fire right after with the real code/reason.
-        appendOutput('\n[ws error]\n');
-    });
-}
-
-// Best-effort ANSI/escape stripper so the simple <pre> stays readable.
-// Drops:
-//   - CSI escapes:   ESC [ <params> <command-letter>
-//   - OSC sequences: ESC ] … BEL or ESC \
-//   - Single-char escapes: ESC <one of a few well-known cmds>
-//   - Bare control chars except newline + tab
-// Terminal output will be readable but not visually faithful (no colors, no
-// cursor positioning). That's the trade-off per the "simple <pre>" decision.
-function stripAnsi(s) {
-    if (!s) return '';
-    // Strip CSI: ESC [ ... letter
-    s = s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-    // Strip OSC: ESC ] ... (BEL | ESC \)
-    s = s.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
-    // Strip simple ESC <one char> (e.g. ESC =, ESC >, ESC c)
-    s = s.replace(/\x1b[=>cM78()]/g, '');
-    // Drop other bare ESC
-    s = s.replace(/\x1b/g, '');
-    // Drop bell + carriage-return (keep \n, \t)
-    s = s.replace(/[\x07\r]/g, '');
-    return s;
-}
-
-function appendOutput(text) {
-    const outEl = document.getElementById('cliAgentsOutput');
-    if (!outEl) return;
-    outEl.textContent += text;
-    outEl.scrollTop = outEl.scrollHeight;  // auto-scroll
-}
-
-// =============================================================================
-// Input — submit form sends raw bytes (binary frame) to WS
-// =============================================================================
-
-function setupInputForm() {
-    const form = document.getElementById('cliAgentsInputForm');
-    if (!form) return;
-    form.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const input = document.getElementById('cliAgentsInputField');
-        const text = input?.value ?? '';
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
-            toastError('Not connected');
-            return;
-        }
-        // Append newline so the line is committed by the remote shell / agent.
-        const payload = new TextEncoder().encode(text + '\n');
-        try {
-            activeSocket.send(payload);
-            // Echo locally — the PTY may also echo, in which case the user sees
-            // their input twice. Acceptable for first cut; real terminal would
-            // honor the remote echo flag.
-            appendOutput(`> ${text}\n`);
-            if (input) input.value = '';
-        } catch (err) {
-            toastError(`Send failed: ${err.message}`);
-        }
+        terminal?.write('\r\n\x1b[31m[ws error]\x1b[0m\r\n');
     });
 }
 
@@ -266,9 +296,10 @@ function setupDisconnect() {
         }
         activeSessionId = null;
         const setupEl = document.getElementById('cliAgentsSetup');
-        const termEl = document.getElementById('cliAgentsTerminal');
+        const paneEl = document.getElementById('cliAgentsTerminalPane');
         if (setupEl) setupEl.style.display = '';
-        if (termEl) termEl.style.display = 'none';
+        if (paneEl) paneEl.style.display = 'none';
+        // Keep the xterm.js instance alive — clear() on next launch wipes it.
     });
 }
 
@@ -285,10 +316,10 @@ function openModal() {
 function closeModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.add('hide');
-    // If a session is open, leave it alone — the orchestrator's tmux session
+    // If a session is open, leave the tmux session alone on the backend — it
     // survives detach so the user can reattach by re-launching with the same
-    // operator + provider + app. The WebSocket stays open in the background;
-    // we close it explicitly so we don't leak frames into the closed modal.
+    // operator + provider + app. We close the WS explicitly so we don't leak
+    // frames into the closed modal.
     if (activeSocket) {
         try { activeSocket.close(1000, 'modal closed'); } catch {}
         activeSocket = null;
@@ -304,6 +335,5 @@ export function initCLIAgentsModal() {
     document.getElementById('btnCLIAgents')?.addEventListener('click', openModal);
     document.getElementById('btnCloseCLIAgents')?.addEventListener('click', closeModal);
     document.getElementById('cliAgentsLaunch')?.addEventListener('click', launchSession);
-    setupInputForm();
     setupDisconnect();
 }

@@ -3,9 +3,10 @@
  * docs/plans/2026-05-20-portal-tools-section-alignment.md.
  *
  * Visual structure mirrors the cron-manager + device-manager modals
- * (vertical sections inside .modal-body). Terminal pane uses a fixed-
- * height monospace <pre> with auto-scroll — Brandon-locked first cut,
- * no xterm.js.
+ * (vertical sections inside .modal-body). Terminal pane embeds xterm.js
+ * (real VT100/xterm emulator) — swapped in from simple <pre> after Brandon
+ * hardware-tested all 3 providers and Claude Code's TUI couldn't render
+ * (cursor escapes had nowhere to land, box-drawing chars butchered).
  */
 
 .cli-agents-card {
@@ -100,7 +101,7 @@
 
 /* ── Terminal pane ─────────────────────────────────────────── */
 
-.cli-agents-terminal {
+.cli-agents-terminal-pane {
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -128,41 +129,17 @@
     margin-right: 12px;
 }
 
-.cli-agents-output {
-    height: 400px;
-    max-height: 50vh;
-    overflow-y: auto;
+/* xterm.js host container — xterm.js renders its own canvas/text inside.
+ * Don't override xterm's internal CSS; just give it a sized box. */
+.cli-agents-terminal-xterm {
+    width: 100%;
+    height: 60vh;
+    min-height: 320px;
+    max-height: 600px;
     background: #0a0a0a;
-    color: #d8d8d8;
     border: 1px solid var(--neutral-300, #2a2a2a);
     border-radius: var(--radius-md, 8px);
-    padding: 12px;
-    margin: 0;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    line-height: 1.4;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-.cli-agents-input-form {
-    display: flex;
-    gap: 8px;
-}
-
-.cli-agents-input-form input[type="text"] {
-    flex: 1;
-    padding: 10px 12px;
-    background: var(--neutral-100, #121212);
-    color: var(--neutral-1000, #e0e0e0);
-    border: 1px solid var(--neutral-300, #2a2a2a);
-    border-radius: var(--radius-md, 8px);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 13px;
-}
-
-.cli-agents-input-form input[type="text"]:focus {
-    outline: none;
-    border-color: rgba(255, 74, 74, 0.6);
-    box-shadow: 0 0 0 3px rgba(255, 74, 74, 0.15);
+    overflow: hidden;
+    padding: 6px;
+    box-sizing: border-box;
 }

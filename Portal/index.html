@@ -14,6 +14,10 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- xterm.js — Track 3 fix: real VT100/xterm emulator for CLI Agents modal -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script type="module" src="/ui/app-modular.js?v=genui267"></script> <!-- v260: STT transcribing state spinner -->
 </head>
 <body>
@@ -1911,16 +1915,12 @@
               </div>
 
               <!-- Terminal pane (hidden until session launches) -->
-              <div class="cli-agents-terminal" id="cliAgentsTerminal" style="display:none;">
+              <div class="cli-agents-terminal-pane" id="cliAgentsTerminalPane" style="display:none;">
                   <div class="cli-agents-terminal-header">
                       <span class="cli-agents-session-info" id="cliAgentsSessionInfo">session-id</span>
                       <button id="cliAgentsDisconnect" class="btn btn-warn" type="button">⏹ Disconnect</button>
                   </div>
-                  <pre id="cliAgentsOutput" class="cli-agents-output" aria-live="polite"></pre>
-                  <form id="cliAgentsInputForm" class="cli-agents-input-form">
-                      <input type="text" id="cliAgentsInputField" placeholder="Type a message + Enter" autocomplete="off">
-                      <button type="submit" class="btn">Send</button>
-                  </form>
+                  <div id="cliAgentsTerminal" class="cli-agents-terminal-xterm"></div>
               </div>
           </div>
       </div>
