@@ -376,6 +376,14 @@ OPENAI_REALTIME_MODELS: List[Dict] = [
     {"id": "gpt-realtime-whisper", "name": "GPT Realtime Whisper (STT-only)", "category": "transcribe"},
 ]
 
+# OpenAI Realtime voices (10 GA voices as of 2026-05-19, verified live).
+# Single source of truth — imported by realtime_routes.py /realtime/status.
+OPENAI_REALTIME_VOICES: List[str] = [
+    "alloy", "ash", "ballad", "coral", "echo",
+    "sage", "shimmer", "verse", "marin", "cedar",
+]
+OPENAI_REALTIME_DEFAULT_VOICE: str = "ash"
+
 # OpenAI Realtime allowlists for server-side validation of client-supplied params.
 OPENAI_REALTIME_VAD_TYPES = ("server_vad", "semantic_vad")
 OPENAI_REALTIME_VAD_EAGERNESS = ("low", "medium", "high", "auto")

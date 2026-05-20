@@ -45,6 +45,8 @@ from Orchestrator.config import (
     OPENAI_REALTIME_URL,
     OPENAI_REALTIME_MODEL,
     OPENAI_REALTIME_MODELS,
+    OPENAI_REALTIME_VOICES,
+    OPENAI_REALTIME_DEFAULT_VOICE,
     OPENAI_REALTIME_VAD_TYPES,
     OPENAI_REALTIME_VAD_EAGERNESS,
     REALTIME_CONTEXT_MAX_CHARS,
@@ -1309,7 +1311,12 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     url_vad_type = websocket.query_params.get("vad_type")
     url_vad_eagerness = websocket.query_params.get("vad_eagerness")
     _idle_str = websocket.query_params.get("idle_timeout_ms")
-    url_idle_timeout_ms: Optional[int] = int(_idle_str) if _idle_str and _idle_str.isdigit() else None
+    if _idle_str and _idle_str.strip().isdigit():
+        url_idle_timeout_ms: Optional[int] = int(_idle_str.strip())
+    else:
+        url_idle_timeout_ms = None
+        if _idle_str:
+            print(f"[REALTIME] WARNING: idle_timeout_ms {_idle_str!r} not a positive integer; ignoring")
     _interrupt_str = websocket.query_params.get("interrupt_response")
     url_interrupt_response: Optional[bool] = (
         _interrupt_str.lower() == "true" if _interrupt_str is not None else None
@@ -1530,14 +1537,6 @@ async def realtime_status():
     - voice_default / voices[]: flat string array (no descriptors — OpenAI
       voices have no character descriptors; that's a Gemini-only field).
     """
-    # OpenAI Realtime voices — sourced from the API docs (verified inline at
-    # configure_openai_session line ~440). Default is "ash".
-    _openai_voices = [
-        "alloy", "ash", "ballad", "coral", "echo",
-        "sage", "shimmer", "verse", "marin", "cedar",
-    ]
-    _openai_voice_default = "ash"
-
     return {
         "available": WEBSOCKETS_AVAILABLE and bool(OPENAI_API_KEY),
         "websockets_installed": WEBSOCKETS_AVAILABLE,
@@ -1549,8 +1548,8 @@ async def realtime_status():
         # Locked v2 catalog shape:
         "model_default": OPENAI_REALTIME_MODEL,
         "models": [m for m in OPENAI_REALTIME_MODELS if m.get("category") == "chat"],
-        "voice_default": _openai_voice_default,
-        "voices": _openai_voices,
+        "voice_default": OPENAI_REALTIME_DEFAULT_VOICE,
+        "voices": list(OPENAI_REALTIME_VOICES),
         "active_sessions": len([s for s in REALTIME_SESSIONS.values() if s.status == "connected"]),
     }
 
