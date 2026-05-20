@@ -1136,6 +1136,20 @@ export async function connect(operator) {
     const voiceSelect = $('realtimeVoiceSelect');
     selectedVoice = voiceSelect ? voiceSelect.value : 'ash';
 
+    // Read new model + VAD config fields from dropdowns (audit M3 — no JS-side catalog)
+    const modelSelect = $('realtimeModelSelect');
+    const vadSelect = $('realtimeVadSelect');
+    const eagernessSelect = $('realtimeEagernessSelect');
+    const idleTimeoutInput = $('realtimeIdleTimeout');
+
+    const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
+    const vadType = (vadSelect && vadSelect.value) ? vadSelect.value : undefined;
+    const vadEagerness = (vadType === 'semantic_vad' && eagernessSelect && eagernessSelect.value)
+        ? eagernessSelect.value : undefined;
+    const idleTimeoutRaw = (vadType === 'server_vad' && idleTimeoutInput && idleTimeoutInput.value)
+        ? parseInt(idleTimeoutInput.value, 10) : NaN;
+    const idleTimeoutMs = Number.isFinite(idleTimeoutRaw) ? idleTimeoutRaw : undefined;
+
     sessionId = crypto.randomUUID();
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws/realtime/${sessionId}`;
@@ -1151,12 +1165,17 @@ export async function connect(operator) {
         currentOperator = operator;
         intentionalDisconnect = false;
 
-        // Send connect message with operator and voice
-        ws.send(JSON.stringify({
+        // Build connect message with new live-models-v2 fields; omit undefined to keep wire clean
+        const connectMsg = {
             type: 'connect',
             operator: operator,
             voice: selectedVoice
-        }));
+        };
+        if (selectedModel) connectMsg.model = selectedModel;
+        if (vadType) connectMsg.vad_type = vadType;
+        if (vadEagerness) connectMsg.vad_eagerness = vadEagerness;
+        if (idleTimeoutMs !== undefined) connectMsg.idle_timeout_ms = idleTimeoutMs;
+        ws.send(JSON.stringify(connectMsg));
     };
 
     ws.onmessage = (event) => {
@@ -1697,6 +1716,14 @@ function updateUI() {
         disconnectBtn.disabled = !isConnected;
     }
 
+    // Audit I4: model + vad_type are schema-changing (URL-rebuild vs setup-rebuild),
+    // so they must be locked while CONNECTED. Voice + eagerness + idle_timeout
+    // stay always-enabled (hot-swappable via session.update).
+    const modelSelect = $('realtimeModelSelect');
+    const vadSelect = $('realtimeVadSelect');
+    if (modelSelect) modelSelect.disabled = isConnected;
+    if (vadSelect) vadSelect.disabled = isConnected;
+
     if (micBtn) {
         micBtn.disabled = !isConnected;
         micBtn.classList.toggle('recording', isRecording);
@@ -1749,6 +1776,73 @@ export function toggleRecording() {
 // =============================================================================
 
 /**
+ * Fetch realtime catalog from /realtime/status with 5min sessionStorage cache.
+ * Mirrors state-management.js fetchAvailableModels() pattern (audit M3 — no JS-side catalog).
+ * Populates model dropdown from models[] and sets default selection from model_default.
+ * @returns {Promise<Object|null>} catalog object, or null on failure
+ */
+async function fetchRealtimeCatalog() {
+    const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
+    const cacheKey = 'bb_realtime_catalog';
+
+    try {
+        const cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
+        if (cached && Date.now() - cached.ts < CACHE_TTL_MS && cached.data) {
+            console.log(`[REALTIME] Catalog cache hit (age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
+            return cached.data;
+        }
+    } catch (_) { /* corrupted cache — fall through */ }
+
+    try {
+        const res = await fetch('/realtime/status');
+        if (res.ok) {
+            const data = await res.json();
+            try {
+                sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+            } catch (_) { /* sessionStorage full or disabled */ }
+            return data;
+        }
+    } catch (err) {
+        console.error('[REALTIME] Failed to fetch catalog:', err);
+    }
+    return null;
+}
+
+/**
+ * Populate the model dropdown from the catalog. Default selection = model_default.
+ */
+function populateRealtimeModelDropdown(catalog) {
+    const modelSelect = $('realtimeModelSelect');
+    if (!modelSelect || !catalog || !Array.isArray(catalog.models)) return;
+    modelSelect.innerHTML = '';
+    catalog.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name || m.id;
+        if (m.id === catalog.model_default) opt.selected = true;
+        modelSelect.appendChild(opt);
+    });
+    console.log(`[REALTIME] Model dropdown populated with ${catalog.models.length} entries, default=${catalog.model_default}`);
+}
+
+/**
+ * Toggle visibility of eagerness vs idle_timeout based on selected vad_type.
+ */
+function updateRealtimeVadVisibility() {
+    const vadSelect = $('realtimeVadSelect');
+    const eagernessSelect = $('realtimeEagernessSelect');
+    const idleTimeoutInput = $('realtimeIdleTimeout');
+    if (!vadSelect) return;
+    const vadType = vadSelect.value;
+    if (eagernessSelect) {
+        eagernessSelect.style.display = (vadType === 'semantic_vad') ? '' : 'none';
+    }
+    if (idleTimeoutInput) {
+        idleTimeoutInput.style.display = (vadType === 'server_vad') ? '' : 'none';
+    }
+}
+
+/**
  * Initialize Realtime UI and event handlers
  */
 export function initRealtimeUI() {
@@ -1757,6 +1851,18 @@ export function initRealtimeUI() {
     const micBtn = $('realtimeMic');
     const toggleBtn = $('realtimeToggleBtn');
     const transcriptSection = $('realtimeTranscriptSection');
+    const vadSelect = $('realtimeVadSelect');
+
+    // Populate model dropdown from /realtime/status (5min sessionStorage cache)
+    fetchRealtimeCatalog().then(catalog => {
+        if (catalog) populateRealtimeModelDropdown(catalog);
+    });
+
+    // Wire VAD type change → show/hide eagerness vs idle_timeout
+    if (vadSelect) {
+        vadSelect.addEventListener('change', updateRealtimeVadVisibility);
+        updateRealtimeVadVisibility();  // initial state
+    }
 
     if (connectBtn) {
         connectBtn.onclick = () => {

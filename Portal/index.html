@@ -8,13 +8,13 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui265"/> <!-- v265: T2 model-list centralization (sessionStorage cache + offline-bootstrap fallbacks) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui266"/> <!-- v265: T2 model-list centralization (sessionStorage cache + offline-bootstrap fallbacks) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui263"></script> <!-- v260: STT transcribing state spinner -->
+  <script type="module" src="/ui/app-modular.js?v=genui266"></script> <!-- v260: STT transcribing state spinner -->
 </head>
 <body>
   <div class="app">
@@ -155,7 +155,7 @@
           <span class="realtime-status" id="realtimeStatus">Disconnected</span>
         </div>
         <div class="realtime-controls">
-          <!-- Voice selector dropdown -->
+          <!-- Voice selector dropdown (hot-swappable via session.update) -->
           <select id="realtimeVoiceSelect" class="realtime-voice-select" title="Select voice">
             <option value="ash">Ash (Deep)</option>
             <option value="alloy">Alloy (Neutral)</option>
@@ -168,6 +168,23 @@
             <option value="marin">Marin (Clear)</option>
             <option value="cedar">Cedar (Bold)</option>
           </select>
+          <!-- Model dropdown (populated from /realtime/status; disabled while CONNECTED per audit I4) -->
+          <select id="realtimeModelSelect" class="realtime-model-select" title="Select model"></select>
+          <!-- VAD type selector (disabled while CONNECTED per audit I4 - schema-changing) -->
+          <select id="realtimeVadSelect" class="realtime-vad-select" title="Voice Activity Detection mode">
+            <option value="server_vad">Server VAD (default)</option>
+            <option value="semantic_vad">Semantic VAD (low latency)</option>
+          </select>
+          <!-- Eagerness selector (semantic_vad only; hot-swappable) -->
+          <select id="realtimeEagernessSelect" class="realtime-eagerness-select" title="Semantic VAD eagerness" style="display:none">
+            <option value="auto">Eagerness: auto</option>
+            <option value="low">Eagerness: low</option>
+            <option value="medium" selected>Eagerness: medium</option>
+            <option value="high">Eagerness: high</option>
+          </select>
+          <!-- Idle timeout input (server_vad only; hot-swappable) -->
+          <input type="number" id="realtimeIdleTimeout" class="realtime-idle-timeout"
+                 placeholder="Idle ms (e.g. 30000)" min="5000" max="300000" title="Idle timeout in ms (server_vad only)">
           <button id="realtimeConnect" class="realtime-btn connect-btn" title="Connect to Realtime API">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -214,14 +231,31 @@
           <span class="gemini-status" id="geminiLiveStatus">Disconnected</span>
         </div>
         <div class="gemini-controls">
-          <!-- Voice selector dropdown -->
-          <select id="geminiVoiceSelect" class="gemini-voice-select" title="Select voice">
-            <option value="Charon">Charon (Deep)</option>
-            <option value="Puck">Puck (Playful)</option>
-            <option value="Kore">Kore (Gentle)</option>
-            <option value="Aoede">Aoede (Warm)</option>
-            <option value="Fenrir">Fenrir (Bold)</option>
-            <option value="Orus">Orus (Calm)</option>
+          <!-- Voice selector dropdown (populated from /gemini-live/status with 30 voices + descriptors; hot-swappable) -->
+          <select id="geminiVoiceSelect" class="gemini-voice-select" title="Select voice"></select>
+          <!-- Model dropdown (populated from /gemini-live/status; disabled while CONNECTED per audit I4) -->
+          <select id="geminiModelSelect" class="gemini-model-select" title="Select model"></select>
+          <!-- VAD start sensitivity (disabled while CONNECTED per audit I4 - schema-changing) -->
+          <select id="geminiVadStartSelect" class="gemini-vad-select" title="Start-of-speech sensitivity">
+            <option value="">Start sensitivity: auto</option>
+            <option value="LOW">Start sensitivity: LOW</option>
+            <option value="MEDIUM">Start sensitivity: MEDIUM</option>
+            <option value="HIGH">Start sensitivity: HIGH</option>
+          </select>
+          <!-- VAD end sensitivity (disabled while CONNECTED per audit I4 - schema-changing) -->
+          <select id="geminiVadEndSelect" class="gemini-vad-select" title="End-of-speech sensitivity">
+            <option value="">End sensitivity: auto</option>
+            <option value="LOW">End sensitivity: LOW</option>
+            <option value="MEDIUM">End sensitivity: MEDIUM</option>
+            <option value="HIGH">End sensitivity: HIGH</option>
+          </select>
+          <!-- Thinking level (gemini-3.1-flash-live-preview only; hot-swappable) -->
+          <select id="geminiThinkingSelect" class="gemini-thinking-select" title="Thinking level (3.1 only)" style="display:none">
+            <option value="">Thinking: auto</option>
+            <option value="minimal">Thinking: minimal</option>
+            <option value="low">Thinking: low</option>
+            <option value="medium">Thinking: medium</option>
+            <option value="high">Thinking: high</option>
           </select>
           <button id="geminiConnect" class="gemini-btn connect-btn" title="Connect to Gemini Live">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

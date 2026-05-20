@@ -152,8 +152,12 @@
     justify-content: center;
 }
 
-/* Voice selector */
-.realtime-voice-select {
+/* Voice selector + live-models-v2 dropdowns (model, vad_type, eagerness, idle_timeout) */
+.realtime-voice-select,
+.realtime-model-select,
+.realtime-vad-select,
+.realtime-eagerness-select,
+.realtime-idle-timeout {
     background: rgba(40, 40, 40, 0.9);
     border: 1px solid rgba(16, 163, 127, 0.3);
     color: #fff;
@@ -164,15 +168,35 @@
     transition: all var(--transition-base);
 }
 
-.realtime-voice-select:hover {
+.realtime-idle-timeout {
+    width: 130px;
+    cursor: text;
+}
+
+.realtime-voice-select:hover,
+.realtime-model-select:hover,
+.realtime-vad-select:hover,
+.realtime-eagerness-select:hover,
+.realtime-idle-timeout:hover {
     border-color: rgba(16, 163, 127, 0.5);
     background: rgba(50, 50, 50, 0.95);
 }
 
-.realtime-voice-select:focus {
+.realtime-voice-select:focus,
+.realtime-model-select:focus,
+.realtime-vad-select:focus,
+.realtime-eagerness-select:focus,
+.realtime-idle-timeout:focus {
     outline: none;
     border-color: rgba(16, 163, 127, 0.6);
     box-shadow: 0 0 8px rgba(16, 163, 127, 0.2);
+}
+
+/* Disabled state (audit I4: model + vad_type locked while CONNECTED) */
+.realtime-model-select:disabled,
+.realtime-vad-select:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .realtime-btn {

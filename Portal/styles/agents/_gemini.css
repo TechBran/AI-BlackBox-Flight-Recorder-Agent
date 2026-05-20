@@ -358,8 +358,11 @@
     justify-content: flex-end;
 }
 
-/* Voice selector */
-.gemini-voice-select {
+/* Voice selector + live-models-v2 dropdowns (model, vad start/end, thinking) */
+.gemini-voice-select,
+.gemini-model-select,
+.gemini-vad-select,
+.gemini-thinking-select {
     background: rgba(40, 40, 40, 0.9);
     border: 1px solid rgba(52, 168, 83, 0.3);
     color: #fff;
@@ -370,15 +373,28 @@
     transition: all var(--transition-base);
 }
 
-.gemini-voice-select:hover {
+.gemini-voice-select:hover,
+.gemini-model-select:hover,
+.gemini-vad-select:hover,
+.gemini-thinking-select:hover {
     border-color: rgba(52, 168, 83, 0.5);
     background: rgba(50, 50, 50, 0.95);
 }
 
-.gemini-voice-select:focus {
+.gemini-voice-select:focus,
+.gemini-model-select:focus,
+.gemini-vad-select:focus,
+.gemini-thinking-select:focus {
     outline: none;
     border-color: rgba(52, 168, 83, 0.6);
     box-shadow: 0 0 8px rgba(52, 168, 83, 0.2);
+}
+
+/* Disabled state (audit I4: model + vad sensitivities locked while CONNECTED) */
+.gemini-model-select:disabled,
+.gemini-vad-select:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 /* Buttons */

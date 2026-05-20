@@ -781,6 +781,19 @@ export async function connect(operator) {
     const voiceSelect = $('geminiVoiceSelect');
     selectedVoice = voiceSelect ? voiceSelect.value : 'Charon';
 
+    // Read new model + VAD + thinking config fields from dropdowns (audit M3 — no JS-side catalog)
+    const modelSelect = $('geminiModelSelect');
+    const vadStartSelect = $('geminiVadStartSelect');
+    const vadEndSelect = $('geminiVadEndSelect');
+    const thinkingSelect = $('geminiThinkingSelect');
+
+    const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
+    const vadSensitivityStart = (vadStartSelect && vadStartSelect.value) ? vadStartSelect.value : undefined;
+    const vadSensitivityEnd = (vadEndSelect && vadEndSelect.value) ? vadEndSelect.value : undefined;
+    // thinking_level only valid for gemini-3.1-flash-live-preview; omit otherwise
+    const thinkingLevel = (selectedModel === 'gemini-3.1-flash-live-preview' && thinkingSelect && thinkingSelect.value)
+        ? thinkingSelect.value : undefined;
+
     // Reset session state
     sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
@@ -802,12 +815,17 @@ export async function connect(operator) {
         currentOperator = operator;
         intentionalDisconnect = false;
 
-        // Send connect message with operator and voice
-        ws.send(JSON.stringify({
+        // Build connect message with new live-models-v2 fields; omit undefined to keep wire clean
+        const connectMsg = {
             type: 'connect',
             operator: operator,
             voice: selectedVoice
-        }));
+        };
+        if (selectedModel) connectMsg.model = selectedModel;
+        if (vadSensitivityStart) connectMsg.vad_sensitivity_start = vadSensitivityStart;
+        if (vadSensitivityEnd) connectMsg.vad_sensitivity_end = vadSensitivityEnd;
+        if (thinkingLevel) connectMsg.thinking_level = thinkingLevel;
+        ws.send(JSON.stringify(connectMsg));
     };
 
     ws.onmessage = (event) => {
@@ -1322,6 +1340,16 @@ function updateUI() {
         disconnectBtn.disabled = !isConnected;
     }
 
+    // Audit I4: model + vad_start + vad_end are schema-changing (setup-message-rebuild),
+    // so they must be locked while CONNECTED. Voice + thinking_level stay always-enabled
+    // (hot-swappable post-setup).
+    const modelSelect = $('geminiModelSelect');
+    const vadStartSelect = $('geminiVadStartSelect');
+    const vadEndSelect = $('geminiVadEndSelect');
+    if (modelSelect) modelSelect.disabled = isConnected;
+    if (vadStartSelect) vadStartSelect.disabled = isConnected;
+    if (vadEndSelect) vadEndSelect.disabled = isConnected;
+
     if (micBtn) {
         micBtn.disabled = !isConnected;
         micBtn.classList.toggle('recording', isRecording);
@@ -1358,12 +1386,107 @@ export function toggleRecording() {
 // Initialization
 // =============================================================================
 
+/**
+ * Fetch Gemini Live catalog from /gemini-live/status with 5min sessionStorage cache.
+ * Mirrors state-management.js fetchAvailableModels() pattern (audit M3 — no JS-side catalog).
+ * @returns {Promise<Object|null>} catalog object, or null on failure
+ */
+async function fetchGeminiLiveCatalog() {
+    const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
+    const cacheKey = 'bb_gemini_live_catalog';
+
+    try {
+        const cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
+        if (cached && Date.now() - cached.ts < CACHE_TTL_MS && cached.data) {
+            console.log(`[GEMINI-LIVE] Catalog cache hit (age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
+            return cached.data;
+        }
+    } catch (_) { /* corrupted cache */ }
+
+    try {
+        const res = await fetch('/gemini-live/status');
+        if (res.ok) {
+            const data = await res.json();
+            try {
+                sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+            } catch (_) { /* sessionStorage full or disabled */ }
+            return data;
+        }
+    } catch (err) {
+        console.error('[GEMINI-LIVE] Failed to fetch catalog:', err);
+    }
+    return null;
+}
+
+/**
+ * Populate the Gemini model dropdown from catalog. Default = model_default.
+ */
+function populateGeminiModelDropdown(catalog) {
+    const modelSelect = $('geminiModelSelect');
+    if (!modelSelect || !catalog || !Array.isArray(catalog.models)) return;
+    modelSelect.innerHTML = '';
+    catalog.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name || m.id;
+        if (m.id === catalog.model_default) opt.selected = true;
+        modelSelect.appendChild(opt);
+    });
+    console.log(`[GEMINI-LIVE] Model dropdown populated with ${catalog.models.length} entries, default=${catalog.model_default}`);
+}
+
+/**
+ * Populate the Gemini voice dropdown from catalog (30 entries).
+ * Label = `${name} (${descriptor})` when descriptor present, else just name.
+ */
+function populateGeminiVoiceDropdown(catalog) {
+    const voiceSelect = $('geminiVoiceSelect');
+    if (!voiceSelect || !catalog || !Array.isArray(catalog.voices)) return;
+    const descriptors = catalog.voice_descriptors || {};
+    voiceSelect.innerHTML = '';
+    catalog.voices.forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        const desc = descriptors[name];
+        opt.textContent = desc ? `${name} (${desc})` : name;
+        if (name === catalog.voice_default) opt.selected = true;
+        voiceSelect.appendChild(opt);
+    });
+    console.log(`[GEMINI-LIVE] Voice dropdown populated with ${catalog.voices.length} entries, default=${catalog.voice_default}`);
+}
+
+/**
+ * Toggle thinking-level dropdown visibility based on selected model (3.1 only).
+ */
+function updateGeminiThinkingVisibility() {
+    const modelSelect = $('geminiModelSelect');
+    const thinkingSelect = $('geminiThinkingSelect');
+    if (!modelSelect || !thinkingSelect) return;
+    const show = (modelSelect.value === 'gemini-3.1-flash-live-preview');
+    thinkingSelect.style.display = show ? '' : 'none';
+}
+
 export function initGeminiLiveUI() {
     const connectBtn = $('geminiConnect');
     const disconnectBtn = $('geminiDisconnect');
     const micBtn = $('geminiMic');
     const toggleBtn = $('geminiToggleBtn');
     const transcriptSection = $('geminiTranscriptSection');
+    const modelSelect = $('geminiModelSelect');
+
+    // Populate model + voice dropdowns from /gemini-live/status (5min sessionStorage cache)
+    fetchGeminiLiveCatalog().then(catalog => {
+        if (catalog) {
+            populateGeminiModelDropdown(catalog);
+            populateGeminiVoiceDropdown(catalog);
+            updateGeminiThinkingVisibility();  // gate thinking dropdown after dropdown populated
+        }
+    });
+
+    // Wire model change → toggle thinking dropdown visibility
+    if (modelSelect) {
+        modelSelect.addEventListener('change', updateGeminiThinkingVisibility);
+    }
 
     if (connectBtn) {
         connectBtn.onclick = () => {
