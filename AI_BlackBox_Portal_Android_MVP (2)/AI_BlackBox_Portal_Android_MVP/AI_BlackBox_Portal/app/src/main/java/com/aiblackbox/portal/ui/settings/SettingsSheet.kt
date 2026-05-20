@@ -29,6 +29,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
@@ -45,6 +46,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.view.HapticFeedbackConstants
@@ -686,11 +690,32 @@ fun SettingsSheet(
                 Column {
                     Text("Paired Server", style = MaterialTheme.typography.labelSmall, color = Neutral500)
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        origin.ifBlank { "Not paired" },
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = if (origin.isNotBlank()) SolidGreen else BbxAccent
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            origin.ifBlank { "Not paired" },
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = if (origin.isNotBlank()) SolidGreen else BbxAccent,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (origin.isNotBlank()) {
+                            IconButton(
+                                onClick = {
+                                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clip.setPrimaryClip(ClipData.newPlainText("Paired Server", origin))
+                                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                    android.widget.Toast.makeText(context, "Copied $origin", android.widget.Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                // Emoji clipboard fallback: material-icons-core (this project's only icons set)
+                                // doesn't include filled.ContentCopy; emoji renders identically across devices.
+                                Text(
+                                    text = "📋",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
