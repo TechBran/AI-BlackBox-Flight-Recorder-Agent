@@ -270,7 +270,6 @@ async def connect_to_openai(session: RealtimeSession, model: Optional[str] = Non
         url = f"{OPENAI_REALTIME_URL}?model={resolved_model}"
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "OpenAI-Beta": "realtime=v1"
         }
 
         print(f"[REALTIME] Connecting to OpenAI: {url}")
@@ -502,22 +501,34 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         if create_response is not None:
             turn_detection["create_response"] = create_response
 
-    # Configure session
+    # Configure session — GA wire format (Beta deprecated 2026-05-19).
+    # Per empirical probe of OpenAI Realtime GA endpoint without OpenAI-Beta header:
+    # - session.type "realtime" is now required
+    # - modalities renamed to output_modalities (audio-only on GA voice path)
+    # - voice, *_audio_format, transcription, turn_detection all moved under
+    #   session.audio.{input,output} nesting per GA wire-format diff
+    # - temperature removed (not present in GA session shape)
+    # See docs/plans/2026-05-19-live-api-ga-migration.md Track 1B for the diff table.
     config_event = {
         "type": "session.update",
         "session": {
-            "modalities": ["text", "audio"],
+            "type": "realtime",
+            "output_modalities": ["audio"],
             "instructions": system_instructions,
-            "voice": voice,  # Voice selected by user - options: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "whisper-1"
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "transcription": {"model": "whisper-1"},
+                    "turn_detection": turn_detection,
+                },
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "voice": voice,  # Voice selected by user - options: alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar
+                    "speed": 1.0,
+                },
             },
-            "turn_detection": turn_detection,
             "tools": REALTIME_TOOLS,
             "tool_choice": "auto",
-            "temperature": 0.8
         }
     }
 

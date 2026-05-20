@@ -357,22 +357,24 @@ OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 
 # OpenAI Realtime API (GPT-4o voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime")  # Alias, always points to current production GA
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")  # Newest GA, valid since Beta header dropped (2026-05-19)
 REALTIME_CONTEXT_MAX_CHARS = 50000    # ~20K tokens budget for initial context
 REALTIME_SNAPSHOT_CHARS_EACH = 8000   # Max chars per snapshot in context
 REALTIME_AUDIO_SAMPLE_RATE = 24000    # PCM16 audio at 24kHz
 
-# OpenAI Realtime model catalog — empirically WS-connection-tested 2026-05-19.
-# IMPORTANT: client.models.list() returns models that may not be accepted at the
-# Realtime WS endpoint. Test by connecting and waiting for session.created (not
-# {"type":"error","error":{...invalid model...}}). The following IDs are listed
-# but REJECTED by the WS endpoint and must NOT be in the catalog:
-#   gpt-realtime-2, gpt-realtime-2025-08-28
+# OpenAI Realtime model catalog — empirically WS-connection-tested 2026-05-19
+# against the GA endpoint (no OpenAI-Beta header). Post-migration findings:
+#   - gpt-realtime-2 is the newest GA, accepted on GA endpoint
+#   - gpt-realtime is the alias, also accepted on GA endpoint
+#   - gpt-realtime-mini and the dated pin both work on GA
+#   - gpt-realtime-2025-08-28 is STILL listed by /v1/models but REJECTED at the WS
+#     endpoint (close code 4000); keep out of the catalog.
 # Routes filter category=="chat" when serving the dropdown; specialized variants
 # (translate, transcribe) are exposed via env-var override only.
 OPENAI_REALTIME_MODELS: List[Dict] = [
-    # Conversational variants (UI dropdown) — all WS-connection-verified
-    {"id": "gpt-realtime", "name": "GPT Realtime (GA alias)", "default": True, "category": "chat"},
+    # Conversational variants (UI dropdown) — all WS-connection-verified on GA endpoint
+    {"id": "gpt-realtime-2", "name": "GPT Realtime 2 (Newest GA)", "default": True, "category": "chat"},
+    {"id": "gpt-realtime", "name": "GPT Realtime (GA alias)", "category": "chat"},
     {"id": "gpt-realtime-1.5", "name": "GPT Realtime 1.5 (pinned)", "category": "chat"},
     {"id": "gpt-realtime-mini", "name": "GPT Realtime Mini (cheap, alias)", "category": "chat"},
     {"id": "gpt-realtime-mini-2025-12-15", "name": "GPT Realtime Mini (Dec 2025 pin)", "category": "chat"},

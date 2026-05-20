@@ -103,7 +103,7 @@ async def test_invalid_vad_type_falls_back_to_server_vad(stub_fossil_context, ca
     )
 
     payload = _extract_payload(session.openai_ws.send)
-    turn_detection = payload["session"]["turn_detection"]
+    turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
 
     # Bad value rejected -> default server_vad shape preserved
     assert turn_detection["type"] == "server_vad"
@@ -127,8 +127,8 @@ async def test_realtime_status_filters_non_chat_categories():
     models = resp["models"]
     model_ids = {m["id"] for m in models}
 
-    # Exactly the 4 chat-category models, no whisper/translate
-    assert len(models) == 4, f"expected 4 chat models, got {len(models)}: {model_ids}"
+    # Exactly the 5 chat-category models, no whisper/translate
+    assert len(models) == 5, f"expected 5 chat models, got {len(models)}: {model_ids}"
 
     # Every emitted model is category=="chat"
     assert all(m.get("category") == "chat" for m in models), (
@@ -139,13 +139,12 @@ async def test_realtime_status_filters_non_chat_categories():
     assert "gpt-realtime-whisper" not in model_ids, "STT-only model leaked into voice dropdown"
     assert "gpt-realtime-translate" not in model_ids, "translate-only model leaked into voice dropdown"
 
-    # gpt-realtime alias present + flagged default
-    # (was gpt-realtime-2 pre-empirical-fix; that id is listed by /v1/models
-    # but REJECTED by the Realtime WS endpoint with close code 4000.
-    # Reverted to the always-working alias.)
+    # gpt-realtime-2 (newest GA) present + flagged default after Beta->GA migration
+    # (2026-05-19 plan Track 1D). Was reverted to gpt-realtime alias during the
+    # T15 Beta-header diagnosis; restored once GA endpoint accepts gpt-realtime-2.
     default_models = [m for m in models if m.get("default") is True]
     assert len(default_models) == 1, f"expected exactly one default model, got {default_models}"
-    assert default_models[0]["id"] == "gpt-realtime"
+    assert default_models[0]["id"] == "gpt-realtime-2"
 
 
 # -----------------------------------------------------------------------------
@@ -166,7 +165,7 @@ async def test_idle_timeout_ignored_under_semantic_vad(stub_fossil_context):
     )
 
     payload = _extract_payload(session.openai_ws.send)
-    turn_detection = payload["session"]["turn_detection"]
+    turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
 
     assert turn_detection["type"] == "semantic_vad"
     assert turn_detection.get("eagerness") == "medium"
@@ -190,7 +189,7 @@ async def test_idle_timeout_honored_under_server_vad(stub_fossil_context):
     )
 
     payload = _extract_payload(session.openai_ws.send)
-    turn_detection = payload["session"]["turn_detection"]
+    turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
 
     assert turn_detection["type"] == "server_vad"
     assert turn_detection.get("idle_timeout_ms") == 45000
@@ -215,7 +214,7 @@ async def test_idle_timeout_out_of_range_rejected(stub_fossil_context, capsys):
     )
 
     payload = _extract_payload(session.openai_ws.send)
-    turn_detection = payload["session"]["turn_detection"]
+    turn_detection = payload["session"]["audio"]["input"]["turn_detection"]
 
     # Out-of-range value must not leak into upstream payload
     assert "idle_timeout_ms" not in turn_detection, (
@@ -316,12 +315,16 @@ def test_allowlist_casing_precision():
     assert "gemini-3.1-flash-live-preview" in GEMINI_LIVE_THINKING_CAPABLE_MODELS
     assert "gemini-2.5-flash-native-audio-latest" not in GEMINI_LIVE_THINKING_CAPABLE_MODELS
 
-    # Catalogs non-empty + contain expected anchors (WS-connection-verified ids)
+    # Catalogs non-empty + contain expected anchors (WS-connection-verified ids
+    # on the GA endpoint after the 2026-05-19 Beta header drop).
+    assert any(m["id"] == "gpt-realtime-2" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gpt-realtime" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gpt-realtime-1.5" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gemini-3.1-flash-live-preview" for m in GEMINI_LIVE_MODELS)
     # Guard: invalid ids that /v1/models lists but Realtime WS rejects (close 4000)
-    rejected = {"gpt-realtime-2", "gpt-realtime-2025-08-28"}
+    # gpt-realtime-2 was previously in this set when the Beta header was still
+    # being sent; restored to the catalog as of the GA migration.
+    rejected = {"gpt-realtime-2025-08-28"}
     assert not any(m["id"] in rejected for m in OPENAI_REALTIME_MODELS), (
         f"WS-rejected model id leaked into catalog: {rejected & {m['id'] for m in OPENAI_REALTIME_MODELS}}"
     )
