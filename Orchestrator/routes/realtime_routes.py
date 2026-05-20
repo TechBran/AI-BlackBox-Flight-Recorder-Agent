@@ -558,22 +558,25 @@ async def handle_portal_message(session: RealtimeSession, data: Dict):
         if session.openai_ws:
             await session.openai_ws.send(json.dumps({
                 "type": "input_audio_buffer.append",
-                "audio": data.get("data", "")  # Base64 PCM16
+                "audio": data.get("data", ""),  # Base64 PCM16
             }))
             session.is_recording = True
             session.last_activity = now_utc_iso()
-
     elif msg_type == "audio_commit":
-        # Commit audio buffer and request response
-        if session.openai_ws:
-            await session.openai_ws.send(json.dumps({
-                "type": "input_audio_buffer.commit"
-            }))
-            await session.openai_ws.send(json.dumps({
-                "type": "response.create"
-            }))
-            session.is_recording = False
-            session.last_activity = now_utc_iso()
+        # In OpenAI Realtime GA, when turn_detection is set (server_vad or
+        # semantic_vad — we always set one), OpenAI auto-commits the buffer on
+        # detected speech-end AND auto-creates a response (per create_response:
+        # true in turn_detection). Manual input_audio_buffer.commit +
+        # response.create from the client COLLIDES with the auto-flow — OpenAI
+        # returns "buffer too small: 0.00ms" because it already drained the
+        # buffer, and the late response.create can cancel the in-flight
+        # auto-generated response. So this handler is a no-op for the WS side.
+        #
+        # Tool-result response.create at the function-call-arguments-done
+        # handler is unaffected — that path is correct because tool results
+        # don't auto-trigger responses.
+        session.is_recording = False
+        session.last_activity = now_utc_iso()
 
     elif msg_type == "text_input":
         # Send text message
@@ -640,10 +643,10 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
     """
     Handle messages from OpenAI and forward to Portal.
 
-    Key event types:
-    - response.audio.delta: Audio chunk to play
-    - response.audio_transcript.delta: Text transcript of audio
-    - response.text.delta: Text response (for text-only)
+    Key event types (GA — Beta names had no output_ infix):
+    - response.output_audio.delta: Audio chunk to play
+    - response.output_audio_transcript.delta: Text transcript of audio
+    - response.output_text.delta: Text response (for text-only)
     - response.function_call_arguments.done: Execute tool
     - response.done: Response complete
     - error: Error occurred
@@ -652,7 +655,7 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
 
     event_type = event.get("type", "")
 
-    if event_type == "response.audio.delta":
+    if event_type == "response.output_audio.delta":
         # Forward audio chunk to Portal
         if session.portal_ws:
             await _safe_ws_send(session.portal_ws, {
@@ -661,7 +664,7 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             })
             session.is_speaking = True
 
-    elif event_type == "response.audio_transcript.delta":
+    elif event_type == "response.output_audio_transcript.delta":
         # Forward transcript to Portal
         delta = event.get("delta", "")
         session.transcript_buffer += delta
@@ -671,7 +674,7 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
                 "data": delta
             })
 
-    elif event_type == "response.text.delta":
+    elif event_type == "response.output_text.delta":
         # Forward text response to Portal
         if session.portal_ws:
             await _safe_ws_send(session.portal_ws, {
