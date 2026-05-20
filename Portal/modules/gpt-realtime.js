@@ -18,6 +18,35 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 
 // =============================================================================
+// Selector configuration
+// =============================================================================
+//
+// Track 4 (2026-05-20): inline banners deprecated. Module reads DOM ids from
+// the SEL table below; the Voice Agents modal passes its own ids via
+// initRealtimeUI({selectors: {...}}) so the same code drives the modal.
+// Defaults preserved for backward-compat in case any caller still relies on
+// the historical ids — Track 4 deletes the inline banners outright, so in
+// production every read goes through the modal-supplied ids.
+const SEL = {
+    voiceSelect: 'realtimeVoiceSelect',
+    modelSelect: 'realtimeModelSelect',
+    vadSelect: 'realtimeVadSelect',
+    eagernessSelect: 'realtimeEagernessSelect',
+    eagernessRow: null,        // optional row wrapper for eagerness
+    idleTimeoutInput: 'realtimeIdleTimeout',
+    idleRow: null,             // optional row wrapper for idle timeout
+    connectButton: 'realtimeConnect',
+    disconnectButton: 'realtimeDisconnect',
+    micButton: 'realtimeMic',
+    micText: 'realtimeMicText',
+    statusEl: 'realtimeStatus',
+    transcriptEl: 'realtimeTranscript',
+    transcriptSection: 'realtimeTranscriptSection',
+    toggleButton: 'realtimeToggleBtn',
+    bannerEl: 'realtimeBanner',
+};
+
+// =============================================================================
 // State
 // =============================================================================
 
@@ -1144,14 +1173,14 @@ export async function connect(operator) {
     vadPreBuffer = [];
 
     // Get selected voice
-    const voiceSelect = $('realtimeVoiceSelect');
+    const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
     selectedVoice = voiceSelect ? voiceSelect.value : 'ash';
 
     // Read new model + VAD config fields from dropdowns (audit M3 — no JS-side catalog)
-    const modelSelect = $('realtimeModelSelect');
-    const vadSelect = $('realtimeVadSelect');
-    const eagernessSelect = $('realtimeEagernessSelect');
-    const idleTimeoutInput = $('realtimeIdleTimeout');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const vadSelect = SEL.vadSelect ? $(SEL.vadSelect) : null;
+    const eagernessSelect = SEL.eagernessSelect ? $(SEL.eagernessSelect) : null;
+    const idleTimeoutInput = SEL.idleTimeoutInput ? $(SEL.idleTimeoutInput) : null;
 
     const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
     const vadType = (vadSelect && vadSelect.value) ? vadSelect.value : undefined;
@@ -1676,7 +1705,7 @@ export function interrupt() {
  * @param {string} status - Status text
  */
 function updateStatus(status) {
-    const statusEl = $('realtimeStatus');
+    const statusEl = SEL.statusEl ? $(SEL.statusEl) : null;
     if (statusEl) {
         statusEl.textContent = status;
 
@@ -1701,7 +1730,7 @@ function updateStatus(status) {
  * @param {string} text - Transcript text
  */
 function updateTranscript(text) {
-    const transcriptEl = $('realtimeTranscript');
+    const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
     if (transcriptEl) {
         transcriptEl.textContent = text;
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -1712,7 +1741,7 @@ function updateTranscript(text) {
  * Clear transcript display
  */
 function clearTranscript() {
-    const transcriptEl = $('realtimeTranscript');
+    const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
     if (transcriptEl) {
         transcriptEl.textContent = '';
     }
@@ -1722,11 +1751,11 @@ function clearTranscript() {
  * Update UI button states
  */
 function updateUI() {
-    const banner = $('realtimeBanner');
-    const connectBtn = $('realtimeConnect');
-    const disconnectBtn = $('realtimeDisconnect');
-    const micBtn = $('realtimeMic');
-    const micText = $('realtimeMicText');
+    const banner = SEL.bannerEl ? $(SEL.bannerEl) : null;
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const micText = SEL.micText ? $(SEL.micText) : null;
 
     // Update banner state classes for visual feedback
     if (banner) {
@@ -1745,8 +1774,8 @@ function updateUI() {
     // Audit I4: model + vad_type are schema-changing (URL-rebuild vs setup-rebuild),
     // so they must be locked while CONNECTED. Voice + eagerness + idle_timeout
     // stay always-enabled (hot-swappable via session.update).
-    const modelSelect = $('realtimeModelSelect');
-    const vadSelect = $('realtimeVadSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const vadSelect = SEL.vadSelect ? $(SEL.vadSelect) : null;
     if (modelSelect) modelSelect.disabled = isConnected;
     if (vadSelect) vadSelect.disabled = isConnected;
 
@@ -1838,7 +1867,7 @@ async function fetchRealtimeCatalog() {
  * Populate the model dropdown from the catalog. Default selection = model_default.
  */
 function populateRealtimeModelDropdown(catalog) {
-    const modelSelect = $('realtimeModelSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
     if (!modelSelect || !catalog || !Array.isArray(catalog.models)) return;
     modelSelect.innerHTML = '';
     catalog.models.forEach(m => {
@@ -1855,29 +1884,42 @@ function populateRealtimeModelDropdown(catalog) {
  * Toggle visibility of eagerness vs idle_timeout based on selected vad_type.
  */
 function updateRealtimeVadVisibility() {
-    const vadSelect = $('realtimeVadSelect');
-    const eagernessSelect = $('realtimeEagernessSelect');
-    const idleTimeoutInput = $('realtimeIdleTimeout');
+    const vadSelect = SEL.vadSelect ? $(SEL.vadSelect) : null;
+    const eagernessSelect = SEL.eagernessSelect ? $(SEL.eagernessSelect) : null;
+    const idleTimeoutInput = SEL.idleTimeoutInput ? $(SEL.idleTimeoutInput) : null;
+    // Optional row wrappers (modal layout) — fall back to toggling the
+    // control itself when the row id isn't supplied (inline-banner shape).
+    const eagernessRow = SEL.eagernessRow ? $(SEL.eagernessRow) : null;
+    const idleRow = SEL.idleRow ? $(SEL.idleRow) : null;
     if (!vadSelect) return;
     const vadType = vadSelect.value;
-    if (eagernessSelect) {
-        eagernessSelect.style.display = (vadType === 'semantic_vad') ? '' : 'none';
+    const eagernessTarget = eagernessRow || eagernessSelect;
+    const idleTarget = idleRow || idleTimeoutInput;
+    if (eagernessTarget) {
+        eagernessTarget.style.display = (vadType === 'semantic_vad') ? '' : 'none';
     }
-    if (idleTimeoutInput) {
-        idleTimeoutInput.style.display = (vadType === 'server_vad') ? '' : 'none';
+    if (idleTarget) {
+        idleTarget.style.display = (vadType === 'server_vad') ? '' : 'none';
     }
 }
 
 /**
- * Initialize Realtime UI and event handlers
+ * Initialize Realtime UI and event handlers.
+ *
+ * @param {Object} [config] - Optional configuration.
+ * @param {Object} [config.selectors] - Override DOM ids (Track 4 modal hook).
+ *   Any omitted key falls back to the historical inline-banner default in SEL.
  */
-export function initRealtimeUI() {
-    const connectBtn = $('realtimeConnect');
-    const disconnectBtn = $('realtimeDisconnect');
-    const micBtn = $('realtimeMic');
-    const toggleBtn = $('realtimeToggleBtn');
-    const transcriptSection = $('realtimeTranscriptSection');
-    const vadSelect = $('realtimeVadSelect');
+export function initRealtimeUI(config) {
+    if (config && config.selectors && typeof config.selectors === 'object') {
+        Object.assign(SEL, config.selectors);
+    }
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const toggleBtn = SEL.toggleButton ? $(SEL.toggleButton) : null;
+    const transcriptSection = SEL.transcriptSection ? $(SEL.transcriptSection) : null;
+    const vadSelect = SEL.vadSelect ? $(SEL.vadSelect) : null;
 
     // Populate model dropdown from /realtime/status (5min sessionStorage cache)
     fetchRealtimeCatalog().then(catalog => {

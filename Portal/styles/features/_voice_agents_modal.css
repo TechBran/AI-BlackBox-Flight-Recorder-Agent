@@ -1,0 +1,130 @@
+/* _voice_agents_modal.css
+ * Voice Agents launcher modal — Track 4 of
+ * docs/plans/2026-05-20-portal-tools-section-alignment.md.
+ *
+ * Provider tabs (GPT Realtime / Gemini Live / Grok Live) wrap the existing
+ * per-provider modules. Inline banners at the top of the chat screen were
+ * deleted in this commit; voice sessions launch ONLY from this modal.
+ *
+ * Visual structure mirrors _cli_agents_modal.css (vertical sections inside
+ * .modal-body) with a tab strip at the top.
+ */
+
+.voice-agents-card {
+    width: min(720px, 92vw);
+}
+
+.voice-agents-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 4px 0;
+}
+
+/* ── Provider tabs ────────────────────────────────────────── */
+
+.voice-agents-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--neutral-300, #2a2a2a);
+    padding-bottom: 0;
+}
+
+.va-tab {
+    background: transparent;
+    color: var(--neutral-700, #888);
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 10px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+    border-radius: 0;
+    margin-bottom: -1px;
+}
+
+.va-tab:hover {
+    color: var(--neutral-900, #d6d6d6);
+}
+
+.va-tab.active {
+    color: var(--neutral-1000, #e0e0e0);
+    border-bottom-color: rgba(255, 74, 74, 0.7);
+    font-weight: 600;
+}
+
+/* ── Tab panes ────────────────────────────────────────────── */
+
+.va-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 4px;
+}
+
+.va-pane-active {
+    /* No special active styling beyond display:'' from JS — pane is just shown */
+}
+
+/* ── Form rows (label + control) ──────────────────────────── */
+
+.va-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.va-row > label {
+    flex: 0 0 140px;
+    font-weight: 500;
+    color: var(--neutral-900, #d6d6d6);
+    font-size: 13px;
+}
+
+.va-row > select,
+.va-row > input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--neutral-100, #121212);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #2a2a2a);
+    border-radius: var(--radius-md, 8px);
+    font-size: 14px;
+}
+
+.va-row > select:focus,
+.va-row > input:focus {
+    outline: none;
+    border-color: rgba(255, 74, 74, 0.6);
+    box-shadow: 0 0 0 3px rgba(255, 74, 74, 0.15);
+}
+
+.va-row > select:disabled,
+.va-row > input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* ── Bottom controls row (Connect / Mic / Disconnect) ─────── */
+
+.va-controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--neutral-200, #1a1a1a);
+}
+
+.va-controls .btn {
+    min-width: 100px;
+}
+
+/* ── Status text ──────────────────────────────────────────── */
+
+.va-status {
+    font-size: 12px;
+    color: var(--neutral-700, #888);
+    padding: 4px 2px 0;
+    font-style: italic;
+}

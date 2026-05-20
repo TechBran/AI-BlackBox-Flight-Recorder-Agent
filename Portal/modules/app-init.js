@@ -84,6 +84,7 @@ import { initCellularManager } from './cellular-manager.js';
 import { initSMSInbox, openSMSInbox, pollUnread as pollSMSUnread } from './sms-inbox.js';
 import { initContactsManager } from './contacts-manager.js';
 import { initCLIAgentsModal } from './cli-agents-modal.js';
+import { initVoiceAgentsModal } from './voice-agents-modal.js';
 import {
     initAgentHandler,
     checkExistingAgentSession
@@ -160,24 +161,19 @@ async function initProviderModelSelectors() {
 }
 
 /**
- * Update Claude Code banner visibility
- * @param {string} provider - Current provider
+ * Update Claude Code / Gemini CLI banner visibility based on provider.
+ * Track 4 (2026-05-20): realtime / gemini-live / grok-live arms removed —
+ * those banners are deleted; voice agents are launched from the Tools modal.
  */
 function updateClaudeCodeBanner(provider) {
     const banner = $('claudeCodeBanner');
     const geminiCodeBanner = $('geminiCodeBanner');
-    const realtimeBanner = $('realtimeBanner');
-    const geminiLiveBanner = $('geminiLiveBanner');
-    const grokLiveBanner = $('grokLiveBanner');
     const history = $('history');
     const baseHeaderPadding = 60;
 
-    // Hide all banners first
+    // Hide all CLI agent banners first
     if (banner) banner.classList.add('hide');
     if (geminiCodeBanner) geminiCodeBanner.classList.add('hide');
-    if (realtimeBanner) realtimeBanner.classList.add('hide');
-    if (geminiLiveBanner) geminiLiveBanner.classList.add('hide');
-    if (grokLiveBanner) grokLiveBanner.classList.add('hide');
 
     if (provider === 'agents') {
         if (banner) {
@@ -192,39 +188,6 @@ function updateClaudeCodeBanner(provider) {
             geminiCodeBanner.classList.remove('hide');
             if (history) {
                 const bannerHeight = geminiCodeBanner.classList.contains('collapsed') ? 55 : 135;
-                history.style.paddingTop = `${baseHeaderPadding + bannerHeight}px`;
-            }
-        }
-    } else if (provider === 'realtime') {
-        if (realtimeBanner) {
-            realtimeBanner.classList.remove('hide');
-            if (history) {
-                // Compact banner: ~50px collapsed, ~200px expanded
-                const transcriptSection = $('realtimeTranscriptSection');
-                const isExpanded = transcriptSection && !transcriptSection.classList.contains('collapsed');
-                const bannerHeight = isExpanded ? 200 : 50;
-                history.style.paddingTop = `${baseHeaderPadding + bannerHeight}px`;
-            }
-        }
-    } else if (provider === 'gemini-live') {
-        if (geminiLiveBanner) {
-            geminiLiveBanner.classList.remove('hide');
-            if (history) {
-                // Compact banner: ~50px collapsed, ~200px expanded
-                const transcriptSection = $('geminiTranscriptSection');
-                const isExpanded = transcriptSection && !transcriptSection.classList.contains('collapsed');
-                const bannerHeight = isExpanded ? 200 : 50;
-                history.style.paddingTop = `${baseHeaderPadding + bannerHeight}px`;
-            }
-        }
-    } else if (provider === 'grok-live') {
-        if (grokLiveBanner) {
-            grokLiveBanner.classList.remove('hide');
-            if (history) {
-                // Compact banner: ~50px collapsed, ~200px expanded
-                const transcriptSection = $('grokTranscriptSection');
-                const isExpanded = transcriptSection && !transcriptSection.classList.contains('collapsed');
-                const bannerHeight = isExpanded ? 200 : 50;
                 history.style.paddingTop = `${baseHeaderPadding + bannerHeight}px`;
             }
         }
@@ -695,6 +658,13 @@ async function initApp() {
     // <pre> output panel. Per docs/plans/2026-05-20-portal-tools-section-alignment.md
     // Track 3. The init function wires the button click itself.
     initCLIAgentsModal();
+
+    // Voice Agents Tools button — opens a modal with provider tabs (GPT
+    // Realtime / Gemini Live / Grok Live). The voice-agents-modal handles
+    // lazy init of the three underlying provider modules on first open;
+    // closing the modal while connected disconnects all active providers.
+    // Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 4.
+    initVoiceAgentsModal();
     initMediaManager();
     initAgentHandler();
     initGeminiAgentHandler();
@@ -709,17 +679,11 @@ async function initApp() {
     initCUDrawer();
     initSlashCommands();
 
-    // Phase 6: GPT-4o Realtime
-    console.log('[Portal] Phase 6: GPT-4o Realtime...');
-    initRealtimeUI();
-
-    // Phase 7: Gemini Live
-    console.log('[Portal] Phase 7: Gemini Live...');
-    initGeminiLiveUI();
-
-    // Phase 8: Grok Live
-    console.log('[Portal] Phase 8: Grok Live...');
-    initGrokLiveUI();
+    // Phase 6-8: GPT-4o Realtime / Gemini Live / Grok Live
+    // Per Track 4 (2026-05-20), voice provider modules init LAZILY from
+    // voice-agents-modal.js on first modal open — the inline banners they
+    // used to drive are gone, so eager init is unnecessary work. Disconnect
+    // helpers remain exported below for any back-compat consumers.
 
     // Initialize history last (after all components ready)
     console.log('[Portal] Initializing history...');

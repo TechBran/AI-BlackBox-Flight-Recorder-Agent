@@ -149,208 +149,6 @@
       </div>
     </div>
 
-    <!-- GPT Realtime Banner (shown when realtime provider selected) -->
-    <div id="realtimeBanner" class="realtime-banner hide">
-      <!-- Compact Row: Title + Status + Controls + Toggle -->
-      <div class="realtime-compact-row">
-        <div class="realtime-info">
-          <span class="realtime-dot"></span>
-          <span class="realtime-title">GPT Realtime</span>
-          <span class="realtime-status" id="realtimeStatus">Disconnected</span>
-        </div>
-        <div class="realtime-controls">
-          <!-- Voice selector dropdown (hot-swappable via session.update) -->
-          <select id="realtimeVoiceSelect" class="realtime-voice-select" title="Select voice">
-            <option value="ash">Ash (Deep)</option>
-            <option value="alloy">Alloy (Neutral)</option>
-            <option value="ballad">Ballad (Warm)</option>
-            <option value="coral">Coral (Soft)</option>
-            <option value="echo">Echo (Bright)</option>
-            <option value="sage">Sage (Calm)</option>
-            <option value="shimmer">Shimmer (Gentle)</option>
-            <option value="verse">Verse (Rich)</option>
-            <option value="marin">Marin (Clear)</option>
-            <option value="cedar">Cedar (Bold)</option>
-          </select>
-          <!-- Model dropdown (populated from /realtime/status; disabled while CONNECTED per audit I4) -->
-          <select id="realtimeModelSelect" class="realtime-model-select" title="Select model"></select>
-          <!-- VAD type selector (disabled while CONNECTED per audit I4 - schema-changing) -->
-          <select id="realtimeVadSelect" class="realtime-vad-select" title="Voice Activity Detection mode">
-            <option value="server_vad">Server VAD (default)</option>
-            <option value="semantic_vad">Semantic VAD (low latency)</option>
-          </select>
-          <!-- Eagerness selector (semantic_vad only; hot-swappable) -->
-          <select id="realtimeEagernessSelect" class="realtime-eagerness-select" title="Semantic VAD eagerness" style="display:none">
-            <option value="auto">Eagerness: auto</option>
-            <option value="low">Eagerness: low</option>
-            <option value="medium" selected>Eagerness: medium</option>
-            <option value="high">Eagerness: high</option>
-          </select>
-          <!-- Idle timeout input (server_vad only; hot-swappable) -->
-          <input type="number" id="realtimeIdleTimeout" class="realtime-idle-timeout"
-                 placeholder="Idle ms (e.g. 30000)" min="5000" max="300000" title="Idle timeout in ms (server_vad only)">
-          <button id="realtimeConnect" class="realtime-btn connect-btn" title="Connect to Realtime API">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-              <polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-            <span class="btn-label">Connect</span>
-          </button>
-          <button id="realtimeMic" class="realtime-btn mic-btn" disabled title="Click to start recording">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            <span class="btn-label" id="realtimeMicText">Mic</span>
-          </button>
-          <button id="realtimeDisconnect" class="realtime-btn disconnect-btn" title="Disconnect from Realtime API">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-            <span class="btn-label">End</span>
-          </button>
-        </div>
-        <button class="realtime-toggle-btn" id="realtimeToggleBtn" title="Show/hide transcript">▼</button>
-      </div>
-
-      <!-- Expandable Transcript Section -->
-      <div class="realtime-transcript-section collapsed" id="realtimeTranscriptSection">
-        <div class="realtime-transcript-header">
-          <span>Live Transcript</span>
-        </div>
-        <div class="realtime-transcript" id="realtimeTranscript"></div>
-      </div>
-    </div>
-
-    <!-- Gemini Live Banner (shown when gemini-live provider selected) -->
-    <div id="geminiLiveBanner" class="gemini-live-banner hide">
-      <!-- Compact Row: Title + Status + Voice + Controls + Toggle -->
-      <div class="gemini-compact-row">
-        <div class="gemini-info">
-          <span class="gemini-dot"></span>
-          <span class="gemini-title">Gemini Live</span>
-          <span class="gemini-status" id="geminiLiveStatus">Disconnected</span>
-        </div>
-        <div class="gemini-controls">
-          <!-- Voice selector dropdown (populated from /gemini-live/status with 30 voices + descriptors; hot-swappable) -->
-          <select id="geminiVoiceSelect" class="gemini-voice-select" title="Select voice"></select>
-          <!-- Model dropdown (populated from /gemini-live/status; disabled while CONNECTED per audit I4) -->
-          <select id="geminiModelSelect" class="gemini-model-select" title="Select model"></select>
-          <!-- VAD start sensitivity (disabled while CONNECTED per audit I4 - schema-changing) -->
-          <select id="geminiVadStartSelect" class="gemini-vad-select" title="Start-of-speech sensitivity">
-            <option value="">Start sensitivity: auto</option>
-            <option value="LOW">Start sensitivity: LOW</option>
-            <option value="MEDIUM">Start sensitivity: MEDIUM</option>
-            <option value="HIGH">Start sensitivity: HIGH</option>
-          </select>
-          <!-- VAD end sensitivity (disabled while CONNECTED per audit I4 - schema-changing) -->
-          <select id="geminiVadEndSelect" class="gemini-vad-select" title="End-of-speech sensitivity">
-            <option value="">End sensitivity: auto</option>
-            <option value="LOW">End sensitivity: LOW</option>
-            <option value="MEDIUM">End sensitivity: MEDIUM</option>
-            <option value="HIGH">End sensitivity: HIGH</option>
-          </select>
-          <!-- Thinking level (gemini-3.1-flash-live-preview only; hot-swappable) -->
-          <select id="geminiThinkingSelect" class="gemini-thinking-select" title="Thinking level (3.1 only)" style="display:none">
-            <option value="">Thinking: auto</option>
-            <option value="minimal">Thinking: minimal</option>
-            <option value="low">Thinking: low</option>
-            <option value="medium">Thinking: medium</option>
-            <option value="high">Thinking: high</option>
-          </select>
-          <button id="geminiConnect" class="gemini-btn connect-btn" title="Connect to Gemini Live">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-              <polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-            <span class="btn-label">Connect</span>
-          </button>
-          <button id="geminiMic" class="gemini-btn mic-btn" disabled title="Click to start recording">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            <span class="btn-label" id="geminiMicText">Mic</span>
-          </button>
-          <button id="geminiDisconnect" class="gemini-btn disconnect-btn" title="Disconnect from Gemini Live">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-            <span class="btn-label">End</span>
-          </button>
-        </div>
-        <button class="gemini-toggle-btn" id="geminiToggleBtn" title="Show/hide transcript">▼</button>
-      </div>
-
-      <!-- Expandable Transcript Section -->
-      <div class="gemini-transcript-section collapsed" id="geminiTranscriptSection">
-        <div class="gemini-transcript-header">
-          <span>Live Transcript</span>
-        </div>
-        <div class="gemini-transcript" id="geminiTranscript"></div>
-      </div>
-    </div>
-
-    <!-- Grok Live Banner (shown when grok-live provider selected) -->
-    <div id="grokLiveBanner" class="gemini-live-banner hide">
-      <!-- Compact Row: Title + Status + Voice + Controls + Toggle -->
-      <div class="gemini-compact-row">
-        <div class="gemini-info">
-          <span class="gemini-dot" style="background: #f97316;"></span>
-          <span class="gemini-title">Grok Live</span>
-          <span class="gemini-status" id="grokLiveStatus">Disconnected</span>
-        </div>
-        <div class="gemini-controls">
-          <!-- Voice selector dropdown -->
-          <select id="grokVoiceSelect" class="gemini-voice-select" title="Select Grok voice">
-            <option value="Ara">Ara (Default)</option>
-            <option value="Rex">Rex</option>
-            <option value="Sal">Sal</option>
-            <option value="Eve">Eve</option>
-            <option value="Leo">Leo</option>
-          </select>
-          <button id="grokConnectBtn" class="gemini-btn connect-btn" title="Connect to Grok Live">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-              <polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-            <span class="btn-label">Connect</span>
-          </button>
-          <button id="grokMicBtn" class="gemini-btn mic-btn" disabled title="Click to start recording">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            <span class="btn-label" id="grokMicText">Mic</span>
-          </button>
-          <button id="grokDisconnectBtn" class="gemini-btn disconnect-btn" title="Disconnect from Grok Live">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-            <span class="btn-label">End</span>
-          </button>
-        </div>
-        <button class="gemini-toggle-btn" id="grokToggleBtn" title="Show/hide transcript">▼</button>
-      </div>
-
-      <!-- Expandable Transcript Section -->
-      <div class="gemini-transcript-section collapsed" id="grokTranscriptSection">
-        <div class="gemini-transcript-header">
-          <span>Live Transcript</span>
-        </div>
-        <div class="gemini-transcript" id="grokTranscript"></div>
-      </div>
-    </div>
-
     <!-- Main -->
     <main class="main">
       <section class="chat">
@@ -552,9 +350,6 @@
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
                 <option value="xai">xAI (Grok)</option>
-                <option value="realtime">GPT Realtime</option>
-                <option value="gemini-live">Gemini Live</option>
-                <option value="grok-live">Grok Live</option>
                 <option value="computer-use">Computer Use</option>
                 <option value="agents">Claude Code</option>
                 <option value="gemini-agents">Gemini CLI</option>
@@ -631,7 +426,8 @@
             <button id="btnContactsManager" class="btn">Contacts</button>
             <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
             <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
-            <!-- Tracks 4-5 will add: Voice Agents, Gmail -->
+            <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
+            <!-- Track 5 will add: Gmail -->
           </div>
         </div>
 
@@ -1926,6 +1722,140 @@
       </div>
   </div>
 
+  <!-- Voice Agents Modal — Track 4 -->
+  <div id="voiceAgentsModal" class="modal hide">
+    <div class="modal-card voice-agents-card">
+      <div class="modal-head">
+        <h3>🎙️ Voice Agents</h3>
+        <button id="btnCloseVoiceAgents" class="btn modal-close" data-modal="voiceAgentsModal" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body voice-agents-body">
+
+        <!-- Provider tabs -->
+        <div class="voice-agents-tabs" role="tablist">
+          <button class="va-tab active" data-provider="realtime" role="tab" type="button">GPT Realtime</button>
+          <button class="va-tab" data-provider="gemini-live" role="tab" type="button">Gemini Live</button>
+          <button class="va-tab" data-provider="grok-live" role="tab" type="button">Grok Live</button>
+        </div>
+
+        <!-- GPT Realtime tab pane -->
+        <div class="va-pane va-pane-active" data-pane="realtime">
+          <div class="va-row">
+            <label for="vaRealtimeModelSelect">Model</label>
+            <select id="vaRealtimeModelSelect"></select>
+          </div>
+          <div class="va-row">
+            <label for="vaRealtimeVoiceSelect">Voice</label>
+            <select id="vaRealtimeVoiceSelect">
+              <option value="ash" selected>Ash (Deep)</option>
+              <option value="alloy">Alloy (Neutral)</option>
+              <option value="ballad">Ballad (Warm)</option>
+              <option value="coral">Coral (Soft)</option>
+              <option value="echo">Echo (Bright)</option>
+              <option value="sage">Sage (Calm)</option>
+              <option value="shimmer">Shimmer (Gentle)</option>
+              <option value="verse">Verse (Rich)</option>
+              <option value="marin">Marin (Clear)</option>
+              <option value="cedar">Cedar (Bold)</option>
+            </select>
+          </div>
+          <div class="va-row">
+            <label for="vaRealtimeVadSelect">VAD</label>
+            <select id="vaRealtimeVadSelect">
+              <option value="server_vad" selected>Server VAD (default)</option>
+              <option value="semantic_vad">Semantic VAD</option>
+            </select>
+          </div>
+          <div class="va-row" id="vaRealtimeEagernessRow" style="display:none;">
+            <label for="vaRealtimeEagernessSelect">Eagerness</label>
+            <select id="vaRealtimeEagernessSelect">
+              <option value="auto">auto</option>
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div class="va-row" id="vaRealtimeIdleRow">
+            <label for="vaRealtimeIdleTimeoutInput">Idle timeout (ms)</label>
+            <input type="number" id="vaRealtimeIdleTimeoutInput" min="5000" max="300000" placeholder="30000">
+          </div>
+          <div class="va-controls">
+            <button id="vaRealtimeConnect" class="btn btn-primary" type="button">Connect</button>
+            <button id="vaRealtimeMic" class="btn" type="button" disabled>🎤 Mic</button>
+            <button id="vaRealtimeDisconnect" class="btn btn-warn" type="button" disabled>Disconnect</button>
+          </div>
+          <div class="va-status" id="vaRealtimeStatus">Disconnected</div>
+        </div>
+
+        <!-- Gemini Live tab pane -->
+        <div class="va-pane" data-pane="gemini-live" style="display:none;">
+          <div class="va-row">
+            <label for="vaGeminiModelSelect">Model</label>
+            <select id="vaGeminiModelSelect"></select>
+          </div>
+          <div class="va-row">
+            <label for="vaGeminiVoiceSelect">Voice</label>
+            <select id="vaGeminiVoiceSelect"></select>
+          </div>
+          <div class="va-row">
+            <label for="vaGeminiVadStartSelect">VAD start</label>
+            <select id="vaGeminiVadStartSelect">
+              <option value="">auto</option>
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+            </select>
+          </div>
+          <div class="va-row">
+            <label for="vaGeminiVadEndSelect">VAD end</label>
+            <select id="vaGeminiVadEndSelect">
+              <option value="">auto</option>
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+            </select>
+          </div>
+          <div class="va-row" id="vaGeminiThinkingRow" style="display:none;">
+            <label for="vaGeminiThinkingSelect">Thinking level (3.1 only)</label>
+            <select id="vaGeminiThinkingSelect">
+              <option value="">auto</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div class="va-controls">
+            <button id="vaGeminiConnect" class="btn btn-primary" type="button">Connect</button>
+            <button id="vaGeminiMic" class="btn" type="button" disabled>🎤 Mic</button>
+            <button id="vaGeminiDisconnect" class="btn btn-warn" type="button" disabled>Disconnect</button>
+          </div>
+          <div class="va-status" id="vaGeminiStatus">Disconnected</div>
+        </div>
+
+        <!-- Grok Live tab pane -->
+        <div class="va-pane" data-pane="grok-live" style="display:none;">
+          <div class="va-row">
+            <label for="vaGrokVoiceSelect">Voice</label>
+            <select id="vaGrokVoiceSelect">
+              <option value="Ara" selected>Ara (Default)</option>
+              <option value="Rex">Rex</option>
+              <option value="Sal">Sal</option>
+              <option value="Eve">Eve</option>
+              <option value="Leo">Leo</option>
+            </select>
+          </div>
+          <div class="va-controls">
+            <button id="vaGrokConnect" class="btn btn-primary" type="button">Connect</button>
+            <button id="vaGrokMic" class="btn" type="button" disabled>🎤 Mic</button>
+            <button id="vaGrokDisconnect" class="btn btn-warn" type="button" disabled>Disconnect</button>
+          </div>
+          <div class="va-status" id="vaGrokStatus">Disconnected</div>
+        </div>
+
+      </div>
+    </div>
+  </div>
 
 </body>
 </html>

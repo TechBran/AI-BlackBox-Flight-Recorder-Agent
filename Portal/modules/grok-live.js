@@ -21,6 +21,30 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 
 // =============================================================================
+// Selector configuration
+// =============================================================================
+//
+// Track 4 (2026-05-20): inline banners deprecated. Module reads DOM ids from
+// the SEL table below; the Voice Agents modal passes its own ids via
+// initGrokLiveUI({selectors: {...}}) so the same code drives the modal.
+// Defaults preserved for backward-compat; production uses modal-supplied ids.
+const SEL = {
+    voiceSelect: 'grokVoiceSelect',
+    connectButton: 'grokConnectBtn',
+    disconnectButton: 'grokDisconnectBtn',
+    micButton: 'grokMicBtn',
+    micText: 'grokMicText',
+    statusEl: 'grokLiveStatus',
+    transcriptEl: 'grokTranscript',
+    transcriptSection: 'grokTranscriptSection',
+    toggleButton: 'grokToggleBtn',
+    sendTextButton: 'grokSendTextBtn',
+    textInput: 'grokTextInput',
+    interruptButton: 'grokInterruptBtn',
+    speakingIndicator: 'grokSpeakingIndicator',
+};
+
+// =============================================================================
 // State
 // =============================================================================
 
@@ -738,7 +762,7 @@ export async function connect(operator) {
     }
 
     // Get selected voice
-    const voiceSelect = $('grokVoiceSelect');
+    const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
     selectedVoice = voiceSelect ? voiceSelect.value : 'Ara';
 
     // Reset session state
@@ -908,7 +932,7 @@ function handleMessage(msg) {
                 });
 
                 // Show in transcript widget
-                const transcriptEl = $('grokTranscript');
+                const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
                 if (transcriptEl) {
                     const userEl = document.createElement('div');
                     userEl.className = 'user-turn';
@@ -1119,7 +1143,7 @@ function stopKeepalive() {
  * @param {string} status - Status text
  */
 function updateStatus(status) {
-    const statusEl = $('grokLiveStatus');
+    const statusEl = SEL.statusEl ? $(SEL.statusEl) : null;
     if (statusEl) {
         statusEl.textContent = status;
         statusEl.className = `status ${isConnected ? 'connected' : 'disconnected'}`;
@@ -1131,7 +1155,7 @@ function updateStatus(status) {
  * @param {string} text - Transcript text
  */
 function updateTranscript(text) {
-    const transcriptEl = $('grokTranscript');
+    const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
     if (transcriptEl) {
         // Find or create current AI turn element
         let aiTurn = transcriptEl.querySelector('.ai-turn.current');
@@ -1158,26 +1182,37 @@ function updateTranscript(text) {
  * Update UI state (buttons, indicators)
  */
 function updateUI() {
-    const micBtn = $('grokMicBtn');
-    const connectBtn = $('grokConnectBtn');
-    const voiceSelect = $('grokVoiceSelect');
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
+    const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
 
     if (micBtn) {
         micBtn.disabled = !isConnected;
         micBtn.classList.toggle('recording', isRecording);
         // Update mic button text
-        const micText = $('grokMicText');
+        const micText = SEL.micText ? $(SEL.micText) : null;
         if (micText) {
             micText.textContent = isRecording ? 'Stop' : 'Mic';
         }
     }
 
+    // Connect button: never repurpose to "Disconnect" when a dedicated
+    // disconnect button exists (modal layout). Preserve legacy
+    // single-button label-swap behavior only when disconnectBtn absent.
     if (connectBtn) {
-        const btnLabel = connectBtn.querySelector('.btn-label');
-        if (btnLabel) {
-            btnLabel.textContent = isConnected ? 'Disconnect' : 'Connect';
+        if (!disconnectBtn) {
+            const btnLabel = connectBtn.querySelector('.btn-label');
+            if (btnLabel) {
+                btnLabel.textContent = isConnected ? 'Disconnect' : 'Connect';
+            }
         }
         connectBtn.classList.toggle('connected', isConnected);
+        connectBtn.disabled = isConnected;
+    }
+
+    if (disconnectBtn) {
+        disconnectBtn.disabled = !isConnected;
     }
 
     if (voiceSelect) {
@@ -1185,7 +1220,7 @@ function updateUI() {
     }
 
     // Update speaking indicator
-    const speakingIndicator = $('grokSpeakingIndicator');
+    const speakingIndicator = SEL.speakingIndicator ? $(SEL.speakingIndicator) : null;
     if (speakingIndicator) {
         speakingIndicator.classList.toggle('active', isAISpeaking);
     }
@@ -1218,21 +1253,33 @@ export async function checkGrokLiveAvailable() {
 // =============================================================================
 
 /**
- * Initialize Grok Live UI components
+ * Initialize Grok Live UI components.
+ *
+ * @param {Object} [config] - Optional configuration.
+ * @param {Object} [config.selectors] - Override DOM ids (Track 4 modal hook).
+ *   Any omitted key falls back to the historical inline-banner default in SEL.
  */
-export function initGrokLiveUI() {
+export function initGrokLiveUI(config) {
+    if (config && config.selectors && typeof config.selectors === 'object') {
+        Object.assign(SEL, config.selectors);
+    }
     console.log('[GROK-LIVE] Initializing UI...');
 
-    const micBtn = $('grokMicBtn');
-    const connectBtn = $('grokConnectBtn');
-    const sendTextBtn = $('grokSendTextBtn');
-    const textInput = $('grokTextInput');
-    const interruptBtn = $('grokInterruptBtn');
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const sendTextBtn = SEL.sendTextButton ? $(SEL.sendTextButton) : null;
+    const textInput = SEL.textInput ? $(SEL.textInput) : null;
+    const interruptBtn = SEL.interruptButton ? $(SEL.interruptButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
 
-    // Connect button
+    // Connect button — if a dedicated disconnect button is wired (modal
+    // layout), this only initiates connect. Otherwise, fall back to legacy
+    // single-button toggle.
     if (connectBtn) {
         connectBtn.addEventListener('click', () => {
-            if (isConnected) {
+            if (disconnectBtn) {
+                if (!isConnected) connect();
+            } else if (isConnected) {
                 disconnect();
             } else {
                 connect();
@@ -1274,7 +1321,7 @@ export function initGrokLiveUI() {
                 });
 
                 // Show in transcript
-                const transcriptEl = $('grokTranscript');
+                const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
                 if (transcriptEl) {
                     const userEl = document.createElement('div');
                     userEl.className = 'user-turn';
@@ -1303,8 +1350,8 @@ export function initGrokLiveUI() {
         });
     }
 
-    // Disconnect button
-    const disconnectBtn = $('grokDisconnectBtn');
+    // Disconnect button (separate from connect — already resolved above
+    // as `disconnectBtn`; just wire its click handler here).
     if (disconnectBtn) {
         disconnectBtn.addEventListener('click', () => {
             disconnect();
@@ -1312,8 +1359,8 @@ export function initGrokLiveUI() {
     }
 
     // Toggle transcript section
-    const toggleBtn = $('grokToggleBtn');
-    const transcriptSection = $('grokTranscriptSection');
+    const toggleBtn = SEL.toggleButton ? $(SEL.toggleButton) : null;
+    const transcriptSection = SEL.transcriptSection ? $(SEL.transcriptSection) : null;
     if (toggleBtn && transcriptSection) {
         toggleBtn.addEventListener('click', () => {
             const isCollapsed = transcriptSection.classList.toggle('collapsed');

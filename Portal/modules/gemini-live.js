@@ -21,6 +21,32 @@ import { getOperator, saveHistory } from './state-management.js';
 import { addBubble } from './chat-bubbles.js';
 
 // =============================================================================
+// Selector configuration
+// =============================================================================
+//
+// Track 4 (2026-05-20): inline banners deprecated. Module reads DOM ids from
+// the SEL table below; the Voice Agents modal passes its own ids via
+// initGeminiLiveUI({selectors: {...}}) so the same code drives the modal.
+// Defaults preserved for backward-compat; production uses modal-supplied ids.
+const SEL = {
+    voiceSelect: 'geminiVoiceSelect',
+    modelSelect: 'geminiModelSelect',
+    vadStartSelect: 'geminiVadStartSelect',
+    vadEndSelect: 'geminiVadEndSelect',
+    thinkingSelect: 'geminiThinkingSelect',
+    thinkingRow: null,         // optional row wrapper for thinking
+    connectButton: 'geminiConnect',
+    disconnectButton: 'geminiDisconnect',
+    micButton: 'geminiMic',
+    micText: 'geminiMicText',
+    statusEl: 'geminiLiveStatus',
+    transcriptEl: 'geminiTranscript',
+    transcriptSection: 'geminiTranscriptSection',
+    toggleButton: 'geminiToggleBtn',
+    bannerEl: 'geminiLiveBanner',
+};
+
+// =============================================================================
 // State
 // =============================================================================
 
@@ -789,14 +815,14 @@ export async function connect(operator) {
     }
 
     // Get selected voice
-    const voiceSelect = $('geminiVoiceSelect');
+    const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
     selectedVoice = voiceSelect ? voiceSelect.value : 'Charon';
 
     // Read new model + VAD + thinking config fields from dropdowns (audit M3 — no JS-side catalog)
-    const modelSelect = $('geminiModelSelect');
-    const vadStartSelect = $('geminiVadStartSelect');
-    const vadEndSelect = $('geminiVadEndSelect');
-    const thinkingSelect = $('geminiThinkingSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const vadStartSelect = SEL.vadStartSelect ? $(SEL.vadStartSelect) : null;
+    const vadEndSelect = SEL.vadEndSelect ? $(SEL.vadEndSelect) : null;
+    const thinkingSelect = SEL.thinkingSelect ? $(SEL.thinkingSelect) : null;
 
     const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
     const vadSensitivityStart = (vadStartSelect && vadStartSelect.value) ? vadStartSelect.value : undefined;
@@ -1312,7 +1338,7 @@ export function interrupt() {
 // =============================================================================
 
 function updateStatus(status) {
-    const statusEl = $('geminiLiveStatus');
+    const statusEl = SEL.statusEl ? $(SEL.statusEl) : null;
     if (statusEl) {
         statusEl.textContent = status;
 
@@ -1332,7 +1358,7 @@ function updateStatus(status) {
 }
 
 function updateTranscript(text) {
-    const transcriptEl = $('geminiTranscript');
+    const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
     if (transcriptEl) {
         transcriptEl.textContent = text;
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -1340,18 +1366,18 @@ function updateTranscript(text) {
 }
 
 function clearTranscript() {
-    const transcriptEl = $('geminiTranscript');
+    const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
     if (transcriptEl) {
         transcriptEl.textContent = '';
     }
 }
 
 function updateUI() {
-    const banner = $('geminiLiveBanner');
-    const connectBtn = $('geminiConnect');
-    const disconnectBtn = $('geminiDisconnect');
-    const micBtn = $('geminiMic');
-    const micText = $('geminiMicText');
+    const banner = SEL.bannerEl ? $(SEL.bannerEl) : null;
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const micText = SEL.micText ? $(SEL.micText) : null;
 
     if (banner) {
         banner.classList.toggle('connected', isConnected);
@@ -1369,9 +1395,9 @@ function updateUI() {
     // Audit I4: model + vad_start + vad_end are schema-changing (setup-message-rebuild),
     // so they must be locked while CONNECTED. Voice + thinking_level stay always-enabled
     // (hot-swappable post-setup).
-    const modelSelect = $('geminiModelSelect');
-    const vadStartSelect = $('geminiVadStartSelect');
-    const vadEndSelect = $('geminiVadEndSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const vadStartSelect = SEL.vadStartSelect ? $(SEL.vadStartSelect) : null;
+    const vadEndSelect = SEL.vadEndSelect ? $(SEL.vadEndSelect) : null;
     if (modelSelect) modelSelect.disabled = isConnected;
     if (vadStartSelect) vadStartSelect.disabled = isConnected;
     if (vadEndSelect) vadEndSelect.disabled = isConnected;
@@ -1448,7 +1474,7 @@ async function fetchGeminiLiveCatalog() {
  * Populate the Gemini model dropdown from catalog. Default = model_default.
  */
 function populateGeminiModelDropdown(catalog) {
-    const modelSelect = $('geminiModelSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
     if (!modelSelect || !catalog || !Array.isArray(catalog.models)) return;
     modelSelect.innerHTML = '';
     catalog.models.forEach(m => {
@@ -1466,7 +1492,7 @@ function populateGeminiModelDropdown(catalog) {
  * Label = `${name} (${descriptor})` when descriptor present, else just name.
  */
 function populateGeminiVoiceDropdown(catalog) {
-    const voiceSelect = $('geminiVoiceSelect');
+    const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
     if (!voiceSelect || !catalog || !Array.isArray(catalog.voices)) return;
     const descriptors = catalog.voice_descriptors || {};
     voiceSelect.innerHTML = '';
@@ -1485,20 +1511,32 @@ function populateGeminiVoiceDropdown(catalog) {
  * Toggle thinking-level dropdown visibility based on selected model (3.1 only).
  */
 function updateGeminiThinkingVisibility() {
-    const modelSelect = $('geminiModelSelect');
-    const thinkingSelect = $('geminiThinkingSelect');
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const thinkingSelect = SEL.thinkingSelect ? $(SEL.thinkingSelect) : null;
+    const thinkingRow = SEL.thinkingRow ? $(SEL.thinkingRow) : null;
     if (!modelSelect || !thinkingSelect) return;
     const show = (modelSelect.value === 'gemini-3.1-flash-live-preview');
-    thinkingSelect.style.display = show ? '' : 'none';
+    const target = thinkingRow || thinkingSelect;
+    target.style.display = show ? '' : 'none';
 }
 
-export function initGeminiLiveUI() {
-    const connectBtn = $('geminiConnect');
-    const disconnectBtn = $('geminiDisconnect');
-    const micBtn = $('geminiMic');
-    const toggleBtn = $('geminiToggleBtn');
-    const transcriptSection = $('geminiTranscriptSection');
-    const modelSelect = $('geminiModelSelect');
+/**
+ * Initialize Gemini Live UI and event handlers.
+ *
+ * @param {Object} [config] - Optional configuration.
+ * @param {Object} [config.selectors] - Override DOM ids (Track 4 modal hook).
+ *   Any omitted key falls back to the historical inline-banner default in SEL.
+ */
+export function initGeminiLiveUI(config) {
+    if (config && config.selectors && typeof config.selectors === 'object') {
+        Object.assign(SEL, config.selectors);
+    }
+    const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;
+    const disconnectBtn = SEL.disconnectButton ? $(SEL.disconnectButton) : null;
+    const micBtn = SEL.micButton ? $(SEL.micButton) : null;
+    const toggleBtn = SEL.toggleButton ? $(SEL.toggleButton) : null;
+    const transcriptSection = SEL.transcriptSection ? $(SEL.transcriptSection) : null;
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
 
     // Populate model + voice dropdowns from /gemini-live/status (5min sessionStorage cache)
     fetchGeminiLiveCatalog().then(catalog => {
