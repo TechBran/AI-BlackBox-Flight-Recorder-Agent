@@ -109,11 +109,15 @@ object Constants {
         "gemini-agents" to listOf(
             "gemini-3.1-pro-preview" to "Gemini 3.1 Pro"
         ),
+        // Empirically WS-connection-verified 2026-05-19. gpt-realtime-2 and
+        // gpt-realtime-2025-08-28 are listed by /v1/models but REJECTED by the
+        // Realtime WS endpoint with close code 4000. Do NOT add them back
+        // without re-testing via actual ws connect + session.created handshake.
         "realtime" to listOf(
-            "gpt-realtime-2" to "GPT Realtime 2 (Newest GA)",
-            "gpt-realtime" to "GPT Realtime (Alias)",
-            "gpt-realtime-1.5" to "GPT Realtime 1.5",
-            "gpt-realtime-mini-2025-12-15" to "GPT Realtime Mini (Cheap)"
+            "gpt-realtime" to "GPT Realtime (GA alias)",
+            "gpt-realtime-1.5" to "GPT Realtime 1.5 (pinned)",
+            "gpt-realtime-mini" to "GPT Realtime Mini (cheap, alias)",
+            "gpt-realtime-mini-2025-12-15" to "GPT Realtime Mini (Dec 2025 pin)"
         ),
         "gemini-live" to listOf(
             "gemini-2.5-flash-native-audio-latest" to "Gemini 2.5 Flash Live (Latest GA-track)",
@@ -141,7 +145,7 @@ object Constants {
 
     /** Default model id per live provider — first item the dropdown picks if no user pref. */
     val LIVE_MODEL_DEFAULTS: Map<String, String> = mapOf(
-        "realtime" to "gpt-realtime-2",
+        "realtime" to "gpt-realtime",
         "gemini-live" to "gemini-2.5-flash-native-audio-latest",
     )
 

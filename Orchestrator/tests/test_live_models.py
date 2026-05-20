@@ -139,10 +139,13 @@ async def test_realtime_status_filters_non_chat_categories():
     assert "gpt-realtime-whisper" not in model_ids, "STT-only model leaked into voice dropdown"
     assert "gpt-realtime-translate" not in model_ids, "translate-only model leaked into voice dropdown"
 
-    # gpt-realtime-2 present + flagged default
+    # gpt-realtime alias present + flagged default
+    # (was gpt-realtime-2 pre-empirical-fix; that id is listed by /v1/models
+    # but REJECTED by the Realtime WS endpoint with close code 4000.
+    # Reverted to the always-working alias.)
     default_models = [m for m in models if m.get("default") is True]
     assert len(default_models) == 1, f"expected exactly one default model, got {default_models}"
-    assert default_models[0]["id"] == "gpt-realtime-2"
+    assert default_models[0]["id"] == "gpt-realtime"
 
 
 # -----------------------------------------------------------------------------
@@ -313,6 +316,12 @@ def test_allowlist_casing_precision():
     assert "gemini-3.1-flash-live-preview" in GEMINI_LIVE_THINKING_CAPABLE_MODELS
     assert "gemini-2.5-flash-native-audio-latest" not in GEMINI_LIVE_THINKING_CAPABLE_MODELS
 
-    # Catalogs non-empty + contain expected anchors
-    assert any(m["id"] == "gpt-realtime-2" for m in OPENAI_REALTIME_MODELS)
+    # Catalogs non-empty + contain expected anchors (WS-connection-verified ids)
+    assert any(m["id"] == "gpt-realtime" for m in OPENAI_REALTIME_MODELS)
+    assert any(m["id"] == "gpt-realtime-1.5" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gemini-3.1-flash-live-preview" for m in GEMINI_LIVE_MODELS)
+    # Guard: invalid ids that /v1/models lists but Realtime WS rejects (close 4000)
+    rejected = {"gpt-realtime-2", "gpt-realtime-2025-08-28"}
+    assert not any(m["id"] in rejected for m in OPENAI_REALTIME_MODELS), (
+        f"WS-rejected model id leaked into catalog: {rejected & {m['id'] for m in OPENAI_REALTIME_MODELS}}"
+    )
