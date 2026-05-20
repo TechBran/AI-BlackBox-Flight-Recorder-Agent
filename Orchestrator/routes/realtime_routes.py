@@ -44,6 +44,9 @@ from Orchestrator.config import (
     OPENAI_API_KEY,
     OPENAI_REALTIME_URL,
     OPENAI_REALTIME_MODEL,
+    OPENAI_REALTIME_MODELS,
+    OPENAI_REALTIME_VAD_TYPES,
+    OPENAI_REALTIME_VAD_EAGERNESS,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     VOL_PATH
@@ -231,9 +234,18 @@ async def execute_search_snapshots(session: RealtimeSession, arguments: Dict) ->
 # OpenAI Realtime API Connection
 # =============================================================================
 
-async def connect_to_openai(session: RealtimeSession) -> bool:
+async def connect_to_openai(session: RealtimeSession, model: Optional[str] = None) -> bool:
     """
     Establish WebSocket connection to OpenAI Realtime API.
+
+    Args:
+        session: RealtimeSession object
+        model: Optional model id override (e.g. "gpt-realtime-2", "gpt-realtime-mini-2025-12-15").
+            Validated against OPENAI_REALTIME_MODELS — any category is accepted at this
+            layer (UI does chat-only filtering). Invalid values fall back to the
+            OPENAI_REALTIME_MODEL default with a logged warning. Per OpenAI API the
+            model is bound at WS-connect via URL query, NOT via session.update
+            (audit C3).
 
     Returns True if connection successful, False otherwise.
     """
@@ -245,8 +257,15 @@ async def connect_to_openai(session: RealtimeSession) -> bool:
         print("[REALTIME] Cannot connect - OPENAI_API_KEY not set")
         return False
 
+    # Resolve + validate model (allowlist from OPENAI_REALTIME_MODELS)
+    _allowed_model_ids = {m["id"] for m in OPENAI_REALTIME_MODELS}
+    if model and model not in _allowed_model_ids:
+        print(f"[REALTIME] WARNING: model {model!r} not in OPENAI_REALTIME_MODELS allowlist; falling back to default {OPENAI_REALTIME_MODEL!r}")
+        model = None
+    resolved_model = model or OPENAI_REALTIME_MODEL
+
     try:
-        url = f"{OPENAI_REALTIME_URL}?model={OPENAI_REALTIME_MODEL}"
+        url = f"{OPENAI_REALTIME_URL}?model={resolved_model}"
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1"
@@ -273,7 +292,17 @@ async def connect_to_openai(session: RealtimeSession) -> bool:
         session.status = "error"
         return False
 
-async def configure_openai_session(session: RealtimeSession, operator: str, voice: str = "ash", custom_role: str = ""):
+async def configure_openai_session(
+    session: RealtimeSession,
+    operator: str,
+    voice: str = "ash",
+    custom_role: str = "",
+    vad_type: Optional[str] = None,
+    vad_eagerness: Optional[str] = None,
+    idle_timeout_ms: Optional[int] = None,
+    interrupt_response: Optional[bool] = None,
+    create_response: Optional[bool] = None,
+):
     """
     Configure the OpenAI Realtime session with tools and settings.
     Injects operator-specific context and personalization.
@@ -283,9 +312,31 @@ async def configure_openai_session(session: RealtimeSession, operator: str, voic
         operator: Operator name for context
         voice: Voice to use (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar)
         custom_role: Optional custom system prompt/persona for outbound calls
+        vad_type: Optional VAD mode — "server_vad" (default) or "semantic_vad".
+            Invalid values fall back to existing server_vad default with a logged warning.
+        vad_eagerness: Optional semantic_vad eagerness — "low" | "medium" | "high" | "auto".
+            Ignored unless vad_type == "semantic_vad". When None, server picks default.
+        idle_timeout_ms: Optional server_vad idle timeout in ms (5000-300000 typical range).
+            Per OpenAI SDK type stubs, idle_timeout_ms is server_vad-only — ignored when
+            vad_type == "semantic_vad".
+        interrupt_response: Optional bool — apply to BOTH server_vad and semantic_vad
+            (audit I3 — both fields exist on both turn-detection shapes per SDK type stubs).
+        create_response: Optional bool — apply to BOTH server_vad and semantic_vad.
+
+        All new VAD-related kwargs default to None to preserve phone bridge
+        positional-arg call sites (audit C2 — phone/bridge.py lines 744, 813, 848,
+        1286, 1322, 1370 must keep working unchanged).
     """
     if not session.openai_ws:
         return
+
+    # Allowlist validation of client-supplied VAD fields.
+    if vad_type is not None and vad_type not in OPENAI_REALTIME_VAD_TYPES:
+        print(f"[REALTIME] WARNING: vad_type {vad_type!r} not in {OPENAI_REALTIME_VAD_TYPES}; falling back to server_vad default")
+        vad_type = None
+    if vad_eagerness is not None and vad_eagerness not in OPENAI_REALTIME_VAD_EAGERNESS:
+        print(f"[REALTIME] WARNING: vad_eagerness {vad_eagerness!r} not in {OPENAI_REALTIME_VAD_EAGERNESS}; ignoring")
+        vad_eagerness = None
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -412,6 +463,35 @@ This is essential because:
 
 Do this BEFORE responding to the user - check what happened recently so you're caught up."""
 
+    # Build turn_detection payload based on vad_type.
+    # - server_vad (default): existing shape + optional idle_timeout_ms
+    # - semantic_vad: {type, eagerness?, interrupt_response?, create_response?}
+    #   (no idle_timeout_ms — per OpenAI SDK, server_vad-only).
+    # interrupt_response / create_response apply to BOTH modes per SDK type stubs
+    # (audit I3).
+    if vad_type == "semantic_vad":
+        turn_detection: Dict[str, Any] = {"type": "semantic_vad"}
+        if vad_eagerness is not None:
+            turn_detection["eagerness"] = vad_eagerness
+        if interrupt_response is not None:
+            turn_detection["interrupt_response"] = interrupt_response
+        if create_response is not None:
+            turn_detection["create_response"] = create_response
+    else:
+        # server_vad (None or explicit)
+        turn_detection = {
+            "type": "server_vad",
+            "threshold": 0.7,           # Sensitivity (0.0-1.0) — raised from 0.5 to reduce noise triggers
+            "prefix_padding_ms": 300,   # Audio to include before speech detected
+            "silence_duration_ms": 800  # Silence before end of turn (raised from 700 for cleaner cuts)
+        }
+        if idle_timeout_ms is not None:
+            turn_detection["idle_timeout_ms"] = idle_timeout_ms
+        if interrupt_response is not None:
+            turn_detection["interrupt_response"] = interrupt_response
+        if create_response is not None:
+            turn_detection["create_response"] = create_response
+
     # Configure session
     config_event = {
         "type": "session.update",
@@ -424,12 +504,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             "input_audio_transcription": {
                 "model": "whisper-1"
             },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.7,           # Sensitivity (0.0-1.0) — raised from 0.5 to reduce noise triggers
-                "prefix_padding_ms": 300,   # Audio to include before speech detected
-                "silence_duration_ms": 800  # Silence before end of turn (raised from 700 for cleaner cuts)
-            },  # Server-side VAD for continuous listening mode
+            "turn_detection": turn_detection,
             "tools": REALTIME_TOOLS,
             "tool_choice": "auto",
             "temperature": 0.8
@@ -1222,6 +1297,28 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     print(f"[REALTIME] WebSocket accepted for session: {session_id}")
 
+    # Android URL-query path (audit M4 + I1): Android passes config via query
+    # string instead of a JSON connect message. We use websocket.query_params.get()
+    # INSIDE the handler (NOT FastAPI Query() signature injection on a WebSocket
+    # route — that pattern is unverified in this codebase). These values become
+    # defaults for the connect handler; if the web client also sends a JSON
+    # connect message, those values win (last write wins — interactive UI).
+    url_operator = websocket.query_params.get("operator")
+    url_voice = websocket.query_params.get("voice")
+    url_model = websocket.query_params.get("model")
+    url_vad_type = websocket.query_params.get("vad_type")
+    url_vad_eagerness = websocket.query_params.get("vad_eagerness")
+    _idle_str = websocket.query_params.get("idle_timeout_ms")
+    url_idle_timeout_ms: Optional[int] = int(_idle_str) if _idle_str and _idle_str.isdigit() else None
+    _interrupt_str = websocket.query_params.get("interrupt_response")
+    url_interrupt_response: Optional[bool] = (
+        _interrupt_str.lower() == "true" if _interrupt_str is not None else None
+    )
+    _create_str = websocket.query_params.get("create_response")
+    url_create_response: Optional[bool] = (
+        _create_str.lower() == "true" if _create_str is not None else None
+    )
+
     # Check dependencies
     if not WEBSOCKETS_AVAILABLE:
         await _safe_ws_send(websocket, {
@@ -1277,11 +1374,21 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
             msg_type = data.get("type", "")
 
             if msg_type == "connect":
-                # Initial connection - establish OpenAI WebSocket
-                operator = data.get("operator", "")
-                voice = data.get("voice", "ash")  # Default to ash if not specified
+                # Initial connection - establish OpenAI WebSocket.
+                # Merge rule: JSON connect message wins over Android URL-query
+                # fallbacks (web is interactive — last write wins).
+                operator = data.get("operator", url_operator or "")
+                voice = data.get("voice", url_voice or "ash")  # Default to ash if not specified
                 greeting = data.get("greeting", "")
                 role = data.get("role", "")
+                # T2 new fields — model goes to connect_to_openai (URL query),
+                # vad/timeout/response fields go to configure_openai_session (session.update).
+                model = data.get("model", url_model)
+                vad_type = data.get("vad_type", url_vad_type)
+                vad_eagerness = data.get("vad_eagerness", url_vad_eagerness)
+                idle_timeout_ms = data.get("idle_timeout_ms", url_idle_timeout_ms)
+                interrupt_response = data.get("interrupt_response", url_interrupt_response)
+                create_response = data.get("create_response", url_create_response)
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1289,11 +1396,21 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                     "data": "Connecting to OpenAI..."
                 })
 
-                # Connect to OpenAI
-                if await connect_to_openai(session):
-                    # Configure session with tools, context, and voice
-                    await configure_openai_session(session, operator, voice, custom_role=role)
-                    print(f"[REALTIME] Voice selected: {voice}")
+                # Connect to OpenAI (model bound at upstream WS URL — audit C3)
+                if await connect_to_openai(session, model=model):
+                    # Configure session with tools, context, voice + VAD/turn settings
+                    await configure_openai_session(
+                        session,
+                        operator,
+                        voice,
+                        custom_role=role,
+                        vad_type=vad_type,
+                        vad_eagerness=vad_eagerness,
+                        idle_timeout_ms=idle_timeout_ms,
+                        interrupt_response=interrupt_response,
+                        create_response=create_response,
+                    )
+                    print(f"[REALTIME] Voice selected: {voice}; model={model or OPENAI_REALTIME_MODEL}; vad_type={vad_type or 'server_vad'}")
 
                     # Emit provenance to the client once per session start so
                     # the Android/Portal UI can show which snapshots were used
@@ -1330,7 +1447,7 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                         "data": {
                             "session_id": session_id,
                             "operator": operator,
-                            "model": OPENAI_REALTIME_MODEL
+                            "model": model or OPENAI_REALTIME_MODEL
                         }
                     })
                 else:
@@ -1403,13 +1520,38 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
 
 @app.get("/realtime/status")
 async def realtime_status():
-    """Get status of Realtime API integration."""
+    """Get status of Realtime API integration.
+
+    Emits the locked status-shape from plan v2 Architecture section:
+    - enabled: API key configured?
+    - model_default / models[]: dropdown catalog, FILTERED to category=="chat"
+      (audit I4 — whisper is STT-only, translate is specialized — both would
+      silently fail in a voice-conversation dropdown).
+    - voice_default / voices[]: flat string array (no descriptors — OpenAI
+      voices have no character descriptors; that's a Gemini-only field).
+    """
+    # OpenAI Realtime voices — sourced from the API docs (verified inline at
+    # configure_openai_session line ~440). Default is "ash".
+    _openai_voices = [
+        "alloy", "ash", "ballad", "coral", "echo",
+        "sage", "shimmer", "verse", "marin", "cedar",
+    ]
+    _openai_voice_default = "ash"
+
     return {
         "available": WEBSOCKETS_AVAILABLE and bool(OPENAI_API_KEY),
         "websockets_installed": WEBSOCKETS_AVAILABLE,
         "api_key_configured": bool(OPENAI_API_KEY),
+        "enabled": bool(OPENAI_API_KEY),
+        # Legacy single-value field — preserved for backwards compat with any
+        # caller that hasn't migrated to model_default yet.
         "model": OPENAI_REALTIME_MODEL,
-        "active_sessions": len([s for s in REALTIME_SESSIONS.values() if s.status == "connected"])
+        # Locked v2 catalog shape:
+        "model_default": OPENAI_REALTIME_MODEL,
+        "models": [m for m in OPENAI_REALTIME_MODELS if m.get("category") == "chat"],
+        "voice_default": _openai_voice_default,
+        "voices": _openai_voices,
+        "active_sessions": len([s for s in REALTIME_SESSIONS.values() if s.status == "connected"]),
     }
 
 @app.get("/realtime/sessions")
