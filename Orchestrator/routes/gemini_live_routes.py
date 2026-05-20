@@ -48,6 +48,11 @@ from Orchestrator.config import (
     GOOGLE_API_KEY,
     GEMINI_LIVE_URL,
     GEMINI_LIVE_MODEL,
+    GEMINI_LIVE_MODELS,
+    GEMINI_LIVE_VOICES,
+    GEMINI_LIVE_VOICE_DESCRIPTORS,
+    GEMINI_LIVE_VAD_SENSITIVITIES,
+    GEMINI_LIVE_THINKING_LEVELS,
     GEMINI_LIVE_INPUT_SAMPLE_RATE,
     GEMINI_LIVE_OUTPUT_SAMPLE_RATE,
     GEMINI_LIVE_DEFAULT_VOICE,
@@ -203,7 +208,17 @@ async def connect_to_gemini(session: GeminiLiveSession) -> bool:
         session.status = "error"
         return False
 
-async def configure_gemini_session(session: GeminiLiveSession, operator: str, voice: str, custom_role: str = "", phone_mode: bool = False):
+async def configure_gemini_session(
+    session: GeminiLiveSession,
+    operator: str,
+    voice: str,
+    custom_role: str = "",
+    phone_mode: bool = False,
+    model: Optional[str] = None,
+    vad_sensitivity_start: Optional[str] = None,
+    vad_sensitivity_end: Optional[str] = None,
+    thinking_level: Optional[str] = None,
+):
     """
     Configure the Gemini Live session with tools and settings.
     Sends BidiGenerateContentSetup message.
@@ -214,9 +229,46 @@ async def configure_gemini_session(session: GeminiLiveSession, operator: str, vo
         voice: Voice to use
         custom_role: Optional custom system prompt/persona for outbound calls
         phone_mode: If True, enable server-side VAD with phone-tuned parameters (LOW sensitivity, 1000ms silence)
+        model: Optional model id override (e.g. "gemini-3.1-flash-live-preview").
+            Validated against GEMINI_LIVE_MODELS — invalid values fall back to
+            GEMINI_LIVE_MODEL default with a logged warning. The model field is
+            part of the BidiGenerateContentSetup payload (NOT URL-bound like
+            OpenAI Realtime).
+        vad_sensitivity_start: Optional start-of-speech sensitivity — one of
+            "LOW" | "MEDIUM" | "HIGH" (UPPERCASE per Gemini API enum). Translated
+            internally to the START_SENSITIVITY_* enum value. Invalid → log
+            warning + ignore (server applies its own default).
+        vad_sensitivity_end: Optional end-of-speech sensitivity — same shape.
+        thinking_level: Optional reasoning budget hint — one of "minimal" | "low"
+            | "medium" | "high" (LOWERCASE per google-genai SDK 1.64.0
+            ThinkingConfig enum — do NOT uppercase). Only emitted when
+            model == "gemini-3.1-flash-live-preview"; ignored otherwise so 2.5
+            sessions don't trip server-side rejects.
+
+        All new kwargs default to None to preserve phone bridge call sites at
+        phone/bridge.py:1286, 1370 (audit C2 — those sites only pass positional
+        + phone_mode=True; Optional=None defaults keep them unchanged).
     """
     if not session.gemini_ws:
         return
+
+    # Allowlist validation of client-supplied fields.
+    _allowed_model_ids = {m["id"] for m in GEMINI_LIVE_MODELS}
+    if model is not None and model not in _allowed_model_ids:
+        print(f"[GEMINI-LIVE] WARNING: model {model!r} not in GEMINI_LIVE_MODELS allowlist; falling back to default {GEMINI_LIVE_MODEL!r}")
+        model = None
+    resolved_model = model or GEMINI_LIVE_MODEL
+
+    if vad_sensitivity_start is not None and vad_sensitivity_start not in GEMINI_LIVE_VAD_SENSITIVITIES:
+        print(f"[GEMINI-LIVE] WARNING: vad_sensitivity_start {vad_sensitivity_start!r} not in {GEMINI_LIVE_VAD_SENSITIVITIES}; ignoring")
+        vad_sensitivity_start = None
+    if vad_sensitivity_end is not None and vad_sensitivity_end not in GEMINI_LIVE_VAD_SENSITIVITIES:
+        print(f"[GEMINI-LIVE] WARNING: vad_sensitivity_end {vad_sensitivity_end!r} not in {GEMINI_LIVE_VAD_SENSITIVITIES}; ignoring")
+        vad_sensitivity_end = None
+
+    if thinking_level is not None and thinking_level not in GEMINI_LIVE_THINKING_LEVELS:
+        print(f"[GEMINI-LIVE] WARNING: thinking_level {thinking_level!r} not in {GEMINI_LIVE_THINKING_LEVELS} (lowercase); ignoring")
+        thinking_level = None
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -363,7 +415,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
 
     # Build BidiGenerateContentSetup message
     setup_config = {
-        "model": f"models/{GEMINI_LIVE_MODEL}",
+        "model": f"models/{resolved_model}",
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": {
@@ -402,12 +454,40 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         }
         print(f"[GEMINI-LIVE] Phone mode: server-side VAD enabled (LOW sensitivity, 1000ms silence)")
 
+    # Client-supplied VAD sensitivity overrides (web UI / Android).
+    # Merge into existing realtimeInputConfig.automaticActivityDetection if
+    # phone_mode already set one; otherwise create the dict. Skip the field
+    # entirely if the corresponding param is None — let server defaults apply.
+    if vad_sensitivity_start is not None or vad_sensitivity_end is not None:
+        rt_cfg = setup_config.setdefault("realtimeInputConfig", {})
+        aad = rt_cfg.setdefault("automaticActivityDetection", {"disabled": False})
+        if vad_sensitivity_start is not None:
+            # LOW/MEDIUM/HIGH → START_SENSITIVITY_LOW/MEDIUM/HIGH (Gemini API enum)
+            aad["startOfSpeechSensitivity"] = f"START_SENSITIVITY_{vad_sensitivity_start}"
+        if vad_sensitivity_end is not None:
+            aad["endOfSpeechSensitivity"] = f"END_SENSITIVITY_{vad_sensitivity_end}"
+        print(f"[GEMINI-LIVE] VAD sensitivity override: start={vad_sensitivity_start}, end={vad_sensitivity_end}")
+
+    # thinkingLevel is ONLY valid for the 3.1 preview model. Emitting it on 2.5
+    # would either be silently ignored or trip an upstream reject — gate strictly
+    # on resolved_model. Path is setup.generationConfig.thinkingConfig.thinkingLevel
+    # (under generationConfig, NOT modelConfig — verified against google-genai
+    # SDK 1.64.0 types.py:ThinkingConfig). Value is LOWERCASE (minimal/low/
+    # medium/high) per the same SDK enum.
+    if thinking_level is not None and resolved_model == "gemini-3.1-flash-live-preview":
+        setup_config["generationConfig"]["thinkingConfig"] = {
+            "thinkingLevel": thinking_level
+        }
+        print(f"[GEMINI-LIVE] thinkingLevel={thinking_level} enabled for gemini-3.1-flash-live-preview")
+    elif thinking_level is not None:
+        print(f"[GEMINI-LIVE] thinking_level={thinking_level!r} ignored — only applies to gemini-3.1-flash-live-preview (resolved_model={resolved_model})")
+
     setup_message = {"setup": setup_config}
 
     await session.gemini_ws.send(json.dumps(setup_message))
     session.context_injected = True
     session.voice = voice
-    print(f"[GEMINI-LIVE] Session configured for operator {operator} with voice {voice}")
+    print(f"[GEMINI-LIVE] Session configured for operator {operator} with voice {voice}; model={resolved_model}")
 
 # =============================================================================
 # Message Handlers
@@ -1430,6 +1510,24 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     print(f"[GEMINI-LIVE] WebSocket accepted for session: {session_id}")
 
+    # Android URL-query path (audit M4 + I1): Android passes config via query
+    # string instead of a JSON connect message. We use websocket.query_params.get()
+    # INSIDE the handler (NOT FastAPI Query() signature injection on a WebSocket
+    # route — that pattern is unverified in this codebase). These values become
+    # defaults for the connect handler; if the web client also sends a JSON
+    # connect message, those values win (JSON wins, URL fills missing — mirrors
+    # T2 precedence at realtime_routes.py:1377-1391).
+    #
+    # Field naming: vad_sensitivity_start / vad_sensitivity_end across all sides
+    # (JSON message, URL query, Python kwarg, Android client T11) for
+    # consistency with the function signature.
+    url_operator = websocket.query_params.get("operator")
+    url_voice = websocket.query_params.get("voice")
+    url_model = websocket.query_params.get("model")
+    url_vad_sensitivity_start = websocket.query_params.get("vad_sensitivity_start")
+    url_vad_sensitivity_end = websocket.query_params.get("vad_sensitivity_end")
+    url_thinking_level = websocket.query_params.get("thinking_level")
+
     # Check dependencies
     if not WEBSOCKETS_AVAILABLE:
         await _safe_ws_send(websocket, {
@@ -1485,11 +1583,20 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
             msg_type = data.get("type", "")
 
             if msg_type == "connect":
-                # Initial connection - establish Gemini WebSocket
-                operator = data.get("operator", "")
-                voice = data.get("voice", GEMINI_LIVE_DEFAULT_VOICE)
+                # Initial connection - establish Gemini WebSocket.
+                # Merge rule: JSON connect message wins over Android URL-query
+                # fallbacks (web is interactive — JSON wins, URL fills missing).
+                # Mirrors T2 precedence at realtime_routes.py:1377-1391.
+                operator = data.get("operator", url_operator or "")
+                voice = data.get("voice", url_voice or GEMINI_LIVE_DEFAULT_VOICE)
                 greeting = data.get("greeting", "")
                 role = data.get("role", "")
+                # T3 new fields — passed through to configure_gemini_session,
+                # which validates against allowlists and emits payload extensions.
+                model = data.get("model", url_model)
+                vad_sensitivity_start = data.get("vad_sensitivity_start", url_vad_sensitivity_start)
+                vad_sensitivity_end = data.get("vad_sensitivity_end", url_vad_sensitivity_end)
+                thinking_level = data.get("thinking_level", url_thinking_level)
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1499,9 +1606,18 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
 
                 # Connect to Gemini
                 if await connect_to_gemini(session):
-                    # Configure session with tools and context
+                    # Configure session with tools, context, voice + model/VAD/thinking
                     # If role provided (outbound call), use it as custom context
-                    await configure_gemini_session(session, operator, voice, custom_role=role)
+                    await configure_gemini_session(
+                        session,
+                        operator,
+                        voice,
+                        custom_role=role,
+                        model=model,
+                        vad_sensitivity_start=vad_sensitivity_start,
+                        vad_sensitivity_end=vad_sensitivity_end,
+                        thinking_level=thinking_level,
+                    )
 
                     # Emit provenance to the client once per session start so
                     # the Android/Portal UI can show which snapshots were used
@@ -1536,7 +1652,7 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                         "data": {
                             "session_id": session_id,
                             "operator": operator,
-                            "model": GEMINI_LIVE_MODEL,
+                            "model": model or GEMINI_LIVE_MODEL,
                             "voice": voice
                         }
                     })
@@ -1610,16 +1726,35 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
 
 @app.get("/gemini-live/status")
 async def gemini_live_status():
-    """Get status of Gemini Live API integration."""
+    """Get status of Gemini Live API integration.
+
+    Emits the locked status-shape from plan v2 Architecture section:
+    - enabled: API key configured?
+    - model_default / models[]: dropdown catalog. Gemini has no chat/transcribe
+      split (unlike OpenAI Realtime), so no category filter is applied.
+    - voice_default / voices[]: flat string array of 30 voice names.
+    - voice_descriptors: Gemini-only dict mapping voice name → 1-word character
+      descriptor (e.g. "Zephyr" → "Bright"). OpenAI voices have no descriptors,
+      so this field is Gemini-status-specific by plan design.
+    """
     return {
         "available": WEBSOCKETS_AVAILABLE and bool(GOOGLE_API_KEY),
         "websockets_installed": WEBSOCKETS_AVAILABLE,
         "api_key_configured": bool(GOOGLE_API_KEY),
+        "enabled": bool(GOOGLE_API_KEY),
+        # Legacy single-value fields — preserved for backcompat with any caller
+        # that hasn't migrated to model_default / voice_default yet.
         "model": GEMINI_LIVE_MODEL,
+        "default_voice": GEMINI_LIVE_DEFAULT_VOICE,
         "input_sample_rate": GEMINI_LIVE_INPUT_SAMPLE_RATE,
         "output_sample_rate": GEMINI_LIVE_OUTPUT_SAMPLE_RATE,
-        "default_voice": GEMINI_LIVE_DEFAULT_VOICE,
-        "active_sessions": len([s for s in GEMINI_LIVE_SESSIONS.values() if s.status == "connected"])
+        # Locked v2 catalog shape:
+        "model_default": GEMINI_LIVE_MODEL,
+        "models": list(GEMINI_LIVE_MODELS),
+        "voice_default": GEMINI_LIVE_DEFAULT_VOICE,
+        "voices": list(GEMINI_LIVE_VOICES),
+        "voice_descriptors": dict(GEMINI_LIVE_VOICE_DESCRIPTORS),
+        "active_sessions": len([s for s in GEMINI_LIVE_SESSIONS.values() if s.status == "connected"]),
     }
 
 @app.get("/gemini-live/sessions")
