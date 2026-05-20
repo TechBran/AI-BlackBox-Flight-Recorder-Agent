@@ -8,13 +8,13 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui266"/> <!-- v265: T2 model-list centralization (sessionStorage cache + offline-bootstrap fallbacks) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui267"/> <!-- v265: T2 model-list centralization (sessionStorage cache + offline-bootstrap fallbacks) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui266"></script> <!-- v260: STT transcribing state spinner -->
+  <script type="module" src="/ui/app-modular.js?v=genui267"></script> <!-- v260: STT transcribing state spinner -->
 </head>
 <body>
   <div class="app">
@@ -612,12 +612,20 @@
             <button id="btnGenMusic" class="btn btn-generation">🎵 Generate Music</button>
             <button id="btnGenGoogleSSML" class="btn btn-generation">Google Audio (SSML)</button>
             <button id="btnGenGeminiProAudio" class="btn btn-generation">Gemini Pro Audio</button>
-            <button id="btnCronManager" class="btn btn-generation">Scheduler</button>
-            <button id="btnDeviceManager" class="btn btn-generation">Devices</button>
-            <button id="btnTelephonyManager" class="btn btn-generation">Telephony</button>
-            <button id="btnCellularManager" class="btn btn-generation">Cellular</button>
-            <button id="btnSMSInbox" class="btn btn-generation">SMS<span id="smsBadge"></span></button>
-            <button id="btnContactsManager" class="btn btn-generation">Contacts</button>
+          </div>
+        </div>
+
+        <!-- Tools Section -->
+        <div class="menu-group tools-section">
+          <h4>🛠️ Tools</h4>
+          <div class="menu-grid">
+            <button id="btnCronManager" class="btn">Scheduler</button>
+            <button id="btnDeviceManager" class="btn">Devices</button>
+            <button id="btnTelephonyManager" class="btn">Telephony</button>
+            <button id="btnCellularManager" class="btn">Cellular</button>
+            <button id="btnSMSInbox" class="btn">SMS<span id="smsBadge"></span></button>
+            <button id="btnContactsManager" class="btn">Contacts</button>
+            <!-- Tracks 2-5 will add: Computer Use, CLI Agents, Voice Agents, Gmail -->
           </div>
         </div>
 

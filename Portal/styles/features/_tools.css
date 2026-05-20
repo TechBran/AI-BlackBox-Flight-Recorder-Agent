@@ -1,0 +1,20 @@
+/* _tools.css
+ * Tools section in the hamburger menu.
+ * Extracted from the Generation section per
+ * docs/plans/2026-05-20-portal-tools-section-alignment.md (Track 1).
+ *
+ * Visual weight intentionally subtle — mirrors the Updates section
+ * pattern (no highlighted gradient like .generation-section).
+ * Vertical rhythm comes from the shared .menu-group + .menu-grid
+ * rules defined in components/_modals.css; this file only adds the
+ * top-divider + h4 accent color so the section reads as its own group.
+ */
+
+.tools-section {
+  border-top: 1px solid var(--neutral-300);
+  padding-top: 12px;
+}
+
+.tools-section h4 {
+  color: #ffb454; /* warm amber — distinct from running-apps blue + voice-prefs green */
+}
