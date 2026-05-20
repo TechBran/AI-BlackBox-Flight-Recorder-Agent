@@ -427,7 +427,7 @@
             <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
             <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
             <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
-            <!-- Track 5 will add: Gmail -->
+            <button id="btnGmail" class="btn">📧 Gmail</button>
           </div>
         </div>
 
@@ -1853,6 +1853,32 @@
           <div class="va-status" id="vaGrokStatus">Disconnected</div>
         </div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- Gmail Modal — Track 5 -->
+  <div id="gmailModal" class="modal hide">
+    <div class="modal-card gmail-card">
+      <div class="modal-head">
+        <h3>📧 Gmail</h3>
+        <button class="modal-close" data-modal="gmailModal" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body gmail-body">
+        <div class="gmail-status-row" id="gmailStatusRow">
+          <span class="gmail-status-label">Status:</span>
+          <span class="gmail-status-value" id="gmailStatusValue">Checking…</span>
+        </div>
+        <div class="gmail-controls">
+          <button id="gmailConnectBtn" class="btn btn-primary" type="button" style="display:none;">Connect Gmail</button>
+          <button id="gmailDisconnectBtn" class="btn btn-warn" type="button" style="display:none;">Disconnect</button>
+          <button id="gmailRefreshBtn" class="btn" type="button" title="Refresh connection status">🔄 Refresh</button>
+        </div>
+        <p class="gmail-hint">
+          Connect Gmail to let voice/chat agents read your inbox, search messages, send replies,
+          and manage labels. Authorization opens in a new tab via Google OAuth — your password
+          never touches BlackBox. Tokens are stored per-operator on this device.
+        </p>
       </div>
     </div>
   </div>

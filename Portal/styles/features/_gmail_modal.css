@@ -1,0 +1,56 @@
+/* Gmail modal — Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 5.
+ * Minimal Connect/Disconnect launcher matching Android's SettingsSheet.kt:391 scope. */
+
+.gmail-card {
+    width: 480px;
+    max-width: 92vw;
+}
+
+.gmail-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px;
+}
+
+.gmail-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    background: var(--neutral-150, #1a1a1a);
+    border-radius: var(--radius-md, 8px);
+}
+
+.gmail-status-label {
+    font-weight: 600;
+    color: var(--neutral-700, #888);
+}
+
+.gmail-status-value {
+    color: var(--neutral-900, #ccc);
+}
+
+.gmail-status-value.gmail-connected {
+    /* Brand uses warm red elsewhere; for "connected/ok" we want a clear positive
+     * signal that doesn't clash. No --success token exists in _variables.css, so
+     * inline the green here. */
+    color: #4ade80;
+}
+
+.gmail-status-value.gmail-disconnected {
+    color: var(--neutral-700, #888);
+}
+
+.gmail-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.gmail-hint {
+    font-size: 12px;
+    color: var(--neutral-700, #888);
+    line-height: 1.5;
+    margin: 0;
+}

@@ -85,6 +85,7 @@ import { initSMSInbox, openSMSInbox, pollUnread as pollSMSUnread } from './sms-i
 import { initContactsManager } from './contacts-manager.js';
 import { initCLIAgentsModal } from './cli-agents-modal.js';
 import { initVoiceAgentsModal } from './voice-agents-modal.js';
+import { initGmailModal } from './gmail-modal.js';
 import {
     initAgentHandler,
     checkExistingAgentSession
@@ -665,6 +666,13 @@ async function initApp() {
     // closing the modal while connected disconnects all active providers.
     // Per docs/plans/2026-05-20-portal-tools-section-alignment.md Track 4.
     initVoiceAgentsModal();
+
+    // Gmail Tools button — opens a minimal Connect/Disconnect modal that
+    // calls the existing /auth/gmail/* + /gmail/status|disconnect endpoints.
+    // Matches Android's "📧 Connect Gmail" scope (SettingsSheet.kt:391) — no
+    // inbox UI. Per docs/plans/2026-05-20-portal-tools-section-alignment.md
+    // Track 5. Inbox interactions are agent-driven via gmail_* MCP tools.
+    initGmailModal();
     initMediaManager();
     initAgentHandler();
     initGeminiAgentHandler();
