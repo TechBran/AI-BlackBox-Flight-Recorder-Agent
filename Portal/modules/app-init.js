@@ -673,6 +673,21 @@ async function initApp() {
     // Poll unread SMS every 30s
     pollSMSUnread();
     setInterval(pollSMSUnread, 30000);
+
+    // Computer Use Tools button — shortcut that switches chat provider to
+    // computer-use, which auto-attaches the existing cu-drawer to the
+    // operator-menu-bubble. Per docs/plans/2026-05-20-portal-tools-section-alignment.md
+    // Track 2 — Brandon decision: keep existing cu-drawer flow exactly as-is.
+    const btnComputerUse = $('btnComputerUse');
+    if (btnComputerUse) {
+        btnComputerUse.addEventListener('click', () => {
+            const providerSelect = document.getElementById('providerSelect');
+            if (providerSelect) {
+                providerSelect.value = 'computer-use';
+                providerSelect.dispatchEvent(new Event('change'));
+            }
+        });
+    }
     initMediaManager();
     initAgentHandler();
     initGeminiAgentHandler();
