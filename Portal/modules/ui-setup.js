@@ -792,15 +792,37 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     });
     safeSetOnClick("btnCloseMenu", () => menuModal && menuModal.classList.add("hide"));
 
-    // Advanced Settings Accordion Toggle
-    safeSetOnClick("btnToggleAdvanced", () => {
-        const advancedContent = $("advancedSettings");
-        const toggleBtn = $("btnToggleAdvanced");
-        if (advancedContent && toggleBtn) {
-            advancedContent.classList.toggle("collapsed");
-            toggleBtn.classList.toggle("active");
+    // Collapsible section helper — generalizes the existing .advanced-section
+    // toggle pattern to Generation/Tools/Apps/Reasoning sections. Per
+    // docs/plans/2026-05-20-hamburger-polish-and-tailscale-copy.md Track 3.
+    // In-memory state only (no localStorage); refresh resets to default.
+    function wireCollapsibleSection(toggleBtnId, contentDivId, initiallyExpanded = false) {
+        const btn = $(toggleBtnId);
+        const content = $(contentDivId);
+        if (!btn || !content) return;
+        if (initiallyExpanded) {
+            content.classList.remove("collapsed");
+            btn.classList.add("active");
+        } else {
+            content.classList.add("collapsed");
+            btn.classList.remove("active");
         }
-    });
+        btn.addEventListener("click", () => {
+            const isCollapsed = content.classList.toggle("collapsed");
+            btn.classList.toggle("active", !isCollapsed);
+        });
+    }
+
+    // Existing Advanced Settings Accordion (preserved behavior — markup uses
+    // .advanced-content not .section-content, but the collapsed class is the
+    // same so the helper works identically).
+    wireCollapsibleSection("btnToggleAdvanced", "advancedSettings");
+
+    // 4 new collapsibles introduced in Track 3 — all default to collapsed.
+    wireCollapsibleSection("btnToggleGeneration", "generationContent");
+    wireCollapsibleSection("btnToggleTools", "toolsContent");
+    wireCollapsibleSection("btnToggleApps", "appsContent");
+    wireCollapsibleSection("btnToggleReasoning", "reasoningContent");
 
     // Manifest modal
     safeSetOnClick("btnManifest", async () => {

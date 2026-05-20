@@ -1,0 +1,66 @@
+/* Section toggle pattern — generalizes the existing .advanced-section pattern
+   to Generation/Tools/Apps/Reasoning. Per
+   docs/plans/2026-05-20-hamburger-polish-and-tailscale-copy.md Track 3.
+
+   Visual weight mirrors .btn-advanced-toggle (see components/_buttons.css:275)
+   so all 5 collapsible-section headers look consistent. */
+
+.btn-section-toggle {
+    width: 100%;
+    background: var(--neutral-0);
+    color: var(--neutral-800);
+    border: 1px solid var(--neutral-400);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    text-align: left;
+    transition: all var(--transition-base);
+}
+
+.btn-section-toggle:hover {
+    background: var(--neutral-300);
+    border-color: var(--neutral-500);
+    color: var(--neutral-900);
+}
+
+/* Chevron rotates when toggle button has .active class (set by JS).
+   .toggle-icon transition is already defined in _utilities.css. */
+.btn-section-toggle.active .toggle-icon {
+    transform: rotate(180deg);
+}
+
+/* Inline title span inside the toggle button — keeps spacing tight
+   so the chevron stays right-aligned via justify-content: space-between. */
+.btn-section-toggle .section-title {
+    flex: 1 1 auto;
+}
+
+/* Smooth expand/collapse via max-height, matching .advanced-content. */
+.section-content {
+    max-height: 1000px;
+    overflow: hidden;
+    transition: max-height var(--transition-slow),
+                opacity var(--transition-slow),
+                margin-top var(--transition-slow);
+    opacity: 1;
+    margin-top: 12px;
+}
+
+.section-content.collapsed {
+    max-height: 0;
+    opacity: 0;
+    margin-top: 0;
+}
+
+/* Single-column layout for Generation + Tools when expanded.
+   Other sections (Voice Preferences, Updates, System Controls) keep
+   their existing .menu-grid 2-column layout — they don't have
+   .menu-grid-vertical added. */
+.menu-grid.menu-grid-vertical {
+    grid-template-columns: 1fr;
+}

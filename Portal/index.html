@@ -402,32 +402,42 @@
         <button id="btnCloseMenu" class="btn" aria-label="Close menu">✕</button>
       </div>
       <div class="menu-body">
-        <!-- Generation Section (Highlighted) -->
+        <!-- Generation Section (Collapsible) -->
         <div class="menu-group generation-section">
-          <h4 class="generation-title">🎨 Generation</h4>
-          <div class="menu-grid generation-grid">
-            <button id="btnGenImage" class="btn btn-generation">Generate Image</button>
-            <button id="btnGenVideo" class="btn btn-generation">Generate Video</button>
-            <button id="btnGenMusic" class="btn btn-generation">🎵 Generate Music</button>
-            <button id="btnGenGoogleSSML" class="btn btn-generation">Google Audio (SSML)</button>
-            <button id="btnGenGeminiProAudio" class="btn btn-generation">Gemini Pro Audio</button>
+          <button id="btnToggleGeneration" class="btn-section-toggle">
+            <span class="section-title generation-title">🎨 Generation</span>
+            <span class="toggle-icon">▼</span>
+          </button>
+          <div id="generationContent" class="section-content collapsed">
+            <div class="menu-grid menu-grid-vertical generation-grid">
+              <button id="btnGenImage" class="btn btn-generation">Generate Image</button>
+              <button id="btnGenVideo" class="btn btn-generation">Generate Video</button>
+              <button id="btnGenMusic" class="btn btn-generation">🎵 Generate Music</button>
+              <button id="btnGenGoogleSSML" class="btn btn-generation">Google Audio (SSML)</button>
+              <button id="btnGenGeminiProAudio" class="btn btn-generation">Gemini Pro Audio</button>
+            </div>
           </div>
         </div>
 
-        <!-- Tools Section -->
+        <!-- Tools Section (Collapsible) -->
         <div class="menu-group tools-section">
-          <h4>🛠️ Tools</h4>
-          <div class="menu-grid">
-            <button id="btnCronManager" class="btn">Scheduler</button>
-            <button id="btnDeviceManager" class="btn">Devices</button>
-            <button id="btnTelephonyManager" class="btn">Telephony</button>
-            <button id="btnCellularManager" class="btn">Cellular</button>
-            <button id="btnSMSInbox" class="btn">SMS<span id="smsBadge"></span></button>
-            <button id="btnContactsManager" class="btn">Contacts</button>
-            <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
-            <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
-            <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
-            <button id="btnGmail" class="btn">📧 Gmail</button>
+          <button id="btnToggleTools" class="btn-section-toggle">
+            <span class="section-title">🛠️ Tools</span>
+            <span class="toggle-icon">▼</span>
+          </button>
+          <div id="toolsContent" class="section-content collapsed">
+            <div class="menu-grid menu-grid-vertical">
+              <button id="btnCronManager" class="btn">Scheduler</button>
+              <button id="btnDeviceManager" class="btn">Devices</button>
+              <button id="btnTelephonyManager" class="btn">Telephony</button>
+              <button id="btnCellularManager" class="btn">Cellular</button>
+              <button id="btnSMSInbox" class="btn">SMS<span id="smsBadge"></span></button>
+              <button id="btnContactsManager" class="btn">Contacts</button>
+              <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
+              <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
+              <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
+              <button id="btnGmail" class="btn">📧 Gmail</button>
+            </div>
           </div>
         </div>
 
@@ -441,11 +451,16 @@
           </div>
         </div>
 
-        <!-- Running Apps Section -->
+        <!-- Running Apps Section (Collapsible) -->
         <div class="menu-group running-apps-section">
-          <h4>🚀 Running Apps</h4>
-          <div id="menuRunningApps" class="menu-apps-list">
-            <div class="no-apps-message">No apps running</div>
+          <button id="btnToggleApps" class="btn-section-toggle">
+            <span class="section-title">🚀 Running Apps</span>
+            <span class="toggle-icon">▼</span>
+          </button>
+          <div id="appsContent" class="section-content collapsed">
+            <div id="menuRunningApps" class="menu-apps-list">
+              <div class="no-apps-message">No apps running</div>
+            </div>
           </div>
         </div>
 
@@ -538,17 +553,22 @@
           <p class="voice-hint">Voice setting is saved per operator</p>
         </div>
 
-        <!-- Streaming Mode Section -->
+        <!-- Streaming Mode Section (Collapsible) -->
         <div class="menu-group streaming-section">
-          <h4>🧠 AI Reasoning Mode</h4>
-          <div class="streaming-toggle-row">
-            <label for="streamingToggle">Show AI Thinking:</label>
-            <label class="switch">
-              <input type="checkbox" id="streamingToggle" checked>
-              <span class="slider round"></span>
-            </label>
+          <button id="btnToggleReasoning" class="btn-section-toggle">
+            <span class="section-title">🧠 AI Reasoning Mode</span>
+            <span class="toggle-icon">▼</span>
+          </button>
+          <div id="reasoningContent" class="section-content collapsed">
+            <div class="streaming-toggle-row">
+              <label for="streamingToggle">Show AI Thinking:</label>
+              <label class="switch">
+                <input type="checkbox" id="streamingToggle" checked>
+                <span class="slider round"></span>
+              </label>
+            </div>
+            <p class="streaming-hint">When enabled, see AI reasoning in real-time with streaming responses</p>
           </div>
-          <p class="streaming-hint">When enabled, see AI reasoning in real-time with streaming responses</p>
         </div>
 
         <!-- Updates Section (T8) -->
