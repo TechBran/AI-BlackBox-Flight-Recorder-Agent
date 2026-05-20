@@ -89,7 +89,13 @@ class VoiceClient(private val client: OkHttpClient, private val baseWsUrl: Strin
         const val PONG_TIMEOUT_MS = 30_000L
     }
 
-    fun connect(backend: VoiceBackend, operator: String, voice: String, scope: CoroutineScope) {
+    fun connect(
+        backend: VoiceBackend,
+        operator: String,
+        voice: String,
+        scope: CoroutineScope,
+        sessionConfig: VoiceSessionConfig? = null,
+    ) {
         this.scope = scope
         currentOperator = operator
         currentVoice = voice
@@ -99,7 +105,25 @@ class VoiceClient(private val client: OkHttpClient, private val baseWsUrl: Strin
 
         connectionJob = scope.launch {
             val sessionId = UUID.randomUUID().toString()
-            val url = "$baseWsUrl${backend.wsPath}/$sessionId?operator=$operator&voice=$voice"
+            // T12 (plan 2026-05-19): extend URL query with optional model/vad fields.
+            // Long-form Gemini naming (vad_sensitivity_start/_end) per Phase A backend.
+            val url = buildString {
+                append(baseWsUrl)
+                append(backend.wsPath)
+                append('/')
+                append(sessionId)
+                append("?operator=").append(operator)
+                append("&voice=").append(voice)
+                sessionConfig?.let { cfg ->
+                    cfg.model?.let { append("&model=").append(it) }
+                    cfg.vadType?.let { append("&vad_type=").append(it) }
+                    cfg.vadEagerness?.let { append("&vad_eagerness=").append(it) }
+                    cfg.idleTimeoutMs?.let { append("&idle_timeout_ms=").append(it) }
+                    cfg.vadStart?.let { append("&vad_sensitivity_start=").append(it) }
+                    cfg.vadEnd?.let { append("&vad_sensitivity_end=").append(it) }
+                    cfg.thinkingLevel?.let { append("&thinking_level=").append(it) }
+                }
+            }
             android.util.Log.d("VoiceClient", "Connecting to: $url")
             wsClient.connect(url).collect { msg ->
                 when (msg) {

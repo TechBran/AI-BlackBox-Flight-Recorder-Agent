@@ -19,6 +19,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,13 +37,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -66,7 +70,9 @@ import com.aiblackbox.portal.data.voice.TranscriptEntry
 import com.aiblackbox.portal.data.voice.VoiceBackend
 import com.aiblackbox.portal.data.voice.VoiceClient
 import com.aiblackbox.portal.data.voice.VoiceEvent
+import com.aiblackbox.portal.data.voice.VoiceSessionConfig
 import com.aiblackbox.portal.data.voice.VoiceState
+import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.ui.components.ContextProvenance
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import android.view.HapticFeedbackConstants
@@ -102,7 +108,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _backend = MutableStateFlow(VoiceBackend.GEMINI_LIVE)
     val backend: StateFlow<VoiceBackend> = _backend.asStateFlow()
 
-    private val _voice = MutableStateFlow("Charon")
+    private val _voice = MutableStateFlow(Constants.DEFAULT_GEMINI_LIVE_VOICE)
     val voice: StateFlow<String> = _voice.asStateFlow()
 
     private val _voiceState = MutableStateFlow(VoiceState.DISCONNECTED)
@@ -201,7 +207,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun setBackend(backend: VoiceBackend) { _backend.value = backend }
     fun setVoice(voice: String) { _voice.value = voice }
 
-    fun connect() {
+    fun connect(sessionConfig: VoiceSessionConfig? = null) {
         _error.value = null
         stopMic()
         stopAudioPlayback()
@@ -221,7 +227,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = true
         }
-        voiceClient?.connect(_backend.value, currentOperator, _voice.value, viewModelScope)
+        voiceClient?.connect(_backend.value, currentOperator, _voice.value, viewModelScope, sessionConfig)
     }
 
     fun disconnect() {
@@ -549,15 +555,24 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-// Provider-specific voice lists (matches Portal gpt-realtime.js, gemini-live.js, grok-live.js)
-private val VOICES_GPT = listOf("ash", "alloy", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar")
-private val VOICES_GEMINI = listOf("Charon", "Puck", "Kore", "Aoede", "Fenrir", "Orus")
+// Provider-specific voice lists.
+// T13 (plan 2026-05-19): VOICES_GPT + VOICES_GEMINI now sourced from Constants.kt
+// (single source of truth). VOICES_GROK unchanged — Grok Live out of scope.
+private val VOICES_GPT = Constants.VOICES_GPT_REALTIME
+private val VOICES_GEMINI = Constants.VOICES_GEMINI_LIVE
 private val VOICES_GROK = listOf("Ara", "Rex", "Sal", "Eve", "Leo")
 
 private fun voicesForBackend(backend: VoiceBackend) = when (backend) {
     VoiceBackend.GPT_REALTIME -> VOICES_GPT
     VoiceBackend.GEMINI_LIVE -> VOICES_GEMINI
     VoiceBackend.GROK_LIVE -> VOICES_GROK
+}
+
+/** Format a voice name with character descriptor for Gemini Live. */
+private fun voiceLabel(backend: VoiceBackend, voice: String): String = when (backend) {
+    VoiceBackend.GEMINI_LIVE ->
+        Constants.GEMINI_VOICE_DESCRIPTORS[voice]?.let { "$voice ($it)" } ?: voice
+    else -> voice
 }
 
 @Composable
@@ -619,10 +634,57 @@ fun VoiceScreen(
     LaunchedEffect(transcript.size) {
         if (transcript.isNotEmpty()) listState.animateScrollToItem(transcript.size - 1)
     }
-    // Reset voice when backend changes
-    LaunchedEffect(backend) { viewModel.setVoice(voicesForBackend(backend).first()) }
+    // Reset voice when backend changes — pick the per-backend canonical default
+    // (Constants.DEFAULT_*_VOICE), falling back to first in the list.
+    LaunchedEffect(backend) {
+        val default = when (backend) {
+            VoiceBackend.GPT_REALTIME -> Constants.DEFAULT_GPT_REALTIME_VOICE
+            VoiceBackend.GEMINI_LIVE -> Constants.DEFAULT_GEMINI_LIVE_VOICE
+            VoiceBackend.GROK_LIVE -> voicesForBackend(backend).first()
+        }
+        viewModel.setVoice(default)
+    }
 
     val isConnected = voiceState != VoiceState.DISCONNECTED && voiceState != VoiceState.ERROR
+
+    // ── Live-models config state (T13 plan 2026-05-19) ──
+    // OpenAI Realtime config
+    var realtimeModel by remember {
+        mutableStateOf(Constants.LIVE_MODEL_DEFAULTS["realtime"] ?: "")
+    }
+    var realtimeVadType by remember { mutableStateOf("server_vad") }
+    var realtimeVadEagerness by remember { mutableStateOf("medium") }
+    // Idle timeout as a text field so the user can clear it (null = backend default).
+    var realtimeIdleTimeoutText by remember { mutableStateOf("") }
+
+    // Gemini Live config — null entries map to backend default ("auto").
+    var geminiModel by remember {
+        mutableStateOf(Constants.LIVE_MODEL_DEFAULTS["gemini-live"] ?: "")
+    }
+    var geminiVadStart by remember { mutableStateOf<String?>(null) }
+    var geminiVadEnd by remember { mutableStateOf<String?>(null) }
+    var geminiThinkingLevel by remember { mutableStateOf<String?>(null) }
+
+    // Builder: assemble the optional config to pass to viewModel.connect().
+    fun buildSessionConfig(): VoiceSessionConfig? = when (backend) {
+        VoiceBackend.GPT_REALTIME -> VoiceSessionConfig(
+            model = realtimeModel.takeIf { it.isNotBlank() },
+            vadType = realtimeVadType.takeIf { it.isNotBlank() },
+            vadEagerness = if (realtimeVadType == "semantic_vad") realtimeVadEagerness else null,
+            idleTimeoutMs = if (realtimeVadType == "server_vad")
+                realtimeIdleTimeoutText.trim().toIntOrNull() else null,
+        )
+        VoiceBackend.GEMINI_LIVE -> {
+            val thinkingAllowed = geminiModel in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS
+            VoiceSessionConfig(
+                model = geminiModel.takeIf { it.isNotBlank() },
+                vadStart = geminiVadStart,
+                vadEnd = geminiVadEnd,
+                thinkingLevel = if (thinkingAllowed) geminiThinkingLevel else null,
+            )
+        }
+        VoiceBackend.GROK_LIVE -> null
+    }
 
     // Pulse animation for mic recording + AI speaking
     val pulse = rememberInfiniteTransition(label = "pulse")
@@ -673,10 +735,18 @@ fun VoiceScreen(
         }
         Spacer(Modifier.height(12.dp))
 
-        // ── Voice selector — provider-specific (disabled while connected) ──
+        // ── Voice selector — provider-specific.
+        // T13 audit I4: voice is always hot-swappable (mid-session OK via session.update),
+        // so enabled regardless of connection state — UNLIKE model/vad which are bound at
+        // upstream WS connect time and stay disabled while CONNECTED.
         Text("Voice", style = MaterialTheme.typography.labelLarge, color = BbxDim)
         Spacer(Modifier.height(4.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+        ) {
             voicesForBackend(backend).forEach { v ->
                 val isSelected = v == voice
                 Box(
@@ -684,17 +754,49 @@ fun VoiceScreen(
                         .clip(RoundedCornerShape(12.dp))
                         .background(if (isSelected) SolidGreen.copy(alpha = 0.15f) else Neutral200)
                         .then(if (isSelected) Modifier.border(1.dp, SolidGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp)) else Modifier)
-                        .clickable(enabled = !isConnected) {
+                        .clickable {
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             viewModel.setVoice(v)
                         }
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
-                    Text(v, style = MaterialTheme.typography.labelSmall,
+                    Text(voiceLabel(backend, v), style = MaterialTheme.typography.labelSmall,
                         color = if (isSelected) SolidGreen else Neutral500)
                 }
             }
         }
+        Spacer(Modifier.height(12.dp))
+
+        // ── Per-provider live-models config (T13 plan 2026-05-19) ──
+        // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
+        // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
+        // Voice/eagerness/idle_timeout/thinking_level: always enabled (hot-swappable mid-session).
+        when (backend) {
+            VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
+                connected = isConnected,
+                model = realtimeModel,
+                onModelChange = { realtimeModel = it },
+                vadType = realtimeVadType,
+                onVadTypeChange = { realtimeVadType = it },
+                vadEagerness = realtimeVadEagerness,
+                onVadEagernessChange = { realtimeVadEagerness = it },
+                idleTimeoutText = realtimeIdleTimeoutText,
+                onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
+            )
+            VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
+                connected = isConnected,
+                model = geminiModel,
+                onModelChange = { geminiModel = it },
+                vadStart = geminiVadStart,
+                onVadStartChange = { geminiVadStart = it },
+                vadEnd = geminiVadEnd,
+                onVadEndChange = { geminiVadEnd = it },
+                thinkingLevel = geminiThinkingLevel,
+                onThinkingLevelChange = { geminiThinkingLevel = it },
+            )
+            VoiceBackend.GROK_LIVE -> Unit // out of scope
+        }
+
         Spacer(Modifier.height(20.dp))
 
         // ── Central mic button + status + disconnect ──
@@ -737,7 +839,7 @@ fun VoiceScreen(
                                 if (isConnected) HapticFeedbackConstants.CONTEXT_CLICK
                                 else HapticFeedbackConstants.CONFIRM
                             )
-                            if (isConnected) viewModel.toggleMic() else viewModel.connect()
+                            if (isConnected) viewModel.toggleMic() else viewModel.connect(buildSessionConfig())
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -842,6 +944,190 @@ fun VoiceScreen(
             snapId = snapId,
             origin = origin,
             onDismiss = { peekSnapId = null }
+        )
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// T13 (plan 2026-05-19): per-provider live-models config blocks.
+// Pattern matches the existing voice chip-row selector for visual consistency.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generic chip-row picker. Renders a label + horizontally scrollable row of
+ * selectable chips. Selection is highlighted with the accent color.
+ *
+ * @param enabled if false, chips are visually dimmed and clicks are blocked
+ *   (used for model/vad chips while CONNECTED — audit I4).
+ */
+@Composable
+private fun ChipRowPicker(
+    label: String,
+    options: List<Pair<String, String>>,  // (id, displayName)
+    selectedId: String?,
+    enabled: Boolean = true,
+    onSelect: (String) -> Unit,
+) {
+    val view = LocalView.current
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = BbxDim)
+        Spacer(Modifier.height(4.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+        ) {
+            options.forEach { (id, name) ->
+                val isSelected = id == selectedId
+                val baseColor = if (enabled) BbxAccent else Neutral500
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (isSelected) baseColor.copy(alpha = if (enabled) 0.18f else 0.08f)
+                            else Neutral200
+                        )
+                        .then(
+                            if (isSelected) Modifier.border(
+                                1.dp, baseColor.copy(alpha = if (enabled) 0.4f else 0.2f),
+                                RoundedCornerShape(12.dp)
+                            ) else Modifier
+                        )
+                        .clickable(enabled = enabled) {
+                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            onSelect(id)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            isSelected && enabled -> baseColor
+                            isSelected -> Neutral500
+                            !enabled -> Neutral300
+                            else -> Neutral500
+                        }
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+    }
+}
+
+/** OpenAI Realtime config dropdowns: model, vad_type, vad_eagerness OR idle_timeout. */
+@Composable
+private fun RealtimeConfigBlock(
+    connected: Boolean,
+    model: String,
+    onModelChange: (String) -> Unit,
+    vadType: String,
+    onVadTypeChange: (String) -> Unit,
+    vadEagerness: String,
+    onVadEagernessChange: (String) -> Unit,
+    idleTimeoutText: String,
+    onIdleTimeoutChange: (String) -> Unit,
+) {
+    val modelOpts = Constants.MODEL_CONFIG["realtime"].orEmpty()
+    ChipRowPicker(
+        label = "Model",
+        options = modelOpts,
+        selectedId = model,
+        enabled = !connected,  // audit I4: model bound at upstream WS connect time
+        onSelect = onModelChange,
+    )
+    ChipRowPicker(
+        label = "Turn detection",
+        options = Constants.OPENAI_REALTIME_VAD_TYPES.map { it to it },
+        selectedId = vadType,
+        enabled = !connected,  // audit I4: vad_type schema differs between server/semantic
+        onSelect = onVadTypeChange,
+    )
+    // Conditional: eagerness only meaningful for semantic_vad
+    if (vadType == "semantic_vad") {
+        ChipRowPicker(
+            label = "Eagerness",
+            options = Constants.OPENAI_REALTIME_VAD_EAGERNESS.map { it to it },
+            selectedId = vadEagerness,
+            enabled = true,  // hot-swappable mid-session
+            onSelect = onVadEagernessChange,
+        )
+    }
+    // Conditional: idle_timeout only meaningful for server_vad
+    if (vadType == "server_vad") {
+        Text("Idle timeout (ms)", style = MaterialTheme.typography.labelLarge, color = BbxDim)
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = idleTimeoutText,
+            onValueChange = { new -> onIdleTimeoutChange(new.filter { it.isDigit() }.take(7)) },
+            placeholder = { Text("30000", color = Neutral500) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = BbxWhite,
+                unfocusedTextColor = BbxWhite,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 200.dp),
+        )
+        Spacer(Modifier.height(10.dp))
+    }
+}
+
+/** Gemini Live config dropdowns: model, vad_start, vad_end, thinking_level (3.1 only). */
+@Composable
+private fun GeminiConfigBlock(
+    connected: Boolean,
+    model: String,
+    onModelChange: (String) -> Unit,
+    vadStart: String?,
+    onVadStartChange: (String?) -> Unit,
+    vadEnd: String?,
+    onVadEndChange: (String?) -> Unit,
+    thinkingLevel: String?,
+    onThinkingLevelChange: (String?) -> Unit,
+) {
+    val modelOpts = Constants.MODEL_CONFIG["gemini-live"].orEmpty()
+    ChipRowPicker(
+        label = "Model",
+        options = modelOpts,
+        selectedId = model,
+        enabled = !connected,  // audit I4: model bound at setup time
+        onSelect = onModelChange,
+    )
+    // "auto" entry maps to null (lets backend use its default).
+    val sensitivityOpts: List<Pair<String, String>> =
+        listOf("__auto__" to "auto") + Constants.GEMINI_LIVE_VAD_SENSITIVITIES.map { it to it }
+    val toNullable: (String) -> String? = { if (it == "__auto__") null else it }
+    val toSelectedId: (String?) -> String = { it ?: "__auto__" }
+
+    ChipRowPicker(
+        label = "VAD start sensitivity",
+        options = sensitivityOpts,
+        selectedId = toSelectedId(vadStart),
+        enabled = !connected,  // audit I4: VAD configured at setup time
+        onSelect = { onVadStartChange(toNullable(it)) },
+    )
+    ChipRowPicker(
+        label = "VAD end sensitivity",
+        options = sensitivityOpts,
+        selectedId = toSelectedId(vadEnd),
+        enabled = !connected,
+        onSelect = { onVadEndChange(toNullable(it)) },
+    )
+    // Conditional: thinking_level only for 3.1
+    if (model in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS) {
+        val thinkingOpts: List<Pair<String, String>> =
+            listOf("__auto__" to "auto") + Constants.GEMINI_LIVE_THINKING_LEVELS.map { it to it }
+        ChipRowPicker(
+            label = "Thinking level",
+            options = thinkingOpts,
+            selectedId = toSelectedId(thinkingLevel),
+            enabled = true,  // hot-swappable mid-session (per plan: voice/eagerness/idle/thinking always enabled)
+            onSelect = { onThinkingLevelChange(toNullable(it)) },
         )
     }
 }

@@ -110,11 +110,15 @@ object Constants {
             "gemini-3.1-pro-preview" to "Gemini 3.1 Pro"
         ),
         "realtime" to listOf(
-            "" to "GPT Realtime (GA)",
-            "gpt-4o-realtime-preview" to "GPT-4o Realtime Preview"
+            "gpt-realtime-2" to "GPT Realtime 2 (Newest GA)",
+            "gpt-realtime" to "GPT Realtime (Alias)",
+            "gpt-realtime-1.5" to "GPT Realtime 1.5",
+            "gpt-realtime-mini-2025-12-15" to "GPT Realtime Mini (Cheap)"
         ),
         "gemini-live" to listOf(
-            "" to "Gemini Live"
+            "gemini-2.5-flash-native-audio-latest" to "Gemini 2.5 Flash Live (Latest GA-track)",
+            "gemini-3.1-flash-live-preview" to "Gemini 3.1 Flash Live (Preview, thinkingLevel)",
+            "gemini-2.5-flash-native-audio-preview-12-2025" to "Gemini 2.5 Flash Live (Dec 2025 pin)"
         ),
         "grok-live" to listOf(
             "" to "Grok Live"
@@ -130,4 +134,60 @@ object Constants {
             "gemini-robotics-er-1.5-preview" to "Gemini Robotics-ER 1.5"
         )
     )
+
+    // ─── Live Models Upgrade (T10, plan 2026-05-19) ──────────────────────────
+    // Catalogs + allowlists for OpenAI Realtime + Gemini Live. Constants.kt is
+    // the SoT — VoiceScreen.kt and VoiceClient.kt must consume from here.
+
+    /** Default model id per live provider — first item the dropdown picks if no user pref. */
+    val LIVE_MODEL_DEFAULTS: Map<String, String> = mapOf(
+        "realtime" to "gpt-realtime-2",
+        "gemini-live" to "gemini-2.5-flash-native-audio-latest",
+    )
+
+    /** OpenAI Realtime voices (10 GA voices, 2026-05-19 verified). */
+    val VOICES_GPT_REALTIME: List<String> = listOf(
+        "alloy", "ash", "ballad", "coral", "echo",
+        "sage", "shimmer", "verse", "marin", "cedar"
+    )
+    const val DEFAULT_GPT_REALTIME_VOICE = "ash"
+
+    /** Gemini Live voices (30 voices, full catalog). */
+    val VOICES_GEMINI_LIVE: List<String> = listOf(
+        "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda",
+        "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus",
+        "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi",
+        "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima",
+        "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
+    )
+    const val DEFAULT_GEMINI_LIVE_VOICE = "Orus"
+
+    /** Gemini voice character descriptors (1:1 with VOICES_GEMINI_LIVE). */
+    val GEMINI_VOICE_DESCRIPTORS: Map<String, String> = mapOf(
+        "Zephyr" to "Bright",       "Puck" to "Upbeat",          "Charon" to "Informative",
+        "Kore" to "Firm",           "Fenrir" to "Excitable",     "Leda" to "Youthful",
+        "Orus" to "Firm",           "Aoede" to "Breezy",         "Callirrhoe" to "Easy-going",
+        "Autonoe" to "Bright",      "Enceladus" to "Breathy",    "Iapetus" to "Clear",
+        "Umbriel" to "Easy-going",  "Algieba" to "Smooth",       "Despina" to "Smooth",
+        "Erinome" to "Clear",       "Algenib" to "Gravelly",     "Rasalgethi" to "Informative",
+        "Laomedeia" to "Upbeat",    "Achernar" to "Soft",        "Alnilam" to "Firm",
+        "Schedar" to "Even",        "Gacrux" to "Mature",        "Pulcherrima" to "Forward",
+        "Achird" to "Friendly",     "Zubenelgenubi" to "Casual", "Vindemiatrix" to "Gentle",
+        "Sadachbia" to "Lively",    "Sadaltager" to "Knowledgeable", "Sulafat" to "Warm"
+    )
+
+    /** Allowed VAD types for OpenAI Realtime. */
+    val OPENAI_REALTIME_VAD_TYPES: List<String> = listOf("server_vad", "semantic_vad")
+
+    /** Allowed eagerness for OpenAI Realtime semantic_vad. */
+    val OPENAI_REALTIME_VAD_EAGERNESS: List<String> = listOf("auto", "low", "medium", "high")
+
+    /** Allowed VAD sensitivities for Gemini Live. UPPERCASE per Gemini API. */
+    val GEMINI_LIVE_VAD_SENSITIVITIES: List<String> = listOf("LOW", "MEDIUM", "HIGH")
+
+    /** Allowed thinking levels for Gemini 3.1. LOWERCASE per google-genai SDK. */
+    val GEMINI_LIVE_THINKING_LEVELS: List<String> = listOf("minimal", "low", "medium", "high")
+
+    /** Model ids that support thinkingLevel (3.1-only currently). */
+    val GEMINI_LIVE_THINKING_CAPABLE_MODELS: Set<String> = setOf("gemini-3.1-flash-live-preview")
 }
