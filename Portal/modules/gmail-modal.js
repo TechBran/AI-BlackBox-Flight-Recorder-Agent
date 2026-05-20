@@ -103,12 +103,20 @@ async function disconnect() {
  * Wire button handlers + lazy status fetch on each modal open.
  */
 export function initGmailModal() {
+    const modal = document.getElementById('gmailModal');
+
     // Tools button opens modal
     document.getElementById('btnGmail')?.addEventListener('click', () => {
-        const modal = document.getElementById('gmailModal');
         modal?.classList.remove('hide');
         // Refresh every open — user may have just completed an OAuth round-trip.
         refreshStatus();
+    });
+
+    // Close button (the X in the modal head) — matches the wiring pattern used
+    // by voice-agents-modal.js. No central .modal-close auto-binding exists;
+    // each modal wires its own.
+    modal?.querySelector('.modal-close')?.addEventListener('click', () => {
+        modal.classList.add('hide');
     });
 
     // Modal internal buttons
