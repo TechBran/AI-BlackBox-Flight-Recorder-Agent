@@ -735,10 +735,12 @@ fun VoiceScreen(
         }
         Spacer(Modifier.height(12.dp))
 
-        // ── Voice selector — provider-specific.
-        // T13 audit I4: voice is always hot-swappable (mid-session OK via session.update),
-        // so enabled regardless of connection state — UNLIKE model/vad which are bound at
-        // upstream WS connect time and stay disabled while CONNECTED.
+        // ── Voice selector — provider-specific (disabled while connected).
+        // T13 review: VoiceClient has no post-connect session.update outbound path,
+        // so changing voice mid-session only updates local _voice.value — the audible
+        // voice keeps the old setting until next connect(). Gemini Live additionally
+        // doesn't support mid-session voice change (voice is in the setup message).
+        // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
         Text("Voice", style = MaterialTheme.typography.labelLarge, color = BbxDim)
         Spacer(Modifier.height(4.dp))
         Row(
@@ -754,7 +756,7 @@ fun VoiceScreen(
                         .clip(RoundedCornerShape(12.dp))
                         .background(if (isSelected) SolidGreen.copy(alpha = 0.15f) else Neutral200)
                         .then(if (isSelected) Modifier.border(1.dp, SolidGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp)) else Modifier)
-                        .clickable {
+                        .clickable(enabled = !isConnected) {
                             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             viewModel.setVoice(v)
                         }
