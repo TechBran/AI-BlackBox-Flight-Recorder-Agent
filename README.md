@@ -1,4 +1,4 @@
-# AI BlackBox — Flight Recorder for AI
+# AI BlackBox — Flight Recorder - AI Agent 
 
 > **One Linux box. Every AI model. Total recall. Zero lock-in.**
 
