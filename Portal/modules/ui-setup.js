@@ -85,6 +85,38 @@ export async function refreshHealth() {
             }
         }
 
+        // Tailscale paired-server display in System Controls section
+        // Per docs/plans/2026-05-20-hamburger-polish-and-tailscale-copy.md Track 4
+        const pairing = j.pairing || {};
+        const tsValueEl = $("tailscaleAddressValue");
+        const tsCopyBtn = $("btnCopyTailscale");
+        const tsOrigin = pairing.default_origin || "";
+        if (tsValueEl) {
+            if (tsOrigin) {
+                tsValueEl.textContent = tsOrigin;
+                tsValueEl.classList.remove("tailscale-empty");
+                if (tsCopyBtn) tsCopyBtn.disabled = false;
+            } else {
+                tsValueEl.textContent = "Not paired";
+                tsValueEl.classList.add("tailscale-empty");
+                if (tsCopyBtn) tsCopyBtn.disabled = true;
+            }
+        }
+        if (tsCopyBtn && tsOrigin && !tsCopyBtn.dataset.wired) {
+            tsCopyBtn.dataset.wired = "1";  // avoid double-wiring on re-init
+            tsCopyBtn.addEventListener("click", async () => {
+                try {
+                    await navigator.clipboard.writeText(tsOrigin);
+                    toast(`Copied ${tsOrigin}`);
+                } catch (err) {
+                    console.error("[Tailscale] copy failed:", err);
+                    // Visual fallback if clipboard API rejects
+                    tsCopyBtn.textContent = "✓";
+                    setTimeout(() => { tsCopyBtn.textContent = "📋"; }, 1500);
+                }
+            });
+        }
+
     } catch (e) {
         // Health indicator — lost
         if (dot) { dot.className = "health-dot lost"; }

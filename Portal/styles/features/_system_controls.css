@@ -1,0 +1,62 @@
+/* System Controls section — extras
+   Per docs/plans/2026-05-20-hamburger-polish-and-tailscale-copy.md Track 4 */
+
+.tailscale-address-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    background: var(--neutral-150);
+    border-radius: var(--radius-md);
+    font-size: 12px;
+}
+
+.tailscale-label {
+    color: var(--neutral-700);
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.tailscale-value {
+    flex: 1;
+    color: #4ade80;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.tailscale-value.tailscale-empty {
+    color: var(--neutral-700);
+    font-style: italic;
+}
+
+.btn-icon-copy {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--neutral-400);
+    border-radius: var(--radius-sm);
+    color: var(--neutral-700);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 150ms ease, border-color 150ms ease;
+}
+
+.btn-icon-copy:hover:not(:disabled) {
+    background: var(--neutral-200);
+    border-color: var(--neutral-500);
+}
+
+.btn-icon-copy:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}

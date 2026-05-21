@@ -593,6 +593,12 @@
         <!-- System Controls Section -->
         <div class="menu-group system-controls-section">
           <h4>System Controls</h4>
+          <!-- Tailscale paired-server address with copy button -->
+          <div class="tailscale-address-row">
+            <span class="tailscale-label">Paired Server:</span>
+            <code class="tailscale-value" id="tailscaleAddressValue">Loading…</code>
+            <button id="btnCopyTailscale" class="btn-icon-copy" title="Copy paired-server URL to clipboard" type="button" disabled>📋</button>
+          </div>
           <div class="menu-grid">
             <button id="btnCheckpoint" class="btn btn-checkpoint" title="Create checkpoint - manually save conversation state">💾 Checkpoint</button>
             <button id="btnMediaManager" class="btn" title="Manage uploaded media">📁 Media Manager</button>
