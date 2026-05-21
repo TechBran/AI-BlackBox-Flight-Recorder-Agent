@@ -23,7 +23,7 @@ from Orchestrator.volume import verify_gm_or_halt
 from Orchestrator.checkpoint import create_checkpoint_async, perform_mint
 from Orchestrator.config import (
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT,
-    ARC_DIR, ARTIFACTS_DIR, AUDIO_ENGINE, CFG,
+    ARC_DIR, ARTIFACTS_DIR, AUDIO_ENGINE, BLACKBOX_TAILNET_HOSTNAME, CFG,
     CHECKPOINT_AUTO_CREATE_INTERVAL, CHECKPOINT_MIN_SNAPSHOTS, CHECKPOINT_TURNS_TO_COMPRESS,
     CTX_MAX, CURRENT_OPERATOR, END_RX,
     GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE,
@@ -236,6 +236,76 @@ async def trigger_session_cleanup(max_age_days: int = 3):
     cleaned = cleanup_old_session_files(max_age_days)
     return {"cleaned_sessions": cleaned, "max_age_days": max_age_days}
 
+# ─── Tailnet origin resolution ─────────────────────────────────────────────
+# /health and Portal's System Controls row both consume `pairing.default_origin`.
+# Pre-2026-05-20, this was sourced only from config.ini [pairing] default_origin,
+# which broke fresh installs where onboarding hadn't persisted it. Now: 4-step
+# resolution chain with 5-min in-memory cache of the tailscale-CLI detection.
+#
+#   1. config.ini [pairing] default_origin    (existing — wins if set)
+#   2. BLACKBOX_TAILNET_HOSTNAME env var       (set by onboarding T2.3.1 success)
+#   3. `tailscale status --json` -> Self.DNSName   (auto-detect, cached)
+#   4. ""                                       (genuinely not paired)
+#
+# Per Brandon 2026-05-20: "Let's make it solid for every new user."
+
+import subprocess
+import time as _time
+
+_tailnet_cache: Dict[str, Any] = {"value": None, "expires_at": 0.0}
+_TAILNET_CACHE_TTL_SECS = 300  # 5 minutes
+
+
+def _detect_tailnet_hostname_via_cli() -> str:
+    """Run `tailscale status --json` and extract Self.DNSName.
+
+    Cached for 5 minutes — avoids shelling out on every /health hit
+    (Portal polls /health periodically). Returns the bare hostname
+    (trailing dot stripped) or "" on any failure (tailscale not
+    installed, daemon down, unauthenticated, JSON malformed).
+    """
+    now = _time.time()
+    if _tailnet_cache["value"] is not None and now < _tailnet_cache["expires_at"]:
+        return _tailnet_cache["value"]
+    hostname = ""
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            raw = (data.get("Self") or {}).get("DNSName", "") or ""
+            hostname = raw.rstrip(".")  # tailscale returns FQDN with trailing dot
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
+        hostname = ""
+    _tailnet_cache["value"] = hostname
+    _tailnet_cache["expires_at"] = now + _TAILNET_CACHE_TTL_SECS
+    return hostname
+
+
+def _resolve_tailnet_origin() -> str:
+    """Return the canonical Tailscale-paired origin URL, or "" if unknown."""
+    # 1. config.ini (legacy persistence, populated by some onboarding paths)
+    try:
+        cfg_origin = (CFG.get("pairing", "default_origin", fallback="") or "").strip()
+        if cfg_origin:
+            return cfg_origin
+    except Exception:
+        pass
+    # 2. env var (preferred persistence path per pairing_routes.py)
+    if BLACKBOX_TAILNET_HOSTNAME:
+        return f"https://{BLACKBOX_TAILNET_HOSTNAME}"
+    # 3. tailscale CLI auto-detect (resilient fallback for installs where
+    #    neither config.ini nor env was populated — common on fresh MSO2-style
+    #    setups where onboarding completed Tailscale via OS, not the wizard)
+    hostname = _detect_tailnet_hostname_via_cli()
+    if hostname:
+        return f"https://{hostname}"
+    # 4. genuinely not paired
+    return ""
+
+
 @app.get("/health")
 def health():
     try:
@@ -254,7 +324,7 @@ def health():
         snapshot_count = 0
     try:
         pairing = {
-            "default_origin": CFG.get("pairing", "default_origin", fallback=""),
+            "default_origin": _resolve_tailnet_origin(),
             "default_operator": CFG.get("pairing", "default_operator", fallback=""),
         }
     except Exception:
