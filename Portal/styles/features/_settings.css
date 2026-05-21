@@ -4,13 +4,13 @@
  * Blocks: 7
  */
 
-/* Generation Section (Dark Gray) */
+/* Generation Section — plain divider, matches Tools/Apps/Voice-Prefs pattern.
+   The gradient+border "card" was removed per Brandon 2026-05-20: "Generation
+   doesn't need to stand out like that... just make it look like the other
+   buttons." */
 .generation-section {
-  background: linear-gradient(135deg, #333333 0%, #000000 100%);
-  border: 1px solid var(--neutral-700);
-  border-radius: var(--radius-lg);
-  padding: 16px;
-  box-shadow: var(--shadow-md);
+  border-top: 1px solid var(--neutral-300);
+  padding-top: 12px;
 }
 
 /* Running Apps Section in Menu */

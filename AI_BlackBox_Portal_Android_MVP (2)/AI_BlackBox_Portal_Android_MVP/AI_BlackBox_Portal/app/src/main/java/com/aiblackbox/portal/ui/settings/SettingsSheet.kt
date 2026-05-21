@@ -148,33 +148,19 @@ fun SettingsSheet(
             )
             Spacer(Modifier.height(20.dp))
 
-            // ══════════════════════════════════════════════════════════════
-            // Generation Section — matches Portal .generation-section
-            // gradient bg (dark gray → black), accent border, grid layout
-            // ══════════════════════════════════════════════════════════════
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(RadiusLg))
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(Color(0xFF333333), Color(0xFF000000))
-                        )
-                    )
-                    .border(1.dp, Neutral700, RoundedCornerShape(RadiusLg))
-                    .padding(16.dp)
+            // Generation — plain CollapsibleSection, matches the visual weight
+            // of Tools/Apps/Gmail (no special gradient card). Per Brandon
+            // 2026-05-20: keep it consistent with the other section dropdowns.
+            CollapsibleSection(
+                title = "\uD83C\uDFA8 Generation",
+                accent = BbxAccent,
             ) {
-                CollapsibleSection(
-                    title = "\uD83C\uDFA8 Generation",
-                    accent = BbxAccent,
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FullWidthMenuButton("Generate Image") { onNavigate("image_gen"); onDismiss() }
-                        FullWidthMenuButton("Generate Video") { onNavigate("video_gen"); onDismiss() }
-                        FullWidthMenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
-                        FullWidthMenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
-                        FullWidthMenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
-                    }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FullWidthMenuButton("Generate Image") { onNavigate("image_gen"); onDismiss() }
+                    FullWidthMenuButton("Generate Video") { onNavigate("video_gen"); onDismiss() }
+                    FullWidthMenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
+                    FullWidthMenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
+                    FullWidthMenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
                 }
             }
 
