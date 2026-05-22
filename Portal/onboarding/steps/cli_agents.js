@@ -1,19 +1,35 @@
 // CLI Agents step — sixth screen of the onboarding wizard.
-// Three CLI providers ship with the BlackBox: Anthropic Claude Code,
-// Google Gemini CLI, and OpenAI Codex. Install.sh's Step 1c npm-installs
-// the binaries at first boot, but each provider requires a one-time
-// interactive auth (Anthropic Console / Google OAuth / OpenAI auth)
-// that can't be automated. This step:
+// Four CLI providers ship with the BlackBox: Anthropic Claude Code,
+// Google Gemini CLI, OpenAI Codex, and Google Antigravity. Install.sh's
+// Step 1c npm-installs the first three at first boot; Antigravity uses
+// a curl-piped shell installer. Each provider requires a one-time
+// interactive auth that can't be automated. Auth shape differs:
+//
+//   - Claude / Gemini / Codex: file-based credentials, `<bin> login`
+//     subcommand triggers the OAuth/console flow.
+//   - Antigravity: OS keyring (no file to check), NO `agy login`
+//     subcommand — auth triggers implicitly on first interactive `agy`
+//     launch. Status reports `authenticated: null` +
+//     `auth_method: "implicit_on_launch"` to signal this.
+//
+// This step:
 //
 //   1. GET /onboarding/cli-agent/status — per-provider {installed, auth}
-//   2. Render 3 provider cards. Each card shows status badges + actions:
-//      - If !installed: "Install" button → spawns terminal running npm install
-//      - If installed but !auth: "Sign in" button → spawns terminal running
-//        the provider's interactive login command
+//   2. Render 4 provider cards. Each card shows status badges + actions:
+//      - If !installed: "Install" button → spawns terminal running the
+//        provider's install command (npm or curl-pipe)
+//      - If installed but !auth (Claude/Gemini/Codex): "Sign in" button
+//        → spawns terminal running the provider's interactive login
+//      - If installed + auth_method=implicit_on_launch (Antigravity):
+//        "Launch & Sign In" button — wires to the CLI Agents modal in
+//        Track 3 (currently disabled with a tooltip explaining Track 3
+//        is the prerequisite for the full launch flow).
 //      - If installed AND auth: green checkmark, no action
 //   3. "Re-check status" button re-fetches /status (user runs it after
 //      finishing auth in the spawned terminal)
-//   4. Continue button enabled when all 3 providers are ready
+//   4. Continue button enabled when status.ready === true (backend
+//      computes per-provider semantics: antigravity is "ready" iff
+//      installed, since auth is unobservable)
 //   5. Skip option always available (advanced users who want a subset)
 //
 // Wizard does NOT block the terminal — once spawned, the user does
@@ -42,6 +58,13 @@ const PROVIDERS = [
         package: "@openai/codex",
         authBlurb: "Sign in via your OpenAI account.",
     },
+    {
+        key: "antigravity",
+        name: "Antigravity",
+        vendor: "Google",
+        package: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        authBlurb: "Sign-in happens automatically on first launch — your browser will open for OAuth.",
+    },
 ];
 
 let lastStatus = null;  // cached most recent /status response
@@ -64,12 +87,12 @@ export async function render(container, { next, back, skip }) {
                     Sign into your <em>CLI agents</em>.
                 </h1>
                 <p class="ob-step-lede">
-                    The BlackBox ships with three command-line AI agents from
-                    Anthropic, Google, and OpenAI. They're already installed
-                    &mdash; each one just needs a one-time sign-in to your
-                    account. Click <strong>Sign in</strong>, finish the prompt
-                    in the terminal that opens, then come back here and click
-                    <strong>Re-check</strong>.
+                    The BlackBox ships with four command-line AI agents from
+                    Anthropic, Google (Gemini and Antigravity), and OpenAI.
+                    They're already installed &mdash; each one just needs a
+                    one-time sign-in. Click <strong>Sign in</strong>, finish
+                    the prompt in the terminal that opens, then come back
+                    here and click <strong>Re-check</strong>.
                 </p>
                 <div id="ob-cli-agent-grid" class="ob-cli-agent-grid">
                     <div class="ob-loading">Probing CLI agents&hellip;</div>
@@ -157,12 +180,20 @@ function renderGrid(container, status) {
 
 function renderCard(provider, state) {
     const installed = !!state.installed;
-    const authed = !!state.authenticated;
-    const ready = installed && authed;
+    // Antigravity reports authenticated: null + auth_method: "implicit_on_launch"
+    // because keyring auth is unobservable. Treat the implicit-launch case as
+    // a third status state: "installed, click Launch to sign in".
+    const implicitAuth = state.auth_method === "implicit_on_launch";
+    const authed = state.authenticated === true;  // strict bool — null is NOT authed
+    const ready = installed && (authed || implicitAuth);
     const busy = busyProvider === provider.key;
 
     let statusBadge;
-    if (ready) {
+    if (installed && implicitAuth) {
+        // Antigravity: installed, auth state unknowable. Render an info pill
+        // that explicitly tells the user how to sign in.
+        statusBadge = `<span class="ob-cli-agent-badge ob-cli-agent-badge-info">&check; Installed</span>`;
+    } else if (installed && authed) {
         statusBadge = `<span class="ob-cli-agent-badge ob-cli-agent-badge-ok">&check; Ready</span>`;
     } else if (installed && !authed) {
         statusBadge = `<span class="ob-cli-agent-badge ob-cli-agent-badge-needs-auth">! Needs sign-in</span>`;
@@ -189,6 +220,24 @@ function renderCard(provider, state) {
                 <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
             </button>
         `;
+    } else if (implicitAuth) {
+        // Antigravity: no separate `agy login` command exists. The "Launch &
+        // Sign In" button will open the CLI Agents modal with antigravity
+        // preselected, and OAuth triggers implicitly on first launch.
+        // The modal-side radio + preselect plumbing lands in Track 3 of the
+        // Antigravity integration plan; until then this button stays disabled
+        // with a tooltip pointing at the dependency. After Track 3, swap the
+        // disabled attribute for a click handler that opens the modal.
+        actions = `
+            <p class="ob-cli-agent-auth-blurb">${escapeHtml(provider.authBlurb)}</p>
+            <button type="button" class="ob-cta ob-cli-agent-action ob-cli-agent-action-launch"
+                    id="ob-cli-launch-${provider.key}"
+                    disabled
+                    title="Available once the CLI Agents modal gains an Antigravity option (Track 3).">
+                Launch &amp; Sign In
+                <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
+            </button>
+        `;
     } else if (!authed) {
         actions = `
             <p class="ob-cli-agent-auth-blurb">${escapeHtml(provider.authBlurb)}</p>
@@ -204,8 +253,12 @@ function renderCard(provider, state) {
         `;
     }
 
+    const dataState = installed
+        ? (implicitAuth ? "implicit-auth" : (authed ? "ready" : "needs-auth"))
+        : "missing";
+
     return `
-        <div class="ob-cli-agent-card" data-state="${ready ? "ready" : installed ? "needs-auth" : "missing"}">
+        <div class="ob-cli-agent-card" data-state="${dataState}">
             <div class="ob-cli-agent-head">
                 <div class="ob-cli-agent-title">
                     <span class="ob-cli-agent-name">${escapeHtml(provider.name)}</span>

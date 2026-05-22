@@ -2448,6 +2448,7 @@ body::after {
 .ob-cli-agent-badge-ok         { background: rgba(80, 200, 100, 0.15);  color: rgba(180, 240, 200, 0.95); }
 .ob-cli-agent-badge-needs-auth { background: rgba(255, 180, 50, 0.15);  color: rgba(255, 220, 150, 0.95); }
 .ob-cli-agent-badge-missing    { background: rgba(255, 100, 100, 0.13); color: rgba(255, 190, 190, 0.95); }
+.ob-cli-agent-badge-info       { background: rgba(100, 170, 255, 0.15); color: rgba(190, 220, 255, 0.95); }
 
 .ob-cli-agent-meta-row {
     display: flex;
