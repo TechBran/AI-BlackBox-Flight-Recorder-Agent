@@ -78,6 +78,7 @@ enum class CliAgentProvider(val slug: String, val display: String) {
     CLAUDE("claude", "Claude"),
     GEMINI("gemini", "Gemini"),
     CODEX("codex", "Codex"),
+    ANTIGRAVITY("antigravity", "Antigravity"),
     ;
 
     companion object {
