@@ -159,20 +159,30 @@ class TmuxSessionManager:
             "PATH": _augmented_spawn_path(),
             **self.oc.env_for(operator),
         }
-        # Grant the spawned CLI process access to the user's D-Bus session
-        # bus, so libsecret/secret-service can read the OS keyring. Antigravity
-        # (agy) stores its OAuth token there; without DBUS_SESSION_BUS_ADDRESS,
-        # libsecret returns "no service" and agy falls back to per-launch
-        # SSH-mode interactive auth — even when the user already authenticated
-        # in a separate desktop terminal session. Future CLI providers using
-        # keyring-based auth benefit identically.
-        # Only inject when the socket actually exists (typically /run/user/UID/bus
-        # on Linux systems with systemd-logind). On headless/embedded systems
-        # without a user session, the file is absent and we skip the injection
-        # cleanly — agy then falls back to its own interactive auth flow.
-        _dbus_path = f"/run/user/{os.getuid()}/bus"
-        if os.path.exists(_dbus_path):
-            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus_path}"
+        # Grant the spawned CLI process access to the user's keyring so
+        # CLIs with keyring-based auth (Antigravity `agy`) pick up tokens
+        # the user already authenticated in their desktop session — no
+        # per-launch SSH-mode re-auth. Future CLI providers using keyring
+        # auth benefit identically. Three vars matter:
+        #   - DBUS_SESSION_BUS_ADDRESS: secret-service D-Bus endpoint
+        #   - XDG_RUNTIME_DIR: where freedesktop runtime files live
+        #     (libsecret needs this; without it, the D-Bus connection
+        #     succeeds but no keyring data store is found)
+        #   - GNOME_KEYRING_CONTROL: direct keyring control socket
+        #     (fallback path some libsecret versions use)
+        # Each guarded by os.path.exists so headless systems without
+        # systemd-logind skip cleanly and the CLI falls back to its
+        # own interactive auth flow.
+        _uid = os.getuid()
+        _xdg_runtime = f"/run/user/{_uid}"
+        if os.path.isdir(_xdg_runtime):
+            env["XDG_RUNTIME_DIR"] = _xdg_runtime
+            _dbus_path = f"{_xdg_runtime}/bus"
+            if os.path.exists(_dbus_path):
+                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus_path}"
+            _keyring_ctrl = f"{_xdg_runtime}/keyring"
+            if os.path.exists(_keyring_ctrl):
+                env["GNOME_KEYRING_CONTROL"] = _keyring_ctrl
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)
