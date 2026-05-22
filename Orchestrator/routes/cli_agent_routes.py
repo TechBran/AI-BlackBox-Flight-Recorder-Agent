@@ -24,6 +24,14 @@ _ALLOWED = os.getenv("CLI_AGENT_OPERATORS", "").strip()
 ALLOWED_OPS: Optional[set] = set(filter(None, _ALLOWED.split(","))) if _ALLOWED else None
 
 
+_PROVIDER_BINARY_NAMES = {
+    # Most providers' CLI binary name matches the provider id, but
+    # Antigravity ships as `agy` (not `antigravity`) per its install
+    # script (Track 1 of 2026-05-22-antigravity-cli-integration plan).
+    "antigravity": "agy",
+}
+
+
 def _resolve_provider_bin(name: str) -> str:
     """Resolve a CLI agent binary to an absolute path.
 
@@ -33,18 +41,35 @@ def _resolve_provider_bin(name: str) -> str:
     includes both. Falls back to the bare name (which will fail loudly
     via tmux if the binary truly cannot be found).
 
+    For providers whose binary filename differs from the provider id
+    (currently just antigravity → agy), the lookup uses the binary
+    name; the dual fallback for Antigravity also probes
+    ~/.local/bin/agy explicitly in case shutil.which misses it (e.g.,
+    the install ran but the dir isn't on the systemd PATH and the
+    extended-path lookup somehow falls short).
+
     See Orchestrator.cli_agent.path_extension for the shared dir list.
     """
     from Orchestrator.cli_agent.path_extension import extended_path_dirs
+    bin_name = _PROVIDER_BINARY_NAMES.get(name, name)
     extended_path = os.pathsep.join([
         os.environ.get("PATH", ""),
         *extended_path_dirs(),
     ])
-    found = shutil.which(name, path=extended_path)
-    return found or name
+    found = shutil.which(bin_name, path=extended_path)
+    if found:
+        return found
+    # Antigravity install.sh installs to ~/.local/bin/agy. Explicit
+    # fallback (D5b) so the resolver works even if the extended path
+    # somehow misses ~/.local/bin (e.g., user moved their install).
+    if name == "antigravity":
+        fallback = os.path.expanduser("~/.local/bin/agy")
+        if os.path.exists(fallback) and os.access(fallback, os.X_OK):
+            return fallback
+    return bin_name
 
 
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "gemini", "codex")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "gemini", "codex", "antigravity")
 
 
 def provider_bin(name: str) -> str | None:

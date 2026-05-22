@@ -711,29 +711,54 @@ async def open_external_url(req: OpenUrlRequest) -> dict:
 # path = authenticated. Heuristic, not authoritative — a malformed
 # config file would still show "auth ok" here, but the user can
 # always re-run "Sign in" if the CLI complains later.
+#
+# Antigravity is an exception: it stores credentials in the OS
+# keyring (Linux secret-service), so there is no file to check.
+# Empty list signals to the status builder that auth state is
+# unknown/unobservable; the response then sets
+# `authenticated: None` (per D2b of 2026-05-22 plan) and the wizard
+# UI renders "Click Launch to sign in" instead of an auth check.
 _AUTH_MARKERS = {
-    "claude":  [".claude/.credentials.json", ".claude/auth.json", ".claude/config.json"],
-    "gemini":  [".gemini/oauth_creds.json", ".gemini/google_account_id", ".gemini/settings.json"],
-    "codex":   [".codex/auth.json", ".codex/config.toml"],
+    "claude":      [".claude/.credentials.json", ".claude/auth.json", ".claude/config.json"],
+    "gemini":      [".gemini/oauth_creds.json", ".gemini/google_account_id", ".gemini/settings.json"],
+    "codex":       [".codex/auth.json", ".codex/config.toml"],
+    "antigravity": [],  # OS keyring — no file to check (D2b)
 }
 
-# Per-provider commands. Install command is what install.sh's Step 1c
-# already runs; we expose it as a manual rescue if the user blew away
-# their node_modules or upgraded mid-flow. Auth command launches the
-# provider's interactive login flow.
-_CLI_INSTALL_PKGS = {
-    "claude":  "@anthropic-ai/claude-code",
-    "gemini":  "@google/gemini-cli",
-    "codex":   "@openai/codex",
+# Per-provider install commands. Generalized 2026-05-22 from the
+# previous `_CLI_INSTALL_PKGS` dict (provider → npm package name)
+# to `INSTALL_COMMANDS` (provider → full subprocess.run arg list).
+# The 3 npm-based providers keep equivalent behavior:
+# `subprocess.run(["npm", "install", "-g", <pkg>])`. Antigravity
+# uses a curl-piped shell installer, hence the `bash -c` wrapper.
+# This is what install.sh's Step 1c runs for each provider; we
+# expose it as a manual rescue if the user blew away their
+# node_modules / agy binary or upgraded mid-flow.
+INSTALL_COMMANDS: dict[str, list[str]] = {
+    "claude":      ["npm", "install", "-g", "@anthropic-ai/claude-code"],
+    "gemini":      ["npm", "install", "-g", "@google/gemini-cli"],
+    "codex":       ["npm", "install", "-g", "@openai/codex"],
+    "antigravity": ["bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"],
 }
-_CLI_AUTH_CMD = {
+
+# Per-provider commands. Auth command launches the provider's
+# interactive login flow.
+#
+# Antigravity has no separate login command — auth triggers
+# implicitly on the first interactive `agy` launch via the OS
+# keyring. `None` signals to the wizard (Track 2) to render a
+# "Launch & Sign In" button instead of "Login" for this provider.
+# (D3b of 2026-05-22 plan.)
+_CLI_AUTH_CMD: dict[str, str | None] = {
     # Claude prompts on first interactive launch; the /login slash command
     # forces the flow even if a stale ANTHROPIC_API_KEY is set.
-    "claude":  "claude",
+    "claude":      "claude",
     # Gemini auto-prompts for Google OAuth on first interactive launch.
-    "gemini":  "gemini",
+    "gemini":      "gemini",
     # Codex has an explicit login subcommand.
-    "codex":   "codex login",
+    "codex":       "codex login",
+    # Antigravity: no separate command. See note above.
+    "antigravity": None,
 }
 
 
@@ -779,34 +804,68 @@ def cli_agent_status() -> dict:
             "claude": {"installed": bool, "authenticated": bool,
                        "bin_path": str|None, "package": str},
             "gemini": {...},
-            "codex":  {...}
+            "codex":  {...},
+            "antigravity": {"installed": bool,
+                            "authenticated": None,
+                            "auth_method": "implicit_on_launch",
+                            "bin_path": str|None,
+                            "install_command": list[str]}
           },
-          "ready": bool          # all three installed AND authenticated
+          "ready": bool          # all installed AND (authenticated OR auth_method == implicit)
         }
+
+    Antigravity (added 2026-05-22 per Track 1 plan) has a different
+    shape: `authenticated` is always None because credentials live in
+    the OS keyring (no file to inspect), and `auth_method` is the
+    string the wizard uses to pick the right CTA copy. For the `ready`
+    calculation, antigravity counts as ready when merely installed,
+    since auth is verified only by the user actually launching the
+    CLI (D2b).
     """
     from pathlib import Path
-    from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin
+    from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin, _PROVIDER_BINARY_NAMES
 
     home = Path.home()
-    out = {}
+    out: dict[str, dict] = {}
     all_ready = True
-    for prov, pkg in _CLI_INSTALL_PKGS.items():
+    for prov, cmd in INSTALL_COMMANDS.items():
+        bin_name = _PROVIDER_BINARY_NAMES.get(prov, prov)
         bin_path = _resolve_provider_bin(prov)
-        installed = bool(bin_path) and bin_path != prov and Path(bin_path).is_file()
-        authenticated = any((home / marker).exists() for marker in _AUTH_MARKERS[prov])
-        out[prov] = {
+        installed = bool(bin_path) and bin_path != bin_name and Path(bin_path).is_file()
+        markers = _AUTH_MARKERS.get(prov, [])
+        if markers:
+            authenticated: bool | None = any((home / marker).exists() for marker in markers)
+        else:
+            # No file markers (e.g., antigravity uses OS keyring) → auth
+            # state unobservable. Wizard handles via "Launch & Sign In" UI.
+            authenticated = None
+        entry: dict = {
             "installed": installed,
             "authenticated": authenticated,
             "bin_path": bin_path if installed else None,
-            "package": pkg,
+            "install_command": cmd,
         }
-        if not (installed and authenticated):
+        # Keep `package` for backwards compatibility with existing
+        # consumers that read it on the npm-based providers. Derive
+        # from the install command's last element (the package name).
+        if cmd[:2] == ["npm", "install"]:
+            entry["package"] = cmd[-1]
+        if authenticated is None:
+            # Currently only antigravity. Surface auth method so the
+            # wizard renders the right CTA (D2b/D3b of 2026-05-22 plan).
+            entry["auth_method"] = "implicit_on_launch"
+            # Ready iff installed — auth verified out-of-band by user launch.
+            provider_ready = installed
+        else:
+            provider_ready = installed and authenticated
+        out[prov] = entry
+        if not provider_ready:
             all_ready = False
     return {"providers": out, "ready": all_ready}
 
 
 class SpawnTerminalRequest(BaseModel):
-    provider: Literal["claude", "gemini", "codex"]
+    provider: Literal["claude", "gemini", "codex", "antigravity"]
     mode: Literal["install", "auth"]
 
 
@@ -817,29 +876,44 @@ def cli_agent_spawn_terminal(req: SpawnTerminalRequest) -> dict:
     /open-url — direct subprocess.Popen of gnome-terminal from
     blackbox.service's cgroup hits the same cross-namespace wall.
 
-    Mode "install" runs `npm install -g <package>` (inside an
-    nvm-loaded shell so it lands at the right node version).
-    Mode "auth" runs the provider's interactive login command.
+    Mode "install" runs the provider's install command (npm for
+    claude/gemini/codex, curl-piped bash for antigravity), wrapped
+    in an nvm-loaded shell so npm installs land at the right node
+    version.
+    Mode "auth" runs the provider's interactive login command. For
+    antigravity there is no separate login command — the wizard
+    (Track 2) should not request mode=auth for antigravity; we
+    fall back to launching `agy` itself, which triggers the OAuth
+    flow on first run via the OS keyring.
 
     Both commands are wrapped so the terminal stays open after exit:
     user sees the final output + presses Enter to dismiss. Without
     this, gnome-terminal closes the second the command exits and
     any error message is lost.
     """
+    import shlex
     import subprocess
 
     prov = req.provider
-    pkg = _CLI_INSTALL_PKGS[prov]
+    install_cmd_list = INSTALL_COMMANDS[prov]
+    # Quote each arg safely so it round-trips through bash -c.
+    install_cmd_str = " ".join(shlex.quote(a) for a in install_cmd_list)
+    # Friendly label for the "Installing X..." line. For npm packages
+    # use the package name; for antigravity show the binary name.
+    install_label = install_cmd_list[-1] if install_cmd_list[:2] == ["npm", "install"] else prov
     if req.mode == "install":
         inner = (
             f'export NVM_DIR="$HOME/.nvm"; '
             f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
-            f'echo "Installing {pkg}..."; '
-            f'npm install -g {pkg}; '
+            f'echo "Installing {install_label}..."; '
+            f'{install_cmd_str}; '
             f'echo; echo "Done. Press Enter to close."; read'
         )
     else:  # auth
-        cmd = _CLI_AUTH_CMD[prov]
+        # Antigravity has no separate login command — launching the
+        # binary itself triggers OAuth via the OS keyring on first
+        # run. For npm-based providers, use the configured login cmd.
+        cmd = _CLI_AUTH_CMD.get(prov) or "agy"
         inner = (
             f'export NVM_DIR="$HOME/.nvm"; '
             f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
