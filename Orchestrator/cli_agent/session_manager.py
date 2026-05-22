@@ -159,6 +159,20 @@ class TmuxSessionManager:
             "PATH": _augmented_spawn_path(),
             **self.oc.env_for(operator),
         }
+        # Grant the spawned CLI process access to the user's D-Bus session
+        # bus, so libsecret/secret-service can read the OS keyring. Antigravity
+        # (agy) stores its OAuth token there; without DBUS_SESSION_BUS_ADDRESS,
+        # libsecret returns "no service" and agy falls back to per-launch
+        # SSH-mode interactive auth — even when the user already authenticated
+        # in a separate desktop terminal session. Future CLI providers using
+        # keyring-based auth benefit identically.
+        # Only inject when the socket actually exists (typically /run/user/UID/bus
+        # on Linux systems with systemd-logind). On headless/embedded systems
+        # without a user session, the file is absent and we skip the injection
+        # cleanly — agy then falls back to its own interactive auth flow.
+        _dbus_path = f"/run/user/{os.getuid()}/bus"
+        if os.path.exists(_dbus_path):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus_path}"
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)
