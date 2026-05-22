@@ -9,8 +9,11 @@
  *  - Loaded via jsDelivr CDN as UMD scripts; globals window.Terminal +
  *    window.FitAddon consumed from this ES module.
  *  - In-modal terminal panel (no separate browser tab).
- *  - Provider radio: Claude / Gemini / Codex (backend supports all 3 per
- *    Orchestrator/routes/cli_agent_routes.py:47 SUPPORTED_PROVIDERS).
+ *  - Provider radio: Claude / Gemini / Codex / Antigravity (backend supports
+ *    all 4 per Orchestrator/routes/cli_agent_routes.py:47 SUPPORTED_PROVIDERS).
+ *    Antigravity (agy binary) was added as the 4th provider in Track 3 of
+ *    docs/plans/2026-05-22-antigravity-cli-integration.md. buildSessionName()
+ *    is provider-agnostic — no allowlist client-side; backend validates.
  *
  * Backend contract (cli_agent_routes.py):
  *  - WS path:  /cli-agent/ws/{session_id}
@@ -311,6 +314,31 @@ function openModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.remove('hide');
     refreshAppList();
+    // Onboarding wizard's "Launch & Sign In" button (Antigravity card) sets
+    // this sessionStorage flag, then navigates here. We honor it on the next
+    // openModal call and clear the flag so it only fires once.
+    applyPreselectProvider();
+}
+
+function applyPreselectProvider() {
+    let preselect = null;
+    try { preselect = sessionStorage.getItem('cliAgentsPreselectProvider'); } catch {}
+    if (!preselect) return;
+    try { sessionStorage.removeItem('cliAgentsPreselectProvider'); } catch {}
+    const radio = document.querySelector(`input[name="cliAgentsProvider"][value="${preselect}"]`);
+    if (radio) radio.checked = true;
+}
+
+// Auto-open on page-load if the wizard set the flag and navigated to the
+// Portal root. The wizard's launch button drops a second flag specifically
+// for the "modal should be open when you arrive" case (vs the Tools-button
+// flow, which arrives at the Portal already loaded and dispatches the click).
+function autoOpenFromWizard() {
+    let shouldOpen = null;
+    try { shouldOpen = sessionStorage.getItem('cliAgentsAutoOpen'); } catch {}
+    if (shouldOpen !== '1') return;
+    try { sessionStorage.removeItem('cliAgentsAutoOpen'); } catch {}
+    openModal();
 }
 
 function closeModal() {
@@ -336,4 +364,7 @@ export function initCLIAgentsModal() {
     document.getElementById('btnCloseCLIAgents')?.addEventListener('click', closeModal);
     document.getElementById('cliAgentsLaunch')?.addEventListener('click', launchSession);
     setupDisconnect();
+    // If the onboarding wizard navigated us here with a "please open the
+    // CLI Agents modal" flag, honor it. Runs after init so all DOM is wired.
+    autoOpenFromWizard();
 }

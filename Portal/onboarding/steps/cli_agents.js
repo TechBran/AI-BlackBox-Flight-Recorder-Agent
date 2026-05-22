@@ -21,9 +21,10 @@
 //      - If installed but !auth (Claude/Gemini/Codex): "Sign in" button
 //        → spawns terminal running the provider's interactive login
 //      - If installed + auth_method=implicit_on_launch (Antigravity):
-//        "Launch & Sign In" button — wires to the CLI Agents modal in
-//        Track 3 (currently disabled with a tooltip explaining Track 3
-//        is the prerequisite for the full launch flow).
+//        "Launch & Sign In" button — hands off via sessionStorage flags
+//        + navigates to / where the Portal's CLI Agents modal auto-opens
+//        with antigravity preselected. OAuth triggers when the user
+//        clicks Launch inside that modal (first-run keyring auth).
 //      - If installed AND auth: green checkmark, no action
 //   3. "Re-check status" button re-fetches /status (user runs it after
 //      finishing auth in the spawned terminal)
@@ -165,11 +166,15 @@ function renderGrid(container, status) {
     PROVIDERS.forEach((p) => {
         const installBtn = grid.querySelector(`#ob-cli-install-${p.key}`);
         const authBtn = grid.querySelector(`#ob-cli-auth-${p.key}`);
+        const launchBtn = grid.querySelector(`#ob-cli-launch-${p.key}`);
         if (installBtn) {
             installBtn.addEventListener("click", () => spawnTerminal(container, p, "install"));
         }
         if (authBtn) {
             authBtn.addEventListener("click", () => spawnTerminal(container, p, "auth"));
+        }
+        if (launchBtn) {
+            launchBtn.addEventListener("click", () => launchInPortalModal(p));
         }
     });
 
@@ -222,18 +227,21 @@ function renderCard(provider, state) {
         `;
     } else if (implicitAuth) {
         // Antigravity: no separate `agy login` command exists. The "Launch &
-        // Sign In" button will open the CLI Agents modal with antigravity
-        // preselected, and OAuth triggers implicitly on first launch.
-        // The modal-side radio + preselect plumbing lands in Track 3 of the
-        // Antigravity integration plan; until then this button stays disabled
-        // with a tooltip pointing at the dependency. After Track 3, swap the
-        // disabled attribute for a click handler that opens the modal.
+        // Sign In" button opens the main Portal's CLI Agents modal with
+        // antigravity preselected (Track 3 of the Antigravity integration
+        // plan). OAuth triggers implicitly when the user clicks Launch
+        // inside that modal (first-launch keyring auth).
+        //
+        // Cross-page hand-off: the wizard runs at /onboarding/, the modal
+        // lives at /. We drop two sessionStorage flags then navigate:
+        //   - cliAgentsPreselectProvider: which radio to check on open
+        //   - cliAgentsAutoOpen: tells the modal init to open immediately
+        // The Portal's cli-agents-modal.js consumes + clears both on load.
         actions = `
             <p class="ob-cli-agent-auth-blurb">${escapeHtml(provider.authBlurb)}</p>
             <button type="button" class="ob-cta ob-cli-agent-action ob-cli-agent-action-launch"
                     id="ob-cli-launch-${provider.key}"
-                    disabled
-                    title="Available once the CLI Agents modal gains an Antigravity option (Track 3).">
+                    data-provider="${escapeHtml(provider.key)}">
                 Launch &amp; Sign In
                 <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
             </button>
@@ -270,6 +278,27 @@ function renderCard(provider, state) {
             <div class="ob-cli-agent-actions">${actions}</div>
         </div>
     `;
+}
+
+// Launch & Sign In (Antigravity only — implicit_on_launch auth_method).
+// The CLI Agents modal lives in the main Portal at /, not in the wizard
+// at /onboarding/. We hand off via two sessionStorage flags consumed by
+// Portal/modules/cli-agents-modal.js on init: preselect the radio, and
+// auto-open the modal on arrival.
+function launchInPortalModal(provider) {
+    try {
+        sessionStorage.setItem("cliAgentsPreselectProvider", provider.key);
+        sessionStorage.setItem("cliAgentsAutoOpen", "1");
+    } catch (e) {
+        // sessionStorage can throw in private-mode / locked-down configs.
+        // We still navigate; user will land on the Portal and can open the
+        // modal manually + pick the radio.
+        console.warn("[ob/cli_agents] sessionStorage write failed:", e);
+    }
+    // Same-tab navigation to the Portal root. Tauri webview and plain-browser
+    // both handle this. The wizard is a transient first-run flow; sending the
+    // user to the Portal is the correct next step regardless.
+    window.location.assign("/");
 }
 
 async function spawnTerminal(container, provider, mode) {
