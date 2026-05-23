@@ -63,11 +63,50 @@ function showAuthUrlBanner(url) {
     btn.type = 'button';
     btn.className = 'cli-agents-auth-banner-btn';
     btn.textContent = 'Open in browser';
-    btn.addEventListener('click', () => {
-        window.open(url, '_blank', 'noopener,noreferrer');
-        banner.classList.add('cli-agents-auth-banner-opened');
-        btn.textContent = '✓ Opened';
+    btn.addEventListener('click', async () => {
         btn.disabled = true;
+        btn.textContent = 'Opening…';
+        // PRIMARY PATH: backend /onboarding/open-url uses the hardened 3-step
+        // chain (xdg-desktop-portal → gio launch firefox snap → direct firefox
+        // subprocess) to spawn a browser on the BackBlackBox host's desktop.
+        // Bypasses client-side popup blockers and works on machines where
+        // xdg-open routing is misconfigured. Reuses the same endpoint the
+        // onboarding wizard uses for external links (proven on MSO2).
+        let ok = false;
+        try {
+            const res = await fetch('/onboarding/open-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            if (res.ok) {
+                const data = await res.json().catch(() => ({}));
+                ok = data.ok !== false;  // treat missing ok=true as success
+            }
+        } catch (err) {
+            console.warn('[CLI-AGENTS] /onboarding/open-url failed:', err);
+        }
+        // FALLBACK: window.open if backend couldn't open (e.g., headless
+        // BlackBox install with no display, or endpoint unreachable). User
+        // gesture is preserved — click is still in the synchronous portion
+        // of this handler conceptually, but await may break that on some
+        // browsers; fallback is best-effort.
+        if (!ok) {
+            const opened = window.open(url, '_blank', 'noopener,noreferrer');
+            ok = !!(opened && !opened.closed);
+        }
+        if (ok) {
+            banner.classList.add('cli-agents-auth-banner-opened');
+            btn.textContent = '✓ Opened';
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Open in browser';
+            // Show the URL inline so user can copy it manually as a last resort
+            const fallback = document.createElement('div');
+            fallback.className = 'cli-agents-auth-banner-fallback';
+            fallback.textContent = `Couldn't auto-open. Copy this URL into a browser: ${url}`;
+            banner.appendChild(fallback);
+        }
     });
     const dismiss = document.createElement('button');
     dismiss.type = 'button';

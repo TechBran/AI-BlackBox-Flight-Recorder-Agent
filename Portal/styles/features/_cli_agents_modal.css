@@ -185,3 +185,15 @@
 }
 .cli-agents-auth-banner-dismiss:hover { color: var(--neutral-700, #ccc); }
 .cli-agents-auth-banner-opened { border-color: #4ade80; }
+.cli-agents-auth-banner-fallback {
+    margin-top: 8px;
+    padding: 8px;
+    background: rgba(255, 200, 0, 0.1);
+    border: 1px solid rgba(255, 200, 0, 0.3);
+    border-radius: var(--radius-sm, 4px);
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 11px;
+    color: var(--neutral-700, #ccc);
+    word-break: break-all;
+    user-select: all;
+}
