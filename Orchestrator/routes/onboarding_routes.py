@@ -522,6 +522,96 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.get("/cli-agent/spawn-claude-bare-pty")
+def cli_agent_spawn_claude_bare_pty() -> dict:
+    """Spawn claude via a direct python pty.fork, NO tmux involved.
+    Captures stdout for 10 seconds, then kills. Tells us whether claude's
+    TUI renders when isolated from our tmux wrapper. If text appears here
+    but the modal pane stays blank, the bug is in tmux/session_manager.
+    If text also doesn't appear here, the bug is even deeper (claude +
+    PTY combo on this machine).
+    """
+    import pty, select, fcntl, struct, termios, signal, time
+    from Orchestrator.routes.cli_agent_routes import provider_bin
+    from Orchestrator.cli_agent.path_extension import extended_path_dirs
+
+    claude_bin = provider_bin("claude")
+    if not claude_bin:
+        return {"error": "claude binary not resolvable"}
+
+    aug_path = os.pathsep.join([os.environ.get("PATH", ""), *extended_path_dirs()])
+    # Mirror the env session_manager passes for claude AFTER our scope fix:
+    # no DISPLAY, no BROWSER, just keyring + TERM + PATH.
+    env = {
+        "TERM": "xterm-256color",
+        "PATH": aug_path,
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+    uid = os.getuid()
+    if os.path.isdir(f"/run/user/{uid}"):
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+        if os.path.exists(f"/run/user/{uid}/bus"):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        # Child: replace this process with claude
+        # Set window size first
+        try:
+            fcntl.ioctl(0, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 30, 120, 0, 0))
+        except Exception:
+            pass
+        try:
+            os.execvpe(claude_bin, [claude_bin], env)
+        except Exception as e:
+            os.write(2, f"execvpe failed: {e}\n".encode())
+            os._exit(1)
+
+    # Parent: read PTY for up to 10s
+    captured = bytearray()
+    deadline = time.time() + 10
+    try:
+        while time.time() < deadline:
+            r, _, _ = select.select([fd], [], [], 0.5)
+            if not r:
+                continue
+            try:
+                data = os.read(fd, 8192)
+                if not data:
+                    break
+                captured.extend(data)
+            except OSError:
+                break
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    decoded = captured.decode("utf-8", errors="replace")
+    import re
+    # Strip ANSI for readability + compress blank lines
+    cleaned = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r", "", decoded)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return {
+        "claude_bin": claude_bin,
+        "captured_bytes": len(captured),
+        "cleaned_text": cleaned[:3500],
+        "raw_preview": decoded[:600],
+    }
+
+
 @router.post("/cli-agent/clear-claude-cloud-auth-cache")
 def cli_agent_clear_claude_cloud_auth_cache() -> dict:
     """Quarantine ~/.claude/mcp-needs-auth-cache.json. Claude Code's TUI
