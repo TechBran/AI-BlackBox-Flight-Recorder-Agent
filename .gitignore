@@ -240,3 +240,15 @@ Orchestrator/device_registry/devices.json
 
 # Antigravity CLI (agy) runtime config — created by ~/.local/bin/agy install
 .antigravitycli/
+
+# Project-scope MCP configs: these get auto-loaded by claude/gemini when run
+# from this directory, but they hold ABSOLUTE PATHS to MCP/venv/bin/python +
+# blackbox_mcp_server.py. Committing them means every customer install
+# inherits the dev box's paths, which don't exist on their machine — and
+# Claude HANGS silently trying to launch the broken project-scope MCP, never
+# rendering its UI (Brandon hit this on MSO2 2026-05-23). install.sh Step 2b
+# already writes USER-scope MCP registrations with correct per-machine paths
+# via `claude mcp add -s user`, which is the right layer for this — project
+# scope shouldn't ship at all.
+.mcp.json
+.gemini/settings.json
