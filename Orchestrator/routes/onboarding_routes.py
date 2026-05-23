@@ -629,6 +629,34 @@ def cli_agent_claude_doctor() -> dict:
     out["tmux_version"] = run(["tmux", "-V"], timeout=2.0)
     out["node_version"] = run([os.path.join(os.path.dirname(claude_bin), "node"), "--version"], timeout=2.0)
 
+    # Test claude in --print mode (non-interactive, no TUI). If this hangs
+    # or errors, claude itself is broken irrespective of our PTY/tmux setup.
+    # If it succeeds, the bug is in the interactive/TUI layer.
+    print_env = {**env, "TERM": "xterm-256color"}
+    out["print_mode_test"] = run(
+        [claude_bin, "--print", "say hi in 3 words then stop"],
+        timeout=20.0,
+    )
+
+    # Dump small config files that might explain a hang
+    for fname in ("settings.json", "policy-limits.json", "mcp-needs-auth-cache.json"):
+        p = os.path.join(cfg_dir, fname)
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    out[f"config_{fname}"] = f.read()[:4000]
+            except OSError as e:
+                out[f"config_{fname}"] = f"ERROR: {e}"
+
+    # Check for debug log dir (claude writes to ~/.claude/debug when set up)
+    debug_dir = os.path.join(cfg_dir, "debug")
+    if os.path.isdir(debug_dir):
+        try:
+            files = sorted(os.listdir(debug_dir))[-5:]
+            out["debug_dir_recent"] = files
+        except OSError:
+            pass
+
     return out
 
 
