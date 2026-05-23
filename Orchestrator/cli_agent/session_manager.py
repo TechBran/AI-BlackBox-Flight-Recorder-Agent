@@ -66,7 +66,9 @@ def _post_attach_hook_for(provider: str) -> list[str] | None:
 # the same nvm dirs the resolver searches. Keep this in sync with
 # cli_agent_routes._resolve_provider_bin's search list.
 def _augmented_spawn_path() -> str:
-    """Build a PATH that includes nvm node version bin dirs.
+    """Build a PATH that includes nvm node version bin dirs and our
+    exec-shim dir (prepended so `xdg-open` resolves to our shim
+    instead of /usr/bin/xdg-open — see path_shim_dir docstring).
 
     Mirrors cli_agent_routes._resolve_provider_bin's search list — the
     binary the bridge spawns is itself a Node script with a
@@ -75,8 +77,12 @@ def _augmented_spawn_path() -> str:
 
     See Orchestrator.cli_agent.path_extension for the shared dir list.
     """
-    from .path_extension import extended_path_dirs
-    return os.pathsep.join([os.environ.get("PATH", ""), *extended_path_dirs()])
+    from .path_extension import extended_path_dirs, path_shim_dir
+    return os.pathsep.join([
+        path_shim_dir(),                          # shims win over system bins
+        os.environ.get("PATH", ""),               # then inherited PATH
+        *extended_path_dirs(),                    # then user-local + nvm
+    ])
 
 
 def session_name(operator: str, provider: str, app: str) -> str:
@@ -197,6 +203,15 @@ class TmuxSessionManager:
             _xauth = f"{_xdg_runtime}/gdm/Xauthority"
             if os.path.exists(_xauth):
                 env["XAUTHORITY"] = _xauth
+            # Belt-and-suspenders: set BROWSER to our xdg-open shim so any
+            # CLI tool that consults BROWSER per the freedesktop convention
+            # (python webbrowser module, gh, hub, etc.) routes through the
+            # same direct-browser-binary cascade as xdg-open. Without this,
+            # tools that bypass xdg-open and check BROWSER directly would
+            # see whatever the inherited env had (likely unset → fallback
+            # to xdg-open → back to xdg-mime defaults problem).
+            from .path_extension import path_shim_dir
+            env["BROWSER"] = os.path.join(path_shim_dir(), "xdg-open")
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)

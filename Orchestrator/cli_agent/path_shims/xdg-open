@@ -1,0 +1,42 @@
+#!/bin/bash
+# BlackBox xdg-open shim — installed ONLY in the CLI Agent bridge's PATH
+# (not system-wide). Bypasses GNOME's xdg-mime defaults for HTTP(S) URLs.
+#
+# Why this exists (Brandon 2026-05-22):
+#   Antigravity `agy` (and any other CLI that calls xdg-open for OAuth)
+#   delegates to whatever `xdg-mime query default x-scheme-handler/https`
+#   returns. On MSO2 Ultra that default reliably drifts back to empty or
+#   to a non-browser handler (gnome-text-editor), so the OAuth URL opens
+#   in a text editor instead of a browser. install.sh Step 4i tries to
+#   pin the default to chromium-browser, but GNOME / snap / initial-setup
+#   re-clobber it. Rather than chase that, we intercept xdg-open at the
+#   tmux PATH level and route HTTP(S) directly to a browser binary.
+#
+# Resolution order: apt-installed binaries first (chromium-browser,
+# chromium, google-chrome) before snap firefox. Snap firefox commonly
+# fails when launched from a systemd-cgroup-restricted parent like
+# blackbox.service with `snap-confine: cap_dac_override not found`;
+# the `--version` probe catches that in <200ms so we fall through to
+# the next candidate instead of leaving agy hanging on a dead browser.
+#
+# Non-HTTP schemes (file://, mailto:, magnet:, etc.) defer to the real
+# xdg-open via absolute path so we don't recurse through PATH.
+
+url="$1"
+case "$url" in
+    http://*|https://*)
+        for browser in chromium-browser chromium google-chrome firefox; do
+            command -v "$browser" >/dev/null 2>&1 || continue
+            # Probe: can this browser actually launch in this env?
+            # apt-installed binaries return rc=0 with version string;
+            # snap-confined firefox under systemd cgroup exits non-zero.
+            "$browser" --version >/dev/null 2>&1 || continue
+            exec "$browser" "$url"
+        done
+        # No working browser — fall through to real xdg-open as last
+        # resort. This will likely fail too (or open the text editor),
+        # but at least we tried.
+        ;;
+esac
+
+exec /usr/bin/xdg-open "$@"

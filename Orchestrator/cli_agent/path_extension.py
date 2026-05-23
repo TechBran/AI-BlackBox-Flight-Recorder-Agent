@@ -58,3 +58,17 @@ def extended_path_dirs() -> list[str]:
         "/usr/bin",
         *nvm_node_bin_dirs(),
     ]
+
+
+def path_shim_dir() -> str:
+    """Directory containing exec-shims that get PREPENDED to PATH for
+    CLI-agent-spawned processes — overriding the corresponding system
+    binaries only within the tmux session, not system-wide.
+
+    Currently ships one shim: `xdg-open`. Antigravity `agy` (and any
+    OAuth-flow CLI) calls xdg-open to launch the user's browser; on
+    Ubuntu Desktop the xdg-mime default for HTTP(S) reliably drifts
+    back to empty/text-editor, so URLs open in gnome-text-editor.
+    Our shim bypasses xdg-mime entirely and routes straight to the
+    first browser binary on PATH."""
+    return str(Path(__file__).parent / "path_shims")
