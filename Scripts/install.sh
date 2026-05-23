@@ -535,6 +535,52 @@ sudo -u "$REAL_USER" bash -c '
     fi
 ' || true
 
+# ── Step 4i: default browser handler — chromium/firefox xdg-settings ──
+# Fresh Ubuntu installs leave all MIME handlers EMPTY out-of-the-box:
+#   xdg-settings get default-web-browser    → (blank)
+#   xdg-mime query default text/html        → (blank)
+#   xdg-mime query default x-scheme-handler/https → (blank)
+# When a CLI agent (Antigravity `agy` in particular — issued via PTY-bridge
+# from the CLI Agents modal) calls `xdg-open https://...` for OAuth, xdg-open
+# finds no registered handler and falls back to whatever default exists —
+# which on Ubuntu Desktop often routes to gedit/text-editor/Notepad-equivalent.
+# Result: agy auto-pops a text editor with HTML content instead of a browser.
+# Brandon hit this on MSO2 2026-05-22.
+# Fix: register the first available browser as default for all relevant MIME
+# types. Prefer chromium-browser.desktop (apt-installed, deterministic launch);
+# fall back to firefox_firefox.desktop (snap-managed) if chromium absent.
+# Idempotent: re-running with the default already set is a no-op.
+sudo -u "$REAL_USER" bash -c '
+    DESKTOP_DIRS="/usr/share/applications /var/lib/snapd/desktop/applications"
+    chosen=""
+    # Priority order: chromium-browser (apt) → firefox_firefox (snap) → google-chrome
+    for desktop in chromium-browser.desktop firefox_firefox.desktop firefox.desktop google-chrome.desktop; do
+        for dir in $DESKTOP_DIRS; do
+            if [[ -f "$dir/$desktop" ]]; then
+                chosen="$desktop"
+                break 2
+            fi
+        done
+    done
+    if [[ -n "$chosen" ]]; then
+        # xdg-settings + xdg-mime need DBUS_SESSION_BUS_ADDRESS to talk to
+        # the user keyring/desktop layer. /run/user/<uid>/bus is the systemd
+        # logind path; populated for any user with an active graphical or
+        # PAM-spawned session.
+        if [[ -e "/run/user/$(id -u)/bus" ]]; then
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+        fi
+        xdg-settings set default-web-browser "$chosen" 2>/dev/null \
+            && echo "[install] Default browser set: $chosen" \
+            || echo "[install] (xdg-settings failed for $chosen — re-run after login)"
+        xdg-mime default "$chosen" text/html x-scheme-handler/http x-scheme-handler/https x-scheme-handler/about x-scheme-handler/unknown 2>/dev/null \
+            && echo "[install] MIME handlers registered for $chosen (text/html + http/https schemes)" \
+            || echo "[install] (xdg-mime failed for $chosen — re-run after login)"
+    else
+        echo "[install] WARNING: no browser .desktop file found (looked in $DESKTOP_DIRS for chromium/firefox/chrome). CLI agents that auto-open browsers (Antigravity, etc.) will fall through to xdg-open default — likely a text editor. Install chromium-browser or firefox and re-run."
+    fi
+' || true
+
 # ── Step 5: Build + install Tauri setup app (audit C2 / Q1=A) ──
 build_tauri_setup() {
     echo "[install] Building BlackBox Setup (Tauri .deb)..."
