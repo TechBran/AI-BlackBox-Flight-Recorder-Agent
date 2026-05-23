@@ -8,6 +8,7 @@ import dataclasses
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -519,6 +520,76 @@ async def restart_blackbox_service() -> dict:
         start_new_session=True,
     )
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
+
+
+@router.get("/cli-agent/claude-doctor")
+def cli_agent_claude_doctor() -> dict:
+    """Run a battery of quick diagnostic commands against the user's
+    claude install — version, MCP server list, config file existence,
+    a 3-second pty-less spawn to capture stderr. Used to debug
+    'modal is blank when launching claude' bugs on remote machines
+    where we can't SSH in to inspect claude's actual behavior.
+    """
+    import subprocess
+    from Orchestrator.cli_agent.path_extension import extended_path_dirs
+
+    out: dict = {}
+
+    # Resolve claude binary (same logic the bridge uses)
+    from Orchestrator.routes.cli_agent_routes import provider_bin
+    claude_bin = provider_bin("claude")
+    out["claude_bin"] = claude_bin
+    if not claude_bin:
+        out["error"] = "claude binary not resolvable"
+        return out
+
+    # Build same augmented PATH as the bridge would
+    aug_path = os.pathsep.join([os.environ.get("PATH", ""), *extended_path_dirs()])
+    env = {**os.environ, "PATH": aug_path}
+
+    def run(cmd: list[str], timeout: float = 4.0) -> dict:
+        try:
+            r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                               timeout=timeout)
+            return {
+                "rc": r.returncode,
+                "stdout": r.stdout[-1500:],
+                "stderr": r.stderr[-1500:],
+            }
+        except subprocess.TimeoutExpired as e:
+            return {
+                "rc": "TIMEOUT",
+                "stdout": (e.stdout or b"").decode(errors="replace")[-1500:],
+                "stderr": (e.stderr or b"").decode(errors="replace")[-1500:],
+            }
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    out["version"] = run([claude_bin, "--version"])
+    out["mcp_list"] = run([claude_bin, "mcp", "list"])
+
+    # Check the claude config directory
+    cfg_dir = os.path.expanduser("~/.claude")
+    out["config_dir_exists"] = os.path.isdir(cfg_dir)
+    if out["config_dir_exists"]:
+        try:
+            out["config_dir_listing"] = sorted(os.listdir(cfg_dir))[:30]
+        except OSError as e:
+            out["config_dir_listing"] = f"ERROR: {e}"
+
+    # Check MCP venv path that install.sh registered
+    blackbox_root = os.environ.get("BLACKBOX_ROOT", "")
+    if not blackbox_root:
+        # Fall back to deriving from this file's path
+        blackbox_root = str(Path(__file__).resolve().parents[2])
+    mcp_py = os.path.join(blackbox_root, "MCP/venv/bin/python")
+    mcp_server = os.path.join(blackbox_root, "MCP/blackbox_mcp_server.py")
+    out["mcp_py_path"] = mcp_py
+    out["mcp_py_exists"] = os.path.isfile(mcp_py)
+    out["mcp_server_path"] = mcp_server
+    out["mcp_server_exists"] = os.path.isfile(mcp_server)
+
+    return out
 
 
 @router.get("/cli-agent/pane-content")
