@@ -227,23 +227,32 @@ class TmuxSessionManager:
             os.path.exists("/tmp/.X11-unix/X0")
             or os.path.exists(_wayland_socket)
         )
-        if _has_display:
+        # Display vars are only useful for CLIs that auto-open a browser
+        # (Antigravity `agy` is the canonical case — it OAuth-popups via
+        # native GTK). Claude Code is a pure TUI: it doesn't need DISPLAY
+        # and on systems where systemd auto-bind-mounts /tmp/.X11-unix
+        # into PrivateTmp (systemd ~250+, default on Ubuntu 24.04 / MSO2
+        # Ultra) claude HANGS silently in TUI mode if DISPLAY=:0 is set
+        # — presumably an X11 connectivity check at startup that blocks
+        # forever in our PTY/tmux context. Brandon hit this 2026-05-23.
+        # Restrict display injection to providers that actually need it.
+        _display_needed = provider in ("antigravity",)
+        if _has_display and _display_needed:
             env["DISPLAY"] = ":0"
             _xauth = f"{_xdg_runtime}/gdm/Xauthority"
             if os.path.exists(_xauth):
                 env["XAUTHORITY"] = _xauth
             if os.path.exists(_wayland_socket):
                 env["WAYLAND_DISPLAY"] = "wayland-0"
-        # Always set BROWSER to our shim — it's harmless on headless
-        # systems (the shim falls through to /usr/bin/xdg-open if no
-        # graphical session) and absolutely required when agy / claude /
-        # other CLIs consult BROWSER per the freedesktop convention. Moved
-        # outside the display-detection block (2026-05-23 Brandon debug)
-        # because PrivateTmp=true was hiding /tmp/.X11-unix/X0 from this
-        # process, leaving BROWSER unset and CLIs falling through to
-        # xdg-mime-defaults → text editor.
-        from .path_extension import path_shim_dir
-        env["BROWSER"] = os.path.join(path_shim_dir(), "xdg-open")
+        # BROWSER follows the same rule: only useful for CLIs that fire
+        # native URL-open (agy). Setting it for claude is harmless in
+        # theory but on MSO2 it correlates with the TUI hang above —
+        # safer to scope it to providers that actually consume it. The
+        # PATH-shim xdg-open intercept in _augmented_spawn_path still
+        # protects shell-out URL launches regardless.
+        if _display_needed:
+            from .path_extension import path_shim_dir
+            env["BROWSER"] = os.path.join(path_shim_dir(), "xdg-open")
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)
