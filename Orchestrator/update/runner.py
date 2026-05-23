@@ -211,11 +211,30 @@ class UpdateRunner:
                 timeout=600.0,
             )
             if rc != 0:
-                yield self._fail(PHASE_SYSTEMD_REGEN,
-                                 f"install.sh failed (rc={rc}): {_tail(out)}")
-                await self._rollback_code()
-                return
-            yield self._log(PHASE_SYSTEMD_REGEN, "System-level regen complete.")
+                # Common failure mode: sudoers doesn't grant non-interactive
+                # `bash install.sh` (only specific systemctl/journalctl/helper
+                # paths per installer/templates/sudoers-blackbox-system). Don't
+                # roll back the entire update for this — the code/dependency
+                # changes (git reset, pip install, etc) already applied
+                # successfully. System-level regen (systemd unit / sudoers
+                # rewrites) is deferred; the customer can run install.sh
+                # manually via SSH if they need those changes immediately.
+                # Most install.sh edits (Step 4g GNOME tweaks, Step 4i browser
+                # defaults, etc) are user-session config that doesn't need a
+                # privileged re-run anyway. Hit by Brandon on MSO2 2026-05-22
+                # after commit 236ea70 (Step 4i browser default) triggered
+                # the systemd bucket without needing actual systemd work.
+                # Future: refine changes.py categorization to only trigger
+                # systemd bucket when install.sh changes ACTUALLY touch
+                # systemd-relevant heredocs (Steps 4 / 4b / 4b1 / 4e).
+                yield self._log(PHASE_SYSTEMD_REGEN,
+                                f"WARNING: install.sh re-run failed (rc={rc}); "
+                                f"continuing without system-level regen. "
+                                f"Run `sudo bash Scripts/install.sh` manually if "
+                                f"systemd unit / sudoers / helpers need updating. "
+                                f"Output tail: {_tail(out)}")
+            else:
+                yield self._log(PHASE_SYSTEMD_REGEN, "System-level regen complete.")
 
         # PHASE: restart_pending — emit complete event, schedule restart
         self._write_state(PHASE_RESTART_PENDING)
