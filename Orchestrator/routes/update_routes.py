@@ -166,18 +166,33 @@ def _compute_status_uncached(root: Path) -> dict:
 @router.post("/preflight")
 def update_preflight() -> dict:
     """Force a fresh git-fetch + return current status. Used by the
-    "Check for updates" button. Bypasses the /status cache."""
+    "Check for updates" button. Bypasses the /status cache.
+
+    Also clears any persisted FAILED state from a prior attempt — the
+    user clicking Check is implicit acknowledgement that they want to
+    retry. Without this, a one-time failure (sudo denied, network
+    blip, etc.) leaves update_state.json with phase=failed, which the
+    Portal UI uses to gate the Install button. Customer would need
+    SSH to manually rm the state file. Auto-clearing on Check breaks
+    that trap — they hit Check, the stale failed state goes away, the
+    Install button re-enables, retry proceeds. Brandon hit this on
+    MSO2 2026-05-22 when install.sh re-run failed sudo.
+    `clear_failed_state()` is idempotent + only touches `failed`
+    phase (complete/in-progress phases untouched).
+    """
     global _STATUS_CACHE, _STATUS_CACHE_TS
     _STATUS_CACHE = {}
     _STATUS_CACHE_TS = 0.0
     if not git_ops.is_initialized(_ROOT):
         return {"ok": False, "git_initialized": False,
                 "message": "Run install.sh first to initialize git."}
+    cleared_failed = _MGR.clear_failed_state()
     status = _compute_status_uncached(_ROOT)
     return {
         "ok": "fetch_error" not in status,
         **status,
         "active_sessions": list_active_cli_sessions(),
+        "cleared_failed_state": cleared_failed,
     }
 
 

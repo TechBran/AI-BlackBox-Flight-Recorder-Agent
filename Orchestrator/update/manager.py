@@ -190,6 +190,30 @@ class UpdateManager:
         # Non-terminal phase recorded but lock not held → interrupted.
         return not self.is_locked()
 
+    def clear_failed_state(self) -> bool:
+        """Remove the persisted state file IF its current phase is `failed`.
+        Called by /update/preflight when the user clicks "Check for updates"
+        — implicit acknowledgement that they want to retry, so the stale
+        failed-state from a previous attempt shouldn't gate the Install
+        button anymore.
+
+        Returns True if a failed state was cleared, False if nothing to clear
+        (no state file OR phase was complete/in-progress). Idempotent.
+
+        Never clears non-failed states — `complete` is kept so /update/status
+        can report the last successful update SHA; in-progress states are
+        either real (current update running) or genuinely interrupted
+        (caller should investigate via is_interrupted() instead of clearing).
+        """
+        state = self.read_state()
+        if state is None or state.get("phase") != PHASE_FAILED:
+            return False
+        try:
+            self.state_file.unlink()
+            return True
+        except OSError:
+            return False
+
 
 def _now_iso() -> str:
     """UTC timestamp in ISO 8601 with second precision."""
