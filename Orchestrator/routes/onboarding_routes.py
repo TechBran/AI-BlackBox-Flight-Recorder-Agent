@@ -663,6 +663,21 @@ def cli_agent_claude_doctor() -> dict:
         timeout=20.0,
     )
 
+    # claude with --debug: claude writes diagnostic info to stderr about
+    # what it's loading/connecting to at startup. Captures startup chatter
+    # so we can see WHY the TUI hangs. Use --print to keep this from
+    # blocking forever; we just want the startup phase logs.
+    out["debug_startup_test"] = run(
+        [claude_bin, "--debug", "--print", "hi"],
+        timeout=20.0,
+    )
+
+    # Check the spawn-env signals that influence claude TUI behavior
+    out["display_var_in_orchestrator"] = os.environ.get("DISPLAY", "(unset)")
+    out["x11_socket_visible"] = os.path.exists("/tmp/.X11-unix/X0")
+    uid = os.getuid()
+    out["wayland_socket_visible"] = os.path.exists(f"/run/user/{uid}/wayland-0")
+
     # Dump small config files that might explain a hang
     for fname in ("settings.json", "policy-limits.json", "mcp-needs-auth-cache.json"):
         p = os.path.join(cfg_dir, fname)
