@@ -521,6 +521,36 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.get("/cli-agent/url-handlers")
+def url_handler_status() -> dict:
+    """Return the current xdg-mime default for HTTP(S) and text/html so
+    we can verify whether the startup-hook assertion (in startup.py)
+    actually persisted. If these return something OTHER than chromium-
+    browser.desktop, agy's native URL-open call routes there directly
+    and our PATH shim doesn't help.
+    """
+    import subprocess
+    out = {}
+    for scheme in ("x-scheme-handler/https", "x-scheme-handler/http", "text/html"):
+        try:
+            r = subprocess.run(
+                ["xdg-mime", "query", "default", scheme],
+                capture_output=True, text=True, timeout=4,
+            )
+            out[scheme] = r.stdout.strip() if r.returncode == 0 else f"ERROR rc={r.returncode}"
+        except (subprocess.TimeoutExpired, OSError) as e:
+            out[scheme] = f"EXC {e!r}"
+    # Also check whether the chromium .desktop file actually exists
+    chromium_paths = []
+    for d in ("/usr/share/applications", "/var/lib/snapd/desktop/applications"):
+        for desktop in ("chromium-browser.desktop", "chromium.desktop", "google-chrome.desktop"):
+            p = os.path.join(d, desktop)
+            if os.path.isfile(p):
+                chromium_paths.append(p)
+    out["chromium_desktop_files"] = chromium_paths
+    return out
+
+
 @router.get("/cli-agent/xdg-open-log")
 def xdg_open_shim_log(tail: int = 100) -> dict:
     """Return the last N lines of /tmp/blackbox-xdg-open.log so we can

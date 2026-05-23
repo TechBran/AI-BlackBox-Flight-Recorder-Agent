@@ -226,6 +226,87 @@ def startup_check_index():
 
 
 @app.on_event("startup")
+def startup_assert_url_handlers():
+    """Re-assert chromium-browser as the default URL handler for HTTP(S)
+    and text/html every time the service starts. Brandon's MSO2 hit a
+    persistent regression (2026-05-22 through 2026-05-23) where xdg-mime
+    defaults drifted from chromium-browser to org.gnome.TextEditor.desktop
+    between sessions — cause unknown (snap refresh? GNOME initial-setup?
+    a user mis-click on a file association prompt?). install.sh Step 4i
+    sets it once at install time but doesn't re-assert.
+
+    Our PATH-shim xdg-open/gio interception in TmuxSessionManager covers
+    CLIs that call those binaries directly. But CLIs that use D-Bus
+    (org.freedesktop.portal.OpenURI) or GTK natively (gtk_show_uri)
+    bypass PATH and consult xdg-mime defaults directly — Antigravity
+    `agy` appears to do this since our shim invocation log stays empty
+    when agy auto-opens its OAuth URL.
+
+    Belt-and-suspenders: assert the default at startup. Idempotent
+    (no-op if already correct). Failure here is non-fatal — the PATH
+    shims are still in place as the secondary defense for CLIs that
+    do use xdg-open/gio.
+    """
+    import os
+    import shutil
+    import subprocess
+    # Pick the first browser .desktop file that actually exists on disk.
+    candidates = [
+        "chromium-browser.desktop",
+        "chromium.desktop",
+        "google-chrome.desktop",
+        "firefox_firefox.desktop",   # snap
+        "firefox.desktop",
+    ]
+    desktop_dirs = [
+        "/usr/share/applications",
+        "/var/lib/snapd/desktop/applications",
+        os.path.expanduser("~/.local/share/applications"),
+    ]
+    chosen = None
+    for desktop in candidates:
+        for d in desktop_dirs:
+            if os.path.isfile(os.path.join(d, desktop)):
+                chosen = desktop
+                break
+        if chosen:
+            break
+    if not chosen:
+        logger.warning("[url-handlers] no browser .desktop file found in %s — "
+                       "URL-opening will fall through to xdg-mime defaults",
+                       desktop_dirs)
+        return
+    # Need DBUS to talk to the user's GNOME session for xdg-mime to persist.
+    uid = os.getuid()
+    env = os.environ.copy()
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+    if shutil.which("xdg-mime") is None:
+        logger.warning("[url-handlers] xdg-mime not on PATH; skipping default assertion")
+        return
+    schemes = [
+        "text/html",
+        "x-scheme-handler/http",
+        "x-scheme-handler/https",
+        "x-scheme-handler/about",
+        "x-scheme-handler/unknown",
+    ]
+    try:
+        result = subprocess.run(
+            ["xdg-mime", "default", chosen, *schemes],
+            env=env, capture_output=True, text=True, timeout=8,
+        )
+        if result.returncode == 0:
+            logger.info("[url-handlers] asserted %s as default for %s",
+                        chosen, ", ".join(schemes))
+        else:
+            logger.warning("[url-handlers] xdg-mime default failed rc=%d stderr=%r",
+                           result.returncode, result.stderr[:200])
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("[url-handlers] xdg-mime invocation errored: %r", e)
+
+
+@app.on_event("startup")
 async def startup_scheduler():
     """Start the cron job scheduler."""
     try:
