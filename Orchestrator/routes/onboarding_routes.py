@@ -521,6 +521,55 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.get("/cli-agent/pane-content")
+def cli_agent_pane_content(session_id: str) -> dict:
+    """Diagnostic: capture the actual rendered content of a CLI agent
+    tmux pane via `tmux capture-pane -J -p`. Plus list the running
+    processes inside the pane via tmux's pane_pid + ps walk. Lets us
+    see what the user is actually looking at when they say 'the modal
+    is blank' — was claude's UI ever drawn? Did it exit? Is it stuck
+    at a hidden prompt?
+    """
+    import subprocess
+    if not session_id.startswith("cli-agent-"):
+        return {"error": "invalid session_id"}
+    # Capture pane content as it would render
+    cap = subprocess.run(
+        ["tmux", "capture-pane", "-J", "-p", "-t", session_id],
+        capture_output=True, text=True, timeout=4,
+    )
+    # Get pane pid + walk children
+    pid_proc = subprocess.run(
+        ["tmux", "list-panes", "-t", session_id, "-F", "#{pane_pid}"],
+        capture_output=True, text=True, timeout=4,
+    )
+    pane_pid = pid_proc.stdout.strip()
+    proc_tree = ""
+    if pane_pid:
+        try:
+            ps = subprocess.run(
+                ["ps", "--ppid", pane_pid, "-o", "pid,cmd", "--forest"],
+                capture_output=True, text=True, timeout=4,
+            )
+            proc_tree = ps.stdout
+            # Also include the pane_pid itself
+            ps_self = subprocess.run(
+                ["ps", "-p", pane_pid, "-o", "pid,cmd"],
+                capture_output=True, text=True, timeout=4,
+            )
+            proc_tree = ps_self.stdout + "\n--- children ---\n" + proc_tree
+        except Exception as e:
+            proc_tree = f"ps error: {e}"
+    return {
+        "session_id": session_id,
+        "pane_pid": pane_pid,
+        "pane_content_raw": cap.stdout,
+        "pane_content_lines": cap.stdout.splitlines(),
+        "proc_tree": proc_tree,
+        "capture_stderr": cap.stderr.strip() if cap.stderr.strip() else None,
+    }
+
+
 @router.get("/cli-agent/url-handlers")
 def url_handler_status() -> dict:
     """Return the current xdg-mime default for HTTP(S) and text/html so
