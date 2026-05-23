@@ -160,6 +160,23 @@ class TmuxSessionManager:
     def attach_or_create(self, *, operator: str, provider: str,
                           app: str, command: Sequence[str]) -> SessionInfo:
         cwd = self.pv.validate(app)  # may raise WorkspaceViolation
+        # Claude-specific: quarantine ~/.claude/mcp-needs-auth-cache.json
+        # before spawn. Claude Code's TUI tries to refresh OAuth tokens for
+        # Anthropic-hosted MCP connectors (claude.ai Gmail/Drive/Calendar)
+        # on startup if this cache lists any. The refresh hangs silently
+        # inside our PTY/tmux because the OAuth browser dance can't complete
+        # in time, leaving the pane blank forever (Brandon MSO2 2026-05-23).
+        # Renaming the file makes claude treat connectors as fresh — no
+        # refresh attempted, TUI renders normally. The cache is non-load-
+        # bearing: claude rebuilds it as the user (re-)authenticates.
+        if provider == "claude":
+            import time
+            cache_path = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+            if os.path.exists(cache_path):
+                try:
+                    os.rename(cache_path, f"{cache_path}.bak.{int(time.time())}")
+                except OSError:
+                    pass  # best-effort; if we can't rename, spawn proceeds
         env = {
             "TERM": self._DEFAULT_TERM,
             "PATH": _augmented_spawn_path(),

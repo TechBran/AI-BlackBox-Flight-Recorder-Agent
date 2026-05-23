@@ -522,6 +522,31 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.post("/cli-agent/clear-claude-cloud-auth-cache")
+def cli_agent_clear_claude_cloud_auth_cache() -> dict:
+    """Quarantine ~/.claude/mcp-needs-auth-cache.json. Claude Code's TUI
+    reads this file at startup and tries to refresh OAuth tokens for any
+    listed Anthropic-hosted MCP connectors (claude.ai Gmail/Calendar/
+    Drive etc). The refresh hangs silently inside our PTY/tmux when
+    the OAuth dance can't reach a real browser in time, leaving the
+    pane blank forever (Brandon's MSO2 symptom 2026-05-23). Renaming
+    the file to .bak makes claude treat connectors as fresh — no
+    refresh attempted, TUI renders normally.
+
+    Idempotent: if the file is already absent, returns moved=False.
+    """
+    import time
+    cache = os.path.expanduser("~/.claude/mcp-needs-auth-cache.json")
+    if not os.path.exists(cache):
+        return {"moved": False, "reason": "file not present"}
+    bak = f"{cache}.bak.{int(time.time())}"
+    try:
+        os.rename(cache, bak)
+        return {"moved": True, "from": cache, "to": bak}
+    except OSError as e:
+        return {"moved": False, "error": str(e)}
+
+
 @router.post("/cli-agent/reset-tmux")
 def cli_agent_reset_tmux() -> dict:
     """Kill the cli-agent tmux server entirely. Next spawn creates a
