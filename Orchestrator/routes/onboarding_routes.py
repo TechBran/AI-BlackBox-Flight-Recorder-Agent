@@ -609,6 +609,11 @@ def cli_agent_pane_content(session_id: str) -> dict:
         ["tmux", "capture-pane", "-J", "-p", "-t", session_id],
         capture_output=True, text=True, timeout=4,
     )
+    # Also capture with escape sequences + alt-screen + scrollback
+    cap_alt = subprocess.run(
+        ["tmux", "capture-pane", "-J", "-p", "-e", "-S", "-200", "-t", session_id],
+        capture_output=True, text=True, timeout=4,
+    )
     # Get pane pid + walk children
     pid_proc = subprocess.run(
         ["tmux", "list-panes", "-t", session_id, "-F", "#{pane_pid}"],
@@ -631,11 +636,27 @@ def cli_agent_pane_content(session_id: str) -> dict:
             proc_tree = ps_self.stdout + "\n--- children ---\n" + proc_tree
         except Exception as e:
             proc_tree = f"ps error: {e}"
+    # Show env of pane process so we can see what claude actually inherits
+    pane_env = ""
+    if pane_pid:
+        try:
+            with open(f"/proc/{pane_pid}/environ", "rb") as f:
+                raw_env = f.read().replace(b"\x00", b"\n").decode("utf-8", errors="replace")
+                # Filter to keys we care about
+                interesting = []
+                for line in raw_env.split("\n"):
+                    if any(line.startswith(p) for p in ("PATH=", "TERM=", "BROWSER=", "DISPLAY=", "WAYLAND_", "LANG=", "LC_", "HOME=", "USER=", "PWD=", "CLAUDE", "NODE_", "DBUS_", "XDG_")):
+                        interesting.append(line)
+                pane_env = "\n".join(interesting)
+        except OSError as e:
+            pane_env = f"err: {e}"
     return {
         "session_id": session_id,
         "pane_pid": pane_pid,
         "pane_content_raw": cap.stdout,
         "pane_content_lines": cap.stdout.splitlines(),
+        "pane_content_with_escapes": cap_alt.stdout,
+        "pane_env_interesting": pane_env,
         "proc_tree": proc_tree,
         "capture_stderr": cap.stderr.strip() if cap.stderr.strip() else None,
     }
