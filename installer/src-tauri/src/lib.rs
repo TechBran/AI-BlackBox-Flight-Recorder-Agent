@@ -92,17 +92,45 @@ pub fn run_with_url(url: &str, mode: &str) {
                     .unwrap_or_else(|_| format!("/run/user/{}", uid));
                 let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS")
                     .unwrap_or_else(|_| format!("unix:path={}/bus", xdg_runtime));
-                let firefox_ok = std::process::Command::new("firefox")
-                    .arg(url_str)
-                    .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
-                    .env("XDG_RUNTIME_DIR", &xdg_runtime)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .is_ok();
-                if !firefox_ok {
-                    // Fall back to the opener plugin (xdg-open) for non-Ubuntu
-                    // installs where firefox isn't at /usr/bin/firefox.
+                // Try browsers in apt-first order so we prefer deterministic
+                // launches (chromium-browser, google-chrome from apt) over
+                // snap firefox, whose snap-confine commonly fails under non-
+                // user-session cgroups returning rc=1 immediately. `.spawn()`
+                // only reports fork+exec failure (not subsequent immediate
+                // exits), so we PROBE each candidate with --version first;
+                // an apt binary returns rc=0 with version string, a broken
+                // snap binary exits non-zero, and we skip to the next.
+                let mut opened = false;
+                for browser in &["chromium-browser", "chromium", "google-chrome", "firefox"] {
+                    let probe = std::process::Command::new(browser)
+                        .arg("--version")
+                        .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                        .env("XDG_RUNTIME_DIR", &xdg_runtime)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    if !matches!(probe, Ok(s) if s.success()) {
+                        continue;
+                    }
+                    if std::process::Command::new(browser)
+                        .arg(url_str)
+                        .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                        .env("XDG_RUNTIME_DIR", &xdg_runtime)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .is_ok()
+                    {
+                        opened = true;
+                        break;
+                    }
+                }
+                if !opened {
+                    // Fall back to the opener plugin (xdg-open) only if no
+                    // browser binary was viable. Note: on Ubuntu Desktop with
+                    // drifted xdg-mime defaults this fallback routes to
+                    // gnome-text-editor — that's a known failure mode and
+                    // why we exhaust direct-spawn first.
                     if let Err(e) = tauri_plugin_opener::open_url(url_str, None::<&str>) {
                         eprintln!("[blackbox-setup] failed to open external URL {url}: {e}");
                     }

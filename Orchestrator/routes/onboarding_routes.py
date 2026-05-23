@@ -920,8 +920,27 @@ def cli_agent_spawn_terminal(req: SpawnTerminalRequest) -> dict:
     # Friendly label for the "Installing X..." line. For npm packages
     # use the package name; for antigravity show the binary name.
     install_label = install_cmd_list[-1] if install_cmd_list[:2] == ["npm", "install"] else prov
+
+    # Prepend our xdg-open PATH shim and set BROWSER so any CLI inside
+    # the spawned terminal (claude/gemini/codex/agy) that fires
+    # `xdg-open <url>` for OAuth routes to a real browser binary,
+    # NOT to whatever GNOME's xdg-mime defaults happen to be set to
+    # (which reliably drift to gnome-text-editor on MSO2). Mirrors the
+    # injection done by TmuxSessionManager for the modal path. gnome-
+    # terminal-server forks the new terminal session itself, which can
+    # drop env we pass via subprocess; baking export lines into the
+    # inner bash guarantees the shim wins regardless.
+    from Orchestrator.cli_agent.path_extension import path_shim_dir
+    _shim_dir = shlex.quote(path_shim_dir())
+    _shim_xdg = shlex.quote(os.path.join(path_shim_dir(), "xdg-open"))
+    browser_setup = (
+        f'export PATH={_shim_dir}:"$PATH"; '
+        f'export BROWSER={_shim_xdg}; '
+    )
+
     if req.mode == "install":
         inner = (
+            f'{browser_setup}'
             f'export NVM_DIR="$HOME/.nvm"; '
             f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
             f'echo "Installing {install_label}..."; '
@@ -934,6 +953,7 @@ def cli_agent_spawn_terminal(req: SpawnTerminalRequest) -> dict:
         # run. For npm-based providers, use the configured login cmd.
         cmd = _CLI_AUTH_CMD.get(prov) or "agy"
         inner = (
+            f'{browser_setup}'
             f'export NVM_DIR="$HOME/.nvm"; '
             f'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
             f'echo "Starting {prov} authentication..."; '
