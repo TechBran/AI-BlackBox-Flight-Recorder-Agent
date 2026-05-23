@@ -570,14 +570,9 @@ def cli_agent_spawn_claude_bare_pty() -> dict:
             os.write(2, f"execvpe failed: {e}\n".encode())
             os._exit(1)
 
-    # Parent: read PTY for up to 10s. Auto-respond to claude's terminal
-    # capability queries — without a real terminal emulator on the
-    # master side, queries like Primary Device Attributes go unanswered
-    # and claude's TUI may hang waiting (Brandon MSO2 2026-05-23).
-    # Standard xterm-class responses below mimic what a real terminal
-    # would reply.
     captured = bytearray()
     deadline = time.time() + 10
+    trace: list = []
     answered_da1 = False
     answered_xtversion = False
     try:
@@ -588,21 +583,22 @@ def cli_agent_spawn_claude_bare_pty() -> dict:
             try:
                 data = os.read(fd, 8192)
                 if not data:
+                    trace.append(f"t={time.time()-deadline+10:.1f}s read returned 0 bytes (EOF)")
                     break
                 captured.extend(data)
-                # Inspect for capability queries; respond.
-                # \x1b[c   = DA1 (Primary Device Attributes) — respond as
-                #            xterm with common features.
-                # \x1b[>0q = XTVERSION query — respond with a fake version.
+                trace.append(f"t={time.time()-deadline+10:.1f}s read {len(data)} bytes, total={len(captured)}")
                 if not answered_da1 and b"\x1b[c" in data:
-                    # CSI ?64;1;2;6;9;15;18;21;22 c (xterm + 256color)
-                    os.write(fd, b"\x1b[?64;1;2;6;9;15;18;21;22c")
+                    resp = b"\x1b[?64;1;2;6;9;15;18;21;22c"
+                    n = os.write(fd, resp)
+                    trace.append(f"  -> answered DA1 with {len(resp)} bytes, wrote {n}")
                     answered_da1 = True
                 if not answered_xtversion and b"\x1b[>0q" in data:
-                    # DCS > | XTerm(372) ST
-                    os.write(fd, b"\x1bP>|XTerm(372)\x1b\\")
+                    resp = b"\x1bP>|XTerm(372)\x1b\\"
+                    n = os.write(fd, resp)
+                    trace.append(f"  -> answered XTVERSION with {len(resp)} bytes, wrote {n}")
                     answered_xtversion = True
-            except OSError:
+            except OSError as e:
+                trace.append(f"  read errored: {e}")
                 break
     finally:
         try:
@@ -628,6 +624,9 @@ def cli_agent_spawn_claude_bare_pty() -> dict:
         "captured_bytes": len(captured),
         "cleaned_text": cleaned[:3500],
         "raw_preview": decoded[:600],
+        "answered_da1": answered_da1,
+        "answered_xtversion": answered_xtversion,
+        "trace": trace,
     }
 
 
