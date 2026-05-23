@@ -183,6 +183,20 @@ class TmuxSessionManager:
             _keyring_ctrl = f"{_xdg_runtime}/keyring"
             if os.path.exists(_keyring_ctrl):
                 env["GNOME_KEYRING_CONTROL"] = _keyring_ctrl
+        # Promote agy out of SSH-detection mode by exposing a local X display
+        # so it calls xdg-open and pops up a browser on the desktop instead of
+        # printing a paste-URL with process-bound state that 404s when copied
+        # to a different browser context. Only inject when X is actually
+        # running locally (/tmp/.X11-unix/X0 socket exists); headless systems
+        # without a display skip cleanly and agy stays in SSH mode there.
+        # Per Brandon: "When you set up the CLI you're at the desktop anyway"
+        # — the popped browser appears on the dev box / MSO2 display, which is
+        # where the user is during initial auth.
+        if os.path.exists("/tmp/.X11-unix/X0"):
+            env["DISPLAY"] = ":0"
+            _xauth = f"{_xdg_runtime}/gdm/Xauthority"
+            if os.path.exists(_xauth):
+                env["XAUTHORITY"] = _xauth
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)

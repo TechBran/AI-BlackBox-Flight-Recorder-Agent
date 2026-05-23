@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -203,6 +205,38 @@ async def ws_cli_agent(
         env=env, cols=cols, rows=rows,
     )
 
+    # OAuth URL scraper: extract auth URLs from PTY output BEFORE xterm.js
+    # renders them with line wraps. Solves the user-visible bug where
+    # Brandon's manual copy of Antigravity's printed auth URL returned 404
+    # (long URL + 80-col terminal = wrap-induced copy corruption). When a
+    # URL is detected, we push a sidechannel {type:"auth_url_detected"}
+    # text message so the client can surface a clickable "Open OAuth"
+    # banner instead of relying on copy-paste from the rendered terminal.
+    # Per-session dedup so the same URL doesn't spam the banner if agy
+    # reprints it.
+    # OAuth URL extraction via tmux capture-pane:
+    # agy prints long OAuth URLs that line-wrap at terminal width (80 cols),
+    # so a 470-char Google OAuth URL ends up split across 7 visual lines.
+    # Naive regex on the raw PTY byte stream captures only one line at a
+    # time (the wrap inserts \r\n between URL chars). Brandon hit this:
+    # captured URL was 91 chars (cut at `client_id=1071006060591-tmhss`),
+    # missing `response_type` + the rest of the params, which Google rejected.
+    #
+    # The robust fix is `tmux capture-pane -J` which JOINS wrapped lines back
+    # into logical (unwrapped) text. We trigger capture-pane only when a URL
+    # prefix is detected in the recent PTY stream (cheap heuristic), so we
+    # don't shell out on every read for sessions that never print URLs.
+    _auth_url_pattern = re.compile(
+        r"https?://[A-Za-z0-9.\-]+\.(?:google|googleusercontent|googleapis|antigravity\.google)[A-Za-z0-9.\-]*/[A-Za-z0-9._\-~:/?#\[\]@!$&()*+,;=%]+"
+    )
+    # Cheap prefix detector — runs on every read. Triggers capture-pane only
+    # when this matches. Catches all relevant Google OAuth + Antigravity URLs.
+    _auth_url_trigger = re.compile(
+        rb"https?://(?:accounts\.google|oauth2\.googleapis|antigravity\.google)"
+    )
+    _announced_auth_urls: set[str] = set()
+    _scan_buffer = bytearray()
+
     async def pty_to_ws():
         # Bail out promptly when the WebSocket disconnects, even if the
         # PTY is idle (no bytes flowing). Without this check, the loop
@@ -218,6 +252,43 @@ async def ws_cli_agent(
                     await websocket.send_bytes(data)
                 except (WebSocketDisconnect, RuntimeError):
                     return
+                # Cheap trigger: only run capture-pane when we see an OAuth URL
+                # prefix in recent PTY output. Keeps overhead near-zero for
+                # sessions that don't print URLs.
+                _scan_buffer.extend(data)
+                if len(_scan_buffer) > 4096:
+                    del _scan_buffer[:-4096]
+                if not _auth_url_trigger.search(_scan_buffer):
+                    continue
+                # Capture the rendered tmux pane with -J (join wrapped lines)
+                # so URLs reconstitute from their visual line-wraps. Runs in
+                # a thread so we don't block the PTY read loop.
+                try:
+                    cap = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            subprocess.run,
+                            ["tmux", "capture-pane", "-p", "-J", "-t", session_id],
+                            capture_output=True, text=True, timeout=2,
+                        ),
+                        timeout=3,
+                    )
+                except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+                    continue
+                if cap.returncode != 0:
+                    continue
+                for m in _auth_url_pattern.finditer(cap.stdout):
+                    url = m.group(0).rstrip(".,;:!?)\"'")
+                    if not url or url in _announced_auth_urls:
+                        continue
+                    _announced_auth_urls.add(url)
+                    print(f"[CLI-AGENT] auth URL detected ({len(url)} chars): {url[:120]}...")
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "auth_url_detected",
+                            "url": url,
+                        }))
+                    except (WebSocketDisconnect, RuntimeError):
+                        return
 
     async def ws_to_pty():
         while True:

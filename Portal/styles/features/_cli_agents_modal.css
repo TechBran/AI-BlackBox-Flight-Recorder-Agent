@@ -143,3 +143,45 @@
     padding: 6px;
     box-sizing: border-box;
 }
+
+/* OAuth URL banner — surfaced when backend's URL scraper detects an auth URL
+   in agy/claude/gemini output. Click triggers window.open under user gesture
+   (popup blockers reject auto-triggered window.open). */
+.cli-agents-auth-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0;
+    padding: 10px 14px;
+    background: var(--neutral-150, #1a1a1a);
+    border: 1px solid #4a9eff;
+    border-radius: var(--radius-md, 8px);
+    font-size: 13px;
+    animation: cli-agents-auth-banner-fade-in 200ms ease;
+}
+@keyframes cli-agents-auth-banner-fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.cli-agents-auth-banner-label { color: var(--neutral-700, #ccc); flex: 1; }
+.cli-agents-auth-banner-btn {
+    padding: 6px 14px;
+    background: #4a9eff;
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    font-weight: 600;
+}
+.cli-agents-auth-banner-btn:hover:not(:disabled) { background: #3a8eef; }
+.cli-agents-auth-banner-btn:disabled { background: #2a5e9f; cursor: default; }
+.cli-agents-auth-banner-dismiss {
+    width: 24px; height: 24px;
+    background: transparent;
+    color: var(--neutral-500, #888);
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+}
+.cli-agents-auth-banner-dismiss:hover { color: var(--neutral-700, #ccc); }
+.cli-agents-auth-banner-opened { border-color: #4ade80; }

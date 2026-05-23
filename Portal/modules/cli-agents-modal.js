@@ -33,6 +33,53 @@ import { getOperator } from './state-management.js';
 const FIELD_SEP = '__';
 const APPS_ROOT_SLUG = '_root';
 
+// ── OAuth URL banner ─────────────────────────────────────────────────────
+// Backend extracts OAuth URLs from the PTY byte stream and pushes them as
+// {type:"auth_url_detected"} sidechannel messages. We render a sticky banner
+// inside the modal with a click handler that triggers window.open under a
+// user gesture (popup blockers reject auto-triggered window.open). Avoids
+// the copy-paste-from-terminal flow that Antigravity's long auth URLs broke
+// when xterm.js line-wrapped them.
+function showAuthUrlBanner(url) {
+    if (!url) return;
+    const modal = document.getElementById('cliAgentsModal');
+    if (!modal) return;
+    // Reuse existing banner if present (dedup repeat detections)
+    let banner = modal.querySelector('.cli-agents-auth-banner');
+    if (banner && banner.dataset.url === url) return;  // same URL, already shown
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'cli-agents-auth-banner';
+        // Insert at top of the terminal pane (above the xterm container)
+        const termWrap = document.getElementById('cliAgentsTerminalPane') || modal.querySelector('.modal-body');
+        termWrap?.insertBefore(banner, termWrap.firstChild);
+    }
+    banner.dataset.url = url;
+    banner.innerHTML = '';
+    const label = document.createElement('span');
+    label.className = 'cli-agents-auth-banner-label';
+    label.textContent = '🔗 OAuth sign-in detected — ';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cli-agents-auth-banner-btn';
+    btn.textContent = 'Open in browser';
+    btn.addEventListener('click', () => {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        banner.classList.add('cli-agents-auth-banner-opened');
+        btn.textContent = '✓ Opened';
+        btn.disabled = true;
+    });
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'cli-agents-auth-banner-dismiss';
+    dismiss.textContent = '✕';
+    dismiss.title = 'Dismiss';
+    dismiss.addEventListener('click', () => banner.remove());
+    banner.appendChild(label);
+    banner.appendChild(btn);
+    banner.appendChild(dismiss);
+}
+
 let activeSocket = null;       // WebSocket | null
 let activeSessionId = null;    // string | null  (for kill on disconnect)
 
@@ -258,13 +305,19 @@ async function launchSession() {
             // PTY bytes — raw write. xterm.js owns ANSI/cursor/box-drawing.
             terminal?.write(new Uint8Array(ev.data));
         } else if (typeof ev.data === 'string') {
-            // JSON control event — session_info, error, etc.
+            // JSON control event — session_info, error, auth_url_detected, etc.
             try {
                 const msg = JSON.parse(ev.data);
                 if (msg.type === 'session_info') {
                     terminal?.write(`\x1b[2m[session ${msg.state || ''}]\x1b[0m\r\n`);
                 } else if (msg.type === 'error') {
                     terminal?.write(`\r\n\x1b[31m[error: ${msg.code || ''} ${msg.message || ''}]\x1b[0m\r\n`);
+                } else if (msg.type === 'auth_url_detected') {
+                    // Backend scraped an OAuth URL from PTY output.
+                    // Surface a clickable banner — popup blockers reject
+                    // unrequested window.open, so we need a user gesture
+                    // (the button click below) to actually open the browser.
+                    showAuthUrlBanner(msg.url);
                 } else {
                     terminal?.write(`\r\n\x1b[2m[${msg.type || 'msg'}: ${ev.data}]\x1b[0m\r\n`);
                 }
