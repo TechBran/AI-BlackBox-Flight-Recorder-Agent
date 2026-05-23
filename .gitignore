@@ -237,3 +237,6 @@ Contacts/contacts.json
 # Per-install device registry state (template at devices.json.template) —
 # customer's tailnet devices populate via /devices/sync-tailscale on first use.
 Orchestrator/device_registry/devices.json
+
+# Antigravity CLI (agy) runtime config — created by ~/.local/bin/agy install
+.antigravitycli/
