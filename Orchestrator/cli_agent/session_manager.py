@@ -198,20 +198,35 @@ class TmuxSessionManager:
         # Per Brandon: "When you set up the CLI you're at the desktop anyway"
         # — the popped browser appears on the dev box / MSO2 display, which is
         # where the user is during initial auth.
-        if os.path.exists("/tmp/.X11-unix/X0"):
+        # Display detection: X11 socket OR Wayland socket. The X11 socket
+        # path /tmp/.X11-unix/X0 isn't visible from blackbox.service when
+        # PrivateTmp=true (default), so we ALSO check the Wayland socket
+        # at /run/user/<uid>/wayland-0 which lives under /run (not /tmp)
+        # and isn't subject to namespace isolation. Either presence is a
+        # signal that a graphical session is running and agy/CLIs should
+        # operate in browser-launching mode rather than SSH paste-URL mode.
+        _wayland_socket = f"{_xdg_runtime}/wayland-0"
+        _has_display = (
+            os.path.exists("/tmp/.X11-unix/X0")
+            or os.path.exists(_wayland_socket)
+        )
+        if _has_display:
             env["DISPLAY"] = ":0"
             _xauth = f"{_xdg_runtime}/gdm/Xauthority"
             if os.path.exists(_xauth):
                 env["XAUTHORITY"] = _xauth
-            # Belt-and-suspenders: set BROWSER to our xdg-open shim so any
-            # CLI tool that consults BROWSER per the freedesktop convention
-            # (python webbrowser module, gh, hub, etc.) routes through the
-            # same direct-browser-binary cascade as xdg-open. Without this,
-            # tools that bypass xdg-open and check BROWSER directly would
-            # see whatever the inherited env had (likely unset → fallback
-            # to xdg-open → back to xdg-mime defaults problem).
-            from .path_extension import path_shim_dir
-            env["BROWSER"] = os.path.join(path_shim_dir(), "xdg-open")
+            if os.path.exists(_wayland_socket):
+                env["WAYLAND_DISPLAY"] = "wayland-0"
+        # Always set BROWSER to our shim — it's harmless on headless
+        # systems (the shim falls through to /usr/bin/xdg-open if no
+        # graphical session) and absolutely required when agy / claude /
+        # other CLIs consult BROWSER per the freedesktop convention. Moved
+        # outside the display-detection block (2026-05-23 Brandon debug)
+        # because PrivateTmp=true was hiding /tmp/.X11-unix/X0 from this
+        # process, leaving BROWSER unset and CLIs falling through to
+        # xdg-mime-defaults → text editor.
+        from .path_extension import path_shim_dir
+        env["BROWSER"] = os.path.join(path_shim_dir(), "xdg-open")
         name = session_name(operator, provider, app)
         if self.has_session(name):
             return SessionInfo(name=name, created=False, cwd=cwd)

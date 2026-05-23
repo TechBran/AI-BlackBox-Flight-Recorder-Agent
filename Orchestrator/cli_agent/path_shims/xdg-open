@@ -12,31 +12,40 @@
 #   re-clobber it. Rather than chase that, we intercept xdg-open at the
 #   tmux PATH level and route HTTP(S) directly to a browser binary.
 #
-# Resolution order: apt-installed binaries first (chromium-browser,
-# chromium, google-chrome) before snap firefox. Snap firefox commonly
-# fails when launched from a systemd-cgroup-restricted parent like
-# blackbox.service with `snap-confine: cap_dac_override not found`;
-# the `--version` probe catches that in <200ms so we fall through to
-# the next candidate instead of leaving agy hanging on a dead browser.
-#
-# Non-HTTP schemes (file://, mailto:, magnet:, etc.) defer to the real
-# xdg-open via absolute path so we don't recurse through PATH.
+# Diagnostic logging (Brandon 2026-05-23): every invocation appends to
+# /tmp/blackbox-xdg-open.log with argv + env + parent cmdline so we can
+# verify whether the shim is reached at all. notify-send is best-effort
+# for a visual "shim fired" signal; it's silent if D-Bus / session not
+# reachable.
+
+LOG=/tmp/blackbox-xdg-open.log
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] xdg-open-shim called"
+    echo "  argv:    $*"
+    echo "  PPID:    $PPID"
+    ps -o cmd= -p "$PPID" 2>/dev/null | sed 's/^/  parent:  /'
+    echo "  PATH:    $PATH"
+    echo "  BROWSER: $BROWSER"
+    echo "  DISPLAY: $DISPLAY"
+} >> "$LOG" 2>&1
+
+# Best-effort desktop notification so Brandon can SEE that the shim is
+# being called. notify-send needs D-Bus + a notification daemon, both
+# of which the wizard-spawned env should have. Silent on failure.
+notify-send -u low "BlackBox xdg-open shim" "Opening: $1" 2>/dev/null &
 
 url="$1"
 case "$url" in
     http://*|https://*)
         for browser in chromium-browser chromium google-chrome firefox; do
             command -v "$browser" >/dev/null 2>&1 || continue
-            # Probe: can this browser actually launch in this env?
-            # apt-installed binaries return rc=0 with version string;
-            # snap-confined firefox under systemd cgroup exits non-zero.
             "$browser" --version >/dev/null 2>&1 || continue
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   -> exec $browser $url" >> "$LOG"
             exec "$browser" "$url"
         done
-        # No working browser — fall through to real xdg-open as last
-        # resort. This will likely fail too (or open the text editor),
-        # but at least we tried.
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   -> NO BROWSER WORKED — falling through to /usr/bin/xdg-open" >> "$LOG"
         ;;
 esac
 
+echo "[$(date '+%Y-%m-%d %H:%M:%S')]   -> non-HTTP scheme, falling through to /usr/bin/xdg-open" >> "$LOG"
 exec /usr/bin/xdg-open "$@"

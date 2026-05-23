@@ -1,0 +1,35 @@
+#!/bin/bash
+# BlackBox `gio` shim — intercepts `gio open <http(s)://...>` for the
+# same reason the xdg-open shim exists (see ./xdg-open). Some CLI tools
+# (Node's `open` package on certain versions, Python webbrowser on
+# GNOME, Google CLIs) skip xdg-open and call `gio open URL` directly,
+# which bypasses our xdg-open intercept entirely and routes through
+# xdg-mime defaults → text editor on MSO2.
+#
+# All non-`open` subcommands and non-HTTP `open` invocations defer to
+# the real /usr/bin/gio so we don't break filesystem/uri operations.
+
+LOG=/tmp/blackbox-xdg-open.log
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] gio-shim called"
+    echo "  argv:    $*"
+    echo "  PPID:    $PPID"
+    ps -o cmd= -p "$PPID" 2>/dev/null | sed 's/^/  parent:  /'
+} >> "$LOG" 2>&1
+
+if [ "$1" = "open" ] && [ -n "$2" ]; then
+    case "$2" in
+        http://*|https://*)
+            notify-send -u low "BlackBox gio shim" "Opening: $2" 2>/dev/null &
+            for browser in chromium-browser chromium google-chrome firefox; do
+                command -v "$browser" >/dev/null 2>&1 || continue
+                "$browser" --version >/dev/null 2>&1 || continue
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   -> gio open intercepted: exec $browser $2" >> "$LOG"
+                exec "$browser" "$2"
+            done
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   -> gio open: NO BROWSER WORKED — falling through to /usr/bin/gio" >> "$LOG"
+            ;;
+    esac
+fi
+
+exec /usr/bin/gio "$@"

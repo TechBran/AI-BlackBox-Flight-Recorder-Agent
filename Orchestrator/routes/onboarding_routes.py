@@ -521,6 +521,35 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.get("/cli-agent/xdg-open-log")
+def xdg_open_shim_log(tail: int = 100) -> dict:
+    """Return the last N lines of /tmp/blackbox-xdg-open.log so we can
+    verify whether the xdg-open / gio shims (Orchestrator/cli_agent/
+    path_shims/) are actually being reached when a CLI agent fires
+    OAuth. Diagnostic-only endpoint for remote MSO2 debugging — the
+    log is silent in normal operation, only the diagnostic-enhanced
+    shim writes to it.
+
+    No PII risk: the log contains argv (URLs), parent process cmdline,
+    and a few env vars (PATH, BROWSER, DISPLAY). These are exactly what
+    we already log to journalctl during normal operation.
+    """
+    log_path = "/tmp/blackbox-xdg-open.log"
+    if not os.path.exists(log_path):
+        return {"exists": False, "lines": []}
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        safe_tail = max(1, min(int(tail), 1000))
+        return {
+            "exists": True,
+            "total_lines": len(all_lines),
+            "lines": [l.rstrip("\n") for l in all_lines[-safe_tail:]],
+        }
+    except OSError as e:
+        return {"exists": True, "error": str(e), "lines": []}
+
+
 @router.get("/logs/stream")
 async def logs_stream(lines: int = 200):
     """Stream blackbox.service logs as Server-Sent Events for the wizard's
