@@ -522,6 +522,42 @@ async def restart_blackbox_service() -> dict:
     return {"ok": True, "message": "restart triggered — service will be back in ~60-90s"}
 
 
+@router.post("/cli-agent/reset-tmux")
+def cli_agent_reset_tmux() -> dict:
+    """Kill the cli-agent tmux server entirely. Next spawn creates a
+    fresh one from scratch — clears any cached tmux options / window-
+    level state / accumulated server-level env that survived service
+    restarts (blackbox.service has KillMode=process specifically to
+    preserve tmux across service restarts; that's normally good, but
+    can pin bad state).
+
+    Brandon asked for this 2026-05-23 after multiple commits failed to
+    move the "Claude blank in Portal modal" symptom. Worth trying as a
+    blanket reset before any more surgical investigation.
+    """
+    import subprocess
+    out: dict = {}
+    # List sessions before kill
+    pre = subprocess.run(
+        ["tmux", "list-sessions"], capture_output=True, text=True, timeout=3,
+    )
+    out["sessions_before"] = pre.stdout.strip().splitlines() if pre.returncode == 0 else []
+    out["pre_stderr"] = pre.stderr.strip() if pre.stderr else None
+    # Kill the server
+    kill = subprocess.run(
+        ["tmux", "kill-server"], capture_output=True, text=True, timeout=5,
+    )
+    out["kill_rc"] = kill.returncode
+    out["kill_stderr"] = kill.stderr.strip() if kill.stderr else None
+    # Confirm
+    post = subprocess.run(
+        ["tmux", "list-sessions"], capture_output=True, text=True, timeout=3,
+    )
+    out["sessions_after"] = post.stdout.strip().splitlines() if post.returncode == 0 else []
+    out["post_stderr"] = post.stderr.strip() if post.stderr else None
+    return out
+
+
 @router.get("/cli-agent/claude-doctor")
 def cli_agent_claude_doctor() -> dict:
     """Run a battery of quick diagnostic commands against the user's
@@ -588,6 +624,10 @@ def cli_agent_claude_doctor() -> dict:
     out["mcp_py_exists"] = os.path.isfile(mcp_py)
     out["mcp_server_path"] = mcp_server
     out["mcp_server_exists"] = os.path.isfile(mcp_server)
+
+    # tmux + node versions — useful for cross-machine compare
+    out["tmux_version"] = run(["tmux", "-V"], timeout=2.0)
+    out["node_version"] = run([os.path.join(os.path.dirname(claude_bin), "node"), "--version"], timeout=2.0)
 
     return out
 
