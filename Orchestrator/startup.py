@@ -226,6 +226,83 @@ def startup_check_index():
 
 
 @app.on_event("startup")
+def startup_assert_sudoers_current():
+    """Auto-update /etc/sudoers.d/blackbox-system if the template in this
+    git checkout adds grants that aren't already present. Uses the
+    `blackbox-write-systemd sudoers-system` helper (NOPASSWD-granted by
+    the EXISTING sudoers file, so no password needed) which runs
+    `visudo -c` before installing.
+
+    Why this exists (Brandon 2026-05-24): the update pipeline's
+    systemd_regen phase tries `sudo -n bash install.sh`. The original
+    sudoers file didn't grant that, so the call would fail with a
+    scary 'password required' message. cecc3c1 made the runner tolerate
+    the failure but the message still alarmed customers. Adding the
+    grant to the template fixes new installs; this startup hook ports
+    the grant to EXISTING installs without requiring them to manually
+    re-run install.sh.
+
+    Idempotent: rendered template is compared byte-for-byte against the
+    deployed file; helper only invoked when they differ. Failure is
+    non-fatal — the worst case is the customer's old sudoers stays in
+    place (same as today).
+    """
+    import subprocess
+    import tempfile
+
+    root = Path(__file__).resolve().parents[1]
+    template = root / "installer" / "templates" / "sudoers-blackbox-system"
+    deployed = "/etc/sudoers.d/blackbox-system"
+    if not template.is_file():
+        return
+    real_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "bbx"
+    try:
+        rendered = (
+            template.read_text(encoding="utf-8")
+            .replace("REAL_USER_PLACEHOLDER", real_user)
+            .replace("BLACKBOX_ROOT_PLACEHOLDER", str(root))
+        )
+    except OSError as e:
+        logger.warning("[sudoers] could not read template: %r", e)
+        return
+    # If the deployed file already matches, no action needed.
+    try:
+        with open(deployed, "r", encoding="utf-8", errors="replace") as f:
+            current = f.read()
+        if current == rendered:
+            logger.info("[sudoers] /etc/sudoers.d/blackbox-system already current")
+            return
+    except (OSError, PermissionError):
+        # File doesn't exist or we can't read it — fall through and try
+        # to write (helper will fail gracefully if not permitted).
+        pass
+
+    helper = "/usr/local/sbin/blackbox-write-systemd"
+    if not os.path.isfile(helper):
+        logger.warning("[sudoers] helper %s missing; can't auto-update", helper)
+        return
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sudoers",
+                                          delete=False, encoding="utf-8") as tmp:
+            tmp.write(rendered)
+            tmp_path = tmp.name
+        result = subprocess.run(
+            ["sudo", "-n", helper, "sudoers-system", tmp_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        os.unlink(tmp_path)
+        if result.returncode == 0:
+            logger.info("[sudoers] auto-updated /etc/sudoers.d/blackbox-system "
+                        "(new grants from template now active)")
+        else:
+            logger.warning("[sudoers] helper failed rc=%d stderr=%r",
+                           result.returncode, result.stderr[:200])
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("[sudoers] auto-update errored: %r", e)
+
+
+@app.on_event("startup")
 def startup_assert_url_handlers():
     """Re-assert chromium-browser as the default URL handler for HTTP(S)
     and text/html every time the service starts. Brandon's MSO2 hit a

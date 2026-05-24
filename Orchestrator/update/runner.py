@@ -201,15 +201,35 @@ class UpdateRunner:
         if buckets["systemd"] or buckets["sudoers"] or buckets["helpers"]:
             self._write_state(PHASE_SYSTEMD_REGEN)
             yield self._phase_event(PHASE_SYSTEMD_REGEN)
-            # For v1, regenerate everything by re-running install.sh in
-            # NON-interactive mode (its blocks have if-not-exists guards).
-            # Future: surgical regen-only-what-changed via per-template logic.
-            yield self._log(PHASE_SYSTEMD_REGEN,
-                            "Re-running sudo install.sh for system-level regen...")
-            rc, out = await self._run(
-                ["sudo", "-n", "bash", str(self.root / "Scripts/install.sh")],
-                timeout=600.0,
-            )
+            # Probe non-interactive sudo BEFORE attempting install.sh. If
+            # we know `sudo -n` will fail (no NOPASSWD grant for bash
+            # install.sh — see installer/templates/sudoers-blackbox-system),
+            # skip the phase entirely with a friendly message rather than
+            # surfacing a scary "install.sh failed" / "password required"
+            # error to the user. Brandon's customer hit this 2026-05-23:
+            # cecc3c1's graceful-degrade still showed an alarming WARNING
+            # line that read like a failure in the UI even though the
+            # update actually completed.
+            probe_rc, _ = await self._run(["sudo", "-n", "true"], timeout=5.0)
+            if probe_rc != 0:
+                yield self._log(PHASE_SYSTEMD_REGEN,
+                                "Skipped privileged regen (no passwordless sudo). "
+                                "Code + dependencies updated successfully. If a "
+                                "systemd unit, sudoers, or helper script change "
+                                "needs to apply, run `sudo bash Scripts/install.sh` "
+                                "once manually.")
+                rc = 0  # treat as success for downstream phases
+                out = ""
+            else:
+                # For v1, regenerate everything by re-running install.sh in
+                # NON-interactive mode (its blocks have if-not-exists guards).
+                # Future: surgical regen-only-what-changed via per-template logic.
+                yield self._log(PHASE_SYSTEMD_REGEN,
+                                "Re-running sudo install.sh for system-level regen...")
+                rc, out = await self._run(
+                    ["sudo", "-n", "bash", str(self.root / "Scripts/install.sh")],
+                    timeout=600.0,
+                )
             if rc != 0:
                 # Common failure mode: sudoers doesn't grant non-interactive
                 # `bash install.sh` (only specific systemctl/journalctl/helper

@@ -380,7 +380,8 @@ if [[ -f /etc/sudoers.d/blackbox-tailscale ]]; then
     sudo rm -f /etc/sudoers.d/blackbox-tailscale
     echo "[install] Removed legacy /etc/sudoers.d/blackbox-tailscale (renamed to -system)"
 fi
-sed "s|REAL_USER_PLACEHOLDER|$REAL_USER|g" \
+sed -e "s|REAL_USER_PLACEHOLDER|$REAL_USER|g" \
+    -e "s|BLACKBOX_ROOT_PLACEHOLDER|$BLACKBOX_ROOT|g" \
     "$BLACKBOX_ROOT/installer/templates/sudoers-blackbox-system" \
     | sudo install -m 0440 -o root -g root /dev/stdin /etc/sudoers.d/blackbox-system
 if ! sudo visudo -c -f /etc/sudoers.d/blackbox-system > /dev/null; then

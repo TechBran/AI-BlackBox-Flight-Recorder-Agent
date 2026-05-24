@@ -54,3 +54,14 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/journalctl -u blackbox.servi
 # narrow purpose. That's the design intent — the helpers ARE the policy.
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-apt-install *
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-systemd *
+
+# ── Update-pipeline install.sh re-run (Brandon 2026-05-24) ──────────────
+# Bounded to the exact BLACKBOX_ROOT path so an attacker who can write
+# another bash script can't use this grant against arbitrary targets.
+# install.sh itself is git-tracked and changes only on update; an attacker
+# with write access to install.sh could already trigger root via this on
+# the next Portal update regardless, so the grant doesn't widen the actual
+# threat model. Avoids the "scary FAILED message" UX (cecc3c1) by letting
+# the runner's `sudo -n bash install.sh` actually succeed for the systemd
+# regen phase.
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/bash BLACKBOX_ROOT_PLACEHOLDER/Scripts/install.sh
