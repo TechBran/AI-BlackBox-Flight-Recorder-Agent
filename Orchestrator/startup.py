@@ -13,11 +13,12 @@ Original SHA-256: ef19b35b98d461528de8fae91c27887ef850830798abe8b12e25015e169ea4
 
 # Standard library imports
 import logging
+import os
+from pathlib import Path
 import re
 import sys
 import signal
 import threading
-from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger("blackbox.startup")
