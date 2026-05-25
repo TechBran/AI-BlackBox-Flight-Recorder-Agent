@@ -491,6 +491,36 @@ async def startup_sms():
         logger.error("SMS system startup error: %s (non-fatal, continuing)", e)
 
 
+@app.on_event("startup")
+async def startup_cli_agent_zellij():
+    """Initialize the Zellij subsystem for the CLI Agent (Phase 2 T7).
+
+    Wired BEFORE the first request is served (FastAPI startup events
+    complete before request acceptance), satisfying audit C3's
+    "reconcile MUST run before any route handler" constraint.
+
+    Sequence (per Orchestrator/cli_agent/__init__.py):
+      1. ensure_config()        — refresh ~/.config/zellij/config.kdl
+      2. web_server_healthy()   — wait for zellij-web (up to ~10s)
+      3. reconcile_or_wipe()    — state ↔ tokens.db consistency check
+
+    NEVER raises — the orchestrator must boot even if Zellij is down.
+    get_backend() returns "tmux" as the safe fallback in degraded mode.
+    """
+    try:
+        import asyncio
+        from Orchestrator.cli_agent import startup_initialize
+        # ensure_config + web_server_healthy + reconcile are blocking
+        # subprocess + filesystem + urllib work — punt to a worker thread
+        # so we don't stall the event loop while other startup hooks run.
+        await asyncio.to_thread(startup_initialize)
+    except Exception as e:
+        logger.error(
+            "CLI Agent Zellij startup error: %s (non-fatal, continuing in "
+            "tmux-only degraded mode)", e,
+        )
+
+
 @app.on_event("shutdown")
 async def shutdown_sms():
     """Stop the SMS system."""
