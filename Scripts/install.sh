@@ -334,7 +334,10 @@ step_2c_install_zellij() {
         # hash-mismatch failures) so we never leak /tmp/zellij-install-* dirs.
         # The explicit `rm -rf "$TMPDIR"` at the end of the happy path is kept
         # as documented redundancy — the trap handles both happy + sad paths.
-        trap 'rm -rf "$TMPDIR"' EXIT
+        # ${TMPDIR:-} default protects against `local` going out of scope when
+        # the trap fires AFTER function-exit (set -u would otherwise kill the
+        # trap with "TMPDIR: unbound variable").
+        trap 'rm -rf "${TMPDIR:-}"' EXIT
 
         local TARBALL_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"
         local SHA_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.sha256sum"
@@ -420,9 +423,11 @@ KDL_EOF
         else
             echo "[install] config.kdl: writing (first install)"
         fi
-        sudo -u "$REAL_USER" cp "$TMP_CFG" "$ZELLIJ_CFG"
+        # Atomic write with correct ownership in one root-side `install` call.
+        # `sudo -u $REAL_USER cp` was the original approach but breaks because
+        # mktemp creates root-owned mode-0600 files that REAL_USER can't read.
+        sudo install -m 0644 -o "$REAL_USER" -g "$REAL_USER" "$TMP_CFG" "$ZELLIJ_CFG"
         rm -f "$TMP_CFG"
-        sudo chown -R "$REAL_USER:$REAL_USER" "$ZELLIJ_CFG_DIR"
         echo "[install] Wrote $ZELLIJ_CFG (port $ZELLIJ_PORT, enforce_https=true)"
     fi
 
