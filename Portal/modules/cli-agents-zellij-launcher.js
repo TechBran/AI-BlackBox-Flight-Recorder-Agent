@@ -250,35 +250,6 @@ async function injectShortcut(shortcut) {
             expiresAt: data.expires_at,
         }, 'onLaunched');
 
-        // CLAUDE: auto-inject `/tui fullscreen` 5s after launch.
-        //
-        // Claude Code's DEFAULT renderer uses the alternate screen buffer,
-        // which is incompatible with non-native terminals (tmux web bridge,
-        // Zellij web bridge, xterm.js over WebSocket). Bytes don't render.
-        // The /tui fullscreen slash command switches claude to its own
-        // built-in scrollback renderer which DOES work in those contexts.
-        //
-        // This exact workaround shipped in the original tmux-backed Android
-        // CLI Agent (SNAP-20260501-6373, gotcha #1) — a daemon thread that
-        // typed `/tui fullscreen\r` 5s after session start. We lost it in
-        // the Zellij rewrite. Reinstating here as a frontend delayed inject
-        // since the launcher already has access to /cli-agent/zellij/inject.
-        //
-        // Why 5 seconds: claude needs time to spawn, initialize the slash-
-        // command handler, and become ready to accept input. Less than ~3s
-        // and the keystrokes land before the input loop is wired up.
-        if (shortcut.id === 'claude') {
-            setTimeout(() => {
-                fetch(`${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_name: data.session_name,
-                        text: '/tui fullscreen\r',
-                    }),
-                }).catch(() => {});
-            }, 5000);
-        }
     } catch (err) {
         fireCb(currentCallbacks.onError, {
             provider: shortcut.id,

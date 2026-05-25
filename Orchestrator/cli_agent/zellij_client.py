@@ -511,6 +511,18 @@ def launch_session(
         bus_path = f"/run/user/{os.getuid()}/bus"
         if os.path.exists(bus_path):
             child_env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
+    # Augment PATH with user-local + nvm node bin dirs so CLI agents whose
+    # entry scripts use `#!/usr/bin/env node` (gemini, codex) can find
+    # their interpreter. The orchestrator's systemd PATH excludes
+    # ~/.nvm/versions/node/<ver>/bin, so the shebang fails with
+    # "no such file or directory" when the script is exec'd directly by
+    # zellij's pane layout. Mirrors the spawn-time augmentation the
+    # tmux backend has in session_manager.
+    from Orchestrator.cli_agent.path_extension import extended_path_dirs
+    child_env["PATH"] = os.pathsep.join([
+        *extended_path_dirs(),
+        child_env.get("PATH", ""),
+    ])
     try:
         try:
             proc = subprocess.Popen(

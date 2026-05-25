@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""claude-zellij-shim
+
+Wraps `claude` (Claude Code TUI) in a PTY and strips synchronized-output
+escapes (\x1b[?2026h, \x1b[?2026l) from claude's output. Works around a
+zellij-web serializer bug that drops the trailing partial line of any
+synchronized-output frame, which silently eats claude's input prompt row.
+
+Stripping these advisory escapes makes claude render frame-by-frame instead
+of atomically. Visually identical for an interactive TUI on a fast PTY.
+
+Env:
+  CLAUDE_SHIM_TARGET   Override the wrapped binary name (default: "claude").
+"""
+import fcntl
+import os
+import pty
+import select
+import signal
+import struct
+import sys
+import termios
+
+
+CLAUDE_BIN = os.environ.get("CLAUDE_SHIM_TARGET") or "claude"
+SYNC_OPEN = b"\x1b[?2026h"
+SYNC_CLOSE = b"\x1b[?2026l"
+MAX_ESC_LEN = max(len(SYNC_OPEN), len(SYNC_CLOSE))
+
+
+class SyncStripper:
+    """Boundary-safe filter. Holds back trailing bytes that could be the
+    prefix of a sync-escape split across two read() calls."""
+
+    __slots__ = ("_tail",)
+
+    def __init__(self):
+        self._tail = b""
+
+    def feed(self, data: bytes) -> bytes:
+        buf = self._tail + data
+        out = buf.replace(SYNC_OPEN, b"").replace(SYNC_CLOSE, b"")
+        for i in range(min(MAX_ESC_LEN - 1, len(out)), 0, -1):
+            suffix = out[-i:]
+            if SYNC_OPEN.startswith(suffix) or SYNC_CLOSE.startswith(suffix):
+                self._tail = suffix
+                return out[:-i]
+        self._tail = b""
+        return out
+
+    def flush(self) -> bytes:
+        tail, self._tail = self._tail, b""
+        return tail
+
+
+_FALLBACK_DIRS = (
+    os.path.expanduser("~/.local/bin"),
+    "/usr/local/bin",
+    "/usr/bin",
+    os.path.expanduser("~/.nvm/versions/node/*/bin"),
+)
+
+
+def _resolve_claude():
+    # If caller pinned an absolute path via CLAUDE_SHIM_TARGET, use it.
+    if CLAUDE_BIN.startswith("/") and os.path.isfile(CLAUDE_BIN) and os.access(CLAUDE_BIN, os.X_OK):
+        return CLAUDE_BIN
+    self_path = os.path.realpath(sys.argv[0])
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    # Walk $PATH first, then known install fallbacks (the orchestrator's
+    # systemd PATH excludes ~/.local/bin where claude usually lives).
+    seen = set()
+    for d in (*path_dirs, *_FALLBACK_DIRS):
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        # Expand globs (for ~/.nvm/versions/node/*/bin)
+        import glob as _glob
+        expanded = _glob.glob(d) if "*" in d else [d]
+        for ed in expanded:
+            candidate = os.path.join(ed, CLAUDE_BIN)
+            if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+                continue
+            if os.path.realpath(candidate) == self_path:
+                continue
+            return candidate
+    sys.stderr.write(
+        f"claude-zellij-shim: {CLAUDE_BIN!r} not found on PATH or in "
+        f"fallbacks {_FALLBACK_DIRS}\n"
+    )
+    sys.exit(127)
+
+
+def _get_winsize(fd):
+    try:
+        return fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+    except OSError:
+        return struct.pack("HHHH", 24, 80, 0, 0)
+
+
+def main():
+    real_claude = _resolve_claude()
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            ws = _get_winsize(sys.stdin.fileno())
+            fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSWINSZ, ws)
+        except OSError:
+            pass
+        os.execvp(real_claude, [real_claude, *sys.argv[1:]])
+
+    stripper = SyncStripper()
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+
+    def on_winch(*_):
+        try:
+            ws = _get_winsize(stdout_fd)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, ws)
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGWINCH, on_winch)
+    on_winch()
+
+    while True:
+        try:
+            r, _, _ = select.select([stdin_fd, fd], [], [])
+        except (InterruptedError, OSError):
+            continue
+
+        if stdin_fd in r:
+            try:
+                data = os.read(stdin_fd, 4096)
+            except OSError:
+                data = b""
+            if data:
+                try:
+                    os.write(fd, data)
+                except OSError:
+                    break
+
+        if fd in r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                tail = stripper.flush()
+                if tail:
+                    try:
+                        os.write(stdout_fd, tail)
+                    except OSError:
+                        pass
+                break
+            try:
+                os.write(stdout_fd, stripper.feed(data))
+            except OSError:
+                break
+
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        status = 0
+    sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
+
+
+if __name__ == "__main__":
+    main()

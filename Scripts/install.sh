@@ -602,7 +602,7 @@ sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/
 # the cli-agent zellij endpoints. Without this, every
 # /cli-agent/zellij/launch returns 500 "attempt to write a readonly
 # database" once CLI_AGENT_BACKEND=zellij.
-ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij /tmp
+ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij /tmp
 # Disable PrivateTmp so tmux's socket lives in real /tmp and survives
 # service restarts (combined with KillMode=process below).
 PrivateTmp=false
@@ -616,6 +616,14 @@ KillMode=process
 # capability. xterm-256color is the safest 'works everywhere' baseline;
 # COLORTERM=truecolor unlocks 24-bit where the tool supports it.
 Environment=TERM=xterm-256color COLORTERM=truecolor
+# Claude needs writable home (T16, 2026-05-25): claude-cli's interactive
+# TUI writes to many files at \$HOME root (~/.claude.json, ~/.npm cache,
+# ~/.local/state, plugin marketplaces). The original whitelist missed
+# enough of them that claude silently hung in startup with no output to
+# its PTY — pane buffer stayed at 0 bytes for minutes. Enumerating every
+# path is brittle (changes per claude version), so we disable ProtectHome
+# entirely. ProtectSystem=strict still protects /etc /usr /run.
+ProtectHome=no
 EOF
 
 # ── Step 4c: log rotation (audit M3 carry-forward) ──

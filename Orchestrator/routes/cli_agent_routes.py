@@ -522,7 +522,14 @@ async def zellij_launch(
     # the KDL layout's `pane command=BINARY` triggers Zellij's "Command not
     # found" error inside the pane (T15-final empirical finding). terminal
     # provider passes None → no KDL layout, no binary lookup needed.
-    binary = provider_bin(bare_binary) if bare_binary else None
+    #
+    # Pass `provider` (not `bare_binary`) to provider_bin: provider_bin's
+    # SUPPORTED_PROVIDERS gate is keyed on the public provider id (e.g.,
+    # "antigravity"), not on the binary name ("agy"), and its
+    # _PROVIDER_BINARY_NAMES map performs the id→binary lookup internally.
+    # Passing the binary name skipped that gate and returned None for
+    # antigravity, breaking the agy shortcut.
+    binary = provider_bin(provider) if bare_binary else None
     if bare_binary and not binary:
         raise HTTPException(
             500,
