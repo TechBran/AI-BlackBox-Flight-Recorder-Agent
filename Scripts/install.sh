@@ -470,6 +470,17 @@ if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     echo "[install] Created .env from template (mode 0600)"
 fi
 
+# Step 3a: ensure CLI_AGENT_BACKEND=zellij is set on existing customers'
+# .env files too (idempotent — appended only if missing, never overrides
+# an existing assignment). Without this, customers who installed before
+# Phase 3 keep defaulting to the legacy tmux backend and never see the
+# launch-buttons UI even after pulling the new code. MSO2 hit this on
+# the 2026-05-25 update.
+if ! grep -qE "^CLI_AGENT_BACKEND=" "$BLACKBOX_ROOT/.env" 2>/dev/null; then
+    sudo -u "$REAL_USER" bash -c "echo 'CLI_AGENT_BACKEND=zellij' >> '$BLACKBOX_ROOT/.env'"
+    echo "[install] Appended CLI_AGENT_BACKEND=zellij to .env (was missing)"
+fi
+
 # ── Step 3b: config.ini from template (per-customer state — operators + pairing) ──
 # Customer ZIP doesn't ship config.ini (gitignored to prevent shipping the
 # author's operator roster + tailnet hostname). Wizard's operator + tailscale
