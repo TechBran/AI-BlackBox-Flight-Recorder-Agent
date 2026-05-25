@@ -29,12 +29,28 @@ import datetime as _dt
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
 from . import zellij_client
 
 logger = logging.getLogger(__name__)
+
+# Module-level lock guarding read-modify-write sequences. FastAPI runs
+# request handlers concurrently — two `/launch` requests within
+# milliseconds would otherwise both `load()`, append, `save()` and lose
+# one row (second writer wins; os.replace is atomic at the FS level but
+# does NOT serialize the surrounding read-modify-write).
+#
+# threading.Lock (not asyncio.Lock) because callers wrap state mutators
+# in `asyncio.to_thread(...)` — they run on worker threads, not on the
+# event loop. An asyncio.Lock would force every caller to be async.
+#
+# Read-only helpers (load, list_for_operator) DO NOT take the lock — at
+# worst they observe a snapshot from before or after another writer's
+# os.replace, never a torn read.
+_STATE_LOCK = threading.Lock()
 
 # Module-level state directory + file. Kept under cli_agent/state/ so the
 # `state/` directory is the single place to grep for "is there any raw
@@ -125,32 +141,37 @@ def add_session(
     (``token_1``, etc.), NOT the raw UUID returned by
     ``zellij_client.mint_token()``. The UUID lives only in the
     launch-response payload and dies with the in-memory request scope.
+
+    Acquires ``_STATE_LOCK`` for the full read-modify-write so concurrent
+    callers cannot lose updates.
     """
-    rows = load()
-    now = _now_iso()
-    matched = False
-    for row in rows:
-        if row.get("operator") == operator and row.get("session_name") == session_name:
-            row["token_name"] = token_name
-            row["expires_at"] = expires_at
-            # Preserve original created_at on update; rewrite provider/app
-            # in case the caller renamed (defensive — should not happen
-            # given the prefix discipline in route handlers).
-            row["provider"] = provider
-            row["app"] = app
-            matched = True
-            break
-    if not matched:
-        rows.append({
-            "operator": operator,
-            "provider": provider,
-            "app": app,
-            "session_name": session_name,
-            "token_name": token_name,
-            "created_at": now,
-            "expires_at": expires_at,
-        })
-    save(rows)
+    with _STATE_LOCK:
+        rows = load()
+        now = _now_iso()
+        matched = False
+        for row in rows:
+            if row.get("operator") == operator and row.get("session_name") == session_name:
+                row["token_name"] = token_name
+                row["expires_at"] = expires_at
+                # Preserve original created_at on update; rewrite
+                # provider/app in case the caller renamed (defensive —
+                # should not happen given the prefix discipline in route
+                # handlers).
+                row["provider"] = provider
+                row["app"] = app
+                matched = True
+                break
+        if not matched:
+            rows.append({
+                "operator": operator,
+                "provider": provider,
+                "app": app,
+                "session_name": session_name,
+                "token_name": token_name,
+                "created_at": now,
+                "expires_at": expires_at,
+            })
+        save(rows)
     logger.info(
         "zellij_state.add_session: operator=%s session=%s token_name=%s "
         "(updated=%s)",
@@ -163,16 +184,21 @@ def add_session(
 
 def remove_session(session_name: str) -> None:
     """Remove the row matching ``session_name``. Idempotent — removing a
-    session that does not exist is a logged no-op."""
-    rows = load()
-    new_rows = [r for r in rows if r.get("session_name") != session_name]
-    if len(new_rows) == len(rows):
-        logger.debug(
-            "zellij_state.remove_session: %s not found (idempotent no-op)",
-            session_name,
-        )
-        return
-    save(new_rows)
+    session that does not exist is a logged no-op.
+
+    Acquires ``_STATE_LOCK`` for the full read-modify-write so concurrent
+    callers cannot resurrect a removed row.
+    """
+    with _STATE_LOCK:
+        rows = load()
+        new_rows = [r for r in rows if r.get("session_name") != session_name]
+        if len(new_rows) == len(rows):
+            logger.debug(
+                "zellij_state.remove_session: %s not found (idempotent no-op)",
+                session_name,
+            )
+            return
+        save(new_rows)
     logger.info("zellij_state.remove_session: removed %s", session_name)
 
 
@@ -223,6 +249,21 @@ def reconcile_or_wipe() -> None:
     """Compare orchestrator state ↔ Zellij ``tokens.db`` at orchestrator
     startup (audit C3).
 
+    .. IMPORTANT::
+       This MUST be called during orchestrator startup BEFORE any route
+       handler is registered (typically in a FastAPI ``startup`` event
+       with strict priority ordering — T7 wires this in). Calling
+       ``reconcile_or_wipe`` concurrent with ``mint_token`` /
+       ``launch_session`` / ``add_session`` WILL cause data loss: a
+       freshly-minted token can be classified as orphan on either side
+       and wiped out from under the in-flight request.
+
+       The internal ``_STATE_LOCK`` acquired here serializes against
+       ``add_session`` / ``remove_session`` mutators, but it does NOT
+       cover Zellij's own ``tokens.db`` writes (those happen inside the
+       zellij binary, out of our control). The only safe sequencing is
+       "reconcile fully done before /launch is reachable."
+
     Four cases:
 
     1. Both clean (no state rows, no Zellij tokens)        → no-op.
@@ -235,59 +276,60 @@ def reconcile_or_wipe() -> None:
     session whose backend may or may not still exist, and trying to
     salvage a partial mapping is more dangerous than starting clean.
     """
-    state_rows = load()
-    state_token_names = {
-        row.get("token_name")
-        for row in state_rows
-        if row.get("token_name")
-    }
+    with _STATE_LOCK:
+        state_rows = load()
+        state_token_names = {
+            row.get("token_name")
+            for row in state_rows
+            if row.get("token_name")
+        }
 
-    try:
-        zellij_tokens = zellij_client.list_tokens()
-    except Exception as exc:  # noqa: BLE001 — defensive, daemon may be down
-        logger.warning(
-            "zellij_state.reconcile_or_wipe: cannot list zellij tokens (%s) "
-            "— skipping reconcile this boot. orchestrator will retry next start.",
-            exc,
-        )
-        return
-
-    zellij_token_names = {t["name"] for t in zellij_tokens if "name" in t}
-
-    state_present = bool(state_token_names)
-    zellij_present = bool(zellij_token_names)
-
-    if not state_present and not zellij_present:
-        logger.info(
-            "zellij_state.reconcile_or_wipe: both state and tokens.db clean "
-            "(no-op)"
-        )
-        return
-
-    if state_present and zellij_present:
-        if state_token_names == zellij_token_names:
-            logger.info(
-                "zellij_state.reconcile_or_wipe: state and tokens.db match "
-                "(%d token(s); no-op)",
-                len(state_token_names),
+        try:
+            zellij_tokens = zellij_client.list_tokens()
+        except Exception as exc:  # noqa: BLE001 — defensive, daemon may be down
+            logger.warning(
+                "zellij_state.reconcile_or_wipe: cannot list zellij tokens (%s) "
+                "— skipping reconcile this boot. orchestrator will retry next start.",
+                exc,
             )
             return
-        only_in_state = sorted(state_token_names - zellij_token_names)
-        only_in_zellij = sorted(zellij_token_names - state_token_names)
-        _wipe(
-            f"mismatch — only_in_state={only_in_state} "
-            f"only_in_zellij={only_in_zellij}"
-        )
-        return
 
-    # Exactly one side populated.
-    if state_present and not zellij_present:
-        _wipe(
-            f"state has {len(state_token_names)} token(s) "
-            "but tokens.db is empty"
-        )
-    else:
-        _wipe(
-            f"tokens.db has {len(zellij_token_names)} token(s) "
-            "but state is empty"
-        )
+        zellij_token_names = {t["name"] for t in zellij_tokens if "name" in t}
+
+        state_present = bool(state_token_names)
+        zellij_present = bool(zellij_token_names)
+
+        if not state_present and not zellij_present:
+            logger.info(
+                "zellij_state.reconcile_or_wipe: both state and tokens.db clean "
+                "(no-op)"
+            )
+            return
+
+        if state_present and zellij_present:
+            if state_token_names == zellij_token_names:
+                logger.info(
+                    "zellij_state.reconcile_or_wipe: state and tokens.db match "
+                    "(%d token(s); no-op)",
+                    len(state_token_names),
+                )
+                return
+            only_in_state = sorted(state_token_names - zellij_token_names)
+            only_in_zellij = sorted(zellij_token_names - state_token_names)
+            _wipe(
+                f"mismatch — only_in_state={only_in_state} "
+                f"only_in_zellij={only_in_zellij}"
+            )
+            return
+
+        # Exactly one side populated.
+        if state_present and not zellij_present:
+            _wipe(
+                f"state has {len(state_token_names)} token(s) "
+                "but tokens.db is empty"
+            )
+        else:
+            _wipe(
+                f"tokens.db has {len(zellij_token_names)} token(s) "
+                "but state is empty"
+            )

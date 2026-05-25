@@ -28,6 +28,7 @@ import logging
 import os
 import pty
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -36,6 +37,16 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+class ZellijBinaryMissing(RuntimeError):
+    """Raised when the zellij binary is not present at the expected path.
+
+    Typically means install.sh has not been run (or Phase 1 dependencies
+    were skipped). Surfaced as a typed error so route handlers can render
+    a friendly "run install.sh" hint instead of a raw FileNotFoundError
+    traceback.
+    """
 
 # Locked port for zellij-web on the BlackBox device (plan Track A T1,
 # Phase 0 finding #10). install.sh seeds the same value into config.kdl;
@@ -103,8 +114,13 @@ def _run(
     - text mode (str stdout/stderr)
     - bounded timeout (Zellij CLI calls are sub-100ms in practice; 10s
       is a generous ceiling for I/O hiccups)
-    - logs full argv at DEBUG, failure detail at DEBUG (callers decide
-      whether to upgrade to ERROR — some failures are idempotent paths)
+    - logs full argv at DEBUG, failure detail at WARNING (visible in
+      production journalctl which usually filters at INFO+). Callers can
+      still catch and decide whether to upgrade to ERROR for fatal cases
+      or downgrade to INFO for known-idempotent paths.
+    - FileNotFoundError on the zellij binary is re-raised as
+      ZellijBinaryMissing so route handlers can render an actionable
+      "install.sh" hint rather than a cryptic Python traceback.
     """
     logger.debug("zellij_client._run: %s", args)
     try:
@@ -115,8 +131,23 @@ def _run(
             text=True,
             timeout=timeout,
         )
+    except FileNotFoundError as exc:
+        # Most likely: /usr/local/bin/zellij absent (install.sh not run).
+        if args and args[0] == _ZELLIJ_BIN:
+            logger.error(
+                "zellij binary missing at %s — run install.sh to install "
+                "Phase 1 dependencies",
+                _ZELLIJ_BIN,
+            )
+            raise ZellijBinaryMissing(
+                f"zellij binary missing at {_ZELLIJ_BIN} — "
+                "run install.sh to install Phase 1 dependencies"
+            ) from exc
+        # Some other binary missing (unlikely but don't swallow).
+        logger.error("subprocess binary missing: %s (%s)", args[0] if args else "?", exc)
+        raise
     except subprocess.CalledProcessError as exc:
-        logger.debug(
+        logger.warning(
             "zellij command non-zero exit (rc=%s): %s -- stdout=%r stderr=%r",
             exc.returncode,
             args,
@@ -169,18 +200,42 @@ def mint_token() -> tuple[str, str]:
     SECURITY (audit I7): the caller MUST embed ``uuid_value`` in the
     launch-response payload and then forget it. NEVER persist
     ``uuid_value`` to disk. State stores ``auto_name`` only.
+
+    ROBUSTNESS: takes the LAST ``token_N: <uuid>`` line in stdout (not
+    the first) so any future Zellij version that prints the full token
+    list with the new one appended still yields the just-minted token.
+    Also requires the "Created token successfully" preamble — if that's
+    missing, the output format has changed in a way we can't safely
+    parse, and we raise rather than silently grab the wrong row.
     """
     result = _run([_ZELLIJ_BIN, "web", "--create-token"])
-    match = _TOKEN_LINE_RE.search(result.stdout)
-    if not match:
+    stdout = result.stdout or ""
+
+    # Preamble sanity check — guard against silent format drift.
+    if "Created token successfully" not in stdout:
+        logger.error(
+            "mint_token: 'Created token successfully' preamble missing "
+            "in `zellij web --create-token` output: %r",
+            stdout,
+        )
+        raise RuntimeError(
+            "Unexpected `zellij web --create-token` output format "
+            "(preamble missing) — refusing to parse"
+        )
+
+    matches = list(_TOKEN_LINE_RE.finditer(stdout))
+    if not matches:
         logger.error(
             "mint_token: could not parse `zellij web --create-token` "
             "output: %r",
-            result.stdout,
+            stdout,
         )
         raise RuntimeError(
             "Failed to parse `zellij web --create-token` output"
         )
+    # Take last match — the just-minted token will be the most recent
+    # one printed, even if Zellij decides to also dump the full list.
+    match = matches[-1]
     name = match.group("name")
     value = match.group("value")
     logger.info("zellij token minted: name=%s", name)
@@ -295,46 +350,103 @@ def launch_session(
     # independently of this pty's lifetime — closing the pty does NOT
     # kill the session.
     master_fd, slave_fd = pty.openpty()
+    slave_closed = False
+    rc: Optional[int] = None
+    detached = False
     try:
-        proc = subprocess.Popen(
-            argv,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            text=True,
-            close_fds=True,
-        )
-    except Exception:
-        os.close(master_fd)
-        os.close(slave_fd)
-        raise
-
-    # The Popen now owns the slave-end via dup; we can close our copy.
-    os.close(slave_fd)
-
-    # Brief wait so the session lands in `list_sessions()` before the
-    # caller asks for it. Zellij registers the session with the daemon
-    # well within 500ms in practice; if Popen has already exited by
-    # then it usually means an error (bad binary, name collision).
-    try:
-        rc = proc.wait(timeout=2.0)
-        # If we got here zellij exited quickly — either failure, or the
-        # session is fully detached and that's normal. Check rc.
-    except subprocess.TimeoutExpired:
-        # Healthy path: the client is still running, session is registered,
-        # backend is alive. Detach: kill the orchestrator-side client
-        # process (the per-session backend is separate and survives).
-        proc.terminate()
         try:
-            proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=1.0)
-        os.close(master_fd)
-        return
+            proc = subprocess.Popen(
+                argv,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                text=True,
+                close_fds=True,
+            )
+        except Exception:
+            # Popen failed before the child got the slave fd dup'd —
+            # close it explicitly. (master_fd is closed by the outer
+            # finally.)
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+            slave_closed = True
+            raise
 
-    os.close(master_fd)
+        # The Popen now owns the slave-end via dup; we can close our copy.
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+        slave_closed = True
+
+        # Brief wait so the session lands in `list_sessions()` before the
+        # caller asks for it. Zellij registers the session with the daemon
+        # well within 500ms in practice; if Popen has already exited by
+        # then it usually means an error (bad binary, name collision).
+        try:
+            rc = proc.wait(timeout=2.0)
+            # If we got here zellij exited quickly — either failure, or
+            # the session is fully detached and that's normal. Check rc
+            # below the outer try/finally.
+        except subprocess.TimeoutExpired:
+            # Healthy path: the client is still running, session is
+            # registered, backend is alive. Detach: kill the
+            # orchestrator-side client process (the per-session backend
+            # is separate and survives).
+            #
+            # Wrap terminate/wait/kill so any exception (OSError from a
+            # process already reaped, TimeoutExpired from a zombie) does
+            # NOT leak master_fd — the outer finally guarantees close.
+            detached = True
+            try:
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=1.0)
+                        except subprocess.TimeoutExpired:
+                            # Zombie / stuck — log and move on. The
+                            # backend session is what matters; the
+                            # client process will be reaped by init.
+                            logger.warning(
+                                "launch_session: client process for %s "
+                                "did not exit after kill; abandoning",
+                                name,
+                            )
+                except OSError as exc:
+                    # Process already reaped between terminate and wait,
+                    # or signal delivery failed — both safe to ignore.
+                    logger.debug(
+                        "launch_session: terminate/kill OSError "
+                        "(process likely already reaped): %s",
+                        exc,
+                    )
+            finally:
+                pass  # master_fd close handled by outer finally
+    finally:
+        # Outer guarantee: master_fd ALWAYS closed, regardless of which
+        # exception path we took (Popen raise, inner terminate failure,
+        # zombie kill, normal exit).
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        # Defense in depth: if Popen raised before we closed slave_fd
+        # AND the inner handler missed it, close here too.
+        if not slave_closed:
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+
+    if detached:
+        return
 
     if rc != 0:
         stderr = (proc.stderr.read() if proc.stderr else "") or ""
@@ -451,6 +563,13 @@ def web_server_healthy(
 
     Port is read from ``~/.config/zellij/config.kdl`` when available,
     falling back to the locked default 9097.
+
+    IDENTITY CHECK: an HTTP 200 alone is not sufficient — a different
+    service (operator misconfig, port collision) could return 200 too.
+    We read the first ~2KB of the response body and require it to
+    contain Zellij's xterm.js signature ("Zellij Web Client" in the
+    <title>, with "xterm" as a fallback signature). Returns False with
+    a LOUD warning if 200 but body doesn't look like Zellij.
     """
     port = _read_port_from_config()
     url = f"http://127.0.0.1:{port}/"
@@ -460,13 +579,40 @@ def web_server_healthy(
         try:
             with urllib.request.urlopen(url, timeout=2.0) as resp:
                 if 200 <= resp.status < 300:
-                    if attempt > 1:
-                        logger.info(
-                            "web_server_healthy: ok at %s on attempt %d",
+                    # Identity check: read first 2KB, look for Zellij
+                    # signature in the served HTML.
+                    try:
+                        body_bytes = resp.read(2048)
+                    except (OSError, TimeoutError) as exc:
+                        logger.warning(
+                            "web_server_healthy: %s returned 200 but body "
+                            "read failed (%s); treating as unhealthy",
                             url,
-                            attempt,
+                            exc,
                         )
-                    return True
+                        if attempt < attempts:
+                            time.sleep(backoff_seconds)
+                        continue
+                    body = body_bytes.decode("utf-8", errors="replace")
+                    if (
+                        "Zellij Web Client" in body
+                        or "xterm" in body.lower()
+                    ):
+                        if attempt > 1:
+                            logger.info(
+                                "web_server_healthy: ok at %s on attempt %d",
+                                url,
+                                attempt,
+                            )
+                        return True
+                    logger.error(
+                        "web_server_healthy: port %d returned 200 but does "
+                        "NOT look like Zellij — another service may have "
+                        "claimed the port. body[:200]=%r",
+                        port,
+                        body[:200],
+                    )
+                    return False
                 logger.warning(
                     "web_server_healthy: %s returned HTTP %s on attempt %d",
                     url,
@@ -559,6 +705,35 @@ def ensure_config() -> None:
     )
 
     _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Backup existing config (if any and content actually differs) so
+    # operator hand-edits aren't silently lost. Use a unix-timestamp
+    # suffix so multiple regenerations don't overwrite each other.
+    if file_present:
+        try:
+            current_content = _CONFIG_PATH.read_text(encoding="utf-8")
+        except OSError:
+            current_content = None
+        if current_content is not None and current_content != body:
+            backup_path = _CONFIG_PATH.with_suffix(
+                _CONFIG_PATH.suffix + f".bak.{int(time.time())}"
+            )
+            try:
+                shutil.copy2(_CONFIG_PATH, backup_path)
+                logger.info(
+                    "ensure_config: backed up prior %s to %s "
+                    "(operator hand-edits preserved here)",
+                    _CONFIG_PATH,
+                    backup_path,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "ensure_config: backup of %s -> %s failed: %s "
+                    "(continuing with regeneration)",
+                    _CONFIG_PATH,
+                    backup_path,
+                    exc,
+                )
 
     # Atomic write so we never leave a half-written config behind for
     # the daemon to choke on. Same .tmp + os.replace dance used
