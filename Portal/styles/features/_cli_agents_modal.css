@@ -197,3 +197,259 @@
     word-break: break-all;
     user-select: all;
 }
+
+/* ════════════════════════════════════════════════════════════════════
+ * Zellij mode — T13 three-region layout
+ * Launcher row (top), switcher rail (left), iframe host (fills).
+ * Shell containers are .cli-agents-zellij-* (created by T12 in modal-body).
+ * Inside modules use .zellij-* (attached by the 3 zellij JS modules).
+ * Flex chosen over CSS Grid: the row/column split is trivially nestable
+ * and avoids grid-template-rows weirdness when the launcher height
+ * shifts between auth states.
+ * ════════════════════════════════════════════════════════════════════ */
+
+.cli-agents-zellij-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    height: 70vh;
+    min-height: 420px;
+    max-height: 720px;
+    background: var(--neutral-100, #141414);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    padding: 10px;
+    box-sizing: border-box;
+}
+
+.cli-agents-zellij-launcher-host {
+    flex: 0 0 auto;
+    width: 100%;
+}
+
+.cli-agents-zellij-main {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    gap: 10px;
+    min-height: 0; /* allow children to shrink + iframe to flex-fill */
+}
+
+.cli-agents-zellij-switcher-host {
+    flex: 0 0 220px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.cli-agents-zellij-iframe-host {
+    flex: 1 1 auto;
+    position: relative; /* overlays anchor to this */
+    min-width: 0;
+    background: #0a0a0a;
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    overflow: hidden;
+}
+
+/* ── Launcher row ───────────────────────────────────────── */
+
+.zellij-launcher-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.zellij-launcher-btn {
+    padding: 8px 14px;
+    background: var(--neutral-150, #1a1a1a);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #333);
+    border-left-width: 3px;
+    border-radius: var(--radius-md, 8px);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color var(--transition-fast, 0.15s ease),
+                background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-launcher-btn:hover:not(:disabled) {
+    background: var(--neutral-200, #222);
+    border-color: #4a9eff;
+}
+
+.zellij-launcher-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* Subtle per-provider left-border tint — identifiable without leaning
+ * into a "marketing site" feel. */
+.zellij-launcher-btn[data-provider="claude"]      { border-left-color: #cc785c; }
+.zellij-launcher-btn[data-provider="gemini"]      { border-left-color: #4285f4; }
+.zellij-launcher-btn[data-provider="codex"]       { border-left-color: #10a37f; }
+.zellij-launcher-btn[data-provider="antigravity"] { border-left-color: #8b5cf6; }
+
+/* + Terminal: distinct dashed style so it reads as "additive / blank pane". */
+.zellij-launcher-btn-terminal {
+    border-style: dashed;
+    border-left-width: 1px; /* drop the accent stripe — dashed is the cue */
+    color: var(--neutral-800, #aaa);
+}
+
+.zellij-launcher-btn-terminal:hover:not(:disabled) {
+    color: var(--neutral-1000, #e0e0e0);
+    border-color: var(--neutral-500, #555);
+}
+
+/* ── Switcher rail ──────────────────────────────────────── */
+
+.zellij-switcher-rail {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    background: var(--neutral-150, #1a1a1a);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+}
+
+.zellij-switcher-empty {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--neutral-600, #666);
+    font-size: 12px;
+    font-style: italic;
+    padding: 24px 8px;
+    text-align: center;
+}
+
+.zellij-switcher-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-left: 3px solid transparent;
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.15s ease),
+                border-color var(--transition-fast, 0.15s ease);
+    min-width: 0;
+}
+
+.zellij-switcher-item:hover {
+    background: var(--neutral-200, #222);
+}
+
+.zellij-switcher-item-active {
+    background: rgba(74, 158, 255, 0.12);
+    border-left-color: #4a9eff;
+}
+
+.zellij-switcher-item-active:hover {
+    background: rgba(74, 158, 255, 0.18);
+}
+
+.zellij-switcher-item-label {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0; /* required for text-overflow to engage */
+}
+
+.zellij-switcher-provider-badge {
+    flex: 0 0 auto;
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 5px;
+    border-radius: var(--radius-xs, 4px);
+    background: var(--neutral-300, #333);
+    color: var(--neutral-1000, #e0e0e0);
+    line-height: 1.2;
+}
+
+.zellij-switcher-provider-badge[data-provider="claude"]      { background: #cc785c; }
+.zellij-switcher-provider-badge[data-provider="gemini"]      { background: #4285f4; }
+.zellij-switcher-provider-badge[data-provider="codex"]       { background: #10a37f; }
+.zellij-switcher-provider-badge[data-provider="antigravity"] { background: #8b5cf6; }
+.zellij-switcher-provider-badge[data-provider="terminal"]    { background: var(--neutral-500, #555); }
+
+.zellij-switcher-name {
+    flex: 1 1 auto;
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 12px;
+    color: var(--neutral-900, #ccc);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.zellij-switcher-delete {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: transparent;
+    color: var(--neutral-600, #666);
+    border: none;
+    border-radius: var(--radius-xs, 4px);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color var(--transition-fast, 0.15s ease),
+                background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-switcher-delete:hover {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.1);
+}
+
+/* ── Iframe + overlays ──────────────────────────────────── */
+
+.zellij-iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: #0a0a0a;
+}
+
+.zellij-iframe-loading,
+.zellij-iframe-error {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--neutral-900, #ccc);
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 13px;
+    text-align: center;
+    padding: 16px;
+}
+
+.zellij-iframe-error {
+    cursor: pointer; /* T11b retry-on-click */
+    color: #ff8a8a;
+}
+
+.zellij-iframe-error:hover {
+    background: rgba(0, 0, 0, 0.82);
+}
