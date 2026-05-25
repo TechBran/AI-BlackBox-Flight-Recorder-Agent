@@ -69,8 +69,13 @@ function fireCb(cb, payload, label) {
 
 function refreshShortcutsState() {
     if (!currentShortcutsBtn) return;
-    // Dropdown is meaningful only when there's a live session to inject into.
-    const canInject = !!currentActiveSession && !launchInFlight;
+    // Dropdown is meaningful any time there's a live session to inject into.
+    // Deliberately NOT gated on launchInFlight: the caller's onLaunched fires
+    // setActiveSession() BEFORE finishFlight() clears launchInFlight, which
+    // would leave the button disabled-until-next-event if we also gated on
+    // the in-flight flag. The inject endpoint is independent of /launch
+    // anyway — they hit different code paths server-side.
+    const canInject = !!currentActiveSession;
     currentShortcutsBtn.disabled = !canInject;
     currentShortcutsBtn.title = canInject
         ? 'Inject a CLI agent alias into the current terminal'
