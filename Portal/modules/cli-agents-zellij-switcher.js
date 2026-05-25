@@ -32,6 +32,10 @@ let currentPollIntervalMs = 5000;
 // fire time and drop their result if it no longer matches — guards
 // against orphan callbacks landing after unmount or operator-switch reset.
 let mountSerial = 0;
+// Names with a DELETE currently in-flight. Gates both the × click handler
+// (no double-DELETE on double-click) AND the row-body click handler (no
+// onSwitch fire for a session being torn down). Cleared on unmount.
+const inFlightDeletes = new Set();
 
 const SESSIONS_URL = '/cli-agent/zellij/sessions';
 const PROXY_BASE = '/app-proxy/9097/';
@@ -83,11 +87,19 @@ function makeItem(name, provider, app) {
     del.setAttribute('aria-label', 'Delete session');
     del.textContent = '×';
     // stopPropagation keeps the row-level click from firing onSwitch on
-    // the very session we're deleting.
-    del.addEventListener('click', (ev) => { ev.stopPropagation(); deleteSession(name); });
+    // the very session we're deleting. inFlightDeletes guard prevents a
+    // double-click × from firing two parallel DELETEs (and two onDelete).
+    del.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (inFlightDeletes.has(name)) return;
+        deleteSession(name);
+    });
     item.appendChild(del);
 
     item.addEventListener('click', () => {
+        // Skip onSwitch for sessions being torn down — iframe would
+        // otherwise navigate to a 401/404 mid-delete.
+        if (inFlightDeletes.has(name)) return;
         fireCb(currentCallbacks.onSwitch, { name, provider, app, sessionUrl: sessionUrlFor(name) }, 'onSwitch');
     });
     return item;
@@ -106,12 +118,16 @@ async function deleteSession(name) {
     if (!currentOperator) return;
     const serial = mountSerial;
     const url = `${SESSIONS_URL}/${encodeURIComponent(name)}?op=${encodeURIComponent(currentOperator)}`;
+    inFlightDeletes.add(name);
     try {
         const resp = await fetch(url, { method: 'DELETE' });
         if (!isStillMounted(serial)) return;
         // 204/200/404 all count as "gone" — DELETE is idempotent server-side
         // and 404 means it was already cleaned up; reflect that either way.
         if (resp.ok || resp.status === 404) {
+            // Clear active marker before firing onDelete so a future session
+            // reusing this name doesn't get spuriously rendered active.
+            if (name === currentActiveName) currentActiveName = null;
             fireCb(currentCallbacks.onDelete, { name }, 'onDelete');
         } else {
             const message = await resp.text().catch(() => '');
@@ -120,6 +136,8 @@ async function deleteSession(name) {
     } catch (err) {
         if (!isStillMounted(serial)) return;
         fireCb(currentCallbacks.onError, { stage: 'delete', status: 0, message: String(err) }, 'onError');
+    } finally {
+        inFlightDeletes.delete(name);
     }
     // Always reconcile after a delete attempt — even on error the server
     // may or may not have removed the row; refresh() is the cheapest probe.
@@ -158,7 +176,8 @@ async function pollOnce() {
 // WHY setTimeout-not-setInterval: setInterval fires on a fixed cadence
 // regardless of in-flight requests, which under a slow network can stack
 // overlapping polls. Chained setTimeout keeps exactly one in-flight.
-function pollAndReschedule(immediate) {
+// Always fires immediately; reschedules itself off pollOnce completion.
+function pollAndReschedule() {
     if (currentPollTimeoutId !== null) { clearTimeout(currentPollTimeoutId); currentPollTimeoutId = null; }
     const serial = mountSerial;
     const tick = async () => {
@@ -168,8 +187,7 @@ function pollAndReschedule(immediate) {
         if (!isStillMounted(serial)) return;
         currentPollTimeoutId = setTimeout(tick, currentPollIntervalMs);
     };
-    if (immediate) tick();
-    else currentPollTimeoutId = setTimeout(tick, currentPollIntervalMs);
+    tick();
 }
 
 export function mountSwitcher(containerEl, options = {}) {
@@ -208,7 +226,7 @@ export function mountSwitcher(containerEl, options = {}) {
     currentRailEl = rail;
 
     renderEmpty();
-    pollAndReschedule(true);
+    pollAndReschedule();
     return rail;
 }
 
@@ -230,6 +248,9 @@ export function setOperator(op) {
 }
 
 export function markSessionActive(sessionName) {
+    // Active state has two readers: direct DOM mutation here (instant visual
+    // feedback) AND makeItem's class application on every re-render driven by
+    // poll/refresh. Both rely on currentActiveName as the source of truth.
     currentActiveName = sessionName || null;
     if (!currentRailEl) return;
     currentRailEl.querySelectorAll('.zellij-switcher-item').forEach((el) => {
@@ -243,7 +264,7 @@ export function refresh() {
         console.warn('[ZELLIJ-SWITCHER] refresh called before mountSwitcher — ignored');
         return;
     }
-    pollAndReschedule(true);
+    pollAndReschedule();
 }
 
 export function unmountSwitcher() {
@@ -251,6 +272,7 @@ export function unmountSwitcher() {
     if (currentRailEl && currentRailEl.parentNode) currentRailEl.parentNode.removeChild(currentRailEl);
     currentRailEl = null; currentContainerEl = null; currentOperator = null;
     currentCallbacks = {}; currentActiveName = null; currentSessions = [];
+    inFlightDeletes.clear();
     // Bump serial so any in-flight pollOnce/deleteSession callbacks drop
     // their results on resolution (mountSerial mismatch = orphan).
     mountSerial += 1;
