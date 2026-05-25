@@ -23,6 +23,8 @@ let currentLoadingEl = null;
 let currentErrorEl = null;
 let currentContainerEl = null;
 let currentLoadTimeoutId = null;
+let currentHandleLoad = null;
+let lastLoadAttempt = null;
 let mountOptions = {};
 
 // Zellij's WebSocket handshake + xterm.js boot typically finishes well under
@@ -40,9 +42,13 @@ export function mountIframe(containerEl, options = {}) {
         console.error('[ZELLIJ-IFRAME] mountIframe called without container element');
         return null;
     }
-    if (currentContainerEl === containerEl && currentIframe) {
+    if (currentIframe && currentContainerEl === containerEl) {
         console.warn('[ZELLIJ-IFRAME] mountIframe is idempotent — second call on same container ignored');
         return { iframe: currentIframe, loadingEl: currentLoadingEl, errorEl: currentErrorEl };
+    }
+    if (currentIframe && currentContainerEl !== containerEl) {
+        console.warn('[ZELLIJ-IFRAME] mountIframe called with new container before unmount — auto-cleaning prior mount');
+        unmountIframe();
     }
 
     mountOptions = options || {};
@@ -77,6 +83,13 @@ export function mountIframe(containerEl, options = {}) {
     errorEl.className = 'zellij-iframe-error';
     errorEl.setAttribute('role', 'alert');
     errorEl.hidden = true;
+    // "Tap to retry" — replay the most recent loadSession args verbatim so
+    // callers get back the same callbacks they originally wired up.
+    errorEl.addEventListener('click', () => {
+        if (!lastLoadAttempt) return;
+        errorEl.hidden = true;
+        loadSession(lastLoadAttempt);
+    });
 
     containerEl.appendChild(iframe);
     containerEl.appendChild(loadingEl);
@@ -100,10 +113,17 @@ export function loadSession({ sessionUrl, sessionName, onLoad, onError } = {}) {
         console.error('[ZELLIJ-IFRAME] loadSession requires sessionUrl + sessionName');
         return;
     }
-    if (sessionName === currentSessionName) {
+    // Same-name guard: skip only if the session is currently SUCCESSFULLY
+    // loaded. If the error overlay is showing — e.g. previous attempt timed
+    // out — allow the retry to proceed.
+    if (sessionName === currentSessionName && currentLoadingEl.hidden && currentErrorEl.hidden) {
         console.warn(`[ZELLIJ-IFRAME] session "${sessionName}" already loaded — skipping reload`);
         return;
     }
+
+    // Remember the args so the error overlay's click-to-retry can replay
+    // them verbatim with the original callbacks.
+    lastLoadAttempt = { sessionUrl, sessionName, onLoad, onError };
 
     // Cancel any pending timeout from an in-flight previous swap. The
     // switcher can fire loadSession rapidly when the user clicks between
@@ -111,6 +131,13 @@ export function loadSession({ sessionUrl, sessionName, onLoad, onError } = {}) {
     if (currentLoadTimeoutId !== null) {
         clearTimeout(currentLoadTimeoutId);
         currentLoadTimeoutId = null;
+    }
+    // Remove any stale load listener from the previous in-flight swap. Its
+    // closure captures the OLD sessionName/sessionUrl, so if we leave it
+    // attached it will fire stale callbacks when the NEW src finishes loading.
+    if (currentHandleLoad) {
+        currentIframe.removeEventListener('load', currentHandleLoad);
+        currentHandleLoad = null;
     }
 
     currentSessionName = sessionName;
@@ -120,6 +147,7 @@ export function loadSession({ sessionUrl, sessionName, onLoad, onError } = {}) {
 
     const handleLoad = () => {
         currentIframe.removeEventListener('load', handleLoad);
+        currentHandleLoad = null;
         if (currentLoadTimeoutId !== null) {
             clearTimeout(currentLoadTimeoutId);
             currentLoadTimeoutId = null;
@@ -130,17 +158,22 @@ export function loadSession({ sessionUrl, sessionName, onLoad, onError } = {}) {
         fireCb(mountOptions.onSessionLoad, payload, 'onSessionLoad');
     };
 
+    currentHandleLoad = handleLoad;
     currentIframe.addEventListener('load', handleLoad);
     currentIframe.src = sessionUrl;
 
     currentLoadTimeoutId = setTimeout(() => {
         currentLoadTimeoutId = null;
         currentIframe.removeEventListener('load', handleLoad);
+        currentHandleLoad = null;
         currentLoadingEl.hidden = true;
         currentErrorEl.hidden = false;
         currentErrorEl.textContent = 'Terminal failed to load. Tap to retry.';
         console.error(`[ZELLIJ-IFRAME] session "${sessionName}" load timed out after ${LOAD_TIMEOUT_MS}ms`);
         const payload = { sessionName, sessionUrl, reason: 'timeout' };
+        // Clear currentSessionName so a retry of the same name is not
+        // silently blocked by the same-name guard above.
+        currentSessionName = null;
         fireCb(onError, payload, 'onError');
         fireCb(mountOptions.onSessionError, payload, 'onSessionError');
     }, LOAD_TIMEOUT_MS);
@@ -151,6 +184,10 @@ export function unloadSession() {
     if (currentLoadTimeoutId !== null) {
         clearTimeout(currentLoadTimeoutId);
         currentLoadTimeoutId = null;
+    }
+    if (currentHandleLoad) {
+        currentIframe.removeEventListener('load', currentHandleLoad);
+        currentHandleLoad = null;
     }
     currentIframe.src = 'about:blank';
     currentLoadingEl.hidden = true;
@@ -168,6 +205,7 @@ export function unmountIframe() {
         clearTimeout(currentLoadTimeoutId);
         currentLoadTimeoutId = null;
     }
+    if (currentIframe && currentHandleLoad) currentIframe.removeEventListener('load', currentHandleLoad);
     if (currentIframe && currentIframe.parentNode) currentIframe.parentNode.removeChild(currentIframe);
     if (currentLoadingEl && currentLoadingEl.parentNode) currentLoadingEl.parentNode.removeChild(currentLoadingEl);
     if (currentErrorEl && currentErrorEl.parentNode) currentErrorEl.parentNode.removeChild(currentErrorEl);
@@ -176,5 +214,7 @@ export function unmountIframe() {
     currentErrorEl = null;
     currentContainerEl = null;
     currentSessionName = null;
+    currentHandleLoad = null;
+    lastLoadAttempt = null;
     mountOptions = {};
 }
