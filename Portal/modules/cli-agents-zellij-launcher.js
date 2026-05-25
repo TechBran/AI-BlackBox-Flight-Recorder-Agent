@@ -250,32 +250,34 @@ async function injectShortcut(shortcut) {
             expiresAt: data.expires_at,
         }, 'onLaunched');
 
-        // T15 critical workaround: Claude Code's startup sends a DA1
-        // (`ESC[c`) terminal query and BLOCKS until a reply arrives. Zellij
-        // 0.44.3's web client has a known regression (PR #5156 fixes it on
-        // main) where `ForwardQueryToHost` messages — the path that
-        // forwards DA1 to xterm.js for a reply — are dropped. xterm.js
-        // never sees the query, never responds, claude waits forever.
-        // Workaround per Anthropic claude-code issue #62220: inject the
-        // DA1 reply (`ESC[?1;2c` = VT100 with advanced video) into the
-        // pane ~750ms after launch (giving the iframe + claude time to
-        // start). Fire 3x spaced 500ms apart in case the first arrives
-        // before claude is ready to read. Other binaries that don't use
-        // the DA1 sentinel are unaffected.
+        // CLAUDE: auto-inject `/tui fullscreen` 5s after launch.
+        //
+        // Claude Code's DEFAULT renderer uses the alternate screen buffer,
+        // which is incompatible with non-native terminals (tmux web bridge,
+        // Zellij web bridge, xterm.js over WebSocket). Bytes don't render.
+        // The /tui fullscreen slash command switches claude to its own
+        // built-in scrollback renderer which DOES work in those contexts.
+        //
+        // This exact workaround shipped in the original tmux-backed Android
+        // CLI Agent (SNAP-20260501-6373, gotcha #1) — a daemon thread that
+        // typed `/tui fullscreen\r` 5s after session start. We lost it in
+        // the Zellij rewrite. Reinstating here as a frontend delayed inject
+        // since the launcher already has access to /cli-agent/zellij/inject.
+        //
+        // Why 5 seconds: claude needs time to spawn, initialize the slash-
+        // command handler, and become ready to accept input. Less than ~3s
+        // and the keystrokes land before the input loop is wired up.
         if (shortcut.id === 'claude') {
-            const da1Reply = '\x1b[?1;2c';
-            for (const delayMs of [750, 1250, 1750]) {
-                setTimeout(() => {
-                    fetch(`${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            session_name: data.session_name,
-                            text: da1Reply,
-                        }),
-                    }).catch(() => {});
-                }, delayMs);
-            }
+            setTimeout(() => {
+                fetch(`${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_name: data.session_name,
+                        text: '/tui fullscreen\r',
+                    }),
+                }).catch(() => {});
+            }, 5000);
         }
     } catch (err) {
         fireCb(currentCallbacks.onError, {
