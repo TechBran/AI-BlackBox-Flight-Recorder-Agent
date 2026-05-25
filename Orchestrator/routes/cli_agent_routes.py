@@ -449,10 +449,16 @@ def _zellij_session_url(session_name_: str, token_value: str) -> str:
     Same-origin via existing ``/app-proxy/{port}/{path}`` route — keeps
     TLS termination, auth, and CORS at the orchestrator edge instead of
     leaking ``http://localhost:9097`` to the customer's browser.
+
+    Session name goes in the URL PATH, not a query param: Zellij's
+    web client reads it via ``location.pathname.split('/').pop()``
+    (assets/index.js). When the last path segment is empty, zellij-web
+    auto-creates a brand-new session and our pre-minted session is
+    orphaned in /tmp. T11c surfaced this empirically.
     """
     return (
-        f"/app-proxy/{_ZELLIJ_WEB_PORT}/"
-        f"?session={session_name_}&token={token_value}"
+        f"/app-proxy/{_ZELLIJ_WEB_PORT}/{session_name_}"
+        f"?token={token_value}"
     )
 
 

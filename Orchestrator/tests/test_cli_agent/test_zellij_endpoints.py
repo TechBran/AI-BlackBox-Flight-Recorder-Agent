@@ -146,7 +146,8 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     assert "session_url" in body
     # Same-origin proxy URL — must NOT be a raw localhost URL.
     assert body["session_url"].startswith("/app-proxy/")
-    assert "session=Brandon__terminal" in body["session_url"]
+    # Session name lives in the URL PATH (Zellij reads via pathname.split('/').pop()).
+    assert "/Brandon__terminal" in body["session_url"]
     assert f"token={fake_token_value}" in body["session_url"]
     assert body["token"] == fake_token_value
     # Terminal-mode token is long-lived; expires_at is null.
