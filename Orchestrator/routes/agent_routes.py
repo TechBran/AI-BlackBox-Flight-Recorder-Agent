@@ -1354,10 +1354,19 @@ async def app_proxy(port: int, path: str, request: Request):
                 except Exception as e:
                     print(f"[APP-PROXY] HTML rewrite error: {e}")
 
-            # Build response headers
+            # Build response headers. Strip x-frame-options: upstream apps
+            # like Zellij send DENY by default, which prevents the Portal
+            # from rendering them inside an iframe regardless of same-origin.
+            # The proxy is the security boundary; embedding decisions belong
+            # to the Portal layer.
             response_headers = {}
             for key, value in resp.headers.items():
-                if key.lower() not in ('transfer-encoding', 'content-encoding', 'content-length'):
+                if key.lower() not in (
+                    'transfer-encoding',
+                    'content-encoding',
+                    'content-length',
+                    'x-frame-options',
+                ):
                     response_headers[key] = value
 
             # Force no-cache to ensure fresh content through proxy
