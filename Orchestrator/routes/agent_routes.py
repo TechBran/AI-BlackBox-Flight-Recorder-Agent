@@ -1397,8 +1397,25 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     if query:
         target_uri += f"?{query}"
 
+    # Forward Cookie + Authorization to upstream. Zellij's web client auths
+    # by POSTing /command/login with the query-string token, then relying on
+    # the resulting Set-Cookie for all subsequent WS connections. Without
+    # forwarding these headers, upstream sees an un-authed connection and
+    # returns 401, which our generic except surfaces as 1011 to the browser.
+    # T11c surfaced this on real browser-driven iframes.
+    forward_headers = {}
+    for name in ("cookie", "authorization"):
+        value = websocket.headers.get(name)
+        if value:
+            forward_headers[name] = value
+
     try:
-        upstream_cm = websockets.connect(target_uri, max_size=None, open_timeout=10)
+        upstream_cm = websockets.connect(
+            target_uri,
+            max_size=None,
+            open_timeout=10,
+            additional_headers=forward_headers or None,
+        )
         upstream = await upstream_cm.__aenter__()
     except Exception as e:
         # Redact query string (contains Zellij auth token) before logging.
