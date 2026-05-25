@@ -235,8 +235,8 @@ sudo tee /etc/systemd/system/blackbox.service > /dev/null <<EOF
 [Unit]
 Description=AI BlackBox Orchestrator
 Documentation=https://github.com/TechBran/blackbox-poc
-After=network-online.target
-Wants=network-online.target
+After=network-online.target zellij-web.service
+Wants=network-online.target zellij-web.service
 # Restart rate limiting (audit empirical fix: these belong in [Unit], not [Service]
 # — systemd silently ignores them in [Service] and warns. Without them, Restart=always
 # loops forever on a broken install at ~6 attempts/min instead of bounding to 5 per 600s.)
