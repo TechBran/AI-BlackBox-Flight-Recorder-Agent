@@ -69,7 +69,7 @@ This pivot expands Track C and tightens AC3, codified in new **AC9** below.
 | ID | Gap | Resolution location |
 |---|---|---|
 | C0 | `bbx` user is a fiction — production runs as `$REAL_USER` | Track A (`User=$REAL_USER`); narrative sweeps |
-| C1 | TLS cert source unresolved | AC2 (locked: install.sh self-signed at `/etc/blackbox/zellij/`); Phase 1 T1.5 (cert generation) |
+| C1 | TLS cert source unresolved | **REFRAMED in Phase 1 T5** — AC1 was over-engineering. Customer traffic flows Tailscale MagicDNS HTTPS → orchestrator (edge TLS termination) → reverse-proxy to `127.0.0.1:9097` (HTTP). Internal localhost hop is NEVER customer-visible; HTTPS there adds zero attack-surface reduction. AC2 updated to document the corrected architecture. T1.5 cert generation removed from install.sh in commit `5ebc840` |
 | C2 | First-boot ordering — orchestrator may mint before Zellij listens | Track A (systemd `After=`/`Wants=`); Track B (`web_server_healthy()` retries with backoff) |
 | C3 | Reinstall semantics for `tokens.db` unspecified | Track A T3 + Track B (`zellij_state.reconcile_or_wipe()` at startup) |
 | C4 | Customer-update has no health-gate or auto-fallback | Track F + Track G (code-default; `get_backend()` health-fallback to tmux on Zellij failure) |
@@ -100,6 +100,58 @@ This pivot expands Track C and tightens AC3, codified in new **AC9** below.
 - Subagent: `superpowers:code-reviewer` against full plan against `install.sh`/`installer/templates/` reality.
 - Main session: independent grep-and-verify against actual production systemd unit + sudoers template.
 - Findings cross-referenced — every CRITICAL caught by at least one channel, several by both.
+
+---
+
+## Phase 1 RESULTS — PASSED 2026-05-24
+
+**Status: 11 commits, 6 files, +550/-4 lines. T5 smoke test green: zellij-web.service active on 127.0.0.1:9097 (HTTP), sudoers grants installed + visudo-validated, end-to-end install.sh completed.**
+
+### Final commit chain
+
+| Commit | Task |
+|---|---|
+| `20f5f97` | T1 — pin v0.44.3 + document port 9097 |
+| `f5b6644` | T2 — zellij-web.service unit + blackbox.service ordering |
+| `48f38ba` | T2 polish — rate-limit + stable docs URL |
+| `672acdb` | T4 — sudoers grants |
+| `2544e37` | T4 polish — daemon-reload general-purpose note |
+| `5fc785e` | T4.5 — binary-install dispatcher + zellij-web-unit target_kind |
+| `8270cc8` | T4.5 fix — concurrency lock + verify restart success |
+| `46c8d8d` | T3+T1.5 — install.sh step_2c_install_zellij (244 LoC) |
+| `daeb4db` | T3 polish — trap-cleanup + settle delay + overwrite log |
+| `e61fa0d` | T5 fix — config.kdl perm + trap unbound TMPDIR |
+| `5ebc840` | T5 reframe — HTTP on localhost (AC1 was over-engineering, see AC2) |
+
+### Two T5-discovered bugs (caught by smoke test, would have shipped otherwise)
+
+1. **config.kdl write permission** — `sudo -u $REAL_USER cp` couldn't read root-owned mktemp file. Fixed with atomic `sudo install -m 0644 -o $REAL_USER -g $REAL_USER`. Three reviewer passes missed it because they reviewed CODE PATH, not EXECUTION CONTEXT (only surfaces when install.sh actually runs as root).
+2. **TMPDIR unbound on trap** — `local TMPDIR` has function scope; when `set -e` triggered abnormal return, EXIT trap fired AFTER function scope ended, `set -u` killed it. Fixed with `"${TMPDIR:-}"` default.
+
+### One architectural reframe surfaced by T5
+
+**Audit C1 was over-engineering.** Original lock: install.sh generates self-signed cert + `enforce_https_for_localhost true`. Empirical reality: Zellij 0.44.3 refuses to honor `web_server_cert`/`web_server_key` config keys regardless of format. BUT — the deeper insight is that internal-hop TLS adds zero attack-surface reduction; the customer's HTTPS terminates at the Tailscale funnel, never reaches localhost. Architecture corrected: HTTP on localhost, TLS at orchestrator edge. See AC2 for full rationale.
+
+### What's now installed on a customer box after install.sh
+
+- `/usr/local/bin/zellij` — 0.44.3 musl binary, sha256-verified against extracted-binary hash
+- `/usr/local/sbin/blackbox-install-zellij-binary` — future-update dispatcher (with flock + restart verification)
+- `/etc/systemd/system/zellij-web.service` — systemd unit running as `$REAL_USER`, depends on `network-online.target`, ordered after by `blackbox.service`
+- `/etc/sudoers.d/blackbox-system` — extended with Zellij grants (restart + daemon-reload + dispatcher wildcard)
+- `~/.config/zellij/config.kdl` — `web_server true` on `127.0.0.1:9097`, `enforce_https_for_localhost false`
+- `~/.local/share/zellij/tokens.db` — empty (reconciled per audit C3)
+
+### Verification evidence
+
+- `systemctl is-active zellij-web.service` → `active`
+- `ss -tlnp | grep 9097` → bound by zellij PID
+- `curl http://127.0.0.1:9097/` → HTTP 200 (xterm.js landing page)
+- `sudo visudo -cf /etc/sudoers.d/blackbox-system` → `parsed OK`
+- install.sh exit code 0; final log: "Done. Reboot to launch BlackBox Setup..."
+
+### Pickup point for next session
+
+Read this Phase 1 RESULTS section + Phase 2 task list (T6-T10 — Backend orchestration). First action: **T6 — write `Orchestrator/cli_agent/zellij_client.py`** per the AC API defined in Track B + `zellij_state.py` with `reconcile_or_wipe()` startup hook. All design decisions still locked from Phase 0.5 audit; subagent-driven-development continues.
 
 ---
 
@@ -183,16 +235,45 @@ Unit: `/etc/systemd/system/zellij-web.service`. Binds 127.0.0.1 only (security-b
 
 (The previously-considered "Option A long-lived encrypted tokens" was rejected — defense-in-depth wins; the per-open latency is invisible to users.)
 
-**TLS — LOCKED (audit C1): install.sh generates self-signed cert at install time.**
-- `step_2c_install_zellij` generates `/etc/blackbox/zellij/cert.pem` + `/etc/blackbox/zellij/key.pem` (CN=localhost, 10-year validity, no rotation cron needed in 10-year window — documented for future rotation).
-- Owned by `$REAL_USER:$REAL_USER`, mode 0600.
-- Idempotent: skip if both files exist, both readable, cert not expired.
-- `config.kdl` references these paths via `web_server_cert` + `web_server_key`.
-- **Customer-facing iframes do NOT hit Zellij directly.** They go through orchestrator's existing Tailscale-funnel TLS termination on 9091, which reverse-proxies `/zellij/*` to `127.0.0.1:9097`. So the cert mismatch (self-signed `localhost` cert vs customer's funnel domain) never reaches the browser — orchestrator strips it. (Audit M17: Track A T2 documents the proxy mount.)
-- Power-user direct `zellij attach` from gnome-terminal also goes through orchestrator's funnel path → presents the customer's real cert, not the self-signed.
-- The self-signed cert only ever sees orchestrator-localhost traffic; no UX impact.
+**TLS — RE-LOCKED in Phase 1 T5: HTTP on localhost; TLS terminated at orchestrator edge.**
 
-Phase 0 spike used `enforce_https_for_localhost false` for the test; production install MUST set it to `true` and rely on the cert paths above. install.sh refuses to leave HTTPS-enforcement disabled.
+Original audit C1 lock specified install.sh-generated self-signed cert at `/etc/blackbox/zellij/{cert,key}.pem` + `enforce_https_for_localhost true`. **Phase 1 T5 smoke test revealed this was over-engineering, not a bug worth fixing.**
+
+**Why over-engineering:** The customer's traffic flow makes the internal HTTPS hop architecturally redundant. The customer's browser never reaches `127.0.0.1:9097`:
+
+```
+Customer phone/laptop
+       │
+       │ HTTPS (Tailscale MagicDNS cert, Tailscale-terminated)
+       ▼
+https://<customer>.tailnet-name.ts.net/...
+       │
+       │ Tailscale funnel terminates TLS
+       ▼
+http://localhost:9091/  (orchestrator on the BlackBox device)
+       │
+       │ orchestrator serves Portal HTML/JS
+       │ Portal iframe src = same-origin /zellij/<session>?token=...
+       │ orchestrator reverse-proxies /zellij/* → 127.0.0.1:9097
+       ▼
+http://127.0.0.1:9097/  (zellij-web daemon — never customer-visible)
+```
+
+The localhost-to-localhost connection between orchestrator and zellij-web is INTERNAL. TLS there is defense-in-depth — but here it adds zero attack-surface reduction (anyone with localhost access already owns the entire stack: tokens.db, session sockets, the orchestrator's own state).
+
+**Mechanical observation from T5:** Zellij 0.44.3 refuses to honor `web_server_cert`/`web_server_key` config keys (and the `--cert`/`--key` CLI flags), citing "Cannot bind without an SSL certificate" regardless of cert path/format. No matching GitHub issues. Even if we wanted defense-in-depth TLS, the Zellij side wasn't going to cooperate cheaply.
+
+**Locked architecture (committed `5ebc840`):**
+- install.sh's `step_2c_install_zellij` writes `config.kdl` with `enforce_https_for_localhost false`.
+- No cert generation. `/etc/blackbox/zellij/` directory unused (left in place from earlier audit C1 attempts; future Phase 1 polish can remove).
+- zellij-web binds plain HTTP on `127.0.0.1:9097`.
+- Sanity check uses `curl http://...` not `https://`.
+
+**Customer-facing crypto is unchanged:** Tailscale MagicDNS HTTPS + orchestrator's Tailscale-funnel TLS termination at port 9091. Customer never sees the cert mismatch because they never see the cert.
+
+**Phase 3 wiring requirement:** Portal iframe `src` must use same-origin `/zellij/<session>?token=...` (orchestrator reverse-proxies), NOT `http://localhost:9097/...` (mixed-content blocking + cross-origin issues + customer's browser isn't on the BlackBox). The existing `/app-proxy/{port}/{path:path}` route in `Orchestrator/routes/agent_routes.py:1300` is the pattern — Track C T11.6 either reuses it directly (iframe src = `/app-proxy/9097/...`) or adds a dedicated `/zellij/*` route for cleaner URLs. **One caveat for Phase 3:** the existing app-proxy is HTTP-only (httpx); Zellij's WebSocket terminal traffic will need WebSocket-aware proxying added.
+
+**Defense-in-depth note (deferred to v1.1):** Should we choose to add internal-hop TLS later, the path is either (a) figure out the Zellij 0.44.3 cert config that the docs imply but the runtime rejects (likely an upstream bug or undocumented requirement), or (b) wait for a Zellij version that fixes it. Not blocking v1 ship.
 
 ### AC3: Portal owns the session-launcher and session-switcher UX; Zellij is the rendering substrate
 
@@ -406,8 +487,8 @@ Track names match the antigravity plan convention. Subagent execution per `super
 1. **Download:** fetch `https://github.com/zellij-org/zellij/releases/download/v{ver}/zellij-x86_64-unknown-linux-musl.tar.gz` + `.sha256sum`. Use the `musl` build (statically linked, no glibc concerns across customer distros).
 2. **Verify:** extract tarball FIRST, then sha256sum the extracted binary against the `.sha256sum` file. The `.sha256sum` hashes the EXTRACTED binary (under CI path `target/x86_64-unknown-linux-musl/release/zellij`), NOT the tarball — verify-tarball will always fail. → Phase 0 finding #4.
 3. **Install:** move binary to `/usr/local/bin/zellij` mode 0755.
-4. **Generate TLS cert (audit C1):** if `/etc/blackbox/zellij/cert.pem` + `key.pem` are not both present-and-valid (cert not expired, mode 0600, owner `$REAL_USER:$REAL_USER`), generate a self-signed pair via `openssl req -x509 -newkey rsa:4096 -nodes -days 3650 -subj '/CN=localhost' ...`. Idempotent. install.sh refuses to leave `enforce_https_for_localhost true` without a valid cert — fail-loud, do not silently fall back to plain HTTP.
-5. **Write config:** install `~$REAL_USER/.config/zellij/config.kdl` with `web_server true`, `web_server_ip "127.0.0.1"`, `web_server_port <PORT>`, `web_sharing "on"`, `enforce_https_for_localhost true`, `web_server_cert "/etc/blackbox/zellij/cert.pem"`, `web_server_key "/etc/blackbox/zellij/key.pem"`. Daemon silently no-ops without `web_server true`. → Phase 0 finding #1, #2.
+4. **TLS posture (REFRAMED in Phase 1 T5 — see AC2):** no cert generation. The customer's browser never touches `127.0.0.1:9097`; TLS terminates at the Tailscale funnel before reaching the orchestrator, and orchestrator reverse-proxies same-origin to localhost. Internal-hop TLS adds zero attack-surface reduction. install.sh just logs `[install] TLS posture: HTTP on localhost (TLS terminated at orchestrator edge — see plan AC2)`.
+5. **Write config:** install `~$REAL_USER/.config/zellij/config.kdl` with `web_server true`, `web_server_ip "127.0.0.1"`, `web_server_port <PORT>`, `web_sharing "on"`, `enforce_https_for_localhost false`. Daemon silently no-ops without `web_server true`. → Phase 0 finding #1, #2.
 6. **Choose port deliberately (audit M14):** port 9092 (originally in plan) collides with `Orchestrator/asterisk/audio_subprocess.py`. **Locked: port 9097** (validated in spike, adjacent to orchestrator's 9091, far from Apps range 8060-8099 and UGV's 8082). Document choice in `zellij-version` template comment. → Phase 0 finding #10.
 7. **systemd unit (zellij-web.service):** `Type=simple` running `/usr/local/bin/zellij web` with NO `--daemonize` flag. The `--daemonize` flag is broken in 0.44.3 — forked child silently dies. → Phase 0 finding #3. **`User=$REAL_USER` (audit C0)**, `Restart=always`, no `PrivateTmp` or `ProtectSystem` (avoid the namespace traps documented in memory `cli_agent_systemd_hardening.md`).
 8. **No service for session backends.** Per-session `zellij --server <socket>` processes spawn under Zellij's own control when the first client connects to a new session. systemd does not manage them. → Phase 0 finding #7.
