@@ -600,15 +600,21 @@ def list_sessions() -> list[dict]:
 
 
 def kill_session(name: str) -> None:
-    """Kill a Zellij session by name. Idempotent — killing a session
-    that does not exist logs and returns cleanly.
+    """Kill a Zellij session by name AND free its name from the namespace.
+
+    Uses ``delete-session --force`` rather than ``kill-session``: the latter
+    terminates the process but leaves the name reserved (visible in
+    list-sessions as EXITED), which blocks any re-launch under the same name.
+    Fixed-name sessions (e.g. terminal provider's ``{op}__terminal``) hit
+    this on every relaunch. Idempotent — deleting an already-absent session
+    logs and returns cleanly.
 
     Note: Zellij 0.44.3 prints "No session named X found." to stdout
     (not stderr) and exits rc=1 in that case. We match either stream.
     """
     try:
-        _run([_ZELLIJ_BIN, "kill-session", name])
-        logger.info("zellij session killed: name=%s", name)
+        _run([_ZELLIJ_BIN, "delete-session", "--force", name])
+        logger.info("zellij session deleted: name=%s", name)
     except subprocess.CalledProcessError as exc:
         combined = ((exc.stderr or "") + (exc.stdout or "")).lower()
         if (
