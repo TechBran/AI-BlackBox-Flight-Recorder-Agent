@@ -704,33 +704,39 @@ def kill_session(name: str) -> None:
         raise
 
 
-def spawn_in_new_tab(session_name: str, binary: str) -> None:
-    """Spawn ``binary`` in a NEW Zellij tab inside ``session_name``.
+def spawn_in_place(session_name: str, binary: str) -> None:
+    """Spawn ``binary`` IN PLACE of the current pane inside ``session_name``.
 
-    Uses ``zellij action new-tab -- BINARY`` which creates a fresh tab
-    running the binary directly (no bash wrapper, no PTY shenanigans).
-    This is the path that empirically works for claude — `write-chars`
-    typing "claude\\n" into a bash pane silently fails (claude appears
-    to start but never renders, possibly due to bash job-control
-    interaction). new-tab bypasses bash entirely.
+    Uses ``zellij action new-pane -i --close-on-exit -- BINARY`` which
+    REPLACES the currently-focused pane with a new one running the binary.
+    This is the path that empirically works for claude in an iframe-attached
+    client:
+      - `write-chars "claude\\n"` (the old /inject path) — bash receives but
+        silently doesn't execute claude. Other binaries work; claude doesn't.
+      - `new-tab -- claude` — claude spawns BUT only in the backend's client
+        focus, not the iframe-attached client. Brandon sees a blank pane.
+      - `new-pane -i -- claude` — replaces the focused pane in the SESSION
+        state (not per-client), so every attached client sees the change.
+        When claude exits (Ctrl+C → twice), the bash pane comes back.
 
     SECURITY: caller MUST validate binary is in an allowlist BEFORE
-    invoking — the binary string is passed directly to the shell via
-    `zellij action new-tab -- BINARY`. The Zellij CLI tokenizes
-    correctly when using `--` but a malicious binary path could still
-    pwn anything claude/agy/etc. can pwn. Caller is the perimeter.
+    invoking — the binary string is passed directly via `--`. The Zellij
+    CLI tokenizes correctly but a malicious binary path would still pwn
+    anything claude/agy/etc. can pwn. Caller is the perimeter.
     """
     argv = [
         _ZELLIJ_BIN,
         "--session",
         session_name,
         "action",
-        "new-tab",
+        "new-pane",
+        "-i",
+        "--close-on-exit",
         "--",
         binary,
     ]
     _run(argv)
-    logger.info("zellij new-tab spawned: session=%s binary=%s", session_name, binary)
+    logger.info("zellij in-place pane spawned: session=%s binary=%s", session_name, binary)
 
 
 def inject(session_name: str, text: str) -> None:

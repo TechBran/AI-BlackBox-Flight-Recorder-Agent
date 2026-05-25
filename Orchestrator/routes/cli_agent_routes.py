@@ -865,7 +865,7 @@ async def zellij_spawn(req: ZellijSpawnRequest, op: str = Query(...)):
     resolved = provider_bin(req.binary) or req.binary
 
     try:
-        await asyncio.to_thread(zellij_client.spawn_in_new_tab, req.session_name, resolved)
+        await asyncio.to_thread(zellij_client.spawn_in_place, req.session_name, resolved)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "zellij_spawn: spawn_in_new_tab(%s, %s) failed: %s",
