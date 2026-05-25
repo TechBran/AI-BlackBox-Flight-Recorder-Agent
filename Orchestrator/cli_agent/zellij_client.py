@@ -56,6 +56,25 @@ _DEFAULT_ZELLIJ_WEB_PORT = 9097
 
 _ZELLIJ_BIN = "/usr/local/bin/zellij"
 
+# Env vars stripped from the child environment when spawning a Zellij
+# session. Every CLI agent the user might `claude` / `gemini` / `agy` /
+# `codex` into in a pane reads its own auth from one of these — if the
+# orchestrator's value propagates through, the CLI ends up trying server-
+# side credentials (which may be scope-limited, expired, or simply wrong
+# for interactive use) and hangs. Stripping the lot forces each CLI to
+# fall back to its own user-side OAuth / cached-session flow, which is
+# what works in a real terminal anyway. T15 surfaced ANTHROPIC_API_KEY
+# specifically — the rest are listed defensively for symmetry.
+_ENV_DENYLIST_FOR_PANES = frozenset({
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+})
+
 # Path to the user-level config file we manage. install.sh seeds the
 # initial file; ensure_config() refreshes it at orchestrator startup so
 # new required fields land without re-running install.sh (audit M15).
@@ -479,6 +498,17 @@ def launch_session(
     rc: Optional[int] = None
     detached = False
     proc: Optional[subprocess.Popen] = None
+    # Strip the orchestrator's own API/auth env vars before spawning Zellij.
+    # The session backend's bash inherits this env; users typing `claude` /
+    # `gemini` inside the pane otherwise get the orchestrator's API keys
+    # propagated, which (a) silently hangs claude when the key isn't claude-
+    # code-scoped, and (b) leaks server-side keys into user-controlled CLI
+    # contexts. Strip the lot so each CLI falls back to its own user-side
+    # OAuth/cached session (the desired UX). T15 surfaced this empirically.
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if k not in _ENV_DENYLIST_FOR_PANES
+    }
     try:
         try:
             proc = subprocess.Popen(
@@ -489,6 +519,7 @@ def launch_session(
                 start_new_session=True,
                 text=True,
                 close_fds=True,
+                env=child_env,
             )
         except Exception:
             # Popen failed before the child got the slave fd dup'd —
