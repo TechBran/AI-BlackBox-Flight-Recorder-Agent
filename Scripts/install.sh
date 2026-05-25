@@ -580,6 +580,13 @@ PrivateTmp=false
 # Restart only kills the main uvicorn process; tmux server + CLI agents
 # persist across restarts. See session_manager.py _new_session_cmd comment.
 KillMode=process
+# Color terminal support (T11c, 2026-05-25): systemd services start with
+# no TERM set; subprocess.Popen children (Zellij + the CLI binary it runs)
+# then inherit empty TERM and fall back to dumb-terminal output. claude /
+# gemini / codex / antigravity all probe TERM + COLORTERM to decide color
+# capability. xterm-256color is the safest 'works everywhere' baseline;
+# COLORTERM=truecolor unlocks 24-bit where the tool supports it.
+Environment=TERM=xterm-256color COLORTERM=truecolor
 EOF
 
 # ── Step 4c: log rotation (audit M3 carry-forward) ──
