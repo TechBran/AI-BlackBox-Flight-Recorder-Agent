@@ -383,6 +383,7 @@ _ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
     "gemini": "gemini",
     "codex": "codex",
     "agy": "agy",
+    "antigravity": "agy",
     "terminal": None,
 }
 
@@ -515,7 +516,18 @@ async def zellij_launch(
     if app is not None and not isinstance(app, str):
         raise HTTPException(400, "app must be a string or null")
 
-    binary = _ZELLIJ_PROVIDER_BINARIES[provider]
+    bare_binary = _ZELLIJ_PROVIDER_BINARIES[provider]
+    # Resolve to absolute path: orchestrator service's PATH doesn't include
+    # user-local bin dirs (~/.local/bin, ~/.nvm/*/bin). Without absolute path,
+    # the KDL layout's `pane command=BINARY` triggers Zellij's "Command not
+    # found" error inside the pane (T15-final empirical finding). terminal
+    # provider passes None → no KDL layout, no binary lookup needed.
+    binary = provider_bin(bare_binary) if bare_binary else None
+    if bare_binary and not binary:
+        raise HTTPException(
+            500,
+            f"Provider {provider!r} binary {bare_binary!r} not found in any known location",
+        )
     session_name_ = _generate_zellij_session_name(op, provider, app)
 
     # Mint token first — if Zellij is sick, fail before creating a
