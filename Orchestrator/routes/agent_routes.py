@@ -1350,16 +1350,28 @@ async def app_proxy(port: int, path: str, request: Request):
                     html = content.decode('utf-8', errors='replace')
                     # Rewrite href, src, action attributes that start with /
                     html = re.sub(r'(href|src|action)=["\']/', f'\\1="/app-proxy/{port}/', html)
-                    # Strip xterm.js WebGL addon load tag — its renderer
-                    # silently breaks rendering when destination rect <
-                    # viewport rect (Brandon's console: "Drawing to a
-                    # destination rect smaller than the viewport rect").
-                    # Claude's alt-screen TUI triggers this; bash / gemini /
-                    # codex / agy don't. Without WebGL addon, xterm.js falls
-                    # back to Canvas renderer which doesn't have the issue.
+                    # Replace xterm.js WebGL addon with a no-op stub. The
+                    # real WebGL renderer silently breaks rendering when
+                    # destination rect < viewport rect (Brandon's console:
+                    # "Drawing to a destination rect smaller than the
+                    # viewport rect"). Claude's alt-screen TUI triggers
+                    # this; bash / gemini / codex / agy don't.
+                    #
+                    # Can't just strip the script tag — terminal.js does
+                    # `new WebglAddon.WebglAddon()` and `.onContextLoss()`
+                    # at init, so the global symbol must exist. Define a
+                    # stub class with the methods xterm.js / terminal.js
+                    # actually call (no-ops). xterm.js then falls back to
+                    # its Canvas renderer when no real WebGL addon attaches.
+                    webgl_stub = (
+                        '<script>window.WebglAddon={WebglAddon:class{'
+                        'activate(){}dispose(){}onContextLoss(){}'
+                        'clearTextureAtlas(){}get textureAtlas(){return null;}'
+                        '}};</script>'
+                    )
                     html = re.sub(
-                        r'<script\s+[^>]*src=["\'][^"\']*addon-webgl\.js["\'][^>]*>\s*</script>\s*',
-                        '<!-- webgl addon stripped by orchestrator proxy (T15) -->',
+                        r'<script\s+[^>]*src=["\'][^"\']*addon-webgl\.js["\'][^>]*>\s*</script>',
+                        webgl_stub,
                         html, flags=re.IGNORECASE,
                     )
                     content = html.encode('utf-8')
