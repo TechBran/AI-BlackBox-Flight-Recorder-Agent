@@ -400,20 +400,13 @@ web_sharing "on"
 enforce_https_for_localhost false
 
 // ── UX cleanup (T15, 2026-05-25) ─────────────────────────────────────────
-// Brandon's smoke test surfaced that the default Zellij UI is heavy for
-// our embedded use case — welcome tips screen, pane frames, fancy fonts.
-// Strip all of it so the iframe shows just the terminal.
-simplified_ui true
-pane_frames false
-default_layout "blackbox"
-
-// Disable the first-run welcome screen plugin (otherwise users get a
-// tips page that requires Escape×2 to dismiss before reaching the shell).
-plugins {
-    welcome-screen location="zellij:session-manager" {
-        welcome_screen false
-    }
-}
+// Drop the auto-shown tips/release-notes plugins. (Earlier experiments
+// with simplified_ui/pane_frames/default_layout "blackbox" empirically
+// BROKE claude's TUI rendering in WS-attached clients — root cause is
+// zellij-web's serialization bug per PR #5156, but the chromeless
+// layout exacerbated it. Keep Zellij's default layout for now.)
+show_startup_tips false
+show_release_notes false
 KDL_EOF
     if [[ -f "$ZELLIJ_CFG" ]] && cmp -s "$TMP_CFG" "$ZELLIJ_CFG"; then
         echo "[install] zellij config.kdl already current, skipping write"
