@@ -1299,6 +1299,22 @@ async def unregister_app(app_id: str):
             raise HTTPException(404, "App not found")
 
 
+_ZELLIJ_WEBGL_STUB_JS = (
+    "// xterm.js WebGL addon stub served by orchestrator (T15).\n"
+    "// Real addon-webgl.js silently breaks rendering when destination rect <\n"
+    "// viewport rect — Brandon's claude TUI triggers this on Zellij+iframe.\n"
+    "// Stub keeps terminal.js's `new WebglAddon.WebglAddon()` succeeding;\n"
+    "// xterm.js falls back to its Canvas renderer (no rendering bug).\n"
+    "window.WebglAddon = { WebglAddon: class {\n"
+    "  activate() {}\n"
+    "  dispose() {}\n"
+    "  onContextLoss() {}\n"
+    "  clearTextureAtlas() {}\n"
+    "  get textureAtlas() { return null; }\n"
+    "} };\n"
+)
+
+
 @app.api_route("/app-proxy/{port}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def app_proxy(port: int, path: str, request: Request):
     """Reverse proxy to locally running apps created by Claude Code.
@@ -1307,6 +1323,19 @@ async def app_proxy(port: int, path: str, request: Request):
     # Validate port is reasonable
     if port < 1024 or port > 65535:
         raise HTTPException(400, "Invalid port number")
+
+    # Intercept Zellij's addon-webgl.js request — serve our no-op stub
+    # instead of the real WebGL renderer (see _ZELLIJ_WEBGL_STUB_JS).
+    if port == 9097 and path.endswith("assets/addon-webgl.js"):
+        return Response(
+            content=_ZELLIJ_WEBGL_STUB_JS,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     target_url = f"http://localhost:{port}/{path}"
 
@@ -1350,30 +1379,11 @@ async def app_proxy(port: int, path: str, request: Request):
                     html = content.decode('utf-8', errors='replace')
                     # Rewrite href, src, action attributes that start with /
                     html = re.sub(r'(href|src|action)=["\']/', f'\\1="/app-proxy/{port}/', html)
-                    # Replace xterm.js WebGL addon with a no-op stub. The
-                    # real WebGL renderer silently breaks rendering when
-                    # destination rect < viewport rect (Brandon's console:
-                    # "Drawing to a destination rect smaller than the
-                    # viewport rect"). Claude's alt-screen TUI triggers
-                    # this; bash / gemini / codex / agy don't.
-                    #
-                    # Can't just strip the script tag — terminal.js does
-                    # `new WebglAddon.WebglAddon()` and `.onContextLoss()`
-                    # at init, so the global symbol must exist. Define a
-                    # stub class with the methods xterm.js / terminal.js
-                    # actually call (no-ops). xterm.js then falls back to
-                    # its Canvas renderer when no real WebGL addon attaches.
-                    webgl_stub = (
-                        '<script>window.WebglAddon={WebglAddon:class{'
-                        'activate(){}dispose(){}onContextLoss(){}'
-                        'clearTextureAtlas(){}get textureAtlas(){return null;}'
-                        '}};</script>'
-                    )
-                    html = re.sub(
-                        r'<script\s+[^>]*src=["\'][^"\']*addon-webgl\.js["\'][^>]*>\s*</script>',
-                        webgl_stub,
-                        html, flags=re.IGNORECASE,
-                    )
+                    # WebGL addon: handled separately by intercepting the
+                    # asset request (see ZELLIJ_WEBGL_STUB_JS below).
+                    # CSP default-src 'self' blocks inline scripts, so we
+                    # can't stub via inline HTML — must serve the stub at
+                    # the addon's URL.
                     content = html.encode('utf-8')
                 except Exception as e:
                     print(f"[APP-PROXY] HTML rewrite error: {e}")
