@@ -1401,7 +1401,9 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
         upstream_cm = websockets.connect(target_uri, max_size=None, open_timeout=10)
         upstream = await upstream_cm.__aenter__()
     except Exception as e:
-        print(f"[APP-PROXY-WS] Upstream connect failed for {target_uri}: {e}")
+        # Redact query string (contains Zellij auth token) before logging.
+        target_uri_redacted = target_uri.split('?', 1)[0]
+        print(f"[APP-PROXY-WS] Upstream connect failed for {target_uri_redacted}: {e}")
         try:
             await websocket.close(code=1011, reason="Upstream unavailable")
         except Exception:
@@ -1427,11 +1429,15 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     async def pump_upstream_to_client():
         try:
             async for frame in upstream:
-                if isinstance(frame, (bytes, bytearray, memoryview)):
-                    await websocket.send_bytes(bytes(frame))
+                # websockets lib only yields str | bytes — no defensive cast needed.
+                if isinstance(frame, bytes):
+                    await websocket.send_bytes(frame)
                 else:
                     await websocket.send_text(frame)
-        except ConnectionClosed:
+        # Broaden to catch client-side disconnect: if browser closes mid-stream,
+        # Starlette raises WebSocketDisconnect or RuntimeError("Cannot call 'send'
+        # once a close message has been sent") — neither is a ConnectionClosed.
+        except (ConnectionClosed, WebSocketDisconnect, RuntimeError):
             pass
 
     task_c2u = asyncio.create_task(pump_client_to_upstream())
