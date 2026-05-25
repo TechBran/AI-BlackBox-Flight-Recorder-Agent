@@ -48,6 +48,9 @@ const PROVIDERS = [
     { id: 'terminal', label: '+ Terminal', extraClass: 'zellij-launcher-btn-terminal' },
 ];
 
+const LAUNCH_URL = '/cli-agent/zellij/launch';
+const LOGIN_URL = '/app-proxy/9097/command/login';
+
 function fireCb(cb, payload, label) {
     if (typeof cb !== 'function') return;
     try { cb(payload); } catch (err) { console.error(`[ZELLIJ-LAUNCHER] ${label} threw:`, err); }
@@ -93,22 +96,39 @@ async function launchProvider(provider) {
     };
 
     let launchData;
+    let launchStatus = 0;
     try {
         const resp = await fetch(
-            `/cli-agent/zellij/launch?op=${encodeURIComponent(currentOperator)}`,
+            `${LAUNCH_URL}?op=${encodeURIComponent(currentOperator)}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ provider }),
             },
         );
+        launchStatus = resp.status;
         if (!resp.ok) {
             const message = await resp.text().catch(() => '');
             return emitError('launch', resp.status, message);
         }
-        launchData = await resp.json();
+        try {
+            launchData = await resp.json();
+        } catch (e) {
+            return emitError('launch', resp.status, `malformed launch response: ${e.message}`);
+        }
     } catch (err) {
         return emitError('launch', 0, String(err));
+    }
+
+    // Validate required fields up front — don't trust the server blindly. If
+    // any of session_name/session_url/token are missing or non-string, abort
+    // BEFORE attempting the login cookie bridge (which would fail anyway with
+    // an undefined token, but with a less actionable error).
+    const { session_name, session_url, token } = launchData || {};
+    if (typeof session_name !== 'string' || !session_name ||
+        typeof session_url !== 'string' || !session_url ||
+        typeof token !== 'string' || !token) {
+        return emitError('launch', launchStatus, 'launch response missing required fields (session_name, session_url, token)');
     }
 
     // Cookie bridge: POST /command/login with credentials:"include" so the
@@ -116,15 +136,27 @@ async function launchProvider(provider) {
     // The iframe's subsequent navigation auto-includes the cookie (same
     // origin, Path=/, SameSite=Strict permits same-site requests).
     try {
-        const login = await fetch('/app-proxy/9097/command/login', {
+        const login = await fetch(LOGIN_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({ auth_token: launchData.token, remember_me: false }),
+            body: JSON.stringify({ auth_token: token, remember_me: false }),
         });
         if (!login.ok) {
             const message = await login.text().catch(() => '');
             return emitError('login', login.status, message);
+        }
+        // Defense in depth: a 200 with success:false is theoretical for Zellij
+        // today (it returns 401 on bad tokens), but parse + assert success===true
+        // so a future shape change can't silently land us in a half-authed state.
+        let loginBody;
+        try {
+            loginBody = await login.json();
+        } catch (e) {
+            return emitError('login', login.status, `malformed login response: ${e.message}`);
+        }
+        if (loginBody?.success !== true) {
+            return emitError('login', login.status, loginBody?.message || 'login refused');
         }
     } catch (err) {
         return emitError('login', 0, String(err));
@@ -139,9 +171,9 @@ async function launchProvider(provider) {
             currentCallbacks.onLaunched,
             {
                 provider,
-                sessionName: launchData.session_name,
-                sessionUrl: launchData.session_url,
-                token: launchData.token,
+                sessionName: session_name,
+                sessionUrl: session_url,
+                token,
                 expiresAt: launchData.expires_at,
             },
             'onLaunched',
@@ -199,6 +231,10 @@ export function mountLauncher(containerEl, options = {}) {
 export function setOperator(op) {
     if (!currentRowEl) {
         console.warn('[ZELLIJ-LAUNCHER] setOperator called before mountLauncher — ignored');
+        return;
+    }
+    if (typeof op !== 'string' || !op) {
+        console.warn('[ZELLIJ-LAUNCHER] setOperator requires a non-empty string; got:', op);
         return;
     }
     currentOperator = op;
