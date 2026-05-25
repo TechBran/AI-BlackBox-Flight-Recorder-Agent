@@ -30,6 +30,7 @@ import pty
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -296,6 +297,61 @@ def list_tokens() -> list[dict]:
 # --- session operations --------------------------------------------------
 
 
+def _kdl_escape(value: str) -> str:
+    """Escape a string for safe inclusion in a KDL double-quoted literal.
+
+    KDL string literals support C-style backslash escapes. We escape
+    backslash + double-quote so a malicious binary/arg cannot break out
+    of the quoted token, terminate the pane block, or smuggle KDL syntax
+    into the layout file. Newlines/tabs are also escaped to keep the
+    generated KDL on one line per token (cleaner for debug logs and
+    avoids accidental block-comment / multi-line-string surprises).
+    """
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+
+
+def _build_layout_kdl(binary: str, args: Optional[list[str]]) -> str:
+    """Render the minimal KDL layout that auto-runs ``binary`` (with
+    optional ``args``) inside the session's first pane.
+
+    The KDL syntax Zellij 0.44.3 expects is:
+
+    .. code-block:: kdl
+
+        layout {
+            pane command="BINARY" {
+                args "ARG1" "ARG2"
+            }
+        }
+
+    The ``args`` block is omitted when no args are provided (otherwise
+    ``args`` with zero values is a KDL parse error in some Zellij
+    versions). All user-controlled strings are run through
+    :func:`_kdl_escape` to neutralise quote/backslash injection.
+    """
+    binary_q = _kdl_escape(binary)
+    if args:
+        args_line = " ".join(f'"{_kdl_escape(a)}"' for a in args)
+        return (
+            "layout {\n"
+            f'    pane command="{binary_q}" {{\n'
+            f'        args {args_line}\n'
+            "    }\n"
+            "}\n"
+        )
+    return (
+        "layout {\n"
+        f'    pane command="{binary_q}"\n'
+        "}\n"
+    )
+
+
 def launch_session(
     name: str,
     binary: Optional[str] = None,
@@ -309,8 +365,23 @@ def launch_session(
 
     Mechanism:
 
-    - With binary:  ``zellij --session <name> -- <binary> <args...>``
-    - Without:      ``zellij --session <name>``
+    - With binary:  ``zellij --session <name> -n <layout-file>`` where
+      the layout file contains a KDL ``pane command="<binary>"`` spec
+      that auto-runs the binary on session open. We write the KDL to a
+      throwaway temp file (deleted in finally) because Zellij 0.44.3
+      rejects ``--layout-string`` combined with ``--new-session-with-layout``
+      AND rejects ``--layout`` / ``--layout-string`` combined with bare
+      ``--session`` ("Session not found" — those flags only add tabs to
+      EXISTING sessions). Only ``-n``/``--new-session-with-layout`` with
+      a file path actually creates a new session with a pre-baked layout.
+    - Without:      ``zellij --session <name>`` (opens default shell)
+
+    The earlier ``zellij --session NAME -- <binary>`` shape from the T6
+    spec was rejected by Zellij 0.44.3 ("Found argument 'claude' which
+    wasn't expected") — the ``--`` separator doesn't carry binary args
+    through to the spawned pane. T8 surfaced this; the layout-file
+    approach is the documented Zellij path for "session that auto-runs
+    X" (KDL ``pane command=`` block).
 
     Per Phase 0 + Phase 1, the session_name MUST follow the
     ``{operator}__{provider}__{app_or_root}`` convention. Callers (route
@@ -327,18 +398,39 @@ def launch_session(
     Raises ``subprocess.CalledProcessError`` on failure (caller decides
     how to surface the error to the user).
     """
-    argv = [_ZELLIJ_BIN, "--session", name]
+    # Build argv. When binary is supplied we hand Zellij a KDL layout
+    # file via -n; otherwise the bare `--session NAME` form creates a
+    # default-shell session (terminal mode, unchanged from T6).
+    argv: list[str] = [_ZELLIJ_BIN, "--session", name]
+    layout_path: Optional[str] = None
     if binary is not None:
-        argv.append("--")
-        argv.append(binary)
-        if args:
-            argv.extend(args)
+        kdl = _build_layout_kdl(binary, args)
+        # NamedTemporaryFile with delete=False so the child process can
+        # open the path; we delete it ourselves in the outer finally
+        # once the session has either failed fast or detached (the
+        # session backend reads the layout into memory at startup, so
+        # the file is no longer needed after that point).
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".kdl",
+            prefix="blackbox-zellij-layout-",
+            encoding="utf-8",
+            delete=False,
+        )
+        try:
+            tmp.write(kdl)
+            tmp.flush()
+        finally:
+            tmp.close()
+        layout_path = tmp.name
+        argv.extend(["-n", layout_path])
 
     logger.info(
-        "launch_session: name=%s binary=%s args=%s",
+        "launch_session: name=%s binary=%s args=%s layout=%s",
         name,
         binary,
         args,
+        layout_path,
     )
 
     # The orchestrator runs headless under systemd — no controlling TTY.
@@ -353,6 +445,7 @@ def launch_session(
     slave_closed = False
     rc: Optional[int] = None
     detached = False
+    proc: Optional[subprocess.Popen] = None
     try:
         try:
             proc = subprocess.Popen(
@@ -444,12 +537,25 @@ def launch_session(
                 os.close(slave_fd)
             except OSError:
                 pass
+        # Always remove the throwaway layout file. The session backend
+        # has already read it into memory by the time we get here
+        # (either via clean detach or via failed Popen / quick exit);
+        # leaving it would litter /tmp with one file per launch.
+        if layout_path is not None:
+            try:
+                os.unlink(layout_path)
+            except OSError as exc:
+                logger.debug(
+                    "launch_session: cleanup of layout file %s failed: %s",
+                    layout_path,
+                    exc,
+                )
 
     if detached:
         return
 
     if rc != 0:
-        stderr = (proc.stderr.read() if proc.stderr else "") or ""
+        stderr = (proc.stderr.read() if proc and proc.stderr else "") or ""
         logger.error(
             "launch_session failed (rc=%s) for %s: %s",
             rc,
