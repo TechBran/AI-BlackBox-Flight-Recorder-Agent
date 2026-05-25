@@ -57,22 +57,19 @@ _DEFAULT_ZELLIJ_WEB_PORT = 9097
 _ZELLIJ_BIN = "/usr/local/bin/zellij"
 
 # Env vars stripped from the child environment when spawning a Zellij
-# session. Every CLI agent the user might `claude` / `gemini` / `agy` /
-# `codex` into in a pane reads its own auth from one of these — if the
-# orchestrator's value propagates through, the CLI ends up trying server-
-# side credentials (which may be scope-limited, expired, or simply wrong
-# for interactive use) and hangs. Stripping the lot forces each CLI to
-# fall back to its own user-side OAuth / cached-session flow, which is
-# what works in a real terminal anyway. T15 surfaced ANTHROPIC_API_KEY
-# specifically — the rest are listed defensively for symmetry.
+# session. Originally a wider denylist; trimmed back after Brandon
+# reported claude regression (T15-final). Claude Code is configured to
+# use Google Vertex AI for inference on Brandon's machine — it NEEDS
+# GOOGLE_APPLICATION_CREDENTIALS in env to authenticate. Stripping it
+# caused claude to spawn, fail auth handshake, and exit silently within
+# ~1s of iframe attach (matching every symptom Brandon described).
+#
+# Final denylist: ONLY ANTHROPIC_API_KEY, because that's the one that
+# claude prefers over its cached OAuth session when present, and
+# Brandon's key isn't scoped for the CLI. Every other CLI handles
+# present-but-unused credentials gracefully.
 _ENV_DENYLIST_FOR_PANES = frozenset({
     "ANTHROPIC_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "OPENAI_API_KEY",
-    "GOOGLE_OAUTH_CLIENT_ID",
-    "GOOGLE_OAUTH_CLIENT_SECRET",
-    "GOOGLE_APPLICATION_CREDENTIALS",
 })
 
 # Path to the user-level config file we manage. install.sh seeds the
