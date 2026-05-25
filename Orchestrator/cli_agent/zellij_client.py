@@ -57,20 +57,15 @@ _DEFAULT_ZELLIJ_WEB_PORT = 9097
 _ZELLIJ_BIN = "/usr/local/bin/zellij"
 
 # Env vars stripped from the child environment when spawning a Zellij
-# session. Originally a wider denylist; trimmed back after Brandon
-# reported claude regression (T15-final). Claude Code is configured to
-# use Google Vertex AI for inference on Brandon's machine — it NEEDS
-# GOOGLE_APPLICATION_CREDENTIALS in env to authenticate. Stripping it
-# caused claude to spawn, fail auth handshake, and exit silently within
-# ~1s of iframe attach (matching every symptom Brandon described).
+# session. T15-final FULL REVERT: empty denylist. All previous env
+# stripping (ANTHROPIC_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, etc.)
+# was speculative and contributed to claude regressions. Brandon's
+# desktop terminal sees the exact same env and claude works there;
+# stripping anything makes us diverge from the working baseline.
 #
-# Final denylist: ONLY ANTHROPIC_API_KEY, because that's the one that
-# claude prefers over its cached OAuth session when present, and
-# Brandon's key isn't scoped for the CLI. Every other CLI handles
-# present-but-unused credentials gracefully.
-_ENV_DENYLIST_FOR_PANES = frozenset({
-    "ANTHROPIC_API_KEY",
-})
+# If we ever need to strip something here in the future, add it back
+# with empirical evidence of WHY — not theory.
+_ENV_DENYLIST_FOR_PANES = frozenset()
 
 # Path to the user-level config file we manage. install.sh seeds the
 # initial file; ensure_config() refreshes it at orchestrator startup so
