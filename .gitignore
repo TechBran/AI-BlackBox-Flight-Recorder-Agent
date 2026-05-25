@@ -238,6 +238,12 @@ Contacts/contacts.json
 # customer's tailnet devices populate via /devices/sync-tailscale on first use.
 Orchestrator/device_registry/devices.json
 
+# Zellij CLI Agent state: (operator, provider, app) -> session_name +
+# token_name mapping. Per-install runtime data; NEVER stores raw token
+# UUIDs (audit I7). Reconciled at orchestrator startup against Zellij's
+# tokens.db via zellij_state.reconcile_or_wipe().
+Orchestrator/cli_agent/state/zellij_sessions.json
+
 # Antigravity CLI (agy) runtime config — created by ~/.local/bin/agy install
 .antigravitycli/
 
