@@ -26,9 +26,15 @@
 
 [Unit]
 Description=AI BlackBox CLI Agent — Zellij web client daemon
-Documentation=https://github.com/zellij-org/zellij
+Documentation=https://zellij.dev/documentation/
 After=network-online.target
 Wants=network-online.target
+# Restart rate limiting (mirrors blackbox.service convention in install.sh —
+# StartLimit* directives belong in [Unit], not [Service]; systemd silently
+# ignores them in [Service] and warns. Without them, Restart=always loops
+# at ~6 attempts/min indefinitely on a broken binary.)
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=simple
