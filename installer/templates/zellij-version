@@ -1,0 +1,12 @@
+# Pinned Zellij version for the CLI Agent terminal bridge.
+# install.sh reads this to download the matching x86_64-unknown-linux-musl
+# build; the update pipeline (Phase 5) watches this file for bumps and
+# triggers a download+zellij-web.service restart on customer machines.
+#
+# Validated in Phase 0 spike: claude, gemini, codex, agy all render with
+# native scrollback on 0.44.3. Do not bump without re-validating the spike.
+#
+# Port choice: zellij-web.service binds to 9097. 9091 = orchestrator,
+# 9092 = asterisk audio_subprocess, 8060-8099 = user apps, 8082 = UGV
+# supervisor. 9097 is free and adjacent to the orchestrator family.
+0.44.3
