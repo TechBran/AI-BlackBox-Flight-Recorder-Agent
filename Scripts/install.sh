@@ -201,6 +201,250 @@ sudo -u "$REAL_USER" bash -c "
     fi
 "
 
+# ── Step 2c: install zellij (Phase 1 T3 + T1.5 fused) ──
+# Stands up the Zellij web client daemon that backs the CLI Agent terminal
+# bridge. Eight ordered sub-steps inside step_2c_install_zellij():
+#   1. Read pinned version from installer/templates/zellij-version
+#   2. Generate TLS cert at /etc/blackbox/zellij/{cert,key}.pem (T1.5 fused —
+#      idempotent skip if present+valid+non-expired; refuse to leave HTTPS
+#      enforcement disabled if cert generation fails)
+#   3. Reconcile ~/.local/share/zellij/tokens.db against orchestrator session
+#      state file (audit C3 — wipe both if one-sided, leave alone otherwise)
+#   4. Download + sha256-verify + atomic-install zellij binary (extract-then-
+#      verify per Phase 0 finding #4; skip download if already at pinned ver)
+#   5. Install the dispatcher script at /usr/local/sbin/blackbox-install-zellij-binary
+#      for future updates (sudoers grant points at this exact path)
+#   6. Write ~/.config/zellij/config.kdl (port 9097, enforce_https=true,
+#      cert paths pointing at step 2's artifacts)
+#   7. Install + daemon-reload + enable + restart zellij-web.service (template
+#      lives at installer/templates/zellij-web.service; substitute REAL_USER)
+#   8. HTTPS sanity check via curl --insecure (warning-only — T5 catches
+#      persistent issues)
+step_2c_install_zellij() {
+    local ZELLIJ_TEMPLATE_DIR="$BLACKBOX_ROOT/installer/templates"
+    local CERT_DIR="/etc/blackbox/zellij"
+    local CERT_FILE="$CERT_DIR/cert.pem"
+    local KEY_FILE="$CERT_DIR/key.pem"
+    local ZELLIJ_BIN="/usr/local/bin/zellij"
+    local ZELLIJ_PORT="9097"
+
+    # ─── 1. Read pinned version ───
+    local ZELLIJ_VERSION
+    ZELLIJ_VERSION=$(grep -vE '^[[:space:]]*(#|$)' "$ZELLIJ_TEMPLATE_DIR/zellij-version" \
+                       | head -n 1 | tr -d '[:space:]')
+    if [[ -z "$ZELLIJ_VERSION" ]]; then
+        echo "[install] ERROR: could not parse pinned zellij version from $ZELLIJ_TEMPLATE_DIR/zellij-version" >&2
+        exit 1
+    fi
+    echo "[install] Pinned zellij version: $ZELLIJ_VERSION"
+
+    # ─── 2. Generate TLS cert (T1.5 fused) ───
+    # install.sh REFUSES to leave HTTPS enforcement disabled — if cert
+    # generation fails, exit non-zero with a loud error. Idempotent skip
+    # only when ALL conditions hold: both files exist, cert not expired,
+    # owner = $REAL_USER:$REAL_USER, mode = 0600.
+    local cert_ok=0
+    if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
+        if sudo openssl x509 -in "$CERT_FILE" -checkend 0 -noout > /dev/null 2>&1; then
+            local cert_owner key_owner cert_mode key_mode
+            cert_owner=$(sudo stat -c '%U:%G' "$CERT_FILE")
+            key_owner=$(sudo stat -c '%U:%G' "$KEY_FILE")
+            cert_mode=$(sudo stat -c '%a' "$CERT_FILE")
+            key_mode=$(sudo stat -c '%a' "$KEY_FILE")
+            if [[ "$cert_owner" == "$REAL_USER:$REAL_USER" \
+               && "$key_owner"  == "$REAL_USER:$REAL_USER" \
+               && "$cert_mode"  == "600" \
+               && "$key_mode"   == "600" ]]; then
+                cert_ok=1
+            fi
+        fi
+    fi
+    if [[ $cert_ok -eq 1 ]]; then
+        echo "[install] TLS cert: present + valid + non-expired, skipping"
+    else
+        echo "[install] TLS cert: generating self-signed (CN=localhost, 10-year)..."
+        if ! command -v openssl > /dev/null 2>&1; then
+            echo "[install] ERROR: openssl not available — cannot generate Zellij TLS cert. Refusing to leave HTTPS enforcement disabled." >&2
+            exit 1
+        fi
+        sudo mkdir -p "$CERT_DIR"
+        sudo chmod 0755 "$CERT_DIR"
+        if ! sudo openssl req -x509 -newkey rsa:4096 -nodes \
+                -keyout "$KEY_FILE" \
+                -out "$CERT_FILE" \
+                -days 3650 -subj '/CN=localhost' > /dev/null 2>&1; then
+            echo "[install] ERROR: openssl cert generation failed. Refusing to leave HTTPS enforcement disabled." >&2
+            exit 1
+        fi
+        sudo chown "$REAL_USER:$REAL_USER" "$CERT_FILE" "$KEY_FILE"
+        sudo chmod 0600 "$CERT_FILE" "$KEY_FILE"
+        # Re-verify what we just wrote — defense against silent permission drift.
+        if ! sudo openssl x509 -in "$CERT_FILE" -checkend 0 -noout > /dev/null 2>&1; then
+            echo "[install] ERROR: cert generated but openssl x509 -checkend rejects it. Refusing to proceed." >&2
+            exit 1
+        fi
+        echo "[install] TLS cert: generated"
+    fi
+
+    # ─── 3. Reconcile tokens.db (audit C3) ───
+    # Four cases:
+    #   neither present → no-op (fresh install)
+    #   both present    → no-op (consistent state)
+    #   one-sided       → wipe both (reinstall partial-state reconciliation)
+    local TOKENS_DB="$REAL_HOME/.local/share/zellij/tokens.db"
+    local SESSIONS_JSON="$BLACKBOX_ROOT/Orchestrator/cli_agent/state/zellij_sessions.json"
+    local have_tokens=0 have_sessions=0
+    [[ -f "$TOKENS_DB" ]]      && have_tokens=1
+    [[ -f "$SESSIONS_JSON" ]]  && have_sessions=1
+    if [[ $have_tokens -eq 0 && $have_sessions -eq 0 ]]; then
+        echo "[install] tokens.db reconciliation: clean (neither tokens.db nor zellij_sessions.json present)"
+    elif [[ $have_tokens -eq 1 && $have_sessions -eq 1 ]]; then
+        echo "[install] tokens.db reconciliation: consistent (both present, leaving alone)"
+    else
+        echo "[install] tokens.db reconciliation: WIPING — one-sided state detected (tokens=$have_tokens sessions=$have_sessions)"
+        sudo -u "$REAL_USER" rm -f "$TOKENS_DB"      2>/dev/null || true
+        sudo -u "$REAL_USER" rm -f "$SESSIONS_JSON"  2>/dev/null || true
+    fi
+
+    # ─── 4. Download + install zellij binary ───
+    # Direct install (NOT via dispatcher — dispatcher is for UPDATES). Skip
+    # download if already at pinned version. Extract-then-verify per Phase 0
+    # finding #4 (published .sha256sum hashes the EXTRACTED binary, not the
+    # tarball). Atomic install via `install -m 0755`.
+    local need_download=1
+    if [[ -x "$ZELLIJ_BIN" ]]; then
+        local current
+        current=$("$ZELLIJ_BIN" --version 2>/dev/null | awk '{print $2}' || true)
+        if [[ "$current" == "$ZELLIJ_VERSION" ]]; then
+            echo "[install] zellij $ZELLIJ_VERSION already installed, skipping download"
+            need_download=0
+        fi
+    fi
+    if [[ $need_download -eq 1 ]]; then
+        local TMPDIR
+        TMPDIR=$(mktemp -d /tmp/zellij-install-XXXXXX)
+        # Matches build_ydotool's pattern: cleanup on success path; on failure
+        # the explicit exit 1 short-circuits the whole installer anyway, and
+        # /tmp/zellij-install-* is cheap to garbage-collect manually.
+
+        local TARBALL_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"
+        local SHA_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.sha256sum"
+
+        echo "[install] Downloading zellij v${ZELLIJ_VERSION} (x86_64-linux-musl)..."
+        if ! curl --fail --location --silent --show-error \
+                --output "$TMPDIR/zellij.tar.gz" "$TARBALL_URL"; then
+            echo "[install] ERROR: zellij tarball download failed: $TARBALL_URL" >&2
+            exit 1
+        fi
+        if ! curl --fail --location --silent --show-error \
+                --output "$TMPDIR/zellij.sha256sum" "$SHA_URL"; then
+            echo "[install] ERROR: zellij sha256sum download failed: $SHA_URL" >&2
+            exit 1
+        fi
+
+        echo "[install] Extracting zellij tarball..."
+        if ! tar -xzf "$TMPDIR/zellij.tar.gz" -C "$TMPDIR"; then
+            echo "[install] ERROR: zellij tarball extraction failed" >&2
+            exit 1
+        fi
+        if [[ ! -f "$TMPDIR/zellij" ]]; then
+            echo "[install] ERROR: expected zellij binary not found at $TMPDIR/zellij after extract" >&2
+            exit 1
+        fi
+
+        # Phase 0 finding #4: hash the EXTRACTED binary, not the tarball.
+        local EXPECTED ACTUAL
+        EXPECTED=$(awk '{print $1}' "$TMPDIR/zellij.sha256sum")
+        ACTUAL=$(sha256sum "$TMPDIR/zellij" | awk '{print $1}')
+        if [[ -z "$EXPECTED" ]]; then
+            echo "[install] ERROR: could not parse expected hash from $TMPDIR/zellij.sha256sum" >&2
+            exit 1
+        fi
+        if [[ "$EXPECTED" != "$ACTUAL" ]]; then
+            echo "[install] ERROR: zellij sha256 mismatch" >&2
+            echo "[install]   expected: $EXPECTED" >&2
+            echo "[install]   actual:   $ACTUAL" >&2
+            exit 1
+        fi
+        echo "[install] zellij sha256 verified ($ACTUAL)"
+
+        # Atomic install + perms + ownership in one call.
+        sudo install -m 0755 -o root -g root "$TMPDIR/zellij" "$ZELLIJ_BIN"
+        echo "[install] Installed $ZELLIJ_BIN (version $ZELLIJ_VERSION)"
+        rm -rf "$TMPDIR"
+    fi
+
+    # ─── 5. Install the dispatcher script (for future updates) ───
+    # Sudoers grant authorizes `/usr/local/sbin/blackbox-install-zellij-binary *`
+    # (no .sh extension — see installer/templates/sudoers-blackbox-system).
+    sudo install -m 0755 -o root -g root \
+        "$ZELLIJ_TEMPLATE_DIR/blackbox-install-zellij-binary.sh" \
+        "/usr/local/sbin/blackbox-install-zellij-binary"
+    echo "[install] Installed dispatcher: /usr/local/sbin/blackbox-install-zellij-binary"
+
+    # ─── 6. Write ~/.config/zellij/config.kdl ───
+    # Port 9097 hardcoded here (matches comment in installer/templates/zellij-version).
+    # Idempotent: skip write if file is byte-identical to what we'd emit.
+    local ZELLIJ_CFG_DIR="$REAL_HOME/.config/zellij"
+    local ZELLIJ_CFG="$ZELLIJ_CFG_DIR/config.kdl"
+    sudo -u "$REAL_USER" mkdir -p "$ZELLIJ_CFG_DIR"
+    local TMP_CFG
+    TMP_CFG=$(mktemp)
+    cat > "$TMP_CFG" <<KDL_EOF
+// $ZELLIJ_CFG
+// Generated by BlackBox install.sh — DO NOT EDIT BY HAND.
+// Zellij web server config for AI BlackBox CLI Agent.
+web_server true
+web_server_ip "127.0.0.1"
+web_server_port $ZELLIJ_PORT
+web_sharing "on"
+enforce_https_for_localhost true
+web_server_cert "$CERT_FILE"
+web_server_key "$KEY_FILE"
+KDL_EOF
+    if [[ -f "$ZELLIJ_CFG" ]] && cmp -s "$TMP_CFG" "$ZELLIJ_CFG"; then
+        echo "[install] zellij config.kdl already current, skipping write"
+        rm -f "$TMP_CFG"
+    else
+        sudo -u "$REAL_USER" cp "$TMP_CFG" "$ZELLIJ_CFG"
+        rm -f "$TMP_CFG"
+        sudo chown -R "$REAL_USER:$REAL_USER" "$ZELLIJ_CFG_DIR"
+        echo "[install] Wrote $ZELLIJ_CFG (port $ZELLIJ_PORT, enforce_https=true)"
+    fi
+
+    # ─── 7. Install zellij-web.service unit ───
+    # Substitute REAL_USER_PLACEHOLDER at install time. daemon-reload first
+    # so systemd notices the new unit, then enable + restart (restart handles
+    # both "not running yet" and "already running" cases).
+    sed "s/REAL_USER_PLACEHOLDER/$REAL_USER/g" \
+        "$ZELLIJ_TEMPLATE_DIR/zellij-web.service" \
+        | sudo tee /etc/systemd/system/zellij-web.service > /dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable zellij-web.service > /dev/null 2>&1
+    sudo systemctl restart zellij-web.service
+    sleep 1
+    if ! sudo systemctl is-active --quiet zellij-web.service; then
+        echo "[install] ERROR: zellij-web.service is not active after restart" >&2
+        echo "[install] (Check 'journalctl -u zellij-web.service' for details)" >&2
+        exit 1
+    fi
+    echo "[install] zellij-web.service installed + active"
+
+    # ─── 8. HTTPS sanity check ───
+    # --insecure: self-signed cert, expected. Warning only — T5 smoke-test
+    # catches persistent issues; transient timing on first start shouldn't
+    # block the rest of install.sh.
+    local http_code
+    http_code=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+                    --insecure --max-time 5 "https://127.0.0.1:$ZELLIJ_PORT/" 2>/dev/null || echo "000")
+    if [[ "$http_code" == "200" ]]; then
+        echo "[install] zellij-web HTTPS sanity check: 200 OK"
+    else
+        echo "[install] WARNING: zellij-web HTTPS sanity check returned $http_code (expected 200) — T5 will verify"
+    fi
+}
+step_2c_install_zellij
+
 # ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"
