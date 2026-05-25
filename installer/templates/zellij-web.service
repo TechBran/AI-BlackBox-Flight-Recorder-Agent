@@ -43,6 +43,14 @@ ExecStart=/usr/local/bin/zellij web
 Restart=always
 RestartSec=10
 
+# Color terminal support (T11c, 2026-05-25): zellij-web auto-spawns
+# session backends + their pane child processes (bash, claude, gemini,
+# etc.) when the browser connects. Systemd starts services with no
+# TERM, so without this the child sees empty TERM and CLI tools fall
+# back to dumb-terminal output. xterm-256color is the safest baseline;
+# COLORTERM=truecolor unlocks 24-bit color in apps that probe for it.
+Environment=TERM=xterm-256color COLORTERM=truecolor
+
 # Logging
 StandardOutput=journal
 StandardError=journal
