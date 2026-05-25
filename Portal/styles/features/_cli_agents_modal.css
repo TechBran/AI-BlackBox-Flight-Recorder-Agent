@@ -371,7 +371,8 @@
 .zellij-switcher-provider-badge {
     flex: 0 0 auto;
     font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
-    font-size: 9px;
+    /* 10px floor for legibility (T12+T13 review found 9px squints on 1080p). */
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;

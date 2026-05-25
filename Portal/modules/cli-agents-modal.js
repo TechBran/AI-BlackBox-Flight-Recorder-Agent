@@ -56,6 +56,12 @@ const APPS_ROOT_SLUG = '_root';
 // Zellij-mode singleton state (only populated when backend is Zellij).
 let zellijMode = false;
 let zellijShellEl = null;
+// Monotonic open-counter used to drop stale post-await work. Every openModal
+// increments it; every closeModal also increments it. Any async branch that
+// captured the value at entry must compare to confirm "still my open" before
+// touching DOM/modules. Fixes the re-entrant race + close-during-detect race
+// flagged in T12 code-review.
+let openSerial = 0;
 
 // Defaults-to-tmux on ANY error: never break the existing path because of a
 // transient orchestrator hiccup or new-endpoint deploy lag.
@@ -447,11 +453,15 @@ async function openModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.remove('hide');
 
-    // Detect backend once per open. Operator-change-while-open is NOT
-    // forwarded into the launcher/switcher (modal-open re-mount handles it
-    // naturally); document as a known limitation rather than wire a
-    // change-listener.
+    // Increment for this open; capture locally. If the user clicks Close, or
+    // Open again, before detectBackend resolves, our captured value will be
+    // stale and we'll bail before touching anything. Operator-change-while-
+    // open is NOT forwarded into the launcher/switcher (modal-open re-mount
+    // handles it naturally); documented as a known limitation.
+    const mySerial = ++openSerial;
     const backend = await detectBackend();
+    if (mySerial !== openSerial) return;  // stale; another open/close happened
+
     if (backend === 'zellij') {
         enterZellijMode();
     } else {
@@ -472,8 +482,14 @@ function enterZellijMode() {
     if (term) term.style.display = 'none';
 
     // Idempotent: if a prior open already built the shell and close didn't
-    // tear it down for some reason, blow it away rather than stacking.
+    // tear it down for some reason, blow away the trio's state FIRST (so
+    // their singletons release refs to the old DOM children) THEN remove
+    // the stale shell. Calling unmount* on never-mounted state is safe.
+    unmountLauncher();
+    unmountSwitcher();
+    unmountIframe();
     if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
+    zellijShellEl = null;
 
     const body = document.querySelector('#cliAgentsModal .cli-agents-body');
     if (!body) {
@@ -498,7 +514,10 @@ function enterZellijMode() {
     zellijShellEl.appendChild(mainRow);
     body.appendChild(zellijShellEl);
 
-    const op = getOperator();
+    // Defensive operator default — matches the tmux-path fallback elsewhere
+    // in this file. mountLauncher would throw with a missing operator
+    // otherwise, which would leave the modal in a half-mounted state.
+    const op = getOperator() || 'Brandon';
 
     mountIframe(iframeHost, {
         onSessionError: ({ sessionName, reason }) => {
@@ -573,6 +592,10 @@ function autoOpenFromWizard() {
 function closeModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.add('hide');
+
+    // Invalidate any in-flight detectBackend from a prior open — the bumped
+    // serial makes the awaited branch bail before touching DOM/modules.
+    openSerial++;
 
     // Zellij teardown first (idempotent + safe pre-mount): stops the switcher
     // poll, removes the iframe + launcher DOM, clears module state. The
