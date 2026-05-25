@@ -24,6 +24,8 @@ from typing import Dict, Any, Optional, List
 # External library imports
 import httpx
 import psutil
+import websockets
+from websockets.exceptions import ConnectionClosed
 from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form, Request, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, Response
 
@@ -1377,6 +1379,83 @@ async def app_proxy(port: int, path: str, request: Request):
     except Exception as e:
         print(f"[APP-PROXY] Error: {e}")
         raise HTTPException(500, f"Proxy error: {str(e)}")
+
+
+# Why a second route registration on the same path: Starlette dispatches by ASGI
+# scope type, so @app.api_route (http) and @app.websocket coexist. Zellij's web
+# client opens ws://.../app-proxy/9097/... back through us once its iframe HTML
+# loads via the HTTP handler above.
+@app.websocket("/app-proxy/{port}/{path:path}")
+async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
+    await websocket.accept()
+    if port < 1024 or port > 65535:
+        await websocket.close(code=1008, reason="Invalid port")
+        return
+
+    query = websocket.scope.get("query_string", b"").decode("latin-1")
+    target_uri = f"ws://127.0.0.1:{port}/{path}"
+    if query:
+        target_uri += f"?{query}"
+
+    try:
+        upstream_cm = websockets.connect(target_uri, max_size=None, open_timeout=10)
+        upstream = await upstream_cm.__aenter__()
+    except Exception as e:
+        print(f"[APP-PROXY-WS] Upstream connect failed for {target_uri}: {e}")
+        try:
+            await websocket.close(code=1011, reason="Upstream unavailable")
+        except Exception:
+            pass
+        return
+
+    async def pump_client_to_upstream():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+                text = msg.get("text")
+                if text is not None:
+                    await upstream.send(text)
+                    continue
+                data = msg.get("bytes")
+                if data is not None:
+                    await upstream.send(data)
+        except (WebSocketDisconnect, ConnectionClosed):
+            pass
+
+    async def pump_upstream_to_client():
+        try:
+            async for frame in upstream:
+                if isinstance(frame, (bytes, bytearray, memoryview)):
+                    await websocket.send_bytes(bytes(frame))
+                else:
+                    await websocket.send_text(frame)
+        except ConnectionClosed:
+            pass
+
+    task_c2u = asyncio.create_task(pump_client_to_upstream())
+    task_u2c = asyncio.create_task(pump_upstream_to_client())
+    try:
+        done, pending = await asyncio.wait(
+            {task_c2u, task_u2c}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        try:
+            await upstream_cm.__aexit__(None, None, None)
+        except Exception:
+            pass
+        # Prefer upstream's close code so e.g. auth-failure 4xxx flows to the browser.
+        code = upstream.close_code if upstream.close_code is not None else 1000
+        reason = upstream.close_reason or ""
+        try:
+            if websocket.application_state == WebSocketState.CONNECTED:
+                await websocket.close(code=code, reason=reason)
+        except Exception:
+            pass
 
 
 # -----------------------------------------------------------------------------
