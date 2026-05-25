@@ -57,15 +57,21 @@ _DEFAULT_ZELLIJ_WEB_PORT = 9097
 _ZELLIJ_BIN = "/usr/local/bin/zellij"
 
 # Env vars stripped from the child environment when spawning a Zellij
-# session. T15-final FULL REVERT: empty denylist. All previous env
-# stripping (ANTHROPIC_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, etc.)
-# was speculative and contributed to claude regressions. Brandon's
-# desktop terminal sees the exact same env and claude works there;
-# stripping anything makes us diverge from the working baseline.
+# session.
 #
-# If we ever need to strip something here in the future, add it back
-# with empirical evidence of WHY — not theory.
-_ENV_DENYLIST_FOR_PANES = frozenset()
+# ANTHROPIC_API_KEY (added 2026-05-25 — Brandon MSO2 report): the
+# orchestrator's server-side key from .env propagates into the claude
+# pane and triggers claude's "both a token and an API key are set"
+# warning at the top of every session — the user's cached OAuth token
+# (or Vertex auth via CLAUDE_CODE_USE_VERTEX=1) is ambiguous with the
+# leaked env var. Strip it so each pane's claude falls back to its own
+# user-side auth without warnings. Other CLI providers (gemini, codex,
+# agy) don't read ANTHROPIC_API_KEY, so stripping is safe globally.
+# GOOGLE_APPLICATION_CREDENTIALS is intentionally NOT stripped —
+# claude needs it for Vertex AI auth and gemini may use it too.
+_ENV_DENYLIST_FOR_PANES = frozenset({
+    "ANTHROPIC_API_KEY",
+})
 
 # Path to the user-level config file we manage. install.sh seeds the
 # initial file; ensure_config() refreshes it at orchestrator startup so
