@@ -209,7 +209,40 @@ def mint_token() -> tuple[str, str]:
     missing, the output format has changed in a way we can't safely
     parse, and we raise rather than silently grab the wrong row.
     """
-    result = _run([_ZELLIJ_BIN, "web", "--create-token"])
+    # Zellij 0.44.3 auto-names tokens token_1, token_2, etc. — but doesn't
+    # always reuse the lowest-free slot after revokes (empirically observed
+    # T15: counter sometimes drifts and a mint trips "Token name 'token_N'
+    # already exists"). Force-revoke any colliding name and retry. Up to 5
+    # collisions per mint; beyond that, the token-store is genuinely wedged
+    # and the caller should surface the original error.
+    result = None
+    last_err: Optional[Exception] = None
+    for _ in range(6):
+        try:
+            result = _run([_ZELLIJ_BIN, "web", "--create-token"])
+            break
+        except subprocess.CalledProcessError as exc:
+            combined = ((exc.stderr or "") + (exc.stdout or ""))
+            m = re.search(r"Token name '([^']+)' already exists", combined)
+            if not m:
+                raise
+            collide_name = m.group(1)
+            logger.warning(
+                "mint_token: collision on %s — force-revoking + retrying",
+                collide_name,
+            )
+            try:
+                _run([_ZELLIJ_BIN, "web", "--revoke-token", collide_name])
+            except subprocess.CalledProcessError as revoke_err:
+                logger.warning(
+                    "mint_token: force-revoke of %s failed: %s",
+                    collide_name,
+                    revoke_err,
+                )
+            last_err = exc
+    if result is None:
+        # Exhausted retries — re-raise the most recent collision error.
+        raise last_err or RuntimeError("mint_token retry budget exhausted")
     stdout = result.stdout or ""
 
     # Preamble sanity check — guard against silent format drift.

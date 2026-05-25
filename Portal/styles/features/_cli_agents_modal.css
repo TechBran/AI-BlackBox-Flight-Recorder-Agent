@@ -13,6 +13,21 @@
     width: min(780px, 92vw);
 }
 
+/* In Zellij mode the modal hosts a real interactive terminal — widen the
+   card so the terminal has working-sized columns/rows. The card width is
+   adapted only when the Zellij shell is mounted (T12 builds .cli-agents-
+   zellij-shell inside .cli-agents-body); the :has() selector picks that
+   up cleanly without adding a JS class-toggle. */
+.cli-agents-card:has(.cli-agents-zellij-shell) {
+    width: min(1400px, 96vw);
+    max-width: 96vw;
+}
+.cli-agents-card:has(.cli-agents-zellij-shell) .cli-agents-body {
+    /* Let the shell consume the body's height fully — the body's existing
+       column-flex layout would otherwise center the shell vertically. */
+    padding: 0;
+}
+
 .cli-agents-body {
     display: flex;
     flex-direction: column;
