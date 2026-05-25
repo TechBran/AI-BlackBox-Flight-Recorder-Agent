@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
 from Orchestrator.cli_agent import get_backend
 from Orchestrator.cli_agent import zellij_client, zellij_state
@@ -753,6 +754,76 @@ async def zellij_delete_session(name: str, op: str = Query(...)):
 
     logger.info("zellij_delete_session: operator=%s session=%s deleted", op, name)
     # 204 No Content
+    return Response(status_code=204)
+
+
+# ── T14.8: POST /zellij/inject — type text into a live session ──────────
+# Consumed by the launcher's shortcut dropdown to send "claude\n" etc into
+# the active terminal pane. Wraps zellij_client.inject (which runs
+# `zellij --session NAME action write-chars TEXT` under the hood).
+#
+# Security boundary (audit I10):
+#   1. Operator must be in ALLOWED_OPS (_check_operator_allowed)
+#   2. Session name must start with {operator}__ (operator-prefix gate)
+#   3. Text length capped at 4096 chars — prevents pathologically large
+#      injects (the launcher only ever sends short binary names like
+#      "claude\n", so this is comfortably under the cap)
+#
+# Note: this endpoint deliberately does NOT enforce provider="terminal"
+# yet (plan T14.8 mentioned it as a future hardening). The operator-
+# prefix gate already prevents cross-operator injection; whether a given
+# operator can inject into their OWN claude session vs only their
+# terminal session is a UX-policy decision deferred to T14.9.
+class ZellijInjectRequest(BaseModel):
+    session_name: str
+    text: str
+
+
+@router.post("/zellij/inject", status_code=204)
+async def zellij_inject(req: ZellijInjectRequest, op: str = Query(...)):
+    """Inject text into a Zellij session as if the user typed it."""
+    _check_operator_allowed(op)
+
+    if not _validate_operator_prefix(req.session_name, op):
+        logger.warning(
+            "zellij_inject: operator-prefix gate VIOLATION — "
+            "operator=%s attempted to inject into session=%s",
+            op,
+            req.session_name,
+        )
+        raise HTTPException(
+            403,
+            "Cannot inject into a session belonging to another operator",
+        )
+
+    if not req.text or len(req.text) > 4096:
+        raise HTTPException(
+            400,
+            "Inject text must be 1-4096 chars",
+        )
+
+    _require_zellij_backend()
+
+    try:
+        await asyncio.to_thread(zellij_client.inject, req.session_name, req.text)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_inject: inject(%s, %d chars) failed: %s",
+            req.session_name,
+            len(req.text),
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to inject into Zellij session: {exc}")
+
+    # Log without the text content (could leak whatever the launcher
+    # decides to send later — names, tokens-in-shortcuts, etc.).
+    logger.info(
+        "zellij_inject: operator=%s session=%s text_len=%d injected",
+        op,
+        req.session_name,
+        len(req.text),
+    )
     return Response(status_code=204)
 
 
