@@ -779,6 +779,18 @@ class ZellijInjectRequest(BaseModel):
     text: str
 
 
+class ZellijSpawnRequest(BaseModel):
+    session_name: str
+    binary: str  # must be in _SPAWN_BINARY_ALLOWLIST
+
+
+# Allowlist for /spawn — keep tight because the binary name is exec'd
+# directly via Zellij's `action new-tab -- BINARY`. Resolution happens at
+# request time via shutil.which (or the existing CLI agent provider_bin
+# lookup) so we don't ship hardcoded user-specific paths.
+_SPAWN_ALLOWED_BINARIES = frozenset({"claude", "gemini", "codex", "agy", "antigravity"})
+
+
 @router.post("/zellij/inject", status_code=204)
 async def zellij_inject(req: ZellijInjectRequest, op: str = Query(...)):
     """Inject text into a Zellij session as if the user typed it."""
@@ -823,6 +835,47 @@ async def zellij_inject(req: ZellijInjectRequest, op: str = Query(...)):
         op,
         req.session_name,
         len(req.text),
+    )
+    return Response(status_code=204)
+
+
+@router.post("/zellij/spawn", status_code=204)
+async def zellij_spawn(req: ZellijSpawnRequest, op: str = Query(...)):
+    """Spawn a binary in a NEW Zellij tab inside the operator's session.
+
+    Used by the launcher's Shortcuts dropdown — clicking "Claude" / "Gemini"
+    /etc. opens a fresh tab with that binary running. Bypasses the
+    write-chars-into-bash path because claude empirically doesn't render
+    when launched via bash inside Zellij (T15 diagnostic).
+    """
+    _check_operator_allowed(op)
+    if not _validate_operator_prefix(req.session_name, op):
+        logger.warning(
+            "zellij_spawn: operator-prefix gate VIOLATION — operator=%s session=%s",
+            op, req.session_name,
+        )
+        raise HTTPException(403, "Cannot spawn into a session belonging to another operator")
+    if req.binary not in _SPAWN_ALLOWED_BINARIES:
+        raise HTTPException(400, f"Binary '{req.binary}' not in allowlist: {sorted(_SPAWN_ALLOWED_BINARIES)}")
+
+    _require_zellij_backend()
+
+    # Resolve binary path via the existing provider_bin lookup. Falls back to
+    # bare name if not found (Zellij will then try PATH inside its env).
+    resolved = provider_bin(req.binary) or req.binary
+
+    try:
+        await asyncio.to_thread(zellij_client.spawn_in_new_tab, req.session_name, resolved)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_spawn: spawn_in_new_tab(%s, %s) failed: %s",
+            req.session_name, resolved, exc, exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to spawn binary in Zellij session: {exc}")
+
+    logger.info(
+        "zellij_spawn: operator=%s session=%s binary=%s resolved=%s spawned",
+        op, req.session_name, req.binary, resolved,
     )
     return Response(status_code=204)
 

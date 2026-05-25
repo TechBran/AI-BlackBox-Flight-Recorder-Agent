@@ -704,6 +704,35 @@ def kill_session(name: str) -> None:
         raise
 
 
+def spawn_in_new_tab(session_name: str, binary: str) -> None:
+    """Spawn ``binary`` in a NEW Zellij tab inside ``session_name``.
+
+    Uses ``zellij action new-tab -- BINARY`` which creates a fresh tab
+    running the binary directly (no bash wrapper, no PTY shenanigans).
+    This is the path that empirically works for claude — `write-chars`
+    typing "claude\\n" into a bash pane silently fails (claude appears
+    to start but never renders, possibly due to bash job-control
+    interaction). new-tab bypasses bash entirely.
+
+    SECURITY: caller MUST validate binary is in an allowlist BEFORE
+    invoking — the binary string is passed directly to the shell via
+    `zellij action new-tab -- BINARY`. The Zellij CLI tokenizes
+    correctly when using `--` but a malicious binary path could still
+    pwn anything claude/agy/etc. can pwn. Caller is the perimeter.
+    """
+    argv = [
+        _ZELLIJ_BIN,
+        "--session",
+        session_name,
+        "action",
+        "new-tab",
+        "--",
+        binary,
+    ]
+    _run(argv)
+    logger.info("zellij new-tab spawned: session=%s binary=%s", session_name, binary)
+
+
 def inject(session_name: str, text: str) -> None:
     """Inject ``text`` into the given Zellij session as if the user typed it.
 

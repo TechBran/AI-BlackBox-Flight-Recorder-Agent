@@ -59,6 +59,7 @@ const SHORTCUTS = [
 const LAUNCH_URL = '/cli-agent/zellij/launch';
 const LOGIN_URL = '/app-proxy/9097/command/login';
 const INJECT_URL = '/cli-agent/zellij/inject';
+const SPAWN_URL  = '/cli-agent/zellij/spawn';
 
 function fireCb(cb, payload, label) {
     if (typeof cb !== 'function') return;
@@ -197,21 +198,28 @@ async function injectShortcut(shortcut) {
         console.warn('[ZELLIJ-LAUNCHER] injectShortcut called with no active session');
         return;
     }
-    const text = `${shortcut.binary}\n`;
+    // Use /zellij/spawn (new-tab) rather than /zellij/inject (write-chars).
+    // T15 surfaced empirically that typing "claude\n" into a bash pane
+    // doesn't actually run claude (bash never executes it — silent), while
+    // `zellij action new-tab -- claude` works. To keep all four shortcuts
+    // consistent, all of them spawn-in-new-tab.
     try {
         const resp = await fetch(
-            `${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`,
+            `${SPAWN_URL}?op=${encodeURIComponent(currentOperator)}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_name: currentActiveSession, text }),
+                body: JSON.stringify({
+                    session_name: currentActiveSession,
+                    binary: shortcut.binary,
+                }),
             },
         );
         if (!resp.ok) {
             const message = await resp.text().catch(() => '');
             fireCb(currentCallbacks.onError, {
                 provider: shortcut.id,
-                stage: 'inject',
+                stage: 'spawn',
                 status: resp.status,
                 message,
             }, 'onError');
@@ -225,7 +233,7 @@ async function injectShortcut(shortcut) {
     } catch (err) {
         fireCb(currentCallbacks.onError, {
             provider: shortcut.id,
-            stage: 'inject',
+            stage: 'spawn',
             status: 0,
             message: String(err),
         }, 'onError');
