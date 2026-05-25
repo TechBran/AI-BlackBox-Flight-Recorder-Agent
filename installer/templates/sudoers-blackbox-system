@@ -65,3 +65,31 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-write-system
 # the runner's `sudo -n bash install.sh` actually succeed for the systemd
 # regen phase.
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/bash BLACKBOX_ROOT_PLACEHOLDER/Scripts/install.sh
+
+# ── Zellij CLI Agent (Track A T4, audit C5) ─────────────────────────────
+# Grants required by the Zellij rewrite of the CLI Agent terminal stack.
+# Plan: docs/plans/2026-05-24-zellij-cli-agent-rewrite.md (Track A).
+#
+# Why three grants and not just `restart`:
+#   - `systemctl restart zellij-web.service` — normal lifecycle (rotate
+#     binary, recover from a hung session, post-update bounce).
+#   - `systemctl daemon-reload` — REQUIRED whenever the unit file content
+#     on disk changes (e.g. update pipeline writes a new
+#     zellij-web.service via blackbox-write-systemd). `restart` alone does
+#     NOT re-read the unit; systemd will keep running the old definition
+#     until daemon-reload. These are separate sudo verbs, hence two grants.
+#   - `/usr/local/sbin/blackbox-install-zellij-binary *` — dispatcher
+#     script (written by Track A T4.5) that drops the pinned zellij
+#     binary into /usr/local/bin/. The orchestrator namespace runs with
+#     ProtectSystem=strict (see MEMORY: protectsystem_strict_blast_radius),
+#     so writes to /usr/local/bin/ are blocked even via sudo from inside
+#     the service. The dispatcher does the bounded root operation,
+#     mirroring blackbox-write-systemd + blackbox-apt-install: it
+#     validates the version arg against an allowlist, verifies the
+#     downloaded artifact's checksum, then performs the atomic install.
+#     The wildcard `*` follows the same pattern as the existing
+#     blackbox-apt-install / blackbox-write-systemd grants — argument
+#     validation lives inside the helper, not in the sudoers rule.
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart zellij-web.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/local/sbin/blackbox-install-zellij-binary *
