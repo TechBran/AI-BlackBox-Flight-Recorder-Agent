@@ -221,6 +221,10 @@ sudo -u "$REAL_USER" bash -c "
 #   8. HTTPS sanity check via curl --insecure (warning-only — T5 catches
 #      persistent issues)
 step_2c_install_zellij() {
+    # Requires from install.sh preamble:
+    #   $REAL_USER       — the user that owns blackbox.service (== $REAL_USER in unit)
+    #   $REAL_HOME       — that user's home directory (where ~/.config/zellij lives)
+    #   $BLACKBOX_ROOT   — the project root (where installer/templates/ lives)
     local ZELLIJ_TEMPLATE_DIR="$BLACKBOX_ROOT/installer/templates"
     local CERT_DIR="/etc/blackbox/zellij"
     local CERT_FILE="$CERT_DIR/cert.pem"
@@ -302,6 +306,9 @@ step_2c_install_zellij() {
         echo "[install] tokens.db reconciliation: consistent (both present, leaving alone)"
     else
         echo "[install] tokens.db reconciliation: WIPING — one-sided state detected (tokens=$have_tokens sessions=$have_sessions)"
+        # Permission errors are possible if tokens.db is owned by another user (e.g., a leftover
+        # from a previous install with a different REAL_USER); '|| true' keeps reconciliation
+        # from breaking install.
         sudo -u "$REAL_USER" rm -f "$TOKENS_DB"      2>/dev/null || true
         sudo -u "$REAL_USER" rm -f "$SESSIONS_JSON"  2>/dev/null || true
     fi
@@ -323,9 +330,11 @@ step_2c_install_zellij() {
     if [[ $need_download -eq 1 ]]; then
         local TMPDIR
         TMPDIR=$(mktemp -d /tmp/zellij-install-XXXXXX)
-        # Matches build_ydotool's pattern: cleanup on success path; on failure
-        # the explicit exit 1 short-circuits the whole installer anyway, and
-        # /tmp/zellij-install-* is cheap to garbage-collect manually.
+        # Trap covers the five exit-1 paths below (download/extract/hash-parse/
+        # hash-mismatch failures) so we never leak /tmp/zellij-install-* dirs.
+        # The explicit `rm -rf "$TMPDIR"` at the end of the happy path is kept
+        # as documented redundancy — the trap handles both happy + sad paths.
+        trap 'rm -rf "$TMPDIR"' EXIT
 
         local TARBALL_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"
         local SHA_URL="https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.sha256sum"
@@ -406,6 +415,11 @@ KDL_EOF
         echo "[install] zellij config.kdl already current, skipping write"
         rm -f "$TMP_CFG"
     else
+        if [[ -f "$ZELLIJ_CFG" ]]; then
+            echo "[install] config.kdl: overwrote previous version (operator edits to this file are NOT preserved; customize via /etc/blackbox/zellij/ overrides if needed)"
+        else
+            echo "[install] config.kdl: writing (first install)"
+        fi
         sudo -u "$REAL_USER" cp "$TMP_CFG" "$ZELLIJ_CFG"
         rm -f "$TMP_CFG"
         sudo chown -R "$REAL_USER:$REAL_USER" "$ZELLIJ_CFG_DIR"
@@ -422,7 +436,11 @@ KDL_EOF
     sudo systemctl daemon-reload
     sudo systemctl enable zellij-web.service > /dev/null 2>&1
     sudo systemctl restart zellij-web.service
-    sleep 1
+    # 2-second settle gives systemd's start-job → active transition AND
+    # zellij's port-bind both time to complete before the curl sanity check
+    # below (otherwise slow boxes see is-active=true but port not yet open,
+    # producing a spurious "returned 000" WARNING).
+    sleep 2
     if ! sudo systemctl is-active --quiet zellij-web.service; then
         echo "[install] ERROR: zellij-web.service is not active after restart" >&2
         echo "[install] (Check 'journalctl -u zellij-web.service' for details)" >&2
