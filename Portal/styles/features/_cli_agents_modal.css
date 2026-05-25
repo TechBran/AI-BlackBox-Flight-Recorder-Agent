@@ -271,6 +271,9 @@
 /* ── Launcher row ───────────────────────────────────────── */
 
 .zellij-launcher-row {
+    /* Anchored relative so the shortcuts dropdown menu can absolute-position
+       below the trigger button without escaping the launcher row's column. */
+    position: relative;
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
@@ -278,21 +281,20 @@
 }
 
 .zellij-launcher-btn {
-    padding: 8px 14px;
-    background: var(--neutral-150, #1a1a1a);
+    padding: 8px 16px;
+    background: var(--neutral-200, #222);
     color: var(--neutral-1000, #e0e0e0);
     border: 1px solid var(--neutral-300, #333);
-    border-left-width: 3px;
     border-radius: var(--radius-md, 8px);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
     cursor: pointer;
     transition: border-color var(--transition-fast, 0.15s ease),
                 background var(--transition-fast, 0.15s ease);
 }
 
 .zellij-launcher-btn:hover:not(:disabled) {
-    background: var(--neutral-200, #222);
+    background: var(--neutral-300, #2a2a2a);
     border-color: #4a9eff;
 }
 
@@ -301,23 +303,69 @@
     cursor: default;
 }
 
-/* Subtle per-provider left-border tint — identifiable without leaning
- * into a "marketing site" feel. */
-.zellij-launcher-btn[data-provider="claude"]      { border-left-color: #cc785c; }
-.zellij-launcher-btn[data-provider="gemini"]      { border-left-color: #4285f4; }
-.zellij-launcher-btn[data-provider="codex"]       { border-left-color: #10a37f; }
-.zellij-launcher-btn[data-provider="antigravity"] { border-left-color: #8b5cf6; }
-
-/* + Terminal: distinct dashed style so it reads as "additive / blank pane". */
+/* "+ Terminal" is the primary action — slightly more prominent than the
+   shortcuts trigger. Blue accent border + brighter text. */
 .zellij-launcher-btn-terminal {
-    border-style: dashed;
-    border-left-width: 1px; /* drop the accent stripe — dashed is the cue */
-    color: var(--neutral-800, #aaa);
+    border-color: #4a9eff;
 }
 
 .zellij-launcher-btn-terminal:hover:not(:disabled) {
-    color: var(--neutral-1000, #e0e0e0);
+    background: rgba(74, 158, 255, 0.12);
+}
+
+/* ── Shortcuts dropdown ─────────────────────────────────── */
+
+.zellij-launcher-shortcuts-trigger {
+    padding: 8px 12px;
+    background: transparent;
+    color: var(--neutral-700, #ccc);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color var(--transition-fast, 0.15s ease),
+                background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-launcher-shortcuts-trigger:hover:not(:disabled) {
+    background: var(--neutral-200, #222);
     border-color: var(--neutral-500, #555);
+}
+
+.zellij-launcher-shortcuts-trigger:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.zellij-launcher-shortcuts-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    min-width: 160px;
+    background: var(--neutral-150, #1a1a1a);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    padding: 4px;
+}
+
+.zellij-launcher-shortcut-item {
+    padding: 8px 12px;
+    background: transparent;
+    color: var(--neutral-900, #d6d6d6);
+    border: none;
+    border-radius: var(--radius-sm, 4px);
+    text-align: left;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-launcher-shortcut-item:hover {
+    background: var(--neutral-300, #2a2a2a);
 }
 
 /* ── Switcher rail ──────────────────────────────────────── */

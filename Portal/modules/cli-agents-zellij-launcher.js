@@ -1,96 +1,118 @@
 /**
  * cli-agents-zellij-launcher.js
- * Provider button row + launch-flow execution for the Zellij CLI Agent modal.
+ * Terminal-first launcher with shortcut-injection dropdown.
  *
- * Per docs/plans/2026-05-24-zellij-cli-agent-rewrite.md T11.5.
+ * Per docs/plans/2026-05-24-zellij-cli-agent-rewrite.md T11.5 (pivoted T15).
  *
- * Scope:
- *   - Renders 5 provider buttons (Claude / Gemini / Codex / Antigravity /
- *     + Terminal) inside a caller-supplied container.
- *   - On click: POSTs /cli-agent/zellij/launch?op={op} to mint a session,
- *     then POSTs /app-proxy/9097/command/login to set the same-origin
- *     session_token cookie that the iframe load needs (Zellij requires the
- *     cookie on the iframe request itself — we cannot inject Authorization
- *     headers on an iframe src navigation, so we bridge via cookie).
- *   - Hands the session URL/name back to the caller via onLaunched callback;
- *     does NOT touch the iframe (cli-agents-zellij-iframe.js owns that).
+ * Brandon's T15 redesign: drop the original 5-button per-provider row.
+ * Replace with ONE primary "+ Terminal" button + ONE small "▾" shortcuts
+ * trigger that opens a dropdown of binary aliases (Claude / Gemini /
+ * Codex / Antigravity). Each dropdown click injects "<binary>\n" into
+ * the currently-active terminal session via POST /cli-agent/zellij/inject.
+ *
+ * Why this is better than per-provider auto-launch:
+ *   - Zellij's `pane command=X` in a layout file only spawns the binary
+ *     when a client renders the pane. Our launch_session detaches its
+ *     transient client after ~2s — the binary never actually spawns.
+ *     T15 smoke confirmed: empty session backend, no children, browser
+ *     attach shows default bash.
+ *   - Injecting "claude\n" into a live bash pane sidesteps the entire
+ *     "pane command needs a client" problem. Bash receives "claude" via
+ *     its stdin, types it as if the user did, hits Enter, runs claude.
+ *   - User can manually re-launch the binary at will (Ctrl+C → up → Enter).
+ *
+ * Exports:
+ *   - mountLauncher(containerEl, options)
+ *   - setOperator(op)
+ *   - setActiveSession(sessionName | null)  ← drives shortcut-dropdown gate
+ *   - unmountLauncher()
  *
  * Out of scope:
- *   - Iframe lifecycle (T11b / cli-agents-zellij-iframe.js).
- *   - Switcher rail (T11.6).
- *   - Modal chrome wiring (T12).
- *   - CSS (T13 owns Portal/styles/features/_cli_agents_modal.css).
- *
- * Provider list:
- *   The first 4 (claude/gemini/codex/antigravity) drive real CLI binaries
- *   inside the Zellij session. "terminal" is the AC10 BlackBox Terminal mode
- *   — backend launches Zellij with no startup command, dropping the user
- *   at a bare bash prompt for arbitrary shell work.
+ *   - Iframe lifecycle (cli-agents-zellij-iframe.js).
+ *   - Switcher rail (cli-agents-zellij-switcher.js).
+ *   - Modal chrome wiring (cli-agents-modal.js).
+ *   - CSS (Portal/styles/features/_cli_agents_modal.css).
  */
 
-// Module-level singletons. One launcher per Portal page is the design —
-// the caller (T12 modal) instantiates once when the modal opens, swaps the
-// container reference if the modal re-mounts.
+// Module-level singletons. One launcher per Portal page.
 let currentContainerEl = null;
 let currentRowEl = null;
+let currentTerminalBtn = null;
+let currentShortcutsBtn = null;
+let currentDropdownEl = null;
 let currentOperator = null;
+let currentActiveSession = null;
 let currentCallbacks = {};
-// Single in-flight slot, not a Set: only one provider can be launching at a
-// time because all 5 buttons disable on click. The slot exists as defense in
-// depth against rapid double-clicks slipping past the disabled state.
-let inFlightProvider = null;
+let launchInFlight = false;
+let dropdownOpen = false;
+let documentClickHandler = null;
 
-const PROVIDERS = [
-    { id: 'claude', label: 'Claude', extraClass: null },
-    { id: 'gemini', label: 'Gemini', extraClass: null },
-    { id: 'codex', label: 'Codex', extraClass: null },
-    { id: 'antigravity', label: 'Antigravity', extraClass: null },
-    { id: 'terminal', label: '+ Terminal', extraClass: 'zellij-launcher-btn-terminal' },
+// Shortcut dropdown items: label → binary alias typed into the terminal.
+// Antigravity's binary is `agy` (per the CLI Agent install convention).
+const SHORTCUTS = [
+    { id: 'claude',      label: 'Claude',      binary: 'claude' },
+    { id: 'gemini',      label: 'Gemini',      binary: 'gemini' },
+    { id: 'codex',       label: 'Codex',       binary: 'codex' },
+    { id: 'antigravity', label: 'Antigravity', binary: 'agy' },
 ];
 
 const LAUNCH_URL = '/cli-agent/zellij/launch';
 const LOGIN_URL = '/app-proxy/9097/command/login';
+const INJECT_URL = '/cli-agent/zellij/inject';
 
 function fireCb(cb, payload, label) {
     if (typeof cb !== 'function') return;
-    try { cb(payload); } catch (err) { console.error(`[ZELLIJ-LAUNCHER] ${label} threw:`, err); }
+    try { cb(payload); } catch (err) {
+        console.error(`[ZELLIJ-LAUNCHER] ${label} threw:`, err);
+    }
 }
 
-function setButtonsDisabled(disabled) {
-    if (!currentRowEl) return;
-    const buttons = currentRowEl.querySelectorAll('button.zellij-launcher-btn');
-    buttons.forEach((b) => { b.disabled = disabled; });
+function refreshShortcutsState() {
+    if (!currentShortcutsBtn) return;
+    // Dropdown is meaningful only when there's a live session to inject into.
+    const canInject = !!currentActiveSession && !launchInFlight;
+    currentShortcutsBtn.disabled = !canInject;
+    currentShortcutsBtn.title = canInject
+        ? 'Inject a CLI agent alias into the current terminal'
+        : 'Launch a terminal first';
+    if (!canInject && dropdownOpen) closeDropdown();
 }
 
-async function launchProvider(provider) {
-    if (inFlightProvider) {
-        console.warn(`[ZELLIJ-LAUNCHER] launch already in flight for "${inFlightProvider}" — ignoring click on "${provider}"`);
+function setTerminalDisabled(disabled) {
+    if (currentTerminalBtn) currentTerminalBtn.disabled = disabled;
+}
+
+async function launchTerminal() {
+    if (launchInFlight) {
+        console.warn('[ZELLIJ-LAUNCHER] terminal launch already in flight — ignoring click');
         return;
     }
     if (!currentOperator) {
-        console.error('[ZELLIJ-LAUNCHER] launchProvider called without operator set');
+        console.error('[ZELLIJ-LAUNCHER] launchTerminal called without operator set');
         return;
     }
 
-    inFlightProvider = provider;
-    setButtonsDisabled(true);
-    fireCb(currentCallbacks.onLaunching, { provider }, 'onLaunching');
+    launchInFlight = true;
+    setTerminalDisabled(true);
+    refreshShortcutsState();
+    fireCb(currentCallbacks.onLaunching, { provider: 'terminal' }, 'onLaunching');
 
-    // Capture the row reference at launch time. If it changes (unmount, or
-    // remount onto a different container) before our fetches resolve, we
-    // treat the launch as orphaned and drop callbacks silently — the caller
-    // who wired onLaunched/onError is gone.
+    // Row-ref snapshot — unmount-during-flight drops callbacks silently.
     const launchRowEl = currentRowEl;
     const isStillMounted = () => currentRowEl === launchRowEl;
 
     const finishFlight = () => {
-        if (isStillMounted()) setButtonsDisabled(false);
-        if (inFlightProvider === provider) inFlightProvider = null;
+        if (isStillMounted()) {
+            setTerminalDisabled(false);
+            refreshShortcutsState();
+        }
+        launchInFlight = false;
     };
 
     const emitError = (stage, status, message) => {
         if (isStillMounted()) {
-            fireCb(currentCallbacks.onError, { provider, stage, status, message }, 'onError');
+            fireCb(currentCallbacks.onError,
+                { provider: 'terminal', stage, status, message }, 'onError');
         }
         finishFlight();
     };
@@ -103,7 +125,7 @@ async function launchProvider(provider) {
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider }),
+                body: JSON.stringify({ provider: 'terminal' }),
             },
         );
         launchStatus = resp.status;
@@ -120,10 +142,6 @@ async function launchProvider(provider) {
         return emitError('launch', 0, String(err));
     }
 
-    // Validate required fields up front — don't trust the server blindly. If
-    // any of session_name/session_url/token are missing or non-string, abort
-    // BEFORE attempting the login cookie bridge (which would fail anyway with
-    // an undefined token, but with a less actionable error).
     const { session_name, session_url, token } = launchData || {};
     if (typeof session_name !== 'string' || !session_name ||
         typeof session_url !== 'string' || !session_url ||
@@ -131,10 +149,7 @@ async function launchProvider(provider) {
         return emitError('launch', launchStatus, 'launch response missing required fields (session_name, session_url, token)');
     }
 
-    // Cookie bridge: POST /command/login with credentials:"include" so the
-    // Set-Cookie session_token from upstream Zellij lands on our origin.
-    // The iframe's subsequent navigation auto-includes the cookie (same
-    // origin, Path=/, SameSite=Strict permits same-site requests).
+    // Cookie bridge — Zellij auth on iframe load.
     try {
         const login = await fetch(LOGIN_URL, {
             method: 'POST',
@@ -146,9 +161,6 @@ async function launchProvider(provider) {
             const message = await login.text().catch(() => '');
             return emitError('login', login.status, message);
         }
-        // Defense in depth: a 200 with success:false is theoretical for Zellij
-        // today (it returns 401 on bad tokens), but parse + assert success===true
-        // so a future shape change can't silently land us in a half-authed state.
         let loginBody;
         try {
             loginBody = await login.json();
@@ -162,24 +174,107 @@ async function launchProvider(provider) {
         return emitError('login', 0, String(err));
     }
 
-    // session_url is path-shape (e.g. /app-proxy/9097/Brandon__terminal?token=UUID)
-    // — Zellij's JS reads the session name from location.pathname.split('/').pop(),
-    // so the URL MUST include the pre-minted name in its path. We pass it
-    // through untouched.
     if (isStillMounted()) {
-        fireCb(
-            currentCallbacks.onLaunched,
-            {
-                provider,
-                sessionName: session_name,
-                sessionUrl: session_url,
-                token,
-                expiresAt: launchData.expires_at,
-            },
-            'onLaunched',
-        );
+        fireCb(currentCallbacks.onLaunched, {
+            provider: 'terminal',
+            sessionName: session_name,
+            sessionUrl: session_url,
+            token,
+            expiresAt: launchData.expires_at,
+        }, 'onLaunched');
     }
     finishFlight();
+}
+
+async function injectShortcut(shortcut) {
+    closeDropdown();
+    if (!currentActiveSession) {
+        console.warn('[ZELLIJ-LAUNCHER] injectShortcut called with no active session');
+        return;
+    }
+    const text = `${shortcut.binary}\n`;
+    try {
+        const resp = await fetch(
+            `${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_name: currentActiveSession, text }),
+            },
+        );
+        if (!resp.ok) {
+            const message = await resp.text().catch(() => '');
+            fireCb(currentCallbacks.onError, {
+                provider: shortcut.id,
+                stage: 'inject',
+                status: resp.status,
+                message,
+            }, 'onError');
+            return;
+        }
+        fireCb(currentCallbacks.onInjected, {
+            shortcut: shortcut.id,
+            binary: shortcut.binary,
+            sessionName: currentActiveSession,
+        }, 'onInjected');
+    } catch (err) {
+        fireCb(currentCallbacks.onError, {
+            provider: shortcut.id,
+            stage: 'inject',
+            status: 0,
+            message: String(err),
+        }, 'onError');
+    }
+}
+
+function openDropdown() {
+    if (!currentRowEl || dropdownOpen) return;
+    dropdownOpen = true;
+    currentShortcutsBtn?.setAttribute('aria-expanded', 'true');
+
+    currentDropdownEl = document.createElement('div');
+    currentDropdownEl.className = 'zellij-launcher-shortcuts-menu';
+    currentDropdownEl.setAttribute('role', 'menu');
+    for (const s of SHORTCUTS) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'zellij-launcher-shortcut-item';
+        item.dataset.provider = s.id;
+        item.setAttribute('role', 'menuitem');
+        item.textContent = s.label;
+        item.addEventListener('click', () => injectShortcut(s));
+        currentDropdownEl.appendChild(item);
+    }
+    currentRowEl.appendChild(currentDropdownEl);
+
+    // Click-away to close. Listener attached on document (capture phase) and
+    // cleaned up on closeDropdown/unmount so we don't leak handlers across
+    // modal re-opens.
+    documentClickHandler = (ev) => {
+        if (!currentDropdownEl) return;
+        if (currentDropdownEl.contains(ev.target)) return;
+        if (currentShortcutsBtn?.contains(ev.target)) return;
+        closeDropdown();
+    };
+    setTimeout(() => document.addEventListener('click', documentClickHandler, true), 0);
+}
+
+function closeDropdown() {
+    if (!dropdownOpen) return;
+    dropdownOpen = false;
+    currentShortcutsBtn?.setAttribute('aria-expanded', 'false');
+    if (currentDropdownEl?.parentNode) {
+        currentDropdownEl.parentNode.removeChild(currentDropdownEl);
+    }
+    currentDropdownEl = null;
+    if (documentClickHandler) {
+        document.removeEventListener('click', documentClickHandler, true);
+        documentClickHandler = null;
+    }
+}
+
+function toggleDropdown() {
+    if (dropdownOpen) closeDropdown(); else openDropdown();
 }
 
 export function mountLauncher(containerEl, options = {}) {
@@ -202,29 +297,43 @@ export function mountLauncher(containerEl, options = {}) {
 
     currentContainerEl = containerEl;
     currentOperator = options.operator;
+    currentActiveSession = options.activeSession || null;
     currentCallbacks = {
         onLaunching: options.onLaunching,
         onLaunched: options.onLaunched,
         onError: options.onError,
+        onInjected: options.onInjected,
     };
 
     const row = document.createElement('div');
     row.className = 'zellij-launcher-row';
 
-    for (const p of PROVIDERS) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = p.extraClass
-            ? `zellij-launcher-btn ${p.extraClass}`
-            : 'zellij-launcher-btn';
-        btn.dataset.provider = p.id;
-        btn.textContent = p.label;
-        btn.addEventListener('click', () => launchProvider(p.id));
-        row.appendChild(btn);
-    }
+    const terminalBtn = document.createElement('button');
+    terminalBtn.type = 'button';
+    terminalBtn.className = 'zellij-launcher-btn zellij-launcher-btn-terminal';
+    terminalBtn.dataset.provider = 'terminal';
+    terminalBtn.textContent = '+ Terminal';
+    terminalBtn.addEventListener('click', launchTerminal);
 
+    const shortcutsBtn = document.createElement('button');
+    shortcutsBtn.type = 'button';
+    shortcutsBtn.className = 'zellij-launcher-shortcuts-trigger';
+    shortcutsBtn.setAttribute('aria-haspopup', 'menu');
+    shortcutsBtn.setAttribute('aria-expanded', 'false');
+    shortcutsBtn.textContent = 'Shortcuts ▾';
+    shortcutsBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        toggleDropdown();
+    });
+
+    row.appendChild(terminalBtn);
+    row.appendChild(shortcutsBtn);
     containerEl.appendChild(row);
+
     currentRowEl = row;
+    currentTerminalBtn = terminalBtn;
+    currentShortcutsBtn = shortcutsBtn;
+    refreshShortcutsState();
     return row;
 }
 
@@ -240,16 +349,31 @@ export function setOperator(op) {
     currentOperator = op;
 }
 
+// Driven by the caller (T12 modal-branch) whenever the user-visible active
+// session changes — both after onLaunched fires AND after the switcher rail
+// reports an onSwitch / onDelete. Pass null to indicate no active session
+// (which disables the shortcuts dropdown).
+export function setActiveSession(sessionName) {
+    if (!currentRowEl) {
+        console.warn('[ZELLIJ-LAUNCHER] setActiveSession called before mountLauncher — ignored');
+        return;
+    }
+    currentActiveSession = (typeof sessionName === 'string' && sessionName) ? sessionName : null;
+    refreshShortcutsState();
+}
+
 export function unmountLauncher() {
-    if (currentRowEl && currentRowEl.parentNode) {
+    closeDropdown();
+    if (currentRowEl?.parentNode) {
         currentRowEl.parentNode.removeChild(currentRowEl);
     }
     currentRowEl = null;
     currentContainerEl = null;
+    currentTerminalBtn = null;
+    currentShortcutsBtn = null;
     currentOperator = null;
+    currentActiveSession = null;
     currentCallbacks = {};
-    // Deliberately do NOT clear inFlightProvider — a pending fetch may still
-    // resolve. Its isStillMounted() check uses a row-ref snapshot taken at
-    // launch time; since we just nulled currentRowEl, it returns false and
-    // the orphan launch drops its callbacks + DOM touches silently.
+    // Don't reset launchInFlight — pending fetch may still resolve; its
+    // isStillMounted() check (row-ref snapshot) drops the callbacks.
 }

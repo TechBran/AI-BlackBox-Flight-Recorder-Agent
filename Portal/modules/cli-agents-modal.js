@@ -42,6 +42,7 @@ import {
 import {
     mountLauncher, unmountLauncher,
     setOperator as setLauncherOperator,
+    setActiveSession as setLauncherActiveSession,
 } from './cli-agents-zellij-launcher.js';
 import {
     mountSwitcher, unmountSwitcher,
@@ -530,10 +531,15 @@ function enterZellijMode() {
         onLaunched: ({ sessionName, sessionUrl }) => {
             loadSession({ sessionUrl, sessionName });
             markSessionActive(sessionName);
+            setLauncherActiveSession(sessionName);
             refreshSwitcher();
         },
         onError: ({ provider, stage, status, message }) => {
             toastError(`${provider} ${stage} failed (${status}): ${message || ''}`);
+        },
+        onInjected: ({ binary, sessionName }) => {
+            // Silent success is fine; surface only when something interesting
+            // happens. Could add a debug toast here if Brandon wants feedback.
         },
     });
 
@@ -542,11 +548,13 @@ function enterZellijMode() {
         onSwitch: ({ name, sessionUrl }) => {
             loadSession({ sessionUrl, sessionName: name });
             markSessionActive(name);
+            setLauncherActiveSession(name);
         },
         onDelete: ({ name }) => {
             if (getCurrentSessionName() === name) {
                 unloadSession();
                 markSessionActive(null);
+                setLauncherActiveSession(null);
             }
         },
         onError: ({ stage, status, message }) => {
