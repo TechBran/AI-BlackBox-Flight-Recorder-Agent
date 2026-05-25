@@ -78,6 +78,9 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/bash BLACKBOX_ROOT_PLACEHOLD
 #     zellij-web.service via blackbox-write-systemd). `restart` alone does
 #     NOT re-read the unit; systemd will keep running the old definition
 #     until daemon-reload. These are separate sudo verbs, hence two grants.
+#     NOTE: this grant is general-purpose — any future unit added via
+#     blackbox-write-systemd benefits from it; do NOT duplicate this rule
+#     in future sections (e.g. a hypothetical worker.service grant block).
 #   - `/usr/local/sbin/blackbox-install-zellij-binary *` — dispatcher
 #     script (written by Track A T4.5) that drops the pinned zellij
 #     binary into /usr/local/bin/. The orchestrator namespace runs with
