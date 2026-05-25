@@ -1350,6 +1350,18 @@ async def app_proxy(port: int, path: str, request: Request):
                     html = content.decode('utf-8', errors='replace')
                     # Rewrite href, src, action attributes that start with /
                     html = re.sub(r'(href|src|action)=["\']/', f'\\1="/app-proxy/{port}/', html)
+                    # Strip xterm.js WebGL addon load tag — its renderer
+                    # silently breaks rendering when destination rect <
+                    # viewport rect (Brandon's console: "Drawing to a
+                    # destination rect smaller than the viewport rect").
+                    # Claude's alt-screen TUI triggers this; bash / gemini /
+                    # codex / agy don't. Without WebGL addon, xterm.js falls
+                    # back to Canvas renderer which doesn't have the issue.
+                    html = re.sub(
+                        r'<script\s+[^>]*src=["\'][^"\']*addon-webgl\.js["\'][^>]*>\s*</script>\s*',
+                        '<!-- webgl addon stripped by orchestrator proxy (T15) -->',
+                        html, flags=re.IGNORECASE,
+                    )
                     content = html.encode('utf-8')
                 except Exception as e:
                     print(f"[APP-PROXY] HTML rewrite error: {e}")
