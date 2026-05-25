@@ -498,17 +498,27 @@ def launch_session(
     rc: Optional[int] = None
     detached = False
     proc: Optional[subprocess.Popen] = None
-    # Strip the orchestrator's own API/auth env vars before spawning Zellij.
-    # The session backend's bash inherits this env; users typing `claude` /
-    # `gemini` inside the pane otherwise get the orchestrator's API keys
-    # propagated, which (a) silently hangs claude when the key isn't claude-
-    # code-scoped, and (b) leaks server-side keys into user-controlled CLI
-    # contexts. Strip the lot so each CLI falls back to its own user-side
-    # OAuth/cached session (the desired UX). T15 surfaced this empirically.
+    # Build the child env for the Zellij session backend (and thereby every
+    # bash + CLI agent the user spawns in a pane):
+    # 1. Strip orchestrator API/auth keys (denylist). They'd leak server-side
+    #    credentials into user-interactive contexts AND, in claude's case,
+    #    silently hang the auth handshake when the key isn't claude-code-
+    #    scoped. Each CLI must fall back to its own user-side OAuth/cached
+    #    session — the desired UX.
+    # 2. Inject DBUS_SESSION_BUS_ADDRESS if absent. Claude reads the OS
+    #    keychain (libsecret/GNOME-Keyring over DBus) during interactive
+    #    startup; with no bus address set, the DBus connect hangs forever.
+    #    The standard user-session bus lives at /run/user/<uid>/bus; pointing
+    #    at it lets claude reach the keychain (other CLIs ignore this var).
+    #    T15 surfaced empirically — symptom was "claude just sits there".
     child_env = {
         k: v for k, v in os.environ.items()
         if k not in _ENV_DENYLIST_FOR_PANES
     }
+    if "DBUS_SESSION_BUS_ADDRESS" not in child_env:
+        bus_path = f"/run/user/{os.getuid()}/bus"
+        if os.path.exists(bus_path):
+            child_env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
     try:
         try:
             proc = subprocess.Popen(
