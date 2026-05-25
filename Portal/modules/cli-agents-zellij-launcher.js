@@ -249,6 +249,34 @@ async function injectShortcut(shortcut) {
             token: data.token,
             expiresAt: data.expires_at,
         }, 'onLaunched');
+
+        // T15 critical workaround: Claude Code's startup sends a DA1
+        // (`ESC[c`) terminal query and BLOCKS until a reply arrives. Zellij
+        // 0.44.3's web client has a known regression (PR #5156 fixes it on
+        // main) where `ForwardQueryToHost` messages — the path that
+        // forwards DA1 to xterm.js for a reply — are dropped. xterm.js
+        // never sees the query, never responds, claude waits forever.
+        // Workaround per Anthropic claude-code issue #62220: inject the
+        // DA1 reply (`ESC[?1;2c` = VT100 with advanced video) into the
+        // pane ~750ms after launch (giving the iframe + claude time to
+        // start). Fire 3x spaced 500ms apart in case the first arrives
+        // before claude is ready to read. Other binaries that don't use
+        // the DA1 sentinel are unaffected.
+        if (shortcut.id === 'claude') {
+            const da1Reply = '\x1b[?1;2c';
+            for (const delayMs of [750, 1250, 1750]) {
+                setTimeout(() => {
+                    fetch(`${INJECT_URL}?op=${encodeURIComponent(currentOperator)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            session_name: data.session_name,
+                            text: da1Reply,
+                        }),
+                    }).catch(() => {});
+                }, delayMs);
+            }
+        }
     } catch (err) {
         fireCb(currentCallbacks.onError, {
             provider: shortcut.id,
