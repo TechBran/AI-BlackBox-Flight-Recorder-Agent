@@ -587,6 +587,22 @@ EOF
 #
 # Dev box never hit this because it runs uvicorn directly in a shell
 # (no systemd unit = no hardening sandbox).
+
+# Pre-create every dir referenced in ReadWritePaths below. systemd refuses
+# to set up the mount namespace if any ReadWritePaths entry doesn't
+# resolve at start time, so a service that listed ~/.local/share/zellij
+# would fail with status=226/NAMESPACE on any host where zellij had
+# never run interactively (MSO2 customer flash, 2026-05-25 incident).
+# Files don't need pre-creation (systemd handles missing files fine);
+# only directories.
+sudo -u "$REAL_USER" mkdir -p \
+    "$REAL_HOME/.claude" \
+    "$REAL_HOME/.gemini" \
+    "$REAL_HOME/.codex" \
+    "$REAL_HOME/.config" \
+    "$REAL_HOME/.cache" \
+    "$REAL_HOME/.npm" \
+    "$REAL_HOME/.local/share/zellij"
 sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/null <<EOF
 # CLI Agent compatibility drop-in (E22). DO NOT EDIT — install.sh manages
 # this file. To customize service behavior, edit override.conf instead.
