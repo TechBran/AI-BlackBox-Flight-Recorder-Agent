@@ -43,7 +43,8 @@
 #   3 — requested version does not match pinned zellij-version file
 #   4 — download failed (network, 404, etc.)
 #   5 — sha256 mismatch (the catch-an-attacker exit)
-#   6 — systemctl restart zellij-web.service failed
+#   6 — systemctl restart zellij-web.service failed (or unit not active post-restart)
+#   7 — lock held: another install in progress (concurrent invocation rejected)
 
 set -euo pipefail
 
@@ -77,6 +78,23 @@ if [[ "$VERSION" != "$PINNED" ]]; then
     echo "[blackbox-install-zellij-binary] ERROR: requested version '$VERSION' does not match pinned '$PINNED'" >&2
     echo "[blackbox-install-zellij-binary] (Bump $PINNED_FILE first, then re-invoke with the matching version)" >&2
     exit 3
+fi
+
+# Concurrency lock — Track F update timer can collide with Track E onboarding
+# "Retry Zellij install" button. Without serialization, two simultaneous
+# processes race on $DEST.install-tmp (second `mv` lands mid-first `cp` =
+# truncated /usr/local/bin/zellij) and double `systemctl restart` flaps the
+# daemon. -n = non-blocking: fail-fast with exit 7 rather than queue forever
+# (the second invoker is doing the same work anyway, no value in waiting).
+# fd 9 is held for the install+restart sequence; auto-released on script exit.
+# Cheap arg/pinned-file checks above are concurrent-safe and intentionally
+# outside the lock.
+LOCK_FILE="/var/lock/blackbox-install-zellij-binary.lock"
+exec 9>"$LOCK_FILE"
+if ! /usr/bin/flock -n 9; then
+    echo "[blackbox-install-zellij-binary] ERROR: another install already in progress (lock $LOCK_FILE held)" >&2
+    echo "[blackbox-install-zellij-binary] (Wait for the in-flight install to complete, or check 'fuser $LOCK_FILE' for the holder PID)" >&2
+    exit 7
 fi
 
 # Idempotency: if /usr/local/bin/zellij already reports the requested version,
@@ -176,6 +194,19 @@ fi
 # install can still want a fresh daemon).
 if ! /usr/bin/systemctl restart zellij-web.service; then
     echo "[blackbox-install-zellij-binary] ERROR: systemctl restart zellij-web.service failed" >&2
+    echo "[blackbox-install-zellij-binary] (Check 'journalctl -u zellij-web.service' for details)" >&2
+    exit 6
+fi
+
+# Verify the unit actually reached `active` — systemctl restart returns 0 once
+# the start-job is QUEUED, not when the unit transitions to active. A segfault
+# at launch would otherwise report success. Brief settle delay because the
+# start-job → active transition is async; without it, is-active can report
+# "activating" instead of "active" on a healthy unit.
+sleep 1
+if ! /usr/bin/systemctl is-active --quiet zellij-web.service; then
+    echo "[blackbox-install-zellij-binary] ERROR: zellij-web.service is not active after restart" >&2
+    echo "[blackbox-install-zellij-binary] (Check 'journalctl -u zellij-web.service' for details)" >&2
     exit 6
 fi
 
