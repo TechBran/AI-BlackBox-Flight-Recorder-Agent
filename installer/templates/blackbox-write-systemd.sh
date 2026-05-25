@@ -24,6 +24,7 @@
 #   unit                  → /etc/systemd/system/blackbox.service
 #   override              → /etc/systemd/system/blackbox.service.d/override.conf
 #   cli-agent-overrides   → /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf
+#   zellij-web-unit       → /etc/systemd/system/zellij-web.service
 #   sudoers-system        → /etc/sudoers.d/blackbox-system
 #
 # Exit codes:
@@ -49,7 +50,7 @@ if [[ ! -f "$SOURCE_FILE" ]]; then
 fi
 
 # Target whitelist → HARDCODED destination. Caller cannot influence the
-# destination path; only chooses which of the four supported targets.
+# destination path; only chooses which of the supported targets.
 case "$TARGET_KIND" in
     unit)
         DEST="/etc/systemd/system/blackbox.service"
@@ -63,13 +64,17 @@ case "$TARGET_KIND" in
         DEST="/etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf"
         IS_SUDOERS=0
         ;;
+    zellij-web-unit)
+        DEST="/etc/systemd/system/zellij-web.service"
+        IS_SUDOERS=0
+        ;;
     sudoers-system)
         DEST="/etc/sudoers.d/blackbox-system"
         IS_SUDOERS=1
         ;;
     *)
         echo "[blackbox-write-systemd] ERROR: unknown target_kind: $TARGET_KIND" >&2
-        echo "[blackbox-write-systemd] (Valid: unit | override | cli-agent-overrides | sudoers-system)" >&2
+        echo "[blackbox-write-systemd] (Valid: unit | override | cli-agent-overrides | zellij-web-unit | sudoers-system)" >&2
         exit 4
         ;;
 esac
