@@ -454,3 +454,12 @@
 .zellij-iframe-error:hover {
     background: rgba(0, 0, 0, 0.82);
 }
+
+/* `display: flex` above overrides the browser's default [hidden]{display:none}.
+   Restore the hidden behavior with matching specificity. T11b toggles the
+   `hidden` HTML attribute on these overlays; without this rule they stayed
+   visible forever ("connecting to terminal..." over a loaded iframe). */
+.zellij-iframe-loading[hidden],
+.zellij-iframe-error[hidden] {
+    display: none;
+}
