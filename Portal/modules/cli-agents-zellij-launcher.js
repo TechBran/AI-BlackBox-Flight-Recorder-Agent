@@ -194,46 +194,65 @@ async function launchTerminal() {
 
 async function injectShortcut(shortcut) {
     closeDropdown();
-    if (!currentActiveSession) {
-        console.warn('[ZELLIJ-LAUNCHER] injectShortcut called with no active session');
-        return;
-    }
-    // Use /zellij/spawn (new-tab) rather than /zellij/inject (write-chars).
-    // T15 surfaced empirically that typing "claude\n" into a bash pane
-    // doesn't actually run claude (bash never executes it — silent), while
-    // `zellij action new-tab -- claude` works. To keep all four shortcuts
-    // consistent, all of them spawn-in-new-tab.
+    // New strategy (T15 final): each shortcut click LAUNCHES A NEW SESSION
+    // with the provider as a KDL `pane command=` layout. When the iframe
+    // attaches to the new session, Zellij spawns the binary natively. No
+    // `write-chars`-into-bash (broken for claude) and no `new-pane -i`
+    // focus-per-client tangle. Trade-off: each click creates a fresh
+    // session that the user navigates between via the switcher rail.
     try {
-        const resp = await fetch(
-            `${SPAWN_URL}?op=${encodeURIComponent(currentOperator)}`,
+        const launch = await fetch(
+            `${LAUNCH_URL}?op=${encodeURIComponent(currentOperator)}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    session_name: currentActiveSession,
-                    binary: shortcut.binary,
-                }),
+                body: JSON.stringify({ provider: shortcut.id }),
             },
         );
-        if (!resp.ok) {
-            const message = await resp.text().catch(() => '');
+        if (!launch.ok) {
+            const message = await launch.text().catch(() => '');
             fireCb(currentCallbacks.onError, {
                 provider: shortcut.id,
-                stage: 'spawn',
-                status: resp.status,
+                stage: 'launch',
+                status: launch.status,
                 message,
             }, 'onError');
             return;
         }
-        fireCb(currentCallbacks.onInjected, {
-            shortcut: shortcut.id,
-            binary: shortcut.binary,
-            sessionName: currentActiveSession,
-        }, 'onInjected');
+        const data = await launch.json();
+
+        // Cookie-bridge auth — Zellij sets the session_token cookie on our
+        // origin so the iframe load includes it automatically.
+        const login = await fetch(LOGIN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ auth_token: data.token, remember_me: false }),
+        });
+        if (!login.ok) {
+            const message = await login.text().catch(() => '');
+            fireCb(currentCallbacks.onError, {
+                provider: shortcut.id,
+                stage: 'login',
+                status: login.status,
+                message,
+            }, 'onError');
+            return;
+        }
+
+        // Fire onLaunched so the caller (T12 modal) swaps the iframe to
+        // the new session URL. Identical shape to terminal launch.
+        fireCb(currentCallbacks.onLaunched, {
+            provider: shortcut.id,
+            sessionName: data.session_name,
+            sessionUrl: data.session_url,
+            token: data.token,
+            expiresAt: data.expires_at,
+        }, 'onLaunched');
     } catch (err) {
         fireCb(currentCallbacks.onError, {
             provider: shortcut.id,
-            stage: 'spawn',
+            stage: 'launch',
             status: 0,
             message: String(err),
         }, 'onError');
