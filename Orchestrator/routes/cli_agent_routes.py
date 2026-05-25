@@ -1,20 +1,28 @@
 import asyncio
+import datetime as _dt
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 
+from Orchestrator.cli_agent import get_backend
+from Orchestrator.cli_agent import zellij_client, zellij_state
 from Orchestrator.cli_agent.operator_config import OperatorConfig
 from Orchestrator.cli_agent.path_validator import PathValidator, WorkspaceViolation
 from Orchestrator.cli_agent.session_manager import (
     TmuxSessionManager, session_name,
 )
 from Orchestrator.cli_agent.pty_bridge import PtyBridge
+
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -342,3 +350,456 @@ async def ws_cli_agent(
             await asyncio.to_thread(bridge.close)
         except Exception:
             pass
+
+
+# === Zellij backend (Phase 2 T8) =========================================
+#
+# New Zellij-backed endpoints, coexisting with the tmux-backed endpoints
+# above. Selection is governed by ``CLI_AGENT_BACKEND`` via
+# :func:`Orchestrator.cli_agent.get_backend`; each endpoint here returns
+# HTTP 503 when the effective backend is not "zellij" so callers fail
+# fast instead of silently invoking the wrong backend.
+#
+# Operator identity (audit I8): we reuse the existing route convention
+# (``?op=<name>`` query param, gated by the ``CLI_AGENT_OPERATORS``
+# allowlist via :data:`ALLOWED_OPS`). The plan's "informational only"
+# note refers to the future cookie/session world; in the current
+# orchestrator the env-allowlisted ``op`` IS the trusted identity.
+# Session names embed ``op`` so the prefix gate on DELETE remains
+# meaningful.
+#
+# Tokens (audit I7): :func:`zellij_client.mint_token` returns
+# ``(name, value)``. Only ``name`` is persisted to state; ``value`` is
+# returned once in the launch response and then forgotten by the
+# orchestrator.
+
+_ZELLIJ_WEB_PORT = 9097  # locked per zellij_client._DEFAULT_ZELLIJ_WEB_PORT
+
+# Provider id (Portal-facing) -> binary name for `zellij --session NAME -- BINARY`.
+# "terminal" is special: no binary, default shell.
+_ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
+    "claude": "claude",
+    "gemini": "gemini",
+    "codex": "codex",
+    "agy": "agy",
+    "terminal": None,
+}
+
+# Short-lived token TTL (audit I7). Tokens are mint-per-launch; the
+# orchestrator schedules an async timer to revoke them after this window
+# regardless of whether the iframe ever loaded successfully.
+_ZELLIJ_TOKEN_TTL_SECONDS = 5 * 60
+
+
+def _require_zellij_backend() -> None:
+    """Raise HTTP 503 if ``get_backend() != "zellij"``.
+
+    Called at the top of every Zellij endpoint so misrouted requests
+    fail loudly rather than fall through to undefined behavior.
+    """
+    backend = get_backend()
+    if backend != "zellij":
+        raise HTTPException(
+            status_code=503,
+            detail=f"Zellij backend not active (effective backend={backend!r})",
+        )
+
+
+def _check_operator_allowed(op: str) -> None:
+    """Apply the existing CLI_AGENT_OPERATORS allowlist gate."""
+    if ALLOWED_OPS is not None and op not in ALLOWED_OPS:
+        raise HTTPException(403, f"Operator {op} not allowed")
+
+
+def _generate_zellij_session_name(
+    operator: str,
+    provider: str,
+    app: Optional[str],
+) -> str:
+    """Compute the Zellij session name for an operator+provider+app combo.
+
+    - CLI providers (``claude``/``gemini``/``codex``/``agy``):
+      ``{operator}__{provider}__{app_or_root}__{unix_ts}`` — unique per
+      launch so multiple parallel sessions of the same provider don't
+      collide.
+    - Terminal mode: ``{operator}__terminal`` — reused per operator
+      (single terminal session per operator, intentional per AC10).
+
+    Kept as a module-level pure function so T9 can unit-test it without
+    spinning up FastAPI.
+    """
+    if provider == "terminal":
+        return f"{operator}__terminal"
+    app_part = app if app else "root"
+    return f"{operator}__{provider}__{app_part}__{int(time.time())}"
+
+
+def _validate_operator_prefix(session_name_: str, operator: str) -> bool:
+    """Return True iff ``session_name_`` starts with ``{operator}__``.
+
+    Pure function so T9 can unit-test cross-operator delete attempts
+    without HTTP plumbing. Audit I8 gate.
+    """
+    return session_name_.startswith(f"{operator}__")
+
+
+def _zellij_session_url(session_name_: str, token_value: str) -> str:
+    """Compose the session URL the Portal iframe will load.
+
+    Same-origin via existing ``/app-proxy/{port}/{path}`` route — keeps
+    TLS termination, auth, and CORS at the orchestrator edge instead of
+    leaking ``http://localhost:9097`` to the customer's browser.
+    """
+    return (
+        f"/app-proxy/{_ZELLIJ_WEB_PORT}/"
+        f"?session={session_name_}&token={token_value}"
+    )
+
+
+async def _schedule_token_revoke(token_name: str, delay_seconds: int) -> None:
+    """Sleep for ``delay_seconds``, then revoke ``token_name``.
+
+    Spawned via ``asyncio.create_task`` from the launch handler. We do
+    NOT await this — the launch response returns immediately and the
+    timer fires later. ``revoke_token`` is idempotent so a race with a
+    manual delete is harmless.
+    """
+    try:
+        await asyncio.sleep(delay_seconds)
+        await asyncio.to_thread(zellij_client.revoke_token, token_name)
+        logger.info(
+            "zellij: scheduled token revoke fired for %s after %ds",
+            token_name,
+            delay_seconds,
+        )
+    except asyncio.CancelledError:
+        # Service shutdown — let the cancel propagate; the next boot's
+        # reconcile_or_wipe will catch any leftover token.
+        raise
+    except Exception as exc:  # noqa: BLE001 — never crash the background task
+        logger.error(
+            "zellij: scheduled token revoke for %s failed: %s",
+            token_name,
+            exc,
+        )
+
+
+@router.post("/zellij/launch", status_code=201)
+async def zellij_launch(
+    body: dict = Body(...),
+    op: str = Query(...),
+):
+    """Mint a Zellij token, create a fresh session, return the iframe URL.
+
+    Body: ``{"provider": "claude"|"gemini"|"codex"|"agy"|"terminal",
+              "app": "<app-name>" | null}``
+    """
+    _check_operator_allowed(op)
+    _require_zellij_backend()
+
+    provider = body.get("provider")
+    if provider not in _ZELLIJ_PROVIDER_BINARIES:
+        raise HTTPException(
+            400,
+            f"Unknown provider {provider!r}; expected one of "
+            f"{sorted(_ZELLIJ_PROVIDER_BINARIES)}",
+        )
+    app = body.get("app")
+    if app is not None and not isinstance(app, str):
+        raise HTTPException(400, "app must be a string or null")
+
+    binary = _ZELLIJ_PROVIDER_BINARIES[provider]
+    session_name_ = _generate_zellij_session_name(op, provider, app)
+
+    # Mint token first — if Zellij is sick, fail before creating a
+    # half-registered session.
+    try:
+        token_name, token_value = await asyncio.to_thread(
+            zellij_client.mint_token
+        )
+    except zellij_client.ZellijBinaryMissing as exc:
+        logger.error("zellij_launch: %s", exc)
+        raise HTTPException(503, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("zellij_launch: mint_token failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Failed to mint Zellij token: {exc}")
+
+    # Launch the session (blocking subprocess call). On failure, revoke
+    # the just-minted token so we don't leak it.
+    try:
+        await asyncio.to_thread(
+            zellij_client.launch_session,
+            session_name_,
+            binary,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_launch: launch_session(%s) failed: %s",
+            session_name_,
+            exc,
+            exc_info=True,
+        )
+        try:
+            await asyncio.to_thread(zellij_client.revoke_token, token_name)
+        except Exception as revoke_exc:  # noqa: BLE001
+            logger.warning(
+                "zellij_launch: cleanup revoke_token(%s) also failed: %s",
+                token_name,
+                revoke_exc,
+            )
+        raise HTTPException(500, f"Failed to launch Zellij session: {exc}")
+
+    # Compute expires_at AFTER both ops succeeded. Terminal mode is
+    # long-lived (no TTL); CLI providers get a 5-minute short-lived
+    # token per audit I7.
+    expires_at: Optional[str] = None
+    if provider != "terminal":
+        expires_dt = _dt.datetime.now(_dt.timezone.utc).replace(
+            microsecond=0
+        ) + _dt.timedelta(seconds=_ZELLIJ_TOKEN_TTL_SECONDS)
+        expires_at = expires_dt.isoformat()
+
+    try:
+        await asyncio.to_thread(
+            zellij_state.add_session,
+            op,
+            provider,
+            app,
+            session_name_,
+            token_name,
+            expires_at,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # State write failed but the Zellij side is live — log loudly,
+        # try to clean up, and surface 500 so the client doesn't think
+        # the session is usable.
+        logger.error(
+            "zellij_launch: state.add_session(%s) failed: %s",
+            session_name_,
+            exc,
+            exc_info=True,
+        )
+        try:
+            await asyncio.to_thread(zellij_client.kill_session, session_name_)
+            await asyncio.to_thread(zellij_client.revoke_token, token_name)
+        except Exception as cleanup_exc:  # noqa: BLE001
+            logger.warning(
+                "zellij_launch: cleanup after state-write failure also failed: %s",
+                cleanup_exc,
+            )
+        raise HTTPException(500, f"Failed to record Zellij session state: {exc}")
+
+    # Schedule the revoke timer for CLI providers only. Terminal mode's
+    # token is intentionally long-lived (single per-operator session).
+    if provider != "terminal":
+        asyncio.create_task(
+            _schedule_token_revoke(token_name, _ZELLIJ_TOKEN_TTL_SECONDS)
+        )
+
+    logger.info(
+        "zellij_launch: operator=%s provider=%s app=%s session=%s "
+        "token_name=%s expires_at=%s",
+        op,
+        provider,
+        app,
+        session_name_,
+        token_name,
+        expires_at,
+    )
+
+    return {
+        "session_name": session_name_,
+        "session_url": _zellij_session_url(session_name_, token_value),
+        "token": token_value,
+        "expires_at": expires_at,
+    }
+
+
+@router.get("/zellij/sessions")
+async def zellij_list_sessions(op: str = Query(...)):
+    """List this operator's active Zellij sessions.
+
+    Intersection of (a) state rows for this operator and (b) sessions
+    actually present in Zellij. A row that exists in state but not in
+    Zellij is treated as stale and omitted (operator may have killed it
+    out-of-band via ``zellij kill-session``); the next launch+reconcile
+    cycle will clean it up.
+    """
+    _check_operator_allowed(op)
+    _require_zellij_backend()
+
+    try:
+        zellij_sessions = await asyncio.to_thread(zellij_client.list_sessions)
+    except zellij_client.ZellijBinaryMissing as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("zellij_list_sessions: list_sessions failed: %s", exc, exc_info=True)
+        raise HTTPException(500, f"Failed to list Zellij sessions: {exc}")
+
+    try:
+        state_rows = await asyncio.to_thread(zellij_state.list_for_operator, op)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_list_sessions: state.list_for_operator(%s) failed: %s",
+            op,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to read Zellij state: {exc}")
+
+    live_names = {s["name"] for s in zellij_sessions if "name" in s}
+    out: list[dict] = []
+    op_prefix = f"{op}__"
+    for row in state_rows:
+        name = row.get("session_name")
+        if not name or not name.startswith(op_prefix):
+            continue
+        if name not in live_names:
+            continue
+        out.append({
+            "name": name,
+            "provider": row.get("provider"),
+            "app": row.get("app"),
+            "created_at": row.get("created_at"),
+            "expires_at": row.get("expires_at"),
+        })
+    return {"sessions": out}
+
+
+@router.delete("/zellij/sessions/{name}", status_code=204)
+async def zellij_delete_session(name: str, op: str = Query(...)):
+    """Kill a Zellij session + revoke its token + remove the state row.
+
+    Idempotent: returns 204 even if the session/token were already gone
+    by the time the request arrived.
+
+    Audit I8: rejects with 403 if ``name`` doesn't start with the
+    requesting operator's prefix.
+    """
+    _check_operator_allowed(op)
+
+    if not _validate_operator_prefix(name, op):
+        logger.warning(
+            "zellij_delete_session: operator-prefix gate VIOLATION — "
+            "operator=%s attempted to delete session=%s",
+            op,
+            name,
+        )
+        raise HTTPException(
+            403,
+            "Cannot delete session belonging to another operator",
+        )
+
+    _require_zellij_backend()
+
+    # Look up token_name from state so we can revoke it. If the row is
+    # already gone (e.g. previous delete attempt half-succeeded), skip
+    # the revoke — kill_session + remove_session are both idempotent.
+    token_name: Optional[str] = None
+    try:
+        rows = await asyncio.to_thread(zellij_state.list_for_operator, op)
+        for row in rows:
+            if row.get("session_name") == name:
+                token_name = row.get("token_name")
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "zellij_delete_session: state lookup failed for %s (%s) "
+            "— proceeding with kill+remove anyway",
+            name,
+            exc,
+        )
+
+    if token_name:
+        try:
+            await asyncio.to_thread(zellij_client.revoke_token, token_name)
+        except Exception as exc:  # noqa: BLE001
+            # Token revoke failure shouldn't block the kill — log and
+            # continue. Next boot's reconcile_or_wipe will catch
+            # orphaned tokens.
+            logger.warning(
+                "zellij_delete_session: revoke_token(%s) failed: %s",
+                token_name,
+                exc,
+            )
+
+    try:
+        await asyncio.to_thread(zellij_client.kill_session, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_delete_session: kill_session(%s) failed: %s",
+            name,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to kill Zellij session: {exc}")
+
+    try:
+        await asyncio.to_thread(zellij_state.remove_session, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "zellij_delete_session: state.remove_session(%s) failed: %s",
+            name,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to remove Zellij state row: {exc}")
+
+    logger.info("zellij_delete_session: operator=%s session=%s deleted", op, name)
+    # 204 No Content
+    return Response(status_code=204)
+
+
+@router.get("/zellij/backend-status")
+async def zellij_backend_status(op: str = Query(...)):
+    """Lightweight status for the Portal status-bar indicator (audit I9).
+
+    Designed to respond fast even when Zellij is sick: ``get_backend()``
+    is TTL-cached so it doesn't curl Zellij on the hot path, and the
+    session-count probes only run when we know the daemon is up.
+    """
+    _check_operator_allowed(op)
+
+    # Raw env (NOT the post-fallback effective value). Mirrors the
+    # logic in cli_agent.__init__.get_backend so we can show
+    # "configured zellij but falling back to tmux" in the UI.
+    raw_env = os.environ.get("CLI_AGENT_BACKEND", "").strip().lower()
+    if raw_env in {"tmux", "zellij"}:
+        configured_backend = raw_env
+    else:
+        # Match the locked code default in cli_agent.__init__.
+        configured_backend = "tmux"
+
+    effective_backend = get_backend()
+
+    web_daemon_running = False
+    session_count_total = 0
+    my_session_count = 0
+
+    if effective_backend == "zellij":
+        # Daemon-aware probes only when we believe Zellij is the active
+        # backend; get_backend() already did the health check.
+        web_daemon_running = True
+        try:
+            all_sessions = await asyncio.to_thread(zellij_client.list_sessions)
+            session_count_total = len(all_sessions)
+            op_prefix = f"{op}__"
+            my_session_count = sum(
+                1 for s in all_sessions if s.get("name", "").startswith(op_prefix)
+            )
+        except Exception as exc:  # noqa: BLE001 — never make status fail
+            logger.warning(
+                "zellij_backend_status: list_sessions failed (%s) — "
+                "reporting zero counts",
+                exc,
+            )
+            session_count_total = 0
+            my_session_count = 0
+
+    return {
+        "web_daemon_running": web_daemon_running,
+        "session_count_total": session_count_total,
+        "my_session_count": my_session_count,
+        "configured_backend": configured_backend,
+        "effective_backend": effective_backend,
+    }
