@@ -29,9 +29,50 @@
 import { toast, toastError } from './core-utils.js';
 import { getOperator } from './state-management.js';
 
+// ── Zellij backend trio (Phase 3 T11+T11.5+T11.6) ────────────────────────
+// The modal branches at openModal time: tmux backend keeps the existing
+// xterm.js flow untouched; Zellij backend composes these three modules into
+// a three-region UI (launcher row top, switcher rail left, iframe fills
+// rest). Coexistence is intentional — flipping CLI_AGENT_BACKEND in .env is
+// the only required change to switch backends. T12 (this file's branching).
+import {
+    mountIframe, loadSession, unloadSession,
+    getCurrentSessionName, unmountIframe,
+} from './cli-agents-zellij-iframe.js';
+import {
+    mountLauncher, unmountLauncher,
+    setOperator as setLauncherOperator,
+} from './cli-agents-zellij-launcher.js';
+import {
+    mountSwitcher, unmountSwitcher,
+    markSessionActive, refresh as refreshSwitcher,
+    setOperator as setSwitcherOperator,
+} from './cli-agents-zellij-switcher.js';
+
 // Session-name field separator (mirrors Orchestrator/cli_agent/session_manager.py _FIELD_SEP).
 const FIELD_SEP = '__';
 const APPS_ROOT_SLUG = '_root';
+
+// Zellij-mode singleton state (only populated when backend is Zellij).
+let zellijMode = false;
+let zellijShellEl = null;
+
+// Defaults-to-tmux on ANY error: never break the existing path because of a
+// transient orchestrator hiccup or new-endpoint deploy lag.
+async function detectBackend() {
+    try {
+        const op = getOperator();
+        const resp = await fetch(
+            `/cli-agent/zellij/backend-status?op=${encodeURIComponent(op)}`,
+        );
+        if (!resp.ok) return 'tmux';
+        const body = await resp.json();
+        return body?.effective_backend === 'zellij' ? 'zellij' : 'tmux';
+    } catch (e) {
+        console.warn('[CLI-AGENTS-MODAL] backend detection failed; defaulting to tmux:', e);
+        return 'tmux';
+    }
+}
 
 // ── OAuth URL banner ─────────────────────────────────────────────────────
 // Backend extracts OAuth URLs from the PTY byte stream and pushes them as
@@ -402,14 +443,110 @@ function setupDisconnect() {
 // Modal open/close wiring
 // =============================================================================
 
-function openModal() {
+async function openModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.remove('hide');
-    refreshAppList();
-    // Onboarding wizard's "Launch & Sign In" button (Antigravity card) sets
-    // this sessionStorage flag, then navigates here. We honor it on the next
-    // openModal call and clear the flag so it only fires once.
-    applyPreselectProvider();
+
+    // Detect backend once per open. Operator-change-while-open is NOT
+    // forwarded into the launcher/switcher (modal-open re-mount handles it
+    // naturally); document as a known limitation rather than wire a
+    // change-listener.
+    const backend = await detectBackend();
+    if (backend === 'zellij') {
+        enterZellijMode();
+    } else {
+        enterTmuxMode();
+        refreshAppList();
+        applyPreselectProvider();
+    }
+}
+
+// Build the three-region Zellij shell inside .cli-agents-body and compose
+// the launcher + switcher + iframe modules with cross-wired callbacks.
+function enterZellijMode() {
+    zellijMode = true;
+    // Hide the tmux-mode panes (do NOT modify HTML; just toggle display).
+    const setup = document.getElementById('cliAgentsSetup');
+    const term = document.getElementById('cliAgentsTerminalPane');
+    if (setup) setup.style.display = 'none';
+    if (term) term.style.display = 'none';
+
+    // Idempotent: if a prior open already built the shell and close didn't
+    // tear it down for some reason, blow it away rather than stacking.
+    if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
+
+    const body = document.querySelector('#cliAgentsModal .cli-agents-body');
+    if (!body) {
+        console.error('[CLI-AGENTS-MODAL] cannot build Zellij shell: .cli-agents-body missing');
+        return;
+    }
+
+    zellijShellEl = document.createElement('div');
+    zellijShellEl.className = 'cli-agents-zellij-shell';
+    zellijShellEl.id = 'cliAgentsZellijShell';
+    const launcherHost = document.createElement('div');
+    launcherHost.className = 'cli-agents-zellij-launcher-host';
+    const mainRow = document.createElement('div');
+    mainRow.className = 'cli-agents-zellij-main';
+    const switcherHost = document.createElement('div');
+    switcherHost.className = 'cli-agents-zellij-switcher-host';
+    const iframeHost = document.createElement('div');
+    iframeHost.className = 'cli-agents-zellij-iframe-host';
+    mainRow.appendChild(switcherHost);
+    mainRow.appendChild(iframeHost);
+    zellijShellEl.appendChild(launcherHost);
+    zellijShellEl.appendChild(mainRow);
+    body.appendChild(zellijShellEl);
+
+    const op = getOperator();
+
+    mountIframe(iframeHost, {
+        onSessionError: ({ sessionName, reason }) => {
+            toastError(`Terminal failed for ${sessionName}: ${reason || 'unknown'}`);
+        },
+    });
+
+    mountLauncher(launcherHost, {
+        operator: op,
+        onLaunched: ({ sessionName, sessionUrl }) => {
+            loadSession({ sessionUrl, sessionName });
+            markSessionActive(sessionName);
+            refreshSwitcher();
+        },
+        onError: ({ provider, stage, status, message }) => {
+            toastError(`${provider} ${stage} failed (${status}): ${message || ''}`);
+        },
+    });
+
+    mountSwitcher(switcherHost, {
+        operator: op,
+        onSwitch: ({ name, sessionUrl }) => {
+            loadSession({ sessionUrl, sessionName: name });
+            markSessionActive(name);
+        },
+        onDelete: ({ name }) => {
+            if (getCurrentSessionName() === name) {
+                unloadSession();
+                markSessionActive(null);
+            }
+        },
+        onError: ({ stage, status, message }) => {
+            toastError(`Switcher ${stage} failed (${status}): ${message || ''}`);
+        },
+    });
+}
+
+// Restore the tmux-mode DOM in case a prior open was Zellij.
+function enterTmuxMode() {
+    zellijMode = false;
+    const setup = document.getElementById('cliAgentsSetup');
+    const term = document.getElementById('cliAgentsTerminalPane');
+    if (setup) setup.style.display = '';
+    if (term) term.style.display = '';
+    if (zellijShellEl?.parentNode) {
+        zellijShellEl.parentNode.removeChild(zellijShellEl);
+        zellijShellEl = null;
+    }
 }
 
 function applyPreselectProvider() {
@@ -436,10 +573,26 @@ function autoOpenFromWizard() {
 function closeModal() {
     const modal = document.getElementById('cliAgentsModal');
     if (modal) modal.classList.add('hide');
-    // If a session is open, leave the tmux session alone on the backend — it
-    // survives detach so the user can reattach by re-launching with the same
-    // operator + provider + app. We close the WS explicitly so we don't leak
-    // frames into the closed modal.
+
+    // Zellij teardown first (idempotent + safe pre-mount): stops the switcher
+    // poll, removes the iframe + launcher DOM, clears module state. The
+    // backend Zellij sessions PERSIST across modal close — re-open will
+    // re-mount and the switcher's poll will surface them again.
+    if (zellijMode) {
+        unmountLauncher();
+        unmountSwitcher();
+        unmountIframe();
+        if (zellijShellEl?.parentNode) {
+            zellijShellEl.parentNode.removeChild(zellijShellEl);
+        }
+        zellijShellEl = null;
+        zellijMode = false;
+    }
+
+    // If a tmux session is open, leave the tmux session alone on the backend
+    // — it survives detach so the user can reattach by re-launching with the
+    // same operator + provider + app. We close the WS explicitly so we don't
+    // leak frames into the closed modal.
     if (activeSocket) {
         try { activeSocket.close(1000, 'modal closed'); } catch {}
         activeSocket = null;
