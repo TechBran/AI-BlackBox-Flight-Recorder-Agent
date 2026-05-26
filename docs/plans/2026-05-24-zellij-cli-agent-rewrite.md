@@ -155,6 +155,65 @@ Read this Phase 1 RESULTS section + Phase 2 task list (T6-T10 — Backend orches
 
 ---
 
+## Phase 2-3 RESULTS — PASSED 2026-05-25 (with marathon hardening)
+
+**Status: Backend orchestration + Portal launcher + iframe + chrome stripping all shipped. MSO2 customer flash deployed, all 4 CLI shortcuts verified rendering correctly. Phase 4 (Android) unblocked.**
+
+### Phase 2 commit chain (T6-T10, 5 commits)
+
+| Commit | Task |
+|---|---|
+| `93b4ca9` | T6 — `zellij_client.py` + `zellij_state.py` (mint/revoke/launch/list/kill/inject + state mapping) |
+| `d520a04` | T6 polish — fd-leak + state-lock + identity-check + 5 minors |
+| `8ab42b9` | T6 fix — `launch_session` uses layout-string for binary auto-run (T8 surfaced) |
+| `d14980f` | T7 — `get_backend()` + startup_initialize |
+| `67d2f17` | T8 — launch/sessions/delete/status endpoints |
+| `c9fb8e4` | T9 — unit tests (zellij_client, state, get_backend, endpoints) |
+
+### Phase 3 commit chain (T11-T15, ~22 commits including marathon)
+
+T11 (iframe lifecycle), T11.5 (launcher), T11.6 (switcher), T12 (modal branch), T13 (CSS), T15-chrome (custom blackbox layout) all shipped. See `git log --oneline | grep -E 'T11|T12|T13|T15'` for the full chain. **Key empirical-smoke commit:** `39e7baf` (T11c "session-name-in-path keystone" — see snapshot SNAP-20260525-6794 for the 7-bug haul that 4 reviewer passes missed).
+
+### Phase 3 Hardening Backlog (load-bearing fixes NOT in original plan)
+
+The Phase 3 marathon (2026-05-24 → 2026-05-25) landed ~15 in-the-trenches fixes that are now load-bearing dependencies for Phase 4. They are durable in code, but the plan didn't anticipate them. Phase 4 (Android) inherits all of these via the existing zellij-web backend — no Android-side work required, but the implementer should know they exist.
+
+| Fix | Commit | Where | Why it's load-bearing |
+|---|---|---|---|
+| Mount-namespace fix (`ProtectHome=no`) | `046bf36` + install.sh template | `/etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf` | claude-cli writes too many paths at home root for whitelist enumeration; without this, claude silently hangs in iframe. `ProtectSystem=strict` retained. **Diagnostic technique:** `/proc/<pid>/ns/mnt` bisect (see memory `feedback_mount_ns_bisect.md`). |
+| Session-name-in-path URL keystone | `39e7baf` | `Orchestrator/cli_agent/zellij_client.py` `_zellij_session_url` | Zellij's `assets/index.js` reads `location.pathname.split('/').pop()`, NOT query strings. Path-form required: `/app-proxy/9097/{name}?token=T`. T18 inherits via T17 spike doc. |
+| WebSocket-proxy forwards Cookie + Authorization | `7be857a` | `Orchestrator/routes/agent_routes.py` | Zellij auth is cookie-based; un-forwarded → 401 → wrapped as WS 1011. |
+| HTTP proxy strips `X-Frame-Options: DENY` | `6783ba9` | `agent_routes.py` | Browser refuses iframe regardless of same-origin without this. |
+| `TERM=xterm-256color COLORTERM=truecolor` env | `5a89b0c` + `71a24c0` | `blackbox.service` drop-in + `zellij-web.service` | systemd starts with no TERM → dumb-terminal fallback → no color in any CLI. |
+| WebGL addon stub at proxy boundary | `4d213b8`, `f5dcacf`, `28e6441` | `agent_routes.py` | xterm.js WebGL addon breaks claude TUI rendering; stub served at asset URL via CSP-compliant proxy. |
+| Chrome stripping (custom blackbox layout) | `c427804`, `ccf7181` | `installer/templates/zellij-blackbox-layout.kdl` | Removed Zellij welcome screen, pane frames, status bar, tab bar for clean iframe rendering. |
+| ANTHROPIC_API_KEY denylist | `123ec17` | `zellij_client.py` `_ENV_DENYLIST_FOR_PANES` | Server-side key from `.env` leaked into pane env, triggering claude's "both token and API key set" warning. Latent debt: denylist grows per-provider; revisit when 5th provider lands. |
+| PATH augmentation for nvm shebangs | `046bf36` | `zellij_client.py:launch_session` | gemini/codex are `#!/usr/bin/env node` scripts; orchestrator's systemd PATH doesn't include nvm dirs. Same `extended_path_dirs()` helper the tmux backend uses. |
+| `provider_bin(provider)` not `provider_bin(bare_binary)` | `046bf36` | `Orchestrator/routes/cli_agent_routes.py` | "agy" is NOT in SUPPORTED_PROVIDERS; "antigravity" is. Pass the provider id, not the binary name. |
+| `kill_session` → `delete-session --force` | `3f7b2c5` | `zellij_client.py` | kill-session left names reserved in EXITED state; second launch collided with the same name. |
+| DA1 reply injection for claude | `6a74b55` | (workaround for Zellij 0.44.3 web-client bug) | Claude waits for terminal DA1 response on startup; Zellij-web didn't reply. |
+| `DBUS_SESSION_BUS_ADDRESS` injection | `2f7d468` | `zellij_client.py` | claude's keychain access (libsecret) needs DBus; service env doesn't inherit. |
+| `/spawn` uses `new-pane -i` (in-place) | `dacc2dc`, `1092b23` | `cli_agent_routes.py` | iframe client sees the spawned pane when in-place; `new-tab` opened in a separate tab the iframe couldn't see. |
+| install.sh idempotent `CLI_AGENT_BACKEND=zellij` append | `d1a9400` | `Scripts/install.sh` step 3a | Existing customer `.env` files lacked the var; defaulted to tmux backend post-update. |
+
+**Implications for Phase 4 (Android):** the WS protocol Android consumes is the SAME backend that the desktop iframe consumes, so every fix above applies transparently. The session-name-in-path keystone is the most load-bearing — T18's `ZellijWebSocketClient.kt` MUST use path-form attach.
+
+### T25-T28 status (silently completed via `d1a9400`)
+
+The original plan called for a 2-week coexistence soak (T25 Brandon dev box, T26 MSO2, T27 stability decision, T28 default flip in `.env.template`). **Commit `d1a9400` flipped the default for ALL customers immediately** — both fresh installs (via `.env.template`) and existing customers (via install.sh idempotent append). This collapsed T25-T28 into one production rollout.
+
+**Why this happened:** the MSO2 deploy on 2026-05-25 surfaced that the customer had the new zellij code + new systemd drop-in + new binary all installed correctly but was still on tmux because `.env` defaulted that way. Adding the idempotent append to install.sh was the fastest fix; it incidentally also accomplished T28 for everyone.
+
+**Risk accepted:** customers update to zellij default with no soak period. Mitigation in code: the `get_backend()` health-fallback to tmux (audit C4) means a Zellij outage degrades gracefully rather than killing CLI agents entirely. Brandon retains opt-out via explicit `CLI_AGENT_BACKEND=tmux` in customer `.env`.
+
+**Plan status:** T25-T28 marked as silently completed. Phase 7 essentially shipped on 2026-05-25 alongside Phase 3. Phase 8 (decommission tmux code) remains gated on a stable observation period — recommend 4 weeks of zellij-default with no rollbacks before starting T31-T34.
+
+### Pickup point for next session
+
+Phase 4 (Android). First action: **T18 — write `ZellijWebSocketClient.kt`** per the spec in `docs/notes/2026-05-25-zellij-ws-protocol.md` (T17 spike output). See Track D table at lines ~678-689 for the full T17-T24 sequence. T23 device QA on Z Fold 6 is the acceptance gate, not a verification step (per Phase 3 T11c lesson — see hardening backlog above).
+
+---
+
 ## Phase 0 — Validation spike (DECISION GATE — 1-2 days) [HISTORICAL — see RESULTS above]
 
 **No code commits in this phase.** Just install, test, decide. If Phase 0 fails any of the must-pass criteria below, this plan is abandoned and we fall back to A+B in the research doc.
@@ -405,6 +464,18 @@ Documented limitation: a malicious operator with shell access on the device coul
 **Android port of this UX:** Track D inherits the launcher button row, switcher panel, AND the existing on-screen terminal-key overlay (confirmed already present in Android Portal). Touch ergonomics: launch buttons stacked vertically on phone aspect ratio; switcher collapsible (hamburger menu) when not in use.
 
 ### AC10: BlackBox Terminal — raw shell + extensible shortcut palette (added 2026-05-24)
+
+**SHIPPED REALITY (2026-05-25 pivot — overrides design below for v1):** Phase 3 T11.5-pivot (commits `dcb14a7` and `bc3a9d7`) shipped a simplified version of AC10 that diverges from the original design in 4 ways:
+1. **Primary, not 5th button.** The Portal launcher row now shows a single `[+ Terminal]` button with a `▾` dropdown next to it. The four CLI-provider buttons (Claude/Gemini/Codex/Antigravity) live inside that dropdown as inject items, not as separate top-level buttons.
+2. **Hardcoded shortcut list, no YAML.** The dropdown contains 4 inject items (claude, gemini, codex, agy) hardcoded inside `Portal/modules/cli-agents-zellij-launcher.js` (no `shortcuts.py`, no `installer/templates/shortcuts/system.yaml`, no `state/shortcuts/{op}.yaml`).
+3. **Single endpoint instead of full CRUD.** Only `POST /cli-agent/zellij/inject` shipped (`bc3a9d7`). The designed `GET/POST/DELETE /cli-agent/zellij/shortcuts` endpoints + `cli-agents-zellij-shortcuts.js` were NOT built.
+4. **Pivot rationale:** "inject not pre-launch" — clicking a shortcut writes the command into the active terminal pane via `write-chars`, the user reviews + presses Enter. No new Zellij session is minted per click. Faster to ship, fewer moving pieces, lets the design below ride into v1.1 once we have customer feedback on whether the YAML system is actually wanted.
+
+**Still-TODO from the design below (deferred to v1.1):** YAML-backed system + user shortcuts, full CRUD endpoints, dedicated shortcuts module, palette CRUD UI. **Still-TODO load-bearing for v1:** verify `POST /inject` enforces the audit I10 `provider="terminal"` gate (current launcher injects into ANY active session; per design, should reject CLI-provider sessions).
+
+The design below is the **v1.1 target**, retained verbatim for when we revisit.
+
+---
 
 **A FIFTH launch button alongside the four CLI-provider buttons** — `[+ BlackBox Terminal]` — targeting advanced users who want full Zellij power without being scoped to a single CLI. Born from Brandon's observation that the four CLI buttons cover the curated-product path well but leave no door open for the power-user workflow of "I want a raw shell on this device with all my aliases handy."
 
@@ -680,7 +751,7 @@ Dropdown when tapped:
 | # | Task | Files | Days | Notes |
 |---|------|-------|------|-------|
 | T17 | Probe + document zellij web-client WS protocol (websocat capture against dev box + cross-ref zellij rust source `zellij-server/src/web_server/...`) | spike doc → `docs/notes/2026-05-25-zellij-ws-protocol.md` | 1-2 | De-risks T18. Document frame layout, auth handshake (cookie or query token), control messages, resize semantics. |
-| T18 | Implement `ZellijWebSocketClient.kt` (new) — `connect(sessionUrl, token)`, `sendBytes(bytes)`, `sendResize(cols, rows)`, `onBytes(callback)`, `close()`. Mirror surface of `CliAgentWebSocket.kt` so the swap in `TerminalScreen.kt` is one constructor line. | new `data/api/ZellijWebSocketClient.kt`, unit tests | 2-3 | Lock to zellij 0.44.3; add version probe + warn if mismatch. |
+| T18 | Implement `ZellijWebSocketClient.kt` (new) — `connect(sessionUrl, token)`, `sendBytes(bytes)`, `sendResize(cols, rows)`, `onBytes(callback)`, `close()`. Mirror surface of `CliAgentWebSocket.kt` so the  swap in `TerminalScreen.kt` is one constructor line. Revised down to 1 day after T17 spike (2026-05-25) — protocol is just raw bytes + small JSON envelope. | new `data/api/ZellijWebSocketClient.kt`, unit tests | 2-3 | Lock to zellij 0.44.3; add version probe + warn if mismatch. |
 | T19 | Extend `CliAgentSessionRepository.kt` — add `launchSession(provider): Session` (POST `/cli-agent/zellij/launch?op={op}`), `listSessions()` (GET `/cli-agent/zellij/sessions?op={op}`), `killSession(name)` (DELETE `/cli-agent/zellij/sessions/{name}?op={op}`). Update `Session` model to carry `session_url` + `token`. | modify repo + DTOs | 1 | Reuse existing operator-resolution helpers. |
 | T20 | `SessionSwitcherTopBar.kt` (new composable) — current session label + ▼ chevron, dropdown rendered via Material 3 `DropdownMenu` or custom bottom sheet, hosts active-sessions list + "+ Terminal" + "Shortcuts ▼" entries. Wire to repository. | new composable + modify CliAgentScreen | 2 | Touch target ≥48 dp; honor system status bar inset. |
 | T21 | Empty-state launch buttons — replace/wrap the picker branch of CliAgentScreen with centered "+ Terminal" + "Shortcuts ▼" big buttons (mirror Portal). On tap: call repository.launchSession() + transition to TerminalScreen. Long-press "+ Terminal" → fall through to existing AppFolderPicker for "choose folder first" flow. | modify CliAgentScreen + new EmptyStateLaunchButtons composable | 1 | |
@@ -698,6 +769,8 @@ Dropdown when tapped:
 - **Risk:** zellij's protocol may include framing/auth that's not trivial in vanilla Kotlin WebSocket clients (`okhttp.WebSocket`). **Mitigation:** T17 spike resolves before T18 starts. If protocol is too complex, fall back to WebView for the terminal area only (still keeps native switcher/launcher chrome — hybrid model).
 - **Risk:** existing customers on MSO2-like deployments who already use the tmux Android app could be confused by two parallel CLI flows (legacy tmux still works, new zellij is the recommended path). **Mitigation:** when Phase 4 ships, hide the legacy entry point + auto-route all CLI flows through Zellij; tmux path remains available only via direct WebSocket URL for backwards compat.
 - **Risk:** TerminalView resize behavior may differ from xterm.js, causing Zellij to send mis-sized frames. **Mitigation:** test in T23 with phone rotation, foldable unfold (Z Fold 6 is a real concern here), and IME open/close.
+- **Risk (load-bearing, surfaced by Phase 3 T11c):** Zellij's web client reads session name from `location.pathname.split('/').pop()`, NOT from a query string. T18 MUST attach via `/ws/terminal/{sessionName}?web_client_id={uuid}` path-form — query-form attaches to an empty name and zellij-web auto-creates an orphan session, breaking the entire `provider=` plumbing silently (commit `39e7baf` was the desktop fix). **Mitigation:** T17 spike doc already captures the path-form URL pattern; T18 implementer MUST follow it verbatim. Add a smoke check in T23 that the top-bar label shows our session name (`Brandon__claude__...`), not a Zellij auto-name like `adamant-capsicum`.
+- **Risk (process):** Phase 3 T11c found 7 production-blocking bugs (X-Frame-Options, Cookie forwarding, TERM env, session-path keystone, etc.) that 4 reviewer passes + 99 unit tests missed. The bugs surfaced ONLY when a real browser drove the system. **Mitigation:** treat T23 Z Fold 6 device QA as the ACCEPTANCE gate, not a verification step. Subagent code review + Kotlin unit tests are necessary but not sufficient; a green T23 is what closes Phase 4.
 
 **Test plan (T23 acceptance):**
 1. Open hamburger → tap "CLI Agents" → see empty state with "+ Terminal" + "Shortcuts ▼".
@@ -829,14 +902,9 @@ Dropdown when tapped:
 
 ### Phase 4 (Android MVP)
 
-| T# | Task | Track | Depends on |
-|---|---|---|---|
-| T17 | Audit existing Android CLI agent activity + on-screen terminal-key overlay (Brandon confirmed both exist Phase 0). Locate filenames, confirm keystroke-injection target is rewireable from xterm.js → WebView | D | T8 |
-| T17.5 | Add Zellij URL pattern to Android `Constants.kt` | D | T17 |
-| T18 | Modify CLI agent activity to load Zellij URL in WebView instead of WebSocket-driven custom view. Rewire existing on-screen key overlay to send keystrokes to the WebView | D | T17, T17.5 |
-| T19 | Token plumbing (URL query param or POST + form-data per AC2 decision in T6) | D | T17.5 |
-| T19.5 | Port launcher + switcher UI from Portal to Android (launch buttons as touch targets; switcher collapses to hamburger on phone, stays as rail on tablet) | D | T18 |
-| T20 | Build APK + smoke-test on Brandon's Z Fold — verify (1) launch buttons work, (2) on-screen key overlay sends Ctrl+C/Esc/arrows correctly to Zellij, (3) switcher works, (4) virtual keyboard + overlay co-exist without UI overlap | D | T18, T19, T19.5 |
+**SUPERSEDED by Track D revised table at lines ~678-689.** The rows that previously lived here (T17-T20 assuming "load Zellij URL in WebView") were written before Brandon's 2026-05-25 architectural correction. The Android app is a full native Kotlin/Compose frontend with a Termux `TerminalView` (NOT WebView) and a Kotlin WebSocket client. Execute Phase 4 from the Track D table (T17-T24, ~10-12 days), NOT from this section.
+
+T17 (zellij WS protocol spike) is complete — see `docs/notes/2026-05-25-zellij-ws-protocol.md` and commit `79b01f9`. Next executable task is T18 (`ZellijWebSocketClient.kt`).
 
 ### Phase 5 (Update pipeline + onboarding)
 
