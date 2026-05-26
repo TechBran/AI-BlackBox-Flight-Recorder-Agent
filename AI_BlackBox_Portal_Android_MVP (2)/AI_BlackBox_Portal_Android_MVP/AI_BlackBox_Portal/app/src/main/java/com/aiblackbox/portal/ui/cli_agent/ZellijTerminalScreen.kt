@@ -36,6 +36,7 @@ import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -58,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -238,11 +240,86 @@ fun ZellijTerminalScreen(
         }
 
         // --- Terminal surface --------------------------------------------------
+        //
+        // The outer Box wraps the AndroidView<TerminalView> with a Compose
+        // pointerInput layer that intercepts vertical drags and converts them
+        // to terminal scroll operations BEFORE they reach the TerminalView.
+        //
+        // T23 device QA (2026-05-26): without this interception, claude turns
+        // on mouse-tracking mode (CSI ?1000h/?1003h/?1006h) and the underlying
+        // Termux TerminalView forwards every touch as an SGR mouse escape
+        // sequence ("<65;44;17M") that visibly accumulates in the prompt. The
+        // ExtraKeysBar's PgUp/PgDn buttons work but you can't actually swipe
+        // — which is the natural gesture on a phone.
+        //
+        // Implementation:
+        //   - detectVerticalDragGestures only fires after Compose's touchSlop
+        //     is exceeded vertically, so single taps still pass through to
+        //     the TerminalView for IME focus.
+        //   - dragAmount > 0 (finger moving down) → reveal history above
+        //     (topRow more negative) — matches platform-natural scroll.
+        //   - In alt-screen buffer (vim, nano, claude's full-screen TUI),
+        //     dispatch PgUp/PgDn over the WebSocket so the app handles it.
+        //   - change.consume() prevents the gesture from bubbling to the
+        //     TerminalView, so no mouse-tracking sequences get emitted.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = true)
                 .background(BbxBlack)
+                .pointerInput(Unit) {
+                    // Fractional pixels we haven't yet converted to a whole
+                    // scroll-line. Reset on drag start/end so a slow swipe
+                    // doesn't accumulate stale fractional movement.
+                    var accumulator = 0f
+                    // ~20 device pixels per scroll line. Picked to feel close
+                    // to the desktop wheel speed; tuneable in v1.1.
+                    val pixelsPerLine = 20f
+                    detectVerticalDragGestures(
+                        onDragStart = { accumulator = 0f },
+                        onDragEnd = { accumulator = 0f },
+                        onDragCancel = { accumulator = 0f },
+                    ) { change, dragAmount ->
+                        accumulator += dragAmount
+                        val wholeLines = (accumulator / pixelsPerLine).toInt()
+                        if (wholeLines != 0) {
+                            val v = terminalView
+                            val emu = v?.mEmulator
+                            if (v != null && emu != null) {
+                                // Natural scroll: dragAmount > 0 (down) →
+                                // delta < 0 → topRow more negative (history).
+                                val delta = -wholeLines
+                                if (emu.isAlternateBufferActive) {
+                                    val seq: ByteArray = if (delta < 0) {
+                                        // PgUp = ESC[5~
+                                        byteArrayOf(
+                                            0x1b,
+                                            '['.code.toByte(),
+                                            '5'.code.toByte(),
+                                            '~'.code.toByte(),
+                                        )
+                                    } else {
+                                        // PgDn = ESC[6~
+                                        byteArrayOf(
+                                            0x1b,
+                                            '['.code.toByte(),
+                                            '6'.code.toByte(),
+                                            '~'.code.toByte(),
+                                        )
+                                    }
+                                    client.sendBytes(seq)
+                                } else {
+                                    val maxBack = -emu.screen.activeTranscriptRows
+                                    val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
+                                    v.topRow = newTop
+                                    v.onScreenUpdated()
+                                }
+                            }
+                            accumulator -= wholeLines * pixelsPerLine
+                        }
+                        change.consume()
+                    }
+                }
                 .onSizeChanged { _ ->
                     val v = terminalView ?: return@onSizeChanged
                     v.post {
