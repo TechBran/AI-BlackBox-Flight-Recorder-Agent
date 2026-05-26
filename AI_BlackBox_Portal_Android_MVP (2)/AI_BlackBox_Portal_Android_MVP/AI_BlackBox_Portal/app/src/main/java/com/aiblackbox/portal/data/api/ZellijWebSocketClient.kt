@@ -185,11 +185,11 @@ class ZellijWebSocketClient(
     // --- Internals: HTTP pre-flight --------------------------------------
 
     /**
-     * `GET {origin}/info/version` — defensive probe. Logs WARN on mismatch
-     * or any error; NEVER fails the connect.
+     * `GET {origin}{APP_PROXY_PREFIX}/info/version` — defensive probe.
+     * Logs WARN on mismatch or any error; NEVER fails the connect.
      */
     private fun probeVersion() {
-        val url = "${httpOrigin()}/info/version"
+        val url = "${httpOrigin()}$APP_PROXY_PREFIX/info/version"
         val req = Request.Builder().url(url).get().build()
         try {
             httpClient.newCall(req).execute().use { resp ->
@@ -210,13 +210,13 @@ class ZellijWebSocketClient(
     }
 
     /**
-     * `POST {origin}/command/login` with `{auth_token,…}` — sets the
-     * `session_token` cookie that [cookieJar] then attaches to the WS
-     * upgrade request. Without this the upgrade returns 401 (visible as
-     * close code 1011).
+     * `POST {origin}{APP_PROXY_PREFIX}/command/login` with `{auth_token,…}`
+     * — sets the `session_token` cookie that [cookieJar] then attaches to
+     * the WS upgrade request. Without this the upgrade returns 401
+     * (visible as close code 1011).
      */
     private fun preflightAuth() {
-        val url = "${httpOrigin()}/command/login"
+        val url = "${httpOrigin()}$APP_PROXY_PREFIX/command/login"
         val payload = JSONObject().apply {
             put("auth_token", sessionToken)
             put("remember_me", false)
@@ -541,6 +541,22 @@ class ZellijWebSocketClient(
         /** Reconnect backoff schedule in seconds. After exhausting → give up. */
         val BACKOFF_SCHEDULE_SECONDS: List<Int> = listOf(1, 2, 4, 8, 16)
 
+        /**
+         * Orchestrator reverse-proxy path prefix for zellij-web. All four
+         * URL builders (version probe, auth pre-flight, terminal WS, control
+         * WS) MUST go through this prefix because zellij-web binds
+         * 127.0.0.1:9097 (localhost-only); Android over Tailscale can ONLY
+         * reach the orchestrator's funnel-exposed 9091. Same architectural
+         * decision as plan AC2 (desktop iframe uses same-origin
+         * /app-proxy/9097/...). T23 device QA on Z Fold 6 surfaced this
+         * when direct-to-9097 URLs produced "error unknown" because the
+         * WS upgrade never reached the orchestrator's reverse-proxy.
+         *
+         * The "9097" must match `_ZELLIJ_WEB_PORT` in
+         * `Orchestrator/cli_agent/zellij_client.py`. Coupling point.
+         */
+        internal const val APP_PROXY_PREFIX = "/app-proxy/9097"
+
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
         // --- Log shims --------------------------------------------------------
@@ -592,6 +608,14 @@ class ZellijWebSocketClient(
                 .scheme(base.scheme) // http/https; OkHttp swaps to ws/wss for newWebSocket
                 .host(base.host)
                 .port(base.port)
+                // App-proxy prefix — see APP_PROXY_PREFIX kdoc above. The
+                // hardcoded "9097" matches _ZELLIJ_WEB_PORT on the backend.
+                // T23 device QA surfaced this: previously the URL went
+                // directly to /ws/terminal/{name} on the orchestrator port,
+                // which has no such route; the orchestrator's app-proxy
+                // forwards /app-proxy/9097/* to localhost:9097.
+                .addPathSegment("app-proxy")
+                .addPathSegment("9097")
                 .addPathSegment("ws")
                 .addPathSegment("terminal")
                 .addPathSegment(sessionName)
@@ -619,7 +643,9 @@ class ZellijWebSocketClient(
                 httpOrigin.startsWith("http://", ignoreCase = true) -> "ws://" + httpOrigin.substring(7)
                 else -> httpOrigin
             }
-            return "$ws/ws/control"
+            // App-proxy prefix — same architectural decision as buildTerminalUrl.
+            // T23 device QA fix.
+            return "$ws$APP_PROXY_PREFIX/ws/control"
         }
 
         /**

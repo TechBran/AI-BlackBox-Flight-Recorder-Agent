@@ -60,13 +60,16 @@ class ZellijWebSocketClientTest {
     @Test
     fun `buildTerminalUrl puts session name in path, not query`() {
         val url = ZellijWebSocketClient.buildTerminalUrl(
-            origin = "http://example.test:9097",
+            origin = "http://example.test:9091",
             sessionName = "Brandon__claude__root__1779750372",
             webClientId = "fixed-uuid-1234",
         )
+        // T23 fix: URL must route through orchestrator's /app-proxy/9097/
+        // because zellij-web binds 127.0.0.1:9097 (unreachable from Android
+        // over Tailscale). Origin is the orchestrator's 9091.
         assertTrue(
-            "URL must contain /ws/terminal/{sessionName}; got '$url'",
-            url.contains("/ws/terminal/Brandon__claude__root__1779750372")
+            "URL must contain /app-proxy/9097/ws/terminal/{sessionName}; got '$url'",
+            url.contains("/app-proxy/9097/ws/terminal/Brandon__claude__root__1779750372")
         )
         assertTrue(
             "URL must have web_client_id query param; got '$url'",
@@ -81,11 +84,11 @@ class ZellijWebSocketClientTest {
     @Test
     fun `buildTerminalUrl uses ws scheme for http origin`() {
         val url = ZellijWebSocketClient.buildTerminalUrl(
-            origin = "http://10.0.0.5:9097",
+            origin = "http://10.0.0.5:9091",
             sessionName = "s",
             webClientId = "x",
         )
-        assertTrue("Expected ws://; got '$url'", url.startsWith("ws://10.0.0.5:9097/"))
+        assertTrue("Expected ws://; got '$url'", url.startsWith("ws://10.0.0.5:9091/app-proxy/9097/"))
     }
 
     @Test
@@ -95,23 +98,24 @@ class ZellijWebSocketClientTest {
             sessionName = "s",
             webClientId = "x",
         )
-        assertTrue("Expected wss://; got '$url'", url.startsWith("wss://blackbox.example.ts.net/"))
+        assertTrue("Expected wss://; got '$url'", url.startsWith("wss://blackbox.example.ts.net/app-proxy/9097/"))
     }
 
     @Test
     fun `buildTerminalUrl normalizes ws origin back to ws scheme`() {
         val url = ZellijWebSocketClient.buildTerminalUrl(
-            origin = "ws://10.0.0.5:9097",
+            origin = "ws://10.0.0.5:9091",
             sessionName = "s",
             webClientId = "x",
         )
-        assertTrue("Expected ws://; got '$url'", url.startsWith("ws://10.0.0.5:9097/"))
+        assertTrue("Expected ws://; got '$url'", url.startsWith("ws://10.0.0.5:9091/app-proxy/9097/"))
     }
 
     @Test
     fun `buildControlUrl has no session segment and uses ws scheme`() {
-        val url = ZellijWebSocketClient.buildControlUrl("http://example.test:9097")
-        assertEquals("ws://example.test:9097/ws/control", url)
+        val url = ZellijWebSocketClient.buildControlUrl("http://example.test:9091")
+        // T23 fix: routes through /app-proxy/9097/ — see buildTerminalUrl test.
+        assertEquals("ws://example.test:9091/app-proxy/9097/ws/control", url)
         assertTrue(
             "Control URL must NOT carry session name; got '$url'",
             !url.contains("Brandon__claude")
@@ -121,13 +125,13 @@ class ZellijWebSocketClientTest {
     @Test
     fun `buildControlUrl normalizes https origin to wss`() {
         val url = ZellijWebSocketClient.buildControlUrl("https://blackbox.example.ts.net")
-        assertEquals("wss://blackbox.example.ts.net/ws/control", url)
+        assertEquals("wss://blackbox.example.ts.net/app-proxy/9097/ws/control", url)
     }
 
     @Test
     fun `buildControlUrl normalizes wss origin back to wss`() {
         val url = ZellijWebSocketClient.buildControlUrl("wss://blackbox.example.ts.net")
-        assertEquals("wss://blackbox.example.ts.net/ws/control", url)
+        assertEquals("wss://blackbox.example.ts.net/app-proxy/9097/ws/control", url)
     }
 
     // --- JSON envelope shape ---------------------------------------------
