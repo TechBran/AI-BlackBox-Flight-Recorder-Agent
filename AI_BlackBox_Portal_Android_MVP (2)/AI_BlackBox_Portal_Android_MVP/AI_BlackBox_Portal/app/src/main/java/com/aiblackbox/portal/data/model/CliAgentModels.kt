@@ -86,3 +86,86 @@ enum class CliAgentProvider(val slug: String, val display: String) {
             values().firstOrNull { it.slug == slug } ?: CLAUDE
     }
 }
+
+// --- T19: Zellij REST surface DTOs ─────────────────────────────────────
+// Mirrors POST /cli-agent/zellij/launch, GET /cli-agent/zellij/sessions,
+// DELETE /cli-agent/zellij/sessions/{name}, GET /cli-agent/zellij/backend-status.
+//
+// Provider slugs accepted by the orchestrator (see _ZELLIJ_PROVIDER_BINARIES
+// in cli_agent_routes.py): "claude", "gemini", "codex", "agy",
+// "antigravity", "terminal". Antigravity has two aliases ("agy" and
+// "antigravity"); we send the long form.
+
+/** Allowed provider slugs for Zellij launch. */
+val ZELLIJ_PROVIDER_SLUGS: Set<String> =
+    setOf("claude", "gemini", "codex", "antigravity", "terminal")
+
+/**
+ * Live Zellij session metadata, as returned from POST /launch.
+ *
+ * Carries the iframe-ready [sessionUrl] + short-lived [token] that the
+ * WebSocket transport needs at connect time. For lightweight listing
+ * (GET /sessions), use [ZellijSessionRow] — it intentionally omits
+ * token/sessionUrl since the backend doesn't re-issue them per call.
+ */
+@Serializable
+data class ZellijSession(
+    val name: String,
+    val provider: String,
+    @SerialName("session_url") val sessionUrl: String = "",
+    val token: String = "",
+    @SerialName("expires_at") val expiresAt: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    val app: String? = null,
+    // The orchestrator's GET /sessions response does NOT currently include
+    // last_activity (see cli_agent_routes.py::zellij_list_sessions). The
+    // field is reserved here for forward-compat with audit follow-ups
+    // that may add server-side activity tracking.
+    @SerialName("last_activity") val lastActivity: String? = null,
+)
+
+@Serializable
+data class ZellijLaunchResponse(
+    @SerialName("session_name") val sessionName: String,
+    @SerialName("session_url") val sessionUrl: String,
+    val token: String,
+    @SerialName("expires_at") val expiresAt: String? = null,
+)
+
+@Serializable
+data class ZellijListResponse(
+    val sessions: List<ZellijSessionRow> = emptyList(),
+)
+
+/**
+ * Row as actually returned by GET /cli-agent/zellij/sessions. Distinct
+ * from [ZellijSession] because the GET shape never includes session_url
+ * or token — those are only meaningful immediately after launch. T20+
+ * UI consumers reach for [ZellijSessionRow] when rendering the list and
+ * [ZellijSession] when handling the just-launched session.
+ */
+@Serializable
+data class ZellijSessionRow(
+    val name: String,
+    val provider: String,
+    val app: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("expires_at") val expiresAt: String? = null,
+)
+
+/**
+ * Backend health for the Portal status indicator. The orchestrator
+ * returns five fields; [configuredBackend] and [effectiveBackend] let
+ * the UI distinguish "configured zellij but fell back to tmux" from
+ * "intentionally on tmux" (audit I9). T19 carries them through even
+ * though the brief only enumerated three — they're cheap to expose
+ * and a UI need will land in T22 (hamburger menu).
+ */
+@Serializable
+data class ZellijBackendStatus(
+    @SerialName("web_daemon_running") val webDaemonRunning: Boolean = false,
+    @SerialName("session_count_total") val sessionCountTotal: Int = 0,
+    @SerialName("my_session_count") val mySessionCount: Int = 0,
+    @SerialName("configured_backend") val configuredBackend: String? = null,
+    @SerialName("effective_backend") val effectiveBackend: String? = null,
+)
