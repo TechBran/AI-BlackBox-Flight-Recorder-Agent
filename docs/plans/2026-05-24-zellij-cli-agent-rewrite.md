@@ -625,23 +625,91 @@ def ensure_config() -> None:
 - Copy/paste (Zellij's clipboard addon).
 - Pane splitting / tabs (Zellij's native — Portal doesn't expose, but power users see it in the iframe).
 
-### Track D — Android MVP integration
+### Track D — Android MVP integration (REVISED 2026-05-25)
 
-**Confirmed in Phase 0 (Brandon 2026-05-24):** existing Android Portal app already has an on-screen terminal-key overlay (Ctrl, Esc, Tab, arrows, function keys, etc.) used by today's xterm.js path. Zellij rewrite **inherits this overlay unchanged** — only the terminal-rendering substrate underneath swaps from xterm.js-over-WebSocket to a WebView pointing at Zellij. **No new on-screen key design work.**
+**Architectural correction (Brandon 2026-05-25):** the original Track D sketch assumed "WebView wraps Portal." That was wrong. The Android app at `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/` is a **full native Kotlin/Compose frontend** that mirrors the Portal but is built separately. The terminal itself is rendered via **Termux's native `TerminalView`** (NOT WebView) with a Kotlin WebSocket client feeding bytes directly to `TerminalEmulator.append()`. WebView is only a fallback. So Track D is not "swap iframe URL" — it's "**add native zellij protocol client + native session-switcher UI**".
 
-**Files:**
-- Modify: `AndroidNotificationIntegration/.../cli_agent/CliAgentActivity.kt` (or similar — name varies; T17 audits + locates)
-- Modify: `Constants.kt` — add Zellij URL pattern alongside existing CLI agent paths
-- Modify: WebView's CSP / loadUrl path to accept iframe-style Zellij URLs
-- **Keep unchanged:** the on-screen terminal-key overlay component(s) — they should send keystrokes to the WebView, which forwards via Zellij's WebSocket. (T17 verifies the existing overlay's keystroke-injection path is WebView-compatible — likely is, since today's xterm.js path is also WebView.)
+**Current Android files (15 native components for CLI Agents):**
+- `ui/cli_agent/CliAgentScreen.kt` (92 lines) — top-level state machine: picker → terminal → back
+- `ui/cli_agent/TerminalScreen.kt` (697 lines) — Termux `TerminalView` wrapper, WebSocket bytes → `TerminalEmulator.append()`, keystroke forwarding
+- `ui/cli_agent/ExtraKeysBar.kt` (445 lines) — scrollable bottom keyboard bar (Ctrl/Esc/Tab/arrows/F-keys) — **untouched, dispatches `KeyEvent` to parent**
+- `ui/cli_agent/CliAgentWebSocket.kt` — current tmux-bytes WebSocket client. Hits `/cli-agent/ws/{session_id}`. **Replaced by ZellijWebSocketClient in T18.**
+- `ui/cli_agent/CliAgentSessionRepository.kt` (63 lines) — session state, list/spawn/kill
+- `ui/cli_agent/AppFolderPicker.kt` — provider+folder picker (current empty state) — **demoted to optional flow accessible via launch-button long-press**
+- `ui/cli_agent/CliAgentToolsButton.kt`, `WhisperMicButton.kt` — auxiliary
+- `data/model/CliAgentModels.kt` (88 lines) — provider enum, session DTOs
+- `data/api/BlackBoxApi.kt` (search and confirm in T17) — REST client
+- `navigation/NavGraph.kt` — top-level navigation
 
-**Behavior:**
-- App calls orchestrator's `/cli-agent/zellij/launch` (same launcher contract as Portal — AC9).
-- Loads returned URL in WebView (instead of WebSocket-driven custom view).
-- Token plumbing via URL query param or POST + form-data iframe (decide T17 alongside Phase 2 T6 token mechanism).
-- KEEP the existing launcher buttons UI (provider radios become launch buttons, same as Portal).
-- KEEP the existing on-screen terminal-key overlay — its target changes from "the local xterm.js instance" to "the WebView".
-- Switcher chrome: on phone aspect ratio, switcher collapses to hamburger menu (touch ergonomics); on tablet, can stay as left rail like Portal.
+**Brandon's UX decisions (2026-05-25):**
+
+1. **Terminal substrate**: keep Termux `TerminalView`. Write a Kotlin client for zellij's web-client WebSocket protocol that swaps in where `CliAgentWebSocket` is today.
+2. **Session-switcher entry point**: tap top-bar session name (e.g. `Brandon__claude__root`) → dropdown showing all active sessions + "+ Terminal" + "Shortcuts ▼".
+3. **CLI Agents in nav**: ADD as a new hamburger menu item alongside the existing Apps Folder item (do not replace).
+4. **Empty state**: centered "+ Terminal" + "Shortcuts ▼" buttons (mirrors Portal's empty modal). AppFolderPicker becomes optional, reachable via long-press on "+ Terminal" for "choose folder" flow.
+
+**Layout sketch:**
+```
+┌─────────────────────────────────┐
+│ ☰  Brandon__claude__root  ▼     │  ← top bar — tap = dropdown
+├─────────────────────────────────┤
+│                                 │
+│  <Termux TerminalView fills>    │
+│                                 │
+│                                 │
+│                                 │
+├─────────────────────────────────┤
+│ Ctrl Esc Tab Shift  ← → ↑ ↓ ... │  ← ExtraKeysBar (unchanged)
+└─────────────────────────────────┘
+
+Dropdown when tapped:
+┌────────────────────────────┐
+│ ● Brandon__claude__root    │ ← current
+│ ○ Brandon__gemini__root    │
+│ ○ Brandon__terminal        │
+│ ────────────────────────── │
+│ ➕ + Terminal              │
+│ ⚡ Shortcuts ▼             │
+└────────────────────────────┘
+```
+
+**Coexistence with the legacy tmux path (audit 2026-05-25):** `/cli-agent/ws/{session_id}` does NOT call `_require_zellij_backend()` (see `cli_agent_routes.py:160`), so the existing Android app's tmux WebSocket bridge keeps working against ANY orchestrator regardless of that orchestrator's `CLI_AGENT_BACKEND` setting. The Android app is a portable client — it connects to whatever orchestrator `origin` URL it's pointed at, and the two backend endpoint families (`/cli-agent/ws/*` for legacy tmux and `/cli-agent/zellij/*` for Phase 2+) coexist server-side. Phase 4 is therefore upgrade-by-choice, not break-and-fix.
+
+**Tasks (10-15 dev days total):**
+
+| # | Task | Files | Days | Notes |
+|---|------|-------|------|-------|
+| T17 | Probe + document zellij web-client WS protocol (websocat capture against dev box + cross-ref zellij rust source `zellij-server/src/web_server/...`) | spike doc → `docs/notes/2026-05-25-zellij-ws-protocol.md` | 1-2 | De-risks T18. Document frame layout, auth handshake (cookie or query token), control messages, resize semantics. |
+| T18 | Implement `ZellijWebSocketClient.kt` (new) — `connect(sessionUrl, token)`, `sendBytes(bytes)`, `sendResize(cols, rows)`, `onBytes(callback)`, `close()`. Mirror surface of `CliAgentWebSocket.kt` so the swap in `TerminalScreen.kt` is one constructor line. | new `data/api/ZellijWebSocketClient.kt`, unit tests | 2-3 | Lock to zellij 0.44.3; add version probe + warn if mismatch. |
+| T19 | Extend `CliAgentSessionRepository.kt` — add `launchSession(provider): Session` (POST `/cli-agent/zellij/launch?op={op}`), `listSessions()` (GET `/cli-agent/zellij/sessions?op={op}`), `killSession(name)` (DELETE `/cli-agent/zellij/sessions/{name}?op={op}`). Update `Session` model to carry `session_url` + `token`. | modify repo + DTOs | 1 | Reuse existing operator-resolution helpers. |
+| T20 | `SessionSwitcherTopBar.kt` (new composable) — current session label + ▼ chevron, dropdown rendered via Material 3 `DropdownMenu` or custom bottom sheet, hosts active-sessions list + "+ Terminal" + "Shortcuts ▼" entries. Wire to repository. | new composable + modify CliAgentScreen | 2 | Touch target ≥48 dp; honor system status bar inset. |
+| T21 | Empty-state launch buttons — replace/wrap the picker branch of CliAgentScreen with centered "+ Terminal" + "Shortcuts ▼" big buttons (mirror Portal). On tap: call repository.launchSession() + transition to TerminalScreen. Long-press "+ Terminal" → fall through to existing AppFolderPicker for "choose folder first" flow. | modify CliAgentScreen + new EmptyStateLaunchButtons composable | 1 | |
+| T22 | Hamburger menu integration — add "CLI Agents" entry to NavGraph nav rail/drawer alongside existing Apps Folder item. Tap → CliAgentScreen. | modify NavGraph + the menu source | 0.5 | |
+| T23 | Device QA on Brandon's Z Fold 6 (`100.111.152.112`) pointing at the dev-box orchestrator first, then any reachable production box: all 4 shortcuts launch + render, switcher dropdown opens/switches, ExtraKeysBar still works, suspend/resume preserves session, dropdown closes on outside-tap. The same APK should work against either backend host. | none (validation) | 1-2 | |
+| T24 | Plan + memory updates — close out Track D in this plan with file-paths + commit refs; mint snapshot capturing Phase 4 architecture. | docs only | 0.5 | |
+
+**Critical reuse (no-touch):**
+- `TerminalScreen.kt` Termux bridge — keep its `TerminalView` setup, `TerminalEmulator.append()` byte feeding, IME wiring, and key-event forwarding. Only the WebSocket source swaps.
+- `ExtraKeysBar.kt` (445 lines) — dispatches `KeyEvent` to the TerminalView regardless of bytes source.
+- `WhisperMicButton.kt`, `CliAgentToolsButton.kt` — auxiliary, untouched.
+
+**Risks + mitigations:**
+- **Risk:** zellij's web-client WS protocol is undocumented + rust-internal; may shift between minor versions. **Mitigation:** lock to 0.44.3 in `installer/templates/zellij-version` (already done — Phase 1); T17 captures actual frame layout from running daemon; T18 adds version probe + WARN if remote daemon ≠ pinned version.
+- **Risk:** zellij's protocol may include framing/auth that's not trivial in vanilla Kotlin WebSocket clients (`okhttp.WebSocket`). **Mitigation:** T17 spike resolves before T18 starts. If protocol is too complex, fall back to WebView for the terminal area only (still keeps native switcher/launcher chrome — hybrid model).
+- **Risk:** existing customers on MSO2-like deployments who already use the tmux Android app could be confused by two parallel CLI flows (legacy tmux still works, new zellij is the recommended path). **Mitigation:** when Phase 4 ships, hide the legacy entry point + auto-route all CLI flows through Zellij; tmux path remains available only via direct WebSocket URL for backwards compat.
+- **Risk:** TerminalView resize behavior may differ from xterm.js, causing Zellij to send mis-sized frames. **Mitigation:** test in T23 with phone rotation, foldable unfold (Z Fold 6 is a real concern here), and IME open/close.
+
+**Test plan (T23 acceptance):**
+1. Open hamburger → tap "CLI Agents" → see empty state with "+ Terminal" + "Shortcuts ▼".
+2. Tap "+ Terminal" → bash session launches in Termux view; ExtraKeysBar functional; type `ls`, see output.
+3. Tap top-bar session name → dropdown opens; tap "Shortcuts ▼" → expand list of Claude/Gemini/Codex/Antigravity.
+4. Tap "Claude" → new claude session launches; switcher dropdown now shows 2 sessions (terminal + claude).
+5. Tap the terminal session in dropdown → switch back; verify terminal output preserved.
+6. Long-press "+ Terminal" → AppFolderPicker opens; pick a folder; launch terminal with `cwd` set.
+7. Suspend app (home button) + resume → terminal output intact; ExtraKeysBar functional.
+8. Rotate phone (or unfold Z Fold 6) → terminal resizes correctly; zellij sees new size.
+9. Kill session via dropdown → session list updates; if it was current, transition back to empty state.
+10. Point the SAME APK at the dev-box origin AND any production-box origin (Tailscale-reachable) to confirm the app is genuinely portable — no per-host config required.
 
 ### Track E — Onboarding wizard
 
