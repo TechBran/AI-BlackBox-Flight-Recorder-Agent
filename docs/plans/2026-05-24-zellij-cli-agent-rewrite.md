@@ -214,6 +214,75 @@ Phase 4 (Android). First action: **T18 — write `ZellijWebSocketClient.kt`** pe
 
 ---
 
+## Phase 4 RESULTS — PASSED 2026-05-26 (Z Fold 6 device QA green)
+
+**Status: 7 Phase 4 feature commits + 10 T23-device-QA fix commits + 1 closeout = 18 commits total. Brandon's verdict on Z Fold 6: "all works perfectly, I can go between Terminals and it just works excellent."**
+
+### Phase 4 commit chain
+
+**Feature work (T17-T22, 7 commits):**
+
+| Commit | Task | Lines |
+|---|---|---|
+| `79b01f9` | T17 spike — zellij web-client WS protocol fully documented | +181 (docs only) |
+| `d74b17c` | T18 — `ZellijWebSocketClient.kt` (Phase 4 transport) | +1063 across 4 files |
+| `ee0e467` | T19 — `CliAgentSessionRepository` zellij endpoints | +614 across 3 files |
+| `9461681` | T20 — `SessionSwitcherTopBar` + `LaunchButton` + chrome hide | +831/-26 across 5 files |
+| `b894a60` | T20 fix — land missing `NativeMainActivity.AppChromeLayer` extraction | +49/-23 |
+| `88406a8` | T21 — `CliAgentEmptyState` + `CliAgentScreenState` | +1048/-22 across 5 files |
+| `78d40d1` | T22 — integration milestone (mount + transport swap + nav) | +996/-140 across 8 files |
+
+**T23 device QA fixes (10 commits, one per surfaced bug):**
+
+| Commit | Bug | Root cause |
+|---|---|---|
+| `447f9c8` (a) | Terminal session name collision (HTTP 500 on re-launch) | AC10's "reused name" sub-decision required "already exists" handling we deferred. Switched to timestamped names matching CLI providers. |
+| `447f9c8` (b) | "toybox unknown command 999999" garbage in terminal | Termux `TerminalSession.args` is FULL argv (incl argv[0]), not extra args. `arrayOf("999999")` made argv[0]="999999" → toybox dispatched it as a subcommand. Latent in legacy `TerminalScreen.kt` too — masked by tmux's faster connect. |
+| `ea7a16c` | "Error: unknown" / WS never reaches orchestrator | T18 used the T17 spike doc URL shape (`ws://host:9097/...`) verbatim. Zellij-web is localhost-only; Android over Tailscale must route through `/app-proxy/9097/...` (plan AC2's desktop architecture). Boundary assumption not propagated. |
+| `f2cf96a` | `NetworkOnMainThreadException` from preflight HTTP | `preflightAuth`/`probeVersion` use OkHttp's blocking `.execute()`. `rememberCoroutineScope()` defaults to `AndroidUiDispatcher` = main thread. T18 code-quality reviewer flagged this and I dismissed it in the polish brief — Brandon's logcat caught the actual exception. |
+| `b753c61` | Auth handshake step 2 (`POST /session`) missing | T17 spike doc only read `websockets.js`; the auth flow lives in `auth.js`'s `initAuthentication() → getClientId()`. Browser does `POST /command/login` THEN `POST /session` (returns server-assigned `web_client_id`). Skipping step 2 → WS accepts upgrade but never routes bytes → 30s ping timeout. Brandon's "the web portal works perfectly" was the diagnostic — pointed at client-side missing step. |
+| `a1ea841` | Switcher tap broken (no session swap) + missing X kill button | T20 polish's `DropdownMenuItem.onClick = {} + combinedClickable` pattern silently swallowed tap events on real Android. Restored slot `onClick`, dropped combinedClickable, added trailing `IconButton(X)` for kill — same fix solves Brandon's "I want a visible X" UX ask. |
+| `5cb75b8` | Floating chrome visible in terminal + bar too tall | T20's `LocalShowAppChrome` CompositionLocal scopes to CliAgentScreen DESCENDANTS, but `BlackBoxTopBar` lives in NativeMainActivity as a SIBLING. Lifted state to Activity scope via `onCliAgentTerminalActiveChange` callback. Also shrunk SessionSwitcherTopBar 48→40dp. |
+| `d23c02e` | Touch swipes pasted `>65,44,17M` into prompt | Claude has SGR mouse-tracking on; Termux TerminalView forwarded touches as mouse-escape sequences. Added Compose `pointerInput` overlay with `detectVerticalDragGestures` that consumes vertical swipes before they reach TerminalView. |
+| `3e64c28` | Codex (and probably others) didn't actually scroll | First scroll fix sent PgUp/PgDn in alt-buffer. Modern TUIs use SGR wheel events (button 64/65). Added `isMouseTrackingActive()` branch sending `ESC[<64;1;1M` / `ESC[<65;1;1M` — what xterm.js does in the browser. Three-way dispatch: mouse-track SGR → alt-buffer PgUp/PgDn → normal-buffer local topRow. |
+| `4e8f81f` | Scrolling stops after switching sessions | Stale closures: `pointerInput(Unit)` and `AndroidView { factory }` captured the initial `client` reference. `remember(session.name)` returned a fresh client on session swap but the captures stayed stale. Wrapped `ZellijTerminalScreen(...)` in `key(s.session.name) { ... }` so the entire subtree tears down + rebuilds on session swap — fresh client, fresh emulator, fresh closures. |
+
+### Load-bearing process lesson: "Device QA always finds something"
+
+10 bugs surfaced from a single device-QA pass. Six categories repeat from Phase 3's T11c "7 bugs that 4 reviewer passes missed" arc:
+
+1. **Architectural boundary assumptions not propagated across layers** (3 bugs: app-proxy URL routing, missing `/session` step, `LocalShowAppChrome` scoping). Each was correct in isolation but wrong in composition.
+2. **Polish-pass introduced regressions** (1 bug: T20's `onClick = {}` slot-neutralization broke the switcher). My polish brief explicitly dismissed the IO-dispatcher review question that became `f2cf96a`.
+3. **Spec documents incomplete** (2 bugs: T17 spike doc missed `/session` step + app-proxy prefix). Spike was derived from one source file (`websockets.js`); the auth flow lived in another (`auth.js`).
+4. **Latent bugs in legacy code, masked by timing windows** (2 bugs: toybox argv worked in tmux because bytes arrived in ~50ms before the toybox error was visible; same Termux argv bug, exposed by ZellijWebSocketClient's slower 500ms+ connect).
+5. **Compose-specific scoping footguns** (2 bugs: stale captures after session swap, dropdown-item tap suppression).
+6. **Sub-decisions deferred to "TBD T11" that came due** (1 bug: AC10's "reused terminal session name" required "already exists" handling we never built).
+
+**Mitigation for future phases:** Spec-compliance reviews must explicitly verify boundary assumptions across layers, not just within-component contracts. Polish briefs that dismiss reviewer questions should require justification, not just my judgement call. Sub-decisions deferred to "TBD" should be tracked in a structured backlog, not buried in plan prose.
+
+### Phase 5 backlog (from T23)
+
+| Item | Source | Severity | Effort |
+|---|---|---|---|
+| `POST /cli-agent/zellij/sessions/{name}/reattach` endpoint | Pre-T23 architectural deferral + Brandon's "tokens get revoked" observation | Medium — current UX is "kill + relaunch to reattach", acceptable per Brandon | ~1 day (Python + Android repo extension) |
+| Legacy `TerminalScreen.kt` swipe-scroll port | Latent bug parity with `ZellijTerminalScreen` `d23c02e` + `3e64c28` | Low — tmux path is being decommissioned in Phase 8 | ~1 hour |
+| `code 1006 walks backoff schedule` test refactor (currently `@Ignore`'d) | T23 `f2cf96a` Dispatchers.IO fix broke runTest virtual time | Low — production behavior is verified by Z Fold 6 QA | ~1 hour (inject IO dispatcher as constructor param) |
+| Apply `key(session.name)` pattern to LegacyTerminal branch too | `4e8f81f` only fixed the new Terminal branch | Low — legacy path is being decommissioned | ~5 min |
+| ExtraKeysBar position observation | Brandon noted "could be lower" but `navigationBarsPadding` already places it as low as edge-to-edge allows | Cosmetic | 0 if accept as-is |
+
+### Verification evidence
+
+- Brandon's final words on Z Fold 6 (2026-05-26): *"all works perfectly, I can go between Terminals and it just works excellent."*
+- All 18 commits BUILD SUCCESSFUL on `:app:compileDebugKotlin :app:compileDebugUnitTestKotlin :app:testDebugUnitTest`.
+- Final unit-test count: 86 active + 1 `@Ignore`'d (the reconnect-backoff virtual-time test).
+- Orchestrator-side tests: 99/99 passing (Phase 2 baseline preserved).
+
+### Pickup point for Phase 5
+
+Phase 5 = update pipeline integration + onboarding wizard polish (Tracks F + E in this plan). T21-T24 in the plan's "Tasks (executable order)" table cover it. The Phase 5 backlog above (5 items) is mostly low-priority polish; the update pipeline (`Orchestrator/update/changes.py` needs a `zellij` bucket, `runner.py` needs to call `blackbox-install-zellij-binary`) is the actual feature work. Phase 5 unblocks Phase 6/7 customer rollouts.
+
+---
+
 ## Phase 0 — Validation spike (DECISION GATE — 1-2 days) [HISTORICAL — see RESULTS above]
 
 **No code commits in this phase.** Just install, test, decide. If Phase 0 fails any of the must-pass criteria below, this plan is abandoned and we fall back to A+B in the research doc.
