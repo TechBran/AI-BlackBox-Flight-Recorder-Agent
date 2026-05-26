@@ -287,32 +287,63 @@ fun ZellijTerminalScreen(
                             val emu = v?.mEmulator
                             if (v != null && emu != null) {
                                 // Natural scroll: dragAmount > 0 (down) →
-                                // delta < 0 → topRow more negative (history).
-                                val delta = -wholeLines
-                                if (emu.isAlternateBufferActive) {
-                                    val seq: ByteArray = if (delta < 0) {
-                                        // PgUp = ESC[5~
-                                        byteArrayOf(
-                                            0x1b,
-                                            '['.code.toByte(),
-                                            '5'.code.toByte(),
-                                            '~'.code.toByte(),
+                                // user wants HISTORY (scroll up in scrollback).
+                                // wholeLines > 0 → scroll up. We branch the
+                                // delivery on what the TUI expects.
+                                val scrollUp = wholeLines > 0
+                                when {
+                                    // Case 1: TUI has mouse tracking enabled
+                                    // (claude, htop, mc, any modern full-screen
+                                    // TUI). Browsers translate wheel events to
+                                    // SGR mouse buttons 64 (wheel up) / 65
+                                    // (wheel down). The TUI binds those to its
+                                    // own scroll-history command. T23 fix
+                                    // 2026-05-26: previously we sent PgUp/PgDn
+                                    // here, which claude ignores in alt-buffer
+                                    // mode — "swipes did nothing."
+                                    emu.isMouseTrackingActive -> {
+                                        val button = if (scrollUp) 64 else 65
+                                        // ESC[<{button};{col};{row}M
+                                        // col/row are 1-indexed; we use the
+                                        // top-left because wheel events don't
+                                        // care about position for most TUIs.
+                                        val seq = "[<$button;1;1M".toByteArray(
+                                            Charsets.US_ASCII,
                                         )
-                                    } else {
-                                        // PgDn = ESC[6~
-                                        byteArrayOf(
-                                            0x1b,
-                                            '['.code.toByte(),
-                                            '6'.code.toByte(),
-                                            '~'.code.toByte(),
-                                        )
+                                        repeat(kotlin.math.abs(wholeLines)) {
+                                            client.sendBytes(seq)
+                                        }
                                     }
-                                    client.sendBytes(seq)
-                                } else {
-                                    val maxBack = -emu.screen.activeTranscriptRows
-                                    val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
-                                    v.topRow = newTop
-                                    v.onScreenUpdated()
+
+                                    // Case 2: alt-buffer TUI WITHOUT mouse
+                                    // tracking (rare — most modern TUIs turn
+                                    // on mouse tracking; this is the fallback
+                                    // for less / more / man pages etc.).
+                                    // PgUp/PgDn is the conventional binding.
+                                    emu.isAlternateBufferActive -> {
+                                        val seq: ByteArray = if (scrollUp) {
+                                            // PgUp = ESC[5~
+                                            byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte())
+                                        } else {
+                                            // PgDn = ESC[6~
+                                            byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte())
+                                        }
+                                        repeat(kotlin.math.abs(wholeLines)) {
+                                            client.sendBytes(seq)
+                                        }
+                                    }
+
+                                    // Case 3: Normal-buffer shell (bash prompt
+                                    // after a command). The emulator owns the
+                                    // scrollback — manipulate topRow directly,
+                                    // no bytes go to the WebSocket.
+                                    else -> {
+                                        val delta = -wholeLines
+                                        val maxBack = -emu.screen.activeTranscriptRows
+                                        val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
+                                        v.topRow = newTop
+                                        v.onScreenUpdated()
+                                    }
                                 }
                             }
                             accumulator -= wholeLines * pixelsPerLine
