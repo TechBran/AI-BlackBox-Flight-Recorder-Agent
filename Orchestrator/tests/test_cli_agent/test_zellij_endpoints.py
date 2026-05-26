@@ -142,12 +142,16 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     assert r.status_code == 201, r.text
     body = r.json()
     assert "session_name" in body
-    assert body["session_name"] == "Brandon__terminal"
+    # Terminal session names get a {unix_ts} suffix (changed 2026-05-26 after
+    # T23 device QA surfaced the "already exists" rc=1 launch regression).
+    # Match the prefix; the suffix is wall-clock and varies per test run.
+    assert body["session_name"].startswith("Brandon__terminal__"), body["session_name"]
+    minted_name = body["session_name"]
     assert "session_url" in body
     # Same-origin proxy URL — must NOT be a raw localhost URL.
     assert body["session_url"].startswith("/app-proxy/")
     # Session name lives in the URL PATH (Zellij reads via pathname.split('/').pop()).
-    assert "/Brandon__terminal" in body["session_url"]
+    assert f"/{minted_name}" in body["session_url"]
     assert f"token={fake_token_value}" in body["session_url"]
     assert body["token"] == fake_token_value
     # Terminal-mode token is long-lived; expires_at is null.
@@ -165,7 +169,7 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     row = rows[0]
     assert row["operator"] == "Brandon"
     assert row["provider"] == "terminal"
-    assert row["session_name"] == "Brandon__terminal"
+    assert row["session_name"] == minted_name
     assert row["token_name"] == "token_3"
     assert row["expires_at"] is None
     # Defense in depth: token_name is the safe handle, NEVER the UUID value.
@@ -175,7 +179,7 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     mock_launch.assert_called_once()
     args, kwargs = mock_launch.call_args
     # Positional: (session_name, binary)
-    assert args[0] == "Brandon__terminal"
+    assert args[0] == minted_name
     assert args[1] is None  # terminal → no binary
 
 

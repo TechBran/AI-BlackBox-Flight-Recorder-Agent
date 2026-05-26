@@ -516,10 +516,22 @@ fun TerminalScreen(
                     //     Bridging happens by directly appending WS bytes
                     //     to the emulator and intercepting keystrokes in
                     //     onCodePoint, NOT through this PTY.
+                    //
+                    // argv fix (T23 device QA, 2026-05-26): `args` is the
+                    // FULL argv (argv[0] included), not extra args after
+                    // the binary. /system/bin/sleep is a toybox symlink
+                    // that routes by argv[0]; with args=arrayOf("999999")
+                    // argv[0]="999999" and toybox errors "unknown command
+                    // 999999, code 127". This bug was always present but
+                    // tmux's first bytes overwrote the error within ~50ms
+                    // so users never saw it; ZellijTerminalScreen's
+                    // slower-connect WebSocket surfaced it on Z Fold 6.
+                    // Pass argv[0]="sleep" so toybox dispatches; "999999"
+                    // becomes argv[1] (the duration).
                     val session = TerminalSession(
                         /* shellPath      = */ "/system/bin/sleep",
                         /* cwd            = */ "/",
-                        /* args           = */ arrayOf("999999"),
+                        /* args           = */ arrayOf("sleep", "999999"),
                         /* env            = */ arrayOf<String>(),
                         /* transcriptRows = */ TRANSCRIPT_ROWS,
                         /* client         = */ sessionClient,

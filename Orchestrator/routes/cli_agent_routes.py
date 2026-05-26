@@ -424,15 +424,24 @@ def _generate_zellij_session_name(
       ``{operator}__{provider}__{app_or_root}__{unix_ts}`` — unique per
       launch so multiple parallel sessions of the same provider don't
       collide.
-    - Terminal mode: ``{operator}__terminal`` — reused per operator
-      (single terminal session per operator, intentional per AC10).
+    - Terminal mode: ``{operator}__terminal__{unix_ts}`` — also unique
+      per launch. Reused-name was the AC10 v1 plan ("single terminal
+      session per operator, persistent shell history"), but that
+      requires "already exists" handling — when the user relaunches the
+      app, the named session still exists in zellij and ``zellij
+      --session NAME`` rejects the collision with rc=1. Switched to
+      suffixed names 2026-05-26 after T23 device QA on Z Fold 6
+      surfaced the regression (orchestrator log: "launch_session failed
+      (rc=1) for Brandon__terminal" repeating). The persistent-shell
+      win is a v1.1 feature that needs the deferred /reattach endpoint
+      (Phase 5).
 
     Kept as a module-level pure function so T9 can unit-test it without
     spinning up FastAPI.
     """
-    if provider == "terminal":
-        return f"{operator}__terminal"
     app_part = app if app else "root"
+    if provider == "terminal":
+        return f"{operator}__terminal__{int(time.time())}"
     return f"{operator}__{provider}__{app_part}__{int(time.time())}"
 
 

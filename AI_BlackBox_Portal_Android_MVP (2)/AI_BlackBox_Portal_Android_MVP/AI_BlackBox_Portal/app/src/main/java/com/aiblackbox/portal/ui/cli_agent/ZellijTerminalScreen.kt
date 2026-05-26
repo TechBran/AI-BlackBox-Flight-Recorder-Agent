@@ -375,10 +375,25 @@ fun ZellijTerminalScreen(
                     // Real TerminalSession with harmless local sleep child;
                     // bytes flow through the WS, not this PTY. Same trick
                     // [TerminalScreen] uses — see its long comment for why.
+                    //
+                    // argv convention (T23-surfaced bug, 2026-05-26):
+                    // Termux TerminalSession's `args` is the FULL argv
+                    // including argv[0], NOT extra args after the binary.
+                    // /system/bin/sleep is a toybox symlink that routes by
+                    // argv[0]; passing args=arrayOf("999999") sets
+                    // argv[0]="999999" and toybox errors out with
+                    // "unknown command 999999, code 127". Pass "sleep" as
+                    // argv[0] so toybox dispatches correctly + "999999"
+                    // becomes argv[1] (the duration). The legacy
+                    // TerminalScreen had the same latent bug but tmux
+                    // bytes arrived fast enough to overwrite the error
+                    // before the user saw it; ZellijWebSocketClient's
+                    // auth pre-flight + version probe is slower so the
+                    // error stayed visible.
                     val sess = TerminalSession(
                         /* shellPath      = */ "/system/bin/sleep",
                         /* cwd            = */ "/",
-                        /* args           = */ arrayOf("999999"),
+                        /* args           = */ arrayOf("sleep", "999999"),
                         /* env            = */ arrayOf<String>(),
                         /* transcriptRows = */ TRANSCRIPT_ROWS,
                         /* client         = */ sessionClient,
