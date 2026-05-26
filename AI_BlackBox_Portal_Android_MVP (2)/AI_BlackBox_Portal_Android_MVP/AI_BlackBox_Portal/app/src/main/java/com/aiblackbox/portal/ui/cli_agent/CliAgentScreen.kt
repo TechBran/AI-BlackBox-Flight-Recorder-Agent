@@ -2,6 +2,7 @@ package com.aiblackbox.portal.ui.cli_agent
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -13,6 +14,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.CliAgentProvider
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.ui.insets.LocalShowAppChrome
 import kotlinx.coroutines.launch
 
 /**
@@ -52,32 +54,41 @@ fun CliAgentScreen(
 
     var state by remember { mutableStateOf<CliAgentInternalState>(CliAgentInternalState.Picker) }
 
-    when (val s = state) {
-        CliAgentInternalState.Picker -> {
-            BackHandler(enabled = true) { onBackToTools() }
-            AppFolderPicker(
-                repository = repository,
-                operator = operator,
-                selectedProvider = selectedProvider,
-                onProviderSelected = { p ->
-                    scope.launch { store.setCliAgentProvider(p.slug) }
-                },
-                onAppSelected = { slug, name ->
-                    state = CliAgentInternalState.Terminal(slug, name, selectedProvider.slug)
-                },
-                modifier = modifier,
-            )
-        }
-        is CliAgentInternalState.Terminal -> {
-            TerminalScreen(
-                api = api,
-                operator = operator,
-                appSlug = s.appSlug,
-                appName = s.appName,
-                provider = s.provider,
-                onBack = { state = CliAgentInternalState.Picker },
-                modifier = modifier,
-            )
+    // T20: hide the floating app chrome (operator pill / snapshot count /
+    // connected indicator) while a terminal session is on screen. The
+    // chrome stays visible on the Picker branch so users can still see
+    // operator + health while choosing a workspace. T21 will replace the
+    // Picker branch with the empty-state launch UI; this CompositionLocal
+    // toggle continues to apply only to the Terminal branch.
+    val terminalActive = state is CliAgentInternalState.Terminal
+    CompositionLocalProvider(LocalShowAppChrome provides !terminalActive) {
+        when (val s = state) {
+            CliAgentInternalState.Picker -> {
+                BackHandler(enabled = true) { onBackToTools() }
+                AppFolderPicker(
+                    repository = repository,
+                    operator = operator,
+                    selectedProvider = selectedProvider,
+                    onProviderSelected = { p ->
+                        scope.launch { store.setCliAgentProvider(p.slug) }
+                    },
+                    onAppSelected = { slug, name ->
+                        state = CliAgentInternalState.Terminal(slug, name, selectedProvider.slug)
+                    },
+                    modifier = modifier,
+                )
+            }
+            is CliAgentInternalState.Terminal -> {
+                TerminalScreen(
+                    api = api,
+                    operator = operator,
+                    appSlug = s.appSlug,
+                    appName = s.appName,
+                    provider = s.provider,
+                    onBack = { state = CliAgentInternalState.Picker },
+                    modifier = modifier,
+                )
+            }
         }
     }
 }
