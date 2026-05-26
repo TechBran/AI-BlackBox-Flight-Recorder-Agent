@@ -68,9 +68,26 @@ class ZellijWebSocketClient(
     private val origin: String,
     private val sessionName: String,
     private val sessionToken: String,
-    private val webClientId: String = UUID.randomUUID().toString(),
+    /**
+     * Initial web_client_id (a fresh UUID by default). This value is REPLACED
+     * during [connect] / reconnect with the server-assigned id from
+     * `POST /session` (see `fetchServerWebClientId`). The initial value is
+     * only used if `/session` fails (defensive fallback so connect still
+     * tries the WS upgrade instead of giving up).
+     *
+     * T23 device QA discovery (2026-05-26): the T17 spike doc missed
+     * step 2 of zellij-web's auth handshake. Browser JS does:
+     *   1. POST /command/login → sets session_token cookie
+     *   2. POST /session       → returns {"web_client_id": "<server-uuid>"}
+     *   3. WS upgrade with the server-uuid query param
+     * Skipping step 2 (using a client-generated UUID) causes zellij-web to
+     * accept the WS upgrade but never route bytes — silently fails until
+     * the okhttp ping timeout (~30s) fires onDisconnected with code 1006.
+     */
+    initialWebClientId: String = UUID.randomUUID().toString(),
     private val coroutineScope: CoroutineScope,
 ) {
+    @Volatile private var webClientId: String = initialWebClientId
 
     interface Listener {
         fun onConnected()
@@ -142,6 +159,7 @@ class ZellijWebSocketClient(
                 withContext(Dispatchers.IO) {
                     probeVersion()
                     preflightAuth()
+                    fetchServerWebClientId()
                 }
                 openTerminalSocket()
             } catch (t: Throwable) {
@@ -245,6 +263,46 @@ class ZellijWebSocketClient(
                 throw IOException("Auth pre-flight failed: HTTP ${resp.code} ${resp.message}")
             }
             logd(TAG, "Auth pre-flight OK (cookies=${cookieJar.size()})")
+        }
+    }
+
+    /**
+     * `POST {origin}{APP_PROXY_PREFIX}/session` with `{}` — the SECOND step
+     * of zellij-web's auth handshake. Returns `{"web_client_id": "<uuid>",
+     * "is_read_only": false}`. The returned `web_client_id` MUST be used in
+     * the WS upgrade query param; a client-generated UUID will cause
+     * zellij-web to accept the WS upgrade silently but never route bytes.
+     *
+     * T23 device QA caught this — the T17 spike doc only documented
+     * `/command/login` and missed the `/session` step. Brandon's web portal
+     * worked because the browser's JS does this step automatically; the
+     * Android client (and direct WS test scripts) skipped it.
+     *
+     * Overwrites [webClientId] in-place so the URL builders pick up the
+     * new value on next `terminalUrl()`/`controlUrl()` call.
+     */
+    private fun fetchServerWebClientId() {
+        val url = "${httpOrigin()}$APP_PROXY_PREFIX/session"
+        val req = Request.Builder()
+            .url(url)
+            .post("{}".toRequestBody(JSON_MEDIA))
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IOException("Session init failed: HTTP ${resp.code} ${resp.message}")
+            }
+            val body = resp.body?.string().orEmpty()
+            val newId = try {
+                JSONObject(body).optString("web_client_id").takeIf { it.isNotBlank() }
+            } catch (t: Throwable) {
+                logw(TAG, "Session response JSON parse failed: ${t.message}")
+                null
+            }
+            if (newId == null) {
+                throw IOException("Session response missing 'web_client_id': $body")
+            }
+            webClientId = newId
+            logd(TAG, "Server-assigned web_client_id received")
         }
     }
 
@@ -425,11 +483,13 @@ class ZellijWebSocketClient(
                     delay(sec * 1000L)
                     if (userClosed.get()) return@launch
                     try {
-                        // preflightAuth uses blocking httpClient.execute() —
-                        // must run on Dispatchers.IO to avoid StrictMode's
-                        // NetworkOnMainThreadException (same fix as connect()).
+                        // preflightAuth + fetchServerWebClientId use blocking
+                        // httpClient.execute() — must run on Dispatchers.IO to
+                        // avoid StrictMode's NetworkOnMainThreadException
+                        // (same fix as connect()).
                         withContext(Dispatchers.IO) {
                             preflightAuth()
+                            fetchServerWebClientId()
                         }
                         openTerminalSocket()
                         return@launch // success — terminal onOpen will reset lastReconnectIdx

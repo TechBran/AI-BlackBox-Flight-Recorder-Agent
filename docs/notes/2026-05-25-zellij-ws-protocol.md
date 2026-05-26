@@ -21,16 +21,34 @@ Two WebSockets per session:
 
 ## Authentication
 
-- Cookie-based: `session_token=<uuid>` cookie set via `POST /command/login`
-  (orchestrator already does this — see `/cli-agent/zellij/launch` flow:
-  mint token via zellij CLI, return URL + token; client posts token to
-  `/command/login` to get the cookie, then opens iframe).
-- `web_client_id` query param — UUID identifier for THIS client connection.
-  Generated client-side; reused for both terminal and control WS.
+**Two-step handshake** (T23 device QA correction, 2026-05-26 — original
+spike doc missed step 2; Android client and direct WS test scripts
+silently failed without it):
+
+1. **`POST /command/login`** with `{"auth_token": "<zellij-token>",
+   "remember_me": false}` → server sets `session_token=<uuid>; HttpOnly;
+   SameSite=Strict; Path=/` cookie.
+2. **`POST /session`** with `{}` → server returns
+   `{"web_client_id": "<server-assigned-uuid>", "is_read_only": false}`.
+   The returned `web_client_id` MUST be used in the WS upgrade query
+   param. A client-generated UUID will cause zellij-web to accept the WS
+   upgrade silently but **never route bytes** — the connection dies on
+   okhttp's ping timeout (~30s) with close code 1006. Browser JS does
+   this step automatically (`auth.js:initAuthentication()` →
+   `getClientId()`); non-browser clients must replicate it.
+
 - HTTPS-enforcement is OFF for localhost per our install.sh config
   (`enforce_https_for_localhost false`), so plain `ws://` works for
   Android dev/test; production would use `wss://` via the Tailscale
   funnel cert.
+
+**Through orchestrator app-proxy:** the Android client (and any other
+non-localhost consumer) MUST prepend `/app-proxy/9097` to every URL
+(login, session, ws/terminal, ws/control). zellij-web binds
+`127.0.0.1:9097` (unreachable from Tailscale-connected devices); the
+orchestrator's WebSocket-aware reverse proxy at port 9091 forwards
+`/app-proxy/9097/*` to localhost:9097. Same architectural decision as
+plan AC2 (desktop iframe).
 
 ## Terminal WS (bytes)
 

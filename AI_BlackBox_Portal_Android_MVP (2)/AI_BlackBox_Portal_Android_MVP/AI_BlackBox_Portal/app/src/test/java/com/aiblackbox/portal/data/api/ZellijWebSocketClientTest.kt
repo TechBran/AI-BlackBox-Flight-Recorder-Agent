@@ -51,7 +51,7 @@ class ZellijWebSocketClientTest {
         origin = origin,
         sessionName = sessionName,
         sessionToken = token,
-        webClientId = clientId,
+        initialWebClientId = clientId,
         coroutineScope = cs,
     )
 
@@ -354,7 +354,7 @@ class ZellijWebSocketClientTest {
                 origin = "http://${server.hostName}:${server.port}",
                 sessionName = "test",
                 sessionToken = "t",
-                webClientId = "uid",
+                initialWebClientId = "uid",
                 coroutineScope = testScope,
             )
             client.setListenerForTest(object : ZellijWebSocketClient.Listener {
