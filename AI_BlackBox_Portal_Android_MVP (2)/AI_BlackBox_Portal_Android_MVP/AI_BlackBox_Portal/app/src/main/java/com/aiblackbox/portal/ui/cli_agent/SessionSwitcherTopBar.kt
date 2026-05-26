@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.Icons
 // use `Icons.Default.*` — functionally identical to `Icons.Filled.*`.
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.DropdownMenu
@@ -196,6 +198,10 @@ fun SessionSwitcherTopBar(
                         dropdownExpanded = false
                         shortcutsExpanded = false
                     },
+                    // Wider than the Material default so the session label +
+                    // X kill button both fit comfortably on phone portrait.
+                    // Brandon's T23 UX ask (2026-05-26).
+                    modifier = Modifier.widthIn(min = 280.dp),
                 ) {
                     // 1) Existing sessions
                     if (sessions.isEmpty()) {
@@ -222,10 +228,14 @@ fun SessionSwitcherTopBar(
                                     isCurrent = isCurrent,
                                     nowMillis = nowMillis,
                                     onClick = {
-                                        dropdownExpanded = false
+                                        // dropdown auto-dismisses on slot
+                                        // tap (Material 3 behavior).
                                         if (!isCurrent) onSelectSession(row)
                                     },
-                                    onLongClick = {
+                                    onKillClick = {
+                                        // X tap surfaces the same confirm
+                                        // dialog as before (deliberate, kill
+                                        // is destructive + no undo).
                                         pendingKill = row
                                     },
                                 )
@@ -335,19 +345,42 @@ fun SessionSwitcherTopBar(
     }
 }
 
-/** One row inside the session list. Indicator + label + long-press → kill. */
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * One row inside the session list.
+ *
+ * Layout: [●/○ indicator] [label] [✕ kill button]
+ *
+ * - Tap anywhere in the row's label area → [onClick] (switch session;
+ *   Material 3 DropdownMenuItem auto-dismisses the dropdown).
+ * - Tap the trailing ✕ → [onKillClick] (parent shows confirm dialog).
+ *
+ * T23 device QA pivot (2026-05-26): replaced the long-press → kill UX
+ * with a visible X button. Three reasons:
+ *   1. Brandon flagged that long-press was undiscoverable on the Z Fold 6.
+ *   2. Switcher tap stopped working — the polish-pass `onClick = {} +
+ *      combinedClickable` pattern silently swallowed tap events on real
+ *      Android (the modifier-level handler wasn't reliably firing,
+ *      possibly because DropdownMenuItem's internal clickable surface
+ *      consumed the event first). Going back to slot `onClick` makes
+ *      switching work AND re-enables Material 3 auto-dismiss.
+ *   3. The original double-fire bug the polish was guarding against
+ *      doesn't recur because we no longer layer combinedClickable on
+ *      the same modifier — kill is a separate IconButton.
+ */
 @Composable
 private fun SessionRowMenuItem(
     row: ZellijSessionRow,
     isCurrent: Boolean,
     nowMillis: Long,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onKillClick: () -> Unit,
 ) {
     DropdownMenuItem(
         text = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
                     text = if (isCurrent) "●" else "○",  // ● vs ○
                     color = if (isCurrent) {
@@ -372,18 +405,22 @@ private fun SessionRowMenuItem(
                     fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = onKillClick,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Kill ${row.name}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         },
-        // BLOCKING fix (A): neutralise the DropdownMenuItem slot, keep the
-        // combinedClickable modifier. Previously both fired on tap, so
-        // onSelectSession ran twice → visible flicker + race against
-        // dropdownExpanded = false.
-        onClick = {},
-        modifier = Modifier.combinedClickable(
-            onClick = onClick,
-            onLongClick = onLongClick,
-        ),
+        onClick = onClick,
     )
 }
 
