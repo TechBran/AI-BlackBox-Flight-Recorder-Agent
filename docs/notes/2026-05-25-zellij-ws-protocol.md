@@ -166,6 +166,23 @@ is so simple it's mostly okhttp boilerplate + JSON envelope generation.
 Bulk of T18's time is on tests + Termux integration verification, not
 protocol implementation.
 
+**Production deviations from the sketch (landed in T18):**
+
+- Constructor takes an additional `coroutineScope: CoroutineScope`
+  parameter — needed for the HTTP pre-flight + reconnect timers.
+  Owner-managed lifecycle (caller cancels scope to dispose).
+- `connect()` takes a `Listener` interface (5 callbacks) instead of two
+  lambdas. Listener gives `onConnected`, `onBytes(bytes, length)` — the
+  `length` arg matches `TerminalEmulator.append` for swap parity —
+  `onSwitchedSession`, `onDisconnected(code, reason, willReconnect)`,
+  `onError`.
+- Close code 1000 (normal closure from server) is treated as terminal
+  (no reconnect). A strict reading of the spec section "Close codes"
+  implies reconnect-on-anything-but-4001, but server-initiated 1000 in
+  practice means "stay down" — see T18 polish commit for rationale.
+  If a future regression shows up where reconnect IS wanted on 1000,
+  this is the place to revisit.
+
 ## Plan timeline update
 
 T18 estimate revised: **2-3 days → 1 day**. Total Phase 4 timeline:
