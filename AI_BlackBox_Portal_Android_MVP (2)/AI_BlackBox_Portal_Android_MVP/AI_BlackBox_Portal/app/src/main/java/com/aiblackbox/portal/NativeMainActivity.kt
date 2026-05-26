@@ -393,7 +393,11 @@ class NativeMainActivity : ComponentActivity() {
                                     } catch (_: Exception) {}
                                 }
                             }
-                        }
+                        },
+                        // T22: CLI Agents' SessionSwitcherTopBar hamburger
+                        // routes through here to open the same SettingsSheet
+                        // the global BlackBoxTopBar uses.
+                        onOpenSettings = { showSettings = true },
                     )
 
                     // Auto-set provider when on dedicated provider screens

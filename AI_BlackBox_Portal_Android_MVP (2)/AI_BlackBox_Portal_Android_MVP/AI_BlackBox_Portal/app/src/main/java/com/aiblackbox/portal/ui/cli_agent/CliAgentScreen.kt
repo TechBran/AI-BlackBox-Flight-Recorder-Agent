@@ -3,7 +3,11 @@ package com.aiblackbox.portal.ui.cli_agent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -17,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.CliAgentProvider
+import com.aiblackbox.portal.data.model.ZellijSession
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.ui.insets.LocalShowAppChrome
 import kotlinx.coroutines.launch
@@ -24,47 +29,49 @@ import kotlinx.coroutines.launch
 /**
  * Top-level CLI Agent flow.
  *
- * Phase 4 / T21 reshape of the original picker → terminal state machine:
+ * Phase 4 / T22 reshape — wires [SessionSwitcherTopBar] (T20) over BOTH
+ * terminal branches and routes the zellij-launched Terminal branch through
+ * the new [ZellijTerminalScreen] (driven by [com.aiblackbox.portal.data.api.ZellijWebSocketClient])
+ * while preserving the legacy tmux [TerminalScreen] on the picker-driven
+ * LegacyTerminal branch.
  *
- *   EmptyState            ← default landing; no current session.
- *      │  tap "+ Terminal" / shortcut button → launch via [CliAgentScreenState]
- *      │  long-press "+ Terminal" → FolderPicker
+ * State machine:
+ *
+ *   EmptyState                ← default landing; no current session.
+ *      │  tap "+ Terminal" / shortcut → screenState.launch(provider)
+ *      │  long-press "+ Terminal"      → FolderPicker
  *      ▼
- *   Terminal              ← driven by [CliAgentScreenState.currentSession]
+ *   Terminal(ZellijSession)   ← zellij-backed via ZellijTerminalScreen.
  *      │  back → clearCurrent() → EmptyState
  *      ▼
- *   FolderPicker          ← legacy [AppFolderPicker] for workspace-pinned launches
- *      │  pick app → Terminal
+ *   FolderPicker              ← legacy AppFolderPicker for workspace-pinned launches.
+ *      │  pick app → LegacyTerminal
+ *      ▼
+ *   LegacyTerminal(...)       ← tmux-backed via TerminalScreen.
+ *      │  back → EmptyState
  *      ▼
  *   (back from EmptyState → onBackToTools)
  *
- * The state holder ([CliAgentScreenState]) owns:
- *   - sessions list (refreshed from `/cli-agent/zellij/sessions` on mount
- *     and after every successful launch/kill)
- *   - launchInFlight per-provider set
- *   - currentSession selection
+ * **Switcher** (T20 [SessionSwitcherTopBar]) hosts the bar for BOTH terminal
+ * branches and the empty state. The bar shows the current session's
+ * provider+time label, drops down to a session list, exposes "+ Terminal" and
+ * the shortcuts sub-menu, and emits intents back to the holder for
+ * launch / select / kill. The hamburger inside the bar calls
+ * [onOpenNavDrawer] which the caller wires to the existing SettingsSheet.
  *
- * Both the empty state (T21) and the session switcher top bar (T20, wired
- * in T22) read the SAME holder so a launch fired from one surface shows a
- * spinner on the other.
- *
- * The legacy [TerminalScreen] still runs over the tmux-backed
- * [CliAgentWebSocket] today; T22+ will reroute it to a zellij-backed
- * transport using the launch response's `sessionUrl` + `token`. T21
- * deliberately preserves that backward compatibility so the screen
- * continues to work end-to-end during the migration.
- *
- * System back from EmptyState pops to the Tools menu via [onBackToTools].
- * System back from Terminal returns to EmptyState. System back from the
- * legacy FolderPicker also returns to EmptyState. TerminalScreen installs
- * its own BackHandler, so this screen's BackHandler is only active outside
- * the terminal.
+ * **Token discipline (audit I7).** The launch response's `token` lives only
+ * inside [CliAgentScreenState.liveSessionFor] and the [ZellijSession]
+ * threaded into the Terminal state tuple. It's not persisted to disk and is
+ * dropped on holder rebuild (operator switch, config change). Once the WS
+ * client connects, the server holds state and the token becomes irrelevant.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CliAgentScreen(
     origin: String,
     operator: String,
     onBackToTools: () -> Unit,
+    onOpenNavDrawer: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -82,24 +89,23 @@ fun CliAgentScreen(
 
     // ── Screen-scoped state holder ───────────────────────────────────────
     //
-    // Recreated when `operator` changes — the holder is per-operator
-    // because sessions, launch state, and the current session all scope
-    // to a single operator. `remember(operator, repository)` rebuilds on
-    // either change.
-    //
-    // Errors surface as Toasts to match the existing cli_agent/ package
-    // convention (see [AppFolderPicker], [TerminalScreen]).
+    // Holder is per-operator; rebuilds when [operator] changes via
+    // `remember(operator, repository)`. The Terminal-state tuple receives
+    // the freshly-launched ZellijSession in [onLaunched]; selecting an
+    // existing row from the switcher goes through [liveSessionFor] to find
+    // the matching token-carrying session (or toasts if none — see below).
     var state by remember { mutableStateOf<CliAgentInternalState>(CliAgentInternalState.EmptyState) }
     val screenState = remember(operator, repository) {
         CliAgentScreenState(
             scope = scope,
             repository = repository,
             operator = operator,
-            onLaunched = { _ ->
-                // Transition into Terminal. The session is already set as
-                // current inside the holder; CliAgentScreen reads
-                // screenState.currentSession to drive TerminalScreen.
-                state = CliAgentInternalState.Terminal
+            onLaunched = { session ->
+                // Transition into Terminal with the fully-credentialed
+                // ZellijSession. Token + sessionUrl ride along until the
+                // composable mounts and the ZellijWebSocketClient consumes
+                // them on connect.
+                state = CliAgentInternalState.Terminal(session)
             },
             onError = { action, reason ->
                 Toast.makeText(
@@ -111,137 +117,212 @@ fun CliAgentScreen(
         )
     }
 
-    // Initial fetch + refresh when operator changes. The holder
-    // intentionally does NOT auto-refresh on construct because that would
-    // couple data fetching to composition timing in surprising ways;
-    // explicit LaunchedEffect keeps the trigger visible at the screen.
+    // Initial fetch + refresh when operator changes.
     LaunchedEffect(operator) {
         screenState.refreshSessions()
     }
 
-    // T20: hide the floating app chrome (operator pill / snapshot count /
-    // connected indicator) while a terminal session is on screen. The
-    // chrome stays visible on the EmptyState + FolderPicker branches so
-    // users can still see operator + health while choosing a workspace.
-    val terminalActive = state is CliAgentInternalState.Terminal
+    // Hide the floating app chrome while a terminal session is on screen.
+    val terminalActive = state is CliAgentInternalState.Terminal ||
+        state is CliAgentInternalState.LegacyTerminal
     CompositionLocalProvider(LocalShowAppChrome provides !terminalActive) {
-        when (val s = state) {
-            CliAgentInternalState.EmptyState -> {
-                BackHandler(enabled = true) { onBackToTools() }
-                Box(modifier = modifier.fillMaxSize()) {
-                    CliAgentEmptyState(
+        // The session switcher top bar is shown on every branch EXCEPT the
+        // pure FolderPicker (which has its own legacy chrome). Showing it
+        // over EmptyState too is intentional — even with no current session
+        // the user can fire "+ Terminal" or jump to an existing session
+        // from the dropdown.
+        val showSwitcher = state !is CliAgentInternalState.FolderPicker
+
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            topBar = {
+                if (showSwitcher) {
+                    SessionSwitcherTopBar(
+                        operator = operator,
+                        currentSession = screenState.currentSession,
+                        sessions = screenState.sessions,
                         launchInFlight = screenState.launchInFlight,
+                        onSelectSession = { row ->
+                            // Look up the freshly-launched session by name. If we
+                            // have a live token-bearing session, transition into
+                            // Terminal; otherwise toast — the orchestrator's
+                            // current API doesn't re-mint tokens for existing
+                            // sessions (audit I7), so the only way to reattach a
+                            // server-side session this holder never launched is
+                            // kill+relaunch. Brandon flagged this as the known
+                            // hand-off pain point (T23 device QA will surface
+                            // whether users hit it often).
+                            val live = screenState.liveSessionFor(row.name)
+                            if (live != null) {
+                                screenState.selectSession(row)
+                                state = CliAgentInternalState.Terminal(live)
+                            } else {
+                                screenState.selectSession(row)
+                                Toast.makeText(
+                                    context,
+                                    "No live token for ${row.name} — kill and relaunch to reattach.",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        },
                         onLaunchProvider = { provider ->
-                            // No-app launch path: triggers state-holder
-                            // launch which on success transitions us to
-                            // Terminal via onLaunched callback.
+                            // Launch path — onLaunched callback drives the
+                            // state transition into Terminal once the
+                            // launch response is in.
                             screenState.launch(provider)
                         },
-                        onChooseFolderForTerminal = {
-                            // Long-press fallback — switches to the legacy
-                            // AppFolderPicker so the user can pick a
-                            // workspace, then the picker triggers the
-                            // Terminal transition with the chosen app.
-                            state = CliAgentInternalState.FolderPicker
+                        onKillSession = { row ->
+                            // If we're killing the session we're currently
+                            // viewing, fall back to EmptyState so the screen
+                            // doesn't show a stale terminal surface.
+                            val current = state
+                            val killingCurrent =
+                                current is CliAgentInternalState.Terminal &&
+                                    current.session.name == row.name
+                            screenState.kill(row)
+                            if (killingCurrent) {
+                                state = CliAgentInternalState.EmptyState
+                            }
                         },
-                        modifier = Modifier.fillMaxSize(),
+                        onOpenNavDrawer = onOpenNavDrawer,
                     )
                 }
-            }
-
-            CliAgentInternalState.FolderPicker -> {
-                // Legacy picker reached only via long-press on "+ Terminal".
-                // Preserves the existing tmux-backed launch flow when a
-                // user wants to pin a workspace.
-                BackHandler(enabled = true) {
-                    state = CliAgentInternalState.EmptyState
-                }
-                AppFolderPicker(
-                    repository = repository,
-                    operator = operator,
-                    selectedProvider = selectedProvider,
-                    onProviderSelected = { p ->
-                        scope.launch { store.setCliAgentProvider(p.slug) }
-                    },
-                    onAppSelected = { slug, name ->
-                        // Picker chose an app — transition into Terminal
-                        // via the legacy (tmux) appSlug/appName path. The
-                        // currentSession holder field stays null for this
-                        // legacy path because TerminalScreen identifies
-                        // its session via (operator, provider, appSlug)
-                        // rather than a ZellijSessionRow.
-                        state = CliAgentInternalState.LegacyTerminal(
-                            appSlug = slug,
-                            appName = name,
-                            provider = selectedProvider.slug,
-                        )
-                    },
-                    modifier = modifier,
-                )
-            }
-
-            CliAgentInternalState.Terminal -> {
-                // T21 transition target for zellij launches. Today the
-                // TerminalScreen still runs the legacy tmux WebSocket
-                // (we MUST NOT modify TerminalScreen per the T21 brief),
-                // so we pass the launched session's provider and an empty
-                // appSlug — matching the "+ Terminal" no-app contract.
-                // T22 will swap in a zellij-backed transport that uses
-                // the launch response's sessionUrl + token.
-                val cur = screenState.currentSession
-                // Defensive: if currentSession is/becomes null while we're
-                // in the Terminal branch (e.g. a kill races with rendering),
-                // bounce back to EmptyState. Keying the effect on `cur`
-                // ensures it re-fires whenever currentSession transitions
-                // to null — not just on first composition entry.
-                LaunchedEffect(cur) {
-                    if (cur == null) {
-                        state = CliAgentInternalState.EmptyState
-                    }
-                }
-                if (cur != null) {
-                    TerminalScreen(
-                        api = api,
-                        operator = operator,
-                        appSlug = cur.app ?: "",
-                        appName = cur.app?.takeIf { it.isNotBlank() } ?: "Terminal",
-                        provider = cur.provider,
-                        onBack = {
-                            screenState.clearCurrent()
-                            state = CliAgentInternalState.EmptyState
-                        },
-                        modifier = modifier,
-                    )
-                }
-            }
-
-            is CliAgentInternalState.LegacyTerminal -> {
-                // Backwards-compat branch for AppFolderPicker-driven launches.
-                // Same TerminalScreen, but the (appSlug, appName, provider)
-                // tuple is sourced from the picker rather than a ZellijSessionRow.
-                TerminalScreen(
-                    api = api,
-                    operator = operator,
-                    appSlug = s.appSlug,
-                    appName = s.appName,
-                    provider = s.provider,
-                    onBack = { state = CliAgentInternalState.EmptyState },
-                    modifier = modifier,
-                )
-            }
+            },
+        ) { innerPadding ->
+            CliAgentBranches(
+                state = state,
+                onStateChange = { state = it },
+                screenState = screenState,
+                repository = repository,
+                api = api,
+                operator = operator,
+                selectedProvider = selectedProvider,
+                onProviderSelected = { p ->
+                    scope.launch { store.setCliAgentProvider(p.slug) }
+                },
+                onBackToTools = onBackToTools,
+                innerPadding = innerPadding,
+            )
         }
     }
 }
 
-private sealed class CliAgentInternalState {
+/**
+ * The branch switch is split out so the Scaffold body stays slim and the
+ * branches each get a clean `Modifier.padding(innerPadding)` for the
+ * SessionSwitcherTopBar inset. Sealed-class exhaustiveness check makes a
+ * future state add a compile-time push (no silent missed branch).
+ */
+@Composable
+private fun CliAgentBranches(
+    state: CliAgentInternalState,
+    onStateChange: (CliAgentInternalState) -> Unit,
+    screenState: CliAgentScreenState,
+    repository: CliAgentSessionRepository,
+    api: BlackBoxApi,
+    operator: String,
+    selectedProvider: CliAgentProvider,
+    onProviderSelected: (CliAgentProvider) -> Unit,
+    onBackToTools: () -> Unit,
+    innerPadding: PaddingValues,
+) {
+    when (val s = state) {
+        CliAgentInternalState.EmptyState -> {
+            BackHandler(enabled = true) { onBackToTools() }
+            Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                CliAgentEmptyState(
+                    launchInFlight = screenState.launchInFlight,
+                    onLaunchProvider = { provider ->
+                        screenState.launch(provider)
+                    },
+                    onChooseFolderForTerminal = {
+                        onStateChange(CliAgentInternalState.FolderPicker)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        CliAgentInternalState.FolderPicker -> {
+            BackHandler(enabled = true) {
+                onStateChange(CliAgentInternalState.EmptyState)
+            }
+            // FolderPicker intentionally renders without the SessionSwitcherTopBar
+            // (showSwitcher = false above) so we don't need innerPadding here —
+            // Scaffold's body still wraps it but with no topBar inset.
+            AppFolderPicker(
+                repository = repository,
+                operator = operator,
+                selectedProvider = selectedProvider,
+                onProviderSelected = onProviderSelected,
+                onAppSelected = { slug, name ->
+                    onStateChange(
+                        CliAgentInternalState.LegacyTerminal(
+                            appSlug = slug,
+                            appName = name,
+                            provider = selectedProvider.slug,
+                        )
+                    )
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        is CliAgentInternalState.Terminal -> {
+            // Defensive: if currentSession was cleared from under us (kill
+            // race), bounce back to EmptyState. The Terminal-state tuple is
+            // independent of currentSession, but they should agree.
+            LaunchedEffect(screenState.currentSession?.name) {
+                if (screenState.currentSession == null) {
+                    onStateChange(CliAgentInternalState.EmptyState)
+                }
+            }
+            ZellijTerminalScreen(
+                api = api,
+                operator = operator,
+                session = s.session,
+                onBack = {
+                    screenState.clearCurrent()
+                    onStateChange(CliAgentInternalState.EmptyState)
+                },
+                modifier = Modifier.fillMaxSize().padding(innerPadding),
+            )
+        }
+
+        is CliAgentInternalState.LegacyTerminal -> {
+            // Backwards-compat: tmux-backed legacy path, unchanged from
+            // before T22. Kept verbatim so the picker → tmux flow keeps
+            // working end-to-end during the migration.
+            TerminalScreen(
+                api = api,
+                operator = operator,
+                appSlug = s.appSlug,
+                appName = s.appName,
+                provider = s.provider,
+                onBack = { onStateChange(CliAgentInternalState.EmptyState) },
+                modifier = Modifier.fillMaxSize().padding(innerPadding),
+            )
+        }
+    }
+}
+
+internal sealed class CliAgentInternalState {
     /** No active session — show empty-state launch UI. */
     data object EmptyState : CliAgentInternalState()
 
     /** Long-press fallback — legacy app/folder picker. */
     data object FolderPicker : CliAgentInternalState()
 
-    /** Zellij-launched terminal session driven by [CliAgentScreenState.currentSession]. */
-    data object Terminal : CliAgentInternalState()
+    /**
+     * Zellij-launched terminal session.
+     *
+     * Carries the full [ZellijSession] (with `token` + `sessionUrl`) so
+     * [ZellijTerminalScreen] can construct a [com.aiblackbox.portal.data.api.ZellijWebSocketClient]
+     * directly from this tuple. Token lives only here + in
+     * [CliAgentScreenState.liveSessionFor]; it's never persisted to disk
+     * (audit I7).
+     */
+    data class Terminal(val session: ZellijSession) : CliAgentInternalState()
 
     /** Picker-driven legacy terminal (tmux path with explicit app pick). */
     data class LegacyTerminal(

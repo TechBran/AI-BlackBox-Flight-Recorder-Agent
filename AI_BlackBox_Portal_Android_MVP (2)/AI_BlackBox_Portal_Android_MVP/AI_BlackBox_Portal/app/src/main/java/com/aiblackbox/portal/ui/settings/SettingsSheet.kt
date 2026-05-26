@@ -245,7 +245,7 @@ fun SettingsSheet(
                     FullWidthMenuButton("Timeline") { onNavigate("timeline"); onDismiss() }
                     FullWidthMenuButton("Media Browser") { onNavigate("media"); onDismiss() }
                     FullWidthMenuButton("Computer Use") { onNavigate("computer_use"); onDismiss() }
-                    FullWidthMenuButton("CLI Agent") { onNavigate("cli_agent"); onDismiss() }
+                    FullWidthMenuButton("CLI Agents") { onNavigate("cli_agent"); onDismiss() }
                     FullWidthMenuButton("Voice Agent") { onNavigate("voice"); onDismiss() }
                     FullWidthMenuButton("Scheduler") { onNavigate("cron"); onDismiss() }
                     FullWidthMenuButton("Devices") { onNavigate("devices"); onDismiss() }

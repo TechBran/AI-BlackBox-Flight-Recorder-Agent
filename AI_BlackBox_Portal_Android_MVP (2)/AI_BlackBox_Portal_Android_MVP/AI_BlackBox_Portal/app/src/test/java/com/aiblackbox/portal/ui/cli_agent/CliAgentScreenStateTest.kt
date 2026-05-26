@@ -346,6 +346,98 @@ class CliAgentScreenStateTest {
 
     // ── selectSession / clearCurrent ─────────────────────────────────────
 
+    // ── liveSessionFor (T22: per-name live ZellijSession breadcrumb) ─────
+
+    @Test
+    fun `liveSessionFor returns the launched ZellijSession after launch completes`() = runTest {
+        val holder = newHolder(this)
+
+        // Launch response carries token + session_url.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body(
+                    """{"session_name":"Brandon__terminal___root__9","session_url":"https://x","token":"tok-xyz","expires_at":null}""",
+                )
+                .build()
+        )
+        // Follow-up refresh.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"Brandon__terminal___root__9","provider":"terminal"}]}""")
+                .build()
+        )
+
+        holder.launch("terminal")
+        joinChildren()
+
+        val live = holder.liveSessionFor("Brandon__terminal___root__9")
+        assertNotNull("live session must be retained per-name after launch", live)
+        assertEquals("tok-xyz", live?.token)
+        assertEquals("https://x", live?.sessionUrl)
+        assertEquals("terminal", live?.provider)
+    }
+
+    @Test
+    fun `liveSessionFor returns null for sessions this holder never launched`() = runTest {
+        val holder = newHolder(this)
+
+        // Just a list call — no launch ever fires through this holder.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"foreign","provider":"claude"}]}""")
+                .build()
+        )
+        holder.refreshSessions()
+        joinChildren()
+
+        // Row exists in [sessions] but [liveSessionFor] knows nothing — this
+        // is the path the screen uses to detect "no token, must relaunch."
+        assertEquals(1, holder.sessions.size)
+        assertNull(holder.liveSessionFor("foreign"))
+    }
+
+    @Test
+    fun `kill drops the live session breadcrumb`() = runTest {
+        val holder = newHolder(this)
+
+        // Seed via launch so we have a live entry to drop.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"doomed","session_url":"u","token":"t","expires_at":null}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"doomed","provider":"claude"}]}""")
+                .build()
+        )
+        holder.launch("claude")
+        joinChildren()
+        assertNotNull(holder.liveSessionFor("doomed"))
+
+        // Kill the session.
+        server.enqueue(MockResponse.Builder().code(204).build())
+        holder.kill(holder.sessions.first())
+        joinChildren()
+
+        assertNull(
+            "Live-session breadcrumb must be dropped on kill (token's revoked server-side)",
+            holder.liveSessionFor("doomed"),
+        )
+    }
+
+    // ── selectSession / clearCurrent ─────────────────────────────────────
+
     @Test
     fun `selectSession sets and clearCurrent unsets currentSession`() = runTest {
         val holder = newHolder(this)

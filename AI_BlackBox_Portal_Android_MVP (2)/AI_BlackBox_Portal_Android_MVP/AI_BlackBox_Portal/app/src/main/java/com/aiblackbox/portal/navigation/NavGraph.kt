@@ -71,6 +71,15 @@ fun BlackBoxNavGraph(
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onModelChange: (String) -> Unit = {},
+    /**
+     * Open the global SettingsSheet (the app's hamburger menu).
+     *
+     * Threaded through so destinations that own their own top bar — e.g.
+     * [CliAgentScreen]'s [com.aiblackbox.portal.ui.cli_agent.SessionSwitcherTopBar] —
+     * can surface a menu button without re-implementing the sheet locally.
+     * Wired in [com.aiblackbox.portal.NativeMainActivity] to `showSettings = true`.
+     */
+    onOpenSettings: () -> Unit = {},
 ) {
     NavHost(
         navController = navController,
@@ -142,6 +151,10 @@ fun BlackBoxNavGraph(
                 origin = origin,
                 operator = operator,
                 onBackToTools = { navController.popBackStack() },
+                // T22: SessionSwitcherTopBar's hamburger forwards to the
+                // global SettingsSheet so the CLI Agents screen integrates
+                // with the same menu the rest of the app uses.
+                onOpenNavDrawer = onOpenSettings,
             )
         }
         composable(Routes.ROBOTICS) {

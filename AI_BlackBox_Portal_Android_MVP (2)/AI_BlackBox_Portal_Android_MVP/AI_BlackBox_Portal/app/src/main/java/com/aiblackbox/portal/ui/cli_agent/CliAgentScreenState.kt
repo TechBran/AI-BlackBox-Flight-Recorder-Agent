@@ -97,6 +97,30 @@ internal class CliAgentScreenState(
     var currentSession: ZellijSessionRow? by mutableStateOf(null)
         private set
 
+    /**
+     * Map of session-name → full [ZellijSession] (with `token` + `sessionUrl`)
+     * for sessions that THIS holder freshly launched in this composition. Used
+     * by the screen to look up transport credentials when the user picks a
+     * row from the switcher — the `ZellijSessionRow` returned from
+     * `GET /sessions` deliberately omits token/URL (audit I7: mint-per-launch),
+     * so we keep our own breadcrumb trail per holder instance.
+     *
+     * **Lifetime.** Cleared when the holder is rebuilt (operator switch,
+     * config change). That's intentional — the token is transient and
+     * server-side state is reachable via `refreshSessions()`. If a user
+     * rotates the device with a session active, they'll need to kill +
+     * relaunch to reattach (T23 device-QA can flag this if it bites).
+     *
+     * **Why state-map, not MutableState<Map>:** the keys-by-name shape +
+     * sparse update pattern (one entry per launch) doesn't need full
+     * recomposition on every put; consumers (CliAgentScreen) look up by
+     * name on demand inside event handlers.
+     */
+    private val liveSessionsByName: MutableMap<String, ZellijSession> = mutableMapOf()
+
+    /** Look up a freshly-launched session by name, or null if not held. */
+    fun liveSessionFor(name: String): ZellijSession? = liveSessionsByName[name]
+
     /** True while the initial sessions fetch is in flight. */
     var isInitialLoad: Boolean by mutableStateOf(true)
         private set
@@ -164,6 +188,10 @@ internal class CliAgentScreenState(
                 )
                 sessions = (sessions + row).distinctBy { it.name }
                 currentSession = row
+                // Stash the live session (with token + sessionUrl) so the
+                // screen can construct the WS client on selectSession too,
+                // not only on the just-fired launch callback.
+                liveSessionsByName[session.name] = session
                 onLaunched(session)
                 // Schedule a follow-up refresh to pick up server-side
                 // fields the launch response didn't carry (createdAt etc).
@@ -194,6 +222,9 @@ internal class CliAgentScreenState(
             try {
                 repository.killZellijSession(operator, row.name)
                 sessions = sessions.filterNot { it.name == row.name }
+                // Drop the live session breadcrumb — the token's revoked
+                // server-side and the session no longer exists.
+                liveSessionsByName.remove(row.name)
                 if (currentSession?.name == row.name) {
                     currentSession = sessions.firstOrNull()
                 }
