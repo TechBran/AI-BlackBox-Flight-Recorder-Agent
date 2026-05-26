@@ -4,9 +4,11 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.aiblackbox.portal.BuildConfig
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -116,7 +118,18 @@ class ZellijWebSocketClient(
 
     /**
      * Idempotent. Fires version probe → auth pre-flight → opens terminal WS.
-     * Auth + version run on [coroutineScope] (IO-bound suspending HTTP calls).
+     *
+     * `probeVersion` and `preflightAuth` use OkHttp's BLOCKING `execute()`
+     * API (not `enqueue()`), so they MUST run on `Dispatchers.IO` — running
+     * them on the caller's `coroutineScope` (which is typically
+     * `rememberCoroutineScope()` → AndroidUiDispatcher = main thread) would
+     * trigger StrictMode's `NetworkOnMainThreadException`. T23 device QA
+     * caught this on the Z Fold 6: Brandon saw "Error: unknown" because
+     * `preflightAuth` threw with a null message (StrictMode's exception
+     * doesn't carry one). `openTerminalSocket` is OK on the caller's
+     * dispatcher because `httpClient.newWebSocket(...)` returns
+     * immediately; the actual connect happens on OkHttp's internal
+     * dispatcher pool.
      */
     fun connect(listener: Listener) {
         if (userClosed.get()) {
@@ -126,8 +139,10 @@ class ZellijWebSocketClient(
         this.listener = listener
         coroutineScope.launch {
             try {
-                probeVersion()
-                preflightAuth()
+                withContext(Dispatchers.IO) {
+                    probeVersion()
+                    preflightAuth()
+                }
                 openTerminalSocket()
             } catch (t: Throwable) {
                 loge(TAG, "connect() failed: ${t.message}", t)
@@ -410,7 +425,12 @@ class ZellijWebSocketClient(
                     delay(sec * 1000L)
                     if (userClosed.get()) return@launch
                     try {
-                        preflightAuth()
+                        // preflightAuth uses blocking httpClient.execute() —
+                        // must run on Dispatchers.IO to avoid StrictMode's
+                        // NetworkOnMainThreadException (same fix as connect()).
+                        withContext(Dispatchers.IO) {
+                            preflightAuth()
+                        }
                         openTerminalSocket()
                         return@launch // success — terminal onOpen will reset lastReconnectIdx
                     } catch (t: Throwable) {
