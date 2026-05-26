@@ -299,16 +299,32 @@ private fun CliAgentBranches(
                     onStateChange(CliAgentInternalState.EmptyState)
                 }
             }
-            ZellijTerminalScreen(
-                api = api,
-                operator = operator,
-                session = s.session,
-                onBack = {
-                    screenState.clearCurrent()
-                    onStateChange(CliAgentInternalState.EmptyState)
-                },
-                modifier = Modifier.fillMaxSize().padding(innerPadding),
-            )
+            // T23 device QA fix (2026-05-26): wrap in key(session.name) so
+            // switching sessions via the switcher tears down the ENTIRE
+            // ZellijTerminalScreen subtree and rebuilds it fresh — new
+            // ZellijWebSocketClient, new TerminalView, new TerminalEmulator,
+            // new pointerInput gesture handler. Without this key, the
+            // composable just re-runs with new params: `remember(session.name)`
+            // returns a fresh client, but the pointerInput(Unit) lambda,
+            // AndroidView factory closures, and other `remember { }` slots
+            // retain stale captures of the previous session's client.
+            // Symptom Brandon hit: scroll (and probably typing) stops
+            // working after switching sessions because the gesture handler
+            // calls .sendBytes() on a closed WebSocket. Wrapping in key()
+            // also avoids mixing the new session's bytes into the old
+            // session's TerminalEmulator scrollback (visual contamination).
+            androidx.compose.runtime.key(s.session.name) {
+                ZellijTerminalScreen(
+                    api = api,
+                    operator = operator,
+                    session = s.session,
+                    onBack = {
+                        screenState.clearCurrent()
+                        onStateChange(CliAgentInternalState.EmptyState)
+                    },
+                    modifier = Modifier.fillMaxSize().padding(innerPadding),
+                )
+            }
         }
 
         is CliAgentInternalState.LegacyTerminal -> {
