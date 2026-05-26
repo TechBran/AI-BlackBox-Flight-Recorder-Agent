@@ -141,6 +141,16 @@ class NativeMainActivity : ComponentActivity() {
                 val checkpointTurns by chatViewModel.checkpointTurns.collectAsState()
                 val operators by chatViewModel.operators.collectAsState()
                 var showSettings by remember { mutableStateOf(false) }
+                // T23 device QA fix (2026-05-26): CliAgentScreen-in-Terminal-state
+                // must hide BOTH the floating operator chrome (Layer 2) AND the
+                // floating X close button (Layer 2.5). Both live as siblings to
+                // BlackBoxNavGraph here, so the CompositionLocalProvider pattern
+                // T20 used inside CliAgentScreen never reached them — that
+                // provider only scopes to children of CliAgentScreen, not
+                // activity-level overlays. Lifting the flag to Activity scope
+                // and passing the setter down through NavGraph is the correct
+                // mechanism.
+                var cliAgentInTerminal by remember { mutableStateOf(false) }
                 val autoTtsEnabled by store.autoTtsEnabled.collectAsState(initial = false)
 
                 // Audio recorder for BlackBox Whisper STT
@@ -398,6 +408,13 @@ class NativeMainActivity : ComponentActivity() {
                         // routes through here to open the same SettingsSheet
                         // the global BlackBoxTopBar uses.
                         onOpenSettings = { showSettings = true },
+                        // T23 device QA fix: lets CliAgentScreen tell the
+                        // activity when its inner state is in Terminal mode,
+                        // so the activity-level chrome layers (Layer 2
+                        // BlackBoxTopBar + Layer 2.5 X close) can hide.
+                        onCliAgentTerminalActiveChange = { active ->
+                            cliAgentInTerminal = active
+                        },
                     )
 
                     // Auto-set provider when on dedicated provider screens
@@ -437,7 +454,7 @@ class NativeMainActivity : ComponentActivity() {
                     // [AppChromeLayer] scopes the LocalShowAppChrome.current read
                     // to a 1-line composable; without this extraction every
                     // sibling in this setContent body would invalidate on toggle.
-                    AppChromeLayer {
+                    AppChromeLayer(forceHide = cliAgentInTerminal) {
                         BlackBoxTopBar(
                             operator = operator,
                             operators = operators,
@@ -470,7 +487,11 @@ class NativeMainActivity : ComponentActivity() {
                     // Essential for XR goggles where back gesture is difficult
                     val currentBackStackEntry by navController.currentBackStackEntryAsState()
                     val currentRoute = currentBackStackEntry?.destination?.route
-                    if (currentRoute != null && currentRoute != Routes.CHAT) {
+                    // T23 device QA fix: also hide when CliAgentScreen is in
+                    // Terminal state — the SessionSwitcherTopBar's own
+                    // hamburger occupies this region, and two affordances at
+                    // the same screen position overlap visually on Z Fold 6.
+                    if (currentRoute != null && currentRoute != Routes.CHAT && !cliAgentInTerminal) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
@@ -764,6 +785,11 @@ class NativeMainActivity : ComponentActivity() {
  * insulated from chrome-visibility toggles.
  */
 @Composable
-private fun AppChromeLayer(content: @Composable () -> Unit) {
-    if (LocalShowAppChrome.current) content()
+private fun AppChromeLayer(
+    forceHide: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    // forceHide is the activity-scope override (T23 fix); LocalShowAppChrome
+    // is the legacy CompositionLocal kept for any descendant-scoped consumers.
+    if (!forceHide && LocalShowAppChrome.current) content()
 }

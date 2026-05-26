@@ -72,6 +72,17 @@ fun CliAgentScreen(
     operator: String,
     onBackToTools: () -> Unit,
     onOpenNavDrawer: () -> Unit = {},
+    /**
+     * T23 device QA fix: invoked with `true` whenever the inner state
+     * machine enters a terminal branch (Zellij or Legacy), `false`
+     * otherwise. NativeMainActivity uses the flag to hide its
+     * activity-scope chrome layers (operator pill + Layer 2.5 X close
+     * button) so they don't overlap [SessionSwitcherTopBar]. The earlier
+     * T20 `LocalShowAppChrome` CompositionLocal pattern only reached
+     * descendants of CliAgentScreen — siblings like BlackBoxTopBar in
+     * NativeMainActivity never saw the override.
+     */
+    onTerminalActiveChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -123,8 +134,19 @@ fun CliAgentScreen(
     }
 
     // Hide the floating app chrome while a terminal session is on screen.
+    //
+    // T23 fix: the CompositionLocalProvider scoping only reaches descendants
+    // of CliAgentScreen — sibling overlays in NativeMainActivity (Layer 2
+    // BlackBoxTopBar + Layer 2.5 X close button) never saw the override and
+    // stayed visible on real devices. The provider is kept for any future
+    // CliAgentScreen-scoped consumers, but the activity-level hide now goes
+    // through [onTerminalActiveChange] which NativeMainActivity treats as
+    // a hard override.
     val terminalActive = state is CliAgentInternalState.Terminal ||
         state is CliAgentInternalState.LegacyTerminal
+    LaunchedEffect(terminalActive) {
+        onTerminalActiveChange(terminalActive)
+    }
     CompositionLocalProvider(LocalShowAppChrome provides !terminalActive) {
         // The session switcher top bar is shown on every branch EXCEPT the
         // pure FolderPicker (which has its own legacy chrome). Showing it

@@ -134,12 +134,19 @@ fun SessionSwitcherTopBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp)
-                .height(48.dp),
+                // T23 device QA: drop the 4dp vertical padding — the
+                // IconButton/Box children already include their own
+                // touch-target padding. Bar is now ~40dp tall instead of
+                // ~56dp, giving the terminal more vertical room.
+                .padding(horizontal = 4.dp)
+                .height(40.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // ── Hamburger ──
-            IconButton(onClick = onOpenNavDrawer) {
+            IconButton(
+                onClick = onOpenNavDrawer,
+                modifier = Modifier.size(40.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Default.Menu,
                     contentDescription = "Open navigation",
@@ -150,7 +157,7 @@ fun SessionSwitcherTopBar(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(48.dp)
+                    .height(40.dp)
                     .combinedClickable(
                         onClick = { dropdownExpanded = true },
                         onLongClick = {
@@ -185,7 +192,10 @@ fun SessionSwitcherTopBar(
 
             // ── Chevron ──
             Box {
-                IconButton(onClick = { dropdownExpanded = true }) {
+                IconButton(
+                    onClick = { dropdownExpanded = true },
+                    modifier = Modifier.size(40.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Default.ArrowDropDown,
                         contentDescription = "Open session switcher",

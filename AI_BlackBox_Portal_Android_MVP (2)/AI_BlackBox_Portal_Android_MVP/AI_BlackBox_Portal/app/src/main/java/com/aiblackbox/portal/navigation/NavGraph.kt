@@ -80,6 +80,14 @@ fun BlackBoxNavGraph(
      * Wired in [com.aiblackbox.portal.NativeMainActivity] to `showSettings = true`.
      */
     onOpenSettings: () -> Unit = {},
+    /**
+     * T23 device QA hook (2026-05-26): [CliAgentScreen] calls this with
+     * `true` when its inner state transitions to a terminal branch and
+     * `false` when it leaves. NativeMainActivity uses the flag to hide
+     * its activity-scope floating chrome (operator pill + Layer 2.5 X
+     * close button) so they don't overlap the SessionSwitcherTopBar.
+     */
+    onCliAgentTerminalActiveChange: (Boolean) -> Unit = {},
 ) {
     NavHost(
         navController = navController,
@@ -146,7 +154,16 @@ fun BlackBoxNavGraph(
                 onSpeakWithId = onSpeakWithId,
             )
         }
-        composable(Routes.CLI_AGENT) {
+        composable(
+            Routes.CLI_AGENT,
+        ) {
+            // T23: clear the terminal-active flag when this composable leaves
+            // composition (user navigated away from CLI Agents entirely).
+            // Otherwise a stale `true` would keep the activity chrome hidden
+            // on the next screen.
+            androidx.compose.runtime.DisposableEffect(Unit) {
+                onDispose { onCliAgentTerminalActiveChange(false) }
+            }
             CliAgentScreen(
                 origin = origin,
                 operator = operator,
@@ -155,6 +172,9 @@ fun BlackBoxNavGraph(
                 // global SettingsSheet so the CLI Agents screen integrates
                 // with the same menu the rest of the app uses.
                 onOpenNavDrawer = onOpenSettings,
+                // T23: propagate inner state-machine transitions up to the
+                // activity so the chrome layers can hide.
+                onTerminalActiveChange = onCliAgentTerminalActiveChange,
             )
         }
         composable(Routes.ROBOTICS) {
