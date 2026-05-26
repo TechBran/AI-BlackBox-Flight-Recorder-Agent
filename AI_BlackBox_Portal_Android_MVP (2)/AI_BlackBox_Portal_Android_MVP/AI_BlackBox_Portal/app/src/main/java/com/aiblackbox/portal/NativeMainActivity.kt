@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -52,6 +53,7 @@ import com.aiblackbox.portal.ui.theme.BlackBoxTheme
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.components.BlackBoxTopBar
+import com.aiblackbox.portal.ui.insets.LocalShowAppChrome
 import com.aiblackbox.portal.ui.settings.SettingsSheet
 import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.util.Constants
@@ -424,32 +426,41 @@ class NativeMainActivity : ComponentActivity() {
                     }
 
                     // Layer 2: TopBar floating on top (transparent bg, only bubbles visible)
-                    BlackBoxTopBar(
-                        operator = operator,
-                        operators = operators,
-                        snapshotCount = snapshotCount,
-                        checkpointTurns = checkpointTurns,
-                        isHealthy = isHealthy,
-                        onMenuClick = { showSettings = true },
-                        onOperatorChange = { scope.launch { store.setOperator(it) } },
-                        onAddOperator = { name ->
-                            scope.launch {
-                                try {
-                                    val api = chatViewModel.getApi() ?: return@launch
-                                    val body = """{"name":"$name"}"""
-                                    val response = api.post("/operator/add", body)
-                                    val obj = jsonParser.parseToJsonElement(response).jsonObject
-                                    val status = obj["status"]?.jsonPrimitive?.content
-                                    if (status == "success" || status == "exists") {
-                                        store.setOperator(name)
-                                        chatViewModel.checkHealth() // Refreshes operator list
+                    // T20: respect LocalShowAppChrome so screens like CliAgentScreen
+                    // (terminal-active branch) can hide the operator pill while
+                    // SessionSwitcherTopBar owns the top region.
+                    //
+                    // [AppChromeLayer] scopes the LocalShowAppChrome.current read
+                    // to a 1-line composable; without this extraction every
+                    // sibling in this setContent body would invalidate on toggle.
+                    AppChromeLayer {
+                        BlackBoxTopBar(
+                            operator = operator,
+                            operators = operators,
+                            snapshotCount = snapshotCount,
+                            checkpointTurns = checkpointTurns,
+                            isHealthy = isHealthy,
+                            onMenuClick = { showSettings = true },
+                            onOperatorChange = { scope.launch { store.setOperator(it) } },
+                            onAddOperator = { name ->
+                                scope.launch {
+                                    try {
+                                        val api = chatViewModel.getApi() ?: return@launch
+                                        val body = """{"name":"$name"}"""
+                                        val response = api.post("/operator/add", body)
+                                        val obj = jsonParser.parseToJsonElement(response).jsonObject
+                                        val status = obj["status"]?.jsonPrimitive?.content
+                                        if (status == "success" || status == "exists") {
+                                            store.setOperator(name)
+                                            chatViewModel.checkHealth() // Refreshes operator list
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("AddOperator", "Failed: ${e.message}", e)
                                     }
-                                } catch (e: Exception) {
-                                    android.util.Log.e("AddOperator", "Failed: ${e.message}", e)
                                 }
                             }
-                        }
-                    )
+                        )
+                    }
 
                     // Layer 2.5: Floating X close button on sub-screens (not chat)
                     // Essential for XR goggles where back gesture is difficult
@@ -736,4 +747,19 @@ class NativeMainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/**
+ * T20 polish: scope the [LocalShowAppChrome] read to a tiny composable so
+ * the giant `setContent { ... }` body in [NativeMainActivity] doesn't
+ * subscribe (and therefore invalidate) every sibling on chrome toggle.
+ *
+ * Pass the chrome ([content]) as a slot lambda — it only executes when
+ * the local resolves to `true`. The CompositionLocal subscription stays
+ * inside this 1-line composable; the rest of the activity content stays
+ * insulated from chrome-visibility toggles.
+ */
+@Composable
+private fun AppChromeLayer(content: @Composable () -> Unit) {
+    if (LocalShowAppChrome.current) content()
 }
