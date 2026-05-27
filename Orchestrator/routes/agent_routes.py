@@ -1351,6 +1351,15 @@ async def app_proxy(port: int, path: str, request: Request):
                 if key.lower() not in ('host', 'content-length', 'transfer-encoding', 'connection'):
                     headers[key] = value
 
+            # Phase 5 master-token model: override any client-supplied
+            # cookie with the orchestrator's master session cookie. See
+            # WS handler below for the architectural rationale.
+            try:
+                from Orchestrator.cli_agent import zellij_client as _zc
+                headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
+            except Exception as exc:  # noqa: BLE001
+                print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — falling back to client headers")
+
             # Forward request
             if request.method == "GET":
                 resp = await client.get(target_url, headers=headers)
@@ -1440,17 +1449,22 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     if query:
         target_uri += f"?{query}"
 
-    # Forward Cookie + Authorization to upstream. Zellij's web client auths
-    # by POSTing /command/login with the query-string token, then relying on
-    # the resulting Set-Cookie for all subsequent WS connections. Without
-    # forwarding these headers, upstream sees an un-authed connection and
-    # returns 401, which our generic except surfaces as 1011 to the browser.
-    # T11c surfaced this on real browser-driven iframes.
-    forward_headers = {}
-    for name in ("cookie", "authorization"):
-        value = websocket.headers.get(name)
-        if value:
-            forward_headers[name] = value
+    # Phase 5 master-token model (2026-05-26): the orchestrator owns
+    # zellij auth via a long-lived master token; the app-proxy injects
+    # the SESSION COOKIE (issued by zellij's /command/login) on every
+    # upstream forward. Clients (browser, Android) never need to know
+    # about zellij tokens — they just open WSes through us.
+    #
+    # Operator isolation (audit I8) still enforced at the route layer
+    # — this cookie just authenticates the orchestrator → zellij-web
+    # connection. See Orchestrator/cli_agent/zellij_client.py for the
+    # two-step auth lifecycle (auth_token vs session_token cookie).
+    forward_headers: dict = {}
+    try:
+        from Orchestrator.cli_agent import zellij_client as _zc
+        forward_headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
+    except Exception as exc:  # noqa: BLE001
+        print(f"[APP-PROXY-WS] get_master_session_cookie failed: {exc} — upstream may 401")
 
     try:
         upstream_cm = websockets.connect(

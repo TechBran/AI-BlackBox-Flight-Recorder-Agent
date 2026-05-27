@@ -125,7 +125,10 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
             name = parsed.sessionName,
             provider = provider,
             sessionUrl = parsed.sessionUrl,
-            token = parsed.token,
+            // Phase 5 (2026-05-26): orchestrator may omit token entirely
+            // (master-token model) — coerce to empty string for backward
+            // compat with the ZellijSession non-null field shape.
+            token = parsed.token ?: "",
             expiresAt = parsed.expiresAt,
             createdAt = null,
             app = app,

@@ -613,7 +613,8 @@ sudo -u "$REAL_USER" mkdir -p \
     "$REAL_HOME/.config" \
     "$REAL_HOME/.cache" \
     "$REAL_HOME/.npm" \
-    "$REAL_HOME/.local/share/zellij"
+    "$REAL_HOME/.local/share/zellij" \
+    "$REAL_HOME/.local/share/blackbox"
 sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/null <<EOF
 # CLI Agent compatibility drop-in (E22). DO NOT EDIT — install.sh manages
 # this file. To customize service behavior, edit override.conf instead.
@@ -629,7 +630,7 @@ sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/
 # the cli-agent zellij endpoints. Without this, every
 # /cli-agent/zellij/launch returns 500 "attempt to write a readonly
 # database" once CLI_AGENT_BACKEND=zellij.
-ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij /tmp
+ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij $REAL_HOME/.local/share/blackbox /tmp
 # Disable PrivateTmp so tmux's socket lives in real /tmp and survives
 # service restarts (combined with KillMode=process below).
 PrivateTmp=false

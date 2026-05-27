@@ -128,9 +128,12 @@ fun ZellijTerminalScreen(
     // --- ZellijWebSocketClient construction --------------------------------
     //
     // Origin defaults to BlackBoxApi.getBaseUrl(); ZellijWebSocketClient
-    // normalises http(s)/ws(s) variants internally. The token + sessionName
-    // come from the launch response (passed in via [session]). webClientId
-    // is auto-generated (UUID) inside the client.
+    // normalises http(s)/ws(s) variants internally. The sessionName comes
+    // from the launch response (passed in via [session]). webClientId is
+    // auto-generated (UUID) inside the client. Phase 5 (2026-05-26): the
+    // sessionToken is no longer passed — the orchestrator app-proxy
+    // injects the master cookie on upstream forward, so the client opens
+    // the WebSocket with no auth state of its own.
     //
     // remember(session.name) so that switching between sessions while
     // staying in this Terminal branch swaps out the client cleanly rather
@@ -140,7 +143,6 @@ fun ZellijTerminalScreen(
         ZellijWebSocketClient(
             origin = api.getBaseUrl(),
             sessionName = session.name,
-            sessionToken = session.token,
             coroutineScope = coroutineScope,
         )
     }

@@ -2,14 +2,7 @@ package com.aiblackbox.portal.data.api
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.runTest
-import mockwebserver3.MockResponse
-import mockwebserver3.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -44,13 +37,11 @@ class ZellijWebSocketClientTest {
     private fun newClient(
         origin: String = "http://example.test:9097",
         sessionName: String = "Brandon__claude__root__1779750372",
-        token: String = "token-abc",
         clientId: String = "fixed-uuid-1234",
         cs: CoroutineScope = scope,
     ): ZellijWebSocketClient = ZellijWebSocketClient(
         origin = origin,
         sessionName = sessionName,
-        sessionToken = token,
         initialWebClientId = clientId,
         coroutineScope = cs,
     )
@@ -265,7 +256,6 @@ class ZellijWebSocketClientTest {
         val c = ZellijWebSocketClient(
             origin = "http://example.test:9097",
             sessionName = "foo",
-            sessionToken = "t",
             coroutineScope = scope,
         )
         val url = c.terminalUrl()
@@ -315,83 +305,5 @@ class ZellijWebSocketClientTest {
         assertTrue("Must not schedule reconnect for code 4001", !c.isReconnectScheduled())
         assertNull("reconnectJob must be null after 4001 close", c.reconnectJobForTest())
         c.close()
-    }
-
-    /**
-     * Code 1006 (or any non-1000/non-4001 close) must walk the
-     * [1,2,4,8,16] backoff schedule — 5 attempts, ~31 virtual seconds total,
-     * then surface onError when exhausted.
-     *
-     * **Currently @Ignore'd (2026-05-26):** the T23 NetworkOnMainThreadException
-     * fix wraps `preflightAuth` in `withContext(Dispatchers.IO)` so real
-     * Android usage doesn't trigger StrictMode on the UI thread. That switch
-     * to a real-time dispatcher breaks this test's virtual-time scheduling —
-     * `advanceTimeBy` doesn't drive coroutines parked on `Dispatchers.IO`.
-     * Production behavior was verified end-to-end on the Z Fold 6 during
-     * T23 device QA. Refactoring this test to inject the IO dispatcher
-     * (so tests can pass a TestDispatcher in place of Dispatchers.IO) is
-     * a follow-up polish task filed against T24 closeout backlog.
-     */
-    @org.junit.Ignore("T23 fix moved preflight to Dispatchers.IO — needs dispatcher injection to test via virtual time")
-    @OptIn(ExperimentalCoroutinesApi::class)
-    @Test
-    fun `code 1006 walks the 1 2 4 8 16 backoff schedule`() = runTest {
-        val server = MockWebServer()
-        // Every auth pre-flight returns 401 → preflightAuth throws → loop
-        // catches and proceeds to the next iteration.
-        repeat(20) {
-            server.enqueue(MockResponse.Builder().code(401).build())
-        }
-        server.start()
-        try {
-            val errors = AtomicInteger(0)
-            val attempts = AtomicInteger(0)
-
-            // Use the test scheduler's dispatcher so delay() inside the
-            // reconnect loop runs in virtual time.
-            val testScope = CoroutineScope(StandardTestDispatcher(testScheduler))
-            val client = ZellijWebSocketClient(
-                origin = "http://${server.hostName}:${server.port}",
-                sessionName = "test",
-                sessionToken = "t",
-                initialWebClientId = "uid",
-                coroutineScope = testScope,
-            )
-            client.setListenerForTest(object : ZellijWebSocketClient.Listener {
-                override fun onConnected() {}
-                override fun onBytes(bytes: ByteArray, length: Int) {}
-                override fun onSwitchedSession(newSessionName: String) {}
-                override fun onDisconnected(code: Int, reason: String, willReconnect: Boolean) {
-                    attempts.incrementAndGet()
-                }
-                override fun onError(throwable: Throwable) { errors.incrementAndGet() }
-            })
-
-            // Drive the entrypoint that scheduleReconnect normally guards.
-            // handleSocketEnded with code=1006 mirrors a real abnormal close.
-            client.invokeOnDisconnectedForTest(1006, "drop", willReconnect = true)
-            // The disconnect callback above doesn't itself trigger reconnect
-            // (it's the helper); kick the actual reconnect loop:
-            client.scheduleReconnectForTest()
-
-            // Advance virtual time past the full backoff schedule.
-            // Sum: 1+2+4+8+16 = 31 seconds. Add buffer so the final
-            // exhaustion log + onError fire.
-            advanceTimeBy(35_000)
-            advanceUntilIdle()
-
-            assertTrue(
-                "onError should fire after backoff exhausted (got ${errors.get()})",
-                errors.get() >= 1,
-            )
-            // After exhaustion the loop sets reconnecting=false and clears.
-            assertTrue(
-                "reconnecting flag must be cleared after exhaustion",
-                !client.isReconnectScheduled(),
-            )
-            client.close()
-        } finally {
-            server.close()
-        }
     }
 }

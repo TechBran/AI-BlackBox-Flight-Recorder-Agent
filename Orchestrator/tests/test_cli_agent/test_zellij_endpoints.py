@@ -109,12 +109,22 @@ def test_launch_with_default_tmux_backend_returns_503(monkeypatch):
 # --- launch with backend=zellij + healthy returns 201 ------------------
 
 
-def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
+def test_launch_with_zellij_backend_returns_201_no_token_in_response(
     monkeypatch, tmp_path,
 ):
-    """Full happy-path: mock the entire Zellij side. Verify response
-    shape (session_name + session_url + token + expires_at) AND that the
-    persisted state file contains zero UUID-shaped strings (audit I7)."""
+    """Phase 5 master-token model (2026-05-26): the launch endpoint no
+    longer mints per-session tokens. The orchestrator's app-proxy
+    injects the master token cookie on every upstream forward; clients
+    never see tokens. Verify:
+      - response shape: session_name + session_url + token (None) +
+        expires_at (None)
+      - session_url has NO `?token=` query param
+      - state row has token_name="master" placeholder
+      - audit-I7-style check still holds: no UUID-shaped strings in
+        the state file (the master token value is stored separately
+        in ~/.local/share/blackbox/zellij-master.token, NOT in
+        zellij_sessions.json)
+    """
     monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
 
     import Orchestrator.cli_agent as cli_agent
@@ -126,11 +136,7 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
     monkeypatch.setattr(zellij_state, "_STATE_PATH", state_path)
 
-    fake_token_value = "6dac3716-1a65-4ea6-95f8-c54af9bdebb0"
-
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
-         patch.object(zellij_client, "mint_token",
-                      return_value=("token_3", fake_token_value)), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -152,17 +158,24 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     assert body["session_url"].startswith("/app-proxy/")
     # Session name lives in the URL PATH (Zellij reads via pathname.split('/').pop()).
     assert f"/{minted_name}" in body["session_url"]
-    assert f"token={fake_token_value}" in body["session_url"]
-    assert body["token"] == fake_token_value
+    # Phase 5 master-token model: NO `?token=` query param in session_url.
+    assert "?token=" not in body["session_url"], (
+        f"master-token model violation — `?token=` leaked into session_url: {body['session_url']!r}"
+    )
+    # token field is now always None (clients never see tokens).
+    assert body["token"] is None
     # Terminal-mode token is long-lived; expires_at is null.
     assert body["expires_at"] is None
 
-    # Audit I7 acceptance: the persisted state file MUST NOT contain a
-    # UUID-shaped string. The raw token value lives only in the response.
+    # State file invariant (renamed from audit-I7 since the per-session-
+    # token rationale is gone, but the test still has value as a sanity
+    # check that we don't accidentally start persisting auth values here).
+    # The master token value lives in ~/.local/share/blackbox/zellij-master.token,
+    # NEVER in zellij_sessions.json.
     assert state_path.exists(), "launch handler did not persist state"
     state_raw = state_path.read_text(encoding="utf-8")
     assert not _UUID_RE.search(state_raw), (
-        f"audit I7 violation — UUID found in state file:\n{state_raw}"
+        f"UUID found in state file (master token should never be persisted here):\n{state_raw}"
     )
     rows = json.loads(state_raw)
     assert len(rows) == 1
@@ -170,10 +183,9 @@ def test_launch_with_zellij_backend_returns_201_and_no_uuid_persisted(
     assert row["operator"] == "Brandon"
     assert row["provider"] == "terminal"
     assert row["session_name"] == minted_name
-    assert row["token_name"] == "token_3"
+    # Phase 5: token_name is the literal "master" placeholder.
+    assert row["token_name"] == "master"
     assert row["expires_at"] is None
-    # Defense in depth: token_name is the safe handle, NEVER the UUID value.
-    assert row["token_name"] != fake_token_value
 
     # launch_session was invoked with binary=None for terminal mode.
     mock_launch.assert_called_once()

@@ -248,6 +248,39 @@ def startup_initialize() -> None:
         )
         return
 
+    # Step 4: master-token bootstrap (Phase 5 master-token model). Two
+    # parts because zellij's auth has two steps:
+    #   4a. Mint (or load) the master auth_token. Persisted to disk so it
+    #       survives orchestrator restarts.
+    #   4b. POST /command/login with the auth_token → receive a
+    #       session_token cookie. That cookie value is what the app-proxy
+    #       injects on every upstream forward. The cookie value is NOT
+    #       persisted to disk — re-exchange on every orchestrator boot is
+    #       cheap and avoids stale-cookie issues.
+    try:
+        zellij_client.ensure_master_zellij_token()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "startup_initialize: ensure_master_zellij_token failed (%s) — "
+            "continuing in degraded mode; app-proxy /app-proxy/9097/* "
+            "requests will fail until next successful startup",
+            exc,
+            exc_info=True,
+        )
+        return
+
+    try:
+        zellij_client.ensure_master_session_cookie()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "startup_initialize: ensure_master_session_cookie failed (%s) — "
+            "continuing in degraded mode; app-proxy /app-proxy/9097/* "
+            "requests will fail with 401 until orchestrator restart",
+            exc,
+            exc_info=True,
+        )
+        return
+
     logger.info(
         "startup_initialize: zellij subsystem ready (backend=%s)",
         get_backend(),

@@ -387,10 +387,11 @@ _ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
     "terminal": None,
 }
 
-# Short-lived token TTL (audit I7). Tokens are mint-per-launch; the
-# orchestrator schedules an async timer to revoke them after this window
-# regardless of whether the iframe ever loaded successfully.
-_ZELLIJ_TOKEN_TTL_SECONDS = 5 * 60
+# Phase 5 master-token model (2026-05-26) removed the per-session-token
+# TTL machinery (_ZELLIJ_TOKEN_TTL_SECONDS, _schedule_token_revoke). The
+# orchestrator now holds a single long-lived master token and injects it
+# at the proxy boundary; per-session tokens no longer exist. See
+# Orchestrator/cli_agent/zellij_client.py ensure_master_zellij_token().
 
 
 def _require_zellij_backend() -> None:
@@ -454,7 +455,7 @@ def _validate_operator_prefix(session_name_: str, operator: str) -> bool:
     return session_name_.startswith(f"{operator}__")
 
 
-def _zellij_session_url(session_name_: str, token_value: str) -> str:
+def _zellij_session_url(session_name_: str, token_value: Optional[str] = None) -> str:
     """Compose the session URL the Portal iframe will load.
 
     Same-origin via existing ``/app-proxy/{port}/{path}`` route — keeps
@@ -466,39 +467,19 @@ def _zellij_session_url(session_name_: str, token_value: str) -> str:
     (assets/index.js). When the last path segment is empty, zellij-web
     auto-creates a brand-new session and our pre-minted session is
     orphaned in /tmp. T11c surfaced this empirically.
+
+    Phase 5 master-token model (2026-05-26): ``token_value`` is now
+    always ``None`` (kept as a parameter for backward-compat with any
+    older callers). The orchestrator's app-proxy injects the master
+    token cookie on upstream forward, so the session URL has no
+    ``?token=`` query param. If a non-None value is passed it's
+    silently ignored — clients should NEVER hold session tokens.
     """
-    return (
-        f"/app-proxy/{_ZELLIJ_WEB_PORT}/{session_name_}"
-        f"?token={token_value}"
-    )
+    return f"/app-proxy/{_ZELLIJ_WEB_PORT}/{session_name_}"
 
 
-async def _schedule_token_revoke(token_name: str, delay_seconds: int) -> None:
-    """Sleep for ``delay_seconds``, then revoke ``token_name``.
-
-    Spawned via ``asyncio.create_task`` from the launch handler. We do
-    NOT await this — the launch response returns immediately and the
-    timer fires later. ``revoke_token`` is idempotent so a race with a
-    manual delete is harmless.
-    """
-    try:
-        await asyncio.sleep(delay_seconds)
-        await asyncio.to_thread(zellij_client.revoke_token, token_name)
-        logger.info(
-            "zellij: scheduled token revoke fired for %s after %ds",
-            token_name,
-            delay_seconds,
-        )
-    except asyncio.CancelledError:
-        # Service shutdown — let the cancel propagate; the next boot's
-        # reconcile_or_wipe will catch any leftover token.
-        raise
-    except Exception as exc:  # noqa: BLE001 — never crash the background task
-        logger.error(
-            "zellij: scheduled token revoke for %s failed: %s",
-            token_name,
-            exc,
-        )
+# _schedule_token_revoke() removed in Phase 5 master-token model
+# (2026-05-26). Per-session tokens no longer exist; nothing to revoke.
 
 
 @router.post("/zellij/launch", status_code=201)
@@ -546,27 +527,28 @@ async def zellij_launch(
         )
     session_name_ = _generate_zellij_session_name(op, provider, app)
 
-    # Mint token first — if Zellij is sick, fail before creating a
-    # half-registered session.
-    try:
-        token_name, token_value = await asyncio.to_thread(
-            zellij_client.mint_token
-        )
-    except zellij_client.ZellijBinaryMissing as exc:
-        logger.error("zellij_launch: %s", exc)
-        raise HTTPException(503, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("zellij_launch: mint_token failed: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Failed to mint Zellij token: {exc}")
+    # Phase 5 master-token model (2026-05-26): no per-session token mint.
+    # The orchestrator's app-proxy (Orchestrator/routes/agent_routes.py)
+    # injects the master token cookie on every upstream forward, so
+    # clients never need to know about zellij tokens. We still record a
+    # state row for operator-prefix gate enforcement (audit I8) and for
+    # listZellijSessions consumers, but the token_name field becomes
+    # a constant marker. See ensure_master_zellij_token() kdoc for the
+    # architectural rationale + the audit-I7 deviation it represents.
+    token_name = "master"
+    token_value: Optional[str] = None  # never returned to client
+    expires_at: Optional[str] = None  # master token doesn't expire
 
-    # Launch the session (blocking subprocess call). On failure, revoke
-    # the just-minted token so we don't leak it.
+    # Launch the session (blocking subprocess call).
     try:
         await asyncio.to_thread(
             zellij_client.launch_session,
             session_name_,
             binary,
         )
+    except zellij_client.ZellijBinaryMissing as exc:
+        logger.error("zellij_launch: %s", exc)
+        raise HTTPException(503, str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "zellij_launch: launch_session(%s) failed: %s",
@@ -574,25 +556,7 @@ async def zellij_launch(
             exc,
             exc_info=True,
         )
-        try:
-            await asyncio.to_thread(zellij_client.revoke_token, token_name)
-        except Exception as revoke_exc:  # noqa: BLE001
-            logger.warning(
-                "zellij_launch: cleanup revoke_token(%s) also failed: %s",
-                token_name,
-                revoke_exc,
-            )
         raise HTTPException(500, f"Failed to launch Zellij session: {exc}")
-
-    # Compute expires_at AFTER both ops succeeded. Terminal mode is
-    # long-lived (no TTL); CLI providers get a 5-minute short-lived
-    # token per audit I7.
-    expires_at: Optional[str] = None
-    if provider != "terminal":
-        expires_dt = _dt.datetime.now(_dt.timezone.utc).replace(
-            microsecond=0
-        ) + _dt.timedelta(seconds=_ZELLIJ_TOKEN_TTL_SECONDS)
-        expires_at = expires_dt.isoformat()
 
     try:
         await asyncio.to_thread(
@@ -607,7 +571,8 @@ async def zellij_launch(
     except Exception as exc:  # noqa: BLE001
         # State write failed but the Zellij side is live — log loudly,
         # try to clean up, and surface 500 so the client doesn't think
-        # the session is usable.
+        # the session is usable. No token-revoke cleanup needed (no
+        # per-session token was minted).
         logger.error(
             "zellij_launch: state.add_session(%s) failed: %s",
             session_name_,
@@ -616,20 +581,13 @@ async def zellij_launch(
         )
         try:
             await asyncio.to_thread(zellij_client.kill_session, session_name_)
-            await asyncio.to_thread(zellij_client.revoke_token, token_name)
         except Exception as cleanup_exc:  # noqa: BLE001
             logger.warning(
-                "zellij_launch: cleanup after state-write failure also failed: %s",
+                "zellij_launch: cleanup kill_session(%s) failed: %s",
+                session_name_,
                 cleanup_exc,
             )
         raise HTTPException(500, f"Failed to record Zellij session state: {exc}")
-
-    # Schedule the revoke timer for CLI providers only. Terminal mode's
-    # token is intentionally long-lived (single per-operator session).
-    if provider != "terminal":
-        asyncio.create_task(
-            _schedule_token_revoke(token_name, _ZELLIJ_TOKEN_TTL_SECONDS)
-        )
 
     logger.info(
         "zellij_launch: operator=%s provider=%s app=%s session=%s "

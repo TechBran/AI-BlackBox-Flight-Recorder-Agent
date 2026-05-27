@@ -9,8 +9,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.Cookie
-import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -23,9 +21,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
-import java.io.IOException
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -56,10 +52,21 @@ import java.util.concurrent.atomic.AtomicReference
  *
  *   connect()
  *     → version probe (GET /info/version, warn on mismatch, never fail)
- *     → auth pre-flight (POST /command/login, sets session_token cookie)
- *     → open terminal WS
+ *     → open terminal WS (orchestrator app-proxy injects master cookie)
  *     → on first inbound message → open control WS
  *     → on control WS onOpen → send initial TerminalResize
+ *
+ * ## Auth (Phase 5, 2026-05-26 — master-token model)
+ *
+ * The Android client no longer participates in zellij's auth handshake.
+ * The orchestrator's `/app-proxy/9097/` reverse proxy (matching any path
+ * under that prefix) injects a master `session_token` cookie on every
+ * upstream forward, so this client opens the WebSocket with no cookie /
+ * no `/command/login` / no `/session` POST.
+ * The `web_client_id` query param is still required by zellij; we
+ * generate a UUID client-side (zellij-web accepts any UUID). See
+ * SNAP-20260526-6798 + docs/plans/2026-05-24-zellij-cli-agent-rewrite.md
+ * Phase 4 RESULTS for why.
  *
  * Close code 4001 = "intentional disconnect by host" → DO NOT reconnect.
  * Any other non-1000 code → reconnect with backoff [1, 2, 4, 8, 16] s.
@@ -67,22 +74,14 @@ import java.util.concurrent.atomic.AtomicReference
 class ZellijWebSocketClient(
     private val origin: String,
     private val sessionName: String,
-    private val sessionToken: String,
     /**
-     * Initial web_client_id (a fresh UUID by default). This value is REPLACED
-     * during [connect] / reconnect with the server-assigned id from
-     * `POST /session` (see `fetchServerWebClientId`). The initial value is
-     * only used if `/session` fails (defensive fallback so connect still
-     * tries the WS upgrade instead of giving up).
-     *
-     * T23 device QA discovery (2026-05-26): the T17 spike doc missed
-     * step 2 of zellij-web's auth handshake. Browser JS does:
-     *   1. POST /command/login → sets session_token cookie
-     *   2. POST /session       → returns {"web_client_id": "<server-uuid>"}
-     *   3. WS upgrade with the server-uuid query param
-     * Skipping step 2 (using a client-generated UUID) causes zellij-web to
-     * accept the WS upgrade but never route bytes — silently fails until
-     * the okhttp ping timeout (~30s) fires onDisconnected with code 1006.
+     * Initial web_client_id (a fresh UUID by default). Phase 5
+     * (2026-05-26): the orchestrator owns AUTH via a master cookie
+     * injected on the upstream proxy, but zellij still REQUIRES a
+     * server-assigned web_client_id (from POST /session) in the WS
+     * upgrade query param — a client-generated UUID makes zellij
+     * silently accept then disconnect. So this initial value is
+     * overwritten by [fetchServerWebClientId] during [connect].
      */
     initialWebClientId: String = UUID.randomUUID().toString(),
     private val coroutineScope: CoroutineScope,
@@ -98,10 +97,7 @@ class ZellijWebSocketClient(
         fun onError(throwable: Throwable)
     }
 
-    private val cookieJar: SimpleCookieJar = SimpleCookieJar()
-
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(cookieJar)
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // long-lived WS
         .pingInterval(30, TimeUnit.SECONDS)
@@ -134,19 +130,23 @@ class ZellijWebSocketClient(
     // --- Public surface ---------------------------------------------------
 
     /**
-     * Idempotent. Fires version probe → auth pre-flight → opens terminal WS.
+     * Idempotent. Fires version probe → POST /session → opens terminal WS.
      *
-     * `probeVersion` and `preflightAuth` use OkHttp's BLOCKING `execute()`
-     * API (not `enqueue()`), so they MUST run on `Dispatchers.IO` — running
-     * them on the caller's `coroutineScope` (which is typically
-     * `rememberCoroutineScope()` → AndroidUiDispatcher = main thread) would
-     * trigger StrictMode's `NetworkOnMainThreadException`. T23 device QA
-     * caught this on the Z Fold 6: Brandon saw "Error: unknown" because
-     * `preflightAuth` threw with a null message (StrictMode's exception
-     * doesn't carry one). `openTerminalSocket` is OK on the caller's
-     * dispatcher because `httpClient.newWebSocket(...)` returns
-     * immediately; the actual connect happens on OkHttp's internal
-     * dispatcher pool.
+     * Phase 5 (2026-05-26): /command/login is gone — the orchestrator's
+     * reverse proxy injects a master session cookie on every upstream
+     * forward. But /session POST is STILL required: zellij assigns a
+     * fresh `web_client_id` per call, and the WS upgrade silently
+     * accepts then disconnects if the query param isn't a value /session
+     * minted. The orchestrator can't do /session on the client's behalf
+     * because the returned id has to be threaded into THIS client's WS
+     * URL (one id per WS connection).
+     *
+     * All HTTP calls use OkHttp's BLOCKING `execute()` so they MUST run
+     * on `Dispatchers.IO` — the caller's `coroutineScope` is typically
+     * `rememberCoroutineScope()` (AndroidUiDispatcher = main thread) and
+     * would trip StrictMode's `NetworkOnMainThreadException`.
+     * `openTerminalSocket` is safe on the caller's dispatcher because
+     * `httpClient.newWebSocket(...)` returns immediately.
      */
     fun connect(listener: Listener) {
         if (userClosed.get()) {
@@ -154,11 +154,11 @@ class ZellijWebSocketClient(
             return
         }
         this.listener = listener
+        logd(TAG, "Auth handled by orchestrator proxy (master-token model)")
         coroutineScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     probeVersion()
-                    preflightAuth()
                     fetchServerWebClientId()
                 }
                 openTerminalSocket()
@@ -243,40 +243,12 @@ class ZellijWebSocketClient(
     }
 
     /**
-     * `POST {origin}{APP_PROXY_PREFIX}/command/login` with `{auth_token,…}`
-     * — sets the `session_token` cookie that [cookieJar] then attaches to
-     * the WS upgrade request. Without this the upgrade returns 401
-     * (visible as close code 1011).
-     */
-    private fun preflightAuth() {
-        val url = "${httpOrigin()}$APP_PROXY_PREFIX/command/login"
-        val payload = JSONObject().apply {
-            put("auth_token", sessionToken)
-            put("remember_me", false)
-        }.toString()
-        val req = Request.Builder()
-            .url(url)
-            .post(payload.toRequestBody(JSON_MEDIA))
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw IOException("Auth pre-flight failed: HTTP ${resp.code} ${resp.message}")
-            }
-            logd(TAG, "Auth pre-flight OK (cookies=${cookieJar.size()})")
-        }
-    }
-
-    /**
-     * `POST {origin}{APP_PROXY_PREFIX}/session` with `{}` — the SECOND step
-     * of zellij-web's auth handshake. Returns `{"web_client_id": "<uuid>",
-     * "is_read_only": false}`. The returned `web_client_id` MUST be used in
-     * the WS upgrade query param; a client-generated UUID will cause
-     * zellij-web to accept the WS upgrade silently but never route bytes.
-     *
-     * T23 device QA caught this — the T17 spike doc only documented
-     * `/command/login` and missed the `/session` step. Brandon's web portal
-     * worked because the browser's JS does this step automatically; the
-     * Android client (and direct WS test scripts) skipped it.
+     * `POST {origin}{APP_PROXY_PREFIX}/session` with `{}` — zellij assigns
+     * a fresh `web_client_id` per call. The orchestrator's proxy injects
+     * the master session cookie on this request, so it succeeds without
+     * any client-side auth. The returned id is what the WS upgrade query
+     * param MUST use; a client-generated UUID causes zellij to silently
+     * accept then disconnect (T23 keystone bug).
      *
      * Overwrites [webClientId] in-place so the URL builders pick up the
      * new value on next `terminalUrl()`/`controlUrl()` call.
@@ -285,11 +257,11 @@ class ZellijWebSocketClient(
         val url = "${httpOrigin()}$APP_PROXY_PREFIX/session"
         val req = Request.Builder()
             .url(url)
-            .post("{}".toRequestBody(JSON_MEDIA))
+            .post(byteArrayOf('{'.code.toByte(), '}'.code.toByte()).toRequestBody("application/json".toMediaType()))
             .build()
         httpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
-                throw IOException("Session init failed: HTTP ${resp.code} ${resp.message}")
+                throw java.io.IOException("Session init failed: HTTP ${resp.code} ${resp.message}")
             }
             val body = resp.body?.string().orEmpty()
             val newId = try {
@@ -299,7 +271,7 @@ class ZellijWebSocketClient(
                 null
             }
             if (newId == null) {
-                throw IOException("Session response missing 'web_client_id': $body")
+                throw java.io.IOException("Session response missing 'web_client_id': $body")
             }
             webClientId = newId
             logd(TAG, "Server-assigned web_client_id received")
@@ -483,12 +455,11 @@ class ZellijWebSocketClient(
                     delay(sec * 1000L)
                     if (userClosed.get()) return@launch
                     try {
-                        // preflightAuth + fetchServerWebClientId use blocking
-                        // httpClient.execute() — must run on Dispatchers.IO to
-                        // avoid StrictMode's NetworkOnMainThreadException
-                        // (same fix as connect()).
+                        // Phase 5 (2026-05-26): no auth pre-flight, but
+                        // /session POST is still required to get a fresh
+                        // web_client_id from zellij for this WS connection.
+                        // Master cookie injected by orchestrator proxy.
                         withContext(Dispatchers.IO) {
-                            preflightAuth()
                             fetchServerWebClientId()
                         }
                         openTerminalSocket()
@@ -572,41 +543,6 @@ class ZellijWebSocketClient(
     @VisibleForTesting internal fun invokeOnErrorForTest(t: Throwable) = safeOnError(t)
     @VisibleForTesting internal fun scheduleReconnectForTest() = scheduleReconnect()
 
-    // --- Cookie jar ------------------------------------------------------
-
-    /**
-     * Minimal in-memory cookie jar keyed by host. zellij-web sets a single
-     * `session_token` cookie on `/command/login`; on the WS upgrade the
-     * cookie is automatically attached because the host matches.
-     */
-    private class SimpleCookieJar : CookieJar {
-        private val store: ConcurrentHashMap<String, MutableList<Cookie>> = ConcurrentHashMap()
-
-        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-            if (cookies.isEmpty()) return
-            val bucket = store.getOrPut(url.host) { mutableListOf() }
-            synchronized(bucket) {
-                // Replace cookies with the same name; drop expired.
-                val now = System.currentTimeMillis()
-                bucket.removeAll { existing ->
-                    cookies.any { it.name == existing.name } || existing.expiresAt < now
-                }
-                bucket.addAll(cookies.filter { it.expiresAt > now })
-            }
-        }
-
-        override fun loadForRequest(url: HttpUrl): List<Cookie> {
-            val bucket = store[url.host] ?: return emptyList()
-            synchronized(bucket) {
-                val now = System.currentTimeMillis()
-                bucket.removeAll { it.expiresAt < now }
-                return bucket.filter { it.matches(url) }.toList()
-            }
-        }
-
-        fun size(): Int = store.values.sumOf { it.size }
-    }
-
     companion object {
         private const val TAG = "ZellijWS"
 
@@ -636,8 +572,6 @@ class ZellijWebSocketClient(
          * `Orchestrator/cli_agent/zellij_client.py`. Coupling point.
          */
         internal const val APP_PROXY_PREFIX = "/app-proxy/9097"
-
-        private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
         // --- Log shims --------------------------------------------------------
         // android.util.Log throws RuntimeException under plain JVM unit tests

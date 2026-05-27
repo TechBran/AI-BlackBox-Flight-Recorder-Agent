@@ -318,6 +318,237 @@ def revoke_token(name: str) -> None:
         raise
 
 
+# --- master token (Phase 5, master-token auth model) ---------------------
+#
+# Architectural override of the audit-I7 "mint-per-launch, revoke-on-load"
+# policy for the orchestrator↔zellij-web boundary. Customer-facing auth
+# still flows through Tailscale + the orchestrator's operator identity
+# system; the audit-I8 operator-prefix gate still runs at the route layer
+# (so multi-operator isolation is preserved). What changes: instead of
+# each session getting its own short-lived token that clients must hold,
+# the orchestrator mints ONE long-lived master token at startup, persists
+# its value to a root-only file on disk, and injects it as the cookie on
+# every upstream forward by the app-proxy (see Orchestrator/routes/
+# agent_routes.py). Clients (browser, Android) never see tokens — they
+# just open WSes; the orchestrator authenticates upstream on their behalf.
+#
+# Why the audit-I7 deviation: T23 device QA surfaced that the per-session
+# model breaks session reattach across app restarts, and our deployment
+# model (Tailscale-fronted, single-tenant box) doesn't need defense-in-
+# depth at this boundary. The master token is intentionally persistent
+# (the audit-I7 ban on persisting raw tokens was specifically about
+# per-session ephemeral tokens, not a system-wide auth handle). Brandon's
+# decision documented in plan AC2 + Phase 4 RESULTS section.
+#
+# Token VALUE storage: ~/.local/share/blackbox/zellij-master.token mode 0600.
+# Token NAME ("master-blackbox") is also stored in zellij's tokens.db (sqlite)
+# as part of `zellij web --create-token`'s normal flow. If either drops
+# out, ensure_master_zellij_token() re-mints on next startup.
+
+_MASTER_TOKEN_NAME = "master-blackbox"
+_MASTER_TOKEN_FILE = Path.home() / ".local" / "share" / "blackbox" / "zellij-master.token"
+_master_token: Optional[str] = None  # the AUTH token (input to /command/login)
+_master_session_cookie: Optional[str] = None  # the session_token cookie (what app-proxy injects)
+
+
+def ensure_master_zellij_token() -> str:
+    """Mint or load the master zellij token. Idempotent.
+
+    Called at orchestrator startup (see Orchestrator.cli_agent.__init__
+    startup_initialize). Loads the persisted value from disk if present;
+    if absent, mints a fresh one via the existing :func:`mint_token`
+    flow and persists it. Sets the module-level :data:`_master_token`
+    cache and returns the value.
+
+    If anything goes wrong (file write fails, mint fails, etc.) we
+    re-raise — the caller (startup hook) should catch and log, since
+    the orchestrator can degrade to "Zellij auth unavailable" without
+    crashing.
+    """
+    global _master_token
+
+    # Fast path: already loaded in this process.
+    if _master_token is not None:
+        return _master_token
+
+    # Try to load from disk first — survives orchestrator restarts.
+    if _MASTER_TOKEN_FILE.exists():
+        try:
+            value = _MASTER_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if value:
+                _master_token = value
+                logger.info(
+                    "ensure_master_zellij_token: loaded existing master token from %s",
+                    _MASTER_TOKEN_FILE,
+                )
+                return value
+            logger.warning(
+                "ensure_master_zellij_token: %s exists but is empty — re-minting",
+                _MASTER_TOKEN_FILE,
+            )
+        except OSError as exc:
+            logger.warning(
+                "ensure_master_zellij_token: failed to read %s (%s) — re-minting",
+                _MASTER_TOKEN_FILE,
+                exc,
+            )
+
+    # No persisted value (or unreadable): mint fresh + persist.
+    # We use the auto-assigned token_N name and STORE the value to disk
+    # (intentional deviation from audit-I7 — see module-header kdoc).
+    _name, value = mint_token()
+
+    _MASTER_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file then atomic-rename so a crash mid-write
+    # doesn't leave a half-written token file.
+    tmp_path = _MASTER_TOKEN_FILE.with_suffix(".token.tmp")
+    tmp_path.write_text(value, encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(_MASTER_TOKEN_FILE)
+
+    _master_token = value
+    logger.info(
+        "ensure_master_zellij_token: minted + persisted new master token to %s",
+        _MASTER_TOKEN_FILE,
+    )
+    return value
+
+
+def get_master_token() -> str:
+    """Return the cached master AUTH token (input to /command/login).
+
+    NOT the value the app-proxy should inject as a cookie — that's
+    [get_master_session_cookie]. This function exists for callers
+    that need to authenticate AS the master account, like the
+    startup hook that exchanges the auth token for a session cookie.
+    """
+    if _master_token is None:
+        raise RuntimeError(
+            "Master zellij token not initialized — "
+            "ensure_master_zellij_token() must be called at startup"
+        )
+    return _master_token
+
+
+def _exchange_master_token_for_session_cookie() -> str:
+    """POST /command/login with the master auth token; return the
+    `session_token` cookie value.
+
+    This is the second step zellij-web's browser JS does in
+    `auth.js:initAuthentication()` — the auth_token alone doesn't
+    grant session access; the SERVER mints a session_token cookie
+    when /command/login succeeds, and that cookie is what
+    subsequent requests (including WS upgrades) must carry.
+
+    The session_token cookie value is what
+    [get_master_session_cookie] returns and what the app-proxy
+    injects on every upstream forward.
+
+    Raises on failure (caller — the startup hook — should catch
+    + log + continue in degraded mode).
+    """
+    if _master_token is None:
+        raise RuntimeError(
+            "Cannot exchange — master token not minted yet"
+        )
+    web_port = _read_port_from_config()
+    url = f"http://127.0.0.1:{web_port}/command/login"
+    body = (
+        '{"auth_token": "' + _master_token + '", "remember_me": false}'
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        if resp.status != 200:
+            raise RuntimeError(
+                f"/command/login returned HTTP {resp.status}"
+            )
+        # Parse Set-Cookie. zellij sends:
+        #   Set-Cookie: session_token=<uuid>; HttpOnly; SameSite=Strict; Path=/
+        # We want just the value.
+        set_cookie = resp.headers.get("Set-Cookie", "")
+        match = re.search(r"session_token=([^;]+)", set_cookie)
+        if not match:
+            raise RuntimeError(
+                f"/command/login response missing session_token cookie: {set_cookie!r}"
+            )
+        return match.group(1)
+
+
+def ensure_master_session_cookie() -> str:
+    """Mint (if needed) the session_token cookie value that the
+    app-proxy injects on every upstream forward.
+
+    Cached in module-level state. Refreshes on call only if the
+    cache is empty (first call) — callers that hit 401 on upstream
+    should call :func:`refresh_master_session_cookie` to force a
+    fresh exchange.
+
+    Self-healing: if the exchange returns HTTP 401 the master auth
+    token on disk is stale (zellij's tokens.db was wiped by
+    reconcile_or_wipe between orchestrator restarts, OR by manual
+    revocation). We re-mint a fresh master token + re-exchange once.
+    """
+    global _master_session_cookie, _master_token
+    if _master_session_cookie is not None:
+        return _master_session_cookie
+    try:
+        _master_session_cookie = _exchange_master_token_for_session_cookie()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            logger.warning(
+                "ensure_master_session_cookie: /command/login returned 401 — "
+                "master auth token is stale; re-minting fresh and retrying"
+            )
+            # Force the stored token to be discarded + re-mint.
+            try:
+                _MASTER_TOKEN_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _master_token = None
+            ensure_master_zellij_token()  # mints + persists fresh
+            _master_session_cookie = _exchange_master_token_for_session_cookie()
+        else:
+            raise
+    logger.info(
+        "ensure_master_session_cookie: minted fresh session_token cookie via /command/login"
+    )
+    return _master_session_cookie
+
+
+def refresh_master_session_cookie() -> str:
+    """Force-refresh the session_token cookie (e.g. after upstream 401).
+
+    Re-exchanges the master auth token for a new session cookie. If
+    the master auth token is itself stale (was revoked or zellij's
+    tokens.db was wiped), this will raise; the caller should fall
+    through to re-minting the master token entirely.
+    """
+    global _master_session_cookie
+    _master_session_cookie = _exchange_master_token_for_session_cookie()
+    logger.info("refresh_master_session_cookie: re-exchanged session cookie")
+    return _master_session_cookie
+
+
+def get_master_session_cookie() -> str:
+    """Return the cached session_token cookie value the app-proxy
+    injects on every upstream forward.
+
+    Raises if not initialized — callers (proxy handlers) should
+    let the exception propagate so the failure is visible.
+    """
+    if _master_session_cookie is None:
+        raise RuntimeError(
+            "Master session cookie not initialized — "
+            "ensure_master_session_cookie() must be called at startup"
+        )
+    return _master_session_cookie
+
+
 def list_tokens() -> list[dict]:
     """Return all tokens known to Zellij as
     ``[{"name": str, "created_at": str}, ...]``.

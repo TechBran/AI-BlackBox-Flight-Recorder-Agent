@@ -107,6 +107,14 @@ val ZELLIJ_PROVIDER_SLUGS: Set<String> =
  * WebSocket transport needs at connect time. For lightweight listing
  * (GET /sessions), use [ZellijSessionRow] — it intentionally omits
  * token/sessionUrl since the backend doesn't re-issue them per call.
+ *
+ * **Master-token model (Phase 5, 2026-05-26):** the [token] field is
+ * kept for backward compatibility with the launch-response wire format
+ * but is no longer used by the Android client — the orchestrator handles
+ * all zellij auth via a master token injected on the upstream proxy.
+ * The field may be `null` or an empty string; consumers MUST NOT depend
+ * on a non-empty value. See SNAP-20260526-6798 +
+ * docs/plans/2026-05-24-zellij-cli-agent-rewrite.md Phase 4 RESULTS.
  */
 @Serializable
 data class ZellijSession(
@@ -128,7 +136,9 @@ data class ZellijSession(
 data class ZellijLaunchResponse(
     @SerialName("session_name") val sessionName: String,
     @SerialName("session_url") val sessionUrl: String,
-    val token: String,
+    // Phase 5 (2026-05-26, master-token model): orchestrator may emit null
+    // or empty token; field retained for wire compatibility but unused.
+    val token: String? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
 )
 
