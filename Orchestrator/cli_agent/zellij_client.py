@@ -523,13 +523,33 @@ def ensure_master_session_cookie() -> str:
 def refresh_master_session_cookie() -> str:
     """Force-refresh the session_token cookie (e.g. after upstream 401).
 
-    Re-exchanges the master auth token for a new session cookie. If
-    the master auth token is itself stale (was revoked or zellij's
-    tokens.db was wiped), this will raise; the caller should fall
-    through to re-minting the master token entirely.
+    Re-exchanges the master auth token for a new session cookie.
+    Self-heals: if the master auth_token itself is stale (zellij's
+    tokens.db was wiped OR the token was revoked), the /command/login
+    will return 401; we delete the on-disk auth_token file, re-mint
+    fresh, and try the exchange again. Same pattern as
+    [ensure_master_session_cookie]; copied here so the proxy's
+    retry path is fully self-healing without needing two exception
+    handlers at the call site.
     """
-    global _master_session_cookie
-    _master_session_cookie = _exchange_master_token_for_session_cookie()
+    global _master_session_cookie, _master_token
+    try:
+        _master_session_cookie = _exchange_master_token_for_session_cookie()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            logger.warning(
+                "refresh_master_session_cookie: /command/login returned 401 — "
+                "master auth token is stale; re-minting fresh and retrying"
+            )
+            try:
+                _MASTER_TOKEN_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            _master_token = None
+            ensure_master_zellij_token()
+            _master_session_cookie = _exchange_master_token_for_session_cookie()
+        else:
+            raise
     logger.info("refresh_master_session_cookie: re-exchanged session cookie")
     return _master_session_cookie
 

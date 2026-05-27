@@ -1389,12 +1389,14 @@ async def app_proxy(port: int, path: str, request: Request):
             # (re-exchange the auth token for a fresh session cookie) and
             # retry ONCE. zellij can invalidate session cookies on its own
             # schedule; this self-heals so the customer never sees the 401.
-            if resp.status_code == 401 and "/app-proxy/9097/" in target_url:
+            # Guard on the zellij-web port (the only upstream that uses
+            # session_token); other proxied services don't care.
+            if resp.status_code == 401 and port == 9097:
                 try:
                     from Orchestrator.cli_agent import zellij_client as _zc
                     fresh = _zc.refresh_master_session_cookie()
                     headers["cookie"] = f"session_token={fresh}"
-                    print(f"[APP-PROXY-HTTP] upstream returned 401 → refreshed master cookie + retrying")
+                    print(f"[APP-PROXY-HTTP] upstream {target_url} returned 401 → refreshed master cookie + retrying")
                     resp = await _do_request()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[APP-PROXY-HTTP] refresh_master_session_cookie failed: {exc}")
@@ -1506,7 +1508,7 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
         # Refresh and retry once. This makes the customer-facing
         # connection resilient to zellij invalidating session cookies
         # on its own schedule.
-        if e.response.status_code == 401 and "/app-proxy/9097/" in target_uri:
+        if e.response.status_code == 401 and port == 9097:
             try:
                 _zc.refresh_master_session_cookie()
                 forward_headers = _build_forward_headers()
