@@ -1352,32 +1352,52 @@ async def app_proxy(port: int, path: str, request: Request):
                     headers[key] = value
 
             # Phase 5 master-token model: override any client-supplied
-            # cookie with the orchestrator's master session cookie. See
-            # WS handler below for the architectural rationale.
+            # cookie with the orchestrator's master session cookie. Strip
+            # any case-variant of the client's existing Cookie header so
+            # our injection is the ONLY cookie that reaches upstream.
+            for k in list(headers.keys()):
+                if k.lower() == "cookie":
+                    del headers[k]
             try:
                 from Orchestrator.cli_agent import zellij_client as _zc
                 headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
             except Exception as exc:  # noqa: BLE001
-                print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — falling back to client headers")
+                print(f"[APP-PROXY-HTTP] get_master_session_cookie failed: {exc} — proceeding without cookie")
 
-            # Forward request
-            if request.method == "GET":
-                resp = await client.get(target_url, headers=headers)
-            elif request.method == "POST":
-                body = await request.body()
-                resp = await client.post(target_url, content=body, headers=headers)
-            elif request.method == "PUT":
-                body = await request.body()
-                resp = await client.put(target_url, content=body, headers=headers)
-            elif request.method == "DELETE":
-                resp = await client.delete(target_url, headers=headers)
-            elif request.method == "PATCH":
-                body = await request.body()
-                resp = await client.patch(target_url, content=body, headers=headers)
-            elif request.method == "OPTIONS":
-                resp = await client.options(target_url, headers=headers)
-            else:
-                resp = await client.request(request.method, target_url, headers=headers)
+            # Body capture (so we can replay on 401 retry without re-reading).
+            body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
+
+            async def _do_request():
+                if request.method == "GET":
+                    return await client.get(target_url, headers=headers)
+                elif request.method == "POST":
+                    return await client.post(target_url, content=body, headers=headers)
+                elif request.method == "PUT":
+                    return await client.put(target_url, content=body, headers=headers)
+                elif request.method == "DELETE":
+                    return await client.delete(target_url, headers=headers)
+                elif request.method == "PATCH":
+                    return await client.patch(target_url, content=body, headers=headers)
+                elif request.method == "OPTIONS":
+                    return await client.options(target_url, headers=headers)
+                else:
+                    return await client.request(request.method, target_url, headers=headers)
+
+            resp = await _do_request()
+
+            # If upstream rejected our master cookie as stale, refresh it
+            # (re-exchange the auth token for a fresh session cookie) and
+            # retry ONCE. zellij can invalidate session cookies on its own
+            # schedule; this self-heals so the customer never sees the 401.
+            if resp.status_code == 401 and "/app-proxy/9097/" in target_url:
+                try:
+                    from Orchestrator.cli_agent import zellij_client as _zc
+                    fresh = _zc.refresh_master_session_cookie()
+                    headers["cookie"] = f"session_token={fresh}"
+                    print(f"[APP-PROXY-HTTP] upstream returned 401 → refreshed master cookie + retrying")
+                    resp = await _do_request()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[APP-PROXY-HTTP] refresh_master_session_cookie failed: {exc}")
 
             content = resp.content
             content_type = resp.headers.get("content-type", "application/octet-stream")
@@ -1459,23 +1479,56 @@ async def app_proxy_websocket(websocket: WebSocket, port: int, path: str):
     # — this cookie just authenticates the orchestrator → zellij-web
     # connection. See Orchestrator/cli_agent/zellij_client.py for the
     # two-step auth lifecycle (auth_token vs session_token cookie).
-    forward_headers: dict = {}
-    try:
-        from Orchestrator.cli_agent import zellij_client as _zc
-        forward_headers["cookie"] = f"session_token={_zc.get_master_session_cookie()}"
-    except Exception as exc:  # noqa: BLE001
-        print(f"[APP-PROXY-WS] get_master_session_cookie failed: {exc} — upstream may 401")
+    from Orchestrator.cli_agent import zellij_client as _zc
 
-    try:
-        upstream_cm = websockets.connect(
+    def _build_forward_headers() -> dict:
+        try:
+            return {"cookie": f"session_token={_zc.get_master_session_cookie()}"}
+        except Exception as exc:  # noqa: BLE001
+            print(f"[APP-PROXY-WS] get_master_session_cookie failed: {exc} — upstream may 401")
+            return {}
+
+    forward_headers = _build_forward_headers()
+
+    async def _connect_upstream(headers: dict):
+        cm = websockets.connect(
             target_uri,
             max_size=None,
             open_timeout=10,
-            additional_headers=forward_headers or None,
+            additional_headers=headers or None,
         )
-        upstream = await upstream_cm.__aenter__()
+        return cm, await cm.__aenter__()
+
+    try:
+        upstream_cm, upstream = await _connect_upstream(forward_headers)
+    except websockets.exceptions.InvalidStatus as e:
+        # Self-heal: zellij rejected our master cookie as stale (401).
+        # Refresh and retry once. This makes the customer-facing
+        # connection resilient to zellij invalidating session cookies
+        # on its own schedule.
+        if e.response.status_code == 401 and "/app-proxy/9097/" in target_uri:
+            try:
+                _zc.refresh_master_session_cookie()
+                forward_headers = _build_forward_headers()
+                print(f"[APP-PROXY-WS] upstream returned 401 → refreshed master cookie + retrying")
+                upstream_cm, upstream = await _connect_upstream(forward_headers)
+            except Exception as retry_exc:  # noqa: BLE001
+                target_uri_redacted = target_uri.split('?', 1)[0]
+                print(f"[APP-PROXY-WS] retry after 401 failed for {target_uri_redacted}: {retry_exc}")
+                try:
+                    await websocket.close(code=1011, reason="Upstream unavailable")
+                except Exception:
+                    pass
+                return
+        else:
+            target_uri_redacted = target_uri.split('?', 1)[0]
+            print(f"[APP-PROXY-WS] Upstream connect failed for {target_uri_redacted}: {e}")
+            try:
+                await websocket.close(code=1011, reason="Upstream unavailable")
+            except Exception:
+                pass
+            return
     except Exception as e:
-        # Redact query string (contains Zellij auth token) before logging.
         target_uri_redacted = target_uri.split('?', 1)[0]
         print(f"[APP-PROXY-WS] Upstream connect failed for {target_uri_redacted}: {e}")
         try:
