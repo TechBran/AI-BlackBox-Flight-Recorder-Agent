@@ -13,8 +13,12 @@ android {
         applicationId "com.aiblackbox.portal"
         minSdk 26
         targetSdk 36
-        versionCode 1
-        versionName "1.0"
+        // Phase 4 + Phase 5 CLI Agent zellij rewrite + master-token model.
+        // First public APK release. Bump versionCode on every future
+        // change so customers' installed APKs upgrade over the top
+        // without uninstalling.
+        versionCode 2
+        versionName "1.0.0-zellij-cli-agent"
         manifestPlaceholders.cleartext="true"
     }
 
