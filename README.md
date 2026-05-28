@@ -813,10 +813,18 @@ device is on the same tailnet):
 
 ## License
 
-License terms are TBD pending the v1 commercial release. Source is
-currently distributed under a per-customer arrangement directly with
-TechBran. Contact for commercial-use terms; a formal `LICENSE` file
-will land in the repo before public-source availability.
+**Proprietary — All Rights Reserved.** See [`LICENSE`](./LICENSE) for
+full terms.
+
+This source is published for transparency, auditability, and the
+portability of the AI BlackBox hardware product. It is **not** open
+source. Personal viewing, security audit, and end-user evaluation are
+permitted. Reproduction, redistribution, commercial use, SaaS hosting,
+or reselling — in source or compiled form — requires prior written
+permission from TechBran.
+
+For commercial licensing or partnership inquiries, open an issue
+titled "Licensing Inquiry" on this repository.
 
 ---
 

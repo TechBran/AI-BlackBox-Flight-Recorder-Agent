@@ -14,6 +14,7 @@ Both functions include:
 """
 
 import re
+import sys
 import time
 import requests
 from typing import Dict, Optional, List, Any, Tuple
@@ -35,9 +36,9 @@ except ImportError:
 
 PERPLEXITY_AVAILABLE = bool(PERPLEXITY_API_KEY)
 if PERPLEXITY_AVAILABLE:
-    print(f"[WEB_TOOLS] Perplexity Sonar API configured (key: ...{PERPLEXITY_API_KEY[-4:]})")
+    print(f"[WEB_TOOLS] Perplexity Sonar API configured (key: ...{PERPLEXITY_API_KEY[-4:]})", file=sys.stderr)
 else:
-    print("[WEB_TOOLS] Warning: PERPLEXITY_API_KEY not set, will fall back to DuckDuckGo")
+    print("[WEB_TOOLS] Warning: PERPLEXITY_API_KEY not set, will fall back to DuckDuckGo", file=sys.stderr)
 
 # =============================================================================
 # Configuration

@@ -1,0 +1,60 @@
+AI BlackBox Flight Recorder
+===========================
+
+Copyright (c) 2026 TechBran / AI BlackBox. All rights reserved.
+
+This source code is published for transparency, auditability, and
+portability of the AI BlackBox Flight Recorder hardware product. It
+is NOT open source software, and no Open Source Initiative-approved
+license is granted, expressed, or implied.
+
+PERMITTED
+---------
+- Viewing and reading this source code for personal evaluation,
+  security audit, or to understand how a BlackBox device you legally
+  own operates.
+- Running this software on a BlackBox device or development machine
+  for personal, non-commercial use as part of an end-user evaluation
+  of the AI BlackBox product.
+- Quoting short excerpts in good-faith technical commentary,
+  reviews, or academic discussion with attribution.
+
+PROHIBITED WITHOUT PRIOR WRITTEN PERMISSION
+-------------------------------------------
+- Reproducing, distributing, sublicensing, selling, leasing, or
+  otherwise commercializing this software or any derivative work,
+  in source or compiled form, in whole or in part.
+- Hosting this software as a service (SaaS) or otherwise offering
+  the functionality of this software for a fee or other commercial
+  benefit.
+- Removing, obscuring, or modifying any copyright notice, license
+  text, or attribution embedded in this codebase.
+- Training, fine-tuning, or evaluating machine-learning models on
+  this source code or any substantial portion of it.
+
+NO WARRANTY
+-----------
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+THIRD-PARTY COMPONENTS
+----------------------
+This repository depends on third-party software (Python packages,
+JavaScript libraries, Kotlin libraries, system binaries) each
+licensed under their own terms. Those terms govern those components,
+not this license. Customers receiving compiled distributions of the
+BlackBox product receive a NOTICES file enumerating third-party
+licenses and their attribution requirements.
+
+LICENSING INQUIRIES
+-------------------
+For commercial licensing, partnership inquiries, or permission
+requests, contact: https://github.com/TechBran (open an issue
+titled "Licensing Inquiry") or reach out to the repository
+maintainer directly.
