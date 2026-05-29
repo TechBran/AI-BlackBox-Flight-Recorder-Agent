@@ -546,7 +546,7 @@ USE_CLOUD_TTS = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_AP
 
 # Default Models
 OPENAI_MODEL_DEFAULT    = os.getenv("OPENAI_MODEL", "gpt-5.1")
-ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 
 # Extended thinking config per Claude model.
 # Opus 4.8 (added 2026-05-28): newest Opus; mirrors 4.7's constraints
