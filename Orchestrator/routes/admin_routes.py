@@ -585,6 +585,7 @@ _FALLBACK_MODELS = {
         {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (Legacy)"},
     ],
     "anthropic": [
+        {"id": "claude-opus-4-8", "name": "Claude Opus 4.8 (May 2026, newest)"},
         {"id": "claude-opus-4-7", "name": "Claude Opus 4.7 (Apr 2026, 1M ctx, adaptive thinking)"},
         {"id": "claude-opus-4-6", "name": "Claude Opus 4.6 (Feb 2026)"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (Mar 2026)"},
