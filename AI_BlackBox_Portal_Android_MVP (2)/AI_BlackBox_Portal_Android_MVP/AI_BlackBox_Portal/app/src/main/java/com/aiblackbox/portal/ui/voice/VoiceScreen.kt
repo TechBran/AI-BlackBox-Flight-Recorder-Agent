@@ -19,11 +19,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,10 +32,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -100,6 +101,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+enum class WaveSpeaker { USER, AI, IDLE }
+
 class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private val audioManager = application.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -128,6 +131,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _isMicActive = MutableStateFlow(false)
     val isMicActive: StateFlow<Boolean> = _isMicActive.asStateFlow()
 
+    // Live waveform inputs — real RMS amplitude (0f..1f) + who is speaking.
+    private val _amplitude = MutableStateFlow(0f)
+    val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
+
+    // Two writers by design: the mic loop sets USER (only when isAISpeaking != true) and the
+    // playback drain sets AI; stopMic()/stopAudioPlayback() reset it back to IDLE when idle.
+    private val _waveSpeaker = MutableStateFlow(WaveSpeaker.IDLE)
+    val waveSpeaker: StateFlow<WaveSpeaker> = _waveSpeaker.asStateFlow()
+
     private var currentOperator = "Brandon"
 
     // Audio I/O
@@ -140,6 +152,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val audioPlaybackQueue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
     private var audioPlaybackJob: Job? = null
     private var audioCollectorJob: Job? = null  // Must be cancelled to prevent duplicate collectors
+    private var aiEnvelopeJob: Job? = null       // Releases (decays) the AI waveform between chunks
 
     // Pre-buffering state
     @Volatile private var preBufferAccumulated = 0
@@ -147,6 +160,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         const val PRE_BUFFER_THRESHOLD_BYTES = 12_000  // ~250ms at 24kHz mono PCM16
+        // Below this RMS the user is considered silent → waveform returns to IDLE (breathing).
+        const val USER_SPEECH_THRESHOLD = 0.02f
+        // AI waveform envelope release per ~33ms frame (attack = chunk RMS via maxOf).
+        // Lets the ribbon fall during the model's pauses instead of freezing at the
+        // last chunk's level — halves roughly every 140ms.
+        const val AI_AMP_RELEASE = 0.83f  // fall rate (~halves every 125ms): fluid but still tracks the model
     }
 
     init {
@@ -323,6 +342,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     while (isRecordingAudio) {
                         val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                         if (readCount > 0) {
+                            val amp = rmsAmplitude(buffer, readCount)
                             // Auto-mute while AI is speaking WITH post-speech delay
                             val client = voiceClient
                             if (client != null) {
@@ -349,6 +369,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             try {
                                 voiceClient?.sendAudioChunk(base64)
                                 wasSendingAudio = true
+                                _amplitude.value = amp
+                                if (voiceClient?.isAISpeaking?.value != true) {
+                                    _waveSpeaker.value =
+                                        if (amp > USER_SPEECH_THRESHOLD) WaveSpeaker.USER
+                                        else WaveSpeaker.IDLE
+                                }
                             } catch (e: Exception) {
                                 android.util.Log.e("VoiceVM", "Send audio chunk failed: ${e.message}")
                             }
@@ -373,6 +399,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun stopMic() {
         isRecordingAudio = false  // Signals mic loop to exit, which sends audio_commit
         _isMicActive.value = false
+        _amplitude.value = 0f
+        if (_waveSpeaker.value == WaveSpeaker.USER) _waveSpeaker.value = WaveSpeaker.IDLE
         try {
             audioRecord?.stop()
             audioRecord?.release()
@@ -504,6 +532,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             val track = audioTrack ?: return@synchronized
                             if (track.state == AudioTrack.STATE_INITIALIZED) {
                                 track.write(chunk, 0, chunk.size)
+                                // Sample loudness at the moment the chunk is committed to the
+                                // audio device, so the waveform stays in sync with what's heard
+                                // (the ~12KB pre-buffer + drain otherwise lag enqueue by ~256ms).
+                                // Attack: jump UP to this chunk's loudness; the envelope job
+                                // releases between chunks so quiet syllables + pauses show.
+                                _waveSpeaker.value = WaveSpeaker.AI
+                                _amplitude.value = maxOf(_amplitude.value, rmsAmplitudeFromBytes(chunk))
                             }
                         }
                     } else {
@@ -523,13 +558,31 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+
+        // AI waveform envelope: release amplitude toward 0 each frame so the ribbon
+        // tracks the model's cadence and dips during pauses. Attacks come from the
+        // chunk writes above (maxOf). Guarded on speaker == AI so the mic path is intact.
+        aiEnvelopeJob?.cancel()
+        aiEnvelopeJob = viewModelScope.launch {
+            while (isActive) {
+                delay(33)
+                if (_waveSpeaker.value == WaveSpeaker.AI) {
+                    val c = _amplitude.value
+                    _amplitude.value = if (c > 0.001f) c * AI_AMP_RELEASE else 0f
+                }
+            }
+        }
     }
 
     private fun stopAudioPlayback() {
+        _amplitude.value = 0f
+        _waveSpeaker.value = WaveSpeaker.IDLE
         audioCollectorJob?.cancel()
         audioCollectorJob = null
         audioPlaybackJob?.cancel()
         audioPlaybackJob = null
+        aiEnvelopeJob?.cancel()
+        aiEnvelopeJob = null
         audioPlaybackQueue.clear()
         preBufferAccumulated = 0
         preBufferReady = false
@@ -590,7 +643,10 @@ fun VoiceScreen(
     val provenance by viewModel.provenance.collectAsState()
     val error by viewModel.error.collectAsState()
     val isMicActive by viewModel.isMicActive.collectAsState()
+    val amplitude by viewModel.amplitude.collectAsState()
+    val waveSpeaker by viewModel.waveSpeaker.collectAsState()
     val listState = rememberLazyListState()
+    val settingsScroll = rememberScrollState()
     var peekSnapId by remember { mutableStateOf<String?>(null) }
     // Request mic permission on first open
     val micPermLauncher = rememberLauncherForActivityResult(
@@ -646,6 +702,10 @@ fun VoiceScreen(
     }
 
     val isConnected = voiceState != VoiceState.DISCONNECTED && voiceState != VoiceState.ERROR
+
+    // Task 8: collapsible settings pane — auto-collapses once a session connects.
+    var settingsExpanded by remember { mutableStateOf(true) }
+    LaunchedEffect(isConnected) { if (isConnected) settingsExpanded = false }
 
     // ── Live-models config state (T13 plan 2026-05-19) ──
     // OpenAI Realtime config
@@ -713,93 +773,96 @@ fun VoiceScreen(
                 modifier = Modifier.padding(bottom = 8.dp))
         }
 
-        // ── Backend selector (disabled while connected) ──
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            VoiceBackend.entries.forEach { b ->
-                val isSelected = b == backend
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) BbxAccent.copy(alpha = 0.2f) else Neutral200)
-                        .then(if (isSelected) Modifier.border(1.dp, BbxAccent.copy(alpha = 0.4f), RoundedCornerShape(16.dp)) else Modifier)
-                        .clickable(enabled = !isConnected) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            viewModel.setBackend(b)
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(b.displayName, style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelected) BbxAccent else Neutral500)
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-
-        // ── Voice selector — provider-specific (disabled while connected).
-        // T13 review: VoiceClient has no post-connect session.update outbound path,
-        // so changing voice mid-session only updates local _voice.value — the audible
-        // voice keeps the old setting until next connect(). Gemini Live additionally
-        // doesn't support mid-session voice change (voice is in the setup message).
-        // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
-        Text("Voice", style = MaterialTheme.typography.labelLarge, color = BbxDim)
-        Spacer(Modifier.height(4.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        // ── Collapsible settings pane (auto-collapses on connect) ──
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
+                .glassSurface(shape = RoundedCornerShape(16.dp), bg = Neutral100)
+                .padding(12.dp)
         ) {
-            voicesForBackend(backend).forEach { v ->
-                val isSelected = v == voice
-                Box(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().clickable {
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    settingsExpanded = !settingsExpanded
+                }
+            ) {
+                Text("⚙️", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (settingsExpanded) "Settings" else "${backend.displayName} · $voice",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = BbxWhite,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(if (settingsExpanded) "▴" else "▾", color = BbxDim)
+            }
+            androidx.compose.animation.AnimatedVisibility(visible = settingsExpanded) {
+                // Bounded + internally scrollable so an expanded pane (6 Gemini
+                // dropdowns) never pushes the pinned mic/waveform off-screen.
+                Column(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (isSelected) SolidGreen.copy(alpha = 0.15f) else Neutral200)
-                        .then(if (isSelected) Modifier.border(1.dp, SolidGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp)) else Modifier)
-                        .clickable(enabled = !isConnected) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            viewModel.setVoice(v)
-                        }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(settingsScroll)
+                        .padding(top = 12.dp)
                 ) {
-                    Text(voiceLabel(backend, v), style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelected) SolidGreen else Neutral500)
+                    // ── Backend selector (disabled while connected) ──
+                    LabeledDropdown(
+                        label = "Backend",
+                        options = VoiceBackend.entries.map { it.id to it.displayName },
+                        selectedId = backend.id,
+                        enabled = !isConnected,
+                        onSelect = { id -> VoiceBackend.entries.firstOrNull { it.id == id }?.let(viewModel::setBackend) },
+                    )
+
+                    // ── Voice selector — provider-specific (disabled while connected).
+                    // T13 review: VoiceClient has no post-connect session.update outbound path,
+                    // so changing voice mid-session only updates local _voice.value — the audible
+                    // voice keeps the old setting until next connect(). Gemini Live additionally
+                    // doesn't support mid-session voice change (voice is in the setup message).
+                    // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
+                    LabeledDropdown(
+                        label = "Voice",
+                        options = voicesForBackend(backend).map { it to voiceLabel(backend, it) },
+                        selectedId = voice,
+                        enabled = !isConnected,
+                        onSelect = viewModel::setVoice,
+                    )
+
+                    // ── Per-provider live-models config (T13 plan 2026-05-19) ──
+                    // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
+                    // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
+                    // Voice/eagerness/idle_timeout/thinking_level: always enabled (hot-swappable mid-session).
+                    when (backend) {
+                        VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
+                            connected = isConnected,
+                            model = realtimeModel,
+                            onModelChange = { realtimeModel = it },
+                            vadType = realtimeVadType,
+                            onVadTypeChange = { realtimeVadType = it },
+                            vadEagerness = realtimeVadEagerness,
+                            onVadEagernessChange = { realtimeVadEagerness = it },
+                            idleTimeoutText = realtimeIdleTimeoutText,
+                            onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
+                        )
+                        VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
+                            connected = isConnected,
+                            model = geminiModel,
+                            onModelChange = { geminiModel = it },
+                            vadStart = geminiVadStart,
+                            onVadStartChange = { geminiVadStart = it },
+                            vadEnd = geminiVadEnd,
+                            onVadEndChange = { geminiVadEnd = it },
+                            thinkingLevel = geminiThinkingLevel,
+                            onThinkingLevelChange = { geminiThinkingLevel = it },
+                        )
+                        VoiceBackend.GROK_LIVE -> Unit // out of scope
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
-
-        // ── Per-provider live-models config (T13 plan 2026-05-19) ──
-        // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
-        // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
-        // Voice/eagerness/idle_timeout/thinking_level: always enabled (hot-swappable mid-session).
-        when (backend) {
-            VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
-                connected = isConnected,
-                model = realtimeModel,
-                onModelChange = { realtimeModel = it },
-                vadType = realtimeVadType,
-                onVadTypeChange = { realtimeVadType = it },
-                vadEagerness = realtimeVadEagerness,
-                onVadEagernessChange = { realtimeVadEagerness = it },
-                idleTimeoutText = realtimeIdleTimeoutText,
-                onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
-            )
-            VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
-                connected = isConnected,
-                model = geminiModel,
-                onModelChange = { geminiModel = it },
-                vadStart = geminiVadStart,
-                onVadStartChange = { geminiVadStart = it },
-                vadEnd = geminiVadEnd,
-                onVadEndChange = { geminiVadEnd = it },
-                thinkingLevel = geminiThinkingLevel,
-                onThinkingLevelChange = { geminiThinkingLevel = it },
-            )
-            VoiceBackend.GROK_LIVE -> Unit // out of scope
-        }
-
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
 
         // ── Central mic button + status + disconnect ──
         Row(
@@ -897,6 +960,14 @@ fun VoiceScreen(
         }
         Spacer(Modifier.height(16.dp))
 
+        // ── HD flowing-ribbon waveform (real amplitude) ──
+        VoiceWaveform(
+            amplitude = amplitude,
+            speaker = waveSpeaker,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+
         // Plan Task 10: retrieval provenance from voice WS dispatcher.
         // Renders above transcript because voice has no per-turn bubble.
         var voiceProvExpanded by remember { mutableStateOf(false) }
@@ -913,11 +984,13 @@ fun VoiceScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        // ── Transcript ──
+        // ── Transcript — the ONLY scrolling region. The settings/mic/waveform above
+        // are pinned (non-weighted children of the fixed outer Column), so the
+        // waveform + connect/disconnect controls never scroll away as text builds up.
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxWidth().weight(1f),
-            contentPadding = PaddingValues(top = 4.dp, bottom = 240.dp),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             items(transcript) { entry ->
@@ -955,70 +1028,6 @@ fun VoiceScreen(
 // Pattern matches the existing voice chip-row selector for visual consistency.
 // ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Generic chip-row picker. Renders a label + horizontally scrollable row of
- * selectable chips. Selection is highlighted with the accent color.
- *
- * @param enabled if false, chips are visually dimmed and clicks are blocked
- *   (used for model/vad chips while CONNECTED — audit I4).
- */
-@Composable
-private fun ChipRowPicker(
-    label: String,
-    options: List<Pair<String, String>>,  // (id, displayName)
-    selectedId: String?,
-    enabled: Boolean = true,
-    onSelect: (String) -> Unit,
-) {
-    val view = LocalView.current
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.labelLarge, color = BbxDim)
-        Spacer(Modifier.height(4.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-        ) {
-            options.forEach { (id, name) ->
-                val isSelected = id == selectedId
-                val baseColor = if (enabled) BbxAccent else Neutral500
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (isSelected) baseColor.copy(alpha = if (enabled) 0.18f else 0.08f)
-                            else Neutral200
-                        )
-                        .then(
-                            if (isSelected) Modifier.border(
-                                1.dp, baseColor.copy(alpha = if (enabled) 0.4f else 0.2f),
-                                RoundedCornerShape(12.dp)
-                            ) else Modifier
-                        )
-                        .clickable(enabled = enabled) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            onSelect(id)
-                        }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        name,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            isSelected && enabled -> baseColor
-                            isSelected -> Neutral500
-                            !enabled -> Neutral300
-                            else -> Neutral500
-                        }
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-    }
-}
-
 /** OpenAI Realtime config dropdowns: model, vad_type, vad_eagerness OR idle_timeout. */
 @Composable
 private fun RealtimeConfigBlock(
@@ -1033,14 +1042,14 @@ private fun RealtimeConfigBlock(
     onIdleTimeoutChange: (String) -> Unit,
 ) {
     val modelOpts = Constants.MODEL_CONFIG["realtime"].orEmpty()
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Model",
         options = modelOpts,
         selectedId = model,
         enabled = !connected,  // audit I4: model bound at upstream WS connect time
         onSelect = onModelChange,
     )
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Turn detection",
         options = Constants.OPENAI_REALTIME_VAD_TYPES.map { it to it },
         selectedId = vadType,
@@ -1049,7 +1058,7 @@ private fun RealtimeConfigBlock(
     )
     // Conditional: eagerness only meaningful for semantic_vad
     if (vadType == "semantic_vad") {
-        ChipRowPicker(
+        LabeledDropdown(
             label = "Eagerness",
             options = Constants.OPENAI_REALTIME_VAD_EAGERNESS.map { it to it },
             selectedId = vadEagerness,
@@ -1093,7 +1102,7 @@ private fun GeminiConfigBlock(
     onThinkingLevelChange: (String?) -> Unit,
 ) {
     val modelOpts = Constants.MODEL_CONFIG["gemini-live"].orEmpty()
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Model",
         options = modelOpts,
         selectedId = model,
@@ -1106,14 +1115,14 @@ private fun GeminiConfigBlock(
     val toNullable: (String) -> String? = { if (it == "__auto__") null else it }
     val toSelectedId: (String?) -> String = { it ?: "__auto__" }
 
-    ChipRowPicker(
+    LabeledDropdown(
         label = "VAD start sensitivity",
         options = sensitivityOpts,
         selectedId = toSelectedId(vadStart),
         enabled = !connected,  // audit I4: VAD configured at setup time
         onSelect = { onVadStartChange(toNullable(it)) },
     )
-    ChipRowPicker(
+    LabeledDropdown(
         label = "VAD end sensitivity",
         options = sensitivityOpts,
         selectedId = toSelectedId(vadEnd),
@@ -1124,7 +1133,7 @@ private fun GeminiConfigBlock(
     if (model in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS) {
         val thinkingOpts: List<Pair<String, String>> =
             listOf("__auto__" to "auto") + Constants.GEMINI_LIVE_THINKING_LEVELS.map { it to it }
-        ChipRowPicker(
+        LabeledDropdown(
             label = "Thinking level",
             options = thinkingOpts,
             selectedId = toSelectedId(thinkingLevel),

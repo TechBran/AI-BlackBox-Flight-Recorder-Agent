@@ -551,8 +551,9 @@ class NativeMainActivity : ComponentActivity() {
                     }
 
                     // Layer 4: Composer floating at bottom (transparent bg, only pills visible)
-                    // Hide on screens that have their own compose UI (SMS, Contacts, CLI Agent)
-                    val hideComposerRoutes = setOf(Routes.SMS_INBOX, Routes.CONTACTS, Routes.CLI_AGENT)
+                    // Hide on screens that have their own compose UI (SMS, Contacts, CLI Agent,
+                    // Voice — the provider/model composer is irrelevant in voice-agent mode).
+                    val hideComposerRoutes = setOf(Routes.SMS_INBOX, Routes.CONTACTS, Routes.CLI_AGENT, Routes.VOICE)
                     if (currentRoute !in hideComposerRoutes)
                     Box(modifier = Modifier
                         .align(Alignment.BottomCenter)

@@ -121,8 +121,8 @@ object Constants {
             "gpt-realtime-mini-2025-12-15" to "GPT Realtime Mini (Dec 2025 pin)"
         ),
         "gemini-live" to listOf(
-            "gemini-2.5-flash-native-audio-latest" to "Gemini 2.5 Flash Live (Latest GA-track)",
             "gemini-3.1-flash-live-preview" to "Gemini 3.1 Flash Live (Preview, thinkingLevel)",
+            "gemini-2.5-flash-native-audio-latest" to "Gemini 2.5 Flash Live (Latest GA-track)",
             "gemini-2.5-flash-native-audio-preview-12-2025" to "Gemini 2.5 Flash Live (Dec 2025 pin)"
         ),
         "grok-live" to listOf(
@@ -147,7 +147,7 @@ object Constants {
     /** Default model id per live provider — first item the dropdown picks if no user pref. */
     val LIVE_MODEL_DEFAULTS: Map<String, String> = mapOf(
         "realtime" to "gpt-realtime-2",
-        "gemini-live" to "gemini-2.5-flash-native-audio-latest",
+        "gemini-live" to "gemini-3.1-flash-live-preview",
     )
 
     /** OpenAI Realtime voices (10 GA voices, 2026-05-19 verified). */
