@@ -784,6 +784,13 @@ async def get_google_voices(operator: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/tts/catalog")
+async def tts_catalog():
+    """Grouped TTS voice catalog -- single source of truth for the voice picker
+    (web Portal + Android both fetch this). See config.build_tts_catalog()."""
+    from Orchestrator.config import build_tts_catalog
+    return {"groups": build_tts_catalog()}
+
 @app.get("/api/last-response")
 async def get_last_response(operator: str):
     """

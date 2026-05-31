@@ -34,6 +34,79 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _apps = MutableStateFlow<List<RegisteredApp>>(emptyList())
     val apps: StateFlow<List<RegisteredApp>> = _apps.asStateFlow()
 
+    // Voice catalog — defaults to the full offline fallback so the picker is never
+    // empty; loadVoiceCatalog() swaps in the live /tts/catalog when reachable.
+    private val _voiceGroups = MutableStateFlow(com.aiblackbox.portal.data.repository.TTS_VOICE_GROUPS)
+    val voiceGroups: StateFlow<List<com.aiblackbox.portal.data.repository.VoiceGroup>> = _voiceGroups.asStateFlow()
+
+    fun loadVoiceCatalog() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                _voiceGroups.value = com.aiblackbox.portal.data.repository.TtsRepository(api).fetchCatalog()
+            } catch (_: Exception) { /* keep the offline default already in _voiceGroups */ }
+        }
+    }
+
+    // ── Voice preview (single ▶ button next to the TTS Voice dropdown) ──
+    // On-demand: OpenAI is synchronous; Gemini flash/pro submit → poll → play.
+    // _previewing gates the UI (loading state + overlap guard); _previewError
+    // surfaces failures (no pre-existing error flow in this VM to reuse).
+    private val _previewing = MutableStateFlow(false)
+    val previewing: StateFlow<Boolean> = _previewing.asStateFlow()
+    private val _previewError = MutableStateFlow<String?>(null)
+    val previewError: StateFlow<String?> = _previewError.asStateFlow()
+    private var previewPlayer: android.media.MediaPlayer? = null
+
+    fun clearPreviewError() { _previewError.value = null }
+
+    fun previewVoice(voiceId: String) {
+        val api = api ?: return
+        if (_previewing.value) return
+        _previewing.value = true
+        _previewError.value = null
+        viewModelScope.launch {
+            try {
+                val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
+                val text = "Hello! This is a preview of the selected voice."
+                val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
+                val url = if (cfg.provider == "openai") {
+                    repo.generateTts(text, cfg.voice, cfg.model).audio_url
+                } else {
+                    val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model)
+                    repo.pollGeminiTaskForUrl(sub.task_id)
+                }
+                if (url.isNotBlank()) playPreview(url)
+                else throw Exception("No audio url returned")
+            } catch (e: Exception) {
+                _previewError.value = "Preview failed: ${e.message}"
+            } finally {
+                _previewing.value = false
+            }
+        }
+    }
+
+    private fun playPreview(url: String) {
+        previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
+        previewPlayer = null
+        // Mirror GeminiProTtsScreen: relative urls need the server origin prefixed.
+        val base = api?.getBaseUrl() ?: ""
+        val src = if (url.startsWith("http")) url else "$base$url"
+        previewPlayer = android.media.MediaPlayer().apply {
+            setDataSource(src)
+            setOnPreparedListener { start() }
+            setOnCompletionListener { it.release(); previewPlayer = null }
+            setOnErrorListener { mp, _, _ -> mp.release(); previewPlayer = null; true }
+            prepareAsync()
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
+        previewPlayer = null
+    }
+
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
         api = BlackBoxApi(origin)

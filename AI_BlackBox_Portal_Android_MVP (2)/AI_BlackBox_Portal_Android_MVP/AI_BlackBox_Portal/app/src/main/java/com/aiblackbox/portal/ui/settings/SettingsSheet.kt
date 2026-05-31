@@ -127,7 +127,10 @@ fun SettingsSheet(
         .collectAsState(initial = "")
     val selectedModel = perProviderModel.ifBlank { currentModel }
 
-    LaunchedEffect(origin) { viewModel.initialize(origin) }
+    LaunchedEffect(origin) {
+        viewModel.initialize(origin)
+        viewModel.loadVoiceCatalog()  // after init so api is ready → live catalog drives the picker
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -422,11 +425,28 @@ fun SettingsSheet(
                 .collectAsState(initial = "openai:onyx")
             var showVoiceMenu by remember { mutableStateOf(false) }
 
-            // Find current voice display name
-            val allVoiceGroups = com.aiblackbox.portal.data.repository.TTS_VOICE_GROUPS
+            // Find current voice display name — render the FETCHED catalog so the
+            // picker always reflects the backend (falls back to offline default).
+            // Load is chained after initialize(origin) (line ~130) so api is ready.
+            val allVoiceGroups by viewModel.voiceGroups.collectAsState()
             val currentVoiceDisplay = allVoiceGroups.flatMap { it.voices }
                 .find { it.id == currentVoice }?.let { "${it.name} — ${it.description}" } ?: currentVoice
 
+            // Single ▶ preview button beside the dropdown — synthesizes a fixed
+            // phrase for the CURRENTLY selected voice and plays it (mirrors the
+            // web portal's #btnPreviewVoice). Loading state + overlap guard live
+            // in the VM (previewing). Errors surface via Toast.
+            val previewing by viewModel.previewing.collectAsState()
+            val previewError by viewModel.previewError.collectAsState()
+            LaunchedEffect(previewError) {
+                previewError?.let {
+                    android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
+                    viewModel.clearPreviewError()
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
             SettingsDropdown(
                 label = "TTS Voice",
                 value = currentVoiceDisplay,
@@ -467,6 +487,14 @@ fun SettingsSheet(
                     }
                 }
             }
+                } // end Box(weight=1f) wrapping the voice dropdown
+                IconButton(
+                    enabled = !previewing,
+                    onClick = { viewModel.previewVoice(currentVoice) }
+                ) {
+                    Text(if (previewing) "…" else "▶", color = SolidGreen)
+                }
+            } // end Row (voice dropdown + ▶ preview)
 
             Spacer(Modifier.height(16.dp))
 

@@ -4,6 +4,8 @@ import android.util.Log
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -62,7 +64,8 @@ class TtsRepository(private val api: BlackBoxApi) {
          *
          * Examples:
          *   "openai:alloy" → VoiceConfig("openai", "alloy", "tts-1-hd")
-         *   "gemini-pro:Charon" → VoiceConfig("gemini-pro", "Charon", "gemini-2.5-flash-tts")
+         *   "gemini-flash:Zephyr" → VoiceConfig("gemini-flash", "Zephyr", "gemini-2.5-flash-tts")
+         *   "gemini-pro:Charon" → VoiceConfig("gemini-pro", "Charon", "gemini-2.5-pro-tts")
          *   "onyx" → VoiceConfig("openai", "onyx", "tts-1-hd") (legacy fallback)
          */
         fun parseVoice(voiceValue: String): VoiceConfig {
@@ -71,7 +74,8 @@ class TtsRepository(private val api: BlackBoxApi) {
                 val provider = parts[0]
                 val voice = parts[1]
                 val model = when (provider) {
-                    "gemini-pro" -> "gemini-2.5-flash-tts"
+                    "gemini-flash" -> "gemini-2.5-flash-tts"
+                    "gemini-pro" -> "gemini-2.5-pro-tts"
                     else -> "tts-1-hd"
                 }
                 VoiceConfig(provider, voice, model)
@@ -142,6 +146,32 @@ class TtsRepository(private val api: BlackBoxApi) {
     }
 
     // =========================================================================
+    // Gemini task poll — wait for a completed task's audio url.
+    // Parsing is based on GeminiProTtsScreen's task-status handling
+    // (status / result_url / error_message); bounded with a timeout.
+    // ~90s ceiling: Gemini Pro TTS can exceed 60s under load.
+    // =========================================================================
+    suspend fun pollGeminiTaskForUrl(taskId: String, attempts: Int = 90, intervalMs: Long = 1000): String {
+        repeat(attempts) {
+            val raw = api.get("/tasks/status/$taskId")
+            val o = json.parseToJsonElement(raw).jsonObject
+            val status = o["status"]?.jsonPrimitive?.content ?: "pending"
+            when {
+                status.equals("completed", ignoreCase = true) -> {
+                    val url = o["result_url"]?.jsonPrimitive?.content
+                    if (!url.isNullOrBlank()) return url
+                }
+                status.equals("failed", ignoreCase = true) -> {
+                    val err = o["error_message"]?.jsonPrimitive?.content ?: "Generation failed"
+                    throw Exception(err)
+                }
+            }
+            kotlinx.coroutines.delay(intervalMs)
+        }
+        throw Exception("Gemini TTS preview timed out")
+    }
+
+    // =========================================================================
     // Provider-aware TTS — routes to correct backend based on voice config
     // Matches Portal generateTTSAudioWithVoice()
     // =========================================================================
@@ -154,7 +184,7 @@ class TtsRepository(private val api: BlackBoxApi) {
         Log.d(TAG, "generateWithVoice: provider=${config.provider}, voice=${config.voice}")
 
         return when (config.provider) {
-            "gemini-pro" -> {
+            "gemini-pro", "gemini-flash" -> {
                 // Gemini TTS is async — start task (polling handled by caller)
                 val result = generateGeminiTts(
                     text = text,
@@ -190,6 +220,35 @@ class TtsRepository(private val api: BlackBoxApi) {
         val obj = json.parseToJsonElement(response)
         return obj.jsonObject["text"]?.jsonPrimitive?.content ?: ""
     }
+
+    // =========================================================================
+    // Voice Catalog — GET /tts/catalog (live catalog with offline fallback)
+    // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}]}]}
+    // Returns TTS_VOICE_GROUPS on ANY failure (network, parse, empty).
+    // =========================================================================
+    suspend fun fetchCatalog(): List<VoiceGroup> = try {
+        val raw = api.get("/tts/catalog")
+        val groups = json.parseToJsonElement(raw).jsonObject["groups"]?.jsonArray
+            ?: return TTS_VOICE_GROUPS
+        val parsed = groups.map { g ->
+            val o = g.jsonObject
+            VoiceGroup(
+                label = o["label"]?.jsonPrimitive?.content ?: "",
+                voices = (o["voices"]?.jsonArray ?: JsonArray(emptyList())).map { v ->
+                    val vo = v.jsonObject
+                    VoiceOption(
+                        id = vo["id"]!!.jsonPrimitive.content,
+                        name = vo["name"]!!.jsonPrimitive.content,
+                        description = vo["description"]?.jsonPrimitive?.content ?: "",
+                    )
+                },
+            )
+        }
+        if (parsed.isEmpty()) TTS_VOICE_GROUPS else parsed
+    } catch (e: Exception) {
+        Log.w(TAG, "fetchCatalog failed, using offline fallback: ${e.message}")
+        TTS_VOICE_GROUPS
+    }
 }
 
 // =============================================================================
@@ -207,6 +266,45 @@ data class VoiceGroup(
     val voices: List<VoiceOption>
 )
 
+/**
+ * Canonical Gemini TTS voice catalog (name → description).
+ * Matches backend GEMINI_TTS_VOICE_DESCRIPTIONS. Shared by both the
+ * Gemini Flash and Gemini Pro fallback groups AND the Gemini Pro TTS
+ * generation screen (DRY — defined once, the single source of truth).
+ */
+val GEMINI_TTS_VOICE_PAIRS: List<Pair<String, String>> = listOf(
+    "Zephyr" to "Bright, cheerful",
+    "Puck" to "Playful, mischievous",
+    "Charon" to "Calm, informative",
+    "Kore" to "Clear, versatile",
+    "Fenrir" to "Bold, confident",
+    "Leda" to "Warm, youthful",
+    "Orus" to "Deep, firm",
+    "Aoede" to "Breezy, conversational",
+    "Callirrhoe" to "Smooth, flowing",
+    "Autonoe" to "Gentle, measured",
+    "Enceladus" to "Rich, resonant",
+    "Iapetus" to "Deep, steady",
+    "Umbriel" to "Soft, mysterious",
+    "Algieba" to "Warm, articulate",
+    "Despina" to "Light, energetic",
+    "Erinome" to "Serene, melodic",
+    "Algenib" to "Crisp, precise",
+    "Rasalgethi" to "Grand, theatrical",
+    "Laomedeia" to "Graceful, elegant",
+    "Achernar" to "Bright, radiant",
+    "Alnilam" to "Strong, commanding",
+    "Schedar" to "Regal, distinguished",
+    "Gacrux" to "Earthy, grounded",
+    "Pulcherrima" to "Beautiful, refined",
+    "Achird" to "Friendly, approachable",
+    "Zubenelgenubi" to "Balanced, neutral",
+    "Vindemiatrix" to "Mature, wise",
+    "Sadachbia" to "Lucky, optimistic",
+    "Sadaltager" to "Hopeful, bright",
+    "Sulafat" to "Lyrical, musical",
+)
+
 val TTS_VOICE_GROUPS = listOf(
     VoiceGroup("OpenAI TTS HD", listOf(
         VoiceOption("openai:alloy", "Alloy", "Neutral, balanced"),
@@ -221,12 +319,10 @@ val TTS_VOICE_GROUPS = listOf(
         VoiceOption("openai:shimmer", "Shimmer", "Soft, ethereal"),
         VoiceOption("openai:verse", "Verse", "Poetic, dramatic"),
     )),
-    VoiceGroup("Gemini Pro TTS", listOf(
-        VoiceOption("gemini-pro:Charon", "Charon", "Deep, resonant"),
-        VoiceOption("gemini-pro:Puck", "Puck", "Playful, bright"),
-        VoiceOption("gemini-pro:Kore", "Kore", "Warm, feminine"),
-        VoiceOption("gemini-pro:Aoede", "Aoede", "Musical, lyrical"),
-        VoiceOption("gemini-pro:Fenrir", "Fenrir", "Strong, commanding"),
-        VoiceOption("gemini-pro:Orus", "Orus", "Calm, steady"),
-    )),
+    VoiceGroup("Gemini Flash TTS",
+        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
+    ),
+    VoiceGroup("Gemini Pro TTS",
+        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
+    ),
 )
