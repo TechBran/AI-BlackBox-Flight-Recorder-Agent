@@ -943,6 +943,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+            elif name in ("gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
+                operator = await resolve_operator(arguments.get("operator"))
+                params = {k: v for k, v in arguments.items() if k != "operator"}
+                resp = await client.post(
+                    f"{BLACKBOX_URL}/gmail/execute",
+                    json={"tool": name, "params": params, "operator": operator},
+                )
+                data_g = resp.json()
+                if data_g.get("success"):
+                    return [TextContent(type="text", text=str(data_g.get("result", "")))]
+                return [TextContent(type="text", text=f"Gmail error: {data_g.get('error') or data_g.get('result') or 'unknown'}")]
+
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

@@ -184,3 +184,38 @@ async def gmail_disconnect(operator: str):
         "disconnected": True,
         "operator": operator,
     })
+
+
+# ---------------------------------------------------------------------------
+# POST /gmail/execute  — whitelisted gmail_* tool execution for the BlackBox MCP
+# ---------------------------------------------------------------------------
+# Gmail tools exposed to the MCP / CLI agents. Whitelist — do NOT route arbitrary
+# tools through this endpoint (keeps the HTTP surface scoped to gmail only).
+_GMAIL_MCP_TOOLS = {"gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"}
+
+
+@app.post("/gmail/execute")
+async def gmail_execute(request: Request):
+    """Execute a whitelisted gmail_* tool (for the BlackBox MCP / CLI agents).
+    Body: {"tool": "gmail_search", "params": {...}, "operator": "<name>"}."""
+    from Orchestrator.tools.blackbox_tools import execute_tool
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
+    tool = body.get("tool")
+    if not isinstance(tool, str) or tool not in _GMAIL_MCP_TOOLS:
+        return JSONResponse({"success": False, "error": f"not a gmail tool: {tool}"}, status_code=400)
+    operator = (body.get("operator") or "system")
+    params = body.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    params = dict(params)
+    params["operator"] = operator
+    try:
+        result = await execute_tool(tool, params, operator)
+        return {"success": bool(result.success), "result": result.result}
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
