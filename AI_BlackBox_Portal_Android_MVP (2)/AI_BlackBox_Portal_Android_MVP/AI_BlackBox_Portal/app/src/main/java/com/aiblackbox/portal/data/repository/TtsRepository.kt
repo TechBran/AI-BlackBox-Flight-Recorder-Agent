@@ -146,6 +146,31 @@ class TtsRepository(private val api: BlackBoxApi) {
     }
 
     // =========================================================================
+    // Gemini task poll — wait for a completed task's audio url.
+    // Mirrors GeminiProTtsScreen's poll loop EXACTLY: reads "status", returns
+    // "result_url" on completed, throws "error_message" on failed.
+    // =========================================================================
+    suspend fun pollGeminiTaskForUrl(taskId: String, attempts: Int = 60, intervalMs: Long = 1000): String {
+        repeat(attempts) {
+            val raw = api.get("/tasks/status/$taskId")
+            val o = json.parseToJsonElement(raw).jsonObject
+            val status = o["status"]?.jsonPrimitive?.content ?: "pending"
+            when {
+                status.equals("completed", ignoreCase = true) -> {
+                    val url = o["result_url"]?.jsonPrimitive?.content
+                    if (!url.isNullOrBlank()) return url
+                }
+                status.equals("failed", ignoreCase = true) -> {
+                    val err = o["error_message"]?.jsonPrimitive?.content ?: "Generation failed"
+                    throw Exception(err)
+                }
+            }
+            kotlinx.coroutines.delay(intervalMs)
+        }
+        throw Exception("Gemini TTS preview timed out")
+    }
+
+    // =========================================================================
     // Provider-aware TTS — routes to correct backend based on voice config
     // Matches Portal generateTTSAudioWithVoice()
     // =========================================================================
