@@ -672,6 +672,10 @@ fun VoiceScreen(
 
     val isConnected = voiceState != VoiceState.DISCONNECTED && voiceState != VoiceState.ERROR
 
+    // Task 8: collapsible settings pane — auto-collapses once a session connects.
+    var settingsExpanded by remember { mutableStateOf(true) }
+    LaunchedEffect(isConnected) { if (isConnected) settingsExpanded = false }
+
     // ── Live-models config state (T13 plan 2026-05-19) ──
     // OpenAI Realtime config
     var realtimeModel by remember {
@@ -738,60 +742,88 @@ fun VoiceScreen(
                 modifier = Modifier.padding(bottom = 8.dp))
         }
 
-        // ── Backend selector (disabled while connected) ──
-        LabeledDropdown(
-            label = "Backend",
-            options = VoiceBackend.entries.map { it.id to it.displayName },
-            selectedId = backend.id,
-            enabled = !isConnected,
-            onSelect = { id -> VoiceBackend.entries.firstOrNull { it.id == id }?.let(viewModel::setBackend) },
-        )
+        // ── Collapsible settings pane (auto-collapses on connect) ──
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .glassSurface(shape = RoundedCornerShape(16.dp), bg = Neutral100)
+                .padding(12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().clickable {
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    settingsExpanded = !settingsExpanded
+                }
+            ) {
+                Text("⚙️", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (settingsExpanded) "Settings" else "${backend.displayName} · $voice",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = BbxWhite,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(if (settingsExpanded) "▴" else "▾", color = BbxDim)
+            }
+            androidx.compose.animation.AnimatedVisibility(visible = settingsExpanded) {
+                Column(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                    // ── Backend selector (disabled while connected) ──
+                    LabeledDropdown(
+                        label = "Backend",
+                        options = VoiceBackend.entries.map { it.id to it.displayName },
+                        selectedId = backend.id,
+                        enabled = !isConnected,
+                        onSelect = { id -> VoiceBackend.entries.firstOrNull { it.id == id }?.let(viewModel::setBackend) },
+                    )
 
-        // ── Voice selector — provider-specific (disabled while connected).
-        // T13 review: VoiceClient has no post-connect session.update outbound path,
-        // so changing voice mid-session only updates local _voice.value — the audible
-        // voice keeps the old setting until next connect(). Gemini Live additionally
-        // doesn't support mid-session voice change (voice is in the setup message).
-        // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
-        LabeledDropdown(
-            label = "Voice",
-            options = voicesForBackend(backend).map { it to voiceLabel(backend, it) },
-            selectedId = voice,
-            enabled = !isConnected,
-            onSelect = viewModel::setVoice,
-        )
+                    // ── Voice selector — provider-specific (disabled while connected).
+                    // T13 review: VoiceClient has no post-connect session.update outbound path,
+                    // so changing voice mid-session only updates local _voice.value — the audible
+                    // voice keeps the old setting until next connect(). Gemini Live additionally
+                    // doesn't support mid-session voice change (voice is in the setup message).
+                    // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
+                    LabeledDropdown(
+                        label = "Voice",
+                        options = voicesForBackend(backend).map { it to voiceLabel(backend, it) },
+                        selectedId = voice,
+                        enabled = !isConnected,
+                        onSelect = viewModel::setVoice,
+                    )
 
-        // ── Per-provider live-models config (T13 plan 2026-05-19) ──
-        // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
-        // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
-        // Voice/eagerness/idle_timeout/thinking_level: always enabled (hot-swappable mid-session).
-        when (backend) {
-            VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
-                connected = isConnected,
-                model = realtimeModel,
-                onModelChange = { realtimeModel = it },
-                vadType = realtimeVadType,
-                onVadTypeChange = { realtimeVadType = it },
-                vadEagerness = realtimeVadEagerness,
-                onVadEagernessChange = { realtimeVadEagerness = it },
-                idleTimeoutText = realtimeIdleTimeoutText,
-                onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
-            )
-            VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
-                connected = isConnected,
-                model = geminiModel,
-                onModelChange = { geminiModel = it },
-                vadStart = geminiVadStart,
-                onVadStartChange = { geminiVadStart = it },
-                vadEnd = geminiVadEnd,
-                onVadEndChange = { geminiVadEnd = it },
-                thinkingLevel = geminiThinkingLevel,
-                onThinkingLevelChange = { geminiThinkingLevel = it },
-            )
-            VoiceBackend.GROK_LIVE -> Unit // out of scope
+                    // ── Per-provider live-models config (T13 plan 2026-05-19) ──
+                    // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
+                    // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
+                    // Voice/eagerness/idle_timeout/thinking_level: always enabled (hot-swappable mid-session).
+                    when (backend) {
+                        VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
+                            connected = isConnected,
+                            model = realtimeModel,
+                            onModelChange = { realtimeModel = it },
+                            vadType = realtimeVadType,
+                            onVadTypeChange = { realtimeVadType = it },
+                            vadEagerness = realtimeVadEagerness,
+                            onVadEagernessChange = { realtimeVadEagerness = it },
+                            idleTimeoutText = realtimeIdleTimeoutText,
+                            onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
+                        )
+                        VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
+                            connected = isConnected,
+                            model = geminiModel,
+                            onModelChange = { geminiModel = it },
+                            vadStart = geminiVadStart,
+                            onVadStartChange = { geminiVadStart = it },
+                            vadEnd = geminiVadEnd,
+                            onVadEndChange = { geminiVadEnd = it },
+                            thinkingLevel = geminiThinkingLevel,
+                            onThinkingLevelChange = { geminiThinkingLevel = it },
+                        )
+                        VoiceBackend.GROK_LIVE -> Unit // out of scope
+                    }
+                }
+            }
         }
-
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
 
         // ── Central mic button + status + disconnect ──
         Row(
