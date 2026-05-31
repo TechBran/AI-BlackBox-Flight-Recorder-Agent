@@ -40,6 +40,46 @@ except ImportError:
 BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
+# Operator resolution (pure decision logic lives in operator_resolution.py).
+# Same-dir import: when this server runs as a bare script
+# (MCP/venv/bin/python MCP/blackbox_mcp_server.py), the script's own directory
+# is on sys.path[0], so the sibling module imports directly without a package root.
+from operator_resolution import choose_operator
+
+# Per-process cache of the install's operators (multi-tenant: never hard-coded).
+_OPERATOR_CACHE = {"operators": None, "default": None}
+
+
+async def _fetch_operators():
+    """Fetch + cache the install's operators from GET /operators.
+
+    Cached only on SUCCESS (per-process, lifetime = one MCP session). A failed
+    fetch returns an empty result WITHOUT caching, so the next call retries —
+    a transient API blip self-heals instead of degrading the whole session.
+    """
+    if _OPERATOR_CACHE["operators"] is not None:
+        return _OPERATOR_CACHE["operators"], _OPERATOR_CACHE["default"]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{BLACKBOX_URL}/operators")
+            data = r.json()
+            operators = list(data.get("operators") or [])
+            default = data.get("default") or ""
+        _OPERATOR_CACHE["operators"] = operators
+        _OPERATOR_CACHE["default"] = default
+        return operators, default
+    except Exception:
+        return [], ""   # do NOT cache — retry on next call
+
+
+async def resolve_operator(provided):
+    """Server-side safety net: resolve the operator for a tool call. When omitted,
+    single operator -> that; multiple -> system default. (Interactive dropdown for
+    the multiple case is handled agent-side, not here.)"""
+    operators, default = await _fetch_operators()
+    resolved, _needs = choose_operator(provided, operators, default)
+    return resolved
+
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_search, perform_web_fetch
@@ -203,7 +243,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "list_recent_snapshots":
-            operator = arguments["operator"]
+            operator = await resolve_operator(arguments.get("operator"))
             count = arguments.get("count", 10)
 
             snapshots = list_snapshots_by_operator(operator, count)
@@ -241,7 +281,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(stats, indent=2))]
 
         elif name == "browse_index":
-            operator = arguments.get("operator")
+            # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
+            operator = arguments.get("operator", "")
             snap_type = arguments.get("snap_type")
             limit = arguments.get("limit", 20)
             offset = arguments.get("offset", 0)
@@ -291,6 +332,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps({
                 "operators": [{"name": op, "snapshot_count": count} for op, count in sorted_ops]
             }, indent=2))]
+
+        elif name == "get_current_operator":
+            operators, default = await _fetch_operators()
+            resolved, needs_selection = choose_operator(None, operators, default)
+            result = {
+                "resolved": resolved,
+                "operators": operators,
+                "default": default,
+                "count": len(operators),
+                "needs_selection": needs_selection,
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "refresh_index":
             load_snapshot_index(force_refresh=True)
@@ -407,6 +460,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             if name == "search_snapshots":
                 query = arguments["query"]
+                # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
                 operator = arguments.get("operator", "")
                 limit = arguments.get("limit", 10)
 
@@ -419,7 +473,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "mint_snapshot":
                 content = arguments["content"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 snap_type = arguments.get("snapshot_type", "normal")
 
                 # Route through /chat for AI processing, auto-mint will capture the result
@@ -450,7 +504,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "get_context":
                 query = arguments["query"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 # Get hybrid search results
                 search_response = await client.get(
@@ -474,7 +528,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "chat_with_context":
                 message = arguments["message"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 provider = arguments.get("provider", "anthropic")
                 model = arguments.get("model")
 
@@ -519,7 +573,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_image":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/image",
@@ -539,7 +593,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_video":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 video_url = arguments.get("video_url")
                 image_url = arguments.get("image_url")
                 image_base64 = arguments.get("image_base64")
@@ -602,7 +656,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "extend_video":
                 video_url = arguments["video_url"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 prompt = arguments.get("prompt", "")
 
                 response = await client.post(
@@ -622,7 +676,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_music":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/lyria_music",
@@ -664,7 +718,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "gemini_pro_tts":
                 text = arguments["text"]
                 voice = arguments.get("voice", "Charon")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/gemini_tts",
@@ -730,7 +784,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_audio":
                 file_path = arguments["file_path"]
                 prompt = arguments.get("prompt", "Transcribe and describe this audio")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/analyze/audio",
@@ -749,7 +803,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_image":
                 image_url = arguments["image_url"]
                 prompt = arguments.get("prompt", "Describe this image in detail")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 provider = arguments.get("provider", "gemini")
 
                 # Use chat endpoint with image content for multimodal analysis
@@ -781,7 +835,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_video":
                 video_url = arguments["video_url"]
                 prompt = arguments.get("prompt", "Describe what happens in this video")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 # Use Gemini for video analysis (best multimodal video support)
                 response = await client.post(
@@ -810,7 +864,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "use_computer":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 url = arguments.get("url")
                 device_id = arguments.get("device_id", "blackbox")
 
@@ -844,12 +898,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps({"devices": device_list}, indent=2))]
 
             elif name == "control_android_device":
+                operator = await resolve_operator(arguments.get("operator"))
                 response = await client.post(
                     f"{BLACKBOX_URL}/gemini-cu/run",
                     json={
                         "prompt": arguments["prompt"],
                         "device_id": arguments["device_id"],
-                        "operator": arguments["operator"]
+                        "operator": operator
                     },
                     timeout=30
                 )

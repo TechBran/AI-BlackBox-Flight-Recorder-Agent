@@ -11,13 +11,19 @@ Mint a snapshot of the current session's completed work into the BlackBox volume
 
 ## Default Behavior
 
-- **Operator:** `Brandon` (NOT `Brandon-DEV` — Brandon-DEV is for sessions where the user is acting as the dev persona, but completions of work for Brandon should be saved under Brandon so his future searches find them).
+- **Operator:** resolved dynamically — NEVER hard-coded. Follow the shared
+  `resolve-operator` procedure (`.claude/commands/resolve-operator.md`): a slash arg
+  wins; otherwise call the `get_current_operator` MCP tool — a single operator is used
+  automatically, and when multiple operators exist you present an AskUserQuestion
+  dropdown (pre-selecting `default`) to pick whose work this snapshot records.
 - **Trigger:** invoked manually via `/snapshot-dev`, OR organically by Claude at the end of any non-trivial task per the CLAUDE.md instruction.
 - **Cost:** ~one Gemini embedding call (~$0.00013 at 3072 dims). No LLM completion call.
 
 ## Operator Override
 
-If the user passes an operator as an argument (`/snapshot-dev system`, `/snapshot-dev Brandon-DEV`), use that. Otherwise default to `Brandon`.
+If the user passes an operator as an argument (e.g. `/snapshot-dev system`), use that
+verbatim. Otherwise resolve via the `resolve-operator` procedure above (single → auto;
+multiple → dropdown). Do not assume any particular operator name.
 
 ## What To Capture
 
@@ -37,7 +43,7 @@ The `assistant_response` field becomes the snapshot body. Future semantic search
 # 1. Build the JSON payload as a heredoc-to-file (avoids shell-quoting hell with embedded JSON)
 cat > /tmp/snap_payload.json <<'EOF'
 {
-  "operator": "Brandon",
+  "operator": "<resolved operator — from resolve-operator, NOT a literal>",
   "user_message": "<one-line framing of the work being snapshotted>",
   "assistant_response": "<the full structured summary — see What To Capture above>",
   "model": "claude-opus-4-7",
@@ -53,7 +59,7 @@ curl -s -X POST http://localhost:9091/chat/save \
 # Expected response:
 #   {
 #     "success": true,
-#     "operator": "Brandon",
+#     "operator": "<resolved operator>",
 #     "minted": true,
 #     "snap_id": "SNAP-YYYYMMDD-NNNN",
 #     ...
@@ -82,7 +88,7 @@ When the snapshot mints, report to the user:
 
 - ❌ Don't POST to `/chat` (LLM round-trip, ~$0.05+ per call vs ~$0.0001 for /chat/save).
 - ❌ Don't manually call `/mint` afterward — auto-mint already fired, you'd create a duplicate.
-- ❌ Don't AskUserQuestion for the operator unless explicitly told to — default to `Brandon` and let the user override via slash arg.
+- ❌ Don't hard-code an operator (e.g. `Brandon`). Resolve via `get_current_operator`: use the single operator automatically; only AskUserQuestion (dropdown) when it reports `needs_selection` (multiple operators).
 - ❌ Don't truncate the summary — semantic search quality depends on full context. The 30k char cap is a hard ceiling, not a target.
 - ❌ Don't use stale model names (`gemini-2.5-pro`, `text-embedding-004`). Current defaults: `gemini-3.1-pro-preview-customtools` (chat), `gemini-embedding-001` (embeddings). The `model` field in the SaveRequest is just metadata; use whichever model actually produced the response (e.g. `claude-opus-4-7`).
 
