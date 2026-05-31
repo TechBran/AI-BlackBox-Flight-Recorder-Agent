@@ -97,38 +97,11 @@ import kotlinx.serialization.json.put
 
 data class GeminiVoice(val name: String, val desc: String)
 
-val GEMINI_PRO_VOICES = listOf(
-    GeminiVoice("Zephyr", "Bright, cheerful"),
-    GeminiVoice("Puck", "Playful, mischievous"),
-    GeminiVoice("Charon", "Calm, informative"),
-    GeminiVoice("Kore", "Clear, versatile"),
-    GeminiVoice("Fenrir", "Bold, confident"),
-    GeminiVoice("Leda", "Warm, youthful"),
-    GeminiVoice("Orus", "Deep, firm"),
-    GeminiVoice("Aoede", "Breezy, conversational"),
-    GeminiVoice("Callirrhoe", "Smooth, flowing"),
-    GeminiVoice("Autonoe", "Gentle, measured"),
-    GeminiVoice("Enceladus", "Rich, resonant"),
-    GeminiVoice("Iapetus", "Deep, steady"),
-    GeminiVoice("Umbriel", "Soft, mysterious"),
-    GeminiVoice("Algieba", "Warm, articulate"),
-    GeminiVoice("Despina", "Light, energetic"),
-    GeminiVoice("Erinome", "Serene, melodic"),
-    GeminiVoice("Algenib", "Crisp, precise"),
-    GeminiVoice("Rasalgethi", "Grand, theatrical"),
-    GeminiVoice("Laomedeia", "Graceful, elegant"),
-    GeminiVoice("Achernar", "Bright, radiant"),
-    GeminiVoice("Alnilam", "Strong, commanding"),
-    GeminiVoice("Schedar", "Regal, distinguished"),
-    GeminiVoice("Gacrux", "Earthy, grounded"),
-    GeminiVoice("Pulcherrima", "Beautiful, refined"),
-    GeminiVoice("Achird", "Friendly, approachable"),
-    GeminiVoice("Zubenelgenubi", "Balanced, neutral"),
-    GeminiVoice("Vindemiatrix", "Mature, wise"),
-    GeminiVoice("Sadachbia", "Lucky, optimistic"),
-    GeminiVoice("Sadaltager", "Hopeful, bright"),
-    GeminiVoice("Sulafat", "Lyrical, musical"),
-)
+// Sourced from the single canonical Gemini voice list in TtsRepository
+// (GEMINI_TTS_VOICE_PAIRS) — no separate copy to drift. Yields the same
+// 30 (name, description) voices used everywhere else in the app.
+val GEMINI_PRO_VOICES = com.aiblackbox.portal.data.repository.GEMINI_TTS_VOICE_PAIRS
+    .map { (n, d) -> GeminiVoice(n, d) }
 
 // =============================================================================
 // ViewModel

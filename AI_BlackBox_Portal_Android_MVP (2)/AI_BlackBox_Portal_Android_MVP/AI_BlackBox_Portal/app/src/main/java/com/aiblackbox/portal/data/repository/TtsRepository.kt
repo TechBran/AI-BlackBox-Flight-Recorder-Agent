@@ -269,9 +269,10 @@ data class VoiceGroup(
 /**
  * Canonical Gemini TTS voice catalog (name → description).
  * Matches backend GEMINI_TTS_VOICE_DESCRIPTIONS. Shared by both the
- * Gemini Flash and Gemini Pro fallback groups (DRY — defined once).
+ * Gemini Flash and Gemini Pro fallback groups AND the Gemini Pro TTS
+ * generation screen (DRY — defined once, the single source of truth).
  */
-private val GEMINI_TTS_VOICES: List<Pair<String, String>> = listOf(
+val GEMINI_TTS_VOICE_PAIRS: List<Pair<String, String>> = listOf(
     "Zephyr" to "Bright, cheerful",
     "Puck" to "Playful, mischievous",
     "Charon" to "Calm, informative",
@@ -319,9 +320,9 @@ val TTS_VOICE_GROUPS = listOf(
         VoiceOption("openai:verse", "Verse", "Poetic, dramatic"),
     )),
     VoiceGroup("Gemini Flash TTS",
-        GEMINI_TTS_VOICES.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
+        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
     ),
     VoiceGroup("Gemini Pro TTS",
-        GEMINI_TTS_VOICES.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
+        GEMINI_TTS_VOICE_PAIRS.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
     ),
 )
