@@ -422,8 +422,10 @@ fun SettingsSheet(
                 .collectAsState(initial = "openai:onyx")
             var showVoiceMenu by remember { mutableStateOf(false) }
 
-            // Find current voice display name
-            val allVoiceGroups = com.aiblackbox.portal.data.repository.TTS_VOICE_GROUPS
+            // Find current voice display name — render the FETCHED catalog so the
+            // picker always reflects the backend (falls back to offline default).
+            LaunchedEffect(Unit) { viewModel.loadVoiceCatalog() }
+            val allVoiceGroups by viewModel.voiceGroups.collectAsState()
             val currentVoiceDisplay = allVoiceGroups.flatMap { it.voices }
                 .find { it.id == currentVoice }?.let { "${it.name} — ${it.description}" } ?: currentVoice
 

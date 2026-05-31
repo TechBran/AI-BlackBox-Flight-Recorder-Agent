@@ -34,6 +34,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _apps = MutableStateFlow<List<RegisteredApp>>(emptyList())
     val apps: StateFlow<List<RegisteredApp>> = _apps.asStateFlow()
 
+    // Voice catalog — defaults to the full offline fallback so the picker is never
+    // empty; loadVoiceCatalog() swaps in the live /tts/catalog when reachable.
+    private val _voiceGroups = MutableStateFlow(com.aiblackbox.portal.data.repository.TTS_VOICE_GROUPS)
+    val voiceGroups: StateFlow<List<com.aiblackbox.portal.data.repository.VoiceGroup>> = _voiceGroups.asStateFlow()
+
+    fun loadVoiceCatalog() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                _voiceGroups.value = com.aiblackbox.portal.data.repository.TtsRepository(api).fetchCatalog()
+            } catch (_: Exception) { /* keep the offline default already in _voiceGroups */ }
+        }
+    }
+
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
         api = BlackBoxApi(origin)
