@@ -243,7 +243,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "list_recent_snapshots":
-            operator = arguments["operator"]
+            operator = await resolve_operator(arguments.get("operator"))
             count = arguments.get("count", 10)
 
             snapshots = list_snapshots_by_operator(operator, count)
@@ -281,7 +281,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(stats, indent=2))]
 
         elif name == "browse_index":
-            operator = arguments.get("operator")
+            operator = await resolve_operator(arguments.get("operator"))
             snap_type = arguments.get("snap_type")
             limit = arguments.get("limit", 20)
             offset = arguments.get("offset", 0)
@@ -471,7 +471,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "mint_snapshot":
                 content = arguments["content"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 snap_type = arguments.get("snapshot_type", "normal")
 
                 # Route through /chat for AI processing, auto-mint will capture the result
@@ -502,7 +502,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "get_context":
                 query = arguments["query"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 # Get hybrid search results
                 search_response = await client.get(
@@ -526,7 +526,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "chat_with_context":
                 message = arguments["message"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 provider = arguments.get("provider", "anthropic")
                 model = arguments.get("model")
 
@@ -571,7 +571,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_image":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/image",
@@ -591,7 +591,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_video":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 video_url = arguments.get("video_url")
                 image_url = arguments.get("image_url")
                 image_base64 = arguments.get("image_base64")
@@ -654,7 +654,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "extend_video":
                 video_url = arguments["video_url"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 prompt = arguments.get("prompt", "")
 
                 response = await client.post(
@@ -674,7 +674,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "generate_music":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/lyria_music",
@@ -716,7 +716,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "gemini_pro_tts":
                 text = arguments["text"]
                 voice = arguments.get("voice", "Charon")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/generate/gemini_tts",
@@ -782,7 +782,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_audio":
                 file_path = arguments["file_path"]
                 prompt = arguments.get("prompt", "Transcribe and describe this audio")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 response = await client.post(
                     f"{BLACKBOX_URL}/analyze/audio",
@@ -801,7 +801,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_image":
                 image_url = arguments["image_url"]
                 prompt = arguments.get("prompt", "Describe this image in detail")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 provider = arguments.get("provider", "gemini")
 
                 # Use chat endpoint with image content for multimodal analysis
@@ -833,7 +833,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             elif name == "analyze_video":
                 video_url = arguments["video_url"]
                 prompt = arguments.get("prompt", "Describe what happens in this video")
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
 
                 # Use Gemini for video analysis (best multimodal video support)
                 response = await client.post(
@@ -862,7 +862,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             elif name == "use_computer":
                 prompt = arguments["prompt"]
-                operator = arguments["operator"]
+                operator = await resolve_operator(arguments.get("operator"))
                 url = arguments.get("url")
                 device_id = arguments.get("device_id", "blackbox")
 
@@ -896,12 +896,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps({"devices": device_list}, indent=2))]
 
             elif name == "control_android_device":
+                operator = await resolve_operator(arguments.get("operator"))
                 response = await client.post(
                     f"{BLACKBOX_URL}/gemini-cu/run",
                     json={
                         "prompt": arguments["prompt"],
                         "device_id": arguments["device_id"],
-                        "operator": arguments["operator"]
+                        "operator": operator
                     },
                     timeout=30
                 )
