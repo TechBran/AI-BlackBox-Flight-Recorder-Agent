@@ -199,12 +199,20 @@ async def gmail_execute(request: Request):
     """Execute a whitelisted gmail_* tool (for the BlackBox MCP / CLI agents).
     Body: {"tool": "gmail_search", "params": {...}, "operator": "<name>"}."""
     from Orchestrator.tools.blackbox_tools import execute_tool
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
     tool = body.get("tool")
-    if tool not in _GMAIL_MCP_TOOLS:
+    if not isinstance(tool, str) or tool not in _GMAIL_MCP_TOOLS:
         return JSONResponse({"success": False, "error": f"not a gmail tool: {tool}"}, status_code=400)
     operator = (body.get("operator") or "system")
-    params = dict(body.get("params") or {})
+    params = body.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    params = dict(params)
     params["operator"] = operator
     try:
         result = await execute_tool(tool, params, operator)
