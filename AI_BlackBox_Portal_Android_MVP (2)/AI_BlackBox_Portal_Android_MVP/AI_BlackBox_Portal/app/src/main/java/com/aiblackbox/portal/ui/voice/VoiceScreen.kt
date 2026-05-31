@@ -156,6 +156,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         const val PRE_BUFFER_THRESHOLD_BYTES = 12_000  // ~250ms at 24kHz mono PCM16
+        // Below this RMS the user is considered silent → waveform returns to IDLE (breathing).
+        const val USER_SPEECH_THRESHOLD = 0.02f
     }
 
     init {
@@ -361,7 +363,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                                 wasSendingAudio = true
                                 _amplitude.value = amp
                                 if (voiceClient?.isAISpeaking?.value != true) {
-                                    _waveSpeaker.value = WaveSpeaker.USER
+                                    _waveSpeaker.value =
+                                        if (amp > USER_SPEECH_THRESHOLD) WaveSpeaker.USER
+                                        else WaveSpeaker.IDLE
                                 }
                             } catch (e: Exception) {
                                 android.util.Log.e("VoiceVM", "Send audio chunk failed: ${e.message}")
