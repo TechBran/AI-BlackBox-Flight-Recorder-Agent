@@ -281,7 +281,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(stats, indent=2))]
 
         elif name == "browse_index":
-            operator = await resolve_operator(arguments.get("operator"))
+            # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
+            operator = arguments.get("operator", "")
             snap_type = arguments.get("snap_type")
             limit = arguments.get("limit", 20)
             offset = arguments.get("offset", 0)
@@ -459,6 +460,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             if name == "search_snapshots":
                 query = arguments["query"]
+                # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
                 operator = arguments.get("operator", "")
                 limit = arguments.get("limit", 10)
 
