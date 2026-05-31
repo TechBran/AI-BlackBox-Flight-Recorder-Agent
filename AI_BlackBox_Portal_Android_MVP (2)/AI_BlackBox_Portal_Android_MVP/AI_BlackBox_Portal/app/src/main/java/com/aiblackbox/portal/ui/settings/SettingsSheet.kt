@@ -127,7 +127,10 @@ fun SettingsSheet(
         .collectAsState(initial = "")
     val selectedModel = perProviderModel.ifBlank { currentModel }
 
-    LaunchedEffect(origin) { viewModel.initialize(origin) }
+    LaunchedEffect(origin) {
+        viewModel.initialize(origin)
+        viewModel.loadVoiceCatalog()  // after init so api is ready → live catalog drives the picker
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -424,7 +427,7 @@ fun SettingsSheet(
 
             // Find current voice display name — render the FETCHED catalog so the
             // picker always reflects the backend (falls back to offline default).
-            LaunchedEffect(Unit) { viewModel.loadVoiceCatalog() }
+            // Load is chained after initialize(origin) (line ~130) so api is ready.
             val allVoiceGroups by viewModel.voiceGroups.collectAsState()
             val currentVoiceDisplay = allVoiceGroups.flatMap { it.voices }
                 .find { it.id == currentVoice }?.let { "${it.name} — ${it.description}" } ?: currentVoice
