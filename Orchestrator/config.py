@@ -433,6 +433,54 @@ GEMINI_LIVE_VOICE_DESCRIPTORS: Dict[str, str] = {
     "Sadachbia": "Lively",       "Sadaltager": "Knowledgeable", "Sulafat": "Warm",
 }
 
+# -- TTS voice catalog (single source of truth for the TTS voice PICKER) ------
+# Served by GET /tts/catalog; consumed by the web Portal + Android Settings.
+# DISTINCT from GEMINI_LIVE_VOICES above (the live Voice Agent, /gemini-live/voices)
+# -- different feature. Do not merge the two.
+
+# Gemini TTS descriptions (Flash + Pro share these -- defined ONCE). Names come
+# from GEMINI_LIVE_VOICES (the 30-name catalog) so names live in one place.
+GEMINI_TTS_VOICE_DESCRIPTIONS: Dict[str, str] = {
+    "Zephyr": "Bright, cheerful", "Puck": "Playful, mischievous", "Charon": "Calm, informative",
+    "Kore": "Clear, versatile", "Fenrir": "Bold, confident", "Leda": "Warm, youthful",
+    "Orus": "Deep, firm", "Aoede": "Breezy, conversational", "Callirrhoe": "Smooth, flowing",
+    "Autonoe": "Gentle, measured", "Enceladus": "Rich, resonant", "Iapetus": "Deep, steady",
+    "Umbriel": "Soft, mysterious", "Algieba": "Warm, articulate", "Despina": "Light, energetic",
+    "Erinome": "Serene, melodic", "Algenib": "Crisp, precise", "Rasalgethi": "Grand, theatrical",
+    "Laomedeia": "Graceful, elegant", "Achernar": "Bright, radiant", "Alnilam": "Strong, commanding",
+    "Schedar": "Regal, distinguished", "Gacrux": "Earthy, grounded", "Pulcherrima": "Beautiful, refined",
+    "Achird": "Friendly, approachable", "Zubenelgenubi": "Balanced, neutral", "Vindemiatrix": "Mature, wise",
+    "Sadachbia": "Lucky, optimistic", "Sadaltager": "Hopeful, bright", "Sulafat": "Lyrical, musical",
+}
+
+# OpenAI TTS HD voices (11): (id, name, description).
+OPENAI_TTS_VOICES = [
+    ("alloy", "Alloy", "Neutral, balanced"), ("ash", "Ash", "Clear, direct"),
+    ("ballad", "Ballad", "Warm, gentle"), ("coral", "Coral", "Friendly, conversational"),
+    ("echo", "Echo", "Smooth, authoritative"), ("fable", "Fable", "Expressive, British"),
+    ("nova", "Nova", "Energetic, confident"), ("onyx", "Onyx", "Deep, authoritative"),
+    ("sage", "Sage", "Thoughtful, measured"), ("shimmer", "Shimmer", "Soft, ethereal"),
+    ("verse", "Verse", "Poetic, dramatic"),
+]
+
+def build_tts_catalog() -> list:
+    """Grouped TTS voice catalog -- the single source of truth for the picker.
+    Returns [{id,label,voices:[{id,name,description}]}]. Gemini ids are
+    'gemini-flash:<Name>' / 'gemini-pro:<Name>'; OpenAI 'openai:<id>'."""
+    def gemini_group(provider: str, label: str) -> dict:
+        return {"id": provider, "label": label, "voices": [
+            {"id": f"{provider}:{n}", "name": n, "description": GEMINI_TTS_VOICE_DESCRIPTIONS[n]}
+            for n in GEMINI_LIVE_VOICES
+        ]}
+    return [
+        {"id": "openai", "label": "OpenAI TTS HD", "voices": [
+            {"id": f"openai:{vid}", "name": nm, "description": ds}
+            for vid, nm, ds in OPENAI_TTS_VOICES
+        ]},
+        gemini_group("gemini-flash", "Gemini Flash TTS"),
+        gemini_group("gemini-pro", "Gemini Pro TTS"),
+    ]
+
 GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
 
 # Gemini Live allowlists for server-side validation of client-supplied params.
