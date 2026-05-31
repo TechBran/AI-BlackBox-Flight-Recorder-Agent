@@ -40,6 +40,39 @@ except ImportError:
 BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
+# Operator resolution (pure decision logic lives in operator_resolution.py).
+# Same-dir import: when this server runs as a bare script
+# (MCP/venv/bin/python MCP/blackbox_mcp_server.py), the script's own directory
+# is on sys.path[0], so the sibling module imports directly without a package root.
+from operator_resolution import choose_operator
+
+# Per-process cache of the install's operators (multi-tenant: never hard-coded).
+_OPERATOR_CACHE = {"operators": None, "default": None}
+
+
+async def _fetch_operators():
+    """Fetch + cache the install's operators from GET /operators (per-process)."""
+    if _OPERATOR_CACHE["operators"] is None:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{BLACKBOX_URL}/operators")
+                data = r.json()
+                _OPERATOR_CACHE["operators"] = list(data.get("operators") or [])
+                _OPERATOR_CACHE["default"] = data.get("default") or ""
+        except Exception:
+            _OPERATOR_CACHE["operators"] = []
+            _OPERATOR_CACHE["default"] = ""
+    return _OPERATOR_CACHE["operators"], _OPERATOR_CACHE["default"]
+
+
+async def resolve_operator(provided):
+    """Server-side safety net: resolve the operator for a tool call. When omitted,
+    single operator -> that; multiple -> system default. (Interactive dropdown for
+    the multiple case is handled agent-side, not here.)"""
+    operators, default = await _fetch_operators()
+    resolved, _needs = choose_operator(provided, operators, default)
+    return resolved
+
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_search, perform_web_fetch
@@ -291,6 +324,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps({
                 "operators": [{"name": op, "snapshot_count": count} for op, count in sorted_ops]
             }, indent=2))]
+
+        elif name == "get_current_operator":
+            operators, default = await _fetch_operators()
+            resolved, needs_selection = choose_operator(None, operators, default)
+            result = {
+                "resolved": resolved,
+                "operators": operators,
+                "default": default,
+                "count": len(operators),
+                "needs_selection": needs_selection,
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "refresh_index":
             load_snapshot_index(force_refresh=True)

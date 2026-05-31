@@ -1047,6 +1047,16 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "groups": _MCP_ONLY,
     },
     {
+        "name": "get_current_operator",
+        "description": "Resolve the BlackBox's current operator. Returns {resolved, operators, default, count, needs_selection}. When needs_selection is true (multiple operators, none specified), the agent should ask the user to pick one (default pre-selected). Use this instead of hard-coding any operator name.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        },
+        "groups": _MCP_ONLY,
+    },
+    {
         "name": "get_index_stats",
         "description": "Get statistics about the snapshot index - total count, operators, byte ranges, etc.",
         "parameters": {
