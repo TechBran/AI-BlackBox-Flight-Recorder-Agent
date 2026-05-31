@@ -51,18 +51,25 @@ _OPERATOR_CACHE = {"operators": None, "default": None}
 
 
 async def _fetch_operators():
-    """Fetch + cache the install's operators from GET /operators (per-process)."""
-    if _OPERATOR_CACHE["operators"] is None:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{BLACKBOX_URL}/operators")
-                data = r.json()
-                _OPERATOR_CACHE["operators"] = list(data.get("operators") or [])
-                _OPERATOR_CACHE["default"] = data.get("default") or ""
-        except Exception:
-            _OPERATOR_CACHE["operators"] = []
-            _OPERATOR_CACHE["default"] = ""
-    return _OPERATOR_CACHE["operators"], _OPERATOR_CACHE["default"]
+    """Fetch + cache the install's operators from GET /operators.
+
+    Cached only on SUCCESS (per-process, lifetime = one MCP session). A failed
+    fetch returns an empty result WITHOUT caching, so the next call retries —
+    a transient API blip self-heals instead of degrading the whole session.
+    """
+    if _OPERATOR_CACHE["operators"] is not None:
+        return _OPERATOR_CACHE["operators"], _OPERATOR_CACHE["default"]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{BLACKBOX_URL}/operators")
+            data = r.json()
+            operators = list(data.get("operators") or [])
+            default = data.get("default") or ""
+        _OPERATOR_CACHE["operators"] = operators
+        _OPERATOR_CACHE["default"] = default
+        return operators, default
+    except Exception:
+        return [], ""   # do NOT cache — retry on next call
 
 
 async def resolve_operator(provided):
