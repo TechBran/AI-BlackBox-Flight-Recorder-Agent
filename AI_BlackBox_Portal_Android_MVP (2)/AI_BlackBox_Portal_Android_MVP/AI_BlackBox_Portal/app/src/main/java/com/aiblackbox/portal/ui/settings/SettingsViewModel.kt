@@ -87,7 +87,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun playPreview(url: String) {
-        previewPlayer?.release()
+        previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
+        previewPlayer = null
         // Mirror GeminiProTtsScreen: relative urls need the server origin prefixed.
         val base = api?.getBaseUrl() ?: ""
         val src = if (url.startsWith("http")) url else "$base$url"
@@ -102,7 +103,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
-        previewPlayer?.release()
+        previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
         previewPlayer = null
     }
 

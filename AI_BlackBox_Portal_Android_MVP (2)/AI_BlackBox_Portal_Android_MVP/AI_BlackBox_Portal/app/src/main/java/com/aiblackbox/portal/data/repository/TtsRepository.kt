@@ -147,10 +147,11 @@ class TtsRepository(private val api: BlackBoxApi) {
 
     // =========================================================================
     // Gemini task poll — wait for a completed task's audio url.
-    // Mirrors GeminiProTtsScreen's poll loop EXACTLY: reads "status", returns
-    // "result_url" on completed, throws "error_message" on failed.
+    // Parsing is based on GeminiProTtsScreen's task-status handling
+    // (status / result_url / error_message); bounded with a timeout.
+    // ~90s ceiling: Gemini Pro TTS can exceed 60s under load.
     // =========================================================================
-    suspend fun pollGeminiTaskForUrl(taskId: String, attempts: Int = 60, intervalMs: Long = 1000): String {
+    suspend fun pollGeminiTaskForUrl(taskId: String, attempts: Int = 90, intervalMs: Long = 1000): String {
         repeat(attempts) {
             val raw = api.get("/tasks/status/$taskId")
             val o = json.parseToJsonElement(raw).jsonObject
