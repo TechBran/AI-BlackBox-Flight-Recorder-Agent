@@ -165,7 +165,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         // AI waveform envelope release per ~33ms frame (attack = chunk RMS via maxOf).
         // Lets the ribbon fall during the model's pauses instead of freezing at the
         // last chunk's level — halves roughly every 140ms.
-        const val AI_AMP_RELEASE = 0.78f  // snappier fall (~halves every 95ms) so it tracks the model
+        const val AI_AMP_RELEASE = 0.83f  // fall rate (~halves every 125ms): fluid but still tracks the model
     }
 
     init {

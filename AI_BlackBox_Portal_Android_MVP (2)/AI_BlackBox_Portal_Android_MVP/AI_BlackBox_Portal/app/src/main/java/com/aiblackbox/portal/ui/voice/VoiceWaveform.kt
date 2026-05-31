@@ -52,8 +52,8 @@ fun VoiceWaveform(
     }
     val eased by animateFloatAsState(
         targetValue = (amplitude * gain).coerceIn(0f, 1f),
-        // Tight easing so the ribbon tracks the audio without trailing behind it.
-        animationSpec = tween(50),
+        // Easing: fluid but responsive — tracks the audio without trailing or twitching.
+        animationSpec = tween(70),
         label = "amp",
     )
 
