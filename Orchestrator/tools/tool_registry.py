@@ -298,7 +298,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator/user name to search within (default: all operators)"
+                    "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
                 },
                 "limit": {
                     "type": "integer",
@@ -338,7 +338,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "properties": {
                 "operator": {
                     "type": "string",
-                    "description": "Operator/user name to filter snapshots for"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 },
                 "count": {
                     "type": "integer",
@@ -834,7 +834,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 }
             },
             "required": []
@@ -853,7 +853,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 }
             },
             "required": ["message_id"]
@@ -884,7 +884,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 }
             },
             "required": ["to", "subject", "body"]
@@ -911,7 +911,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 }
             },
             "required": ["message_id", "thread_id", "body"]
@@ -935,7 +935,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 }
             },
             "required": ["action"]
@@ -1005,7 +1005,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator/user name to associate with this snapshot"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 },
                 "snapshot_type": {
                     "type": "string",
@@ -1074,7 +1074,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "properties": {
                 "operator": {
                     "type": "string",
-                    "description": "Filter by operator (optional)"
+                    "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
                 },
                 "snap_type": {
                     "type": "string",
@@ -1107,7 +1107,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 },
                 "operator": {
                     "type": "string",
-                    "description": "Operator/user name"
+                    "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
                 },
                 "provider": {
                     "type": "string",
@@ -1199,7 +1199,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 
     {"name": "ugv_system_servo_release", "description": "Release UGV Beast servo torque (limp mode). After this, the gimbal will flop under gravity — it won't hold its position. Only use when you specifically want free manipulation or storage.", "parameters": {"type": "object", "properties": {}, "required": []}, "groups": _ALL},
 
-    {"name": "ugv_start_mission", "description": "Hand off a multi-step mission to the UGV Beast's on-device Gemini Robotics-ER 1.6 agent. Use this for goals that require perception + multi-step robot reasoning (patrol, find-and-approach, describe-surroundings, go-to-X). The robot autonomously loops observe → reason → act → speak, terminating when the model calls mission_done or mission_fail. Returns a mission_id — poll with ugv_mission_status. Prefer this over chaining individual motion/gimbal/nav tools for anything that isn't a single primitive action. Plain-language missions only: 'go check if the kitchen lights are on', 'follow me', 'find the red backpack'.", "parameters": {"type": "object", "properties": {"mission": {"type": "string", "description": "Plain-language mission instruction, as you would speak it to a robot. No code, no JSON, no tool names — just the goal."}, "operator": {"type": "string", "description": "Operator name for tracking. Default 'Brandon'."}}, "required": ["mission"]}, "groups": _ALL},
+    {"name": "ugv_start_mission", "description": "Hand off a multi-step mission to the UGV Beast's on-device Gemini Robotics-ER 1.6 agent. Use this for goals that require perception + multi-step robot reasoning (patrol, find-and-approach, describe-surroundings, go-to-X). The robot autonomously loops observe → reason → act → speak, terminating when the model calls mission_done or mission_fail. Returns a mission_id — poll with ugv_mission_status. Prefer this over chaining individual motion/gimbal/nav tools for anything that isn't a single primitive action. Plain-language missions only: 'go check if the kitchen lights are on', 'follow me', 'find the red backpack'.", "parameters": {"type": "object", "properties": {"mission": {"type": "string", "description": "Plain-language mission instruction, as you would speak it to a robot. No code, no JSON, no tool names — just the goal."}, "operator": {"type": "string", "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."}}, "required": ["mission"]}, "groups": _ALL},
 
     {"name": "ugv_mission_status", "description": "Poll the status of a UGV Beast ER mission started by ugv_start_mission. Returns status (active/completed/failed/aborted), step_count, last_assistant_text (what the robot last said), end_reason when terminal, and a ring of recent events. Use this to follow along as the mission runs — the robot narrates via its own speaker, but this lets you see and summarize progress back to the user.", "parameters": {"type": "object", "properties": {"mission_id": {"type": "string", "description": "The mission_id returned by ugv_start_mission."}}, "required": ["mission_id"]}, "groups": _ALL},
 
