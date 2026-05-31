@@ -27,7 +27,10 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 import kotlin.math.PI
 import kotlin.math.sin
 
-private const val VISUAL_GAIN = 2.2f       // speech RMS is quiet; lift it perceptually
+// Per-speaker gain: the mic is close + loud, the model's stream is quieter, so
+// the AI side needs a bigger lift to read on the ribbon. Tuning knobs.
+private const val USER_GAIN = 2.2f         // mic feel — unchanged
+private const val AI_GAIN = 4.5f           // model output is quieter; lift it to read
 private const val IDLE_LEVEL = 0.08f       // gentle breathing baseline when silent
 private val AI_TEAL = Color(0xFF1FB5A6)
 
@@ -43,9 +46,14 @@ fun VoiceWaveform(
     speaker: WaveSpeaker,
     modifier: Modifier = Modifier,
 ) {
+    val gain = when (speaker) {
+        WaveSpeaker.AI -> AI_GAIN
+        else -> USER_GAIN
+    }
     val eased by animateFloatAsState(
-        targetValue = (amplitude * VISUAL_GAIN).coerceIn(0f, 1f),
-        animationSpec = tween(120),
+        targetValue = (amplitude * gain).coerceIn(0f, 1f),
+        // Tight easing so the ribbon tracks the audio without trailing behind it.
+        animationSpec = tween(50),
         label = "amp",
     )
 
