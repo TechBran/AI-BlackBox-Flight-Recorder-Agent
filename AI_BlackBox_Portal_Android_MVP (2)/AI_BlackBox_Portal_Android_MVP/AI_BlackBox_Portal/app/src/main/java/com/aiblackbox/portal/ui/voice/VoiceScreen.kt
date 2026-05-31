@@ -134,6 +134,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _amplitude = MutableStateFlow(0f)
     val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
 
+    // Two writers by design: the mic loop sets USER (only when isAISpeaking != true) and the
+    // playback drain sets AI; stopMic()/stopAudioPlayback() reset it back to IDLE when idle.
     private val _waveSpeaker = MutableStateFlow(WaveSpeaker.IDLE)
     val waveSpeaker: StateFlow<WaveSpeaker> = _waveSpeaker.asStateFlow()
 
@@ -473,8 +475,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 client.audioOutput.collect { base64Chunk ->
                     try {
                         val pcmBytes = Base64.decode(base64Chunk, Base64.NO_WRAP)
-                        _waveSpeaker.value = WaveSpeaker.AI
-                        _amplitude.value = rmsAmplitudeFromBytes(pcmBytes)
                         audioPlaybackQueue.offer(pcmBytes)
 
                         // Track pre-buffer accumulation
@@ -522,6 +522,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             val track = audioTrack ?: return@synchronized
                             if (track.state == AudioTrack.STATE_INITIALIZED) {
                                 track.write(chunk, 0, chunk.size)
+                                // Sample loudness at the moment the chunk is committed to the
+                                // audio device, so the waveform ribbon stays in sync with what's
+                                // heard (the ~12KB pre-buffer + drain otherwise lag enqueue by ~256ms).
+                                _waveSpeaker.value = WaveSpeaker.AI
+                                _amplitude.value = rmsAmplitudeFromBytes(chunk)
                             }
                         }
                     } else {

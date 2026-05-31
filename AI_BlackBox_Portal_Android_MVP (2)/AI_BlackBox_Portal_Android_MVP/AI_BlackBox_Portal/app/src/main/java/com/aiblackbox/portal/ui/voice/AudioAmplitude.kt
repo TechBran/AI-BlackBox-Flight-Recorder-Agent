@@ -38,5 +38,5 @@ fun rmsAmplitudeFromBytes(bytes: ByteArray): Float {
         sumSquares += s * s
         i += 2
     }
-    return kotlin.math.sqrt(sumSquares / n).toFloat().coerceIn(0f, 1f)
+    return sqrt(sumSquares / n).toFloat().coerceIn(0f, 1f)
 }
