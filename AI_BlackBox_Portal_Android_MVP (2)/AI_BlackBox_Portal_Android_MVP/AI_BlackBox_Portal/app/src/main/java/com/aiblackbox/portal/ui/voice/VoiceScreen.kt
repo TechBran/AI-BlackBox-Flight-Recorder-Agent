@@ -32,6 +32,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -147,6 +152,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val audioPlaybackQueue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
     private var audioPlaybackJob: Job? = null
     private var audioCollectorJob: Job? = null  // Must be cancelled to prevent duplicate collectors
+    private var aiEnvelopeJob: Job? = null       // Releases (decays) the AI waveform between chunks
 
     // Pre-buffering state
     @Volatile private var preBufferAccumulated = 0
@@ -156,6 +162,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         const val PRE_BUFFER_THRESHOLD_BYTES = 12_000  // ~250ms at 24kHz mono PCM16
         // Below this RMS the user is considered silent → waveform returns to IDLE (breathing).
         const val USER_SPEECH_THRESHOLD = 0.02f
+        // AI waveform envelope release per ~33ms frame (attack = chunk RMS via maxOf).
+        // Lets the ribbon fall during the model's pauses instead of freezing at the
+        // last chunk's level — halves roughly every 140ms.
+        const val AI_AMP_RELEASE = 0.85f
     }
 
     init {
@@ -523,10 +533,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             if (track.state == AudioTrack.STATE_INITIALIZED) {
                                 track.write(chunk, 0, chunk.size)
                                 // Sample loudness at the moment the chunk is committed to the
-                                // audio device, so the waveform ribbon stays in sync with what's
-                                // heard (the ~12KB pre-buffer + drain otherwise lag enqueue by ~256ms).
+                                // audio device, so the waveform stays in sync with what's heard
+                                // (the ~12KB pre-buffer + drain otherwise lag enqueue by ~256ms).
+                                // Attack: jump UP to this chunk's loudness; the envelope job
+                                // releases between chunks so quiet syllables + pauses show.
                                 _waveSpeaker.value = WaveSpeaker.AI
-                                _amplitude.value = rmsAmplitudeFromBytes(chunk)
+                                _amplitude.value = maxOf(_amplitude.value, rmsAmplitudeFromBytes(chunk))
                             }
                         }
                     } else {
@@ -546,6 +558,20 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+
+        // AI waveform envelope: release amplitude toward 0 each frame so the ribbon
+        // tracks the model's cadence and dips during pauses. Attacks come from the
+        // chunk writes above (maxOf). Guarded on speaker == AI so the mic path is intact.
+        aiEnvelopeJob?.cancel()
+        aiEnvelopeJob = viewModelScope.launch {
+            while (isActive) {
+                delay(33)
+                if (_waveSpeaker.value == WaveSpeaker.AI) {
+                    val c = _amplitude.value
+                    _amplitude.value = if (c > 0.001f) c * AI_AMP_RELEASE else 0f
+                }
+            }
+        }
     }
 
     private fun stopAudioPlayback() {
@@ -555,6 +581,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         audioCollectorJob = null
         audioPlaybackJob?.cancel()
         audioPlaybackJob = null
+        aiEnvelopeJob?.cancel()
+        aiEnvelopeJob = null
         audioPlaybackQueue.clear()
         preBufferAccumulated = 0
         preBufferReady = false
@@ -617,7 +645,8 @@ fun VoiceScreen(
     val isMicActive by viewModel.isMicActive.collectAsState()
     val amplitude by viewModel.amplitude.collectAsState()
     val waveSpeaker by viewModel.waveSpeaker.collectAsState()
-    val scrollState = rememberScrollState()
+    val listState = rememberLazyListState()
+    val settingsScroll = rememberScrollState()
     var peekSnapId by remember { mutableStateOf<String?>(null) }
     // Request mic permission on first open
     val micPermLauncher = rememberLauncherForActivityResult(
@@ -659,7 +688,7 @@ fun VoiceScreen(
         }
     }
     LaunchedEffect(transcript.size) {
-        if (transcript.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
+        if (transcript.isNotEmpty()) listState.animateScrollToItem(transcript.size - 1)
     }
     // Reset voice when backend changes — pick the per-backend canonical default
     // (Constants.DEFAULT_*_VOICE), falling back to first in the list.
@@ -734,9 +763,6 @@ fun VoiceScreen(
             .statusBarsPadding()
             // Extra top padding to clear the floating operator pill (~80dp for pill + spacing)
             .padding(start = 16.dp, end = 16.dp, top = 80.dp, bottom = 16.dp)
-            // Whole screen scrolls so the settings pane + start button stay reachable
-            // even when every dropdown is expanded (transcript renders inline below).
-            .verticalScroll(scrollState)
     ) {
         // ── Header ──
         Text("\uD83C\uDF99\uFE0F Voice Agent", style = MaterialTheme.typography.headlineMedium, color = BbxWhite)
@@ -772,7 +798,15 @@ fun VoiceScreen(
                 Text(if (settingsExpanded) "▴" else "▾", color = BbxDim)
             }
             androidx.compose.animation.AnimatedVisibility(visible = settingsExpanded) {
-                Column(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                // Bounded + internally scrollable so an expanded pane (6 Gemini
+                // dropdowns) never pushes the pinned mic/waveform off-screen.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(settingsScroll)
+                        .padding(top = 12.dp)
+                ) {
                     // ── Backend selector (disabled while connected) ──
                     LabeledDropdown(
                         label = "Backend",
@@ -950,15 +984,16 @@ fun VoiceScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        // ── Transcript ──
-        // Plain Column (not LazyColumn) because the whole screen is now a
-        // verticalScroll container — a nested same-axis LazyColumn would crash.
-        // Voice transcripts are short, so non-lazy rendering is fine.
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        // ── Transcript — the ONLY scrolling region. The settings/mic/waveform above
+        // are pinned (non-weighted children of the fixed outer Column), so the
+        // waveform + connect/disconnect controls never scroll away as text builds up.
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            transcript.forEach { entry ->
+            items(transcript) { entry ->
                 val isUser = entry.role == "user"
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -977,8 +1012,6 @@ fun VoiceScreen(
                 }
             }
         }
-        // Breathing room so the last message clears the floating bottom nav.
-        Spacer(Modifier.height(240.dp))
     }
 
     peekSnapId?.let { snapId ->
