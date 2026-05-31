@@ -23,3 +23,20 @@ fun rmsAmplitude(buffer: ShortArray, count: Int): Float {
     }
     return sqrt(sumSquares / n).toFloat().coerceIn(0f, 1f)
 }
+
+/** RMS for little-endian PCM16 bytes (AI output chunks arrive as ByteArray). */
+fun rmsAmplitudeFromBytes(bytes: ByteArray): Float {
+    val n = bytes.size / 2
+    if (n <= 0) return 0f
+    var sumSquares = 0.0
+    var i = 0
+    while (i + 1 < bytes.size) {
+        val lo = bytes[i].toInt() and 0xFF
+        val hi = bytes[i + 1].toInt()  // signed high byte
+        val sample = (hi shl 8) or lo
+        val s = sample / 32768.0
+        sumSquares += s * s
+        i += 2
+    }
+    return kotlin.math.sqrt(sumSquares / n).toFloat().coerceIn(0f, 1f)
+}

@@ -28,4 +28,15 @@ class AudioAmplitudeTest {
         for (i in 0 until 4) buf[i] = Short.MAX_VALUE
         assertEquals(1f, rmsAmplitude(buf, 4), 0.001f)
     }
+
+    @Test fun `bytes silence is zero`() {
+        assertEquals(0f, rmsAmplitudeFromBytes(ByteArray(512)), 0.0001f)
+    }
+
+    @Test fun `bytes full scale is approximately one`() {
+        val bytes = ByteArray(512)
+        var i = 0
+        while (i + 1 < bytes.size) { bytes[i] = 0xFF.toByte(); bytes[i + 1] = 0x7F.toByte(); i += 2 } // 0x7FFF
+        assertEquals(1f, rmsAmplitudeFromBytes(bytes), 0.001f)
+    }
 }

@@ -100,6 +100,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+enum class WaveSpeaker { USER, AI, IDLE }
+
 class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private val audioManager = application.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -127,6 +129,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     // Mic state
     private val _isMicActive = MutableStateFlow(false)
     val isMicActive: StateFlow<Boolean> = _isMicActive.asStateFlow()
+
+    // Live waveform inputs — real RMS amplitude (0f..1f) + who is speaking.
+    private val _amplitude = MutableStateFlow(0f)
+    val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
+
+    private val _waveSpeaker = MutableStateFlow(WaveSpeaker.IDLE)
+    val waveSpeaker: StateFlow<WaveSpeaker> = _waveSpeaker.asStateFlow()
 
     private var currentOperator = "Brandon"
 
@@ -323,6 +332,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     while (isRecordingAudio) {
                         val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                         if (readCount > 0) {
+                            val amp = rmsAmplitude(buffer, readCount)
                             // Auto-mute while AI is speaking WITH post-speech delay
                             val client = voiceClient
                             if (client != null) {
@@ -349,6 +359,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                             try {
                                 voiceClient?.sendAudioChunk(base64)
                                 wasSendingAudio = true
+                                _amplitude.value = amp
+                                if (voiceClient?.isAISpeaking?.value != true) {
+                                    _waveSpeaker.value = WaveSpeaker.USER
+                                }
                             } catch (e: Exception) {
                                 android.util.Log.e("VoiceVM", "Send audio chunk failed: ${e.message}")
                             }
@@ -373,6 +387,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun stopMic() {
         isRecordingAudio = false  // Signals mic loop to exit, which sends audio_commit
         _isMicActive.value = false
+        _amplitude.value = 0f
+        if (_waveSpeaker.value == WaveSpeaker.USER) _waveSpeaker.value = WaveSpeaker.IDLE
         try {
             audioRecord?.stop()
             audioRecord?.release()
@@ -457,6 +473,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 client.audioOutput.collect { base64Chunk ->
                     try {
                         val pcmBytes = Base64.decode(base64Chunk, Base64.NO_WRAP)
+                        _waveSpeaker.value = WaveSpeaker.AI
+                        _amplitude.value = rmsAmplitudeFromBytes(pcmBytes)
                         audioPlaybackQueue.offer(pcmBytes)
 
                         // Track pre-buffer accumulation
@@ -526,6 +544,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopAudioPlayback() {
+        _amplitude.value = 0f
+        _waveSpeaker.value = WaveSpeaker.IDLE
         audioCollectorJob?.cancel()
         audioCollectorJob = null
         audioPlaybackJob?.cancel()
