@@ -1640,6 +1640,38 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
 // =============================================================================
 
 /**
+ * Build the TTS voice dropdown from the backend catalog (single source of truth).
+ * Falls back to whatever static <option>s are already in the DOM if the fetch fails
+ * or returns an empty catalog.
+ */
+async function populateVoiceCatalog() {
+    const sel = document.getElementById("ttsVoiceSelect");
+    if (!sel) return;
+    try {
+        const res = await fetch("/tts/catalog");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const { groups } = await res.json();
+        if (!groups || !groups.length) return;  // keep static fallback
+        const prev = sel.value || TTS_DEFAULT_VOICE;
+        sel.innerHTML = "";
+        for (const g of groups) {
+            const og = document.createElement("optgroup");
+            og.label = `${g.label} (${g.voices.length} voices)`;
+            for (const v of g.voices) {
+                const o = document.createElement("option");
+                o.value = v.id;
+                o.textContent = `${v.name} - ${v.description}`;
+                og.appendChild(o);
+            }
+            sel.appendChild(og);
+        }
+        sel.value = [...sel.options].some(o => o.value === prev) ? prev : TTS_DEFAULT_VOICE;
+    } catch (e) {
+        console.error("voice catalog fetch failed, keeping static options", e);
+    }
+}
+
+/**
  * Initialize voice selector dropdown and preview button
  */
 export function initVoiceSelector() {
@@ -1647,7 +1679,9 @@ export function initVoiceSelector() {
     const previewBtn = document.getElementById("btnPreviewVoice");
 
     if (voiceSelect) {
-        syncVoiceDropdown();
+        // Build options from the backend catalog (SoT), then sync the
+        // operator's saved preference once the options exist.
+        populateVoiceCatalog().then(syncVoiceDropdown);
 
         voiceSelect.onchange = () => {
             const operator = (localStorage.getItem("bbx_operator") || "").trim();
