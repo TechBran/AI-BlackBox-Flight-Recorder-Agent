@@ -96,5 +96,5 @@ private fun DrawScope.drawRibbon(
             lineTo(x, y)
         }
     }
-    drawPath(path = path, brush = brush, alpha = alpha, style = Stroke(width = 4f))
+    drawPath(path = path, brush = brush, alpha = alpha, style = Stroke(width = 4.dp.toPx()))
 }

@@ -615,6 +615,8 @@ fun VoiceScreen(
     val provenance by viewModel.provenance.collectAsState()
     val error by viewModel.error.collectAsState()
     val isMicActive by viewModel.isMicActive.collectAsState()
+    val amplitude by viewModel.amplitude.collectAsState()
+    val waveSpeaker by viewModel.waveSpeaker.collectAsState()
     val listState = rememberLazyListState()
     var peekSnapId by remember { mutableStateOf<String?>(null) }
     // Request mic permission on first open
@@ -921,6 +923,14 @@ fun VoiceScreen(
             }
         }
         Spacer(Modifier.height(16.dp))
+
+        // ── HD flowing-ribbon waveform (real amplitude) ──
+        VoiceWaveform(
+            amplitude = amplitude,
+            speaker = waveSpeaker,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
 
         // Plan Task 10: retrieval provenance from voice WS dispatcher.
         // Renders above transcript because voice has no per-turn bubble.
