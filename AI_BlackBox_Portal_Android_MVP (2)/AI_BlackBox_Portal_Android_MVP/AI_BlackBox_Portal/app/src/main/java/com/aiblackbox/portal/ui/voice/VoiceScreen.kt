@@ -19,7 +19,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,7 +36,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -741,26 +739,13 @@ fun VoiceScreen(
         }
 
         // ── Backend selector (disabled while connected) ──
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            VoiceBackend.entries.forEach { b ->
-                val isSelected = b == backend
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) BbxAccent.copy(alpha = 0.2f) else Neutral200)
-                        .then(if (isSelected) Modifier.border(1.dp, BbxAccent.copy(alpha = 0.4f), RoundedCornerShape(16.dp)) else Modifier)
-                        .clickable(enabled = !isConnected) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            viewModel.setBackend(b)
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(b.displayName, style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelected) BbxAccent else Neutral500)
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
+        LabeledDropdown(
+            label = "Backend",
+            options = VoiceBackend.entries.map { it.id to it.displayName },
+            selectedId = backend.id,
+            enabled = !isConnected,
+            onSelect = { id -> VoiceBackend.entries.firstOrNull { it.id == id }?.let(viewModel::setBackend) },
+        )
 
         // ── Voice selector — provider-specific (disabled while connected).
         // T13 review: VoiceClient has no post-connect session.update outbound path,
@@ -768,33 +753,13 @@ fun VoiceScreen(
         // voice keeps the old setting until next connect(). Gemini Live additionally
         // doesn't support mid-session voice change (voice is in the setup message).
         // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
-        Text("Voice", style = MaterialTheme.typography.labelLarge, color = BbxDim)
-        Spacer(Modifier.height(4.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-        ) {
-            voicesForBackend(backend).forEach { v ->
-                val isSelected = v == voice
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (isSelected) SolidGreen.copy(alpha = 0.15f) else Neutral200)
-                        .then(if (isSelected) Modifier.border(1.dp, SolidGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp)) else Modifier)
-                        .clickable(enabled = !isConnected) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            viewModel.setVoice(v)
-                        }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    Text(voiceLabel(backend, v), style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelected) SolidGreen else Neutral500)
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
+        LabeledDropdown(
+            label = "Voice",
+            options = voicesForBackend(backend).map { it to voiceLabel(backend, it) },
+            selectedId = voice,
+            enabled = !isConnected,
+            onSelect = viewModel::setVoice,
+        )
 
         // ── Per-provider live-models config (T13 plan 2026-05-19) ──
         // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
@@ -990,70 +955,6 @@ fun VoiceScreen(
 // Pattern matches the existing voice chip-row selector for visual consistency.
 // ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Generic chip-row picker. Renders a label + horizontally scrollable row of
- * selectable chips. Selection is highlighted with the accent color.
- *
- * @param enabled if false, chips are visually dimmed and clicks are blocked
- *   (used for model/vad chips while CONNECTED — audit I4).
- */
-@Composable
-private fun ChipRowPicker(
-    label: String,
-    options: List<Pair<String, String>>,  // (id, displayName)
-    selectedId: String?,
-    enabled: Boolean = true,
-    onSelect: (String) -> Unit,
-) {
-    val view = LocalView.current
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.labelLarge, color = BbxDim)
-        Spacer(Modifier.height(4.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-        ) {
-            options.forEach { (id, name) ->
-                val isSelected = id == selectedId
-                val baseColor = if (enabled) BbxAccent else Neutral500
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (isSelected) baseColor.copy(alpha = if (enabled) 0.18f else 0.08f)
-                            else Neutral200
-                        )
-                        .then(
-                            if (isSelected) Modifier.border(
-                                1.dp, baseColor.copy(alpha = if (enabled) 0.4f else 0.2f),
-                                RoundedCornerShape(12.dp)
-                            ) else Modifier
-                        )
-                        .clickable(enabled = enabled) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            onSelect(id)
-                        }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        name,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            isSelected && enabled -> baseColor
-                            isSelected -> Neutral500
-                            !enabled -> Neutral300
-                            else -> Neutral500
-                        }
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-    }
-}
-
 /** OpenAI Realtime config dropdowns: model, vad_type, vad_eagerness OR idle_timeout. */
 @Composable
 private fun RealtimeConfigBlock(
@@ -1068,14 +969,14 @@ private fun RealtimeConfigBlock(
     onIdleTimeoutChange: (String) -> Unit,
 ) {
     val modelOpts = Constants.MODEL_CONFIG["realtime"].orEmpty()
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Model",
         options = modelOpts,
         selectedId = model,
         enabled = !connected,  // audit I4: model bound at upstream WS connect time
         onSelect = onModelChange,
     )
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Turn detection",
         options = Constants.OPENAI_REALTIME_VAD_TYPES.map { it to it },
         selectedId = vadType,
@@ -1084,7 +985,7 @@ private fun RealtimeConfigBlock(
     )
     // Conditional: eagerness only meaningful for semantic_vad
     if (vadType == "semantic_vad") {
-        ChipRowPicker(
+        LabeledDropdown(
             label = "Eagerness",
             options = Constants.OPENAI_REALTIME_VAD_EAGERNESS.map { it to it },
             selectedId = vadEagerness,
@@ -1128,7 +1029,7 @@ private fun GeminiConfigBlock(
     onThinkingLevelChange: (String?) -> Unit,
 ) {
     val modelOpts = Constants.MODEL_CONFIG["gemini-live"].orEmpty()
-    ChipRowPicker(
+    LabeledDropdown(
         label = "Model",
         options = modelOpts,
         selectedId = model,
@@ -1141,14 +1042,14 @@ private fun GeminiConfigBlock(
     val toNullable: (String) -> String? = { if (it == "__auto__") null else it }
     val toSelectedId: (String?) -> String = { it ?: "__auto__" }
 
-    ChipRowPicker(
+    LabeledDropdown(
         label = "VAD start sensitivity",
         options = sensitivityOpts,
         selectedId = toSelectedId(vadStart),
         enabled = !connected,  // audit I4: VAD configured at setup time
         onSelect = { onVadStartChange(toNullable(it)) },
     )
-    ChipRowPicker(
+    LabeledDropdown(
         label = "VAD end sensitivity",
         options = sensitivityOpts,
         selectedId = toSelectedId(vadEnd),
@@ -1159,7 +1060,7 @@ private fun GeminiConfigBlock(
     if (model in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS) {
         val thinkingOpts: List<Pair<String, String>> =
             listOf("__auto__" to "auto") + Constants.GEMINI_LIVE_THINKING_LEVELS.map { it to it }
-        ChipRowPicker(
+        LabeledDropdown(
             label = "Thinking level",
             options = thinkingOpts,
             selectedId = toSelectedId(thinkingLevel),
