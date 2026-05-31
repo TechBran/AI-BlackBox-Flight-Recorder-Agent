@@ -62,7 +62,8 @@ class TtsRepository(private val api: BlackBoxApi) {
          *
          * Examples:
          *   "openai:alloy" → VoiceConfig("openai", "alloy", "tts-1-hd")
-         *   "gemini-pro:Charon" → VoiceConfig("gemini-pro", "Charon", "gemini-2.5-flash-tts")
+         *   "gemini-flash:Zephyr" → VoiceConfig("gemini-flash", "Zephyr", "gemini-2.5-flash-tts")
+         *   "gemini-pro:Charon" → VoiceConfig("gemini-pro", "Charon", "gemini-2.5-pro-tts")
          *   "onyx" → VoiceConfig("openai", "onyx", "tts-1-hd") (legacy fallback)
          */
         fun parseVoice(voiceValue: String): VoiceConfig {
@@ -71,7 +72,8 @@ class TtsRepository(private val api: BlackBoxApi) {
                 val provider = parts[0]
                 val voice = parts[1]
                 val model = when (provider) {
-                    "gemini-pro" -> "gemini-2.5-flash-tts"
+                    "gemini-flash" -> "gemini-2.5-flash-tts"
+                    "gemini-pro" -> "gemini-2.5-pro-tts"
                     else -> "tts-1-hd"
                 }
                 VoiceConfig(provider, voice, model)
@@ -154,7 +156,7 @@ class TtsRepository(private val api: BlackBoxApi) {
         Log.d(TAG, "generateWithVoice: provider=${config.provider}, voice=${config.voice}")
 
         return when (config.provider) {
-            "gemini-pro" -> {
+            "gemini-pro", "gemini-flash" -> {
                 // Gemini TTS is async — start task (polling handled by caller)
                 val result = generateGeminiTts(
                     text = text,
@@ -207,6 +209,44 @@ data class VoiceGroup(
     val voices: List<VoiceOption>
 )
 
+/**
+ * Canonical Gemini TTS voice catalog (name → description).
+ * Matches backend GEMINI_TTS_VOICE_DESCRIPTIONS. Shared by both the
+ * Gemini Flash and Gemini Pro fallback groups (DRY — defined once).
+ */
+private val GEMINI_TTS_VOICES: List<Pair<String, String>> = listOf(
+    "Zephyr" to "Bright, cheerful",
+    "Puck" to "Playful, mischievous",
+    "Charon" to "Calm, informative",
+    "Kore" to "Clear, versatile",
+    "Fenrir" to "Bold, confident",
+    "Leda" to "Warm, youthful",
+    "Orus" to "Deep, firm",
+    "Aoede" to "Breezy, conversational",
+    "Callirrhoe" to "Smooth, flowing",
+    "Autonoe" to "Gentle, measured",
+    "Enceladus" to "Rich, resonant",
+    "Iapetus" to "Deep, steady",
+    "Umbriel" to "Soft, mysterious",
+    "Algieba" to "Warm, articulate",
+    "Despina" to "Light, energetic",
+    "Erinome" to "Serene, melodic",
+    "Algenib" to "Crisp, precise",
+    "Rasalgethi" to "Grand, theatrical",
+    "Laomedeia" to "Graceful, elegant",
+    "Achernar" to "Bright, radiant",
+    "Alnilam" to "Strong, commanding",
+    "Schedar" to "Regal, distinguished",
+    "Gacrux" to "Earthy, grounded",
+    "Pulcherrima" to "Beautiful, refined",
+    "Achird" to "Friendly, approachable",
+    "Zubenelgenubi" to "Balanced, neutral",
+    "Vindemiatrix" to "Mature, wise",
+    "Sadachbia" to "Lucky, optimistic",
+    "Sadaltager" to "Hopeful, bright",
+    "Sulafat" to "Lyrical, musical",
+)
+
 val TTS_VOICE_GROUPS = listOf(
     VoiceGroup("OpenAI TTS HD", listOf(
         VoiceOption("openai:alloy", "Alloy", "Neutral, balanced"),
@@ -221,12 +261,10 @@ val TTS_VOICE_GROUPS = listOf(
         VoiceOption("openai:shimmer", "Shimmer", "Soft, ethereal"),
         VoiceOption("openai:verse", "Verse", "Poetic, dramatic"),
     )),
-    VoiceGroup("Gemini Pro TTS", listOf(
-        VoiceOption("gemini-pro:Charon", "Charon", "Deep, resonant"),
-        VoiceOption("gemini-pro:Puck", "Puck", "Playful, bright"),
-        VoiceOption("gemini-pro:Kore", "Kore", "Warm, feminine"),
-        VoiceOption("gemini-pro:Aoede", "Aoede", "Musical, lyrical"),
-        VoiceOption("gemini-pro:Fenrir", "Fenrir", "Strong, commanding"),
-        VoiceOption("gemini-pro:Orus", "Orus", "Calm, steady"),
-    )),
+    VoiceGroup("Gemini Flash TTS",
+        GEMINI_TTS_VOICES.map { (n, d) -> VoiceOption("gemini-flash:$n", n, d) }
+    ),
+    VoiceGroup("Gemini Pro TTS",
+        GEMINI_TTS_VOICES.map { (n, d) -> VoiceOption("gemini-pro:$n", n, d) }
+    ),
 )
