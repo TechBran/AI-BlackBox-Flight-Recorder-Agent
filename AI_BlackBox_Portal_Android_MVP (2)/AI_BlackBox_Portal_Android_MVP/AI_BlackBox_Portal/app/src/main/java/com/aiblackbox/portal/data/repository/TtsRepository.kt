@@ -4,6 +4,8 @@ import android.util.Log
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -191,6 +193,35 @@ class TtsRepository(private val api: BlackBoxApi) {
         val response = api.post("/stt/json", body)
         val obj = json.parseToJsonElement(response)
         return obj.jsonObject["text"]?.jsonPrimitive?.content ?: ""
+    }
+
+    // =========================================================================
+    // Voice Catalog — GET /tts/catalog (live catalog with offline fallback)
+    // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}]}]}
+    // Returns TTS_VOICE_GROUPS on ANY failure (network, parse, empty).
+    // =========================================================================
+    suspend fun fetchCatalog(): List<VoiceGroup> = try {
+        val raw = api.get("/tts/catalog")
+        val groups = json.parseToJsonElement(raw).jsonObject["groups"]?.jsonArray
+            ?: return TTS_VOICE_GROUPS
+        val parsed = groups.map { g ->
+            val o = g.jsonObject
+            VoiceGroup(
+                label = o["label"]?.jsonPrimitive?.content ?: "",
+                voices = (o["voices"]?.jsonArray ?: JsonArray(emptyList())).map { v ->
+                    val vo = v.jsonObject
+                    VoiceOption(
+                        id = vo["id"]!!.jsonPrimitive.content,
+                        name = vo["name"]!!.jsonPrimitive.content,
+                        description = vo["description"]?.jsonPrimitive?.content ?: "",
+                    )
+                },
+            )
+        }
+        if (parsed.isEmpty()) TTS_VOICE_GROUPS else parsed
+    } catch (e: Exception) {
+        Log.w(TAG, "fetchCatalog failed, using offline fallback: ${e.message}")
+        TTS_VOICE_GROUPS
     }
 }
 
