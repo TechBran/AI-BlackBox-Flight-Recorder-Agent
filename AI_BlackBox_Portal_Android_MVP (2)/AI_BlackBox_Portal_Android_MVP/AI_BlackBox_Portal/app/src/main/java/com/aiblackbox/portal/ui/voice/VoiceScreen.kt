@@ -22,7 +22,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,9 +32,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -619,7 +617,7 @@ fun VoiceScreen(
     val isMicActive by viewModel.isMicActive.collectAsState()
     val amplitude by viewModel.amplitude.collectAsState()
     val waveSpeaker by viewModel.waveSpeaker.collectAsState()
-    val listState = rememberLazyListState()
+    val scrollState = rememberScrollState()
     var peekSnapId by remember { mutableStateOf<String?>(null) }
     // Request mic permission on first open
     val micPermLauncher = rememberLauncherForActivityResult(
@@ -661,7 +659,7 @@ fun VoiceScreen(
         }
     }
     LaunchedEffect(transcript.size) {
-        if (transcript.isNotEmpty()) listState.animateScrollToItem(transcript.size - 1)
+        if (transcript.isNotEmpty()) scrollState.animateScrollTo(scrollState.maxValue)
     }
     // Reset voice when backend changes — pick the per-backend canonical default
     // (Constants.DEFAULT_*_VOICE), falling back to first in the list.
@@ -736,6 +734,9 @@ fun VoiceScreen(
             .statusBarsPadding()
             // Extra top padding to clear the floating operator pill (~80dp for pill + spacing)
             .padding(start = 16.dp, end = 16.dp, top = 80.dp, bottom = 16.dp)
+            // Whole screen scrolls so the settings pane + start button stay reachable
+            // even when every dropdown is expanded (transcript renders inline below).
+            .verticalScroll(scrollState)
     ) {
         // ── Header ──
         Text("\uD83C\uDF99\uFE0F Voice Agent", style = MaterialTheme.typography.headlineMedium, color = BbxWhite)
@@ -950,13 +951,14 @@ fun VoiceScreen(
         }
 
         // ── Transcript ──
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            contentPadding = PaddingValues(top = 4.dp, bottom = 240.dp),
+        // Plain Column (not LazyColumn) because the whole screen is now a
+        // verticalScroll container — a nested same-axis LazyColumn would crash.
+        // Voice transcripts are short, so non-lazy rendering is fine.
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            items(transcript) { entry ->
+            transcript.forEach { entry ->
                 val isUser = entry.role == "user"
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -975,6 +977,8 @@ fun VoiceScreen(
                 }
             }
         }
+        // Breathing room so the last message clears the floating bottom nav.
+        Spacer(Modifier.height(240.dp))
     }
 
     peekSnapId?.let { snapId ->
