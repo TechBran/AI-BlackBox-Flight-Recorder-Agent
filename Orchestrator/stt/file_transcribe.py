@@ -17,7 +17,7 @@ from Orchestrator import config
 from Orchestrator.stt.resolve import resolve_stt_provider
 
 
-def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str = None,
+def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str | None = None,
                      filename: str = "audio.webm") -> str:
     """Transcribe raw audio bytes using the resolved (or explicit) STT provider.
 
@@ -61,6 +61,17 @@ def _openai_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> 
 
 def _google_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
     """Transcribe via Google Cloud Speech-to-Text v2 (Chirp 2). Lazy SDK import."""
+    creds_path = config.GOOGLE_APPLICATION_CREDENTIALS
+    if not creds_path:
+        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS not configured")
+    try:
+        with open(creds_path, "r") as f:
+            project_id = json.load(f).get("project_id")
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"invalid Google credentials file: {e}")
+    if not project_id:
+        raise RuntimeError("project_id missing from Google credentials file")
+
     from google.api_core.client_options import ClientOptions
     from google.cloud.speech_v2 import SpeechClient
     from google.cloud.speech_v2.types import (
@@ -68,10 +79,6 @@ def _google_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> 
         RecognitionConfig,
         RecognizeRequest,
     )
-
-    creds_path = config.GOOGLE_APPLICATION_CREDENTIALS
-    with open(creds_path, "r") as f:
-        project_id = json.load(f).get("project_id")
 
     region = config.STT_GOOGLE_REGION
     client = SpeechClient(

@@ -24,3 +24,8 @@ def test_no_provider_raises():
     with patch.object(ft, "resolve_stt_provider", return_value=None):
         with pytest.raises(RuntimeError):
             ft.transcribe_bytes(b"x", "audio/wav")
+
+def test_google_missing_creds_raises_runtimeerror(monkeypatch):
+    monkeypatch.setattr(ft.config, "GOOGLE_APPLICATION_CREDENTIALS", "")
+    with pytest.raises(RuntimeError):
+        ft._google_transcribe(b"x", "audio/wav", "audio.wav")
