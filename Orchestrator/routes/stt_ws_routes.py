@@ -13,6 +13,11 @@ clients. The client contract is provider-agnostic:
           {"type":"stt_final","text":...,"target":...}
           {"type":"stt_error","message":...}
 
+stt_delta.text is the CUMULATIVE interim transcript so far (client replaces the
+interim region); stt_final.text is the full final (client commits). Providers
+stream interim text with opposite semantics (OpenAI incremental, Google
+cumulative), so InterimAccumulator normalizes both to this uniform contract.
+
 The endpoint resolves a provider via resolve_stt_provider() and bridges to either
 OpenAI's realtime transcription WS (gRPC-free, websockets lib) or Google Cloud
 Speech-to-Text v2 streaming (gRPC, run in a thread executor so the asyncio event
@@ -39,7 +44,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from Orchestrator.checkpoint import app
 from Orchestrator import config
 from Orchestrator.stt.resolve import resolve_stt_provider
-from Orchestrator.stt.streaming import map_openai_event, map_google_result
+from Orchestrator.stt.streaming import map_openai_event, map_google_result, InterimAccumulator
 from Orchestrator.whisper_filter import is_whisper_hallucination
 
 
@@ -122,6 +127,10 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         # utterance's stt_final.
         stop_evt = asyncio.Event()
 
+        # Normalize OpenAI's incremental deltas into a cumulative interim
+        # transcript so stt_delta.text is uniform across providers.
+        acc = InterimAccumulator()
+
         async def client_to_openai():
             """Pump client audio into OpenAI; commit + signal stop on stt_stop."""
             while True:
@@ -146,7 +155,7 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     event = json.loads(raw)
                 except (ValueError, TypeError):
                     continue
-                m = map_openai_event(event)
+                m = acc.openai(event)
                 if not m:
                     continue
                 if m["type"] == "stt_final" and is_whisper_hallucination(m.get("text", "")):
@@ -267,6 +276,12 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     import queue as _queue
     audio_q: "_queue.Queue" = _queue.Queue()
 
+    # Normalize interim semantics into the uniform cumulative contract. Google's
+    # interim results are already cumulative, but routing through the accumulator
+    # keeps the buffer-reset-on-final behavior consistent across providers. Only
+    # the worker thread touches `acc`, so no locking is needed.
+    acc = InterimAccumulator()
+
     def _request_gen():
         # First request carries the streaming config, then audio chunks.
         yield StreamingRecognizeRequest(
@@ -309,7 +324,7 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     is_final = bool(result.is_final)
                     if is_final and is_whisper_hallucination(text):
                         continue
-                    m = map_google_result(text, is_final)
+                    m = acc.google(text, is_final)
                     m["target"] = target
                     _emit(m)
         except Exception as e:  # surface gRPC/auth errors to the client
