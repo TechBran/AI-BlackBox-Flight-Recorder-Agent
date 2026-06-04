@@ -44,6 +44,7 @@ google-genai>=1.64
 google-generativeai>=0.8.6
 google-api-python-client>=2.187.0
 google-auth-oauthlib>=1.4   # Gmail OAuth client validator (validators.validate_gmail_oauth) — caught missing on MSO2 Ultra fresh install 2026-05-17 (E12)
+google-cloud-speech>=2.27   # Cloud Speech-to-Text v2 (chirp_2) streaming + file STT (Google provider)
 
 # Task Scheduling
 apscheduler>=3.10.4
