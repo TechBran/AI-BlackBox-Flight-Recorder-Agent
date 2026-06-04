@@ -1,3 +1,4 @@
+from Orchestrator.stt import resolve as stt_resolve
 from Orchestrator.stt.resolve import resolve_stt_provider
 
 def test_explicit_wins_when_available():
@@ -17,3 +18,12 @@ def test_none_available_returns_none():
 def test_both_available_no_choice_prefers_openai():
     # documented tie-break; wizard always sets an explicit choice anyway
     assert resolve_stt_provider("", openai_ok=True, google_ok=True) == "openai"
+
+def test_defaults_follow_stt_availability(monkeypatch):
+    # With NO explicit kwargs, resolve reflects live stt_availability().
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, False))
+    assert resolve_stt_provider("") == "openai"
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (False, True))
+    assert resolve_stt_provider("") == "google"
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (False, False))
+    assert resolve_stt_provider("") is None

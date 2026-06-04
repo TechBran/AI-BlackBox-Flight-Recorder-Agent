@@ -107,6 +107,7 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                         "transcription": {
                             "model": config.STT_OPENAI_STREAM,
                             "language": lang or "en",
+                            "delay": config.STT_OPENAI_DELAY,
                         },
                         "turn_detection": None,
                     },
@@ -280,7 +281,19 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
 
     def _emit(payload: dict):
         # Thread -> loop. Schedule the send_json coroutine on the event loop.
-        asyncio.run_coroutine_threadsafe(websocket.send_json(payload), loop)
+        # Observe the returned future so a failed cross-thread send surfaces as
+        # a log line instead of vanishing silently (telemetry-before-silent).
+        fut = asyncio.run_coroutine_threadsafe(websocket.send_json(payload), loop)
+
+        def _log_emit_error(f):
+            try:
+                exc = f.exception()
+            except Exception:
+                return
+            if exc is not None:
+                print(f"[STT/WS] google emit failed: {exc!r}")
+
+        fut.add_done_callback(_log_emit_error)
 
     def _run_google():
         try:

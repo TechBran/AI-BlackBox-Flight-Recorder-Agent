@@ -28,6 +28,30 @@ def test_no_provider_raises(monkeypatch):
 def test_empty_text_short_circuits():
     assert tr.translate_text("", "fr") == ""
 
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+    def raise_for_status(self):
+        pass
+    def json(self):
+        return self._payload
+
+def test_gemini_malformed_body_raises_runtimeerror(monkeypatch):
+    # Safety-blocked / empty-candidates 200 body -> clean RuntimeError, not KeyError.
+    monkeypatch.setattr(tr.config, "GOOGLE_API_KEY", "g", raising=False)
+    monkeypatch.setattr(tr.config, "GEMINI_API_KEY", "", raising=False)
+    with patch.object(tr.requests, "post", return_value=_FakeResp({"candidates": []})):
+        with pytest.raises(RuntimeError, match="translation provider returned no text"):
+            tr.translate_text("hello", "es")
+
+def test_openai_malformed_body_raises_runtimeerror(monkeypatch):
+    monkeypatch.setattr(tr.config, "GOOGLE_API_KEY", "", raising=False)
+    monkeypatch.setattr(tr.config, "GEMINI_API_KEY", "", raising=False)
+    monkeypatch.setattr(tr.config, "OPENAI_API_KEY", "o", raising=False)
+    with patch.object(tr.requests, "post", return_value=_FakeResp({"choices": []})):
+        with pytest.raises(RuntimeError, match="translation provider returned no text"):
+            tr.translate_text("hello", "fr")
+
 def test_route_text(monkeypatch):
     import Orchestrator.app  # noqa: F401 — register routes
     with patch("Orchestrator.stt.translate.translate_text", return_value="hola"):
