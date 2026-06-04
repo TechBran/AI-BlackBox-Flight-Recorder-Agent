@@ -628,6 +628,16 @@ XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-1
 DEFAULT_PROVIDER        = (os.getenv("DEFAULT_PROVIDER") or "google").strip().lower()
 STT_MODEL       = os.getenv("STT_MODEL","whisper-1").strip()
 
+# --- STT provider/model registry (swap a string to upgrade the model) ---
+STT_PROVIDER       = os.getenv("STT_PROVIDER", "").strip().lower()   # "" = auto (whichever cred present)
+STT_OPENAI_STREAM  = os.getenv("STT_OPENAI_STREAM", "gpt-realtime-whisper").strip()
+STT_OPENAI_FILE    = os.getenv("STT_OPENAI_FILE",   "gpt-4o-transcribe").strip()
+STT_OPENAI_DELAY   = os.getenv("STT_OPENAI_DELAY",  "low").strip()
+STT_GOOGLE_MODEL   = os.getenv("STT_GOOGLE_MODEL",  "chirp_2").strip()
+STT_GOOGLE_REGION  = os.getenv("STT_GOOGLE_REGION", "us-central1").strip()
+STT_OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
+STT_GOOGLE_AVAILABLE = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_APPLICATION_CREDENTIALS))
+
 
 # Anchors and ID regex
 SNAP_RE = re.compile(r"SNAP-(\d{8})-(\d+)$")
