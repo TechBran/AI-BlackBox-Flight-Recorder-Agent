@@ -791,6 +791,17 @@ async def tts_catalog():
     from Orchestrator.config import build_tts_catalog
     return {"groups": build_tts_catalog()}
 
+@app.get("/stt/catalog")
+async def stt_catalog():
+    """STT provider/capability catalog -- single source of truth for the STT
+    provider picker (onboarding + Portal + Android). See Orchestrator/stt/catalog."""
+    from Orchestrator import config as _cfg
+    from Orchestrator.stt.catalog import build_stt_catalog
+    from Orchestrator.stt.resolve import resolve_stt_provider
+    resolved = resolve_stt_provider()
+    return {"providers": build_stt_catalog(), "resolved": resolved,
+            "default": _cfg.STT_PROVIDER or resolved}
+
 @app.get("/api/last-response")
 async def get_last_response(operator: str):
     """
