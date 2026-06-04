@@ -98,7 +98,7 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         # we drive commits manually on stt_stop. We pass the client-declared
         # sample_rate through (see module SAMPLE-RATE WATCH-ITEM).
         session_update = {
-            "type": "transcription_session.update",
+            "type": "session.update",
             "session": {
                 "type": "transcription",
                 "audio": {
@@ -115,8 +115,14 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         }
         await openai_ws.send(json.dumps(session_update))
 
+        # Set when the client requests a manual stop (commit sent). The relay
+        # keeps draining until it delivers the final for the committed audio,
+        # then exits — so a normal push-to-talk stop never drops the last
+        # utterance's stt_final.
+        stop_evt = asyncio.Event()
+
         async def client_to_openai():
-            """Pump client audio into OpenAI; commit + stop on stt_stop."""
+            """Pump client audio into OpenAI; commit + signal stop on stt_stop."""
             while True:
                 msg = await websocket.receive_json()
                 mtype = msg.get("type")
@@ -129,7 +135,8 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                         }))
                 elif mtype == "stt_stop":
                     await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                    break
+                    stop_evt.set()
+                    return
 
         async def openai_to_client():
             """Relay OpenAI transcription events back to the client."""
@@ -145,27 +152,48 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     continue
                 m["target"] = target
                 await websocket.send_json(m)
+                # On a manual stop, the final for the committed audio is the last
+                # thing we need — stop draining once it's delivered.
+                if m["type"] == "stt_final" and stop_evt.is_set():
+                    return
 
         pump = asyncio.ensure_future(client_to_openai())
         relay = asyncio.ensure_future(openai_to_client())
         try:
-            # First completed task ends the bridge (client stop, disconnect, or
-            # OpenAI close). Cancel the other and surface real errors.
             done, pending = await asyncio.wait(
                 {pump, relay}, return_when=asyncio.FIRST_COMPLETED
             )
-            for t in pending:
-                t.cancel()
+            if pump in done and relay not in done:
+                # Client stopped: the OpenAI session stays open and delivers the
+                # final transcript AFTER our commit. Drain for it instead of
+                # cancelling synchronously (which would drop the last stt_final).
+                # 5s backstop so we never hang if no final ever arrives.
                 try:
-                    await t
+                    await asyncio.wait_for(relay, timeout=5.0)
+                except asyncio.TimeoutError:
+                    relay.cancel()
+                    try:
+                        await relay
+                    except (asyncio.CancelledError, WebSocketDisconnect):
+                        pass
+                    except Exception:
+                        pass
+            elif relay in done:
+                # OpenAI closed / error / disconnect first: cancel the pump.
+                pump.cancel()
+                try:
+                    await pump
                 except (asyncio.CancelledError, WebSocketDisconnect):
                     pass
                 except Exception:
                     pass
-            for t in done:
-                exc = t.exception()
-                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
-                    raise exc
+
+            # Surface real errors from whichever task(s) finished.
+            for t in (pump, relay):
+                if t.done() and not t.cancelled():
+                    exc = t.exception()
+                    if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                        raise exc
         finally:
             for t in (pump, relay):
                 if not t.done():
@@ -288,6 +316,10 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     except Exception:
                         pass
             elif mtype == "stt_stop":
+                break
+            # If the worker thread died early (e.g. gRPC/auth error -> stt_error),
+            # stop queueing audio against an abandoned generator.
+            if worker.done():
                 break
     except WebSocketDisconnect:
         pass
