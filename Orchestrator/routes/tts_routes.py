@@ -377,6 +377,34 @@ async def stt_json(body: dict = Body(...)):
     print(f"[STT/JSON] Transcription: '{text[:100]}...' ({len(text)} chars)")
     return {"text": text}
 
+
+@app.post("/stt/translate")
+async def stt_translate(body: dict = Body(...)):
+    """Any-target translation. Body: {text?, audio? (base64), content_type?, target_lang}.
+    If audio is given, it is transcribed first (resolved STT provider) then translated."""
+    from Orchestrator.stt.translate import translate_text
+    target_lang = (body.get("target_lang") or "").strip()
+    if not target_lang:
+        raise HTTPException(400, "target_lang required")
+    text = body.get("text")
+    if not text and body.get("audio"):
+        import base64 as _b64
+        from Orchestrator.stt.file_transcribe import transcribe_bytes
+        try:
+            audio_bytes = _b64.b64decode(body["audio"])
+            text = transcribe_bytes(audio_bytes, body.get("content_type") or "audio/wav", filename="audio.wav")
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"STT upstream error: {e}")
+    try:
+        translated = translate_text(text or "", target_lang)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Translate error: {e}")
+    return {"text": translated, "target_lang": target_lang}
+
 # -----------------------------------------------------------------------------
 # Generative Endpoints - Nano Banana Pro (Gemini Image Generation)
 # -----------------------------------------------------------------------------
