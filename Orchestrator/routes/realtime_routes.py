@@ -51,6 +51,7 @@ from Orchestrator.config import (
     OPENAI_REALTIME_VAD_EAGERNESS,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
+    STT_OPENAI_STREAM,
     VOL_PATH
 )
 from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
@@ -518,7 +519,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": 24000},
-                    "transcription": {"model": "whisper-1"},
+                    "transcription": {"model": STT_OPENAI_STREAM},
                     "turn_detection": turn_detection,
                 },
                 "output": {
