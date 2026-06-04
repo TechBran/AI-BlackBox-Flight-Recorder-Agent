@@ -307,24 +307,21 @@ async def tts_stitch(chunks: List[UploadFile] = File(...)):
 
 @app.post("/stt")
 async def stt(file: UploadFile = File(...)):
-    api_key = OPENAI_API_KEY.strip()
-    if not api_key: raise HTTPException(400, "OPENAI_API_KEY not configured")
+    from Orchestrator.stt.file_transcribe import transcribe_bytes
     try:
         audio_bytes = await file.read()
     except Exception as e:
         raise HTTPException(400, f"Failed to read upload: {e}")
-    files = {"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")}
-    data = {"model": STT_MODEL}
     try:
-        r = requests.post(OPENAI_STT_URL, headers={"Authorization": f"Bearer {api_key}"}, data=data, files=files, timeout=60)
+        text = transcribe_bytes(
+            audio_bytes,
+            file.content_type or "audio/webm",
+            filename=file.filename or "audio.webm",
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(502, f"STT upstream error: {e}")
-    if r.status_code != 200:
-        try: detail = r.json()
-        except Exception: detail = r.text
-        raise HTTPException(r.status_code, f"OpenAI STT error: {detail}")
-    try: j = r.json(); text = (j.get("text") or "").strip()
-    except Exception: text = r.text.strip()
     return {"text": text}
 
 
@@ -339,9 +336,7 @@ async def stt_json(body: dict = Body(...)):
         sample_rate: sample rate (default 16000)
         format: 'pcm16' (default)
     """
-    api_key = OPENAI_API_KEY.strip()
-    if not api_key:
-        raise HTTPException(400, "OPENAI_API_KEY not configured")
+    from Orchestrator.stt.file_transcribe import transcribe_bytes
 
     audio_b64 = body.get("audio")
     if not audio_b64:
@@ -371,33 +366,13 @@ async def stt_json(body: dict = Body(...)):
     except Exception as e:
         raise HTTPException(400, f"Failed to decode/convert audio: {e}")
 
-    # Send to OpenAI Whisper
-    files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-    data = {"model": STT_MODEL}
-
+    # Transcribe via resolved provider (OpenAI or Google)
     try:
-        r = requests.post(
-            OPENAI_STT_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            data=data,
-            files=files,
-            timeout=60
-        )
+        text = transcribe_bytes(wav_bytes, "audio/wav", filename="audio.wav")
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(502, f"STT upstream error: {e}")
-
-    if r.status_code != 200:
-        try:
-            detail = r.json()
-        except Exception:
-            detail = r.text
-        raise HTTPException(r.status_code, f"OpenAI STT error: {detail}")
-
-    try:
-        j = r.json()
-        text = (j.get("text") or "").strip()
-    except Exception:
-        text = r.text.strip()
 
     print(f"[STT/JSON] Transcription: '{text[:100]}...' ({len(text)} chars)")
     return {"text": text}
