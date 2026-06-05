@@ -170,6 +170,10 @@ class NativeMainActivity : ComponentActivity() {
                     SttStreamClient(BlackBoxApi(origin).getClient(), wsUrl)
                 }
                 val isWhisperStreaming by sttClient.isStreaming.collectAsState()
+                // Collect amplitude as Compose state so the waveform recomposes as
+                // it changes. Reading sttClient.amplitude.value directly does NOT
+                // subscribe → the ribbon would freeze at one value (caught 2026-06-05).
+                val sttAmp by sttClient.amplitude.collectAsState()
                 // Cumulative-delta applier holders: captured at stream start from the caret.
                 var sttBaseBefore by remember { mutableStateOf("") }
                 var sttBaseAfter by remember { mutableStateOf("") }
@@ -765,7 +769,7 @@ class NativeMainActivity : ComponentActivity() {
                             isRecording = isWhisperStreaming,
                             isRecordingAudio = isRawAudioRecording,
                             recordingAmplitude = {
-                                if (isWhisperStreaming) sttClient.amplitude.value
+                                if (isWhisperStreaming) sttAmp
                                 else rawAudioRecorder.getMaxAmplitude() / 32767f
                             },
                             provider = provider,
