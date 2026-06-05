@@ -1,6 +1,17 @@
 from Orchestrator.stt import resolve as stt_resolve
 from Orchestrator.stt.resolve import resolve_stt_provider
 
+
+def test_runtime_empty_provided_honors_saved_provider(monkeypatch):
+    # Client sends provider:""; the runtime path must fresh-read the saved
+    # STT_PROVIDER (wizard pick) rather than falling to the openai tie-break.
+    monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, True))
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "google")
+    assert resolve_stt_provider("") == "google"
+    monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "")
+    assert resolve_stt_provider("") == "openai"  # no saved pick -> tie-break
+
+
 def test_explicit_wins_when_available():
     assert resolve_stt_provider("openai", openai_ok=True, google_ok=True) == "openai"
     assert resolve_stt_provider("google", openai_ok=True, google_ok=True) == "google"

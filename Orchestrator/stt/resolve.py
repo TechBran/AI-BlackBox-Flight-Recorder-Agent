@@ -30,18 +30,37 @@ def stt_availability():
     return openai_ok, google_ok
 
 
+def _fresh_stt_provider():
+    """Fresh-read the saved STT_PROVIDER (wizard selection) from .env so it takes
+    effect WITHOUT a service restart. The web/Android client sends provider:""
+    and lets the backend resolve, so this is what actually honors the wizard
+    pick. Falls back to the frozen config const if the .env read fails."""
+    try:
+        from dotenv import dotenv_values
+        from Orchestrator.onboarding.secrets_writer import ENV_FILE
+        env = dotenv_values(str(ENV_FILE))
+        return (env.get("STT_PROVIDER") or config.STT_PROVIDER or "").strip().lower()
+    except Exception:
+        return (config.STT_PROVIDER or "").strip().lower()
+
+
 def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None):
     """Return 'openai' | 'google' | None.
 
     Explicit choice wins if its credential is available; otherwise the single
     available provider; otherwise None. When both are available and no explicit
-    choice is given, prefers 'openai' (documented tie-break; the onboarding
-    wizard always sets an explicit choice). The openai_ok/google_ok kwargs
-    override availability (used by tests); when None, availability is sourced
-    live from stt_availability() so just-saved credentials are honored without
-    a restart."""
-    provided = (provided if provided is not None else config.STT_PROVIDER or "").strip().lower()
-    if openai_ok is None or google_ok is None:
+    choice is given, prefers 'openai' (documented tie-break).
+
+    Runtime path (openai_ok/google_ok None): availability is sourced live from
+    stt_availability(), AND when the caller passes no provider (the client always
+    sends ""), the saved STT_PROVIDER is fresh-read from .env — so the onboarding
+    wizard selection is honored immediately, no restart. The kwargs (set by tests)
+    bypass both fresh reads so the pure resolution logic stays deterministic."""
+    runtime = openai_ok is None or google_ok is None
+    provided = (provided or "").strip().lower()
+    if not provided and runtime:
+        provided = _fresh_stt_provider()
+    if runtime:
         live_openai, live_google = stt_availability()
         openai_ok = live_openai if openai_ok is None else openai_ok
         google_ok = live_google if google_ok is None else google_ok

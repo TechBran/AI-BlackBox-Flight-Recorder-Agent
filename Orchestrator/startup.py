@@ -593,9 +593,17 @@ class StaticCacheMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/ui/"):
-            if any(path.endswith(ext) for ext in ('.css', '.js', '.png', '.jpg', '.svg', '.woff2', '.ico')):
+            if any(path.endswith(ext) for ext in ('.png', '.jpg', '.svg', '.woff2', '.ico')):
+                # Binary media rarely changes — cache it.
                 response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
-            elif path.endswith('.html') or path == "/ui/" or path == "/ui":
+            elif (any(path.endswith(ext) for ext in ('.css', '.js'))
+                  or path.endswith('.html') or path == "/ui/" or path == "/ui"):
+                # JS/CSS/HTML must REVALIDATE every load. The ?v= bump on the entry
+                # script does NOT bust relative ES-module deep imports (e.g.
+                # stt-stream.js imported by tts-stt.js), so max-age caching served
+                # stale modules for up to an hour and required manual cache clears.
+                # "no-cache" + the StaticFiles etag = a cheap 304 when unchanged,
+                # a fresh fetch the moment a module changes. (Caught 2026-06-05.)
                 response.headers["Cache-Control"] = "no-cache"
         return response
 
