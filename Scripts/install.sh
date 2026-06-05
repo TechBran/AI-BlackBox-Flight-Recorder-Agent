@@ -522,6 +522,14 @@ WorkingDirectory=$BLACKBOX_ROOT
 EnvironmentFile=$BLACKBOX_ROOT/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Free port 9092 before start. KillMode=process (cli-agent-overrides.conf) keeps
+# children alive across restarts so CLI-agent PTY sessions survive — but it also
+# orphans the Asterisk audio_subprocess, which keeps squatting 127.0.0.1:9092 and
+# makes the next start crash "address already in use" (Errno 98). SIGKILL is
+# required (uncatchable): the subprocess installs a SIGTERM handler whose graceful
+# path hangs once orphaned, so SIGTERM/pkill leaves it alive. '-' ignores
+# "nothing to kill"; pkill skips its own PID. (Caught 2026-06-05.)
+ExecStartPre=-/usr/bin/pkill -9 -f audio_subprocess.py
 ExecStart=$BLACKBOX_ROOT/Orchestrator/venv/bin/python -m uvicorn Orchestrator.app:app \\
     --host 0.0.0.0 --port 9091 \\
     --timeout-keep-alive 120 --limit-max-requests 10000 --loop uvloop
