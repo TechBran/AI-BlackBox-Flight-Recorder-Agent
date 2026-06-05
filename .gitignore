@@ -258,3 +258,6 @@ Orchestrator/cli_agent/state/zellij_sessions.json
 # scope shouldn't ship at all.
 .mcp.json
 .gemini/settings.json
+
+# stray 'script' command capture artifact
+typescript
