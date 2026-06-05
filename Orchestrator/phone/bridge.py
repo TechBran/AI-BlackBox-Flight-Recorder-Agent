@@ -2916,7 +2916,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
 
     async def _whisper_transcribe(self, pcm_data: bytes) -> Optional[str]:
         """Transcribe audio using Whisper."""
-        from Orchestrator.config import OPENAI_API_KEY, OPENAI_STT_URL
+        from Orchestrator.config import OPENAI_API_KEY, OPENAI_STT_URL, STT_MODEL
 
         if not AIOHTTP_AVAILABLE or not OPENAI_API_KEY:
             return None
@@ -2937,7 +2937,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             async with aiohttp.ClientSession() as session:
                 form = aiohttp.FormData()
                 form.add_field('file', wav_buffer, filename='audio.wav', content_type='audio/wav')
-                form.add_field('model', 'whisper-1')
+                form.add_field('model', STT_MODEL)
 
                 async with session.post(
                     OPENAI_STT_URL,

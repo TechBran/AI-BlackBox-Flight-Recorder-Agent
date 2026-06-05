@@ -81,6 +81,7 @@ from Orchestrator.routes.chat_routes import *
 from Orchestrator.routes.agent_routes import *
 from Orchestrator.routes.realtime_routes import *
 from Orchestrator.routes.gemini_live_routes import *
+from Orchestrator.routes.stt_ws_routes import *
 from Orchestrator.routes.gemini_agent_routes import *
 from Orchestrator.routes.grok_live_routes import *
 from Orchestrator.routes.phone_routes import *

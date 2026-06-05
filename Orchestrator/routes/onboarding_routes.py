@@ -84,6 +84,7 @@ class CurrentConfigResponse(BaseModel):
     paired_devices: list[dict]
     tailscale: dict
     onboarding_state: dict
+    stt: dict
 
 
 class ValidateRequest(BaseModel):
@@ -193,12 +194,24 @@ def current_config() -> CurrentConfigResponse:
     except Exception:
         logger.exception("current-config paired_devices load failed")
         paired_devices = []
+    # STT preference — read fresh from .env (E8 pattern) so the wizard sees the
+    # provider it just saved WITHOUT a service restart. STT_PROVIDER is a
+    # preference, not a secret, so it's surfaced here in current-config rather
+    # than gated behind the reveal allowlist. "" / absent == auto (resolver
+    # picks whichever credential is present). The optional model-override keys
+    # are echoed too so the wizard can show non-default model choices.
+    stt = {
+        "provider": (env.get("STT_PROVIDER") or "").strip().lower(),  # "" == auto
+        "openai_file": (env.get("STT_OPENAI_FILE") or "").strip() or None,
+        "google_model": (env.get("STT_GOOGLE_MODEL") or "").strip() or None,
+    }
     return CurrentConfigResponse(
         providers=providers,
         operators=operators,
         paired_devices=paired_devices,
         tailscale=tailscale,
         onboarding_state=_state.snapshot(),
+        stt=stt,
     )
 
 

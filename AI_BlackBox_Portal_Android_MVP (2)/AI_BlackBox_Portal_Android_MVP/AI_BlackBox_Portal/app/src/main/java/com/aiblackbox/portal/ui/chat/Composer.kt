@@ -1,21 +1,13 @@
 package com.aiblackbox.portal.ui.chat
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -42,7 +34,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -55,14 +46,11 @@ import com.aiblackbox.portal.ui.components.RecordAudioIcon
 import com.aiblackbox.portal.ui.components.SendIcon
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import com.aiblackbox.portal.ui.components.SpeakerIcon
+import com.aiblackbox.portal.ui.voice.VoiceWaveform
+import com.aiblackbox.portal.ui.voice.WaveSpeaker
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
@@ -100,9 +88,8 @@ fun Composer(
     onRecordAudio: () -> Unit = {},
     isStreaming: Boolean = false,
     isRecording: Boolean = false,
-    whisperAmplitude: () -> Int = { 0 },
     isRecordingAudio: Boolean = false,
-    audioAmplitude: () -> Int = { 0 },
+    recordingAmplitude: () -> Float = { 0f },
     provider: String = "gemini",
     model: String = "",
     onProviderChange: (String) -> Unit = {},
@@ -145,8 +132,11 @@ fun Composer(
         )
 
         // ── Row 1: Input bubble ──
-        // Matches Portal .textarea-wrapper (frosted glass with shadow)
-        Row(
+        // Matches Portal .textarea-wrapper (frosted glass with shadow).
+        // Inner Column: [waveform ribbon (only while recording)] above
+        // [icons + text field] — the text field is ALWAYS rendered, never
+        // swapped out for the waveform.
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .glassSurface(
@@ -155,31 +145,42 @@ fun Composer(
                     elevation = 8.dp,
                     borderOverride = com.aiblackbox.portal.ui.theme.GlassBorderStrong,
                 )
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.Bottom
+                .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
-            // Attach button (inside bubble, matches Portal .input-action-btn)
-            IconButton(
-                onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                    onAttach()
-                },
-                modifier = Modifier.size(40.dp)
-            ) {
-                AttachIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+            // Waveform ribbon — full-width row DIRECTLY ABOVE the input row,
+            // only composed while recording/streaming (Whisper or raw audio).
+            if (isRecording || isRecordingAudio) {
+                VoiceWaveform(
+                    amplitude = recordingAmplitude(),
+                    speaker = WaveSpeaker.USER,
+                    height = 52.dp,
+                    // Lift speech-level RMS into the short composer ribbon so it
+                    // reads clearly. Tunable — raise for more swing, lower if it
+                    // pins at full on normal speech.
+                    sensitivity = 3.0f,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
             }
 
-            // Text input OR live waveform when recording (Whisper or raw audio)
-            if (isRecording || isRecordingAudio) {
-                // Professional spiked waveform — takes over the prompt area
-                WhisperWaveform(
-                    amplitudeProvider = if (isRecording) whisperAmplitude else audioAmplitude,
-                    isWhisper = isRecording,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                )
-            } else {
+            // Input row: icons + the always-visible text field.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                // Attach button (inside bubble, matches Portal .input-action-btn)
+                IconButton(
+                    onClick = {
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        onAttach()
+                    },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    AttachIcon(modifier = Modifier.size(20.dp), color = BbxAccent)
+                }
+
+                // Text field — ALWAYS visible (never swapped for the waveform).
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -210,51 +211,51 @@ fun Composer(
                         readOnly = isStreaming
                     )
                 }
-            }
 
-            // Raw audio record button (inside bubble, only for Gemini/Google)
-            if (showRecordAudio) {
+                // Raw audio record button (inside bubble, only for Gemini/Google)
+                if (showRecordAudio) {
+                    IconButton(
+                        onClick = {
+                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                            onRecordAudio()
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        RecordAudioIcon(
+                            modifier = Modifier.size(18.dp),
+                            color = if (isRecordingAudio) BbxAccent else Neutral500,
+                            filled = isRecordingAudio
+                        )
+                    }
+                }
+
+                // Whisper mic button (inside bubble)
                 IconButton(
-                    onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                        onRecordAudio()
-                    },
+                    onClick = onWhisper,
                     modifier = Modifier.size(36.dp)
                 ) {
-                    RecordAudioIcon(
+                    MicIcon(
                         modifier = Modifier.size(18.dp),
-                        color = if (isRecordingAudio) BbxAccent else Neutral500,
-                        filled = isRecordingAudio
+                        color = if (isRecording) BbxAccent else Neutral500
                     )
                 }
-            }
 
-            // Whisper mic button (inside bubble)
-            IconButton(
-                onClick = onWhisper,
-                modifier = Modifier.size(36.dp)
-            ) {
-                MicIcon(
-                    modifier = Modifier.size(18.dp),
-                    color = if (isRecording) BbxAccent else Neutral500
-                )
-            }
-
-            // Send button (inside bubble)
-            IconButton(
-                onClick = { if (hasText && !isStreaming) onSend() },
-                modifier = Modifier
-                    .size(40.dp)
-                    .scale(sendScale)
-            ) {
-                Box(
+                // Send button (inside bubble)
+                IconButton(
+                    onClick = { if (hasText && !isStreaming) onSend() },
                     modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(sendColor),
-                    contentAlignment = Alignment.Center
+                        .size(40.dp)
+                        .scale(sendScale)
                 ) {
-                    SendIcon(modifier = Modifier.size(18.dp), color = BbxWhite)
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(sendColor),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        SendIcon(modifier = Modifier.size(18.dp), color = BbxWhite)
+                    }
                 }
             }
         }
@@ -395,134 +396,5 @@ fun Composer(
                 }
             }
         }
-    }
-}
-
-// =============================================================================
-// Live Recording Waveform — scrolling bar visualization
-// =============================================================================
-
-// (Old constants removed — WhisperWaveform uses its own)
-
-// =============================================================================
-// WhisperWaveform — production-grade spiked waveform for voice recording
-//
-// Mirrored top+bottom spikes, red accent on black, smooth scrolling,
-// reactive to live mic amplitude. Matches the AudioPlayerBar aesthetic.
-// =============================================================================
-
-private const val WHISPER_BARS = 56
-private const val WHISPER_POLL_MS = 30L // ~33fps for fluid motion
-
-private val WaveformRed = Color(0xFFEF4444)
-private val WaveformRedDim = Color(0xFF7F1D1D)
-private val WaveformBg = Color.Black
-
-@Composable
-private fun WhisperWaveform(
-    amplitudeProvider: () -> Int,
-    isWhisper: Boolean = true,
-    modifier: Modifier = Modifier
-) {
-    val bars = remember { mutableStateListOf<Float>().apply { repeat(WHISPER_BARS) { add(0f) } } }
-
-    // Poll amplitude at ~33fps, shift bars left for scrolling effect
-    LaunchedEffect(Unit) {
-        while (true) {
-            val raw = amplitudeProvider()
-            // Normalize with slight exponential curve for more dramatic spikes
-            val linear = (raw / 32767f).coerceIn(0f, 1f)
-            val shaped = (linear * linear * 0.4f + linear * 0.6f).coerceIn(0f, 1f)
-            if (bars.size >= WHISPER_BARS) bars.removeAt(0)
-            bars.add(shaped)
-            kotlinx.coroutines.delay(WHISPER_POLL_MS)
-        }
-    }
-
-    // Subtle pulsing glow when active
-    val infiniteTransition = rememberInfiniteTransition(label = "whisperPulse")
-    val pulse by infiniteTransition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse"
-    )
-
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(WaveformBg),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp, vertical = 2.dp)) {
-            val cW = size.width
-            val cH = size.height
-            val centerY = cH / 2f
-            val barCount = bars.size
-            if (barCount == 0) return@Canvas
-
-            val gap = 1.5f
-            val barW = (cW - gap * (barCount - 1)) / barCount
-            val minH = 2f
-
-            // Center baseline glow
-            drawLine(
-                color = WaveformRed.copy(alpha = 0.1f * pulse),
-                start = Offset(0f, centerY),
-                end = Offset(cW, centerY),
-                strokeWidth = 0.5f
-            )
-
-            bars.forEachIndexed { i, amp ->
-                val x = i * (barW + gap)
-                val spikeH = maxOf(minH, amp * cH * 0.42f)
-
-                // Fade older bars slightly for depth
-                val ageFade = (i.toFloat() / barCount).coerceIn(0.4f, 1f)
-                val barAlpha = ageFade * pulse
-
-                // Top spike (upward from center)
-                drawRoundRect(
-                    color = WaveformRed.copy(alpha = barAlpha),
-                    topLeft = Offset(x, centerY - spikeH),
-                    size = Size(barW, spikeH),
-                    cornerRadius = CornerRadius(barW / 2f)
-                )
-
-                // Bottom spike (mirrored, slightly shorter + dimmer)
-                val mirrorH = spikeH * 0.7f
-                drawRoundRect(
-                    color = WaveformRed.copy(alpha = barAlpha * 0.45f),
-                    topLeft = Offset(x, centerY + 1f),
-                    size = Size(barW, mirrorH),
-                    cornerRadius = CornerRadius(barW / 2f)
-                )
-            }
-
-            // Leading edge glow — bright dot at newest bar
-            val lastAmp = bars.lastOrNull() ?: 0f
-            if (lastAmp > 0.05f) {
-                val lastX = (barCount - 1) * (barW + gap) + barW / 2f
-                drawCircle(
-                    color = WaveformRed.copy(alpha = 0.8f),
-                    radius = 3f,
-                    center = Offset(lastX, centerY)
-                )
-            }
-        }
-
-        // "Listening..." label
-        Text(
-            text = if (isWhisper) "Listening..." else "Recording...",
-            fontSize = 10.sp,
-            color = WaveformRed.copy(alpha = 0.5f),
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 8.dp, bottom = 2.dp)
-        )
     }
 }
