@@ -154,6 +154,10 @@ fun Composer(
                     amplitude = recordingAmplitude(),
                     speaker = WaveSpeaker.USER,
                     height = 52.dp,
+                    // Lift speech-level RMS into the short composer ribbon so it
+                    // reads clearly. Tunable — raise for more swing, lower if it
+                    // pins at full on normal speech.
+                    sensitivity = 3.0f,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 2.dp)

@@ -47,13 +47,17 @@ fun VoiceWaveform(
     speaker: WaveSpeaker,
     modifier: Modifier = Modifier,
     height: Dp = 140.dp,
+    // Extra display lift on top of the per-speaker gain. Default 1f leaves the
+    // voice screen exactly as tuned; the small composer ribbon turns this up so
+    // speech-level RMS (~0.05-0.15) reads clearly in its shorter height.
+    sensitivity: Float = 1f,
 ) {
     val gain = when (speaker) {
         WaveSpeaker.AI -> AI_GAIN
         else -> USER_GAIN
     }
     val eased by animateFloatAsState(
-        targetValue = (amplitude * gain).coerceIn(0f, 1f),
+        targetValue = (amplitude * gain * sensitivity).coerceIn(0f, 1f),
         // Easing: fluid but responsive — tracks the audio without trailing or twitching.
         animationSpec = tween(70),
         label = "amp",
