@@ -24,6 +24,6 @@
     "longDescription": "Walks you through setting up your AI BlackBox device — Tailscale, API keys, phone pairing, and more."
   },
   "productName": "BlackBox Setup",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.blackbox.setup"
 }
