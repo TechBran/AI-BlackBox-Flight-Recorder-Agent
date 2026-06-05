@@ -59,6 +59,28 @@ let interimLen = 0;             // length of the current interim region
 let closeTimer = null;
 const CLOSE_GRACE_MS = 1500;
 
+// Fast-failure / fallback support.
+// onUnavailable() fires exactly once when streaming can't get going (ws fails to
+// open within OPEN_TIMEOUT_MS, ws errors before any transcript, or the backend
+// reports a provider/connection stt_error before any transcript). It lets a
+// caller fall back to a legacy record->/stt path for THAT invocation. Once any
+// transcript (delta/final) has been applied, fallback is no longer offered.
+let onUnavailable = null;          // one-shot callback, cleared after firing
+let gotTranscript = false;         // true once a delta/final landed
+let openTimer = null;              // ws-open watchdog
+const OPEN_TIMEOUT_MS = 4000;
+
+function fireUnavailable(reason) {
+    const cb = onUnavailable;
+    onUnavailable = null;
+    if (openTimer) { clearTimeout(openTimer); openTimer = null; }
+    console.warn('[STT-STREAM] streaming unavailable:', reason);
+    if (typeof cb === 'function') {
+        try { cb(reason); } catch (e) { console.error('[STT-STREAM] onUnavailable cb error:', e); }
+    }
+    return !!cb;  // whether a fallback handler consumed it
+}
+
 // =============================================================================
 // Native Android detection (same check as tts-stt.js / gemini-live.js)
 // =============================================================================
@@ -189,6 +211,8 @@ function setButtonRecording(on) {
  * Apply a cumulative interim transcript: replace the interim region with `text`.
  */
 function applyDelta(text) {
+    gotTranscript = true;
+    onUnavailable = null;  // streaming is working — no fallback offer anymore
     const el = $(targetId);
     if (!el) return;
     const interim = text || '';
@@ -205,6 +229,8 @@ function applyDelta(text) {
  * run together.
  */
 function applyFinal(text) {
+    gotTranscript = true;
+    onUnavailable = null;  // streaming is working — no fallback offer anymore
     const el = $(targetId);
     if (!el) return;
     let committed = text || '';
@@ -234,9 +260,17 @@ function handleMessage(msg) {
             break;
         case 'stt_error':
             console.error('[STT-STREAM] stt_error:', msg.message);
-            toast('STT error: ' + (msg.message || 'unknown'));
-            // Stop capture and tear down; do not leave the mic open.
-            cleanup();
+            // If the error arrived before any transcript landed, this invocation
+            // never really started — offer the caller a fallback (e.g. legacy
+            // record->/stt) instead of surfacing a hard error. Tear down quietly.
+            if (!gotTranscript && onUnavailable) {
+                cleanup({ silent: true });
+                fireUnavailable('stt_error: ' + (msg.message || 'unknown'));
+            } else {
+                toast('STT error: ' + (msg.message || 'unknown'));
+                // Stop capture and tear down; do not leave the mic open.
+                cleanup();
+            }
             break;
         default:
             // Ignore unknown message types (forward-compatible).
@@ -401,10 +435,14 @@ function stopNativeCapture() {
  * Full teardown: stop capture, close ws, clear button state. Idempotent.
  * Used by both the normal stop() (after a grace period) and the error path.
  */
-function cleanup() {
+function cleanup(opts = {}) {
     if (closeTimer) {
         clearTimeout(closeTimer);
         closeTimer = null;
+    }
+    if (openTimer) {
+        clearTimeout(openTimer);
+        openTimer = null;
     }
     if (usingNative) {
         stopNativeCapture();
@@ -417,7 +455,11 @@ function cleanup() {
     }
     wsReady = false;
     streaming = false;
-    setButtonRecording(false);
+    // When tearing down silently for a fallback handoff, leave the button visual
+    // for the legacy path to manage so the mic never appears momentarily "off".
+    if (!opts.silent) {
+        setButtonRecording(false);
+    }
 }
 
 // =============================================================================
@@ -428,21 +470,28 @@ function cleanup() {
  * Begin streaming dictation into the element #targetId.
  * @param {string} targetIdArg - id of the target input/textarea
  * @param {string} [buttonIdArg] - id of the trigger button (visual state)
- * @param {Object} [opts] - { lang }
+ * @param {Object} [opts] - { lang, onUnavailable } — onUnavailable(reason) fires
+ *   once if streaming can't get going, so the caller can fall back to a legacy
+ *   record->/stt path for this invocation.
  */
 async function start(targetIdArg, buttonIdArg, opts = {}) {
     if (streaming) {
         // Already streaming — ignore (caller should stop() first to retarget).
         return;
     }
+    // Reset fast-failure state for this invocation.
+    onUnavailable = typeof opts.onUnavailable === 'function' ? opts.onUnavailable : null;
+    gotTranscript = false;
+
     if (!hasMic()) {
-        toast('Microphone not supported');
+        // No mic at all — let the caller decide (fallback shares the same gate).
+        if (!fireUnavailable('no microphone')) toast('Microphone not supported');
         return;
     }
 
     const el = $(targetIdArg);
     if (!el) {
-        toast('STT target not found');
+        if (!fireUnavailable('target not found')) toast('STT target not found');
         return;
     }
 
@@ -466,15 +515,28 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
         ws = new WebSocket(url);
     } catch (e) {
         console.error('[STT-STREAM] WS open failed:', e);
-        toast('STT connection failed');
         resetTargetState();
+        if (!fireUnavailable('ws open threw: ' + (e && e.message))) {
+            toast('STT connection failed');
+        }
         return;
     }
 
     streaming = true;
     setButtonRecording(true);
 
+    // Watchdog: if the socket never opens within the timeout, treat streaming as
+    // unavailable and hand off to the caller's fallback (before any transcript).
+    openTimer = setTimeout(() => {
+        openTimer = null;
+        if (!wsReady && !gotTranscript && onUnavailable) {
+            cleanup({ silent: true });
+            fireUnavailable('ws open timeout');
+        }
+    }, OPEN_TIMEOUT_MS);
+
     ws.onopen = async () => {
+        if (openTimer) { clearTimeout(openTimer); openTimer = null; }
         wsReady = true;
         ws.send(JSON.stringify({
             type: 'stt_start',
@@ -508,6 +570,12 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
 
     ws.onerror = (event) => {
         console.error('[STT-STREAM] WebSocket error:', event);
+        // A ws error before any transcript means streaming never got going —
+        // hand off to the caller's fallback (one-shot).
+        if (!gotTranscript && onUnavailable) {
+            cleanup({ silent: true });
+            fireUnavailable('ws error');
+        }
     };
 
     ws.onclose = () => {
@@ -515,7 +583,13 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
         // the mic never outlives the connection.
         wsReady = false;
         if (streaming) {
-            cleanup();
+            // Closed before any transcript with a pending fallback offer → fall back.
+            if (!gotTranscript && onUnavailable) {
+                cleanup({ silent: true });
+                fireUnavailable('ws closed early');
+            } else {
+                cleanup();
+            }
         }
     };
 }
@@ -568,6 +642,7 @@ function isStreaming() {
 function resetTargetState() {
     streaming = false;
     wsReady = false;
+    if (openTimer) { clearTimeout(openTimer); openTimer = null; }
     setButtonRecording(false);
     ws = null;
 }

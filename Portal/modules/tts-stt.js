@@ -9,6 +9,7 @@
 
 import { $, toast, simpleHash } from './core-utils.js';
 import { getOperator, getAudioCache, saveAudioCache } from './state-management.js';
+import { sttStream } from './stt-stream.js';
 
 // =============================================================================
 // TTS Constants
@@ -61,8 +62,15 @@ let lastAssistantText = "";
 // STT State
 // =============================================================================
 
-/** Mic recording state */
+/** Mic recording state (legacy MediaRecorder path) */
 let micOn = false;
+
+/**
+ * Streaming dictation active flag (sttStream path). Tracked separately from
+ * micOn so the public state getters can report mic-on/transcribing whether the
+ * streaming client OR the legacy recorder is running.
+ */
+let sttStreamingActive = false;
 
 /** MediaRecorder instance */
 let mediaRec = null;
@@ -1746,8 +1754,22 @@ export function isNativeAndroid() {
     return typeof AndroidMic !== "undefined";
 }
 
+// =============================================================================
+// STT public entry points — streaming-first with legacy record->/stt fallback
+//
+// Buttons are wired (in ui-setup.js + generation-modals.js) to startSTT /
+// startSTTFor / toggleSTTFor / stopSTT. These public functions now route through
+// the shared streaming client (sttStream) so dictation is LIVE (editable text
+// appears as you speak). If streaming can't get going for an invocation (no STT
+// provider configured, ws fails to open, early ws/stt_error), they transparently
+// fall back to the legacy MediaRecorder->/stt one-shot path for that invocation.
+//
+// The legacy implementations are preserved verbatim below as legacy* functions.
+// =============================================================================
+
 /**
- * Start STT for a specific input field
+ * Start STT for a specific input field.
+ * Streaming-first; falls back to legacy on streaming-unavailable.
  * @param {string} targetInputId - Target input ID
  * @param {string} buttonId - Button ID
  */
@@ -1758,25 +1780,120 @@ export async function startSTTFor(targetInputId, buttonId) {
 }
 
 /**
- * Toggle STT for a specific input field
+ * Toggle STT for a specific input field.
+ * Works for both the streaming and legacy paths: if any dictation is active,
+ * stop it (re-targeting if a different field is requested); otherwise start.
  * @param {string} targetInputId - Target input ID
  * @param {string} buttonId - Button ID
  */
 export function toggleSTTFor(targetInputId, buttonId) {
-    if (micOn && currentSTTTarget === targetInputId) {
+    const wasStreaming = sttStreamingActive;
+    const active = sttStreamingActive || micOn;
+    if (active && currentSTTTarget === targetInputId) {
         stopSTT();
-    } else if (micOn) {
+    } else if (active) {
+        // Switching target — stop current then start the new one.
         stopSTT(true);
-        setTimeout(() => startSTTFor(targetInputId, buttonId), 100);
+        if (wasStreaming) {
+            // The streaming client keeps its socket open for a short grace window
+            // after stop() (so a trailing final lands), during which sttStream.start
+            // no-ops. Wait until it has fully released before retargeting.
+            waitForStreamReleaseThen(() => startSTTFor(targetInputId, buttonId));
+        } else {
+            setTimeout(() => startSTTFor(targetInputId, buttonId), 150);
+        }
     } else {
         startSTTFor(targetInputId, buttonId);
     }
 }
 
 /**
- * Start STT recording
+ * Poll until the streaming client has fully released its socket (post-stop grace
+ * window elapsed), then run cb. Capped so it never hangs if something goes wrong.
+ * @param {Function} cb
+ */
+function waitForStreamReleaseThen(cb) {
+    const startedAt = Date.now();
+    const MAX_WAIT_MS = 2000;
+    const tick = () => {
+        if (!sttStream.isStreaming() || (Date.now() - startedAt) > MAX_WAIT_MS) {
+            cb();
+        } else {
+            setTimeout(tick, 100);
+        }
+    };
+    setTimeout(tick, 100);
+}
+
+/**
+ * Start STT dictation into currentSTTTarget.
+ * Tries the streaming client first; on streaming-unavailable for THIS
+ * invocation, falls back to the legacy MediaRecorder->/stt flow.
  */
 export async function startSTT() {
+    if (!hasMic()) {
+        toast("Microphone not supported");
+        return;
+    }
+    // Already dictating? No-op (button handlers gate on isMicOn, but be safe).
+    if (sttStreamingActive || micOn) return;
+
+    // A just-stopped streaming session keeps its socket open briefly (grace
+    // window for a trailing final), during which sttStream.start() no-ops. If we
+    // started now we'd light the button but capture nothing. Wait it out first.
+    if (sttStream.isStreaming()) {
+        waitForStreamReleaseThen(() => startSTT());
+        return;
+    }
+
+    const targetId = currentSTTTarget || "prompt";
+    const buttonId = currentSTTButton || "ctlMic";
+
+    // Mark the streaming attempt active + light the button up immediately. If we
+    // fall back, legacyStartSTT re-asserts its own button state.
+    sttStreamingActive = true;
+    const btn = $(buttonId);
+    if (btn) btn.setAttribute("aria-pressed", "true");
+
+    try {
+        await sttStream.start(targetId, buttonId, {
+            onUnavailable: (reason) => {
+                // Streaming couldn't run for this invocation — drop streaming
+                // state and hand off to the legacy record->/stt path.
+                console.warn("[STT] Streaming unavailable, falling back to legacy:", reason);
+                sttStreamingActive = false;
+                legacyStartSTT();
+            }
+        });
+    } catch (e) {
+        // Defensive: any synchronous throw from the streaming client → legacy.
+        console.error("[STT] Streaming start threw, falling back to legacy:", e);
+        sttStreamingActive = false;
+        legacyStartSTT();
+    }
+}
+
+/**
+ * Stop STT dictation.
+ * @param {boolean} cancelOnly - Cancel without committing (used when retargeting)
+ */
+export function stopSTT(cancelOnly = false) {
+    if (sttStreamingActive) {
+        sttStreamingActive = false;
+        try { sttStream.stop(); } catch (e) { console.error("[STT] sttStream.stop error:", e); }
+        // Streaming applies text live + commits its own final via the ws grace
+        // window; clear the button visual now (stt-stream also clears it).
+        const btn = $(currentSTTButton);
+        if (btn) btn.setAttribute("aria-pressed", "false");
+        return;
+    }
+    legacyStopSTT(cancelOnly);
+}
+
+/**
+ * Legacy: Start STT recording (MediaRecorder -> POST /stt). Fallback path.
+ */
+async function legacyStartSTT() {
     if (!hasMic()) {
         toast("Microphone not supported");
         return;
@@ -1791,7 +1908,7 @@ export async function startSTT() {
         } catch (e) {
             console.error(e);
             toast("Mic error: " + e.message);
-            stopSTT(true);
+            legacyStopSTT(true);
         }
     } else {
         try {
@@ -1849,16 +1966,16 @@ export async function startSTT() {
             toast("Recording… tap mic again to stop");
         } catch (e) {
             toast(`Mic error: ${e.message}`);
-            stopSTT(true);
+            legacyStopSTT(true);
         }
     }
 }
 
 /**
- * Stop STT recording
+ * Legacy: Stop STT recording (MediaRecorder path). Fallback path.
  * @param {boolean} cancelOnly - Cancel without processing
  */
-export function stopSTT(cancelOnly = false) {
+function legacyStopSTT(cancelOnly = false) {
     const btn = $(currentSTTButton);
     micOn = false;
 
@@ -1962,11 +2079,12 @@ export function setLastAssistantText(text) {
 }
 
 /**
- * Check if mic is on
+ * Check if the mic is on (dictation in progress) — true for EITHER the streaming
+ * client OR the legacy recorder, so button handlers gate correctly in both modes.
  * @returns {boolean} Mic state
  */
 export function isMicOn() {
-    return micOn;
+    return sttStreamingActive || micOn;
 }
 
 // =============================================================================
