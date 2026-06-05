@@ -212,16 +212,6 @@ class TtsRepository(private val api: BlackBoxApi) {
     }
 
     // =========================================================================
-    // STT — Whisper transcription
-    // =========================================================================
-    suspend fun transcribe(audioBase64: String, sampleRate: Int = 16000): String {
-        val body = """{"audio":"$audioBase64","sample_rate":$sampleRate,"format":"pcm16"}"""
-        val response = api.post("/stt/json", body)
-        val obj = json.parseToJsonElement(response)
-        return obj.jsonObject["text"]?.jsonPrimitive?.content ?: ""
-    }
-
-    // =========================================================================
     // Voice Catalog — GET /tts/catalog (live catalog with offline fallback)
     // Backend shape: {"groups":[{"id","label","voices":[{"id","name","description"}]}]}
     // Returns TTS_VOICE_GROUPS on ANY failure (network, parse, empty).

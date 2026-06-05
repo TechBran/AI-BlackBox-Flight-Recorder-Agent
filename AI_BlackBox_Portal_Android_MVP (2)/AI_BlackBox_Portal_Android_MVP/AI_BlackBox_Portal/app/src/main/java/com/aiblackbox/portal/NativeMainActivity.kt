@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -35,13 +36,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.aiblackbox.portal.data.model.TaskStatus
+import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
+import com.aiblackbox.portal.data.voice.SttEvent
+import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.navigation.BlackBoxNavGraph
 import com.aiblackbox.portal.ui.chat.AttachmentItem
 import com.aiblackbox.portal.ui.chat.ChatState
@@ -153,9 +158,21 @@ class NativeMainActivity : ComponentActivity() {
                 var cliAgentInTerminal by remember { mutableStateOf(false) }
                 val autoTtsEnabled by store.autoTtsEnabled.collectAsState(initial = false)
 
-                // Audio recorder for BlackBox Whisper STT
+                // Legacy audio recorder — still used by onRecordAudio (Gemini) and
+                // the CLI WhisperMicButton. onWhisper no longer drives it.
                 val audioRecorder = remember { AudioRecorderManager(applicationContext) }
                 var isWhisperRecording by remember { mutableStateOf(false) }
+
+                // Live streaming STT client for onWhisper (multi-provider /ws/stt).
+                // Built once per origin, mirroring how VoiceScreen builds VoiceClient.
+                val sttClient = remember(origin) {
+                    val wsUrl = origin.replace("https://", "wss://").replace("http://", "ws://")
+                    SttStreamClient(BlackBoxApi(origin).getClient(), wsUrl)
+                }
+                val isWhisperStreaming by sttClient.isStreaming.collectAsState()
+                // Cumulative-delta applier holders: captured at stream start from the caret.
+                var sttBaseBefore by remember { mutableStateOf("") }
+                var sttBaseAfter by remember { mutableStateOf("") }
 
                 // Raw audio recorder for Gemini audio analysis
                 val rawAudioRecorder = remember { AudioRecorderManager(applicationContext) }
@@ -207,6 +224,43 @@ class NativeMainActivity : ComponentActivity() {
                     if (origin.isNotBlank()) {
                         chatViewModel.initialize(origin)
                     }
+                }
+
+                // Live STT — collect transcript events and apply the cumulative-delta
+                // applier to the prompt (TextFieldValue). Delta.text is the full
+                // interim so far; replace the interim region. Final.text commits.
+                LaunchedEffect(sttClient) {
+                    sttClient.events.collect { event ->
+                        when (event) {
+                            is SttEvent.Delta -> {
+                                val newText = sttBaseBefore + event.text + sttBaseAfter
+                                chatViewModel.onInputChange(
+                                    TextFieldValue(
+                                        newText,
+                                        TextRange((sttBaseBefore + event.text).length)
+                                    )
+                                )
+                            }
+                            is SttEvent.Final -> {
+                                val committed = if (event.text.isNotEmpty() && !event.text.last().isWhitespace())
+                                    "${event.text} " else event.text
+                                sttBaseBefore += committed
+                                val merged = sttBaseBefore + sttBaseAfter
+                                chatViewModel.onInputChange(
+                                    TextFieldValue(merged, TextRange(sttBaseBefore.length))
+                                )
+                            }
+                            is SttEvent.Error -> {
+                                Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
+                                sttClient.stop()
+                            }
+                        }
+                    }
+                }
+
+                // Stop the streaming mic + WS when the composable leaves the tree.
+                DisposableEffect(sttClient) {
+                    onDispose { sttClient.stop() }
                 }
 
                 // Auto-TTS: observe events from ChatViewModel and speak
@@ -622,27 +676,18 @@ class NativeMainActivity : ComponentActivity() {
                                 launchFilePicker()
                             },
                             onWhisper = {
-                                if (isWhisperRecording) {
-                                    isWhisperRecording = false
-                                    scope.launch {
-                                        val file = audioRecorder.stopRecording()
-                                        if (file != null) {
-                                            val api = chatViewModel.getApi()
-                                            if (api != null) {
-                                                val text = audioRecorder.transcribe(api, file)
-                                                if (text.isNotBlank()) {
-                                                    chatViewModel.onInputChange(TextFieldValue(
-                                                        chatViewModel.inputText.value.text + text
-                                                    ))
-                                                }
-                                            }
-                                        }
-                                    }
+                                // Toggle live streaming dictation via /ws/stt.
+                                if (sttClient.isStreaming.value) {
+                                    sttClient.stop()
                                 } else {
                                     withMicPermission {
-                                        if (audioRecorder.startRecording()) {
-                                            isWhisperRecording = true
-                                        }
+                                        // Capture the caret-anchored base for the
+                                        // cumulative-delta applier BEFORE starting.
+                                        val cur = chatViewModel.inputText.value
+                                        val insert = cur.selection.start.coerceIn(0, cur.text.length)
+                                        sttBaseBefore = cur.text.substring(0, insert)
+                                        sttBaseAfter = cur.text.substring(insert)
+                                        sttClient.start()
                                     }
                                 }
                             },
@@ -717,10 +762,12 @@ class NativeMainActivity : ComponentActivity() {
                             // Allow sends during robotics ER missions (prompt injection)
                             isStreaming = (chatState == ChatState.STREAMING || chatState == ChatState.THINKING)
                                 && !(provider == "robotics" && erMissionActive),
-                            isRecording = isWhisperRecording,
-                            whisperAmplitude = { audioRecorder.getMaxAmplitude() },
+                            isRecording = isWhisperStreaming,
                             isRecordingAudio = isRawAudioRecording,
-                            audioAmplitude = { rawAudioRecorder.getMaxAmplitude() },
+                            recordingAmplitude = {
+                                if (isWhisperStreaming) sttClient.amplitude.value
+                                else rawAudioRecorder.getMaxAmplitude() / 32767f
+                            },
                             provider = provider,
                             model = currentModel,
                             onProviderChange = { newProvider ->

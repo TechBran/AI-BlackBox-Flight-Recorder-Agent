@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -45,6 +46,7 @@ fun VoiceWaveform(
     amplitude: Float,
     speaker: WaveSpeaker,
     modifier: Modifier = Modifier,
+    height: Dp = 140.dp,
 ) {
     val gain = when (speaker) {
         WaveSpeaker.AI -> AI_GAIN
@@ -74,7 +76,7 @@ fun VoiceWaveform(
 
     val level = if (speaker == WaveSpeaker.IDLE) IDLE_LEVEL else (IDLE_LEVEL + eased).coerceIn(0f, 1f)
 
-    Canvas(modifier = modifier.fillMaxWidth().height(140.dp)) {
+    Canvas(modifier = modifier.fillMaxWidth().height(height)) {
         val brush = Brush.horizontalGradient(
             listOf(color1.copy(alpha = 0f), color2, color1.copy(alpha = 0f))
         )
