@@ -48,6 +48,7 @@ object Constants {
     // WebSocket paths
     const val WS_AGENT = "/ws/agent"
     const val WS_GEMINI_AGENT = "/ws/gemini-agent"
+    const val WS_STT = "/ws/stt"
 
     // Default values
     const val DEFAULT_PROVIDER = "gemini"
