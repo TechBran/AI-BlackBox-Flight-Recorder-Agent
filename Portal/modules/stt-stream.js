@@ -130,11 +130,14 @@ function lowPassFilter(input, cutoffRatio = 0.4) {
 }
 
 /**
- * Resample Float32 audio from sourceRate to 16kHz (Catmull-Rom interpolation
- * with anti-alias low-pass). Mirrors gemini-live.js resampleTo16kHz.
+ * Resample Float32 audio from sourceRate to 24kHz (Catmull-Rom interpolation
+ * with anti-alias low-pass). 24kHz is the single uniform STT rate: OpenAI
+ * realtime transcription REQUIRES >= 24000 (it rejects 16000 with "format.rate
+ * integer below minimum value"); Google Cloud Speech v2 accepts it; and the
+ * native Android capture is already 24kHz.
  */
-function resampleTo16kHz(input, sourceRate) {
-    const targetRate = 16000;
+function resampleTo24kHz(input, sourceRate) {
+    const targetRate = 24000;
     if (sourceRate === targetRate) return input;
 
     const cutoff = (targetRate / sourceRate) * 0.9;
@@ -349,8 +352,8 @@ async function startBrowserCapture() {
             normalizedData[i] = Math.max(-1, Math.min(1, filtered[i] * gain));
         }
 
-        // Resample native rate -> 16kHz, encode PCM16 -> base64.
-        const resampled = resampleTo16kHz(normalizedData, nativeRate);
+        // Resample native rate -> 24kHz, encode PCM16 -> base64.
+        const resampled = resampleTo24kHz(normalizedData, nativeRate);
         const base64 = float32ToPCM16Base64(resampled);
         sendAudio(base64);
     };
@@ -504,7 +507,7 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
     interimLen = 0;
 
     const native = isNativeAndroid();
-    const sampleRate = native ? 24000 : 16000;
+    const sampleRate = 24000;  // uniform 24kHz (OpenAI requires >=24k; native already 24k)
     const lang = opts.lang || 'en';
 
     // Open the WebSocket.

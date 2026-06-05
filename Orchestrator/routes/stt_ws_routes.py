@@ -24,11 +24,11 @@ Speech-to-Text v2 streaming (gRPC, run in a thread executor so the asyncio event
 loop is never blocked). Pure provider-event translation lives in
 Orchestrator/stt/streaming.py; whisper hallucination filtering in whisper_filter.
 
-SAMPLE-RATE WATCH-ITEM: OpenAI realtime audio is canonically 24kHz while web/
-Android typically capture 16kHz, and Google v2 commonly expects 16kHz. We pass
-the client-declared sample_rate straight through to each provider. This needs a
-live A/B benchmark at integration time to confirm OpenAI accepts the declared
-rate (vs. requiring resample to 24k) — flagged here, not silently assumed.
+SAMPLE-RATE (resolved 2026-06-05 via live test): OpenAI realtime transcription
+REQUIRES sample_rate >= 24000 (it rejects 16000 with "format.rate integer below
+minimum value"). Google Cloud Speech v2 accepts 24000, and the native Android
+capture is already 24kHz. So the client standardizes on 24000 and we pass it
+straight through to both providers. Default fallback is 24000.
 
 `resolve_stt_provider` and `run_stt_bridge` are referenced as MODULE GLOBALS so
 the test suite can monkeypatch them.
@@ -48,6 +48,23 @@ from Orchestrator.stt.streaming import map_openai_event, map_google_result, Inte
 from Orchestrator.whisper_filter import is_whisper_hallucination
 
 
+# Google Cloud Speech v2 (chirp_2) requires full BCP-47 codes (e.g. "en-US"),
+# not bare ISO-639-1 ("en") — it rejects "en" with "language not supported by
+# the model in the location". The uniform client contract sends short codes,
+# so normalize here. OpenAI, by contrast, accepts "en" directly.
+_GOOGLE_LANG = {
+    "en": "en-US", "es": "es-US", "fr": "fr-FR", "de": "de-DE", "it": "it-IT",
+    "pt": "pt-BR", "ja": "ja-JP", "ko": "ko-KR", "zh": "cmn-Hans-CN",
+}
+
+
+def _normalize_google_lang(lang):
+    code = (lang or "").strip()
+    if not code:
+        return "en-US"
+    return _GOOGLE_LANG.get(code.lower(), code)
+
+
 @app.websocket("/ws/stt")
 async def ws_stt(websocket: WebSocket):
     await websocket.accept()
@@ -60,6 +77,8 @@ async def ws_stt(websocket: WebSocket):
         if not provider:
             await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
             return
+        print(f"[STT/WS] start provider={provider} sample_rate={start.get('sample_rate')} "
+              f"lang={start.get('lang')} target={start.get('target')}")
         await run_stt_bridge(websocket, provider, start)
     except WebSocketDisconnect:
         pass
@@ -74,7 +93,7 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
     """Dispatch to the per-provider streaming bridge."""
     target = start.get("target")
     lang = start.get("lang")
-    sample_rate = start.get("sample_rate", 16000)
+    sample_rate = start.get("sample_rate", 24000)
     if provider == "google":
         await _google_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     else:
@@ -120,6 +139,8 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
             },
         }
         await openai_ws.send(json.dumps(session_update))
+        print(f"[STT/WS] openai connected model={config.STT_OPENAI_STREAM} rate={sample_rate} "
+              f"url={url}; session.update sent")
 
         # Set when the client requests a manual stop (commit sent). The relay
         # keeps draining until it delivers the final for the committed audio,
@@ -154,6 +175,17 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 try:
                     event = json.loads(raw)
                 except (ValueError, TypeError):
+                    continue
+                etype = event.get("type", "")
+                # Surface OpenAI error events (e.g. rejected session config / bad
+                # model) instead of silently swallowing them as "unmapped".
+                if "error" in etype:
+                    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
+                    print(f"[STT/WS] openai ERROR event: {json.dumps(event)[:500]}")
+                    try:
+                        await websocket.send_json({"type": "stt_error", "message": f"OpenAI: {detail}"})
+                    except Exception:
+                        pass
                     continue
                 m = acc.openai(event)
                 if not m:
@@ -263,7 +295,7 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
             sample_rate_hertz=sample_rate,
             audio_channel_count=1,
         ),
-        language_codes=[lang or "en-US"],
+        language_codes=[_normalize_google_lang(lang)],
         model=config.STT_GOOGLE_MODEL,
     )
     streaming_config = StreamingRecognitionConfig(
@@ -311,6 +343,8 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         fut.add_done_callback(_log_emit_error)
 
     def _run_google():
+        print(f"[STT/WS] google worker start region={region} model={config.STT_GOOGLE_MODEL} "
+              f"project={project_id} rate={sample_rate} recognizer={recognizer}")
         try:
             client = SpeechClient(
                 client_options=ClientOptions(api_endpoint=f"{region}-speech.googleapis.com")
@@ -327,7 +361,9 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     m = acc.google(text, is_final)
                     m["target"] = target
                     _emit(m)
+            print("[STT/WS] google stream ended")
         except Exception as e:  # surface gRPC/auth errors to the client
+            print(f"[STT/WS] google worker EXCEPTION: {e!r}")
             _emit({"type": "stt_error", "message": str(e)})
 
     # Run the blocking gRPC stream in a worker thread.
