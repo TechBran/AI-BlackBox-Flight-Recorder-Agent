@@ -30,3 +30,10 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 dirs    = "5"
 libc    = "0.2"
 
+# Linux-only: reach the underlying WebKitGTK webview to enable getUserMedia
+# (microphone). WebKitGTK denies media-stream + the user-media permission by
+# default, so the STT mic is dead in the desktop app unless we opt in. Pinned
+# to match wry's webkit2gtk (2.0.2) so PlatformWebview::inner() type-unifies.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "=2.0.2"
+

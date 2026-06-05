@@ -138,6 +138,28 @@ pub fn run_with_url(url: &str, mode: &str) {
                 false  // cancel in-webview load; system browser handles it
             })
             .build()?;
+
+            // Linux/WebKitGTK: getUserMedia (the STT microphone) is denied by
+            // default — the desktop app's mic was dead while the browser worked
+            // (caught 2026-06-05). Enable the media-stream setting and auto-allow
+            // the user-media permission request. Safe: this webview only ever
+            // loads the trusted localhost:9091 Portal (on_navigation blocks all
+            // external navigation), so granting media to that single origin is fine.
+            #[cfg(target_os = "linux")]
+            {
+                use webkit2gtk::{WebViewExt, SettingsExt, PermissionRequestExt};
+                let _ = _window.with_webview(|webview| {
+                    let wv = webview.inner();
+                    if let Some(settings) = WebViewExt::settings(&wv) {
+                        settings.set_enable_media_stream(true);
+                    }
+                    wv.connect_permission_request(|_wv, req| {
+                        req.allow();
+                        true
+                    });
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|_window, event| {
