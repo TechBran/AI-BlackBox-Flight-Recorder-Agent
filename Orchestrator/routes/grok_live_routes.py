@@ -1042,6 +1042,18 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                     "data": transcript
                 })
 
+    elif event_type == "conversation.item.input_audio_transcription.delta":
+        # Incremental (interim) user transcription chunk — live word-by-word.
+        # Grok mirrors OpenAI's realtime schema; handled defensively — if Grok
+        # never emits .delta, behavior is unchanged (.completed still commits
+        # the final user_transcript above).
+        delta_chunk = event.get("delta", "")
+        if delta_chunk and session.portal_ws:
+            await _safe_ws_send(session.portal_ws, {
+                "type": "user_transcript_delta",
+                "data": delta_chunk
+            })
+
     elif event_type == "input_audio_buffer.speech_started":
         # User started speaking (VAD detected)
         if session.portal_ws:

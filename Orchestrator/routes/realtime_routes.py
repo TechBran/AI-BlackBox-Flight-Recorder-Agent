@@ -1112,6 +1112,17 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
         elif transcript:
             print(f"[REALTIME] Filtered Whisper hallucination: '{transcript[:80]}'")
 
+    elif event_type == "conversation.item.input_audio_transcription.delta":
+        # Incremental (interim) user transcription chunk — live word-by-word.
+        # Mirrors the AI-side transcript_delta convention; .completed still
+        # emits the authoritative final user_transcript below.
+        delta_chunk = event.get("delta", "")
+        if delta_chunk and session.portal_ws:
+            await _safe_ws_send(session.portal_ws, {
+                "type": "user_transcript_delta",
+                "data": delta_chunk
+            })
+
     elif event_type == "input_audio_buffer.speech_started":
         # User started speaking (VAD detected)
         if session.portal_ws:
