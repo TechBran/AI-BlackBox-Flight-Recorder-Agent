@@ -231,16 +231,45 @@ class BlackBoxToolExecutor:
         return await self._ugv_er_call("POST", f"/mission/{mid}/abort")
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
-        """Execute a tool and return the result."""
+        """Execute a tool and return the result.
 
+        MODULE-FIRST dispatch: ask the ToolVault registry for a per-tool
+        ``executor.py`` (it resolves alias → canonical → ``executor.py``). If one
+        exists, run it with a :class:`ToolContext`. Otherwise fall back to the
+        legacy ``_execute_<name>`` method on this class.
+
+        Until Task 6.2 migrates every executor into a module, NO ``executor.py``
+        files ship, so ``get_executor`` always returns None and every call falls
+        through to legacy — behavior is unchanged today; this just builds the rail.
+        """
+        from Orchestrator.toolvault import registry
+        from Orchestrator.toolvault.context import ToolContext
+
+        # Module-first: a per-tool executor.py wins (handles alias → canonical).
+        ex = registry.get_executor(tool_name)
+        if ex is not None:
+            try:
+                return await ex(
+                    tool_input,
+                    ToolContext(operator=self.operator, base_url=self.base_url),
+                )
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return ToolResult(
+                    success=False,
+                    result=f"Error executing {tool_name}: {str(e)}"
+                )
+
+        # Legacy fallback (until 6.2 migrates all executors).
         # Resolve aliases (e.g., search_snapshots → search_memory for executor method)
-        tool_name = resolve_executor_name(tool_name)
+        legacy = resolve_executor_name(tool_name)
 
-        handler = getattr(self, f"_execute_{tool_name}", None)
+        handler = getattr(self, f"_execute_{legacy}", None)
         if handler is None:
             return ToolResult(
                 success=False,
-                result=f"Unknown tool: {tool_name}"
+                result=f"Unknown tool: {legacy}"
             )
 
         try:
@@ -250,7 +279,7 @@ class BlackBoxToolExecutor:
             traceback.print_exc()
             return ToolResult(
                 success=False,
-                result=f"Error executing {tool_name}: {str(e)}"
+                result=f"Error executing {legacy}: {str(e)}"
             )
 
     async def _execute_send_sms(self, params: Dict[str, Any]) -> ToolResult:
