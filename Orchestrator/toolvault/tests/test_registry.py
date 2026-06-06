@@ -8,12 +8,14 @@ Tests are hermetic: they point ``registry.TOOLS_DIR`` at a ``tmp_path`` and call
 ``invalidate_cache()`` — they never read the real ``ToolVault/tools``.
 """
 
+import asyncio
 import json
 import os
 
 import pytest
 
 from Orchestrator.toolvault import registry
+from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -256,3 +258,92 @@ def test_resolve_executor_name():
     assert registry.resolve_executor_name("search_snapshots") == "search_memory"
     # Not in the map -> identity.
     assert registry.resolve_executor_name("web_search") == "web_search"
+
+
+# ---------------------------------------------------------------------------
+# get_executor (Task 1.2) — per-tool executor.py loader
+# ---------------------------------------------------------------------------
+
+# A valid executor body: async execute(params, ctx) -> ToolResult.
+_GOOD_EXECUTOR = (
+    "from Orchestrator.toolvault.context import ToolResult\n"
+    "async def execute(params, ctx):\n"
+    "    return ToolResult(True, 'ok')\n"
+)
+
+
+def _write_executor(tools_dir, name, body):
+    """Write tools_dir/<name>/executor.py (folder + schema created if absent)."""
+    folder = tools_dir / name
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "executor.py"
+    path.write_text(body)
+    return path
+
+
+def test_get_executor_valid(tools_dir):
+    _write_module(tools_dir, "good_tool", _valid_schema("good_tool"))
+    _write_executor(tools_dir, "good_tool", _GOOD_EXECUTOR)
+
+    ex = registry.get_executor("good_tool")
+    assert ex is not None
+    assert callable(ex)
+
+    result = asyncio.run(ex({}, ToolContext()))
+    assert isinstance(result, ToolResult)
+    assert result.success is True
+    # A valid executor must not register an error.
+    assert "good_tool" not in registry.load_errors()
+
+
+def test_get_executor_missing_returns_none_no_error(tools_dir):
+    # Schema only, no executor.py — a legitimately schema-only tool.
+    _write_module(tools_dir, "schema_only_tool", _valid_schema("schema_only_tool"))
+
+    assert registry.get_executor("schema_only_tool") is None
+    # Missing executor is allowed: it must NOT be recorded as an error.
+    assert "schema_only_tool" not in registry.load_errors()
+
+
+def test_get_executor_bad_signature_records_error(tools_dir):
+    _write_module(tools_dir, "bad_sig", _valid_schema("bad_sig"))
+    # Not async + wrong arity (1 positional param).
+    _write_executor(tools_dir, "bad_sig", "def execute(params):\n    return None\n")
+
+    assert registry.get_executor("bad_sig") is None
+    errors = registry.load_errors()
+    assert "bad_sig" in errors
+    assert errors["bad_sig"]  # non-empty list
+
+
+def test_get_executor_resolves_alias(tools_dir):
+    # Folder is the canonical name; alias should resolve to it.
+    _write_module(tools_dir, "search_snapshots", _valid_schema("search_snapshots"))
+    _write_executor(tools_dir, "search_snapshots", _GOOD_EXECUTOR)
+
+    ex = registry.get_executor("search_memory")  # alias -> search_snapshots
+    assert ex is not None
+    result = asyncio.run(ex({}, ToolContext()))
+    assert result.success is True
+
+
+def test_get_executor_cache_invalidates_on_mtime_change(tools_dir):
+    _write_module(tools_dir, "good_tool", _valid_schema("good_tool"))
+    path = _write_executor(tools_dir, "good_tool", _GOOD_EXECUTOR)
+
+    ex1 = registry.get_executor("good_tool")
+    r1 = asyncio.run(ex1({}, ToolContext()))
+    assert r1.result == "ok"
+
+    # Rewrite the executor to return a different message; bump mtime to future.
+    path.write_text(
+        "from Orchestrator.toolvault.context import ToolResult\n"
+        "async def execute(params, ctx):\n"
+        "    return ToolResult(True, 'CHANGED')\n"
+    )
+    future = path.stat().st_mtime + 1000
+    os.utime(path, (future, future))
+
+    ex2 = registry.get_executor("good_tool")
+    r2 = asyncio.run(ex2({}, ToolContext()))
+    assert r2.result == "CHANGED"

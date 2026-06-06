@@ -21,9 +21,11 @@ from the *current* global on every call, never captured at import time.
 """
 
 import copy
+import importlib.util
+import inspect
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import PROJECT_ROOT
 from . import resolvers, schema_spec
@@ -52,6 +54,18 @@ _EXECUTOR_NAMES = {
 _cache_canonical: Optional[list] = None
 _cache_errors: Optional[dict] = None
 _cache_key: Optional[tuple] = None
+
+# ---------------------------------------------------------------------------
+# Executor cache. Separate from the schema cache: executors are loaded lazily
+# by :func:`get_executor` (one importlib exec per .py), keyed on the file's
+# (path, mtime). ``_executor_cache`` maps folder name -> (mtime, callable);
+# ``_executor_errors`` maps folder name -> [error strings] for executors that
+# FAILED to load (missing ``execute``, not async, wrong arity, or import error).
+# A legitimately-absent executor.py is NOT an error and is not recorded here.
+# Both are reset by :func:`invalidate_cache` and surface via :func:`load_errors`.
+# ---------------------------------------------------------------------------
+_executor_cache: dict = {}
+_executor_errors: dict = {}
 
 
 def _mtime_key() -> tuple:
@@ -138,11 +152,17 @@ def _ensure_cache() -> None:
 
 
 def invalidate_cache() -> None:
-    """Force the next load to re-scan + re-validate every module."""
+    """Force the next load to re-scan + re-validate every module.
+
+    Also clears the lazily-populated executor cache + executor error store so a
+    reload re-imports every ``executor.py`` from scratch.
+    """
     global _cache_canonical, _cache_errors, _cache_key
     _cache_canonical = None
     _cache_errors = None
     _cache_key = None
+    _executor_cache.clear()
+    _executor_errors.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +197,110 @@ def get_tool(name: str) -> Optional[dict]:
 def load_errors() -> dict:
     """Return ``{folder_name: [error strings]}`` for modules that FAILED.
 
-    Valid modules are excluded. Empty dict if there are no failures.
+    Merges schema-validation failures (from :func:`load_canonical`'s build) with
+    executor-load failures recorded lazily by :func:`get_executor`. A folder
+    that has both kinds of failure has its error lists concatenated. Valid
+    modules are excluded. Empty dict if there are no failures.
     """
     _ensure_cache()
-    return dict(_cache_errors or {})
+    merged: dict = {k: list(v) for k, v in (_cache_errors or {}).items()}
+    for folder, errs in _executor_errors.items():
+        merged.setdefault(folder, []).extend(errs)
+    return merged
+
+
+def get_executor(name: str) -> Optional[Callable]:
+    """Load + return the ``execute`` callable for a tool's ``executor.py``.
+
+    ``name`` may be an alias (e.g. ``search_memory``); it is resolved to its
+    canonical folder via :func:`resolve_alias`, and the executor is loaded from
+    ``TOOLS_DIR/<canonical>/executor.py``.
+
+    Returns:
+        The module's ``execute`` coroutine function, or ``None`` if:
+
+        * the ``executor.py`` does not exist (a schema-only tool is valid — this
+          is NOT an error and is not recorded), or
+        * the module fails to load / lacks a valid ``execute`` (must be an
+          ``async def`` taking exactly 2 positional params). Real failures ARE
+          recorded under the folder name in :func:`load_errors` and never raised.
+
+    The loaded module + callable are cached keyed on the file's mtime, so an
+    on-disk edit (mtime bump) is picked up automatically; :func:`invalidate_cache`
+    clears the cache outright.
+    """
+    canonical = resolve_alias(name)
+    exec_path = TOOLS_DIR / canonical / "executor.py"
+
+    # Legitimately absent executor.py: valid schema-only tool, not an error.
+    try:
+        mtime = exec_path.stat().st_mtime
+    except OSError:
+        # Drop any stale cache/error entry for a now-missing file.
+        _executor_cache.pop(canonical, None)
+        _executor_errors.pop(canonical, None)
+        return None
+
+    cached = _executor_cache.get(canonical)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    # Stale/first load — clear any prior error for this folder before retrying.
+    _executor_errors.pop(canonical, None)
+    _executor_cache.pop(canonical, None)
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"toolvault_executor_{canonical}", str(exec_path)
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("could not create import spec for executor.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as e:  # noqa: BLE001 — never crash on a bad executor.
+        _executor_errors[canonical] = [f"failed to load executor.py: {e}"]
+        print(f"[toolvault.registry] WARNING: {canonical} executor: {e}")
+        return None
+
+    execute = getattr(module, "execute", None)
+    err = _validate_execute(execute)
+    if err is not None:
+        _executor_errors[canonical] = [err]
+        print(f"[toolvault.registry] WARNING: {canonical} executor: {err}")
+        return None
+
+    _executor_cache[canonical] = (mtime, execute)
+    return execute
+
+
+def _validate_execute(execute) -> Optional[str]:
+    """Return an error string if ``execute`` is not a valid executor, else None.
+
+    Valid == an ``async def`` (``inspect.iscoroutinefunction``) taking exactly
+    two positional parameters (``params``, ``ctx``).
+    """
+    if execute is None:
+        return "executor.py defines no 'execute' attribute"
+    if not callable(execute):
+        return "'execute' is not callable"
+    if not inspect.iscoroutinefunction(execute):
+        return "'execute' must be an async function (async def)"
+    try:
+        params = list(inspect.signature(execute).parameters.values())
+    except (TypeError, ValueError) as e:
+        return f"could not inspect 'execute' signature: {e}"
+    positional = [
+        p
+        for p in params
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) != 2:
+        return (
+            f"'execute' must accept exactly 2 positional params (params, ctx); "
+            f"got {len(positional)}"
+        )
+    return None
 
 
 def resolve_alias(name: str) -> str:
