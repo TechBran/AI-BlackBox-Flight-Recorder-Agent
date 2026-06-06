@@ -20,6 +20,7 @@ automatically when the max mtime across ``TOOLS_DIR/**/schema.json`` changes
 from the *current* global on every call, never captured at import time.
 """
 
+import copy
 import json
 from pathlib import Path
 from typing import Optional
@@ -54,23 +55,29 @@ _cache_key: Optional[tuple] = None
 
 
 def _mtime_key() -> tuple:
-    """Cheap cache key: (TOOLS_DIR path, max mtime over all schema.json).
+    """Cheap cache key: (TOOLS_DIR path, frozenset of (path, mtime) pairs).
+
+    Keying on the full file SET — not just the max mtime — makes adds, deletes,
+    and edits all cache-miss correctly. A max-mtime-only key would miss:
+
+    * deleting a module whose mtime wasn't the max (max stays the same), and
+    * adding a module whose mtime is BELOW the current max (e.g. ``git
+      checkout`` / ``cp -p`` / ``tar`` / ``rsync`` preserve source mtimes).
 
     The path is part of the key so a ``TOOLS_DIR`` reassignment (e.g. in tests)
     is treated as a cache miss even if mtimes happen to coincide. A missing dir
-    or no modules yields a max-mtime of 0.0.
+    or no modules yields an empty file set.
     """
     tools_dir = TOOLS_DIR
-    max_mtime = 0.0
+    files = set()
     if tools_dir.exists():
         for path in tools_dir.glob("*/schema.json"):
             try:
                 mt = path.stat().st_mtime
             except OSError:
                 continue
-            if mt > max_mtime:
-                max_mtime = mt
-    return (str(tools_dir), max_mtime)
+            files.add((str(path), mt))
+    return (str(tools_dir), frozenset(files))
 
 
 def _build() -> tuple:
@@ -154,8 +161,8 @@ def load_canonical(group: Optional[str] = None) -> list:
     _ensure_cache()
     entries = _cache_canonical or []
     if group is None:
-        return list(entries)
-    return [e for e in entries if group in (e.get("groups") or [])]
+        return [copy.deepcopy(e) for e in entries]
+    return [copy.deepcopy(e) for e in entries if group in (e.get("groups") or [])]
 
 
 def get_tool(name: str) -> Optional[dict]:
@@ -163,7 +170,7 @@ def get_tool(name: str) -> Optional[dict]:
     _ensure_cache()
     for entry in _cache_canonical or []:
         if entry.get("name") == name:
-            return entry
+            return copy.deepcopy(entry)
     return None
 
 

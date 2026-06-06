@@ -148,6 +148,82 @@ def test_manual_invalidate_cache(tools_dir):
     assert [t["name"] for t in registry.load_canonical()] == ["send_sms"]
 
 
+def test_cache_invalidates_on_deletion_of_non_max_mtime_module(tools_dir):
+    """Deleting a module whose mtime is NOT the max must still cache-miss.
+
+    A max-mtime-only key leaves max unchanged when the deleted module wasn't
+    the newest, so the stale entry keeps being served. Keying on the full file
+    set fixes this.
+    """
+    beta = _write_module(tools_dir, "beta", _valid_schema("beta"))
+    alpha = _write_module(tools_dir, "alpha", _valid_schema("alpha"))
+    # beta older than alpha; deleting beta leaves alpha (the max) untouched.
+    os.utime(beta, (1000, 1000))
+    os.utime(alpha, (5000, 5000))
+
+    first = registry.load_canonical()
+    assert [t["name"] for t in first] == ["alpha", "beta"]
+
+    # Delete beta's folder entirely (max mtime, alpha=5000, is unchanged).
+    import shutil
+    shutil.rmtree(tools_dir / "beta")
+
+    second = registry.load_canonical()
+    assert [t["name"] for t in second] == ["alpha"]
+
+
+def test_cache_invalidates_on_add_of_older_mtime_module(tools_dir):
+    """Adding a module whose mtime is BELOW the current max must cache-miss.
+
+    git checkout / cp -p / tar / rsync preserve source mtimes, so a freshly
+    added module can have an mtime older than an existing one. A max-mtime key
+    misses it entirely; keying on the full file set fixes this.
+    """
+    alpha = _write_module(tools_dir, "alpha", _valid_schema("alpha"))
+    os.utime(alpha, (5000, 5000))
+
+    first = registry.load_canonical()
+    assert [t["name"] for t in first] == ["alpha"]
+
+    # Add delta with an OLDER mtime than alpha (2000 < 5000).
+    delta = _write_module(tools_dir, "delta", _valid_schema("delta"))
+    os.utime(delta, (2000, 2000))
+
+    second = registry.load_canonical()
+    assert "delta" in [t["name"] for t in second]
+
+
+# ---------------------------------------------------------------------------
+# Cache isolation — returned dicts must not be live cache references
+# ---------------------------------------------------------------------------
+
+def test_returned_entries_are_isolated_from_cache(tools_dir):
+    """Mutating a returned entry must not poison the cache for later callers."""
+    _write_module(tools_dir, "send_sms", _valid_schema("send_sms", description="original"))
+
+    first = registry.load_canonical()
+    entry = first[0]
+    entry["description"] = "POISONED"
+    entry["groups"].append("phone")
+
+    second = registry.load_canonical()
+    assert second[0]["description"] == "original"
+    assert "phone" not in second[0]["groups"]
+
+
+def test_get_tool_returns_isolated_copy(tools_dir):
+    """get_tool must also return a copy, not the live cached dict."""
+    _write_module(tools_dir, "send_sms", _valid_schema("send_sms", description="original"))
+
+    entry = registry.get_tool("send_sms")
+    entry["description"] = "POISONED"
+    entry["groups"].append("phone")
+
+    again = registry.get_tool("send_sms")
+    assert again["description"] == "original"
+    assert "phone" not in again["groups"]
+
+
 # ---------------------------------------------------------------------------
 # Empty / missing dir
 # ---------------------------------------------------------------------------
