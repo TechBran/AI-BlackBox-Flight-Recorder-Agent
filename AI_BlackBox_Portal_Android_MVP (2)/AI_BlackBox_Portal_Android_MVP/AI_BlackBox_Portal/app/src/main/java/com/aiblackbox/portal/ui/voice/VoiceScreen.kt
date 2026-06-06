@@ -340,7 +340,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     val buffer = ShortArray(bufferSize / 2)
                     while (isRecordingAudio) {
-                        val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                        // Read via the LOCAL record (not the nullable field) so a
+                        // concurrent stopMic() can never swap/null it mid-read.
+                        val readCount = record.read(buffer, 0, buffer.size)
                         if (readCount > 0) {
                             val amp = rmsAmplitude(buffer, readCount)
                             // Auto-mute while AI is speaking WITH post-speech delay
@@ -388,6 +390,14 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     android.util.Log.e("VoiceVM", "Mic loop error: ${e.message}", e)
                     isRecordingAudio = false
                     _isMicActive.value = false
+                } finally {
+                    // Release the AudioRecord on the SAME thread as read(). Doing
+                    // it from stopMic() on the caller thread raced an in-flight
+                    // read() and aborted natively in AudioRecord::releaseBuffer
+                    // (SIGABRT crash on "start speaking", fixed 2026-06-06).
+                    try { record.stop() } catch (_: Exception) {}
+                    try { record.release() } catch (_: Exception) {}
+                    if (audioRecord === record) audioRecord = null
                 }
             }
         } catch (e: Exception) {
@@ -397,16 +407,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopMic() {
-        isRecordingAudio = false  // Signals mic loop to exit, which sends audio_commit
+        // Only SIGNAL the loop to stop; it sends audio_commit then releases the
+        // AudioRecord in its own finally (same thread as read). Releasing here on
+        // the caller thread raced an in-flight read() and crashed natively in
+        // AudioRecord::releaseBuffer (fixed 2026-06-06).
+        isRecordingAudio = false
         _isMicActive.value = false
         _amplitude.value = 0f
         if (_waveSpeaker.value == WaveSpeaker.USER) _waveSpeaker.value = WaveSpeaker.IDLE
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
-        android.util.Log.d("VoiceVM", "Mic stopped")
+        android.util.Log.d("VoiceVM", "Mic stop requested")
     }
 
     // -------------------------------------------------------------------------
