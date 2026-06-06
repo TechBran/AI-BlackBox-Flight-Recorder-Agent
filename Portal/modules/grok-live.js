@@ -18,7 +18,7 @@
 
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
-import { addBubble } from './chat-bubbles.js';
+import { addBubble, appendBubble } from './chat-bubbles.js';
 
 // =============================================================================
 // Selector configuration
@@ -98,6 +98,12 @@ let currentAudioSource = null;
 
 /** Transcript buffer for current response */
 let transcriptBuffer = '';
+
+/** Accumulated interim user-transcript text for the in-progress utterance */
+let userTranscriptBuffer = '';
+
+/** Transient (non-persisted) live user bubble built from interim deltas */
+let liveUserBubble = null;
 
 /** Full session conversation log for BlackBox capture */
 let sessionConversation = [];
@@ -916,10 +922,35 @@ function handleMessage(msg) {
             console.log('[GROK-LIVE] Response complete');
             break;
 
+        case 'user_transcript_delta':
+            // Incremental (interim) user transcription chunk — live word-by-word.
+            // Mirrors gpt-realtime.js: accumulate into a buffer and render into a
+            // transient (non-persisted) user bubble that updates as chunks arrive.
+            // The final user_transcript commits it. Grok may not emit deltas — if
+            // it doesn't, this case never fires and behavior is unchanged.
+            if (msg.data) {
+                userTranscriptBuffer += msg.data;
+                if (!liveUserBubble) {
+                    // appendBubble adds to the DOM WITHOUT persisting to history,
+                    // so interim chunks don't spam localStorage.
+                    liveUserBubble = appendBubble('user', userTranscriptBuffer);
+                } else {
+                    const span = liveUserBubble.querySelector('.bubble-text');
+                    if (span) span.textContent = userTranscriptBuffer;
+                }
+            }
+            break;
+
         case 'user_transcript':
-            // User's voice input was transcribed
+            // User's voice input was transcribed (authoritative final)
             const userText = msg.data;
             if (userText && userText.trim()) {
+                if (liveUserBubble) {
+                    // Drop the transient live bubble, then persist via addBubble
+                    // so there's exactly one final bubble (no duplicate).
+                    liveUserBubble.remove();
+                    liveUserBubble = null;
+                }
                 // Add to main chat UI
                 addBubble('user', userText.trim());
 
@@ -941,6 +972,8 @@ function handleMessage(msg) {
                     transcriptEl.scrollTop = transcriptEl.scrollHeight;
                 }
             }
+            // Reset for the next utterance (covers delta-less providers too).
+            userTranscriptBuffer = '';
             break;
 
         case 'speech_started':

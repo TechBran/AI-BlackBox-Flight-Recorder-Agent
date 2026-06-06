@@ -670,7 +670,10 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
         print(f"[GEMINI-LIVE] Audio commit - {len(session.user_audio_buffer)} chunks buffered")
 
         # Transcribe user audio with Whisper and send user_transcript event
-        # This runs async so it doesn't block Gemini's response
+        # This runs async so it doesn't block Gemini's response.
+        # NOTE: Gemini Live user transcript is post-hoc Whisper file STT (no
+        # interim deltas), so it is final-only by design — no user_transcript_delta
+        # here (unlike the GPT Realtime + Grok live agents which emit interims).
         transcript = await transcribe_user_audio(session)
         if transcript:
             # Add to session conversation for BlackBox snapshot

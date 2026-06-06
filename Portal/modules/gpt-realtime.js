@@ -15,7 +15,7 @@
 
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
-import { addBubble } from './chat-bubbles.js';
+import { addBubble, appendBubble } from './chat-bubbles.js';
 
 // =============================================================================
 // Selector configuration
@@ -120,6 +120,12 @@ let transcriptBuffer = '';
 
 /** Current chat bubble for AI response */
 let currentBubble = null;
+
+/** Accumulated interim user-transcript text for the in-progress utterance */
+let userTranscriptBuffer = '';
+
+/** Transient (non-persisted) live user bubble built from interim deltas */
+let liveUserBubble = null;
 
 /** Full session conversation log for BlackBox capture */
 let sessionConversation = [];
@@ -1467,10 +1473,34 @@ function handleMessage(msg) {
             });
             break;
 
+        case 'user_transcript_delta':
+            // Incremental (interim) user transcription chunk — live word-by-word.
+            // Mirrors the AI-side transcript_delta pattern: accumulate into a
+            // buffer and render into a transient (non-persisted) user bubble that
+            // updates as chunks arrive. The final user_transcript commits it.
+            if (msg.data) {
+                userTranscriptBuffer += msg.data;
+                if (!liveUserBubble) {
+                    // appendBubble adds to the DOM WITHOUT persisting to history,
+                    // so interim chunks don't spam localStorage.
+                    liveUserBubble = appendBubble('user', userTranscriptBuffer);
+                } else {
+                    const span = liveUserBubble.querySelector('.bubble-text');
+                    if (span) span.textContent = userTranscriptBuffer;
+                }
+            }
+            break;
+
         case 'user_transcript':
-            // User's voice input transcribed by Whisper
+            // User's voice input transcribed by Whisper (authoritative final).
             if (msg.data) {
                 console.log('[REALTIME] User voice transcript:', msg.data);
+                if (liveUserBubble) {
+                    // Finalize the live bubble in place, then persist via addBubble
+                    // and drop the transient one so there's no duplicate.
+                    liveUserBubble.remove();
+                    liveUserBubble = null;
+                }
                 // Add to chat and session log (persisted to localStorage)
                 addBubble('user', msg.data);
                 sessionConversation.push({
@@ -1480,6 +1510,8 @@ function handleMessage(msg) {
                     source: 'voice'
                 });
             }
+            // Reset for the next utterance (covers delta-less providers too).
+            userTranscriptBuffer = '';
             break;
 
         case 'speech_started':
