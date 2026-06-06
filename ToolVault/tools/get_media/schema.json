@@ -1,0 +1,32 @@
+{
+  "name": "get_media",
+  "description": "Retrieve a previously generated media file (image, video, music) by URL or task_id. Use to verify media exists before using it, or to get metadata about past generations.",
+  "category": "media_management",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Media URL (e.g., /ui/uploads/sunset_abc123.png from a previous generation)"
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Alternative: Task ID from a previous generation (will look up the URL)"
+      }
+    },
+    "required": []
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "get_media()",
+  "notes": "Async operation - use get_task_status to check progress."
+}

@@ -1,0 +1,33 @@
+{
+  "name": "web_fetch",
+  "description": "Fetch and extract clean content from a specific URL. Use this to read articles, documentation, blog posts, or web pages when you have the URL.",
+  "category": "web",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "The complete URL to fetch (must start with http:// or https://)"
+      },
+      "max_chars": {
+        "type": "integer",
+        "description": "Maximum characters to return (default 80000, optional)",
+        "default": 80000
+      }
+    },
+    "required": [
+      "url"
+    ]
+  },
+  "example": "web_fetch(url=\"...\")"
+}

@@ -1,0 +1,43 @@
+{
+  "name": "gmail_send",
+  "description": "Compose and send a new email from the operator's Gmail account.",
+  "category": "email",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "to": {
+        "type": "string",
+        "description": "Recipient email address"
+      },
+      "subject": {
+        "type": "string",
+        "description": "Email subject line"
+      },
+      "body": {
+        "type": "string",
+        "description": "Email body text"
+      },
+      "cc": {
+        "type": "string",
+        "description": "CC recipients (comma-separated email addresses)"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "to",
+      "subject",
+      "body"
+    ]
+  },
+  "returns": "Gmail operation result",
+  "example": "gmail_send(to=\"...\", subject=\"...\", body=\"...\")"
+}

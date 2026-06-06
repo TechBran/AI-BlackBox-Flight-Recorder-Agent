@@ -1,0 +1,41 @@
+{
+  "name": "web_search",
+  "description": "Search the web using Perplexity Sonar AI search. Returns a synthesized answer with source citations.",
+  "category": "web",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query to look up on the web"
+      },
+      "search_recency_filter": {
+        "type": "string",
+        "description": "Filter results by recency: 'day', 'week', 'month', 'year' (default: 'month')",
+        "enum": [
+          "hour",
+          "day",
+          "week",
+          "month",
+          "year"
+        ],
+        "default": "month"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "Returns a synthesized answer with source citations",
+  "example": "web_search(query=\"...\")"
+}

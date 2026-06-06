@@ -1,0 +1,44 @@
+{
+  "name": "make_voice_call",
+  "description": "Call a phone number and deliver a pre-recorded voice message using TTS. The system generates the speech audio first (via OpenAI TTS), then calls the number and plays it. For interactive two-way calls, use make_phone_call instead.",
+  "category": "communication",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "phone_number": {
+        "type": "string",
+        "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+      },
+      "message": {
+        "type": "string",
+        "description": "The message to speak. Will be converted to speech via TTS before calling."
+      },
+      "voice": {
+        "type": "string",
+        "description": "TTS voice to use for the message",
+        "enum": [
+          "alloy",
+          "echo",
+          "fable",
+          "onyx",
+          "nova",
+          "shimmer"
+        ]
+      }
+    },
+    "required": [
+      "phone_number",
+      "message"
+    ]
+  },
+  "example": "make_voice_call(phone_number=\"...\", message=\"...\")"
+}

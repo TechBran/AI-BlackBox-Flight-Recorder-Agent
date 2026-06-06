@@ -1,0 +1,37 @@
+{
+  "name": "chat_with_context",
+  "description": "Send a message through BlackBox chat with full context retrieval. Returns AI response enriched with relevant snapshots.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "Message to send"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      },
+      "provider": {
+        "type": "string",
+        "description": "AI provider: 'anthropic', 'openai', or 'gemini'",
+        "default": "anthropic"
+      },
+      "model": {
+        "type": "string",
+        "description": "Model name (optional - uses default for provider)"
+      }
+    },
+    "required": [
+      "message",
+      "operator"
+    ]
+  },
+  "returns": "Returns AI response enriched with relevant snapshots",
+  "example": "chat_with_context(message=\"...\", operator=\"...\")"
+}

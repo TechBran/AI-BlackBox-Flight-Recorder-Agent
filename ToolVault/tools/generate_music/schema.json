@@ -1,0 +1,36 @@
+{
+  "name": "generate_music",
+  "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names."
+      },
+      "negativePrompt": {
+        "type": "string",
+        "description": "Things to exclude (e.g., 'vocals, singing')"
+      },
+      "sampleCount": {
+        "type": "integer",
+        "description": "Variations to generate (1-4, default 1)"
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "example": "generate_music(prompt=\"...\")"
+}

@@ -1,0 +1,52 @@
+{
+  "name": "save_contact",
+  "description": "Save a new contact or update an existing one in the contact book. Use when a user mentions someone new with contact info.",
+  "category": "contacts",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Full name of the contact"
+      },
+      "notes": {
+        "type": "string",
+        "description": "Context about who this person is and any relevant details"
+      },
+      "tags": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Categorization tags (e.g., family, work, doctor, vip)"
+      },
+      "phone": {
+        "type": "string",
+        "description": "Phone number in E.164 format (e.g., +15551234567)"
+      },
+      "email": {
+        "type": "string",
+        "description": "Email address"
+      },
+      "relationship": {
+        "type": "string",
+        "description": "Relationship to the user (e.g., friend, coworker, doctor)"
+      }
+    },
+    "required": [
+      "name",
+      "notes",
+      "tags"
+    ]
+  },
+  "example": "save_contact(name=\"...\", notes=\"...\", tags=\"...\")"
+}

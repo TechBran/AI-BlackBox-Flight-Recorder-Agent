@@ -1,0 +1,14 @@
+{
+  "name": "get_current_operator",
+  "description": "Resolve the BlackBox's current operator. Returns {resolved, operators, default, count, needs_selection}. When needs_selection is true (multiple operators, none specified), the agent should ask the user to pick one (default pre-selected). Use this instead of hard-coding any operator name.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}

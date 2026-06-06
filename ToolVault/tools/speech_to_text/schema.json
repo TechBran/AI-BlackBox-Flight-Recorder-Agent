@@ -1,0 +1,24 @@
+{
+  "name": "speech_to_text",
+  "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+  "category": "audio",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "audio_path": {
+        "type": "string",
+        "description": "Path to audio file (local path)"
+      }
+    },
+    "required": [
+      "audio_path"
+    ]
+  },
+  "example": "speech_to_text(audio_path=\"...\")"
+}

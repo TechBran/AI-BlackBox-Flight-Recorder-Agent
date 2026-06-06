@@ -1,0 +1,27 @@
+{
+  "name": "get_task_status",
+  "description": "Check the status of an async generation task (image, video, music). Returns status, progress, and result URL when complete.",
+  "category": "task_management",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task_id": {
+        "type": "string",
+        "description": "The task ID returned by generate_image/generate_video/generate_music"
+      }
+    },
+    "required": [
+      "task_id"
+    ]
+  },
+  "returns": "Returns status, progress, and result URL when complete",
+  "example": "get_task_status(task_id=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

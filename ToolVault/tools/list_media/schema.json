@@ -1,0 +1,36 @@
+{
+  "name": "list_media",
+  "description": "List media files (images, videos, audio) in the uploads folder. Use to see what media is available for image-to-video, video extension, or image-to-image.",
+  "category": "media_management",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "media_type": {
+        "type": "string",
+        "description": "Filter by type: 'image', 'video', 'audio', or omit for all types",
+        "enum": [
+          "image",
+          "video",
+          "audio"
+        ]
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of results (default 20, max 50)",
+        "default": 20
+      }
+    },
+    "required": []
+  },
+  "returns": "List of matching results",
+  "example": "list_media()"
+}

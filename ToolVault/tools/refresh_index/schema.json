@@ -1,0 +1,15 @@
+{
+  "name": "refresh_index",
+  "description": "Force refresh the snapshot index cache. Use after minting new snapshots.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "example": "refresh_index()"
+}

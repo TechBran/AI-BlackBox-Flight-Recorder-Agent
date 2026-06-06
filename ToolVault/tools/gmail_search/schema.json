@@ -1,0 +1,32 @@
+{
+  "name": "gmail_search",
+  "description": "Search or list emails in the operator's Gmail inbox. Uses Gmail search syntax (e.g., 'from:someone subject:hello', 'is:unread', 'newer_than:2d'). Leave query empty for recent emails.",
+  "category": "email",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Gmail search query like 'from:someone subject:hello'. Leave empty for recent emails"
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Number of results to return (1-20)",
+        "default": 10
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": []
+  },
+  "returns": "Gmail operation result",
+  "example": "gmail_search()"
+}

@@ -1,0 +1,32 @@
+{
+  "name": "mint_snapshot",
+  "description": "Create a new snapshot (memory) in the BlackBox via AI processing. Content is sent through /chat for synthesis, then auto-mint captures the result.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "Content to save - will be processed by AI before minting"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      },
+      "snapshot_type": {
+        "type": "string",
+        "description": "Type hint (currently ignored - auto-mint determines type)",
+        "default": "normal"
+      }
+    },
+    "required": [
+      "content",
+      "operator"
+    ]
+  },
+  "example": "mint_snapshot(content=\"...\", operator=\"...\")"
+}

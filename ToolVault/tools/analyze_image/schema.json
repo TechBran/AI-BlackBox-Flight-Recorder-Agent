@@ -1,0 +1,28 @@
+{
+  "name": "analyze_image",
+  "description": "Analyze an image using multimodal AI. Can describe, extract text, identify objects, answer questions about the image.",
+  "category": "analysis",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image_url": {
+        "type": "string",
+        "description": "URL or local path to the image (e.g. /ui/uploads/sunset.png or https://example.com/photo.jpg)"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Question or instruction about the image (default: 'Describe this image in detail')"
+      }
+    },
+    "required": [
+      "image_url"
+    ]
+  },
+  "example": "analyze_image(image_url=\"...\")"
+}

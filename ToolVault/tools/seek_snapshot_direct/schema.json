@@ -1,0 +1,22 @@
+{
+  "name": "seek_snapshot_direct",
+  "description": "Directly seek and read a snapshot from the volume using byte offsets. Most efficient method for retrieving snapshot content.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "snap_id": {
+        "type": "string",
+        "description": "Snapshot ID to seek"
+      }
+    },
+    "required": [
+      "snap_id"
+    ]
+  },
+  "example": "seek_snapshot_direct(snap_id=\"...\")"
+}

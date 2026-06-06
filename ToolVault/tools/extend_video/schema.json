@@ -1,0 +1,30 @@
+{
+  "name": "extend_video",
+  "description": "Extend an existing video using Veo 3.1. Takes 5-20 minutes. Returns task_id (async). The new clip continues from where the original ended.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "video_url": {
+        "type": "string",
+        "description": "URL of the video to extend (e.g. /ui/uploads/video.mp4)"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Optional prompt for how to extend the video"
+      }
+    },
+    "required": [
+      "video_url"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "extend_video(video_url=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

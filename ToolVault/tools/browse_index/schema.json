@@ -1,0 +1,34 @@
+{
+  "name": "browse_index",
+  "description": "Browse the snapshot index to see available snapshots. Efficient - reads index only.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "operator": {
+        "type": "string",
+        "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
+      },
+      "snap_type": {
+        "type": "string",
+        "description": "Filter by type: 'normal', 'checkpoint', 'summary' (optional)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum results (default: 20)",
+        "default": 20
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Skip first N results for pagination",
+        "default": 0
+      }
+    },
+    "required": []
+  },
+  "example": "browse_index()"
+}

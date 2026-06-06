@@ -1,0 +1,29 @@
+{
+  "name": "gmail_read",
+  "description": "Read the full content of an email by its message ID (from gmail_search results). Returns subject, sender, body text, and labels.",
+  "category": "email",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message_id": {
+        "type": "string",
+        "description": "Gmail message ID from gmail_search results"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "message_id"
+    ]
+  },
+  "returns": "Returns subject, sender, body text, and labels",
+  "example": "gmail_read(message_id=\"...\")"
+}

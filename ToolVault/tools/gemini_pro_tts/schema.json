@@ -1,0 +1,30 @@
+{
+  "name": "gemini_pro_tts",
+  "description": "Generate high-quality speech using Gemini Pro TTS with 30 premium voices. Superior quality to OpenAI TTS. Supports emotional cues in text. Returns task_id (async).",
+  "category": "audio",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to convert to speech. Include emotional cues inline (e.g. 'said with determination', 'whispered nervously')."
+      },
+      "voice": {
+        "type": "string",
+        "description": "Voice name: Zephyr, Puck, Charon, Kore, Fenrir, Leda, Orus, Aoede, and 22 more (default: Charon)"
+      }
+    },
+    "required": [
+      "text"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "gemini_pro_tts(text=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

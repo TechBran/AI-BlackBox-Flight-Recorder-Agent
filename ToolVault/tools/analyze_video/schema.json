@@ -1,0 +1,28 @@
+{
+  "name": "analyze_video",
+  "description": "Analyze a video using multimodal AI. Can describe content, identify actions, extract information.",
+  "category": "analysis",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "video_url": {
+        "type": "string",
+        "description": "URL or local path to the video"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Question or instruction about the video (default: 'Describe what happens in this video')"
+      }
+    },
+    "required": [
+      "video_url"
+    ]
+  },
+  "example": "analyze_video(video_url=\"...\")"
+}

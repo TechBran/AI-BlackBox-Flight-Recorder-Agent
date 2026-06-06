@@ -1,0 +1,36 @@
+{
+  "name": "use_computer",
+  "description": "Control the computer using an AI agent powered by Claude Opus 4.6. Can browse the web, use desktop apps, run terminal commands, manage files — full Linux desktop access. Returns a task ID - use get_task_status to check progress.",
+  "category": "computer_control",
+  "groups": [
+    "chat",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "What to do on the computer (e.g., 'Go to news.ycombinator.com and find the top 3 stories')"
+      },
+      "url": {
+        "type": "string",
+        "description": "Starting URL to navigate to (optional, defaults to about:blank)"
+      },
+      "device_id": {
+        "type": "string",
+        "description": "Target device ID from the Tailscale mesh (default: 'blackbox' for local machine). Use list_devices to see available devices."
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "use_computer(prompt=\"...\")"
+}

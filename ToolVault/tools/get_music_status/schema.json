@@ -1,0 +1,23 @@
+{
+  "name": "get_music_status",
+  "description": "Check the status of a music generation task. Alias for get_task_status with music-specific context.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task_id": {
+        "type": "string",
+        "description": "The task ID returned by generate_music"
+      }
+    },
+    "required": [
+      "task_id"
+    ]
+  },
+  "returns": "Requested data object",
+  "example": "get_music_status(task_id=\"...\")"
+}

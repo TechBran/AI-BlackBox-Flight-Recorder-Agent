@@ -1,0 +1,35 @@
+{
+  "name": "search_cron_jobs",
+  "description": "Search and list scheduled tasks (cron jobs). Use when the user asks about their scheduled tasks, reminders, or cron jobs.",
+  "category": "scheduling",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Optional search query to filter jobs by name or prompt content"
+      },
+      "status": {
+        "type": "string",
+        "description": "Filter by status (default: all)",
+        "enum": [
+          "active",
+          "paused",
+          "all"
+        ]
+      }
+    },
+    "required": []
+  },
+  "returns": "List of matching results",
+  "example": "search_cron_jobs()"
+}

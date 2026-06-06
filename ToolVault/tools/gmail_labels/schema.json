@@ -1,0 +1,41 @@
+{
+  "name": "gmail_labels",
+  "description": "List all Gmail labels, or modify labels on a message (mark read/unread, archive, star/unstar).",
+  "category": "email",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "Action to perform",
+        "enum": [
+          "list",
+          "mark_read",
+          "mark_unread",
+          "archive",
+          "star",
+          "unstar"
+        ]
+      },
+      "message_id": {
+        "type": "string",
+        "description": "Required for modify actions (mark_read, mark_unread, archive, star, unstar)"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  },
+  "returns": "Gmail operation result",
+  "example": "gmail_labels(action=\"...\")"
+}
