@@ -40,19 +40,11 @@ BLACKBOX_TOOLS_GEMINI = get_gemini_live_tools("phone")
 # Tool Executor
 # =============================================================================
 
-@dataclass
-class ToolResult:
-    """Result from executing a tool."""
-    success: bool
-    result: str
-    data: Optional[Dict[str, Any]] = None
-
-    def rich_result(self) -> str:
-        """Return result string enriched with structured data for model consumption."""
-        if self.data:
-            import json
-            return f"{self.result}\n[tool_data]: {json.dumps(self.data, default=str)}"
-        return self.result
+# ToolResult is defined canonically in toolvault.context and re-exported here so
+# the toolvault package has no import-time dependency on this module (breaks the
+# cycle now that tool_registry sources its definitions from the toolvault
+# registry). Same class object — `blackbox_tools.ToolResult is context.ToolResult`.
+from Orchestrator.toolvault.context import ToolResult  # noqa: E402
 
 
 class BlackBoxToolExecutor:
