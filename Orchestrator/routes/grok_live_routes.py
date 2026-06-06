@@ -49,6 +49,7 @@ from Orchestrator.config import (
     GROK_LIVE_SAMPLE_RATE,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
+    GEMINI_MODEL_DEFAULT,
     VOL_PATH
 )
 from Orchestrator.models import GrokLiveSession, GROK_LIVE_SESSIONS, TaskType
@@ -137,7 +138,7 @@ Messages: {len(session.conversation)}
                         "content": f"[Grok Voice Session Transcript]\n{session_summary}"
                     }],
                     "provider": "google",
-                    "model": "gemini-3-pro-preview",
+                    "model": GEMINI_MODEL_DEFAULT,
                     "streaming": False,
                     "auto_checkpoint": False
                 },
