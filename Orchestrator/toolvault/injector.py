@@ -29,7 +29,6 @@ from Orchestrator.toolvault.embeddings import (
 )
 from Orchestrator.toolvault.config import (
     TIER_1,
-    TIER_2,
     SIMILARITY_THRESHOLD,
 )
 
@@ -175,46 +174,53 @@ def _select_names(
 ) -> List[Tuple[str, str]]:
     """Select tool names for a prompt, with a reason for each.
 
-    Selection is purely tier/semantic/group-driven:
+    Three-part selection:
       * ``toolvault`` meta-tool first (reason ``"meta"``).
-      * every Tier 1 tool in ``group`` (reason ``"tier1"``).
-      * Tier 2 tools in ``group`` ranked by ``hybrid_search_store`` up to
-        ``max_semantic_tools`` above ``similarity_threshold`` (reason
-        ``"semantic(0.xx)"``). Only run when ``prompt.strip()``.
+      * every Tier 1 tool **in ``group``** (reason ``"tier1"``) — the always-on
+        baseline; this is the ONLY place the group filter applies.
+      * semantic ranking over the **ENTIRE catalog** (all groups, all tiers —
+        tier-1, tier-2, AND tier-3 internal tools), MINUS whatever's already
+        selected, via ``hybrid_search_store`` up to ``max_semantic_tools`` above
+        ``similarity_threshold`` (reason ``"semantic(0.xx)"``). Only run when
+        ``prompt.strip()``. Discovery is global by design — out-of-group and
+        tier-3 tools surface here when semantically relevant.
 
     Returns an ordered list of ``(name, reason)`` with no duplicates.
     """
-    canonical = registry.load_canonical(group)
-
     selected: List[Tuple[str, str]] = [("toolvault", "meta")]
     seen = {"toolvault"}
 
-    # --- Tier 1: always included ---
-    for entry in canonical:
+    # --- Tier 1: always-on baseline, filtered by the requesting group ---
+    for entry in registry.load_canonical(group):
         if entry.get("tier") == TIER_1:
             name = entry.get("name")
             if name and name not in seen:
                 selected.append((name, "tier1"))
                 seen.add(name)
 
-    # --- Tier 2: semantic ranking over the embeddings store ---
+    # --- Semantic: GLOBAL pool = every canonical tool minus already-selected ---
     if prompt.strip():
+        # ALL tools (all groups, all tiers), excluding what's already selected.
         searchable = {
-            entry["name"]: entry.get("description", "")
-            for entry in canonical
-            if entry.get("tier") == TIER_2 and entry.get("name") not in seen
+            e.get("name"): e.get("description", "")
+            for e in registry.load_canonical()
+            if e.get("name") and e.get("name") not in seen
         }
         if searchable:
             store = load_embeddings_store()
+            # Scope the store to the searchable names so already-selected tools
+            # (e.g. a tier-1 tool that also has a vector) can't consume a
+            # semantic slot.
+            scoped = {n: store[n] for n in searchable if n in store}
             matches = hybrid_search_store(
                 query=prompt,
                 descriptions=searchable,
-                store=store,
+                store=scoped,
                 limit=max_semantic_tools,
                 threshold=similarity_threshold,
             )
             for name, score in matches:
-                if name not in seen:
+                if name not in seen:  # defensive dedup
                     selected.append((name, f"semantic({score:.2f})"))
                     seen.add(name)
 

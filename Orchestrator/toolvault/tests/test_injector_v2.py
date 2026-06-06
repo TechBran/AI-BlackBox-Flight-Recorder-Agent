@@ -61,11 +61,13 @@ def env(tmp_path, monkeypatch):
     """Build a hermetic registry + embeddings store + stubbed network/backend.
 
     Modules:
-      * core_tool      — tier 1, group chat (always injected)
-      * send_sms       — tier 2, group chat, aligned with +x (semantic match)
-      * generate_image — tier 2, group chat, orthogonal (no semantic match)
-      * realtime_only  — tier 1, group realtime (NOT in chat group)
-      * pick_operator  — tier 2, group chat, x-source: operators property
+      * core_tool       — tier 1, group chat (always injected)
+      * send_sms        — tier 2, group chat, aligned with +x (semantic match)
+      * generate_image  — tier 2, group chat, orthogonal (no semantic match)
+      * realtime_only   — tier 1, group realtime (NOT in chat group)
+      * realtime_search — tier 2, group realtime (NOT chat), aligned +x vector
+      * internal_seek   — tier 3, group chat, aligned +x vector
+      * pick_operator   — tier 2, group chat, x-source: operators property
     """
     d = tmp_path / "tools"
     d.mkdir()
@@ -80,6 +82,14 @@ def env(tmp_path, monkeypatch):
                        description="create an image from a prompt"))
     _write(d, _schema("realtime_only", groups=("realtime",), tier=1,
                        description="A realtime-only tool."))
+    # Tier-2 tool in the realtime group (NOT chat) with a +x vector — proves
+    # cross-group semantic discovery into a chat request.
+    _write(d, _schema("realtime_search", groups=("realtime",), tier=2,
+                       description="search realtime stream data"))
+    # Tier-3 internal tool with a +x vector — proves tier-3 surfaces via
+    # semantic search even though it's never an always-on baseline tool.
+    _write(d, _schema("internal_seek", groups=("chat",), tier=3,
+                       description="seek snapshot direct internal"))
     _write(d, _schema(
         "pick_operator", groups=("chat",), tier=2,
         description="do something for an operator",
@@ -95,10 +105,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "TOOLS_DIR", d)
     registry.invalidate_cache()
 
-    # Embeddings store: send_sms aligned with query (+x), others orthogonal.
+    # Embeddings store: send_sms / realtime_search / internal_seek aligned with
+    # the query (+x); generate_image / pick_operator orthogonal.
     store = {
         "send_sms": {"hash": "h", "model": "m", "vector": [1.0, 0.0]},
         "generate_image": {"hash": "h", "model": "m", "vector": [0.0, 1.0]},
+        "realtime_search": {"hash": "h", "model": "m", "vector": [1.0, 0.0]},
+        "internal_seek": {"hash": "h", "model": "m", "vector": [1.0, 0.0]},
         "pick_operator": {"hash": "h", "model": "m", "vector": [0.0, 1.0]},
     }
     store_path = tmp_path / "embeddings.json"
@@ -181,14 +194,28 @@ def test_max_semantic_tools_caps_tier2(env):
 
 
 # ---------------------------------------------------------------------------
-# Group filter
+# Group filter — governs the always-on baseline ONLY (tier-1). Semantic search
+# spans the FULL catalog (all groups + all tiers), so an out-of-group tool is
+# not an always-on, but DOES surface when its vector matches the prompt.
 # ---------------------------------------------------------------------------
 
-def test_group_filter_excludes_other_group(env):
-    names = [n for n, _ in injector.get_injected_tool_names(
-        "realtime", group="chat", similarity_threshold=0.0)]
-    # realtime_only is tier1 but in the realtime group, not chat.
-    assert "realtime_only" not in names
+def test_out_of_group_tier1_not_always_on_but_semantic_can_surface(env):
+    # (a) realtime_only is tier-1 in the realtime group. With an EMPTY prompt
+    #     (no semantic pass) it must NOT appear in a chat request — group filters
+    #     the tier-1 always-on baseline.
+    names_empty = [n for n, _ in injector.get_injected_tool_names(
+        "", group="chat")]
+    assert "realtime_only" not in names_empty
+    # core_tool (chat tier-1) IS the always-on baseline.
+    assert "core_tool" in names_empty
+
+    # (b) realtime_search is tier-2 in the realtime group with a +x vector. WITH
+    #     a matching prompt it DOES appear in a chat request via global semantic.
+    pairs = injector.get_injected_tool_names(
+        "search realtime stream data", group="chat", similarity_threshold=0.1)
+    names_prompt = [n for n, _ in pairs]
+    assert "realtime_search" in names_prompt
+    assert dict(pairs)["realtime_search"].startswith("semantic(")
 
 
 def test_realtime_group_includes_realtime_tool(env):
@@ -196,6 +223,76 @@ def test_realtime_group_includes_realtime_tool(env):
         "", group="realtime")]
     assert "realtime_only" in names
     assert "core_tool" not in names  # chat-only tier1
+
+
+# ---------------------------------------------------------------------------
+# Global semantic pool: cross-group + tier-3 inclusion, no slot starvation
+# ---------------------------------------------------------------------------
+
+def test_cross_group_tier2_injected_via_semantic_into_chat(env):
+    # realtime_search is tier-2, group realtime (NOT chat). Its +x vector means
+    # a chat request with a matching prompt pulls it in via global semantic.
+    pairs = injector.get_injected_tool_names(
+        "search realtime stream data", group="chat", similarity_threshold=0.1)
+    names = [n for n, _ in pairs]
+    assert "realtime_search" in names
+    assert dict(pairs)["realtime_search"].startswith("semantic(")
+    # always-on baseline still present
+    assert "toolvault" in names and "core_tool" in names
+
+
+def test_tier3_tool_injected_via_semantic_into_chat(env):
+    # internal_seek is tier-3 with a +x vector — surfaces via global semantic.
+    pairs = injector.get_injected_tool_names(
+        "seek snapshot direct internal", group="chat", similarity_threshold=0.1)
+    names = [n for n, _ in pairs]
+    assert "internal_seek" in names
+    assert dict(pairs)["internal_seek"].startswith("semantic(")
+
+
+def test_no_slot_starvation_tier1_does_not_consume_semantic_slot(tmp_path,
+                                                                 monkeypatch):
+    # A tier-1 tool that ALSO has a store vector must NOT eat the single semantic
+    # slot — it's already selected (always-on), hence excluded from the
+    # searchable/scoped store passed to hybrid_search_store. With
+    # max_semantic_tools=1, a separate tier-2 tool still gets its slot.
+    #
+    # Deterministic trap: core_tool (tier-1) vector is PERFECTLY aligned with the
+    # query (cos=1.0) while semtool (tier-2) is off-axis (cos<1.0). The prompt
+    # shares NO keywords with either description, so ranking is semantic-only.
+    # An UNSCOPED store ranks core_tool #1 and — since it's already selected —
+    # the lone slot is consumed and semtool is dropped (the old bug). A SCOPED
+    # store omits core_tool, so semtool wins the slot.
+    d = tmp_path / "starve_tools"
+    d.mkdir()
+    _write(d, _schema("core_tool", groups=("chat",), tier=1, description="zzz core"))
+    _write(d, _schema("semtool", groups=("chat",), tier=2, description="qqq tool"))
+    monkeypatch.setattr(registry, "TOOLS_DIR", d)
+    registry.invalidate_cache()
+
+    store = {
+        "core_tool": {"hash": "h", "model": "m", "vector": [1.0, 0.0]},   # cos=1.0
+        "semtool": {"hash": "h", "model": "m", "vector": [0.8, 0.6]},     # cos=0.8
+    }
+    store_path = tmp_path / "embeddings_starve.json"
+    store_path.write_text(json.dumps(store))
+    monkeypatch.setattr(embeddings, "EMBEDDINGS_PATH", store_path)
+    monkeypatch.setattr(embeddings, "embed_query", lambda q: list(QUERY_VEC))
+    monkeypatch.setattr(resolvers, "_list_operators", lambda ctx: ["Brandon"])
+
+    pairs = injector.get_injected_tool_names(
+        "xyz unrelated", group="chat",
+        max_semantic_tools=1, similarity_threshold=0.1)
+    names = [n for n, _ in pairs]
+    registry.invalidate_cache()
+
+    # tier-1 always present (as always-on, NOT as a semantic match)
+    assert "core_tool" in names
+    assert dict(pairs)["core_tool"] == "tier1"
+    # the lone semantic slot went to the tier-2 tool, not the already-selected
+    # tier-1 tool that would otherwise out-rank it.
+    assert "semtool" in names
+    assert dict(pairs)["semtool"].startswith("semantic(")
 
 
 # ---------------------------------------------------------------------------
