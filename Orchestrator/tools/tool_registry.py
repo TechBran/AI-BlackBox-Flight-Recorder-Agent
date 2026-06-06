@@ -228,34 +228,50 @@ def to_mcp(tool: Dict):
 # Convenience Getters (what consumers import)
 # =============================================================================
 
+def _resolved_group(group: str) -> List[Dict]:
+    """Canonical tools for a group, with x-source markers resolved.
+
+    Every non-injector consumer (MCP, static fallbacks, any direct converter
+    use) runs each canonical schema through ``resolve_schema`` BEFORE conversion,
+    so dynamic ``x-source`` fields resolve identically to the chat injector.
+    ``resolve_schema`` is lazy-imported to keep ``toolvault.resolvers`` out of
+    this module's import chain (avoids the cycle the lazy TOOL_DEFINITIONS init
+    is designed to sidestep). With no module carrying ``x-source`` today this is
+    a no-op (returns an equivalent dict), so converter output — and parity —
+    is unchanged.
+    """
+    from Orchestrator.toolvault.resolvers import resolve_schema
+    return [resolve_schema(t) for t in get_tools_by_group(group)]
+
+
 def get_anthropic_tools(group: str = "chat") -> List[Dict]:
     """Get tools in Anthropic format for a group."""
-    return [to_anthropic(t) for t in get_tools_by_group(group)]
+    return [to_anthropic(t) for t in _resolved_group(group)]
 
 
 def get_openai_rest_tools(group: str = "chat") -> List[Dict]:
     """Get tools in OpenAI Chat Completions format for a group."""
-    return [to_openai_rest(t) for t in get_tools_by_group(group)]
+    return [to_openai_rest(t) for t in _resolved_group(group)]
 
 
 def get_openai_realtime_tools(group: str = "realtime") -> List[Dict]:
     """Get tools in OpenAI Realtime (flat) format for a group."""
-    return [to_openai_realtime(t) for t in get_tools_by_group(group)]
+    return [to_openai_realtime(t) for t in _resolved_group(group)]
 
 
 def get_gemini_rest_tools(group: str = "chat") -> List[Dict]:
     """Get tools in Gemini REST format for a group."""
-    return to_gemini_rest(get_tools_by_group(group))
+    return to_gemini_rest(_resolved_group(group))
 
 
 def get_gemini_live_tools(group: str = "gemini_live") -> List[Dict]:
     """Get tools in Gemini Live format for a group."""
-    return to_gemini_live(get_tools_by_group(group))
+    return to_gemini_live(_resolved_group(group))
 
 
 def get_mcp_tools() -> list:
     """Get all MCP-group tools as MCP Tool objects."""
-    return [to_mcp(t) for t in get_tools_by_group("mcp")]
+    return [to_mcp(t) for t in _resolved_group("mcp")]
 
 
 # =============================================================================

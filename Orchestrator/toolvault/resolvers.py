@@ -15,6 +15,7 @@ importing this module is cheap/side-effect-free, and so tests can monkeypatch
 """
 
 import copy
+from typing import Optional
 
 from .context import ToolContext
 
@@ -48,8 +49,12 @@ RESOLVERS = {
 KNOWN_SOURCES = set(RESOLVERS)
 
 
-def resolve_schema(schema: dict, ctx: ToolContext) -> dict:
+def resolve_schema(schema: dict, ctx: Optional[ToolContext] = None) -> dict:
     """Return a deep copy of ``schema`` with all ``x-source`` markers resolved.
+
+    ``ctx`` is optional: converter callers (MCP / static fallbacks) that have no
+    per-call context may omit it, in which case a default :class:`ToolContext`
+    (operator ``"system"``) is used. The injector still passes an explicit ctx.
 
     Walks ``parameters.properties``. For each property carrying ``"x-source"``:
 
@@ -62,6 +67,7 @@ def resolve_schema(schema: dict, ctx: ToolContext) -> dict:
     The input ``schema`` is never mutated. A schema with no
     ``parameters``/``properties`` is returned as an unchanged deep copy.
     """
+    ctx = ctx or ToolContext()
     out = copy.deepcopy(schema)
 
     params = out.get("parameters")
