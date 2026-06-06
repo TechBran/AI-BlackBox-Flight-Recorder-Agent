@@ -415,3 +415,113 @@ def hybrid_search(
         print(f"{Y}  ├─ {name:30s} score={score:.3f}{R}")
 
     return top
+
+
+# ---------------------------------------------------------------------------
+# Search over the embeddings.json store (Task 2.2)
+# ---------------------------------------------------------------------------
+# The functions below mirror semantic_search / hybrid_search exactly, but read
+# vectors from the v2 store shape ({name: {"hash","model","vector":[...]}})
+# produced by sync_embeddings, instead of the OLD manifest shape
+# ({name: {"embedding": [...]}}). The OLD functions above stay intact while the
+# v1 injector is live; they are removed in Task 6.4.
+
+def semantic_search_store(
+    query_vec: List[float],
+    store: Dict[str, Dict[str, Any]],
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> List[Tuple[str, float]]:
+    """Cosine-similarity search of a pre-embedded query over the store.
+
+    Args:
+        query_vec: Already-embedded query vector (caller embeds; no network here)
+        store: embeddings.json store {name: {"vector": [...]}}
+        limit: Maximum results to return
+
+    Returns:
+        Top-``limit`` list of (tool_name, similarity_score) sorted desc.
+        Tools with a missing or empty ``vector`` are skipped.
+    """
+    if not query_vec:
+        return []
+
+    scores = []
+    for name, entry in store.items():
+        vector = entry.get("vector")
+        if not vector:
+            continue
+        sim = cosine_similarity(query_vec, vector)
+        scores.append((name, sim))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:limit]
+
+
+def hybrid_search_store(
+    query: str,
+    descriptions: Dict[str, str],
+    store: Dict[str, Dict[str, Any]],
+    limit: int = DEFAULT_SEARCH_LIMIT,
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> List[Tuple[str, float]]:
+    """Hybrid search (keyword + semantic) over the embeddings.json store.
+
+    Replicates ``hybrid_search``'s blend exactly: keyword score (40%) +
+    semantic score (60%), filtered by ``threshold``, sorted desc, top ``limit``.
+    The query is embedded once via ``embed_query``; per-method results are
+    gathered with no individual threshold (limit*3 candidates) before merging.
+
+    A tool present in ``descriptions`` but absent from ``store`` (no vector yet)
+    remains reachable via its keyword score — its semantic contribution is 0.
+
+    Args:
+        query: Natural language query
+        descriptions: {name: description} for keyword search
+        store: embeddings.json store {name: {"vector": [...]}}
+        limit: Max results
+        threshold: Minimum combined score
+
+    Returns:
+        List of (tool_name, combined_score) sorted by relevance.
+    """
+    query_vec = embed_query(query)
+    if query_vec:
+        semantic_results = semantic_search_store(
+            query_vec, store,
+            limit=limit * 3,  # Get extra candidates for merging
+        )
+    else:
+        print("[TOOLVAULT-SEARCH] Query embedding failed")
+        semantic_results = []
+
+    keyword_results = keyword_search(
+        query, {}, descriptions,
+        limit=limit * 3,
+    )
+
+    # Build score maps
+    semantic_scores = dict(semantic_results)
+    keyword_scores = dict(keyword_results)
+
+    # Combine with weights
+    all_names = set(semantic_scores.keys()) | set(keyword_scores.keys())
+    combined = {}
+
+    for name in all_names:
+        kw = keyword_scores.get(name, 0.0)
+        sem = semantic_scores.get(name, 0.0)
+        combined[name] = (KEYWORD_WEIGHT * kw) + (SEMANTIC_WEIGHT * sem)
+
+    # Filter by threshold and sort
+    results = [(name, score) for name, score in combined.items() if score >= threshold]
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    Y = "\033[33m"  # Yellow
+    R = "\033[0m"   # Reset
+    top = results[:limit]
+    print(f"{Y}[TOOLVAULT-SEARCH] Hybrid(store): {len(semantic_results)} semantic + "
+          f"{len(keyword_results)} keyword → {len(top)} results{R}")
+    for name, score in top:
+        print(f"{Y}  ├─ {name:30s} score={score:.3f}{R}")
+
+    return top
