@@ -64,6 +64,21 @@ def _ensure_loaded() -> None:
         _TOOL_INDEX_CACHE = {t["name"]: t for t in _TOOL_DEFINITIONS}
 
 
+def reset_cache() -> None:
+    """Drop the materialized snapshot so the next access reloads from the registry.
+
+    Called by POST /toolvault/reload so registry-derived calls (get_*_tools,
+    get_tools_by_group, get_tool_by_name, get_mcp_tools) reflect on-disk schema
+    edits without a process restart. NOTE: import-time module constants built from
+    these — blackbox_tools.BLACKBOX_TOOLS_* (phone group) and chat_routes.CHAT_TOOLS_*
+    (the TOOLVAULT_ENABLED=false fallback) — are frozen snapshots and still require
+    a restart. The live chat injector reads load_canonical() fresh and is unaffected.
+    """
+    global _TOOL_DEFINITIONS, _TOOL_INDEX_CACHE
+    _TOOL_DEFINITIONS = None
+    _TOOL_INDEX_CACHE = None
+
+
 def __getattr__(name: str):
     """Module-level lazy attributes: ``TOOL_DEFINITIONS`` and ``_TOOL_INDEX``.
 

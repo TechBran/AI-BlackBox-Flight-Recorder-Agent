@@ -1,8 +1,8 @@
 """
 ToolVault v2 — modules are the source of truth.
 
-Each tool is a self-describing Python module under ``Orchestrator/tools/``
-exposing a canonical schema plus an ``execute`` callable. The registry loads,
+Each tool is a self-describing module folder under ``ToolVault/tools/<name>/``
+(a ``schema.json`` plus an optional ``executor.py`` ``execute`` callable). The registry loads,
 validates, and caches those modules; embeddings live in a hash-keyed store
 (``ToolVault/embeddings.json``) synced from the modules; the injector renders
 the registry into per-provider tool arrays and selects which tools to surface

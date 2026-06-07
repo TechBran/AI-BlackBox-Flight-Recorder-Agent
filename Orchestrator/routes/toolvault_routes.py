@@ -9,8 +9,12 @@ Three small admin endpoints for production hardening of the module system:
   * GET  /toolvault/health   — lightweight status (never fails on errors).
   * GET  /toolvault/validate — full validate_all() report (HTTP 200; the `ok`
                                flag tells the caller whether anything's wrong).
-  * POST /toolvault/reload   — invalidate the registry cache + re-sync embeddings
-                               so an edited module is picked up WITHOUT a restart.
+  * POST /toolvault/reload   — invalidate the registry + tool_registry caches and
+                               re-sync embeddings. The live chat injector already
+                               reads modules fresh (mtime cache); reload makes the
+                               registry-derived tool lists reflect edits too. The
+                               import-time static arrays (phone BLACKBOX_TOOLS_*,
+                               fallback CHAT_TOOLS_*) are frozen until a restart.
 
 Registered via the project's star-import pattern (``from Orchestrator.checkpoint
 import app`` + ``@app.<verb>`` decorators), the same as admin_routes.py.
@@ -54,13 +58,18 @@ def toolvault_validate():
 
 @app.post("/toolvault/reload")
 def toolvault_reload():
-    """Hot-reload: re-scan every module + re-sync embeddings (no restart).
+    """Hot-reload: re-scan every module + re-sync embeddings.
 
-    This is the "edit a module on disk → hit reload" path. It clears the
-    registry's schema + executor caches, then syncs embeddings against the
-    freshly-loaded canonical list (only changed descriptions re-embed).
+    The "edit a module on disk → hit reload" path. Clears the registry's schema +
+    executor caches AND tool_registry's materialized snapshot (so registry-derived
+    get_*_tools/get_mcp_tools reflect edits), then syncs embeddings against the
+    freshly-loaded canonical list (only changed descriptions re-embed). The live
+    chat injector already picks up edits via the mtime cache; the import-time
+    BLACKBOX_TOOLS_*/CHAT_TOOLS_* arrays still need a restart.
     """
     registry.invalidate_cache()
+    from Orchestrator.tools import tool_registry as _tool_registry
+    _tool_registry.reset_cache()
     canonical = registry.load_canonical()
     store = embeddings.sync_embeddings(canonical)
     errors = registry.load_errors()
