@@ -1,0 +1,33 @@
+{
+  "name": "send_sms",
+  "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+  "category": "communication",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "phone_number": {
+        "type": "string",
+        "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+      },
+      "message": {
+        "type": "string",
+        "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+      }
+    },
+    "required": [
+      "phone_number",
+      "message"
+    ]
+  },
+  "example": "send_sms(phone_number=\"...\", message=\"...\")",
+  "notes": "Look up contact number with search_contacts first."
+}

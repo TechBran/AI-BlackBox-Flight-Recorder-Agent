@@ -1,0 +1,87 @@
+"""Executor for send_sms (migrated from blackbox_tools._execute_send_sms)."""
+import aiohttp
+from Orchestrator.toolvault.context import ToolContext, ToolResult
+
+
+async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+    """Send an SMS message via cellular modem or Twilio."""
+    phone_number = params.get("phone_number", "")
+    message = params.get("message", "")
+
+    if not phone_number or not message:
+        return ToolResult(False, "Phone number and message are required")
+
+    # Normalize phone number
+    if not phone_number.startswith("+"):
+        if phone_number.startswith("1") and len(phone_number) == 11:
+            phone_number = f"+{phone_number}"
+        elif len(phone_number) == 10:
+            phone_number = f"+1{phone_number}"
+
+    # Truncate message if too long
+    if len(message) > 1600:
+        message = message[:1597] + "..."
+
+    # Route based on TELEPHONY_PROVIDER config
+    from Orchestrator.config import TELEPHONY_PROVIDER, CELLULAR_ENABLED, ASTERISK_ENABLED
+
+    # Asterisk/TG200 path (preferred when enabled)
+    if TELEPHONY_PROVIDER == "asterisk" and ASTERISK_ENABLED:
+        try:
+            from Orchestrator.sms import get_ami_client, get_message_store
+            ami = get_ami_client()
+            if not ami or not ami.connected:
+                return ToolResult(False, "SMS system not connected (AMI client down)")
+
+            result = await ami.send_sms(phone_number, message, span=2)
+            if result.get("success"):
+                # Store outbound message if we have the store
+                store = get_message_store()
+                if store and ctx.operator:
+                    from datetime import datetime, timezone
+                    store.store_message(
+                        operator=ctx.operator,
+                        direction="outbound",
+                        phone_number=phone_number,
+                        contact_name="",
+                        body=message,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+                return ToolResult(True, f"SMS sent to {phone_number} via TG200.", data={"to": phone_number, "provider": "asterisk"})
+            return ToolResult(False, f"TG200 SMS failed: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            return ToolResult(False, f"TG200 SMS error: {str(e)}")
+
+    # Twilio path (fallback when Asterisk not available)
+    try:
+        from Orchestrator.config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
+
+        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+            return ToolResult(False, "Twilio not configured")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+                auth=aiohttp.BasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                data={
+                    "To": phone_number,
+                    "From": TWILIO_PHONE_NUMBER,
+                    "Body": message
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                result = await resp.json()
+
+                if resp.status in (200, 201):
+                    sid = result.get("sid", "")
+                    return ToolResult(
+                        success=True,
+                        result=f"SMS sent to {phone_number}. Message SID: {sid}",
+                        data={"sid": sid, "to": phone_number}
+                    )
+                else:
+                    error = result.get("message", str(result))
+                    return ToolResult(False, f"Failed to send SMS: {error}")
+
+    except Exception as e:
+        return ToolResult(False, f"SMS error: {str(e)}")

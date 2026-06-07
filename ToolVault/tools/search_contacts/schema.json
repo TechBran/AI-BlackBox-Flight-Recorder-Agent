@@ -1,0 +1,28 @@
+{
+  "name": "search_contacts",
+  "description": "Search the contact book for people by name, phone number, tag, or keyword. Use this before making calls or sending texts to find the person's number.",
+  "category": "contacts",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Name, phone number, tag, or any search term to find contacts"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "List of matching results",
+  "example": "search_contacts(query=\"...\")"
+}

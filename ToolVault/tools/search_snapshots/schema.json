@@ -1,0 +1,40 @@
+{
+  "name": "search_snapshots",
+  "description": "Your primary memory tool. The BlackBox contains 1,600+ snapshots — an unlimited bucket of memory holding every past conversation, development session, bug fix, decision, user preference, and interaction. Search this FIRST and OFTEN. Everything about the user, their projects, past work, preferences, and recent activity lives here. When in doubt, search.",
+  "category": "memory",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Natural language search query. Be descriptive — 'CSS design token migration' finds more than 'CSS'. Search multiple times with different queries if needed."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of results (default: 10)",
+        "default": 10
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "executor": "search_memory",
+  "returns": "List of matching results",
+  "example": "search_snapshots(query=\"...\")"
+}

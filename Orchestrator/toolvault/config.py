@@ -20,8 +20,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # blackbox_poc/
 # Data paths (at project root, alongside Volumes/ and Manifest/)
 # ---------------------------------------------------------------------------
 TOOLVAULT_DIR = PROJECT_ROOT / "ToolVault"
-VOLUME_PATH = TOOLVAULT_DIR / "toolvault_volume.txt"
-MANIFEST_PATH = TOOLVAULT_DIR / "toolvault_manifest.json"
 
 # ---------------------------------------------------------------------------
 # Anchor format

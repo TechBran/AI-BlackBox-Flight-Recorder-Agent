@@ -1,0 +1,42 @@
+{
+  "name": "search_media",
+  "description": "Search for media files by description, prompt, or filename. Use when you need to find a specific image/video/audio that was previously generated or uploaded.",
+  "category": "media_management",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search query - matches against prompts, descriptions, and filenames"
+      },
+      "media_type": {
+        "type": "string",
+        "description": "Filter by type: 'image', 'video', 'audio', or omit for all types",
+        "enum": [
+          "image",
+          "video",
+          "audio"
+        ]
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of results (default 10)",
+        "default": 10
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "List of matching results",
+  "example": "search_media(query=\"...\")"
+}

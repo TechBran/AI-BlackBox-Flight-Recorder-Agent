@@ -1,0 +1,40 @@
+{
+  "name": "gmail_reply",
+  "description": "Reply to an existing email thread. Automatically addresses the reply to the original sender and prefixes 'Re:' to the subject.",
+  "category": "email",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message_id": {
+        "type": "string",
+        "description": "Original message ID to reply to"
+      },
+      "thread_id": {
+        "type": "string",
+        "description": "Thread ID from the original message"
+      },
+      "body": {
+        "type": "string",
+        "description": "Reply text"
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "message_id",
+      "thread_id",
+      "body"
+    ]
+  },
+  "returns": "Gmail operation result",
+  "example": "gmail_reply(message_id=\"...\", thread_id=\"...\", body=\"...\")"
+}

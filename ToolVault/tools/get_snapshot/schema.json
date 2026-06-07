@@ -1,0 +1,31 @@
+{
+  "name": "get_snapshot",
+  "description": "Retrieve a specific snapshot by ID from the BlackBox memory. Use when you have a snapshot ID from search results and need the full content.",
+  "category": "memory",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "snap_id": {
+        "type": "string",
+        "description": "Snapshot ID (e.g., SNAP-20260208-1234)"
+      },
+      "include_content": {
+        "type": "boolean",
+        "description": "Include full content (default: true)",
+        "default": true
+      }
+    },
+    "required": [
+      "snap_id"
+    ]
+  },
+  "returns": "Requested data object",
+  "example": "get_snapshot(snap_id=\"...\")"
+}

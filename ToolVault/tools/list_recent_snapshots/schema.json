@@ -1,0 +1,33 @@
+{
+  "name": "list_recent_snapshots",
+  "description": "Get the most recent snapshots. IMPORTANT: Use this at the START of outbound calls to check for context from other models - there may be task details, order information, or instructions provided before this call was initiated.",
+  "category": "memory",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      },
+      "count": {
+        "type": "integer",
+        "description": "Number of recent snapshots to retrieve (default: 3, max: 5)",
+        "default": 3
+      }
+    },
+    "required": []
+  },
+  "returns": "List of matching results",
+  "example": "list_recent_snapshots()"
+}

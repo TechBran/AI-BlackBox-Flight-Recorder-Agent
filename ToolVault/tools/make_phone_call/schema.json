@@ -1,0 +1,45 @@
+{
+  "name": "make_phone_call",
+  "description": "DELEGATE a real phone call to a separate AI voice agent via the TG200 cellular gateway. You are NOT making the call yourself — you are BRIEFING another AI agent who will have a real-time voice conversation on your behalf. Use 'role' to define WHO the agent IS (their persona/character), and 'greeting' for WHAT task to accomplish on this call. Use search_contacts first to find the number.",
+  "category": "communication",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "phone_number": {
+        "type": "string",
+        "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+      },
+      "role": {
+        "type": "string",
+        "description": "The PERSONA/CHARACTER for the AI voice agent — define WHO they are. This becomes the agent's system prompt before the call starts."
+      },
+      "greeting": {
+        "type": "string",
+        "description": "The TASK INSTRUCTIONS — WHAT to do on this specific call. The voice agent speaks this greeting first, then has a free-form conversation."
+      },
+      "backend": {
+        "type": "string",
+        "description": "AI voice backend for the real-time conversation",
+        "enum": [
+          "openai_realtime",
+          "gemini_live",
+          "grok_live"
+        ]
+      }
+    },
+    "required": [
+      "phone_number"
+    ]
+  },
+  "example": "make_phone_call(phone_number=\"...\")",
+  "notes": "Look up contact number with search_contacts first."
+}

@@ -26,6 +26,9 @@ import json
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
+from . import registry, embeddings, resolvers
+from .config import SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT
+
 
 # ---------------------------------------------------------------------------
 # Meta-Tool Schema (canonical, provider-agnostic format)
@@ -127,14 +130,22 @@ def execute(action: str, **params) -> MetaToolResult:
 def _action_search(query: str) -> MetaToolResult:
     """Search for tools by natural language query.
 
+    Ranks across the FULL canonical catalog (global discovery — this is the
+    model's "second prompt" re-search), sourcing names/descriptions from the v2
+    registry and vectors from the embeddings.json store.
+
     Returns ranked results with name, score, category, and description.
     """
     if not query:
         return MetaToolResult(success=False, result="Missing 'query' parameter for search action.")
 
-    from Orchestrator.toolvault import search_tools, read_tool
+    canonical = registry.load_canonical()
+    descriptions = {t["name"]: t.get("description", "") for t in canonical}
+    store = embeddings.load_embeddings_store()
 
-    results = search_tools(query, limit=8)
+    results = embeddings.hybrid_search_store(
+        query, descriptions, store, limit=8, threshold=SIMILARITY_THRESHOLD
+    )
 
     if not results:
         return MetaToolResult(
@@ -145,13 +156,12 @@ def _action_search(query: str) -> MetaToolResult:
     # Build readable result
     lines = [f"Found {len(results)} tools matching '{query}':\n"]
     for rank, (name, score) in enumerate(results, 1):
-        # Get description from vault
-        tool = read_tool(name)
-        desc = tool.get("DESCRIPTION", "") if tool else ""
+        tool = registry.get_tool(name)
+        desc = tool.get("description", "") if tool else ""
         # Truncate long descriptions
         if len(desc) > 120:
             desc = desc[:117] + "..."
-        category = tool.get("CATEGORY", "") if tool else ""
+        category = tool.get("category", "") if tool else ""
 
         lines.append(f"  {rank}. {name} (score: {score:.2f}, category: {category})")
         lines.append(f"     {desc}")
@@ -175,44 +185,55 @@ def _action_read(tool_name: str) -> MetaToolResult:
     if not tool_name:
         return MetaToolResult(success=False, result="Missing 'tool_name' parameter for read action.")
 
-    from Orchestrator.toolvault import read_tool
-    from Orchestrator.toolvault.manifest import get_tool
-
-    parsed = read_tool(tool_name)
-    if not parsed:
+    entry = registry.get_tool(tool_name)
+    if not entry:
         return MetaToolResult(
             success=False,
             result=f"Tool '{tool_name}' not found in vault. Use toolvault(action='search', query='...') to find tools.",
         )
 
-    # Build the response with everything the model needs
-    entry = get_tool(tool_name)
-    tier = entry.get("tier", 2) if entry else 2
+    # Resolve any x-source markers (e.g. operators enum) so the schema we surface
+    # reflects live sources, then expose the resolved parameters block.
+    resolved = resolvers.resolve_schema(entry)
+    schema = resolved.get("parameters", {})
+    tier = entry.get("tier", 2)
 
     lines = [
-        f"=== Tool: {parsed['NAME']} ===",
-        f"Description: {parsed.get('DESCRIPTION', '')}",
-        f"Category: {parsed.get('CATEGORY', '')}",
+        f"=== Tool: {entry['name']} ===",
+        f"Description: {entry.get('description', '')}",
+        f"Category: {entry.get('category', '')}",
         f"Tier: {tier}",
         "",
         "Parameters:",
     ]
 
-    # Include human-readable parameters
-    param_text = parsed.get("PARAMETERS", "")
-    if param_text:
-        for line in param_text.split("\n"):
-            lines.append(f"  {line.strip()}")
+    # Build a human-readable parameter summary from the resolved schema.
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    required = set(schema.get("required", []) if isinstance(schema, dict) else [])
+    if properties:
+        for pname, prop in properties.items():
+            ptype = prop.get("type", "any")
+            req = "required" if pname in required else "optional"
+            pdesc = prop.get("description", "")
+            line = f"  - {pname} ({ptype}, {req})"
+            if pdesc:
+                line += f": {pdesc}"
+            lines.append(line)
+            if "enum" in prop:
+                lines.append(f"      enum: {prop['enum']}")
+            if "default" in prop:
+                lines.append(f"      default: {prop['default']!r}")
+    else:
+        lines.append("  (none)")
 
-    if parsed.get("RETURNS"):
-        lines.append(f"\nReturns: {parsed['RETURNS']}")
-    if parsed.get("EXAMPLE"):
-        lines.append(f"Example: {parsed['EXAMPLE']}")
-    if parsed.get("NOTES"):
-        lines.append(f"Notes: {parsed['NOTES']}")
+    if entry.get("returns"):
+        lines.append(f"\nReturns: {entry['returns']}")
+    if entry.get("example"):
+        lines.append(f"Example: {entry['example']}")
+    if entry.get("notes"):
+        lines.append(f"Notes: {entry['notes']}")
 
     # Include the JSON schema (machine-readable, for format conversion)
-    schema = parsed.get("JSON_SCHEMA")
     if schema:
         lines.append(f"\nJSON Schema: {json.dumps(schema)}")
 
@@ -222,7 +243,7 @@ def _action_read(tool_name: str) -> MetaToolResult:
         data={
             "name": tool_name,
             "schema": schema,
-            "groups": parsed.get("GROUPS", []),
+            "groups": entry.get("groups", []),
             "tier": tier,
         },
     )
@@ -233,9 +254,7 @@ def _action_list(category: Optional[str] = None) -> MetaToolResult:
 
     Returns a categorized summary with tool names and brief descriptions.
     """
-    from Orchestrator.toolvault import list_all_tools, read_tool
-
-    tools = list_all_tools()
+    tools = registry.load_canonical()
 
     if category:
         tools = [t for t in tools if t.get("category") == category]

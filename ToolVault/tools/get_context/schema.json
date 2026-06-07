@@ -1,0 +1,29 @@
+{
+  "name": "get_context",
+  "description": "Get enriched context for a query, including relevant snapshots and recent history. Use before answering questions that may benefit from historical context.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The query or topic to get context for"
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Operator/user name"
+      }
+    },
+    "required": [
+      "query",
+      "operator"
+    ]
+  },
+  "returns": "Requested data object",
+  "example": "get_context(query=\"...\", operator=\"...\")"
+}

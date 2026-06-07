@@ -1,0 +1,16 @@
+{
+  "name": "get_index_stats",
+  "description": "Get statistics about the snapshot index - total count, operators, byte ranges, etc.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": "Requested data object",
+  "example": "get_index_stats()"
+}

@@ -1,0 +1,45 @@
+{
+  "name": "toolvault",
+  "description": "Your tool discovery system. Use this to find and retrieve tools from the ToolVault. Actions: 'search' finds tools by what you need to do, 'read' gets the full spec for a specific tool, 'list' shows all available tools by category.",
+  "category": "uncategorized",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "search",
+          "read",
+          "list"
+        ],
+        "description": "search=find tools by query, read=get full tool spec by name, list=show all tools by category"
+      },
+      "query": {
+        "type": "string",
+        "description": "For search: natural language description of what you need (e.g., 'send a text message', 'generate an image')"
+      },
+      "tool_name": {
+        "type": "string",
+        "description": "For read: exact tool name to retrieve (e.g., 'send_sms', 'generate_image')"
+      },
+      "category": {
+        "type": "string",
+        "description": "For list: filter by category (e.g., 'communication', 'media_generation', 'email'). Omit for all."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  },
+  "example": "toolvault(action=\"...\")"
+}

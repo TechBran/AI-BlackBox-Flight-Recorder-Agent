@@ -1,0 +1,33 @@
+{
+  "name": "text_to_speech",
+  "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+  "category": "audio",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to convert to speech"
+      },
+      "voice": {
+        "type": "string",
+        "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)"
+      },
+      "model": {
+        "type": "string",
+        "description": "Model: tts-1 or tts-1-hd (default: tts-1-hd)"
+      }
+    },
+    "required": [
+      "text"
+    ]
+  },
+  "returns": "Returns an audio URL",
+  "example": "text_to_speech(text=\"...\")"
+}

@@ -11,11 +11,16 @@ prompt like "send a text message", find the right tool (send_sms)
 without the model needing to see all 41+ tool schemas.
 """
 
+import hashlib
+import json
 import math
+import os
 import time
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from Orchestrator.toolvault.config import (
+    PROJECT_ROOT,
     EMBEDDING_MODEL,
     EMBEDDING_TASK_TYPE_DOC,
     EMBEDDING_TASK_TYPE_QUERY,
@@ -26,6 +31,17 @@ from Orchestrator.toolvault.config import (
     DEFAULT_SEARCH_LIMIT,
     SIMILARITY_THRESHOLD,
 )
+
+# ---------------------------------------------------------------------------
+# Embedding cache store (Task 2.1)
+# ---------------------------------------------------------------------------
+# The store is the ONLY cached artifact in ToolVault v2. Tool modules are the
+# source of truth; embeddings are regenerated only when a tool's DESCRIPTION
+# changes (detected via sha256 hash). Format:
+#   { "<tool_name>": {"hash": "<sha256>", "model": "<model>", "vector": [..]} }
+#
+# Module global so tests can override it (read at call time, not captured).
+EMBEDDINGS_PATH = PROJECT_ROOT / "ToolVault" / "embeddings.json"
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +105,125 @@ def embed_query(query: str) -> Optional[List[float]]:
     Uses retrieval_query task type (optimized for finding relevant docs).
     """
     return generate_embedding(query, task_type=EMBEDDING_TASK_TYPE_QUERY)
+
+
+# ---------------------------------------------------------------------------
+# Embedding cache store + hash-keyed sync (Task 2.1)
+# ---------------------------------------------------------------------------
+
+def _emb_hash(text: str) -> str:
+    """sha256 hex of the embedding-target text (the tool DESCRIPTION)."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def load_embeddings_store(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Read the embeddings cache store.
+
+    Missing file → ``{}``. Corrupt JSON → ``{}`` (logged, never raised).
+    """
+    p = Path(path) if path is not None else EMBEDDINGS_PATH
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            print(f"[TOOLVAULT-EMB] Store at {p} is not an object; treating as empty")
+            return {}
+        return data
+    except Exception as e:
+        print(f"[TOOLVAULT-EMB] Failed to read store at {p}: {e}; treating as empty")
+        return {}
+
+
+def save_embeddings_store(store: Dict[str, Any], path: Optional[Path] = None) -> None:
+    """Atomically write the embeddings store (.part + os.replace).
+
+    Mirrors manifest.py:save_manifest's crash-safe pattern.
+    """
+    p = Path(path) if path is not None else EMBEDDINGS_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".part")
+    try:
+        data = json.dumps(store, indent=2, ensure_ascii=False).encode("utf-8")
+        tmp.write_bytes(data)
+        os.replace(tmp, p)
+    except Exception as e:
+        print(f"[TOOLVAULT-EMB] Failed to save store: {e}")
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def sync_embeddings(
+    canonical: List[Dict[str, Any]],
+    path: Optional[Path] = None,
+    *,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Sync the embedding cache against the canonical tool list.
+
+    For each tool, the DESCRIPTION is hashed (sha256). A tool is re-embedded
+    only when its hash changed (or ``force=True``, or no usable cached vector
+    exists). Tools no longer present in ``canonical`` are pruned. The store is
+    written atomically and returned.
+
+    Embed failures (``embed_tool_description`` returns ``None``) never crash:
+    any prior entry is kept intact; new tools are simply skipped.
+
+    Args:
+        canonical: list of schema dicts (each with ``name`` + ``description``).
+        path: store path override (defaults to ``EMBEDDINGS_PATH``).
+        force: re-embed every tool regardless of hash.
+
+    Returns:
+        The new store dict.
+    """
+    existing = load_embeddings_store(path)
+    new_store: Dict[str, Any] = {}
+
+    embedded = 0
+    skipped = 0
+    canonical_names = set()
+
+    for tool in canonical:
+        name = tool.get("name")
+        if not name:
+            continue
+        canonical_names.add(name)
+        description = tool.get("description", "") or ""
+        h = _emb_hash(description)
+
+        prior = existing.get(name)
+        prior_ok = (
+            isinstance(prior, dict)
+            and prior.get("hash") == h
+            and bool(prior.get("vector"))
+        )
+
+        if not force and prior_ok:
+            new_store[name] = prior
+            skipped += 1
+            continue
+
+        vec = embed_tool_description(description)
+        if vec:
+            new_store[name] = {"hash": h, "model": EMBEDDING_MODEL, "vector": vec}
+            embedded += 1
+        else:
+            # Embed failed: keep any prior entry intact; otherwise skip the tool.
+            print(f"[TOOLVAULT-EMB] embed failed for '{name}'; "
+                  f"{'keeping prior entry' if isinstance(prior, dict) else 'skipping'}")
+            if isinstance(prior, dict):
+                new_store[name] = prior
+            skipped += 1
+
+    pruned = len([n for n in existing if n not in canonical_names])
+
+    save_embeddings_store(new_store, path)
+    print(f"[TOOLVAULT-EMB] embedded={embedded} skipped={skipped} pruned={pruned}")
+    return new_store
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +410,116 @@ def hybrid_search(
     R = "\033[0m"   # Reset
     top = results[:limit]
     print(f"{Y}[TOOLVAULT-SEARCH] Hybrid: {len(semantic_results)} semantic + "
+          f"{len(keyword_results)} keyword → {len(top)} results{R}")
+    for name, score in top:
+        print(f"{Y}  ├─ {name:30s} score={score:.3f}{R}")
+
+    return top
+
+
+# ---------------------------------------------------------------------------
+# Search over the embeddings.json store (Task 2.2)
+# ---------------------------------------------------------------------------
+# The functions below mirror semantic_search / hybrid_search exactly, but read
+# vectors from the v2 store shape ({name: {"hash","model","vector":[...]}})
+# produced by sync_embeddings, instead of the OLD manifest shape
+# ({name: {"embedding": [...]}}). The OLD functions above stay intact while the
+# v1 injector is live; they are removed in Task 6.4.
+
+def semantic_search_store(
+    query_vec: List[float],
+    store: Dict[str, Dict[str, Any]],
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> List[Tuple[str, float]]:
+    """Cosine-similarity search of a pre-embedded query over the store.
+
+    Args:
+        query_vec: Already-embedded query vector (caller embeds; no network here)
+        store: embeddings.json store {name: {"vector": [...]}}
+        limit: Maximum results to return
+
+    Returns:
+        Top-``limit`` list of (tool_name, similarity_score) sorted desc.
+        Tools with a missing or empty ``vector`` are skipped.
+    """
+    if not query_vec:
+        return []
+
+    scores = []
+    for name, entry in store.items():
+        vector = entry.get("vector")
+        if not vector:
+            continue
+        sim = cosine_similarity(query_vec, vector)
+        scores.append((name, sim))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:limit]
+
+
+def hybrid_search_store(
+    query: str,
+    descriptions: Dict[str, str],
+    store: Dict[str, Dict[str, Any]],
+    limit: int = DEFAULT_SEARCH_LIMIT,
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> List[Tuple[str, float]]:
+    """Hybrid search (keyword + semantic) over the embeddings.json store.
+
+    Replicates ``hybrid_search``'s blend exactly: keyword score (40%) +
+    semantic score (60%), filtered by ``threshold``, sorted desc, top ``limit``.
+    The query is embedded once via ``embed_query``; per-method results are
+    gathered with no individual threshold (limit*3 candidates) before merging.
+
+    A tool present in ``descriptions`` but absent from ``store`` (no vector yet)
+    remains reachable via its keyword score — its semantic contribution is 0.
+
+    Args:
+        query: Natural language query
+        descriptions: {name: description} for keyword search
+        store: embeddings.json store {name: {"vector": [...]}}
+        limit: Max results
+        threshold: Minimum combined score
+
+    Returns:
+        List of (tool_name, combined_score) sorted by relevance.
+    """
+    query_vec = embed_query(query)
+    if query_vec:
+        semantic_results = semantic_search_store(
+            query_vec, store,
+            limit=limit * 3,  # Get extra candidates for merging
+        )
+    else:
+        print("[TOOLVAULT-SEARCH] Query embedding failed")
+        semantic_results = []
+
+    keyword_results = keyword_search(
+        query, {}, descriptions,
+        limit=limit * 3,
+    )
+
+    # Build score maps
+    semantic_scores = dict(semantic_results)
+    keyword_scores = dict(keyword_results)
+
+    # Combine with weights
+    all_names = set(semantic_scores.keys()) | set(keyword_scores.keys())
+    combined = {}
+
+    for name in all_names:
+        kw = keyword_scores.get(name, 0.0)
+        sem = semantic_scores.get(name, 0.0)
+        combined[name] = (KEYWORD_WEIGHT * kw) + (SEMANTIC_WEIGHT * sem)
+
+    # Filter by threshold and sort
+    results = [(name, score) for name, score in combined.items() if score >= threshold]
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    Y = "\033[33m"  # Yellow
+    R = "\033[0m"   # Reset
+    top = results[:limit]
+    print(f"{Y}[TOOLVAULT-SEARCH] Hybrid(store): {len(semantic_results)} semantic + "
           f"{len(keyword_results)} keyword → {len(top)} results{R}")
     for name, score in top:
         print(f"{Y}  ├─ {name:30s} score={score:.3f}{R}")

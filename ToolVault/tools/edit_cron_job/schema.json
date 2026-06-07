@@ -1,0 +1,72 @@
+{
+  "name": "edit_cron_job",
+  "description": "Edit an existing scheduled task (cron job). Change the prompt, schedule, delivery method, or other settings.",
+  "category": "scheduling",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "job_id": {
+        "type": "string",
+        "description": "The ID of the cron job to edit"
+      },
+      "name": {
+        "type": "string",
+        "description": "New name for the job"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "New prompt/instruction for the job"
+      },
+      "schedule": {
+        "type": "string",
+        "description": "New cron expression"
+      },
+      "frequency_hint": {
+        "type": "string",
+        "description": "New human-readable schedule description"
+      },
+      "model": {
+        "type": "string",
+        "description": "Change which AI model executes this job",
+        "enum": [
+          "gemini",
+          "openai",
+          "claude",
+          "grok",
+          "computer-use"
+        ]
+      },
+      "delivery": {
+        "type": "string",
+        "description": "Change how results are delivered",
+        "enum": [
+          "snapshot",
+          "sms",
+          "voice_call",
+          "notification"
+        ]
+      },
+      "delivery_target": {
+        "type": "string",
+        "description": "New phone number for SMS/voice delivery"
+      },
+      "pause": {
+        "type": "boolean",
+        "description": "Set to true to pause the job, false to resume it"
+      }
+    },
+    "required": [
+      "job_id"
+    ]
+  },
+  "example": "edit_cron_job(job_id=\"...\")"
+}

@@ -1,0 +1,70 @@
+{
+  "name": "generate_video",
+  "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "For text-to-video: full video description. For image-to-video: describe how the image should animate. For video-extension: describe what happens NEXT in the video."
+      },
+      "image_url": {
+        "type": "string",
+        "description": "URL of an image to animate (e.g., /ui/uploads/sunset_abc123.png). If provided, creates image-to-video instead of text-to-video."
+      },
+      "video_url": {
+        "type": "string",
+        "description": "URL of a video to EXTEND. If provided, creates a continuation of that video guided by the prompt. Takes priority over image_url."
+      },
+      "aspectRatio": {
+        "type": "string",
+        "description": "Aspect ratio: '16:9' (landscape) or '9:16' (portrait). Default: '16:9'",
+        "enum": [
+          "16:9",
+          "9:16"
+        ],
+        "default": "16:9"
+      },
+      "duration": {
+        "type": "integer",
+        "description": "Video duration in seconds: 4, 6, or 8. Default: 8",
+        "enum": [
+          4,
+          6,
+          8
+        ],
+        "default": 8
+      },
+      "resolution": {
+        "type": "string",
+        "description": "Video resolution: '720p' or '1080p'. IMPORTANT: Video extension (video_url) REQUIRES '720p'. Default: '720p'",
+        "enum": [
+          "720p",
+          "1080p"
+        ],
+        "default": "720p"
+      },
+      "negativePrompt": {
+        "type": "string",
+        "description": "Optional. Things to exclude from the video"
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "generate_video(prompt=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

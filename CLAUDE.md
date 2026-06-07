@@ -637,6 +637,22 @@ Before considering a production complete:
 - [ ] Auto-advance working correctly
 - [ ] Snapshot created documenting the production
 
+## ToolVault (v2 — modules as source)
+
+ToolVault is the BlackBox tool catalog. **Per-tool modules are the single source of truth**: each tool is a folder `ToolVault/tools/<name>/` with a canonical `schema.json` (name, description, category, groups, tier, parameters + optional `executor`/`returns`/`example`/`notes`) and an optional `executor.py` (`async def execute(params, ctx) -> ToolResult`). The chat injector, the MCP server, and the static fallback arrays all derive from these modules — there is no dual source of truth. The live chat injector picks up schema edits automatically via the registry's mtime cache; `POST /toolvault/reload` additionally refreshes the registry-derived tool lists and re-embeds. (The import-time phone/fallback arrays — `BLACKBOX_TOOLS_*`/`CHAT_TOOLS_*` — are frozen snapshots that need a restart.) Dynamic fields use an `"x-source"` marker (e.g. `"x-source": "operators"`) resolved at injection time by a registered resolver. `embeddings.json` is the ONLY cache (hash-keyed; re-embeds only changed descriptions). The v1 byte-offset `volume.txt`/`manifest.json` monolith is DELETED.
+
+**Edit → validate → reload workflow:**
+```bash
+# 1. Edit ToolVault/tools/<name>/schema.json or executor.py
+# 2. Validate (CI gate — exits non-zero on any invalid module):
+python -m Orchestrator.toolvault.validate
+# 3. Make it live (re-embed + bust caches, no restart):
+curl -X POST http://localhost:9091/toolvault/reload
+```
+Health/report endpoints: `GET /toolvault/health`, `GET /toolvault/validate`. Module layer lives in `Orchestrator/toolvault/{registry,resolvers,schema_spec,embeddings,injector,meta_tool,context,validate}.py`.
+
+**Full authoring guide:** `ToolVault/tools/README.md`. **Design doc:** `docs/plans/2026-06-06-toolvault-v2-modules-design.md`.
+
 ## Creating Web Apps
 
 When asked to create a web application, **ALWAYS** follow this process:

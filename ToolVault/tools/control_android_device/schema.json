@@ -1,0 +1,34 @@
+{
+  "name": "control_android_device",
+  "description": "Control an Android device on the Tailscale mesh network using Gemini Computer Use. Can tap, type, swipe, open apps, and navigate the device UI autonomously. Returns a task ID - use get_task_status to check progress.",
+  "category": "computer_control",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "What to do on the Android device (e.g., 'Open the Play Store and check StoryBox reviews')"
+      },
+      "device_id": {
+        "type": "string",
+        "description": "Device ID from the device registry (e.g., 'brandon-phone'). Use list_devices to see available devices."
+      }
+    },
+    "required": [
+      "prompt",
+      "device_id"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "control_android_device(prompt=\"...\", device_id=\"...\")"
+}

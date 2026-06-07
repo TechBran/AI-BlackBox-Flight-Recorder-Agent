@@ -1,0 +1,70 @@
+{
+  "name": "create_cron_job",
+  "description": "Create a scheduled task (cron job) that runs a prompt on a schedule. Use when the user wants recurring reminders, checks, or automated tasks.",
+  "category": "scheduling",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "A short, descriptive name for this task (e.g., 'Morning Server Check')"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "The prompt/instruction that will be sent to the AI when the job fires"
+      },
+      "schedule": {
+        "type": "string",
+        "description": "Cron expression (e.g., '0 7 * * *' for daily at 7 AM, '*/30 * * * *' for every 30 minutes)"
+      },
+      "frequency_hint": {
+        "type": "string",
+        "description": "Human-readable description of the schedule (e.g., 'Every day at 7 AM')"
+      },
+      "model": {
+        "type": "string",
+        "description": "Which AI model should execute this job. Use 'computer-use' for tasks needing desktop/browser/GUI interaction (default: gemini)",
+        "enum": [
+          "gemini",
+          "openai",
+          "claude",
+          "grok",
+          "computer-use"
+        ]
+      },
+      "delivery": {
+        "type": "string",
+        "description": "How to deliver the result (default: snapshot)",
+        "enum": [
+          "snapshot",
+          "sms",
+          "voice_call",
+          "notification"
+        ]
+      },
+      "delivery_target": {
+        "type": "string",
+        "description": "Phone number for SMS/voice delivery (E.164 format), not needed for snapshot/notification"
+      },
+      "one_shot": {
+        "type": "boolean",
+        "description": "If true, run once and auto-delete (for one-time reminders). Default: false"
+      }
+    },
+    "required": [
+      "name",
+      "prompt",
+      "schedule"
+    ]
+  },
+  "example": "create_cron_job(name=\"...\", prompt=\"...\", schedule=\"...\")"
+}

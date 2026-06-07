@@ -1,0 +1,16 @@
+{
+  "name": "list_operators",
+  "description": "List all operators (users) that have snapshots in the BlackBox.",
+  "category": "mcp_internal",
+  "groups": [
+    "mcp"
+  ],
+  "tier": 3,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": "List of matching results",
+  "example": "list_operators()"
+}

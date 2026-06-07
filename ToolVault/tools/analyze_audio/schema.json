@@ -1,0 +1,30 @@
+{
+  "name": "analyze_audio",
+  "description": "Analyze audio content using Gemini. Can transcribe, describe sounds, identify music, etc. Returns task_id (async).",
+  "category": "analysis",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "Path to the audio file to analyze"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "What to analyze (e.g. 'Transcribe this audio', 'What sounds are in this?')"
+      }
+    },
+    "required": [
+      "file_path"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "analyze_audio(file_path=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

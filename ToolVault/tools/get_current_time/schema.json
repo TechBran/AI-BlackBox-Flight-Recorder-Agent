@@ -1,0 +1,22 @@
+{
+  "name": "get_current_time",
+  "description": "Get the current date and time with timezone information.",
+  "category": "memory",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": "Requested data object",
+  "example": "get_current_time()"
+}

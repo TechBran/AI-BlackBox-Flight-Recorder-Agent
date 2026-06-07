@@ -1,0 +1,67 @@
+{
+  "name": "generate_image",
+  "description": "Generate images using Gemini's Nano Banana Pro (gemini-3-pro-image-preview). Supports text-to-image AND image-to-image. For image-to-image, pass reference_images URLs from previous generations to guide style/content. Returns a task_id that completes asynchronously.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Detailed description of the image to generate. Be specific about subjects, style, composition, lighting, colors, and mood."
+      },
+      "reference_images": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "URLs of reference images for style/content guidance (e.g., ['/ui/uploads/sunset_abc123.png']). Use for image-to-image generation. Max 10 images recommended.",
+        "maxItems": 14
+      },
+      "aspectRatio": {
+        "type": "string",
+        "description": "Aspect ratio: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'. Default: '16:9'",
+        "enum": [
+          "1:1",
+          "16:9",
+          "9:16",
+          "4:3",
+          "3:4"
+        ],
+        "default": "16:9"
+      },
+      "resolution": {
+        "type": "string",
+        "description": "Image resolution: '1K' (1024px), '2K' (2048px), '4K' (4096px). Higher = more detail but slower. Default: '1K'",
+        "enum": [
+          "1K",
+          "2K",
+          "4K"
+        ],
+        "default": "1K"
+      },
+      "numberOfImages": {
+        "type": "integer",
+        "description": "Number of images to generate (1-4). Default: 1",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "generate_image(prompt=\"...\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

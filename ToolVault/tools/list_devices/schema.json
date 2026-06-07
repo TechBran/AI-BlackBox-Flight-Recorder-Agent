@@ -1,0 +1,27 @@
+{
+  "name": "list_devices",
+  "description": "List all devices on the Tailscale mesh network that can be controlled via Computer Use.",
+  "category": "computer_control",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "device_type": {
+        "type": "string",
+        "description": "Filter: 'android', 'linux', 'windows'"
+      }
+    },
+    "required": []
+  },
+  "returns": "List of matching results",
+  "example": "list_devices()"
+}
