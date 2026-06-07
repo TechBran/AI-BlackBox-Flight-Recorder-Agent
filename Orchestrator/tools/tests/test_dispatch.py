@@ -131,22 +131,28 @@ def test_legacy_fallback_when_no_module(tools_dir):
     assert "legacy:Brandon:42" in result.result
 
 
-def test_legacy_fallback_real_tool_unchanged(tools_dir):
-    """A real un-migrated tool (get_task_status) still dispatches via legacy.
+def test_legacy_fallback_path_is_reached(tools_dir):
+    """The legacy ``_execute_<name>`` rail is reached when no module exists.
 
-    No module executor exists for it (tmp tools_dir is empty), so this proves
-    real tools that have NOT yet been migrated to ``executor.py`` modules fall
-    through to their legacy ``_execute_<name>`` methods. ``get_task_status``
-    short-circuits on a missing ``task_id`` with a deterministic ToolResult, so
-    no network is touched — what we assert is that the legacy method RAN
-    (returns its own validation message), not module/unknown-tool handling.
+    Migration-proof by construction: rather than naming a REAL tool (every real
+    non-mcp tool is becoming an ``executor.py`` module, so any name we picked
+    would eventually be shadowed by a module executor and stop exercising the
+    legacy rail), we use a SYNTHETIC subclass that defines its own
+    ``_execute_faketool`` and point the registry at an empty tmp tools dir so no
+    module executor can shadow it. This proves the façade falls through to the
+    subclass's legacy method — the same intent as the old real-tool test, but it
+    can never break as more tools migrate.
     """
-    ex = BlackBoxToolExecutor(operator="system")
-    result = asyncio.run(ex.execute("get_task_status", {}))
+    class _Sub(BlackBoxToolExecutor):
+        async def _execute_faketool(self, params):
+            return ToolResult(False, f"legacy ran for {self.operator}")
+
+    ex = _Sub(operator="system")
+    result = asyncio.run(ex.execute("faketool", {}))
 
     assert isinstance(result, ToolResult)
     assert result.success is False
-    assert "Task ID is required" in result.result
+    assert "legacy ran for system" in result.result
 
 
 # ---------------------------------------------------------------------------
