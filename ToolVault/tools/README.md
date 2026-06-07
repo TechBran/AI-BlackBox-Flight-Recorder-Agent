@@ -1,5 +1,7 @@
 # ToolVault v2 — Authoring Guide
 
+> **Just want to add a tool?** Follow the step-by-step playbook in **[`ADDING_A_TOOL.md`](ADDING_A_TOOL.md)** (built for CLI agents). This file is the deeper field reference. A complete working example lives in **`ToolVault/tools/roll_dice/`**.
+
 **Per-tool modules are the single source of truth.** Every tool the BlackBox can
 call lives in its own folder under `ToolVault/tools/<name>/`. The chat injector,
 the MCP server, and the static fallback arrays all *derive* from these modules —

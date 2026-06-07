@@ -224,6 +224,46 @@ def _current():
 # operator enum is normalized away (non-ugv, name-sorted). This proves the
 # x-source change is SURGICAL — the operator enum is the ONLY difference.
 # ---------------------------------------------------------------------------
+def _names_of(fmt, entries):
+    """Set of tool names present in a format's entries (shape-aware)."""
+    if fmt in ("gemini_rest_chat", "gemini_live"):
+        names = set()
+        for wrapper in entries:
+            for key in ("function_declarations", "functionDeclarations"):
+                for d in wrapper.get(key, []):
+                    names.add(d["name"])
+        return names
+    if fmt == "openai_rest_chat":
+        return {t["function"]["name"] for t in entries}
+    return {t["name"] for t in entries}  # anthropic, openai_realtime, mcp
+
+
+def _restrict(fmt, entries, names):
+    """Filter entries to only tools whose name is in `names` (shape-preserving, sorted).
+
+    Lets parity ignore NEW tools added after the golden was captured while still
+    proving every golden tool is byte-identical.
+    """
+    if fmt in ("gemini_rest_chat", "gemini_live"):
+        out = []
+        for wrapper in entries:
+            w = dict(wrapper)
+            for key in ("function_declarations", "functionDeclarations"):
+                if key in w:
+                    w[key] = sorted(
+                        (d for d in w[key] if d["name"] in names),
+                        key=lambda d: d["name"],
+                    )
+            out.append(w)
+        return out
+    if fmt == "openai_rest_chat":
+        return sorted(
+            (t for t in entries if t["function"]["name"] in names),
+            key=lambda t: t["function"]["name"],
+        )
+    return sorted((t for t in entries if t["name"] in names), key=lambda t: t["name"])
+
+
 @pytest.mark.parametrize(
     "fmt",
     [
@@ -239,9 +279,15 @@ def test_format_parity(golden, fmt):
     current = _roundtrip(_current()[fmt])
     # No x-source marker may survive into any provider's output.
     assert _find_xsource_paths(current) == [], f"{fmt} leaked x-source markers"
-    # After dropping the operator enum, everything must match the golden byte-for-byte.
     normalized = _strip_operator_enums(current)
-    assert normalized == golden[fmt], f"{fmt} drifted from golden (beyond operator enum)"
+    golden_names = _names_of(fmt, golden[fmt])
+    # No migrated (golden) tool may be LOST.
+    missing = golden_names - _names_of(fmt, normalized)
+    assert not missing, f"{fmt} lost golden tools: {sorted(missing)}"
+    # Every golden tool must be byte-identical (modulo operator enum). NEW tools
+    # added after the golden capture (e.g. roll_dice) are allowed and ignored.
+    restricted = _restrict(fmt, normalized, golden_names)
+    assert restricted == golden[fmt], f"{fmt} drifted from golden (beyond operator enum)"
 
 
 def test_all_formats_present_and_nonempty(golden):
@@ -270,11 +316,12 @@ def test_ugv_absent_from_mcp():
 
 
 # ---------------------------------------------------------------------------
-# TOOL_DEFINITIONS now == 48 canonical, non-ugv tools.
+# TOOL_DEFINITIONS: >= 48 canonical non-ugv tools (48 = migration baseline/floor;
+# tools get added over time, so this is a floor, not an exact count).
 # ---------------------------------------------------------------------------
-def test_tool_definitions_count_and_no_ugv():
+def test_tool_definitions_baseline_and_no_ugv():
     defs = tr.TOOL_DEFINITIONS
-    assert len(defs) == 48, f"expected 48 canonical tools, got {len(defs)}"
+    assert len(defs) >= 48, f"expected >= 48 canonical tools, got {len(defs)}"
     assert not [t for t in defs if t["name"].startswith("ugv_")]
 
 
