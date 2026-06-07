@@ -385,6 +385,46 @@ def startup_assert_url_handlers():
 
 
 @app.on_event("startup")
+def startup_toolvault_embedding_sync():
+    """Sync ToolVault embeddings against the canonical module list, once, at boot.
+
+    Tool modules under ``ToolVault/tools/<name>/`` are the source of truth;
+    ``embeddings.json`` is the only cache. On a fresh install (no embeddings.json)
+    or after a module's description was edited, the affected tools must be
+    (re-)embedded so semantic tool search keeps working. On a warm box (cache
+    present, hashes match) this is a fast no-op.
+
+    A cold install with all 48 tools to embed can take ~30s, so the work runs in
+    a daemon thread to avoid blocking startup (FastAPI serves requests once the
+    startup hooks return). A sync failure (e.g. no GOOGLE_API_KEY) is caught and
+    logged as a warning — it must NEVER crash startup. Embeds that fail keep any
+    prior cached vector intact (see embeddings.sync_embeddings).
+    """
+    def _run():
+        try:
+            from Orchestrator.toolvault import embeddings as tv_embeddings
+            from Orchestrator.toolvault import registry as tv_registry
+
+            canonical = tv_registry.load_canonical()
+            store = tv_embeddings.sync_embeddings(canonical)
+            # sync_embeddings prints its own embedded/skipped/pruned line; mirror
+            # a concise summary into the startup logger for boot-log visibility.
+            logger.info(
+                "[TOOLVAULT] startup embedding sync complete: tools=%d cached=%d",
+                len(canonical), len(store),
+            )
+        except Exception as e:  # noqa: BLE001 — must never crash startup.
+            logger.warning(
+                "[TOOLVAULT] startup embedding sync failed (non-fatal): %s", e,
+            )
+
+    logger.info("Starting ToolVault embedding sync (background)...")
+    threading.Thread(
+        target=_run, name="toolvault-embedding-sync", daemon=True
+    ).start()
+
+
+@app.on_event("startup")
 async def startup_scheduler():
     """Start the cron job scheduler."""
     try:
