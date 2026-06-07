@@ -1,14 +1,11 @@
 """
-ToolVault Configuration - Paths, patterns, and constants.
+ToolVault Configuration - Paths and constants.
 
-The ToolVault is an immutable, append-only volume of tool definitions
-indexed by byte offset with semantic embeddings for O(k) retrieval.
-
-Architecture mirrors the proven snapshot system:
-  Volume file  →  Byte-offset manifest  →  Embedding vectors  →  Hybrid search
+The ToolVault (v2) defines tools as Python modules and indexes them with
+semantic embeddings cached in an embeddings.json store for O(k) retrieval:
+  Tool modules  →  Embedding vectors store  →  Hybrid search
 """
 
-import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -20,68 +17,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # blackbox_poc/
 # Data paths (at project root, alongside Volumes/ and Manifest/)
 # ---------------------------------------------------------------------------
 TOOLVAULT_DIR = PROJECT_ROOT / "ToolVault"
-
-# ---------------------------------------------------------------------------
-# Anchor format
-# ---------------------------------------------------------------------------
-# Human-readable anchors with numbered markers + em-dash (—)
-# Format: === START TOOL 001 — tool_name ===
-#         === END TOOL 001 — tool_name ===
-#
-# Numbers auto-increment on mint. Belt-and-suspenders:
-# name + number for bulletproof START/END pairing.
-
-EM_DASH = "\u2014"  # — (UTF-8: \xe2\x80\x94)
-
-def tool_start_anchor(number: int, name: str) -> str:
-    return f"=== START TOOL {number:03d} {EM_DASH} {name} ==="
-
-def tool_end_anchor(number: int, name: str) -> str:
-    return f"=== END TOOL {number:03d} {EM_DASH} {name} ==="
-
-# ---------------------------------------------------------------------------
-# Regex patterns (text mode - for parsing decoded strings)
-# ---------------------------------------------------------------------------
-START_RX = re.compile(
-    r'^=== START TOOL (\d{3}) \u2014 (.+?) ===$',
-    re.MULTILINE
-)
-END_RX = re.compile(
-    r'^=== END TOOL (\d{3}) \u2014 (.+?) ===$',
-    re.MULTILINE
-)
-
-# Byte-level regex (for scanning raw volume bytes without decoding)
-START_RX_B = re.compile(
-    rb'^=== START TOOL (\d{3}) \xe2\x80\x94 (.+?) ===$',
-    re.MULTILINE
-)
-END_RX_B = re.compile(
-    rb'^=== END TOOL (\d{3}) \xe2\x80\x94 (.+?) ===$',
-    re.MULTILINE
-)
-
-# Field extraction (within a tool block)
-FIELD_RX = re.compile(r'^([A-Z_]+):\s*(.*)$', re.MULTILINE)
-JSON_SCHEMA_RX = re.compile(
-    r'^JSON_SCHEMA:\s*\n(.+?)(?=\n[A-Z_]+:|\n=== END TOOL)',
-    re.MULTILINE | re.DOTALL
-)
-
-# ---------------------------------------------------------------------------
-# Tool block fields (order matters for formatting)
-# ---------------------------------------------------------------------------
-BLOCK_FIELDS = [
-    "NAME",
-    "DESCRIPTION",
-    "CATEGORY",
-    "GROUPS",
-    "PARAMETERS",
-    "RETURNS",
-    "EXAMPLE",
-    "NOTES",
-    "JSON_SCHEMA",
-]
 
 # ---------------------------------------------------------------------------
 # Embedding configuration

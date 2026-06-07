@@ -1,10 +1,8 @@
 """Tests for ToolVault v2 store-based search (Task 2.2).
 
-``semantic_search_store`` and ``hybrid_search_store`` read vectors from the new
+``semantic_search_store`` and ``hybrid_search_store`` read vectors from the
 ``embeddings.json`` store shape (``{name: {"hash","model","vector":[...]}}``)
-built by ``sync_embeddings``. They mirror the existing ``semantic_search`` /
-``hybrid_search`` scoring math, just reading from that store instead of the OLD
-manifest shape (``{name: {"embedding": [...]}}``).
+built by ``sync_embeddings``, blending keyword (40%) + semantic (60%) scores.
 
 Tests are hermetic: ``embeddings.embed_query`` is monkeypatched to a fixed
 vector (never hits the network).
@@ -179,23 +177,3 @@ def test_hybrid_search_store_deterministic(patched_query):
     r2 = embeddings.hybrid_search_store("alpha", descriptions, store, limit=10, threshold=0.0)
     assert r1 == r2
 
-
-# ---------------------------------------------------------------------------
-# Smoke: existing OLD-shape search functions remain intact (Task 6.4 deletes them)
-# ---------------------------------------------------------------------------
-
-def test_existing_semantic_search_still_accepts_old_shape(monkeypatch):
-    monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
-    old_shape = {"t1": {"embedding": [1.0, 0.0]}}
-    results = embeddings.semantic_search("anything", old_shape, limit=5, threshold=0.0)
-    assert results and results[0][0] == "t1"
-
-
-def test_existing_hybrid_search_still_accepts_old_shape(monkeypatch):
-    monkeypatch.setattr(embeddings, "embed_query", lambda q: [1.0, 0.0])
-    old_shape = {"t1": {"embedding": [1.0, 0.0]}}
-    descriptions = {"t1": "some description"}
-    results = embeddings.hybrid_search(
-        "anything", old_shape, descriptions, limit=5, threshold=0.0,
-    )
-    assert any(n == "t1" for n, _ in results)
