@@ -132,17 +132,21 @@ def test_legacy_fallback_when_no_module(tools_dir):
 
 
 def test_legacy_fallback_real_tool_unchanged(tools_dir):
-    """A real existing tool (get_current_time) still dispatches via legacy.
+    """A real un-migrated tool (get_task_status) still dispatches via legacy.
 
     No module executor exists for it (tmp tools_dir is empty), so this proves
-    today's behavior is unchanged: real tools fall through to their legacy
-    ``_execute_<name>`` methods.
+    real tools that have NOT yet been migrated to ``executor.py`` modules fall
+    through to their legacy ``_execute_<name>`` methods. ``get_task_status``
+    short-circuits on a missing ``task_id`` with a deterministic ToolResult, so
+    no network is touched — what we assert is that the legacy method RAN
+    (returns its own validation message), not module/unknown-tool handling.
     """
     ex = BlackBoxToolExecutor(operator="system")
-    result = asyncio.run(ex.execute("get_current_time", {}))
+    result = asyncio.run(ex.execute("get_task_status", {}))
 
     assert isinstance(result, ToolResult)
-    assert result.success is True
+    assert result.success is False
+    assert "Task ID is required" in result.result
 
 
 # ---------------------------------------------------------------------------
