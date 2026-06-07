@@ -1,14 +1,14 @@
-"""Tests for the dispatch façade (Task 5.1).
+"""Tests for the dispatch façade (Task 5.1, updated for 6.4a).
 
-``BlackBoxToolExecutor.execute`` is now MODULE-FIRST: it asks the ToolVault
+``BlackBoxToolExecutor.execute`` is now MODULE-ONLY: it asks the ToolVault
 registry for a per-tool ``executor.py`` (``registry.get_executor``) and runs it
-with a :class:`ToolContext`; only if no module executor exists does it fall back
-to the legacy ``_execute_<name>`` method.
+with a :class:`ToolContext`. Every tool now ships a module executor, so the old
+legacy ``_execute_<name>`` fallback rail was removed in Task 6.4a — a tool with
+no module executor is a hard "Unknown tool" error.
 
-Because NO ``executor.py`` files ship today, every real call still falls through
-to legacy → behavior is unchanged. These tests exercise both rails hermetically
-by pointing ``registry.TOOLS_DIR`` at a ``tmp_path`` and writing throwaway
-modules, restoring the cache afterward.
+These tests exercise the dispatch hermetically by pointing
+``registry.TOOLS_DIR`` at a ``tmp_path`` and writing throwaway modules,
+restoring the cache afterward.
 """
 
 import asyncio
@@ -115,11 +115,14 @@ def test_alias_routes_to_module(tools_dir):
 
 
 # ---------------------------------------------------------------------------
-# 3. Legacy fallback: no module executor → legacy _execute_<name> runs.
+# 3. No legacy fallback: with every tool now a module, a missing module executor
+#    is a hard "Unknown tool" — there is NO ``_execute_<name>`` fallback rail
+#    (removed in Task 6.4a). A subclass defining ``_execute_<name>`` is ignored.
 # ---------------------------------------------------------------------------
 
-def test_legacy_fallback_when_no_module(tools_dir):
+def test_no_legacy_fallback_unknown_tool(tools_dir):
     # tools_dir is empty → get_executor("faketool") returns None.
+    # A legacy ``_execute_faketool`` on a subclass is NOT consulted anymore.
     class _Sub(BlackBoxToolExecutor):
         async def _execute_faketool(self, params):
             return ToolResult(True, f"legacy:{self.operator}:{params.get('x')}")
@@ -127,21 +130,16 @@ def test_legacy_fallback_when_no_module(tools_dir):
     ex = _Sub(operator="Brandon")
     result = asyncio.run(ex.execute("faketool", {"x": 42}))
 
-    assert result.success is True
-    assert "legacy:Brandon:42" in result.result
+    assert result.success is False
+    assert "Unknown tool: faketool" in result.result
 
 
-def test_legacy_fallback_path_is_reached(tools_dir):
-    """The legacy ``_execute_<name>`` rail is reached when no module exists.
+def test_legacy_method_is_not_reached(tools_dir):
+    """The legacy ``_execute_<name>`` rail no longer exists (Task 6.4a).
 
-    Migration-proof by construction: rather than naming a REAL tool (every real
-    non-mcp tool is becoming an ``executor.py`` module, so any name we picked
-    would eventually be shadowed by a module executor and stop exercising the
-    legacy rail), we use a SYNTHETIC subclass that defines its own
-    ``_execute_faketool`` and point the registry at an empty tmp tools dir so no
-    module executor can shadow it. This proves the façade falls through to the
-    subclass's legacy method — the same intent as the old real-tool test, but it
-    can never break as more tools migrate.
+    Even when a subclass defines ``_execute_faketool`` and the registry has no
+    module for it, dispatch returns ``Unknown tool`` rather than invoking the
+    legacy method. Dispatch is now purely module-or-unknown.
     """
     class _Sub(BlackBoxToolExecutor):
         async def _execute_faketool(self, params):
@@ -152,7 +150,7 @@ def test_legacy_fallback_path_is_reached(tools_dir):
 
     assert isinstance(result, ToolResult)
     assert result.success is False
-    assert "legacy ran for system" in result.result
+    assert "Unknown tool: faketool" in result.result
 
 
 # ---------------------------------------------------------------------------

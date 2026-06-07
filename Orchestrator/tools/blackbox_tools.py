@@ -20,7 +20,6 @@ from Orchestrator.tools.tool_registry import (
     get_anthropic_tools,
     get_openai_realtime_tools,
     get_gemini_live_tools,
-    resolve_executor_name,
 )
 
 # =============================================================================
@@ -60,67 +59,34 @@ class BlackBoxToolExecutor:
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Execute a tool and return the result.
 
-        MODULE-FIRST dispatch: ask the ToolVault registry for a per-tool
-        ``executor.py`` (it resolves alias → canonical → ``executor.py``). If one
-        exists, run it with a :class:`ToolContext`. Otherwise fall back to the
-        legacy ``_execute_<name>`` method on this class.
-
-        Until Task 6.2 migrates every executor into a module, NO ``executor.py``
-        files ship, so ``get_executor`` always returns None and every call falls
-        through to legacy — behavior is unchanged today; this just builds the rail.
+        MODULE-ONLY dispatch: ask the ToolVault registry for a per-tool
+        ``executor.py`` (it resolves alias → canonical → ``executor.py``) and run
+        it with a :class:`ToolContext`. Every tool — including ``toolvault`` —
+        now ships an ``executor.py`` module, so there is no legacy fallback: an
+        unknown tool (no module executor) is a hard error.
         """
         from Orchestrator.toolvault import registry
         from Orchestrator.toolvault.context import ToolContext
 
-        # Module-first: a per-tool executor.py wins (handles alias → canonical).
         ex = registry.get_executor(tool_name)
-        if ex is not None:
-            try:
-                return await ex(
-                    tool_input,
-                    ToolContext(operator=self.operator, base_url=self.base_url),
-                )
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                return ToolResult(
-                    success=False,
-                    result=f"Error executing {tool_name}: {str(e)}"
-                )
-
-        # Legacy fallback (until 6.2 migrates all executors).
-        # Resolve aliases (e.g., search_snapshots → search_memory for executor method)
-        legacy = resolve_executor_name(tool_name)
-
-        handler = getattr(self, f"_execute_{legacy}", None)
-        if handler is None:
+        if ex is None:
             return ToolResult(
                 success=False,
-                result=f"Unknown tool: {legacy}"
+                result=f"Unknown tool: {tool_name}"
             )
 
         try:
-            return await handler(tool_input)
+            return await ex(
+                tool_input,
+                ToolContext(operator=self.operator, base_url=self.base_url),
+            )
         except Exception as e:
             import traceback
             traceback.print_exc()
             return ToolResult(
                 success=False,
-                result=f"Error executing {legacy}: {str(e)}"
+                result=f"Error executing {tool_name}: {str(e)}"
             )
-
-    async def _execute_toolvault(self, params: Dict[str, Any]) -> ToolResult:
-        """Execute a ToolVault meta-tool action (search/read/list)."""
-        from Orchestrator.toolvault.meta_tool import execute as tv_execute
-        action = params.get("action", "")
-        # Pass all params except 'action' to the executor
-        action_params = {k: v for k, v in params.items() if k != "action"}
-        result = tv_execute(action, **action_params)
-        return ToolResult(
-            success=result.success,
-            result=result.result,
-            data=result.data if result.data else None,
-        )
 
 
 # =============================================================================
