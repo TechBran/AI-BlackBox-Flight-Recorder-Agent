@@ -15,6 +15,7 @@
       },
       "operator": {
         "type": "string",
+        "x-source": "operators",
         "description": "Operator/user name"
       }
     },

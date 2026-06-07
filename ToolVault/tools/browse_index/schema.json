@@ -11,6 +11,7 @@
     "properties": {
       "operator": {
         "type": "string",
+        "x-source": "operators",
         "description": "Optional. Omit to include ALL operators on this box; pass a name to scope results to one operator."
       },
       "snap_type": {

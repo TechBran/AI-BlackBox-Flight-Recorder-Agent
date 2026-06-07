@@ -25,6 +25,7 @@
       },
       "operator": {
         "type": "string",
+        "x-source": "operators",
         "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
       }
     },
