@@ -252,42 +252,6 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 # Search
 # ---------------------------------------------------------------------------
 
-def semantic_search(
-    query: str,
-    tools_with_embeddings: Dict[str, Dict[str, Any]],
-    limit: int = DEFAULT_SEARCH_LIMIT,
-    threshold: float = SIMILARITY_THRESHOLD,
-) -> List[Tuple[str, float]]:
-    """Semantic search over tool embeddings.
-
-    Args:
-        query: Natural language search query
-        tools_with_embeddings: {name: entry} dict (from manifest.get_tools_with_embeddings)
-        limit: Maximum results to return
-        threshold: Minimum cosine similarity score
-
-    Returns:
-        List of (tool_name, similarity_score) sorted by relevance.
-    """
-    query_vec = embed_query(query)
-    if not query_vec:
-        print("[TOOLVAULT-SEARCH] Query embedding failed")
-        return []
-
-    scores = []
-    for name, entry in tools_with_embeddings.items():
-        embedding = entry.get("embedding")
-        if not embedding:
-            continue
-
-        sim = cosine_similarity(query_vec, embedding)
-        if sim >= threshold:
-            scores.append((name, sim))
-
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return scores[:limit]
-
-
 def keyword_search(
     query: str,
     tools: Dict[str, Dict[str, Any]],
@@ -356,75 +320,11 @@ def keyword_search(
     return scores[:limit]
 
 
-def hybrid_search(
-    query: str,
-    tools_with_embeddings: Dict[str, Dict[str, Any]],
-    tool_descriptions: Dict[str, str],
-    limit: int = DEFAULT_SEARCH_LIMIT,
-    threshold: float = SIMILARITY_THRESHOLD,
-) -> List[Tuple[str, float]]:
-    """Hybrid search combining keyword (40%) and semantic (60%) scores.
-
-    Same weighting as the snapshot hybrid search in fossils.py.
-    This is the primary search interface for the ToolVault.
-
-    Args:
-        query: Natural language query
-        tools_with_embeddings: {name: entry} from manifest
-        tool_descriptions: {name: description} for keyword search
-        limit: Max results
-        threshold: Minimum combined score
-
-    Returns:
-        List of (tool_name, combined_score) sorted by relevance.
-    """
-    # Get candidates from both methods
-    semantic_results = semantic_search(
-        query, tools_with_embeddings,
-        limit=limit * 3,  # Get extra candidates for merging
-        threshold=0.0,    # Don't threshold individual method
-    )
-    keyword_results = keyword_search(
-        query, tools_with_embeddings, tool_descriptions,
-        limit=limit * 3,
-    )
-
-    # Build score maps
-    semantic_scores = dict(semantic_results)
-    keyword_scores = dict(keyword_results)
-
-    # Combine with weights
-    all_names = set(semantic_scores.keys()) | set(keyword_scores.keys())
-    combined = {}
-
-    for name in all_names:
-        kw = keyword_scores.get(name, 0.0)
-        sem = semantic_scores.get(name, 0.0)
-        combined[name] = (KEYWORD_WEIGHT * kw) + (SEMANTIC_WEIGHT * sem)
-
-    # Filter by threshold and sort
-    results = [(name, score) for name, score in combined.items() if score >= threshold]
-    results.sort(key=lambda x: x[1], reverse=True)
-
-    Y = "\033[33m"  # Yellow
-    R = "\033[0m"   # Reset
-    top = results[:limit]
-    print(f"{Y}[TOOLVAULT-SEARCH] Hybrid: {len(semantic_results)} semantic + "
-          f"{len(keyword_results)} keyword → {len(top)} results{R}")
-    for name, score in top:
-        print(f"{Y}  ├─ {name:30s} score={score:.3f}{R}")
-
-    return top
-
-
 # ---------------------------------------------------------------------------
 # Search over the embeddings.json store (Task 2.2)
 # ---------------------------------------------------------------------------
-# The functions below mirror semantic_search / hybrid_search exactly, but read
-# vectors from the v2 store shape ({name: {"hash","model","vector":[...]}})
-# produced by sync_embeddings, instead of the OLD manifest shape
-# ({name: {"embedding": [...]}}). The OLD functions above stay intact while the
-# v1 injector is live; they are removed in Task 6.4.
+# These functions read vectors from the v2 store shape
+# ({name: {"hash","model","vector":[...]}}) produced by sync_embeddings.
 
 def semantic_search_store(
     query_vec: List[float],
@@ -466,8 +366,8 @@ def hybrid_search_store(
 ) -> List[Tuple[str, float]]:
     """Hybrid search (keyword + semantic) over the embeddings.json store.
 
-    Replicates ``hybrid_search``'s blend exactly: keyword score (40%) +
-    semantic score (60%), filtered by ``threshold``, sorted desc, top ``limit``.
+    Blends keyword score (40%) + semantic score (60%), filtered by
+    ``threshold``, sorted desc, top ``limit``.
     The query is embedded once via ``embed_query``; per-method results are
     gathered with no individual threshold (limit*3 candidates) before merging.
 
