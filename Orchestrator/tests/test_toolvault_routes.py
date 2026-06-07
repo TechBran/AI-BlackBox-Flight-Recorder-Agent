@@ -12,7 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-EXPECTED_TOOL_COUNT = 48
+# Migration baseline — a FLOOR, not an exact count (tools get added over time).
+BASELINE_TOOL_COUNT = 48
 
 
 @pytest.fixture
@@ -33,10 +34,10 @@ def test_health_ok(client):
     resp = c.get("/toolvault/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["tool_count"] == EXPECTED_TOOL_COUNT
+    assert body["tool_count"] >= BASELINE_TOOL_COUNT
     assert "schema_only" in body
     assert "load_errors" in body
-    assert body["embedding_coverage"]["total"] == EXPECTED_TOOL_COUNT
+    assert body["embedding_coverage"]["total"] >= BASELINE_TOOL_COUNT
 
 
 def test_validate_ok_true(client):
@@ -46,7 +47,7 @@ def test_validate_ok_true(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["tool_count"] == EXPECTED_TOOL_COUNT
+    assert body["tool_count"] >= BASELINE_TOOL_COUNT
     assert body["errors"] == {}
 
 
@@ -64,7 +65,7 @@ def test_reload_calls_sync_and_returns_shape(client):
 
     body = resp.json()
     assert body["reloaded"] is True
-    assert body["tool_count"] == EXPECTED_TOOL_COUNT
+    assert body["tool_count"] >= BASELINE_TOOL_COUNT
     # embedded == len(mocked store) == 1
     assert body["embedded"] == 1
     assert body["errors"] == {}

@@ -651,7 +651,7 @@ curl -X POST http://localhost:9091/toolvault/reload
 ```
 Health/report endpoints: `GET /toolvault/health`, `GET /toolvault/validate`. Module layer lives in `Orchestrator/toolvault/{registry,resolvers,schema_spec,embeddings,injector,meta_tool,context,validate}.py`.
 
-**Full authoring guide:** `ToolVault/tools/README.md`. **Design doc:** `docs/plans/2026-06-06-toolvault-v2-modules-design.md`.
+**Adding a tool (agent playbook):** `ToolVault/tools/ADDING_A_TOOL.md` — the step-by-step procedure (worked example: `ToolVault/tools/roll_dice/`). **Field reference:** `ToolVault/tools/README.md`. **Design doc:** `docs/plans/2026-06-06-toolvault-v2-modules-design.md`.
 
 ## Creating Web Apps
 

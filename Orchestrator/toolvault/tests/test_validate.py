@@ -3,7 +3,7 @@
 Two layers:
 
 * **Real tree** — ``validate_all()`` against the actual ``ToolVault/tools`` must
-  report ``ok=True``, exactly 48 tools, no errors, and full embedding coverage
+  report ``ok=True``, at least 48 tools, no errors, and full embedding coverage
   (embeddings.json ships with the repo).
 * **Hermetic** — point ``registry.TOOLS_DIR`` at a tmp dir with one invalid
   module and confirm ``ok=False`` and the folder appears in ``errors``.
@@ -16,7 +16,8 @@ import pytest
 from Orchestrator.toolvault import registry, validate
 
 
-EXPECTED_TOOL_COUNT = 48
+# Migration baseline — a FLOOR, not an exact count (tools get added over time).
+BASELINE_TOOL_COUNT = 48
 
 
 # ---------------------------------------------------------------------------
@@ -28,18 +29,18 @@ def test_validate_all_real_tree_ok():
     report = validate.validate_all()
 
     assert report["ok"] is True, f"unexpected errors: {report['errors']}"
-    assert report["tool_count"] == EXPECTED_TOOL_COUNT
+    assert report["tool_count"] >= BASELINE_TOOL_COUNT
     assert report["errors"] == {}
 
     cov = report["embedding_coverage"]
-    assert cov["total"] == EXPECTED_TOOL_COUNT
-    assert cov["embedded"] == EXPECTED_TOOL_COUNT
+    assert cov["total"] >= BASELINE_TOOL_COUNT
+    assert cov["embedded"] == cov["total"]  # full coverage (count-agnostic)
 
     # schema_only is a sorted list of valid no-executor tools (the mcp-internal
     # ones). It must be a subset of all tools and contain no error folders.
     assert isinstance(report["schema_only"], list)
     assert report["schema_only"] == sorted(report["schema_only"])
-    assert len(report["schema_only"]) <= EXPECTED_TOOL_COUNT
+    assert len(report["schema_only"]) <= report["tool_count"]
 
 
 def test_cli_main_real_tree_exits_zero():
