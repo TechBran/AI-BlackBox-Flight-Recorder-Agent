@@ -178,3 +178,108 @@ async def test_unowned_line_unknown_sender_dropped(router):
     assert router._chat_calls == []
     assert router._fake_mgr.client.sent == []
     assert router._fake_store.messages == []
+
+
+# ---------------------------------------------------------------------------
+# System/self seed contact must NEVER satisfy the inbound whitelist.
+#
+# ensure_operator_book() auto-injects SEED_CONTACT (the fixed, spoofable system
+# number +17164512527, created_by 'system', tags ['system','self']) into any
+# bookless operator. The whitelist lookup must be READ-ONLY (no book
+# fabrication) and must skip any system/self seed contact, so the seed number
+# can never reach the chat pipeline. A real operator-added self contact
+# (created_by a user, no 'system' tag) must still route.
+# ---------------------------------------------------------------------------
+SEED_NUMBER = "+17164512527"
+
+# A faithful copy of the auto-injected seed contact, as it would land on disk.
+SEED_ON_DISK = {
+    "id": "seedid",
+    "name": "AI BlackBox Flight Recorder",
+    "phone": SEED_NUMBER,
+    "email": "brandon@aiblackboxfc.com",
+    "relationship": "self",
+    "notes": "This is your own phone number. The AI BlackBox system number.",
+    "tags": ["system", "self"],
+    "created_by": "system",
+}
+
+
+def _patch_contacts(monkeypatch, books):
+    """Point the hermetic loader at `books` (deep-copied per call)."""
+    import copy
+    import Orchestrator.contacts as contacts_mod
+    import Orchestrator.config as config_mod
+
+    monkeypatch.setattr(contacts_mod, "load_contacts",
+                        lambda: copy.deepcopy(books))
+    monkeypatch.setattr(config_mod, "USERS_LIST", list(books.keys()) or ["Brandon"])
+
+
+@pytest.mark.asyncio
+async def test_seed_number_dropped_on_owned_bookless_line(router, monkeypatch):
+    # Owner "Brandon" has NO contacts (bookless). The seed number arriving on
+    # Brandon's owned line (span2) must be DROPPED — the lookup must not
+    # fabricate a seed book to whitelist it.
+    _patch_contacts(monkeypatch, {"Brandon": {}})
+    await router.handle_incoming(
+        sender=SEED_NUMBER, body="spoofed", span=2,
+        recvtime="2026-06-07 12:00:00", gateway_id="g1",
+    )
+    assert router._chat_calls == []
+    assert router._fake_mgr.client.sent == []
+    assert router._fake_store.messages == []
+
+
+@pytest.mark.asyncio
+async def test_seed_contact_on_disk_does_not_whitelist(router, monkeypatch):
+    # The seed contact persisted to disk in Brandon's book must NOT whitelist
+    # the seed number on Brandon's owned line (span2). It is skipped.
+    _patch_contacts(monkeypatch, {"Brandon": {"seedid": dict(SEED_ON_DISK)}})
+    await router.handle_incoming(
+        sender=SEED_NUMBER, body="spoofed", span=2,
+        recvtime="2026-06-07 12:00:00", gateway_id="g1",
+    )
+    assert router._chat_calls == []
+    assert router._fake_mgr.client.sent == []
+    assert router._fake_store.messages == []
+
+
+@pytest.mark.asyncio
+async def test_real_self_contact_still_routes(router, monkeypatch):
+    # A REAL self contact the operator added themselves (created_by a user, no
+    # 'system' tag) must still match — operator-texts-their-own-AI preserved.
+    _patch_contacts(monkeypatch, {
+        "Brandon": {
+            "c1": {
+                "name": "Me",
+                "phone": "+13335557777",
+                "relationship": "self",
+                "created_by": "brandon",
+                "tags": ["self"],
+            }
+        }
+    })
+    await router.handle_incoming(
+        sender="+13335557777", body="hi me", span=2,
+        recvtime="2026-06-07 12:00:00", gateway_id="g1",
+    )
+    assert len(router._chat_calls) == 1
+    assert router._chat_calls[0]["operator"] == "Brandon"
+
+
+@pytest.mark.asyncio
+async def test_seed_number_dropped_all_books(router, monkeypatch):
+    # Unowned line (span3) -> all-books pass. Operators are bookless or only
+    # hold the system seed. The seed number must be DROPPED.
+    _patch_contacts(monkeypatch, {
+        "Brandon": {},
+        "Alice": {"seedid": dict(SEED_ON_DISK)},
+    })
+    await router.handle_incoming(
+        sender=SEED_NUMBER, body="spoofed", span=3,
+        recvtime="2026-06-07 12:00:00", gateway_id="g1",
+    )
+    assert router._chat_calls == []
+    assert router._fake_mgr.client.sent == []
+    assert router._fake_store.messages == []

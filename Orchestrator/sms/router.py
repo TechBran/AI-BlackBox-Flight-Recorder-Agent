@@ -37,6 +37,16 @@ class SMSRouter:
         self.manager.set_sms_callback(self.handle_incoming)
         log.info("SMSRouter initialized — listening for incoming SMS across all gateways")
 
+    @staticmethod
+    def _is_system_seed(contact: dict) -> bool:
+        """The auto-injected system/self seed contact must NEVER satisfy the
+        inbound whitelist (its number is fixed + spoofable). Real operator-added
+        self contacts (created_by != 'system') are unaffected."""
+        if (contact.get("created_by") or "") == "system":
+            return True
+        tags = [str(t).lower() for t in (contact.get("tags") or [])]
+        return "system" in tags
+
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
 
@@ -44,14 +54,18 @@ class SMSRouter:
         1. Check if sender IS an operator (matches a "self"/"owner" contact) → route to that operator
         2. Fall back: search all contact books for the number → route to book owner
 
+        The lookup is READ-ONLY: it never fabricates a book (no
+        ensure_operator_book) and skips the auto-injected system/self seed
+        contact so the fixed, spoofable system number can't whitelist itself.
+
         Returns:
             (operator: str, contact: dict) if found, else (None, None)
         """
         try:
-            from Orchestrator.contacts import load_contacts, ensure_operator_book
+            from Orchestrator.contacts import load_contacts
             from Orchestrator.config import USERS_LIST
         except ImportError:
-            from contacts import load_contacts, ensure_operator_book
+            from contacts import load_contacts
             from config import USERS_LIST
 
         data = load_contacts()
@@ -59,9 +73,10 @@ class SMSRouter:
         # Pass 1: Is the sender an operator? (their own phone number)
         # Check contacts tagged as "self", "owner", or with relationship "self"/"owner"
         for operator in USERS_LIST:
-            ensure_operator_book(data, operator)
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
+                if self._is_system_seed(contact):
+                    continue
                 contact_phone = contact.get("phone", "")
                 if not contact_phone or not _phones_match(phone, contact_phone):
                     continue
@@ -76,6 +91,8 @@ class SMSRouter:
         for operator in USERS_LIST:
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
+                if self._is_system_seed(contact):
+                    continue
                 contact_phone = contact.get("phone", "")
                 if contact_phone and _phones_match(phone, contact_phone):
                     return operator, contact
@@ -104,18 +121,23 @@ class SMSRouter:
         A dedicated line can only be reached by someone whitelisted FOR THAT
         OWNER — being in another operator's book does not count.
 
+        READ-ONLY: never fabricates a book (no ensure_operator_book) and skips
+        the auto-injected system/self seed contact, so a bookless owner has an
+        empty whitelist and the fixed system number can't whitelist itself.
+
         Returns:
             (owner, contact) if found in owner's book, else (None, None).
         """
         try:
-            from Orchestrator.contacts import load_contacts, ensure_operator_book
+            from Orchestrator.contacts import load_contacts
         except ImportError:
-            from contacts import load_contacts, ensure_operator_book
+            from contacts import load_contacts
 
         data = load_contacts()
-        ensure_operator_book(data, owner)
         contacts = data.get(owner, {})
         for _cid, contact in contacts.items():
+            if self._is_system_seed(contact):
+                continue
             contact_phone = contact.get("phone", "")
             if contact_phone and _phones_match(sender, contact_phone):
                 return owner, contact
