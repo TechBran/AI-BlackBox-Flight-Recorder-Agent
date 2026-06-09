@@ -10,9 +10,12 @@ def test_new_gateway_v2_shape():
     assert {p["span"] for p in gw["ports"]} == {2, 3, 4, 5}
 
 
-def test_new_gateway_no_hardcoded_secret():
-    gw = gm._new_gateway(name="x", ip="1.1.1.1")  # no AMI env set in tests
-    assert gw["ami"]["secret"] == ""  # never a literal
+def test_new_gateway_no_hardcoded_secret(monkeypatch):
+    # Force "no AMI configured" regardless of the ambient .env so the test is
+    # deterministic. The point: the secret comes from config, never a literal.
+    monkeypatch.setattr(gm._root_config, "ASTERISK_AMI_SECRET", "")
+    gw = gm._new_gateway(name="x", ip="1.1.1.1")
+    assert gw["ami"]["secret"] == ""  # falls back to empty, never a hardcoded literal
 
 
 def test_migrate_legacy_record():
