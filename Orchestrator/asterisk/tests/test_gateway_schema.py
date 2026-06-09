@@ -40,3 +40,25 @@ def test_span_helpers():
     assert gm.spans_for_model("TG100") == [2]
     assert gm.slot_to_span(0) == 2 and gm.slot_to_span(3) == 5
     assert gm.port_count("TG400") == 4
+
+
+def test_new_gateway_has_http_port():
+    gw = gm._new_gateway(name="x", ip="1.1.1.1", http_port=8080)
+    assert gw["http_port"] == 8080
+    gw2 = gm._new_gateway(name="y", ip="1.1.1.2")
+    assert gw2["http_port"] == 80
+
+
+def test_migrate_preserves_http_port():
+    legacy = {"id":"x","name":"old","ip":"1.2.3.4","http_user":"admin","http_password":"p",
+              "http_port":8443,"capacity":2,"phone_numbers":[],"trunk_name":"t","enabled":True}
+    new = gm.migrate_gateway(legacy)
+    assert new["http_port"] == 8443
+
+
+def test_migrate_idempotent_keeps_http_port():
+    legacy = {"id":"x","name":"old","ip":"1.2.3.4","http_user":"admin","http_password":"p",
+              "http_port":8443,"capacity":2,"phone_numbers":[],"trunk_name":"t","enabled":True}
+    once = gm.migrate_gateway(legacy)
+    twice = gm.migrate_gateway(once)
+    assert twice == once and twice["http_port"] == 8443

@@ -6,6 +6,7 @@
     "ip": "192.168.1.200",
     "enabled": true,
     "sip_port": 5060,
+    "http_port": 80,
     "codec": "g722",
     "trunk_name": "tg-example",
     "http": { "user": "admin", "password": "CHANGE_ME" },

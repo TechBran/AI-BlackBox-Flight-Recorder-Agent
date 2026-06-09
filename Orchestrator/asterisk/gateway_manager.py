@@ -118,6 +118,7 @@ def _new_gateway(
         "ip": ip,
         "enabled": True,
         "sip_port": sip_port,
+        "http_port": http_port,
         "codec": codec,
         "trunk_name": f"tg-{name.lower().replace(' ', '-')}",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -141,6 +142,11 @@ def migrate_gateway(gw: dict) -> dict:
         and isinstance(gw.get("ami"), dict)
         and isinstance(gw.get("ports"), list)
     ):
+        # Already v2. Ensure http_port exists (added after the initial v2
+        # cutover). Mutating + returning the same dict keeps idempotency: a
+        # record that already has http_port comes back unchanged.
+        if "http_port" not in gw:
+            gw["http_port"] = 80
         return gw
 
     capacity = gw.get("capacity", _DEFAULT_PORT_COUNT)
@@ -153,6 +159,7 @@ def migrate_gateway(gw: dict) -> dict:
         "ip": gw.get("ip", ""),
         "enabled": gw.get("enabled", True),
         "sip_port": gw.get("sip_port", 5060),
+        "http_port": gw.get("http_port", 80),
         "codec": gw.get("codec", "g722"),
         "trunk_name": gw.get("trunk_name") or f"tg-{name.lower().replace(' ', '-')}",
         "created_at": gw.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
