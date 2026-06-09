@@ -363,8 +363,14 @@ class AMISMSClient:
     # ------------------------------------------------------------------
 
     def on_sms(self, callback: Callable):
-        """Register an async callback: callback(sender, body, span, recvtime, gateway_id)."""
-        self._sms_callbacks.append(callback)
+        """Register an async callback: callback(sender, body, span, recvtime, gateway_id).
+
+        Idempotent: registering the same callback twice is a no-op, so a
+        re-registration (e.g. manager.set_sms_callback + add_gateway, or a
+        double start) can never cause an inbound SMS to be processed twice.
+        """
+        if callback not in self._sms_callbacks:
+            self._sms_callbacks.append(callback)
 
     async def _handle_received_sms(self, msg: dict):
         """Process a ReceivedSMS event, buffering multi-part if needed."""
