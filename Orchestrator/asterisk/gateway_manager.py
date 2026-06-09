@@ -512,12 +512,12 @@ async def send_sms_via_gateway(
     """
     try:
         from Orchestrator.sms import get_ami_client
-        ami = get_ami_client()
-        if not ami or not ami.connected:
+        ami = get_ami_client(gateway["id"])
+        if ami is None or not ami.connected:
             return {"success": False, "error": "AMI client not connected"}
 
-        # Map port/slot to GSM span (TG200: span 2 = slot 1, span 3 = slot 2)
-        span = port + 1  # port 1 -> span 2, port 2 -> span 3
+        # Map 1-based port/slot to GSM span (slot 0 -> span 2, slot 1 -> span 3, ...)
+        span = slot_to_span(port - 1)
         result = await ami.send_sms(to, message, span=span)
         return result
     except Exception as e:

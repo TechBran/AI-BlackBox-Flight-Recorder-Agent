@@ -10,6 +10,9 @@ class FakeClient:
         self.secret = secret
         self.connected = False
         self.disconnected = False
+        self.gateway_id = None
+        self.sms_callbacks = []
+        self.sent = []  # list of (destination, message, span)
 
     async def connect(self):
         self.connected = True
@@ -17,6 +20,13 @@ class FakeClient:
     async def disconnect(self):
         self.disconnected = True
         self.connected = False
+
+    def on_sms(self, cb):
+        self.sms_callbacks.append(cb)
+
+    async def send_sms(self, destination, message, span=2):
+        self.sent.append((destination, message, span))
+        return {"success": True, "error": None}
 
 
 def _gw(id, ip, enabled=True, numbers=None):
@@ -95,3 +105,27 @@ async def test_idempotent_replace():
     first = m.get("a")
     await m.add_gateway(_gw("a", "10.0.0.9"))  # same id, new ip
     assert m.get("a").host == "10.0.0.9" and first.disconnected
+
+
+@pytest.mark.asyncio
+async def test_make_client_stamps_gateway_id():
+    m = AMIConnectionManager(client_factory=FakeClient)
+    await m.add_gateway(_gw("a", "10.0.0.1"))
+    assert m.get("a").gateway_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_set_sms_callback_existing_and_future():
+    m = AMIConnectionManager(client_factory=FakeClient)
+    await m.add_gateway(_gw("a", "10.0.0.1"))
+
+    async def cb(*args):
+        return None
+
+    m.set_sms_callback(cb)
+    # Registered on the existing client
+    assert cb in m.get("a").sms_callbacks
+
+    # And on a gateway added AFTER the callback was set
+    await m.add_gateway(_gw("b", "10.0.0.2"))
+    assert cb in m.get("b").sms_callbacks

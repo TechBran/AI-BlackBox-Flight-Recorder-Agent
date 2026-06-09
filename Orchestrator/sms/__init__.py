@@ -1,45 +1,58 @@
 """
 SMS System for AI BlackBox Flight Recorder.
 
-Uses TG200 AMI (Asterisk Manager Interface) for sending/receiving SMS.
+Uses TG NeoGate AMI (Asterisk Manager Interface) for sending/receiving SMS.
+Multi-gateway: one AMI client per enabled gateway, owned by AMIConnectionManager.
 """
 
-_ami_client = None
+_manager = None
 _sms_router = None
 _message_store = None
 
 
 async def start_sms_system():
-    """Initialize and start the SMS subsystem."""
-    global _ami_client, _sms_router, _message_store
-    from .ami_client import AMISMSClient
+    """Initialize and start the SMS subsystem (one AMI client per gateway)."""
+    from .manager import AMIConnectionManager
     from .message_store import MessageStore
     from .router import SMSRouter
-    from Orchestrator.config import (
-        ASTERISK_AMI_HOST, ASTERISK_AMI_PORT, ASTERISK_AMI_USER, ASTERISK_AMI_SECRET,
-    )
 
+    global _manager, _sms_router, _message_store
     _message_store = MessageStore()
-    _ami_client = AMISMSClient(
-        host=ASTERISK_AMI_HOST, port=ASTERISK_AMI_PORT,
-        username=ASTERISK_AMI_USER, secret=ASTERISK_AMI_SECRET,
-    )
-    await _ami_client.connect()
-    _sms_router = SMSRouter(_ami_client, _message_store)
-    print("[SMS] System started — AMI connected, listening for incoming SMS")
+    _manager = AMIConnectionManager()
+    await _manager.start()  # connects one client per enabled gateway
+    # Router registers its inbound callback via manager.set_sms_callback.
+    _sms_router = SMSRouter(_manager, _message_store)
+    print(f"[SMS] System started — {len(_manager.clients())} gateway(s) connected")
 
 
 async def stop_sms_system():
     """Shut down the SMS subsystem."""
-    global _ami_client
-    if _ami_client:
-        await _ami_client.disconnect()
-        _ami_client = None
+    global _manager, _sms_router, _message_store
+    if _manager is not None:
+        await _manager.stop()
+    _manager = None
+    _sms_router = None
+    _message_store = None
     print("[SMS] System stopped")
 
 
-def get_ami_client():
-    return _ami_client
+def get_ami_client(gateway_id=None):
+    """Return an AMI client.
+
+    With `gateway_id`, returns that gateway's client; otherwise the default
+    (first enabled) gateway's client. None-safe if the system isn't started.
+    Back-compat: existing no-arg callers get the default client.
+    """
+    if _manager is None:
+        return None
+    if gateway_id:
+        return _manager.get(gateway_id)
+    return _manager.default()
+
+
+def get_manager():
+    """Return the AMIConnectionManager (or None if not started)."""
+    return _manager
 
 
 def get_message_store():

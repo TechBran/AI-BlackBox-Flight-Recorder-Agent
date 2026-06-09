@@ -30,12 +30,12 @@ def _phones_match(a: str, b: str) -> bool:
 class SMSRouter:
     """Routes incoming SMS to the correct operator based on contact book."""
 
-    def __init__(self, ami_client, message_store):
-        self.ami = ami_client
+    def __init__(self, manager, message_store):
+        self.manager = manager
         self.store = message_store
-        # Register as the AMI incoming SMS callback
-        self.ami.on_sms(self.handle_incoming)
-        log.info("SMSRouter initialized — listening for incoming SMS")
+        # Register the inbound callback across ALL (current + future) gateways.
+        self.manager.set_sms_callback(self.handle_incoming)
+        log.info("SMSRouter initialized — listening for incoming SMS across all gateways")
 
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
@@ -82,18 +82,19 @@ class SMSRouter:
 
         return None, None
 
-    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str):
-        """Process an incoming SMS from the AMI client.
+    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str, gateway_id: str = None):
+        """Process an incoming SMS from one of the gateway AMI clients.
 
         Args:
             sender: Sender phone number (E.164, e.g. +14108166914)
             body: Decoded message text
             span: GSM span that received the message
             recvtime: Timestamp from TG200 (e.g. "2026-03-25 17:20:48")
+            gateway_id: Id of the gateway that received the message (reply goes back out the same one)
         """
-        log.info("Incoming SMS from %s: %s", sender, body[:80])
+        log.info("Incoming SMS from %s (gateway=%s span=%s): %s", sender, gateway_id, span, body[:80])
 
-        # 1. Find operator by contact match
+        # 1. Find operator by contact match (whitelist gate — unknown senders dropped)
         operator, contact = self._find_operator_by_phone(sender)
         if not operator:
             log.info("Ignoring SMS from unknown number: %s", sender)
@@ -126,11 +127,15 @@ class SMSRouter:
         except Exception:
             log.exception("Chat pipeline failed for SMS from %s", sender)
 
-        # 5. Send reply as SMS segments
+        # 5. Send reply as SMS segments — out the SAME gateway that received it
         if reply:
+            client = self.manager.get(gateway_id) or self.manager.default()
+            if client is None:
+                log.error("No gateway client available to reply to SMS from %s", sender)
+                return
             segments = self._split_sms(reply)
             for i, segment in enumerate(segments):
-                result = await self.ami.send_sms(sender, segment, span=int(span))
+                result = await client.send_sms(sender, segment, span=int(span))
                 now = datetime.now(timezone.utc).isoformat()
                 status = "delivered" if result.get("success") else "failed"
                 self.store.store_message(
@@ -253,24 +258,54 @@ class SMSRouter:
             text = text[split_at:].lstrip()
         return segments[:10]  # Max 10 segments
 
-    async def send_manual(self, operator: str, to: str, message: str, span: int = 2) -> dict:
+    async def send_manual(
+        self,
+        operator: str,
+        to: str,
+        message: str,
+        from_number: str = None,
+        gateway_id: str = None,
+        span: int = None,
+    ) -> dict:
         """Send an SMS manually (from Portal UI).
+
+        Picks the outbound gateway in priority order:
+          1. explicit gateway_id
+          2. from_number resolved to its owning gateway+span
+          3. default (first enabled) gateway
 
         Args:
             operator: Operator sending the message
             to: Destination phone number
             message: Message text
-            span: GSM span (default 2)
+            from_number: Originating line; resolves gateway + span when set
+            gateway_id: Explicit gateway to send through
+            span: GSM span override (defaults to 2 when unresolved)
 
         Returns:
             {"success": bool, "error": str | None, "message_id": int | None}
         """
+        # Resolve which gateway client (and span) to use.
+        client = None
+        if gateway_id:
+            client = self.manager.get(gateway_id)
+        elif from_number:
+            res = self.manager.resolve_for_number(from_number)
+            if res:
+                client, span = res
+        else:
+            client = self.manager.default()
+
+        client = client or self.manager.default()
+        if client is None:
+            return {"success": False, "error": "No gateway available"}
+
         # Look up contact name
         _, contact = self._find_operator_by_phone(to)
         contact_name = contact.get("name", to) if contact else to
 
-        # Send via AMI
-        result = await self.ami.send_sms(to, message, span=span)
+        # Send via the chosen gateway client (span resolution refined in Task 3.3)
+        result = await client.send_sms(to, message, span=int(span) if span else 2)
         status = "delivered" if result.get("success") else "failed"
 
         # Store outbound message

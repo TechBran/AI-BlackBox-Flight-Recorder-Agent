@@ -30,6 +30,7 @@ class AMIConnectionManager:
         self._factory = client_factory
         self._clients: dict = {}   # gateway_id -> client
         self._gateways: dict = {}  # gateway_id -> gw dict
+        self._sms_callback = None  # inbound-SMS callback, fanned out to every client
 
     # ------------------------------------------------------------------
     # Client construction
@@ -40,12 +41,28 @@ class AMIConnectionManager:
             from .ami_client import AMISMSClient  # lazy to avoid cycles
             factory = AMISMSClient
         ami = gw.get("ami", {}) or {}
-        return factory(
+        client = factory(
             host=gw["ip"],
             port=ami["port"],
             username=ami["user"],
             secret=ami["secret"],
         )
+        client.gateway_id = gw["id"]
+        return client
+
+    # ------------------------------------------------------------------
+    # Inbound-SMS callback fan-out
+    # ------------------------------------------------------------------
+    def set_sms_callback(self, cb) -> None:
+        """Register an inbound-SMS callback across all gateways.
+
+        Stores `cb` so late/reconnected gateways added later (via
+        add_gateway) also receive it, and registers it on every client that
+        already exists.
+        """
+        self._sms_callback = cb
+        for client in self._clients.values():
+            client.on_sms(cb)
 
     # ------------------------------------------------------------------
     # Lifecycle (single gateway)
@@ -70,6 +87,9 @@ class AMIConnectionManager:
                 log.exception("Error disconnecting old client for gateway %s", gateway_id)
 
         client = self._make_client(gw)
+        # Late/reconnected gateways must still deliver inbound SMS.
+        if self._sms_callback is not None:
+            client.on_sms(self._sms_callback)
         self._clients[gateway_id] = client
         self._gateways[gateway_id] = gw
 

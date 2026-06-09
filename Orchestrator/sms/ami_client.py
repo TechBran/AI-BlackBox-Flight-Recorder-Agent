@@ -29,6 +29,7 @@ class AMISMSClient:
         self.port = port
         self.username = username
         self.secret = secret
+        self.gateway_id = None  # stamped by AMIConnectionManager
 
         # Connection state
         self._reader: Optional[asyncio.StreamReader] = None
@@ -362,7 +363,7 @@ class AMISMSClient:
     # ------------------------------------------------------------------
 
     def on_sms(self, callback: Callable):
-        """Register an async callback: callback(sender, body, span, recvtime)."""
+        """Register an async callback: callback(sender, body, span, recvtime, gateway_id)."""
         self._sms_callbacks.append(callback)
 
     async def _handle_received_sms(self, msg: dict):
@@ -440,7 +441,7 @@ class AMISMSClient:
         log.info("SMS dispatch: sender=%s body=%r", sender, body[:100])
         for cb in self._sms_callbacks:
             try:
-                await cb(sender, body, span, recvtime)
+                await cb(sender, body, span, recvtime, self.gateway_id)
             except Exception:
                 log.exception("SMS callback error")
 
