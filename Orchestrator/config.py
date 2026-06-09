@@ -576,6 +576,8 @@ ASTERISK_ARI_USER = os.getenv("ASTERISK_ARI_USER", "blackbox")
 ASTERISK_ARI_PASSWORD = os.getenv("ASTERISK_ARI_PASSWORD", "")
 ASTERISK_AUDIOSOCKET_PORT = int(os.getenv("ASTERISK_AUDIOSOCKET_PORT", "9092"))
 TG200_PHONE_NUMBER = os.getenv("TG200_PHONE_NUMBER", "")
+# Encrypts gateway credentials (http.password, ami.secret) at rest. Stable random string.
+TELEPHONY_SECRET_KEY = os.getenv("TELEPHONY_SECRET_KEY", "")
 
 # UGV Beast on-device ER agent (new in 2026-04-18 deployment).
 UGV_ER_URL: str = os.getenv("UGV_ER_URL", "http://ugv-beast:8082")
