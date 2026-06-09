@@ -15,9 +15,15 @@ async def start_sms_system():
     from .ami_client import AMISMSClient
     from .message_store import MessageStore
     from .router import SMSRouter
+    from Orchestrator.config import (
+        ASTERISK_AMI_HOST, ASTERISK_AMI_PORT, ASTERISK_AMI_USER, ASTERISK_AMI_SECRET,
+    )
 
     _message_store = MessageStore()
-    _ami_client = AMISMSClient()
+    _ami_client = AMISMSClient(
+        host=ASTERISK_AMI_HOST, port=ASTERISK_AMI_PORT,
+        username=ASTERISK_AMI_USER, secret=ASTERISK_AMI_SECRET,
+    )
     await _ami_client.connect()
     _sms_router = SMSRouter(_ami_client, _message_store)
     print("[SMS] System started — AMI connected, listening for incoming SMS")

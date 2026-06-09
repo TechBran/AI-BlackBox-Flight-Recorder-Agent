@@ -20,10 +20,10 @@ class AMISMSClient:
 
     def __init__(
         self,
-        host: str = "192.168.1.200",
+        host: str = "",
         port: int = 5038,
-        username: str = "blackbox",
-        secret: str = "6157Ego8@",
+        username: str = "",
+        secret: str = "",
     ):
         self.host = host
         self.port = port
@@ -60,6 +60,12 @@ class AMISMSClient:
     async def connect(self):
         """Open TCP socket, authenticate, and start the read loop."""
         self._shutting_down = False
+        if not self.host or not self.username or not self.secret:
+            log.warning(
+                "AMI credentials not configured "
+                "(ASTERISK_AMI_HOST/USER/SECRET); SMS disabled"
+            )
+            return
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), timeout=10
