@@ -1,0 +1,18 @@
+[
+  {
+    "id": "example01",
+    "name": "Example TG200",
+    "model": "TG200",
+    "ip": "192.168.1.200",
+    "enabled": true,
+    "sip_port": 5060,
+    "codec": "g722",
+    "trunk_name": "tg-example",
+    "http": { "user": "admin", "password": "CHANGE_ME" },
+    "ami": { "port": 5038, "user": "blackbox", "secret": "CHANGE_ME" },
+    "ports": [
+      { "span": 2, "slot": 0, "phone_number": "", "carrier": "", "enabled": true, "operator": "" },
+      { "span": 3, "slot": 1, "phone_number": "", "carrier": "", "enabled": true, "operator": "" }
+    ]
+  }
+]
