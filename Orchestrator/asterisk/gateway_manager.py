@@ -77,6 +77,11 @@ def _build_ports(model: str, phone_numbers: list) -> list:
     """Build the ports[] array for a model, distributing phone numbers into
     the first ports."""
     phone_numbers = phone_numbers or []
+    if len(phone_numbers) > port_count(model):
+        print(
+            f"[GatewayManager] WARNING: {len(phone_numbers)} phone_numbers exceed "
+            f"{port_count(model)} ports for {model}; extra numbers dropped"
+        )
     ports = []
     for slot in range(port_count(model)):
         ports.append({
@@ -143,10 +148,11 @@ def migrate_gateway(gw: dict) -> dict:
         and isinstance(gw.get("ports"), list)
     ):
         # Already v2. Ensure http_port exists (added after the initial v2
-        # cutover). Mutating + returning the same dict keeps idempotency: a
-        # record that already has http_port comes back unchanged.
+        # cutover). Return a COPY when adding it so we never mutate the caller's
+        # dict — and so load_gateways' `migrated != data` compare sees the
+        # change and re-saves. A record that already has http_port is unchanged.
         if "http_port" not in gw:
-            gw["http_port"] = 80
+            return {**gw, "http_port": 80}
         return gw
 
     capacity = gw.get("capacity", _DEFAULT_PORT_COUNT)
@@ -295,9 +301,10 @@ async def check_gateway_status(gateway: dict) -> dict:
     # Try to get SIM info from TG200 HTTP API
     try:
         timeout = aiohttp.ClientTimeout(total=5)
+        http_creds = gateway.get("http", {})
         auth = aiohttp.BasicAuth(
-            gateway.get("http_user", TG200_HTTP_USER),
-            gateway.get("http_password", TG200_HTTP_PASSWORD),
+            http_creds.get("user", TG200_HTTP_USER),
+            http_creds.get("password", TG200_HTTP_PASSWORD),
         )
         async with aiohttp.ClientSession(timeout=timeout, auth=auth) as session:
             # TG200 API endpoint for GSM status (varies by firmware)
