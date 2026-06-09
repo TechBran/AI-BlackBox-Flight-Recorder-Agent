@@ -51,7 +51,7 @@ AI via AudioSocket). So per gateway: `http` = TG Boa GUI, `ami` = **TG-side** AM
 
 ### 🔴 Critical
 1. **Hardcoded, committed AMI secret.** `sms/ami_client.py:25-27` defaults host/user/secret
-   (`6157Ego8@`), in git history (`e5c3cad`). `sms/__init__.py:20` constructs `AMISMSClient()`
+   (`<REDACTED-SECRET>`), in git history (`e5c3cad`). `sms/__init__.py:20` constructs `AMISMSClient()`
    with no args → always uses them. No AMI config var exists (`config.py` has only ARI).
 2. **Credentials scattered / not in the gateway model.** `gateways.json` stores only HTTP creds;
    the SMS (AMI) and call (ARI) creds live elsewhere. `get_ami_client()` is a **singleton** bound
@@ -164,5 +164,5 @@ side, copy-through for the TG) → Done.
 - `gateways.json` schema migration: on load, upgrade old records (add `model` from `capacity`,
   derive `ami` from the env/old defaults once, convert `phone_numbers[]` → `ports[]`).
 - `messages` table: additive `ALTER` only; existing threads keep working (`line_number=''`).
-- Rotate the leaked AMI secret `6157Ego8@` (new NeoGate AMI user + new secret) as part of rollout.
+- Rotate the leaked AMI secret `<REDACTED-SECRET>` (new NeoGate AMI user + new secret) as part of rollout.
 - Prod runs live from the working tree → every committed state must `import Orchestrator.app`.

@@ -52,10 +52,10 @@ Orchestrator/asterisk/gateways.json
 from Orchestrator.asterisk import secrets
 
 def test_roundtrip():
-    enc = secrets.encrypt("6157Ego8@")
-    assert enc != "6157Ego8@"
+    enc = secrets.encrypt("<REDACTED-SECRET>")
+    assert enc != "<REDACTED-SECRET>"
     assert enc.startswith("enc:")
-    assert secrets.decrypt(enc) == "6157Ego8@"
+    assert secrets.decrypt(enc) == "<REDACTED-SECRET>"
 
 def test_plaintext_passthrough_decrypt():
     # legacy/plaintext values decrypt to themselves (migration tolerance)
@@ -78,13 +78,13 @@ def test_mask():
 - Modify: `Orchestrator/sms/__init__.py` — `start_sms_system` reads creds from `config` (still singleton for now).
 - Test: `Orchestrator/sms/tests/test_ami_client_config.py`
 
-**Step 1: Failing test** — assert `AMISMSClient()` has empty defaults (no `6157Ego8@` anywhere in the module): grep-style test reading the source ensures the literal is gone; and `AMISMSClient(host="h", username="u", secret="s")` stores them.
+**Step 1: Failing test** — assert `AMISMSClient()` has empty defaults (no `<REDACTED-SECRET>` anywhere in the module): grep-style test reading the source ensures the literal is gone; and `AMISMSClient(host="h", username="u", secret="s")` stores them.
 **Step 2:** Run → fails.
 **Step 3:** Implement: strip the hardcoded literal; `sms/__init__.py` builds `AMISMSClient(host=ASTERISK_AMI_HOST, port=ASTERISK_AMI_PORT, username=ASTERISK_AMI_USER, secret=ASTERISK_AMI_SECRET)`.
-**Step 4:** Run tests → pass. Confirm `grep -rn "6157Ego8" Orchestrator/` returns nothing.
+**Step 4:** Run tests → pass. Confirm `grep -rn "<REDACTED-SECRET>" Orchestrator/` returns nothing.
 **Step 5: Import gate** then commit.
 
-> NOTE: The real per-gateway creds arrive in Phase 2; this task removes the committed secret immediately and gives a config path. Operator action: set the new AMI user/secret on the NeoGate and in `.env`/`gateways.json`, rotating `6157Ego8@`.
+> NOTE: The real per-gateway creds arrive in Phase 2; this task removes the committed secret immediately and gives a config path. Operator action: set the new AMI user/secret on the NeoGate and in `.env`/`gateways.json`, rotating `<REDACTED-SECRET>`.
 
 ---
 

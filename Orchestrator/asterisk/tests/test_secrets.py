@@ -2,10 +2,12 @@ from Orchestrator.asterisk import secrets
 
 
 def test_roundtrip():
-    enc = secrets.encrypt("6157Ego8@")
-    assert enc != "6157Ego8@"
+    # Neutral fixture — never use a real credential as a test constant.
+    sample = "unit-test-plaintext-7f3a"
+    enc = secrets.encrypt(sample)
+    assert enc != sample
     assert enc.startswith("enc:")
-    assert secrets.decrypt(enc) == "6157Ego8@"
+    assert secrets.decrypt(enc) == sample
 
 
 def test_plaintext_passthrough_decrypt():
