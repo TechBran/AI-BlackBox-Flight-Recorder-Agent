@@ -28,6 +28,66 @@ from Orchestrator.asterisk.config import (
     TG200_HTTP_USER,
     TG200_HTTP_PASSWORD,
 )
+from Orchestrator import config as _root_config
+
+
+# ---------------------------------------------------------------------------
+# Model / span helpers
+# ---------------------------------------------------------------------------
+# NeoGate TG spans start at 2 (span = 2 + slot). One GSM port per slot.
+MODEL_PORTS = {"TG100": 1, "TG200": 2, "TG400": 4, "TG800": 8}
+
+_DEFAULT_MODEL = "TG200"
+_DEFAULT_PORT_COUNT = 2
+
+
+def port_count(model: str) -> int:
+    """Number of GSM ports for a model. Defaults to 2 for unknown models."""
+    return MODEL_PORTS.get(model, _DEFAULT_PORT_COUNT)
+
+
+def slot_to_span(slot: int) -> int:
+    """Map a 0-based slot index to its NeoGate TG span (span = 2 + slot)."""
+    return 2 + slot
+
+
+def spans_for_model(model: str) -> list:
+    """List of GSM spans for a model, e.g. TG800 -> [2,3,4,5,6,7,8,9]."""
+    return [slot_to_span(slot) for slot in range(port_count(model))]
+
+
+def _model_from_capacity(capacity: int) -> str:
+    """Derive a model name from a port capacity (default TG200)."""
+    for model, count in MODEL_PORTS.items():
+        if count == capacity:
+            return model
+    return _DEFAULT_MODEL
+
+
+def _ami_block() -> dict:
+    """Build the AMI creds block from config. Never hardcodes a secret literal."""
+    return {
+        "port": _root_config.ASTERISK_AMI_PORT,
+        "user": _root_config.ASTERISK_AMI_USER or "blackbox",
+        "secret": _root_config.ASTERISK_AMI_SECRET or "",
+    }
+
+
+def _build_ports(model: str, phone_numbers: list) -> list:
+    """Build the ports[] array for a model, distributing phone numbers into
+    the first ports."""
+    phone_numbers = phone_numbers or []
+    ports = []
+    for slot in range(port_count(model)):
+        ports.append({
+            "span": slot_to_span(slot),
+            "slot": slot,
+            "phone_number": phone_numbers[slot] if slot < len(phone_numbers) else "",
+            "carrier": "",
+            "enabled": True,
+            "operator": "",
+        })
+    return ports
 
 
 # ---------------------------------------------------------------------------
@@ -43,22 +103,65 @@ def _new_gateway(
     phone_numbers: list = None,
     capacity: int = 2,
     codec: str = "g722",
+    model: str = None,
 ) -> dict:
-    """Create a new gateway config dict."""
+    """Create a new v2 gateway config dict.
+
+    Backward-compatible signature: still accepts the legacy kwargs the route
+    passes. `model` is optional; if omitted it is derived from `capacity`.
+    """
+    model = model or _model_from_capacity(capacity)
     return {
         "id": str(uuid.uuid4())[:8],
         "name": name,
+        "model": model,
         "ip": ip,
+        "enabled": True,
         "sip_port": sip_port,
-        "http_port": http_port,
-        "http_user": http_user,
-        "http_password": http_password,
-        "phone_numbers": phone_numbers or [],
-        "capacity": capacity,
         "codec": codec,
         "trunk_name": f"tg-{name.lower().replace(' ', '-')}",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "enabled": True,
+        "http": {"user": http_user, "password": http_password},
+        "ami": _ami_block(),
+        "ports": _build_ports(model, phone_numbers),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Migration (legacy flat dict -> v2)
+# ---------------------------------------------------------------------------
+def migrate_gateway(gw: dict) -> dict:
+    """Upgrade a legacy flat gateway record to the v2 shape.
+
+    Idempotent: a record already in v2 shape (dict `http` + dict `ami` +
+    list `ports`) is returned unchanged.
+    """
+    if (
+        isinstance(gw.get("http"), dict)
+        and isinstance(gw.get("ami"), dict)
+        and isinstance(gw.get("ports"), list)
+    ):
+        return gw
+
+    capacity = gw.get("capacity", _DEFAULT_PORT_COUNT)
+    model = gw.get("model") or _model_from_capacity(capacity)
+    name = gw.get("name", "")
+    return {
+        "id": gw.get("id", str(uuid.uuid4())[:8]),
+        "name": name,
+        "model": model,
+        "ip": gw.get("ip", ""),
+        "enabled": gw.get("enabled", True),
+        "sip_port": gw.get("sip_port", 5060),
+        "codec": gw.get("codec", "g722"),
+        "trunk_name": gw.get("trunk_name") or f"tg-{name.lower().replace(' ', '-')}",
+        "created_at": gw.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+        "http": {
+            "user": gw.get("http_user", "admin"),
+            "password": gw.get("http_password", ""),
+        },
+        "ami": _ami_block(),
+        "ports": _build_ports(model, gw.get("phone_numbers", [])),
     }
 
 
@@ -66,12 +169,21 @@ def _new_gateway(
 # Persistence
 # ---------------------------------------------------------------------------
 def load_gateways() -> List[dict]:
-    """Load gateway configs from disk."""
+    """Load gateway configs from disk, migrating any legacy records to v2.
+
+    If migration changed any record, the upgraded list is re-saved
+    (idempotent: a subsequent load makes no further changes).
+    """
     try:
         if os.path.exists(GATEWAYS_FILE):
             with open(GATEWAYS_FILE, "r") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            migrated = [migrate_gateway(gw) for gw in data]
+            if migrated != data:
+                save_gateways(migrated)
+            return migrated
     except (json.JSONDecodeError, OSError) as e:
         print(f"[GatewayManager] Error loading gateways: {e}")
     return []
