@@ -14,7 +14,7 @@
 
 | Property | Value |
 |----------|-------|
-| TG200 AMI | `192.168.1.200:5038`, user `blackbox`, pass `6157Ego8@` |
+| TG200 AMI | `192.168.1.200:5038`, user `blackbox`, pass `<REDACTED-SECRET>` |
 | Active GSM Span | `2` (Quectel EC21, AT&T) |
 | TG200 Phone | `+14103497272` |
 | Operator Prefs | `Manifest/operator_preferences.json` via `state.py` get/set_operator_preference |
