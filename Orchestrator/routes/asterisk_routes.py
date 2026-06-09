@@ -575,13 +575,15 @@ async def asterisk_list_channels():
 @app.get("/asterisk/gateways")
 async def list_gateways():
     """List all configured gateways with live status."""
-    from Orchestrator.asterisk.gateway_manager import load_gateways, check_gateway_status
+    from Orchestrator.asterisk.gateway_manager import (
+        load_gateways, check_gateway_status, redact_gateway
+    )
 
     gateways = load_gateways()
     result = []
     for gw in gateways:
         status = await check_gateway_status(gw)
-        gw_with_status = {**gw, "status": status}
+        gw_with_status = {**redact_gateway(gw), "status": status}
         result.append(gw_with_status)
 
     return {"gateways": result}
@@ -590,7 +592,9 @@ async def list_gateways():
 @app.post("/asterisk/gateways")
 async def add_gateway_endpoint(req: GatewayAddRequest):
     """Add a new TG200 gateway."""
-    from Orchestrator.asterisk.gateway_manager import _new_gateway, add_gateway
+    from Orchestrator.asterisk.gateway_manager import (
+        _new_gateway, add_gateway, redact_gateway
+    )
 
     gateway = _new_gateway(
         name=req.name,
@@ -604,7 +608,7 @@ async def add_gateway_endpoint(req: GatewayAddRequest):
         codec=req.codec,
     )
     add_gateway(gateway)
-    return {"gateway": gateway}
+    return {"gateway": redact_gateway(gateway)}
 
 
 @app.put("/asterisk/gateways/{gateway_id}")
@@ -612,10 +616,16 @@ async def update_gateway_endpoint(gateway_id: str, req: GatewayUpdateRequest):
     """Update a gateway configuration."""
     from Orchestrator.asterisk.gateway_manager import update_gateway
 
+    from Orchestrator.asterisk.gateway_manager import redact_gateway
+
     updates = {k: v for k, v in req.dict().items() if v is not None}
+    # Send-on-change: drop a blank password so an empty field doesn't clobber
+    # the stored secret. (Legacy flat shape; nested-shape conversion is Task 6.2.)
+    if updates.get("http_password", None) == "":
+        updates.pop("http_password", None)
     result = update_gateway(gateway_id, updates)
     if result:
-        return {"gateway": result}
+        return {"gateway": redact_gateway(result)}
     return {"error": "Gateway not found"}
 
 
@@ -641,14 +651,16 @@ async def discover_gateways_endpoint():
 @app.get("/asterisk/gateways/{gateway_id}/status")
 async def gateway_status_endpoint(gateway_id: str):
     """Get detailed status for a specific gateway."""
-    from Orchestrator.asterisk.gateway_manager import get_gateway, check_gateway_status
+    from Orchestrator.asterisk.gateway_manager import (
+        get_gateway, check_gateway_status, redact_gateway
+    )
 
     gateway = get_gateway(gateway_id)
     if not gateway:
         return {"error": "Gateway not found"}
 
     status = await check_gateway_status(gateway)
-    return {"gateway": gateway, "status": status}
+    return {"gateway": redact_gateway(gateway), "status": status}
 
 
 @app.post("/asterisk/gateways/{gateway_id}/test")
