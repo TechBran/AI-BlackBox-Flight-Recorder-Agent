@@ -9,6 +9,10 @@ import { getOperator } from './state-management.js';
 let _pollTimer = null;
 let _currentPhone = null;
 let _isOpen = false;
+// Our sendable lines (enabled gateways' enabled ports with a phone number)
+let _lines = [];
+// Selected "from" line for outbound SMS; '' = use backend default gateway
+let _selectedFromNumber = '';
 
 // ============================================================================
 // Helpers
@@ -76,16 +80,44 @@ async function fetchMessages(phone) {
 
 async function sendMessage(to, message) {
     const op = getOperator();
+    const body = { operator: op, to, message };
+    // Only include from_number when a specific line is selected (omit → backend default)
+    if (_selectedFromNumber) body.from_number = _selectedFromNumber;
     const res = await fetch('/sms/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator: op, to, message })
+        body: JSON.stringify(body)
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
         throw new Error(data.error || data.detail || 'Send failed');
     }
     return data;
+}
+
+// Fetch our sendable lines: enabled gateways' enabled ports with a non-empty phone number
+async function fetchLines() {
+    try {
+        const res = await fetch('/asterisk/gateways');
+        if (!res.ok) return [];
+        const data = await res.json();
+        const gateways = data.gateways || [];
+        const lines = [];
+        for (const gw of gateways) {
+            if (!gw.enabled) continue;
+            const gwName = gw.name || gw.id || '';
+            const ports = gw.ports || [];
+            for (const port of ports) {
+                if (!port.enabled) continue;
+                const number = (port.phone_number || '').trim();
+                if (!number) continue;
+                lines.push({ number, label: `${gwName} · ${number}` });
+            }
+        }
+        return lines;
+    } catch (_) {
+        return [];
+    }
 }
 
 async function fetchUnreadCount() {
@@ -159,10 +191,15 @@ function renderThreadList(threads) {
             const badge = t.unread_count > 0
                 ? `<span class="sms-thread-badge">${t.unread_count}</span>`
                 : '';
+            const lineNumber = (t.line_number || '').trim();
+            const lineLabel = lineNumber
+                ? `<div class="sms-thread-line">via ${escapeHtml(lineNumber)}</div>`
+                : '';
 
             html += `<div class="sms-thread${active}${unread}" data-phone="${escapeHtml(t.phone_number)}">
                 <div class="sms-thread-name">${name}</div>
                 <div class="sms-thread-phone">${phone}</div>
+                ${lineLabel}
                 <div class="sms-thread-preview">${preview}</div>
                 <div class="sms-thread-meta">
                     <span class="sms-thread-time">${time}</span>
@@ -301,9 +338,37 @@ function renderConversation(messages, phone) {
         container.scrollTop = container.scrollHeight;
     });
 
-    // Show compose area
+    // Show compose area (with from-number selector if we have sendable lines)
     const compose = $('smsCompose');
     if (compose) compose.style.display = 'flex';
+    renderFromSelector();
+}
+
+function renderFromSelector() {
+    const host = $('smsFromSelectorRow');
+    if (!host) return;
+    if (!_lines.length) {
+        host.style.display = 'none';
+        host.innerHTML = '';
+        return;
+    }
+    let html = `<label class="sms-from-label" for="smsFromSelect">From:</label>
+        <select id="smsFromSelect" class="sms-from-select">
+            <option value="">Default line</option>`;
+    for (const line of _lines) {
+        const sel = line.number === _selectedFromNumber ? ' selected' : '';
+        html += `<option value="${escapeHtml(line.number)}"${sel}>${escapeHtml(line.label)}</option>`;
+    }
+    html += `</select>`;
+    host.innerHTML = html;
+    host.style.display = 'flex';
+
+    const sel = $('smsFromSelect');
+    if (sel) {
+        sel.addEventListener('change', () => {
+            _selectedFromNumber = sel.value || '';
+        });
+    }
 }
 
 function updateUnreadBadge(count) {
@@ -475,6 +540,14 @@ export async function openSMSInbox() {
     modal.classList.remove('hide');
     _isOpen = true;
     _currentPhone = null;
+    _selectedFromNumber = '';
+
+    // Load our sendable lines (enabled gateways' enabled ports) for the from-number selector
+    try {
+        _lines = await fetchLines();
+    } catch (_) {
+        _lines = [];
+    }
 
     // Clear conversation panel
     const header = $('smsConvHeader');

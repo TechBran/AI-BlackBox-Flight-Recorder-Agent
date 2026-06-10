@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui276"/> <!-- v276: telephony setup wizard — stepper modal (validate -> configure/apply -> done) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui277"/> <!-- v277: web SMS UI line-aware — thread line label + from-number selector -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui276"></script> <!-- v276: telephony setup wizard — stepper modal (validate -> configure/apply -> done) -->
+  <script type="module" src="/ui/app-modular.js?v=genui277"></script> <!-- v277: web SMS UI line-aware — thread line label + from-number selector -->
 </head>
 <body>
   <div class="app">
@@ -1637,6 +1637,7 @@
               <div class="sms-conversation" id="smsConversation">
                   <div class="sms-conv-header" id="smsConvHeader"></div>
                   <div class="sms-conv-messages" id="smsMessages"></div>
+                  <div class="sms-from-row" id="smsFromSelectorRow" style="display:none;"></div>
                   <div class="sms-conv-compose" id="smsCompose">
                       <input type="text" id="smsInput" placeholder="Type a message..." />
                       <button id="btnSMSSend" class="sms-send-btn" title="Send">

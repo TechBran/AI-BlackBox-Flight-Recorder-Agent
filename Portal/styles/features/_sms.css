@@ -174,6 +174,16 @@
     font-variant-numeric: tabular-nums;
 }
 
+.sms-thread-line {
+    font-size: 0.7rem;
+    color: var(--neutral-500);
+    margin-top: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+}
+
 .sms-thread-preview {
     font-size: 0.82rem;
     color: var(--neutral-600);
@@ -587,6 +597,40 @@
 }
 
 .sms-prefs-input:focus {
+    border-color: var(--accent, #6ea8fe);
+}
+
+/* From-number selector (which of OUR lines to send from) */
+.sms-from-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--neutral-200);
+    background: var(--neutral-50);
+    flex-shrink: 0;
+}
+
+.sms-from-label {
+    font-size: 0.75rem;
+    color: var(--neutral-500);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.sms-from-select {
+    flex: 1;
+    min-width: 120px;
+    padding: 5px 8px;
+    border: 1px solid var(--neutral-300);
+    border-radius: var(--radius-sm);
+    background: var(--neutral-150);
+    color: var(--neutral-950);
+    font-size: 0.8rem;
+    outline: none;
+}
+
+.sms-from-select:focus {
     border-color: var(--accent, #6ea8fe);
 }
 
