@@ -1,12 +1,9 @@
 """Gemini Computer Use configuration."""
 
-# Models that support Computer Use
-GEMINI_CU_MODEL = "gemini-2.5-computer-use-preview-10-2025"
-GEMINI_CU_MODEL_PRO = "gemini-3-pro-preview"
-GEMINI_CU_MODEL_FLASH = "gemini-3-flash-preview"
+from Orchestrator.config import CU_GEMINI_MODEL_DEFAULT
 
-# Default model for CU tasks
-DEFAULT_CU_MODEL = GEMINI_CU_MODEL
+# Default model for CU tasks — single source: Orchestrator/config.py
+DEFAULT_CU_MODEL = CU_GEMINI_MODEL_DEFAULT
 
 # Coordinate system — Gemini CU uses normalized coordinates 0-999
 GEMINI_COORD_MAX = 999

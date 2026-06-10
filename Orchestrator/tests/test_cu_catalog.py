@@ -178,3 +178,23 @@ def test_cu_catalog_all_down_falls_back(monkeypatch):
     assert out["source"] == "fallback"
     assert out["models"], "static fallback must not be empty"
     assert all(m.get("backend") for m in out["models"])
+
+
+# ---------------------------------------------------------------------------
+# Single-source model defaults (plan task 3)
+# ---------------------------------------------------------------------------
+
+def test_no_scattered_cu_model_literals():
+    """Defaults come from config; retired Gemini ids are gone."""
+    from Orchestrator.browser import config as bconfig
+    from Orchestrator.gemini_cu import config as gconfig
+
+    assert bconfig.CU_MODEL == CU_MODEL_DEFAULT
+    assert gconfig.DEFAULT_CU_MODEL == CU_GEMINI_MODEL_DEFAULT
+    assert not hasattr(gconfig, "GEMINI_CU_MODEL_PRO"), "retired gemini-3-pro-preview ref must be deleted"
+    assert not hasattr(gconfig, "GEMINI_CU_MODEL_FLASH")
+
+    import inspect
+    from Orchestrator.routes import chat_routes
+    src = inspect.getsource(chat_routes)
+    assert 'model = "claude-opus-4-6"' not in src, "chat_routes must use CU_MODEL_DEFAULT"

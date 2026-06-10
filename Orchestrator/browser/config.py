@@ -7,10 +7,15 @@ import subprocess
 import time as _time
 from pathlib import Path
 
+from Orchestrator.config import (
+    ANTHROPIC_API_KEY, CU_NATIVE_MODE, CU_CHROME_PATH,
+    CU_MODEL_DEFAULT, CU_MAX_ITERATIONS, CU_SESSION_TIMEOUT,
+)
+
 # ── Native Desktop Mode ──
 # When True, CU operates on the real Linux desktop
 # instead of a sandboxed Xvfb virtual display.
-NATIVE_MODE = True
+NATIVE_MODE = CU_NATIVE_MODE
 
 
 def _detect_native_display() -> int:
@@ -239,23 +244,20 @@ XAUTHORITY = _detect_xauthority() if NATIVE_MODE else ""
 DBUS_SESSION_BUS_ADDRESS = _detect_dbus_session() if NATIVE_MODE else ""
 
 # Chrome settings
-CHROME_PATH = "/opt/google/chrome/chrome"
+CHROME_PATH = CU_CHROME_PATH
 BROWSER_PKG_DIR = Path(__file__).parent
 PROFILE_BASE = BROWSER_PKG_DIR / "profiles"
 CDP_PORT = 9222  # Chrome DevTools Protocol debug port
 
 # Agent loop limits
-MAX_ITERATIONS = 100
-SESSION_TIMEOUT = 300  # seconds
+MAX_ITERATIONS = CU_MAX_ITERATIONS
+SESSION_TIMEOUT = CU_SESSION_TIMEOUT  # seconds
 
 # Anthropic Computer Use API
 ANTHROPIC_BETA_HEADER = "computer-use-2025-11-24"
 COMPUTER_TOOL_TYPE = "computer_20251124"
-CU_MODEL = "claude-opus-4-6"
+CU_MODEL = CU_MODEL_DEFAULT
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-
-# API key — imported from main config
-from Orchestrator.config import ANTHROPIC_API_KEY
 
 # Domain security
 # Always block dangerous domains. In native mode, allow localhost but block cloud metadata.
