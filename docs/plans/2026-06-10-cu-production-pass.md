@@ -273,7 +273,26 @@ def _fetch_cu_models() -> dict | None:
     return _wrap("computer-use", merged, "live") if any_live else None
 ```
 
-5. Register: `_FETCHERS["computer-use"] = _fetch_cu_models` is WRONG (it would recurse through `_FETCHERS` mutation in tests) — instead, in `get_available_models`, route explicitly:
+> **AMENDMENT (post-review, 2026-06-10):** The original `_fetch_cu_models` above has a
+> defect found by live probe during code review: `_fetch_openai_models` carries a chat
+> prefix gate (`gpt-`/`o`) so `computer-use-preview` can NEVER reach the CU filter, and
+> OpenAI's catalog may not list the CUA model at all (access-gated) — the OpenAI backend
+> would be permanently absent from a "live" merge. Corrected semantics (implemented):
+> - Per vendor: on live models passing the filter → `backends[vendor]="live"`, append them.
+>   On live-but-zero-after-filter → `backends[vendor]="fallback"`, append that vendor's
+>   entries from `_FALLBACK_MODELS["computer-use"]` (backfill — covers both the prefix
+>   gate and filter rot). On fetch error/None → `backends[vendor]="error"`, append the
+>   same backfill entries, and `logging.warning` the failure (no silent swallowing).
+> - Envelope gains an additive `backends` field (vendor → live|fallback|error) so
+>   frontends/operators can see partial degradation.
+> - Return `None` (→ static fallback path) only when ALL vendors error.
+> - Do NOT loosen `_fetch_openai_models` itself — that would leak CUA models into the
+>   chat dropdown.
+> Extra tests: cache engages on second call (call-counter, `cached: True`), 
+> `default_id == CU_MODEL_DEFAULT`, openai backfill when live-but-filtered-empty,
+> `backends` statuses on mixed failure.
+
+5. Register: `_FETCHERS["computer-use"] = _fetch_cu_models` is WRONG (tests monkeypatch per-vendor entries in that dict) — instead, in `get_available_models`, route explicitly:
 
 ```python
     fetcher = _fetch_cu_models if provider == "computer-use" else _FETCHERS.get(provider)

@@ -92,10 +92,11 @@ def test_cu_catalog_merges_and_filters(monkeypatch):
     assert out["default_id"]
     for m in out["models"]:
         assert m["backend"] in ("anthropic", "google", "openai")
+    assert out["backends"] == {"anthropic": "live", "google": "live", "openai": "live"}
 
 
 def test_cu_catalog_partial_vendor_failure(monkeypatch):
-    """One vendor down -> still live, with the healthy vendors' models."""
+    """Vendors down -> still live; failed vendors contribute static backfill."""
     from Orchestrator.routes import admin_routes
     monkeypatch.setitem(admin_routes._FETCHERS, "anthropic",
         lambda: _mk("anthropic", ["claude-sonnet-4-6"]))
@@ -105,7 +106,68 @@ def test_cu_catalog_partial_vendor_failure(monkeypatch):
 
     out = admin_routes.get_available_models("computer-use")
     assert out["source"] == "live"
-    assert [m["id"] for m in out["models"]] == ["claude-sonnet-4-6"]
+    ids = {m["id"] for m in out["models"]}
+    assert "claude-sonnet-4-6" in ids                            # anthropic live
+    assert "gemini-2.5-computer-use-preview-10-2025" in ids      # google backfill
+    assert "computer-use-preview" in ids                         # openai backfill
+    assert out["backends"] == {
+        "anthropic": "live", "google": "error", "openai": "error"}
+
+
+def test_cu_catalog_openai_backfill_when_filtered_empty(monkeypatch):
+    """OpenAI live but its catalog has no CU model -> backfill from static list."""
+    from Orchestrator.routes import admin_routes
+    monkeypatch.setitem(admin_routes._FETCHERS, "anthropic",
+        lambda: _mk("anthropic", ["claude-opus-4-8"]))
+    monkeypatch.setitem(admin_routes._FETCHERS, "google",
+        lambda: _mk("google", ["gemini-2.5-computer-use-preview-10-2025"]))
+    monkeypatch.setitem(admin_routes._FETCHERS, "openai",
+        lambda: _mk("openai", ["gpt-5.1"]))  # chat-only catalog, no CUA model
+
+    out = admin_routes.get_available_models("computer-use")
+    assert out["source"] == "live"
+    openai_models = [m for m in out["models"] if m["backend"] == "openai"]
+    assert [m["id"] for m in openai_models] == ["computer-use-preview"]
+    assert out["backends"]["openai"] == "fallback"
+    assert out["backends"]["anthropic"] == "live"
+    assert out["backends"]["google"] == "live"
+
+
+def test_cu_catalog_second_call_cached(monkeypatch):
+    """Second request within the TTL is served from cache (no vendor refetch)."""
+    from Orchestrator.routes import admin_routes
+    calls = {"anthropic": 0}
+
+    def _anthropic_counted():
+        calls["anthropic"] += 1
+        return _mk("anthropic", ["claude-opus-4-8"])
+
+    monkeypatch.setitem(admin_routes._FETCHERS, "anthropic", _anthropic_counted)
+    monkeypatch.setitem(admin_routes._FETCHERS, "google",
+        lambda: _mk("google", ["gemini-2.5-computer-use-preview-10-2025"]))
+    monkeypatch.setitem(admin_routes._FETCHERS, "openai",
+        lambda: _mk("openai", ["computer-use-preview"]))
+
+    first = admin_routes.get_available_models("computer-use")
+    assert first["cached"] is False
+    assert calls["anthropic"] == 1
+
+    second = admin_routes.get_available_models("computer-use")
+    assert second["cached"] is True
+    assert calls["anthropic"] == 1, "cached call must not refetch vendors"
+
+
+def test_cu_catalog_default_id_is_config_default(monkeypatch):
+    from Orchestrator.routes import admin_routes
+    monkeypatch.setitem(admin_routes._FETCHERS, "anthropic",
+        lambda: _mk("anthropic", ["claude-opus-4-8"]))
+    monkeypatch.setitem(admin_routes._FETCHERS, "google",
+        lambda: _mk("google", ["gemini-2.5-computer-use-preview-10-2025"]))
+    monkeypatch.setitem(admin_routes._FETCHERS, "openai",
+        lambda: _mk("openai", ["computer-use-preview"]))
+
+    out = admin_routes.get_available_models("computer-use")
+    assert out["default_id"] == CU_MODEL_DEFAULT
 
 
 def test_cu_catalog_all_down_falls_back(monkeypatch):

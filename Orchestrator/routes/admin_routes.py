@@ -717,27 +717,50 @@ def _fetch_xai_models() -> dict | None:
 def _fetch_cu_models() -> dict | None:
     """Merge the three vendor catalogs, filtered to CU-capable models.
 
-    Each vendor fetched independently (per-vendor failure tolerated). Returns
-    None only when EVERY vendor fails, triggering the static fallback.
+    Each vendor fetched independently. Per-vendor status is tracked in a
+    `backends` dict (vendor -> "live" | "fallback" | "error") returned
+    additively on the envelope:
+      - "live"     — vendor responded and >=1 model passed the CU filter
+      - "fallback" — vendor responded but its catalog had no CU model
+                     (e.g. OpenAI's gated computer-use-preview, which the
+                     chat-oriented _fetch_openai_models prefix gate drops);
+                     that vendor's static entries are backfilled
+      - "error"    — vendor fetch raised or returned nothing; static entries
+                     backfilled and a [CU-MODELS] warning is logged
+    Returns None only when EVERY vendor errors, triggering the static
+    fallback path in get_available_models.
     Each model gains a `backend` field used by frontends for grouping and by
     the CU dispatcher for driver routing.
     """
     import re
     merged = []
-    any_live = False
+    backends: dict[str, str] = {}
+    cu_backfill = _FALLBACK_MODELS["computer-use"]
     for backend in ("anthropic", "google", "openai"):
         try:
             result = _FETCHERS[backend]()
-        except Exception:
+        except Exception as e:
+            print(f"[CU-MODELS] {backend} fetch failed: {e}")
             result = None
         if not result:
+            backends[backend] = "error"
+            print(f"[CU-MODELS] {backend} unavailable — backfilling static CU entries")
+            merged.extend(m for m in cu_backfill if m["backend"] == backend)
             continue
-        any_live = True
         pattern = CU_MODEL_FILTERS[backend]
-        for m in result["models"]:
-            if re.match(pattern, m["id"]):
-                merged.append({**m, "backend": backend})
-    return _wrap("computer-use", merged, "live") if any_live else None
+        passed = [{**m, "backend": backend}
+                  for m in result["models"] if re.match(pattern, m["id"])]
+        if passed:
+            backends[backend] = "live"
+            merged.extend(passed)
+        else:
+            backends[backend] = "fallback"
+            merged.extend(m for m in cu_backfill if m["backend"] == backend)
+    if all(status == "error" for status in backends.values()):
+        return None  # full outage -> static-fallback path handles it
+    out = _wrap("computer-use", merged, "live")
+    out["backends"] = backends  # additive; _wrap contract itself unchanged
+    return out
 
 
 _FETCHERS = {
