@@ -813,8 +813,8 @@ def get_available_models(provider: str):
         raise HTTPException(404, f"Unknown provider: {provider}")
 
     # "computer-use" routes to the merged fetcher explicitly — it is NOT in
-    # _FETCHERS (it iterates that dict per-vendor, so registering it there
-    # would recurse and break per-vendor monkeypatching in tests).
+    # _FETCHERS, which holds only the per-vendor fetchers that
+    # _fetch_cu_models composes (and that tests monkeypatch individually).
     fetcher = _fetch_cu_models if provider == "computer-use" else _FETCHERS.get(provider)
     return _models_cache_get(
         provider,
