@@ -264,3 +264,6 @@ Orchestrator/cli_agent/state/zellij_sessions.json
 
 # stray 'script' command capture artifact
 typescript
+
+# git worktrees (superpowers isolated workspaces)
+.worktrees/
