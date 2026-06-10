@@ -64,6 +64,54 @@ def _model_from_capacity(capacity: int) -> str:
     return _DEFAULT_MODEL
 
 
+# ---------------------------------------------------------------------------
+# Discovery fingerprinting (pure helpers — unit-testable without sockets)
+# ---------------------------------------------------------------------------
+# Body tokens that identify a NeoGate when paired with a generic Boa server.
+_NEOGATE_BODY_TOKENS = ("neogate", "astman", "mypbx", "webcgi", "yeastar")
+
+# Standalone body keywords that identify a Yeastar/NeoGate regardless of server.
+_NEOGATE_BODY_KEYWORDS = (
+    "yeastar", "neogate",
+    "tg100", "tg200", "tg400", "tg800",
+    "gsm gateway", "voip gateway",
+)
+
+# Model numbers to scan for in the page body, longest-first so "TG1600" wins
+# over a substring match against shorter ids.
+_MODEL_SCAN_ORDER = ("TG1600", "TG800", "TG400", "TG200", "TG100")
+
+
+def _looks_like_neogate(server_header: str, body: str) -> bool:
+    """Fingerprint a Yeastar/NeoGate TG gateway from an HTTP response.
+
+    Matches if ANY of:
+      - the ``Server`` header contains ``boa`` AND the body contains a NeoGate
+        token (Boa alone is a generic embedded server and must NOT match), OR
+      - the body contains any known Yeastar/NeoGate keyword, OR
+      - the ``Server`` header contains ``yeastar``.
+    """
+    server = (server_header or "").lower()
+    body_l = (body or "").lower()
+
+    if "yeastar" in server:
+        return True
+    if any(kw in body_l for kw in _NEOGATE_BODY_KEYWORDS):
+        return True
+    if "boa" in server and any(tok in body_l for tok in _NEOGATE_BODY_TOKENS):
+        return True
+    return False
+
+
+def _detect_model(body: str) -> str:
+    """Detect the NeoGate TG model from a page body (default ``TG200``)."""
+    body_u = (body or "").upper()
+    for model in _MODEL_SCAN_ORDER:
+        if model in body_u:
+            return model
+    return _DEFAULT_MODEL
+
+
 def _ami_block() -> dict:
     """Build the AMI creds block from config. Never hardcodes a secret literal."""
     return {
@@ -422,29 +470,18 @@ async def discover_gateways(subnet: str = None, timeout: float = 3.0) -> List[di
                 url = f"http://{ip}:{TG200_HTTP_PORT}"
                 async with session.get(url) as resp:
                     if resp.status in (200, 301, 302, 401):
-                        # Check response for Yeastar indicators
+                        # Fingerprint the real NeoGate TG (Boa server +
+                        # astman/mypbx/WebCGI/NeoGate body, or known keywords).
                         text = await resp.text()
-                        is_yeastar = any(kw in text.lower() for kw in [
-                            "yeastar", "tg200", "tg400", "tg800",
-                            "gsm gateway", "voip gateway"
-                        ])
-                        # Also check headers
-                        server = resp.headers.get("Server", "").lower()
-                        if "yeastar" in server:
-                            is_yeastar = True
-
-                        if is_yeastar:
-                            # Determine model from response
-                            model = "TG200"
-                            for m in ["TG800", "TG400", "TG200"]:
-                                if m.lower() in text.lower():
-                                    model = m
-                                    break
-                            capacity = {"TG200": 2, "TG400": 4, "TG800": 8}.get(model, 2)
+                        server = resp.headers.get("Server", "")
+                        if _looks_like_neogate(server, text):
+                            # Determine model from the page body (default TG200).
+                            model = _detect_model(text)
                             return _new_gateway(
                                 name=f"{model} ({ip})",
                                 ip=ip,
-                                capacity=capacity,
+                                capacity=port_count(model),
+                                model=model,
                             )
         except Exception:
             pass
