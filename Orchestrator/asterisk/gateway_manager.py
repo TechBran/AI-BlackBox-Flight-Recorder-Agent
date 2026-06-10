@@ -143,6 +143,35 @@ def _build_ports(model: str, phone_numbers: list) -> list:
     return ports
 
 
+# Editable per-line fields the UI is allowed to set (span/slot are structural).
+_PORT_EDITABLE_FIELDS = ("phone_number", "operator", "enabled", "carrier")
+
+
+def merge_ports(gw: dict, incoming: list) -> None:
+    """Merge editable per-line fields from `incoming` into `gw["ports"]` in place.
+
+    Rows are matched by `span` (falling back to `slot`). Structural fields
+    (span/slot) are never overwritten from client input; only the editable
+    fields in `_PORT_EDITABLE_FIELDS` are applied. Unknown rows are ignored —
+    the model's port count is authoritative.
+    """
+    if not isinstance(incoming, list):
+        return
+    existing = gw.get("ports") or []
+    by_span = {p.get("span"): p for p in existing if isinstance(p, dict)}
+    by_slot = {p.get("slot"): p for p in existing if isinstance(p, dict)}
+    for row in incoming:
+        if not isinstance(row, dict):
+            continue
+        target = by_span.get(row.get("span")) or by_slot.get(row.get("slot"))
+        if target is None:
+            continue
+        for field in _PORT_EDITABLE_FIELDS:
+            if field in row and row[field] is not None:
+                target[field] = row[field]
+    gw["ports"] = existing
+
+
 # ---------------------------------------------------------------------------
 # Gateway data model
 # ---------------------------------------------------------------------------

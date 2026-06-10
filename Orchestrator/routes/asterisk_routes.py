@@ -72,27 +72,37 @@ class GatewayAddRequest(BaseModel):
     """Request to add a new gateway."""
     name: str
     ip: str
+    model: Optional[str] = None
     sip_port: int = 5060
     http_port: int = 80
     http_user: str = "admin"
     http_password: str = "password"
+    ami_user: Optional[str] = None
+    ami_secret: Optional[str] = None
     phone_numbers: List[str] = []
     capacity: int = 2
     codec: str = "g722"
+    # Per-line config: [{span, slot?, phone_number, operator, enabled}]
+    ports: Optional[List[Dict]] = None
 
 
 class GatewayUpdateRequest(BaseModel):
     """Request to update a gateway."""
     name: Optional[str] = None
     ip: Optional[str] = None
+    model: Optional[str] = None
     sip_port: Optional[int] = None
     http_port: Optional[int] = None
     http_user: Optional[str] = None
     http_password: Optional[str] = None
+    ami_user: Optional[str] = None
+    ami_secret: Optional[str] = None
     phone_numbers: Optional[List[str]] = None
     capacity: Optional[int] = None
     codec: Optional[str] = None
     enabled: Optional[bool] = None
+    # Per-line config: [{span, slot?, phone_number, operator, enabled}]
+    ports: Optional[List[Dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +597,7 @@ async def list_gateways():
 async def add_gateway_endpoint(req: GatewayAddRequest):
     """Add a new TG200 gateway."""
     from Orchestrator.asterisk.gateway_manager import (
-        _new_gateway, add_gateway, redact_gateway
+        _new_gateway, add_gateway, redact_gateway, merge_ports
     )
 
     gateway = _new_gateway(
@@ -600,27 +610,90 @@ async def add_gateway_endpoint(req: GatewayAddRequest):
         phone_numbers=req.phone_numbers,
         capacity=req.capacity,
         codec=req.codec,
+        model=req.model,
     )
+    # AMI creds (send-on-change: only override when supplied)
+    if req.ami_user is not None:
+        gateway.setdefault("ami", {})["user"] = req.ami_user
+    if req.ami_secret:
+        gateway.setdefault("ami", {})["secret"] = req.ami_secret
+    # Per-line config: merge editable fields into the model-built ports[]
+    if req.ports:
+        merge_ports(gateway, req.ports)
     add_gateway(gateway)
     return {"gateway": redact_gateway(gateway)}
 
 
 @app.put("/asterisk/gateways/{gateway_id}")
 async def update_gateway_endpoint(gateway_id: str, req: GatewayUpdateRequest):
-    """Update a gateway configuration."""
-    from Orchestrator.asterisk.gateway_manager import update_gateway
+    """Update a gateway configuration.
 
-    from Orchestrator.asterisk.gateway_manager import redact_gateway
+    v2 shape glue: top-level scalars (name/ip/model/codec/sip_port/http_port/
+    enabled) flow straight through. HTTP/AMI creds map into the nested
+    ``http``/``ami`` blocks and are send-on-change (a blank/omitted secret never
+    clobbers the stored one — the GET only ever returns ``has_*`` booleans). The
+    per-line ``ports`` array is MERGED (editable fields only) so structural
+    span/slot mapping is preserved.
+    """
+    from Orchestrator.asterisk.gateway_manager import (
+        update_gateway, redact_gateway, merge_ports, get_gateway,
+    )
 
-    updates = {k: v for k, v in req.dict().items() if v is not None}
-    # Send-on-change: drop a blank password so an empty field doesn't clobber
-    # the stored secret. (Legacy flat shape; nested-shape conversion is Task 6.2.)
-    if updates.get("http_password", None) == "":
-        updates.pop("http_password", None)
+    raw = req.dict(exclude_none=True)
+
+    # Pull the nested/structured fields out of the flat scalar update.
+    http_user = raw.pop("http_user", None)
+    http_password = raw.pop("http_password", None)
+    ami_user = raw.pop("ami_user", None)
+    ami_secret = raw.pop("ami_secret", None)
+    ports = raw.pop("ports", None)
+
+    # Remaining keys are flat scalars the stored record holds at top level.
+    updates = dict(raw)
+
+    # HTTP creds -> nested http{} (send-on-change for the password).
+    if http_user is not None or (http_password not in (None, "")):
+        existing = get_gateway(gateway_id) or {}
+        http_block = dict(existing.get("http") or {})
+        if http_user is not None:
+            http_block["user"] = http_user
+        if http_password not in (None, ""):
+            http_block["password"] = http_password
+        # Preserve the stored (encrypted) password when only the user changed.
+        if "password" not in http_block:
+            http_block["password"] = (existing.get("http") or {}).get("password", "")
+        updates["http"] = http_block
+
+    # AMI creds -> nested ami{} (send-on-change for the secret).
+    if ami_user is not None or (ami_secret not in (None, "")):
+        existing = get_gateway(gateway_id) or {}
+        ami_block = dict(existing.get("ami") or {})
+        if ami_user is not None:
+            ami_block["user"] = ami_user
+        if ami_secret not in (None, ""):
+            ami_block["secret"] = ami_secret
+        if "secret" not in ami_block:
+            ami_block["secret"] = (existing.get("ami") or {}).get("secret", "")
+        updates["ami"] = ami_block
+
     result = update_gateway(gateway_id, updates)
-    if result:
-        return {"gateway": redact_gateway(result)}
-    return {"error": "Gateway not found"}
+    if not result:
+        return {"error": "Gateway not found"}
+
+    # Per-line merge happens against the freshly-updated record, then re-saved.
+    if ports is not None:
+        from Orchestrator.asterisk.gateway_manager import (
+            load_gateways, save_gateways,
+        )
+        gateways = load_gateways()
+        for gw in gateways:
+            if gw["id"] == gateway_id:
+                merge_ports(gw, ports)
+                result = gw
+                break
+        save_gateways(gateways)
+
+    return {"gateway": redact_gateway(result)}
 
 
 @app.delete("/asterisk/gateways/{gateway_id}")

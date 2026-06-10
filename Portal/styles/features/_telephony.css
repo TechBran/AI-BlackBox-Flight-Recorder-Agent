@@ -339,6 +339,80 @@
     margin-top: 8px;
 }
 
+.gateway-form-section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--neutral-500);
+    margin: 10px 0 6px 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--neutral-200);
+}
+
+/* ============================================================================
+   Per-line (ports) table
+   ============================================================================ */
+
+.gateway-ports-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+
+.gateway-ports-table th {
+    text-align: left;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--neutral-500);
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--neutral-200);
+}
+
+.gateway-ports-table td {
+    padding: 6px 6px;
+    border-bottom: 1px solid var(--neutral-100);
+    vertical-align: middle;
+}
+
+.gateway-ports-table input[type="text"],
+.gateway-ports-table select {
+    margin-bottom: 0;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+
+.gateway-ports-table .gw-port-span {
+    font-weight: 600;
+    color: var(--neutral-800);
+    white-space: nowrap;
+}
+
+.gateway-ports-table .gw-port-span-sub,
+.gateway-ports-table .gw-port-signal {
+    display: block;
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--neutral-400);
+}
+
+.gateway-ports-table .gw-port-carrier {
+    color: var(--neutral-700);
+    white-space: nowrap;
+}
+
+.gateway-ports-table .gw-port-enabled {
+    text-align: center;
+}
+
+.gateway-ports-table .gw-port-enabled-cb {
+    width: auto;
+    margin: 0;
+}
+
 /* ============================================================================
    Discovery Spinner
    ============================================================================ */
