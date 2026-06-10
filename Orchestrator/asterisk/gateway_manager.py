@@ -26,8 +26,6 @@ from Orchestrator.asterisk.config import (
     TG200_DEFAULT_IP,
     TG200_SIP_PORT,
     TG200_HTTP_PORT,
-    TG200_HTTP_USER,
-    TG200_HTTP_PASSWORD,
 )
 from Orchestrator.asterisk import secrets
 from Orchestrator import config as _root_config
@@ -348,35 +346,33 @@ async def check_gateway_status(gateway: dict) -> dict:
     except Exception:
         pass
 
-    # Try to get SIM info from TG200 HTTP API
+    # Get SIM/GSM info over AMI (the NeoGate TG has no REST API — Boa server).
+    # `gsm show spans` + `gsm show span N` give real carrier/signal/registration.
+    # The SIM's own MSISDN is NOT exposed by the gateway; phone_number stays
+    # operator-configured in the gateway's ports[].
     try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        http_creds = gateway.get("http", {})
-        # Password may be stored encrypted (enc:...) on disk; decrypt for use.
-        # (Interim: Phase 4 replaces this block entirely. decrypt is
-        # passthrough-safe for legacy plaintext.)
-        auth = aiohttp.BasicAuth(
-            http_creds.get("user", TG200_HTTP_USER),
-            secrets.decrypt(http_creds.get("password", TG200_HTTP_PASSWORD)),
-        )
-        async with aiohttp.ClientSession(timeout=timeout, auth=auth) as session:
-            # TG200 API endpoint for GSM status (varies by firmware)
-            url = f"http://{gateway['ip']}:{gateway.get('http_port', 80)}/api/v1.0/gsm"
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    # Parse SIM slot info
-                    for port in data.get("ports", []):
-                        slot = {
-                            "slot": port.get("port_id", 0),
-                            "status": port.get("status", "unknown"),
-                            "carrier": port.get("operator", ""),
-                            "signal": port.get("signal_strength", 0),
-                            "phone_number": port.get("phone_number", ""),
-                        }
-                        status["sim_slots"].append(slot)
+        from Orchestrator.sms import get_ami_client
+        ami = get_ami_client(gateway["id"])
+        if ami and ami.connected:
+            # Map configured phone numbers by span for quick lookup.
+            phone_by_span = {
+                p.get("span"): p.get("phone_number", "")
+                for p in gateway.get("ports", [])
+            }
+            spans = await ami.get_all_spans()
+            for span in spans:
+                span_num = span.get("span")
+                status["sim_slots"].append({
+                    "slot": span_num - 2 if isinstance(span_num, int) else None,
+                    "span": span_num,
+                    "status": "up" if span.get("up") else "down",
+                    "carrier": span.get("carrier", ""),
+                    "signal": span.get("signal"),
+                    "registered": span.get("registered", False),
+                    "phone_number": phone_by_span.get(span_num, ""),
+                })
     except Exception:
-        # TG200 API may not be accessible or may have different URL format
+        # AMI not connected / not configured — leave sim_slots empty.
         pass
 
     return status
