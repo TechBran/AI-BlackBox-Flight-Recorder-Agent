@@ -25,7 +25,7 @@ from Orchestrator.config import (
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT,
     ARC_DIR, ARTIFACTS_DIR, AUDIO_ENGINE, BLACKBOX_TAILNET_HOSTNAME, CFG,
     CHECKPOINT_AUTO_CREATE_INTERVAL, CHECKPOINT_MIN_SNAPSHOTS, CHECKPOINT_TURNS_TO_COMPRESS,
-    CTX_MAX, CURRENT_OPERATOR, END_RX,
+    CTX_MAX, CU_MODEL_DEFAULT, CU_MODEL_FILTERS, CURRENT_OPERATOR, END_RX,
     GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE,
     MANIFEST, OPENAI_API_KEY, OPENAI_MODEL_DEFAULT,
     SNAPSHOT_INDEX, START_RX, STT_MODEL, TTS_MODEL,
@@ -618,6 +618,12 @@ _FALLBACK_MODELS = {
         {"id": "grok-3-beta", "name": "Grok 3 Beta (legacy)"},
         {"id": "grok-3-mini-beta", "name": "Grok 3 Mini (legacy, visible thinking)"},
     ],
+    "computer-use": [
+        {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "backend": "anthropic"},
+        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "backend": "anthropic"},
+        {"id": "gemini-2.5-computer-use-preview-10-2025", "name": "Gemini CU Preview", "backend": "google"},
+        {"id": "computer-use-preview", "name": "OpenAI Computer Use", "backend": "openai"},
+    ],
 }
 
 # Per-provider default model id — feeds the dropdown's pre-selected option.
@@ -626,6 +632,7 @@ _DEFAULT_MODEL = {
     "anthropic": ANTHROPIC_MODEL_DEFAULT,
     "openai": OPENAI_MODEL_DEFAULT,
     "xai": XAI_MODEL_DEFAULT,
+    "computer-use": CU_MODEL_DEFAULT,
 }
 
 
@@ -707,6 +714,32 @@ def _fetch_xai_models() -> dict | None:
     return _wrap("xai", models, "live") if models else None
 
 
+def _fetch_cu_models() -> dict | None:
+    """Merge the three vendor catalogs, filtered to CU-capable models.
+
+    Each vendor fetched independently (per-vendor failure tolerated). Returns
+    None only when EVERY vendor fails, triggering the static fallback.
+    Each model gains a `backend` field used by frontends for grouping and by
+    the CU dispatcher for driver routing.
+    """
+    import re
+    merged = []
+    any_live = False
+    for backend in ("anthropic", "google", "openai"):
+        try:
+            result = _FETCHERS[backend]()
+        except Exception:
+            result = None
+        if not result:
+            continue
+        any_live = True
+        pattern = CU_MODEL_FILTERS[backend]
+        for m in result["models"]:
+            if re.match(pattern, m["id"]):
+                merged.append({**m, "backend": backend})
+    return _wrap("computer-use", merged, "live") if any_live else None
+
+
 _FETCHERS = {
     "google": _fetch_google_models,
     "anthropic": _fetch_anthropic_models,
@@ -756,7 +789,10 @@ def get_available_models(provider: str):
     if provider not in _FALLBACK_MODELS:
         raise HTTPException(404, f"Unknown provider: {provider}")
 
-    fetcher = _FETCHERS.get(provider)
+    # "computer-use" routes to the merged fetcher explicitly — it is NOT in
+    # _FETCHERS (it iterates that dict per-vendor, so registering it there
+    # would recurse and break per-vendor monkeypatching in tests).
+    fetcher = _fetch_cu_models if provider == "computer-use" else _FETCHERS.get(provider)
     return _models_cache_get(
         provider,
         fetcher=(lambda f=fetcher: f()) if fetcher else (lambda: None),
