@@ -9,6 +9,7 @@
 **Tech Stack:** FastAPI, httpx, google-genai (async client), anthropic + openai SDKs, pytest + monkeypatch, vanilla-JS Portal modules, Jetpack Compose (Android).
 
 **Critical context for the implementer:**
+- **THIS IS A WORKING SYSTEM, NOT A GREENFIELD BUILD.** Both CU paths function in production today: (a) the `use_computer` ToolVault tool-call path (`/browser/run` → tasks.py), and (b) the chat-provider path driven from the UI model selector (`provider: "computer-use"` → `stream_computer_use` / `stream_gemini_computer_use`). Every task is a hardening/refactor of live behavior — preserving what works is the binding constraint from Task 1, not just at the Phase-4 golden test. If a change would alter observable behavior of either path beyond what the task explicitly specifies, stop and flag it instead of proceeding.
 - Working dir is the worktree: `/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/.worktrees/cu-production-pass`. `config.ini`, `.env`, `credentials` are symlinked from the main tree (already done).
 - Tests run with the MAIN tree's venv (untracked, not present in worktree):
   `PY=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Orchestrator/venv/bin/python` then `$PY -m pytest ...`
