@@ -79,6 +79,8 @@ fun SmsInboxScreen(
     val actionMessage by viewModel.actionMessage.collectAsState()
     val smsProvider by viewModel.smsProvider.collectAsState()
     val smsModel by viewModel.smsModel.collectAsState()
+    val lines by viewModel.lines.collectAsState()
+    val selectedFromNumber by viewModel.selectedFromNumber.collectAsState()
 
     LaunchedEffect(origin) { viewModel.initialize(origin, operator) }
     DisposableEffect(Unit) {
@@ -99,6 +101,9 @@ fun SmsInboxScreen(
             contactName = selectedContactName,
             messages = messages,
             isSending = isSending,
+            lines = lines,
+            selectedFromNumber = selectedFromNumber,
+            onSelectFromNumber = { n -> viewModel.setFromNumber(n) },
             onSend = { msg -> viewModel.sendSms(msg) },
             onBack = { viewModel.clearSelection() }
         )
@@ -280,6 +285,14 @@ private fun SmsThreadCard(thread: SmsThread, onClick: () -> Unit) {
                     )
                     Spacer(Modifier.height(2.dp))
                 }
+                if (thread.lineNumber.isNotBlank()) {
+                    Text(
+                        "via ${thread.lineNumber}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Neutral500
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     (if (thread.direction == "outbound") "\u2197 " else "") + thread.lastMessage.take(60),
@@ -305,6 +318,9 @@ private fun SmsConversationView(
     contactName: String,
     messages: List<SmsMsg>,
     isSending: Boolean,
+    lines: List<SmsLine>,
+    selectedFromNumber: String?,
+    onSelectFromNumber: (String?) -> Unit,
     onSend: (String) -> Unit,
     onBack: () -> Unit
 ) {
@@ -360,12 +376,24 @@ private fun SmsConversationView(
             }
         }
 
-        // Compose bar
-        Row(
+        // Compose area: optional from-number selector + text input row
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Neutral100)
                 .navigationBarsPadding()
+        ) {
+        if (lines.isNotEmpty()) {
+            SmsFromNumberSelector(
+                lines = lines,
+                selectedFromNumber = selectedFromNumber,
+                onSelectFromNumber = onSelectFromNumber
+            )
+        }
+        // Compose bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -404,6 +432,90 @@ private fun SmsConversationView(
                 )
             ) {
                 Text("\u2197", fontSize = 20.sp, color = BbxWhite)
+            }
+        }
+        }
+    }
+}
+
+@Composable
+private fun SmsFromNumberSelector(
+    lines: List<SmsLine>,
+    selectedFromNumber: String?,
+    onSelectFromNumber: (String?) -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+
+    val selectedLabel = if (selectedFromNumber.isNullOrBlank()) {
+        "Default line"
+    } else {
+        lines.find { it.number == selectedFromNumber }?.label ?: selectedFromNumber
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            "From",
+            style = MaterialTheme.typography.labelMedium,
+            color = Neutral500
+        )
+        Box(modifier = Modifier.weight(1f)) {
+            Button(
+                onClick = { showMenu = true },
+                modifier = Modifier.fillMaxWidth().height(36.dp),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Neutral200,
+                    contentColor = BbxWhite
+                )
+            ) {
+                Text(
+                    selectedLabel,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                    fontSize = 13.sp
+                )
+                Text(" ▾", color = BbxDim, fontSize = 12.sp)
+            }
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "Default line",
+                            color = if (selectedFromNumber.isNullOrBlank()) BbxAccent else BbxWhite,
+                            fontWeight = if (selectedFromNumber.isNullOrBlank()) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    onClick = {
+                        showMenu = false
+                        onSelectFromNumber(null)
+                    }
+                )
+                lines.forEach { line ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                line.label,
+                                color = if (line.number == selectedFromNumber) BbxAccent else BbxWhite,
+                                fontWeight = if (line.number == selectedFromNumber) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onSelectFromNumber(line.number)
+                        }
+                    )
+                }
             }
         }
     }

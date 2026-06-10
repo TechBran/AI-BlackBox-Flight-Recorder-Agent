@@ -21,6 +21,10 @@
       "message": {
         "type": "string",
         "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+      },
+      "from_number": {
+        "type": "string",
+        "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
       }
     },
     "required": [

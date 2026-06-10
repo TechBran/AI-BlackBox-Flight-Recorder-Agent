@@ -9,7 +9,7 @@ Audio: 16kHz PCM16 (slin16) via AudioSocket — 2x quality of the SIM7600 8kHz p
 
 Endpoints:
   POST /asterisk/call                  — Outbound voice call via TG200
-  POST /asterisk/sms                   — Send SMS via TG200 HTTP API
+  POST /asterisk/sms                   — Send SMS via TG200 over AMI
   GET  /asterisk/status                — Asterisk + TG200 health
   POST /asterisk/hangup/{session_id}   — End call
   GET  /asterisk/channels              — List active Asterisk channels
@@ -61,7 +61,7 @@ class AsteriskCallRequest(BaseModel):
 
 
 class AsteriskSMSRequest(BaseModel):
-    """Request to send an SMS via TG200 HTTP API."""
+    """Request to send an SMS via the TG200 over AMI."""
     to: str
     message: str
     gateway_id: str = ""  # Empty = first available
@@ -72,27 +72,37 @@ class GatewayAddRequest(BaseModel):
     """Request to add a new gateway."""
     name: str
     ip: str
+    model: Optional[str] = None
     sip_port: int = 5060
     http_port: int = 80
     http_user: str = "admin"
     http_password: str = "password"
+    ami_user: Optional[str] = None
+    ami_secret: Optional[str] = None
     phone_numbers: List[str] = []
     capacity: int = 2
     codec: str = "g722"
+    # Per-line config: [{span, slot?, phone_number, operator, enabled}]
+    ports: Optional[List[Dict]] = None
 
 
 class GatewayUpdateRequest(BaseModel):
     """Request to update a gateway."""
     name: Optional[str] = None
     ip: Optional[str] = None
+    model: Optional[str] = None
     sip_port: Optional[int] = None
     http_port: Optional[int] = None
     http_user: Optional[str] = None
     http_password: Optional[str] = None
+    ami_user: Optional[str] = None
+    ami_secret: Optional[str] = None
     phone_numbers: Optional[List[str]] = None
     capacity: Optional[int] = None
     codec: Optional[str] = None
     enabled: Optional[bool] = None
+    # Per-line config: [{span, slot?, phone_number, operator, enabled}]
+    ports: Optional[List[Dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -453,36 +463,30 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
 
 @app.post("/asterisk/sms")
 async def asterisk_send_sms(sms_request: AsteriskSMSRequest):
-    """Send an SMS via TG200 HTTP API."""
-    from Orchestrator.asterisk.gateway_manager import (
-        load_gateways, send_sms_via_gateway, get_gateway
-    )
+    """Send an SMS via the TG200 over AMI (Asterisk Manager Interface).
 
-    # Select gateway
-    if sms_request.gateway_id:
-        gateway = get_gateway(sms_request.gateway_id)
-        if not gateway:
-            return {"error": f"Gateway not found: {sms_request.gateway_id}"}
-    else:
-        gateways = load_gateways()
-        enabled = [gw for gw in gateways if gw.get("enabled", True)]
-        if not enabled:
-            return {"error": "No gateways configured"}
-        gateway = enabled[0]
+    Routed through the SAME SMS router path as POST /sms/send so outbound
+    from-number selection, span resolution and message storage all live in
+    one place.
+    """
+    from Orchestrator.sms import get_router
+
+    sms_router = get_router()
+    if sms_router is None:
+        return {"success": False, "error": "SMS system not started"}
 
     to_number = _normalize_phone(sms_request.to)
-    result = await send_sms_via_gateway(
-        gateway=gateway,
+    result = await sms_router.send_manual(
+        operator="system",
         to=to_number,
         message=sms_request.message,
-        port=sms_request.port,
+        gateway_id=sms_request.gateway_id or None,
     )
 
     return {
-        "success": result["success"],
+        "success": result.get("success", False),
         "error": result.get("error"),
         "to": to_number,
-        "gateway": gateway["name"],
     }
 
 
@@ -575,13 +579,15 @@ async def asterisk_list_channels():
 @app.get("/asterisk/gateways")
 async def list_gateways():
     """List all configured gateways with live status."""
-    from Orchestrator.asterisk.gateway_manager import load_gateways, check_gateway_status
+    from Orchestrator.asterisk.gateway_manager import (
+        load_gateways, check_gateway_status, redact_gateway
+    )
 
     gateways = load_gateways()
     result = []
     for gw in gateways:
         status = await check_gateway_status(gw)
-        gw_with_status = {**gw, "status": status}
+        gw_with_status = {**redact_gateway(gw), "status": status}
         result.append(gw_with_status)
 
     return {"gateways": result}
@@ -590,7 +596,9 @@ async def list_gateways():
 @app.post("/asterisk/gateways")
 async def add_gateway_endpoint(req: GatewayAddRequest):
     """Add a new TG200 gateway."""
-    from Orchestrator.asterisk.gateway_manager import _new_gateway, add_gateway
+    from Orchestrator.asterisk.gateway_manager import (
+        _new_gateway, add_gateway, redact_gateway, merge_ports
+    )
 
     gateway = _new_gateway(
         name=req.name,
@@ -602,21 +610,90 @@ async def add_gateway_endpoint(req: GatewayAddRequest):
         phone_numbers=req.phone_numbers,
         capacity=req.capacity,
         codec=req.codec,
+        model=req.model,
     )
+    # AMI creds (send-on-change: only override when supplied)
+    if req.ami_user is not None:
+        gateway.setdefault("ami", {})["user"] = req.ami_user
+    if req.ami_secret:
+        gateway.setdefault("ami", {})["secret"] = req.ami_secret
+    # Per-line config: merge editable fields into the model-built ports[]
+    if req.ports:
+        merge_ports(gateway, req.ports)
     add_gateway(gateway)
-    return {"gateway": gateway}
+    return {"gateway": redact_gateway(gateway)}
 
 
 @app.put("/asterisk/gateways/{gateway_id}")
 async def update_gateway_endpoint(gateway_id: str, req: GatewayUpdateRequest):
-    """Update a gateway configuration."""
-    from Orchestrator.asterisk.gateway_manager import update_gateway
+    """Update a gateway configuration.
 
-    updates = {k: v for k, v in req.dict().items() if v is not None}
+    v2 shape glue: top-level scalars (name/ip/model/codec/sip_port/http_port/
+    enabled) flow straight through. HTTP/AMI creds map into the nested
+    ``http``/``ami`` blocks and are send-on-change (a blank/omitted secret never
+    clobbers the stored one — the GET only ever returns ``has_*`` booleans). The
+    per-line ``ports`` array is MERGED (editable fields only) so structural
+    span/slot mapping is preserved.
+    """
+    from Orchestrator.asterisk.gateway_manager import (
+        update_gateway, redact_gateway, merge_ports, get_gateway,
+    )
+
+    raw = req.dict(exclude_none=True)
+
+    # Pull the nested/structured fields out of the flat scalar update.
+    http_user = raw.pop("http_user", None)
+    http_password = raw.pop("http_password", None)
+    ami_user = raw.pop("ami_user", None)
+    ami_secret = raw.pop("ami_secret", None)
+    ports = raw.pop("ports", None)
+
+    # Remaining keys are flat scalars the stored record holds at top level.
+    updates = dict(raw)
+
+    # HTTP creds -> nested http{} (send-on-change for the password).
+    if http_user is not None or (http_password not in (None, "")):
+        existing = get_gateway(gateway_id) or {}
+        http_block = dict(existing.get("http") or {})
+        if http_user is not None:
+            http_block["user"] = http_user
+        if http_password not in (None, ""):
+            http_block["password"] = http_password
+        # Preserve the stored (encrypted) password when only the user changed.
+        if "password" not in http_block:
+            http_block["password"] = (existing.get("http") or {}).get("password", "")
+        updates["http"] = http_block
+
+    # AMI creds -> nested ami{} (send-on-change for the secret).
+    if ami_user is not None or (ami_secret not in (None, "")):
+        existing = get_gateway(gateway_id) or {}
+        ami_block = dict(existing.get("ami") or {})
+        if ami_user is not None:
+            ami_block["user"] = ami_user
+        if ami_secret not in (None, ""):
+            ami_block["secret"] = ami_secret
+        if "secret" not in ami_block:
+            ami_block["secret"] = (existing.get("ami") or {}).get("secret", "")
+        updates["ami"] = ami_block
+
     result = update_gateway(gateway_id, updates)
-    if result:
-        return {"gateway": result}
-    return {"error": "Gateway not found"}
+    if not result:
+        return {"error": "Gateway not found"}
+
+    # Per-line merge happens against the freshly-updated record, then re-saved.
+    if ports is not None:
+        from Orchestrator.asterisk.gateway_manager import (
+            load_gateways, save_gateways,
+        )
+        gateways = load_gateways()
+        for gw in gateways:
+            if gw["id"] == gateway_id:
+                merge_ports(gw, ports)
+                result = gw
+                break
+        save_gateways(gateways)
+
+    return {"gateway": redact_gateway(result)}
 
 
 @app.delete("/asterisk/gateways/{gateway_id}")
@@ -641,14 +718,16 @@ async def discover_gateways_endpoint():
 @app.get("/asterisk/gateways/{gateway_id}/status")
 async def gateway_status_endpoint(gateway_id: str):
     """Get detailed status for a specific gateway."""
-    from Orchestrator.asterisk.gateway_manager import get_gateway, check_gateway_status
+    from Orchestrator.asterisk.gateway_manager import (
+        get_gateway, check_gateway_status, redact_gateway
+    )
 
     gateway = get_gateway(gateway_id)
     if not gateway:
         return {"error": "Gateway not found"}
 
     status = await check_gateway_status(gateway)
-    return {"gateway": gateway, "status": status}
+    return {"gateway": redact_gateway(gateway), "status": status}
 
 
 @app.post("/asterisk/gateways/{gateway_id}/test")
@@ -667,3 +746,154 @@ async def test_gateway_endpoint(gateway_id: str):
         "sip_registered": status["sip_registered"],
         "sim_slots": status["sim_slots"],
     }
+
+
+# =============================================================================
+# Setup Wizard (Tasks 5.3 + 5.4)
+#
+# Validate (live green/red checks), one-click Apply (write OUR Asterisk config +
+# reload + hot-reconnect the AMI client), test SMS/call, and a copy-paste config
+# preview (our-side Asterisk config + the TG-side GUI walk-through). The wizard
+# auto-configures OUR side; the TG side is a guided click-through.
+# =============================================================================
+
+class WizardTestSMSRequest(BaseModel):
+    """Body for the wizard test-SMS step."""
+    to: str
+    message: str = ""
+
+
+class WizardTestCallRequest(BaseModel):
+    """Body for the wizard test-call step."""
+    to: str
+
+
+@app.post("/asterisk/gateways/{gateway_id}/validate")
+async def validate_gateway_endpoint(gateway_id: str):
+    """Run live checks and return a structured green/red result for the wizard.
+
+    Reuses ``check_gateway_status`` for reachability (Boa HTTP), the trunk's SIP
+    registration and the per-SIM spans. ``ami_auth`` is whether this gateway's
+    AMI client is currently connected.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway, check_gateway_status
+    from Orchestrator.sms import get_ami_client
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    status = await check_gateway_status(gw)
+    ami = get_ami_client(gateway_id)
+
+    return {
+        "gateway_id": gateway_id,
+        "reachable": status["reachable"],
+        "ami_auth": bool(ami and ami.connected),
+        "spans": status["sim_slots"],
+        "trunk_online": status["sip_registered"],
+    }
+
+
+@app.post("/asterisk/gateways/{gateway_id}/apply")
+async def apply_gateway_endpoint(gateway_id: str):
+    """Write + reload OUR Asterisk config and hot-reconnect the AMI client.
+
+    If the reload failed (e.g. the install-time sudoers rule isn't present yet),
+    ``restart_recommended`` is True so the UI can prompt a full service restart.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway_decrypted
+    from Orchestrator.asterisk import provisioner
+    from Orchestrator.sms import get_manager
+
+    gw = get_gateway_decrypted(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    result = provisioner.apply_gateway(gw)
+
+    mgr = get_manager()
+    if mgr:
+        await mgr.reconnect(gateway_id)
+
+    reload_result = result.get("reload", {})
+    return {
+        "applied": True,
+        "config": result.get("written"),
+        "reload": reload_result,
+        "restart_recommended": not reload_result.get("ok", False),
+    }
+
+
+@app.post("/asterisk/gateways/{gateway_id}/test-sms")
+async def wizard_test_sms_endpoint(gateway_id: str, req: WizardTestSMSRequest):
+    """Send a test SMS through this gateway via the SMS router."""
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+    from Orchestrator.sms import get_router
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    router = get_router()
+    if router is None:
+        return {"success": False, "error": "SMS system not started"}
+
+    result = await router.send_manual(
+        operator="system",
+        to=_normalize_phone(req.to),
+        message=req.message or "BlackBox test SMS",
+        gateway_id=gateway_id,
+    )
+    return result
+
+
+@app.post("/asterisk/gateways/{gateway_id}/test-call")
+async def wizard_test_call_endpoint(gateway_id: str, req: WizardTestCallRequest):
+    """Initiate a test outbound call through this gateway.
+
+    Reuses the existing outbound-call path (``asterisk_outbound_call`` →
+    ``_handle_outbound_call``) so we never duplicate the call state machine; we
+    only pin the gateway's own trunk name.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    call_request = AsteriskCallRequest(
+        to=req.to,
+        operator="system",
+        trunk=gw["trunk_name"],
+    )
+    return await asterisk_outbound_call(call_request)
+
+
+@app.get("/asterisk/gateways/{gateway_id}/config-preview")
+async def gateway_config_preview_endpoint(gateway_id: str):
+    """Return the copy-paste artifacts: OUR Asterisk config + TG GUI steps."""
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+    from Orchestrator.asterisk import provisioner
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    asterisk_conf = provisioner.render_pjsip(gw) + "\n\n" + provisioner.render_shared_dialplan()
+
+    ip = gw["ip"]
+    tg_steps = [
+        f"Open the NeoGate web GUI at http://{ip} and log in.",
+        "Under Gateway → VoIP Settings → VoIP Trunk, add a Service Provider / "
+        "peer trunk pointing at this server's IP on port 5060 "
+        "(no registration; IP-based authentication).",
+        "Create an AMI/API user (the same user/secret you entered here) with "
+        "SMS + Command permissions so the BlackBox can send SMS and read GSM "
+        "status.",
+        "Under Routes, send inbound GSM calls to the VoIP trunk, and allow "
+        "outbound calls from the trunk out to GSM.",
+        "Click Save & Apply on the NeoGate, then click Re-validate here.",
+    ]
+
+    return {"asterisk_conf": asterisk_conf, "tg_steps": tg_steps}

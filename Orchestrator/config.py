@@ -576,6 +576,14 @@ ASTERISK_ARI_USER = os.getenv("ASTERISK_ARI_USER", "blackbox")
 ASTERISK_ARI_PASSWORD = os.getenv("ASTERISK_ARI_PASSWORD", "")
 ASTERISK_AUDIOSOCKET_PORT = int(os.getenv("ASTERISK_AUDIOSOCKET_PORT", "9092"))
 TG200_PHONE_NUMBER = os.getenv("TG200_PHONE_NUMBER", "")
+# TG-side AMI (SMS send/receive + GSM status). Per-gateway creds arrive in Phase 2;
+# these are the singleton fallback. NEVER hardcode the secret.
+ASTERISK_AMI_HOST = os.getenv("ASTERISK_AMI_HOST", "")
+ASTERISK_AMI_PORT = int(os.getenv("ASTERISK_AMI_PORT", "5038"))
+ASTERISK_AMI_USER = os.getenv("ASTERISK_AMI_USER", "")
+ASTERISK_AMI_SECRET = os.getenv("ASTERISK_AMI_SECRET", "")
+# Encrypts gateway credentials (http.password, ami.secret) at rest. Stable random string.
+TELEPHONY_SECRET_KEY = os.getenv("TELEPHONY_SECRET_KEY", "")
 
 # UGV Beast on-device ER agent (new in 2026-04-18 deployment).
 UGV_ER_URL: str = os.getenv("UGV_ER_URL", "http://ugv-beast:8082")

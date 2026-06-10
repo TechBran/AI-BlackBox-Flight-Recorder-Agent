@@ -30,12 +30,22 @@ def _phones_match(a: str, b: str) -> bool:
 class SMSRouter:
     """Routes incoming SMS to the correct operator based on contact book."""
 
-    def __init__(self, ami_client, message_store):
-        self.ami = ami_client
+    def __init__(self, manager, message_store):
+        self.manager = manager
         self.store = message_store
-        # Register as the AMI incoming SMS callback
-        self.ami.on_sms(self.handle_incoming)
-        log.info("SMSRouter initialized — listening for incoming SMS")
+        # Register the inbound callback across ALL (current + future) gateways.
+        self.manager.set_sms_callback(self.handle_incoming)
+        log.info("SMSRouter initialized — listening for incoming SMS across all gateways")
+
+    @staticmethod
+    def _is_system_seed(contact: dict) -> bool:
+        """The auto-injected system/self seed contact must NEVER satisfy the
+        inbound whitelist (its number is fixed + spoofable). Real operator-added
+        self contacts (created_by != 'system') are unaffected."""
+        if (contact.get("created_by") or "") == "system":
+            return True
+        tags = [str(t).lower() for t in (contact.get("tags") or [])]
+        return "system" in tags
 
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
@@ -44,14 +54,18 @@ class SMSRouter:
         1. Check if sender IS an operator (matches a "self"/"owner" contact) → route to that operator
         2. Fall back: search all contact books for the number → route to book owner
 
+        The lookup is READ-ONLY: it never fabricates a book (no
+        ensure_operator_book) and skips the auto-injected system/self seed
+        contact so the fixed, spoofable system number can't whitelist itself.
+
         Returns:
             (operator: str, contact: dict) if found, else (None, None)
         """
         try:
-            from Orchestrator.contacts import load_contacts, ensure_operator_book
+            from Orchestrator.contacts import load_contacts
             from Orchestrator.config import USERS_LIST
         except ImportError:
-            from contacts import load_contacts, ensure_operator_book
+            from contacts import load_contacts
             from config import USERS_LIST
 
         data = load_contacts()
@@ -59,9 +73,10 @@ class SMSRouter:
         # Pass 1: Is the sender an operator? (their own phone number)
         # Check contacts tagged as "self", "owner", or with relationship "self"/"owner"
         for operator in USERS_LIST:
-            ensure_operator_book(data, operator)
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
+                if self._is_system_seed(contact):
+                    continue
                 contact_phone = contact.get("phone", "")
                 if not contact_phone or not _phones_match(phone, contact_phone):
                     continue
@@ -76,25 +91,80 @@ class SMSRouter:
         for operator in USERS_LIST:
             contacts = data.get(operator, {})
             for _cid, contact in contacts.items():
+                if self._is_system_seed(contact):
+                    continue
                 contact_phone = contact.get("phone", "")
                 if contact_phone and _phones_match(phone, contact_phone):
                     return operator, contact
 
         return None, None
 
-    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str):
-        """Process an incoming SMS from the AMI client.
+    def _resolve_line(self, gateway_id, span):
+        """Resolve the line (our number) and its owner from (gateway_id, span).
+
+        Returns:
+            (line_number: str, owner: str | None) — line_number is "" if the
+            gateway/span can't be resolved; owner is None when the port has no
+            dedicated operator.
+        """
+        gw = self.manager.gateways().get(gateway_id) if gateway_id else None
+        if not gw:
+            return "", None
+        for p in gw.get("ports", []) or []:
+            if str(p.get("span")) == str(span):
+                return p.get("phone_number", "") or "", (p.get("operator") or None)
+        return "", None
+
+    def _find_in_operator_book(self, owner, sender):
+        """Match `sender` ONLY against `owner`'s contact book.
+
+        A dedicated line can only be reached by someone whitelisted FOR THAT
+        OWNER — being in another operator's book does not count.
+
+        READ-ONLY: never fabricates a book (no ensure_operator_book) and skips
+        the auto-injected system/self seed contact, so a bookless owner has an
+        empty whitelist and the fixed system number can't whitelist itself.
+
+        Returns:
+            (owner, contact) if found in owner's book, else (None, None).
+        """
+        try:
+            from Orchestrator.contacts import load_contacts
+        except ImportError:
+            from contacts import load_contacts
+
+        data = load_contacts()
+        contacts = data.get(owner, {})
+        for _cid, contact in contacts.items():
+            if self._is_system_seed(contact):
+                continue
+            contact_phone = contact.get("phone", "")
+            if contact_phone and _phones_match(sender, contact_phone):
+                return owner, contact
+        return None, None
+
+    async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str, gateway_id: str = None):
+        """Process an incoming SMS from one of the gateway AMI clients.
 
         Args:
             sender: Sender phone number (E.164, e.g. +14108166914)
             body: Decoded message text
             span: GSM span that received the message
             recvtime: Timestamp from TG200 (e.g. "2026-03-25 17:20:48")
+            gateway_id: Id of the gateway that received the message (reply goes back out the same one)
         """
-        log.info("Incoming SMS from %s: %s", sender, body[:80])
+        log.info("Incoming SMS from %s (gateway=%s span=%s): %s", sender, gateway_id, span, body[:80])
 
-        # 1. Find operator by contact match
-        operator, contact = self._find_operator_by_phone(sender)
+        # 1. Resolve the LINE (our number + owner) from (gateway_id, span).
+        line_number, owner = self._resolve_line(gateway_id, span)
+
+        # 2. Scope the whitelist by line ownership (only ever TIGHTENS).
+        #    Owned line: match ONLY the owner's book. Unowned line: search all.
+        #    Either way, no contact match -> DROP before any chat/task/send/store.
+        if owner:
+            operator, contact = self._find_in_operator_book(owner, sender)
+        else:
+            operator, contact = self._find_operator_by_phone(sender)
         if not operator:
             log.info("Ignoring SMS from unknown number: %s", sender)
             return
@@ -109,7 +179,7 @@ class SMSRouter:
         except (ValueError, TypeError):
             timestamp = datetime.now(timezone.utc).isoformat()
 
-        # 3. Store inbound message
+        # 3. Store inbound message (tagged with the resolved line + gateway)
         self.store.store_message(
             operator=operator,
             direction="inbound",
@@ -117,6 +187,8 @@ class SMSRouter:
             contact_name=contact_name,
             body=body,
             timestamp=timestamp,
+            line_number=line_number,
+            gateway_id=gateway_id or "",
         )
 
         # 4. Process through main chat pipeline (replaces process_incoming_sms)
@@ -126,11 +198,15 @@ class SMSRouter:
         except Exception:
             log.exception("Chat pipeline failed for SMS from %s", sender)
 
-        # 5. Send reply as SMS segments
+        # 5. Send reply as SMS segments — out the SAME gateway that received it
         if reply:
+            client = self.manager.get(gateway_id) or self.manager.default()
+            if client is None:
+                log.error("No gateway client available to reply to SMS from %s", sender)
+                return
             segments = self._split_sms(reply)
             for i, segment in enumerate(segments):
-                result = await self.ami.send_sms(sender, segment, span=int(span))
+                result = await client.send_sms(sender, segment, span=int(span))
                 now = datetime.now(timezone.utc).isoformat()
                 status = "delivered" if result.get("success") else "failed"
                 self.store.store_message(
@@ -141,6 +217,8 @@ class SMSRouter:
                     body=segment,
                     timestamp=now,
                     status=status,
+                    line_number=line_number,
+                    gateway_id=gateway_id or "",
                 )
                 if not result.get("success"):
                     log.error("SMS segment %d/%d send failed: %s", i + 1, len(segments), result.get("error"))
@@ -253,27 +331,67 @@ class SMSRouter:
             text = text[split_at:].lstrip()
         return segments[:10]  # Max 10 segments
 
-    async def send_manual(self, operator: str, to: str, message: str, span: int = 2) -> dict:
+    async def send_manual(
+        self,
+        operator: str,
+        to: str,
+        message: str,
+        from_number: str = None,
+        gateway_id: str = None,
+        span: int = None,
+    ) -> dict:
         """Send an SMS manually (from Portal UI).
+
+        Picks the outbound gateway in priority order:
+          1. explicit gateway_id
+          2. from_number resolved to its owning gateway+span
+          3. default (first enabled) gateway
 
         Args:
             operator: Operator sending the message
             to: Destination phone number
             message: Message text
-            span: GSM span (default 2)
+            from_number: Originating line; resolves gateway + span when set
+            gateway_id: Explicit gateway to send through
+            span: GSM span override (defaults to 2 when unresolved)
 
         Returns:
             {"success": bool, "error": str | None, "message_id": int | None}
         """
+        # Resolve which gateway client (and span) to use.
+        #   line_number tracks the originating line we end up using, so the
+        #   outbound is stored on the correct thread.
+        client = None
+        line_number = ""
+        if gateway_id:
+            client = self.manager.get(gateway_id)
+        elif from_number:
+            res = self.manager.resolve_for_number(from_number)
+            if res:
+                client, span = res
+                line_number = from_number
+        else:
+            client = self.manager.default()
+
+        client = client or self.manager.default()
+        if client is None:
+            return {"success": False, "error": "No gateway available"}
+
+        # The chosen gateway's id (the client carries it; see manager._make_client).
+        resolved_gateway_id = getattr(client, "gateway_id", "") or (gateway_id or "")
+        # Fall back to whatever from-number we were given if we couldn't resolve a line.
+        if not line_number:
+            line_number = from_number or ""
+
         # Look up contact name
         _, contact = self._find_operator_by_phone(to)
         contact_name = contact.get("name", to) if contact else to
 
-        # Send via AMI
-        result = await self.ami.send_sms(to, message, span=span)
+        # Send via the chosen gateway client.
+        result = await client.send_sms(to, message, span=int(span) if span else 2)
         status = "delivered" if result.get("success") else "failed"
 
-        # Store outbound message
+        # Store outbound message (tagged with the resolved line + chosen gateway)
         now = datetime.now(timezone.utc).isoformat()
         msg_id = self.store.store_message(
             operator=operator,
@@ -283,6 +401,8 @@ class SMSRouter:
             body=message,
             timestamp=now,
             status=status,
+            line_number=line_number,
+            gateway_id=resolved_gateway_id,
         )
 
         return {

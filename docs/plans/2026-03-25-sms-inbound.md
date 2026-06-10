@@ -18,7 +18,7 @@
 | **BlackBox IP** | `192.168.1.164` |
 | **AMI Port** | `5038` |
 | **AMI Username** | `blackbox` |
-| **AMI Password** | `6157Ego8@` |
+| **AMI Password** | `<REDACTED-SECRET>` |
 | **API Permitted IP** | `192.168.1.164` (BlackBox only) |
 | **TG200 Phone Number** | `+14103497272` |
 | **Active GSM Span** | `2` (Quectel EC21, AT&T, signal 21/31) |
@@ -35,7 +35,7 @@
 ```
 Action: Login
 Username: blackbox
-Secret: 6157Ego8@
+Secret: <REDACTED-SECRET>
 Events: on
 ```
 Response: `Response: Success\r\nMessage: Authentication accepted`
@@ -146,7 +146,7 @@ class AMISMSClient:
     """Persistent AMI connection for SMS send/receive via TG200."""
 
     def __init__(self, host="192.168.1.200", port=5038,
-                 username="blackbox", secret="6157Ego8@"):
+                 username="blackbox", secret="<REDACTED-SECRET>"):
         self.host = host
         self.port = port
         self.username = username

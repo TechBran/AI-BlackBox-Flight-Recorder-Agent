@@ -721,6 +721,107 @@ for HELPER in blackbox-apt-install blackbox-write-systemd; do
     echo "[install] Installed helper: /usr/local/sbin/${HELPER}"
 done
 
+# ── Step 4g: Asterisk blackbox.d include + ReadWritePaths + scoped reload sudoers (T5.1) ──
+# The telephony production pass auto-configures OUR local Asterisk at runtime by
+# writing trunk/dialplan files into a dedicated include dir and reloading. But
+# ProtectSystem=strict makes /etc read-only in the service's mount namespace, so
+# the runtime can't create that dir or write the configs unless we punch a narrow
+# hole here, ONCE, at install time (as root). This function:
+#   1. creates /etc/asterisk/blackbox.d, owned by the service user;
+#   2. #includes blackbox.d/*.conf from pjsip.conf + extensions.conf (once);
+#   3. punches a ReadWritePaths hole for JUST that dir via a systemd drop-in;
+#   4. grants the service user a scoped NOPASSWD sudoers rule for the two
+#      `asterisk -rx ... reload` commands only.
+# The runtime NEVER writes sudoers / systemd config itself — only the trunk +
+# dialplan .conf files inside blackbox.d, then `sudo asterisk -rx ... reload`.
+#
+# Idempotent: safe to re-run. Paths are overridable via env vars purely so the
+# bash test (scripts/tests/test_install_asterisk_block.sh) can redirect them
+# into a temp sandbox; production always uses the /etc defaults below.
+setup_asterisk_blackbox_include() {
+    local ASTERISK_ETC="${ASTERISK_ETC:-/etc/asterisk}"
+    local BLACKBOX_D="${BLACKBOX_D:-$ASTERISK_ETC/blackbox.d}"
+    local SYSTEMD_DROPIN_DIR="${SYSTEMD_DROPIN_DIR:-/etc/systemd/system/blackbox.service.d}"
+    local SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/blackbox-asterisk}"
+    local SERVICE_USER="${SERVICE_USER:-$REAL_USER}"
+    local INCLUDE_LINE='#include "blackbox.d/*.conf"'
+
+    # ── 1. include dir, owned by the service user ──
+    mkdir -p "$BLACKBOX_D"
+    if [[ -d "$BLACKBOX_D" ]]; then
+        chown "$SERVICE_USER" "$BLACKBOX_D" 2>/dev/null \
+            || echo "[install] WARN: could not chown $BLACKBOX_D to $SERVICE_USER (continuing)"
+    fi
+    echo "[install] Asterisk include dir ready: $BLACKBOX_D (owner $SERVICE_USER)"
+
+    # ── 2. #include the dir from pjsip.conf + extensions.conf, once each ──
+    local conf
+    for conf in pjsip.conf extensions.conf; do
+        local target="$ASTERISK_ETC/$conf"
+        if [[ ! -f "$target" ]]; then
+            echo "[install] WARN: $target not present — skipping include (Asterisk not configured?)"
+            continue
+        fi
+        if grep -qF "$INCLUDE_LINE" "$target"; then
+            echo "[install] $conf already includes blackbox.d/*.conf (skipping)"
+        else
+            printf '\n; Added by BlackBox installer — auto-managed telephony config\n%s\n' \
+                "$INCLUDE_LINE" >> "$target"
+            echo "[install] Appended blackbox.d include to $conf"
+        fi
+    done
+
+    # ── 3. systemd drop-in: ReadWritePaths hole for JUST the include dir ──
+    # The drop-in content uses the LITERAL /etc path the live service needs; only
+    # WHERE the drop-in is written is overridable (for the test sandbox).
+    mkdir -p "$SYSTEMD_DROPIN_DIR"
+    cat > "$SYSTEMD_DROPIN_DIR/asterisk.conf" <<'DROPIN'
+# Asterisk telephony drop-in (T5.1). DO NOT EDIT — install.sh manages this file.
+# Punches a narrow hole through ProtectSystem=strict so the runtime can write
+# auto-generated trunk + dialplan configs into Asterisk's blackbox.d include dir.
+[Service]
+ReadWritePaths=/etc/asterisk/blackbox.d
+DROPIN
+    echo "[install] Wrote systemd drop-in: $SYSTEMD_DROPIN_DIR/asterisk.conf"
+
+    # ── 4. scoped NOPASSWD sudoers rule for the two reload commands only ──
+    cat > "$SUDOERS_FILE" <<SUDOERS
+# Asterisk reload grant (T5.1). DO NOT EDIT — install.sh manages this file.
+# Bounded NOPASSWD for ONLY the two reload subcommands the runtime needs after
+# rewriting blackbox.d configs. No wildcard — literal-arg matching is the
+# security boundary.
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/sbin/asterisk -rx pjsip reload, /usr/sbin/asterisk -rx dialplan reload
+SUDOERS
+    chmod 0440 "$SUDOERS_FILE"
+    # Validate syntax. Skipped in the test sandbox (SKIP_VISUDO=1) so we never
+    # run visudo against temp files. Never leave an invalid sudoers file behind.
+    if [[ "${SKIP_VISUDO:-0}" != "1" ]]; then
+        if ! visudo -cf "$SUDOERS_FILE" >/dev/null; then
+            echo "[install] ERROR: $SUDOERS_FILE failed visudo syntax check — removing" >&2
+            rm -f "$SUDOERS_FILE"
+            return 1
+        fi
+    fi
+    echo "[install] Wrote scoped Asterisk reload sudoers: $SUDOERS_FILE"
+
+    # ── 5. reload systemd so the drop-in takes effect — ONLY for the real /etc ──
+    # Guarded so the test (which redirects SYSTEMD_DROPIN_DIR into a temp dir)
+    # never invokes systemctl.
+    if [[ "$SYSTEMD_DROPIN_DIR" = "/etc/systemd/system/blackbox.service.d" ]]; then
+        systemctl daemon-reload
+        echo "[install] systemctl daemon-reload (Asterisk drop-in active)"
+    fi
+}
+
+# Only enable the include plumbing if Asterisk is actually installed (it's a
+# FEATURE_OPTIONAL package — see Scripts/onboarding/system-packages.txt).
+if [[ -x /usr/sbin/asterisk ]]; then
+    echo "[install] Asterisk detected — enabling blackbox.d include plumbing"
+    sudo SKIP_VISUDO="${SKIP_VISUDO:-0}" bash -c "REAL_USER='$REAL_USER'; $(declare -f setup_asterisk_blackbox_include); setup_asterisk_blackbox_include"
+else
+    echo "[install] Asterisk not installed (/usr/sbin/asterisk absent) — skipping telephony include setup"
+fi
+
 # ── Step 4h: force X11 session via GDM (audit E18b — Computer Use input on Wayland) ──
 # Wayland's Mutter compositor silently drops uinput events for cursor/click from
 # untrusted processes (including ydotool). xdotool similarly only sees XWayland

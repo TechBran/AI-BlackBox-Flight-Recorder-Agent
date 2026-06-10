@@ -7,6 +7,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     """Send an SMS message via cellular modem or Twilio."""
     phone_number = params.get("phone_number", "")
     message = params.get("message", "")
+    from_number = params.get("from_number") or None
 
     if not phone_number or not message:
         return ToolResult(False, "Phone number and message are required")
@@ -25,28 +26,23 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     # Route based on TELEPHONY_PROVIDER config
     from Orchestrator.config import TELEPHONY_PROVIDER, CELLULAR_ENABLED, ASTERISK_ENABLED
 
-    # Asterisk/TG200 path (preferred when enabled)
+    # Asterisk/TG200 path (preferred when enabled).
+    # Route through the SMS router's send_manual so from-number selection,
+    # span resolution and outbound storage all live in one place.
     if TELEPHONY_PROVIDER == "asterisk" and ASTERISK_ENABLED:
         try:
-            from Orchestrator.sms import get_ami_client, get_message_store
-            ami = get_ami_client()
-            if not ami or not ami.connected:
-                return ToolResult(False, "SMS system not connected (AMI client down)")
+            from Orchestrator.sms import get_router
+            sms_router = get_router()
+            if sms_router is None:
+                return ToolResult(False, "SMS system not connected (router down)")
 
-            result = await ami.send_sms(phone_number, message, span=2)
+            result = await sms_router.send_manual(
+                operator=ctx.operator or "system",
+                to=phone_number,
+                message=message,
+                from_number=from_number,
+            )
             if result.get("success"):
-                # Store outbound message if we have the store
-                store = get_message_store()
-                if store and ctx.operator:
-                    from datetime import datetime, timezone
-                    store.store_message(
-                        operator=ctx.operator,
-                        direction="outbound",
-                        phone_number=phone_number,
-                        contact_name="",
-                        body=message,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                    )
                 return ToolResult(True, f"SMS sent to {phone_number} via TG200.", data={"to": phone_number, "provider": "asterisk"})
             return ToolResult(False, f"TG200 SMS failed: {result.get('error', 'Unknown error')}")
         except Exception as e:

@@ -13,6 +13,7 @@ class SMSSendRequest(BaseModel):
     operator: str
     to: str
     message: str
+    from_number: Optional[str] = None
 
 
 class SMSMarkReadRequest(BaseModel):
@@ -64,7 +65,9 @@ async def send_sms(req: SMSSendRequest):
     sms_router = get_router()
     if sms_router is None:
         raise HTTPException(status_code=503, detail="SMS router not available")
-    result = await sms_router.send_manual(req.operator, req.to, req.message)
+    result = await sms_router.send_manual(
+        req.operator, req.to, req.message, from_number=req.from_number
+    )
     return {
         "success": result.get("success", False),
         "error": result.get("error"),

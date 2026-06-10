@@ -212,14 +212,14 @@ cd /home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc
 # After Track 1
 Orchestrator/venv/bin/python -m py_compile Orchestrator/routes/realtime_routes.py Orchestrator/config.py
 Orchestrator/venv/bin/python -m pytest Orchestrator/tests/test_live_models.py -v
-echo '6157Ego8@' | sudo -S systemctl restart blackbox.service && sleep 20
+echo '<REDACTED-SECRET>' | sudo -S systemctl restart blackbox.service && sleep 20
 curl -s http://localhost:9091/realtime/status | python3 -m json.tool | head -30
 # Brandon: open Portal, connect to OpenAI Realtime, speak, verify response
 
 # After Track 2
 Orchestrator/venv/bin/python -m py_compile Orchestrator/routes/gemini_live_routes.py
-echo '6157Ego8@' | sudo -S systemctl restart blackbox.service && sleep 20
-echo '6157Ego8@' | sudo -S journalctl -u blackbox.service --since="1 minute ago" -o cat | grep -iE 'gemini|1007' | tail -10
+echo '<REDACTED-SECRET>' | sudo -S systemctl restart blackbox.service && sleep 20
+echo '<REDACTED-SECRET>' | sudo -S journalctl -u blackbox.service --since="1 minute ago" -o cat | grep -iE 'gemini|1007' | tail -10
 # Brandon: open Portal, connect to Gemini Live, speak, verify response (no close-1007)
 
 # After Track 3 (if needed)

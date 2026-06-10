@@ -38,6 +38,9 @@ Orchestrator/asterisk/configs/*.conf
 Docker/freeswitch/config/freeswitch.xml
 Docker/freeswitch/config/directory/
 
+# Telephony gateway configs hold per-device credentials (encrypted, but never commit)
+Orchestrator/asterisk/gateways.json
+
 # Claude Code local config (per-machine permissions, not project source)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

@@ -161,7 +161,7 @@ cd /home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc
 Orchestrator/venv/bin/python -m py_compile Orchestrator/routes/cli_agent_routes.py Orchestrator/routes/onboarding_routes.py
 Orchestrator/venv/bin/python -c "from Orchestrator.routes.cli_agent_routes import SUPPORTED_PROVIDERS; assert 'antigravity' in SUPPORTED_PROVIDERS; print('OK')"
 # Restart service
-echo '6157Ego8@' | sudo -S systemctl restart blackbox.service && sleep 20
+echo '<REDACTED-SECRET>' | sudo -S systemctl restart blackbox.service && sleep 20
 # /onboarding/status should now include antigravity
 curl -s 'http://localhost:9091/onboarding/status?operator=Brandon' | python3 -m json.tool | grep -A 4 antigravity
 ```

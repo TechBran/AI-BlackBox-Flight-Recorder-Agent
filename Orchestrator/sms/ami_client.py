@@ -20,15 +20,16 @@ class AMISMSClient:
 
     def __init__(
         self,
-        host: str = "192.168.1.200",
+        host: str = "",
         port: int = 5038,
-        username: str = "blackbox",
-        secret: str = "6157Ego8@",
+        username: str = "",
+        secret: str = "",
     ):
         self.host = host
         self.port = port
         self.username = username
         self.secret = secret
+        self.gateway_id = None  # stamped by AMIConnectionManager
 
         # Connection state
         self._reader: Optional[asyncio.StreamReader] = None
@@ -60,6 +61,12 @@ class AMISMSClient:
     async def connect(self):
         """Open TCP socket, authenticate, and start the read loop."""
         self._shutting_down = False
+        if not self.host or not self.username or not self.secret:
+            log.warning(
+                "AMI credentials not configured "
+                "(ASTERISK_AMI_HOST/USER/SECRET); SMS disabled"
+            )
+            return
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port), timeout=10
@@ -356,8 +363,14 @@ class AMISMSClient:
     # ------------------------------------------------------------------
 
     def on_sms(self, callback: Callable):
-        """Register an async callback: callback(sender, body, span, recvtime)."""
-        self._sms_callbacks.append(callback)
+        """Register an async callback: callback(sender, body, span, recvtime, gateway_id).
+
+        Idempotent: registering the same callback twice is a no-op, so a
+        re-registration (e.g. manager.set_sms_callback + add_gateway, or a
+        double start) can never cause an inbound SMS to be processed twice.
+        """
+        if callback not in self._sms_callbacks:
+            self._sms_callbacks.append(callback)
 
     async def _handle_received_sms(self, msg: dict):
         """Process a ReceivedSMS event, buffering multi-part if needed."""
@@ -434,7 +447,7 @@ class AMISMSClient:
         log.info("SMS dispatch: sender=%s body=%r", sender, body[:100])
         for cb in self._sms_callbacks:
             try:
-                await cb(sender, body, span, recvtime)
+                await cb(sender, body, span, recvtime, self.gateway_id)
             except Exception:
                 log.exception("SMS callback error")
 
@@ -509,6 +522,100 @@ class AMISMSClient:
                 result["state"] = line.split(":", 1)[1].strip()
 
         return result
+
+    async def get_all_spans(self) -> list[dict]:
+        """Enumerate every GSM span and its live SIM/network status over AMI.
+
+        Pulls real data from the gateway's `gsm show spans` (span up/down) and
+        per-span `gsm show span N` (carrier, registration, signal, state). This
+        is the authoritative SIM-status source — the NeoGate TG (Boa server) has
+        no REST API, only AMI.
+
+        Returns a list of dicts, one per span:
+            {
+              "span": int,
+              "up": bool,            # port active/registered per the spans line
+              "carrier": str,        # Network Name (e.g. "AT&T")
+              "registered": bool,    # Network Status contains "Registered"
+              "signal": int | None,  # CSQ as a percent (0-100), None if unknown
+              "signal_raw": int | None,  # CSQ on the raw 0-31 scale, None if unknown
+              "state": str,          # State: line (e.g. "READY")
+            }
+
+        Never raises: on any error returns whatever has been parsed so far
+        (possibly an empty list). Returns [] when not authenticated.
+        """
+        if not self._authenticated:
+            return []
+
+        spans: list[dict] = []
+        try:
+            resp = await self._send_action("SMSCommand", Command="gsm show spans")
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            log.error("get_all_spans: 'gsm show spans' failed: %s", exc)
+            return []
+
+        body = resp.get("_body", "") or ""
+        for line in body.splitlines():
+            line = line.strip()
+            # e.g. "GSM span 2: Power on, Up, Active, Standard"
+            if not line.lower().startswith("gsm span"):
+                continue
+            head, _, status = line.partition(":")
+            # head -> "GSM span 2"
+            parts = head.split()
+            if not parts or not parts[-1].isdigit():
+                continue
+            span_num = int(parts[-1])
+            up = "up" in status.lower()
+            spans.append({
+                "span": span_num,
+                "up": up,
+                "carrier": "",
+                "registered": False,
+                "signal": None,
+                "signal_raw": None,
+                "state": "",
+            })
+
+        # Enrich each span with detail from `gsm show span N`.
+        for entry in spans:
+            try:
+                detail = await self._send_action(
+                    "SMSCommand", Command=f"gsm show span {entry['span']}"
+                )
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                log.warning(
+                    "get_all_spans: detail for span %s failed: %s",
+                    entry["span"], exc,
+                )
+                continue
+
+            dbody = detail.get("_body", "") or ""
+            for line in dbody.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Network Name:"):
+                    entry["carrier"] = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("Network Status:"):
+                    entry["registered"] = "registered" in stripped.lower()
+                elif stripped.startswith("Signal Quality"):
+                    # "Signal Quality (0,31): 19"  -> raw 19
+                    raw_str = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+                    try:
+                        raw = int(raw_str)
+                    except ValueError:
+                        raw = None
+                    # 99 (or out of range) = unknown per the 3GPP CSQ convention.
+                    if raw is None or raw < 0 or raw > 31:
+                        entry["signal_raw"] = None
+                        entry["signal"] = None
+                    else:
+                        entry["signal_raw"] = raw
+                        entry["signal"] = round(raw / 31 * 100)
+                elif stripped.startswith("State:"):
+                    entry["state"] = stripped.split(":", 1)[1].strip()
+
+        return spans
 
     @property
     def connected(self) -> bool:

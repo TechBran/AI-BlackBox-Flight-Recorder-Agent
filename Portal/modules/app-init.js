@@ -80,6 +80,7 @@ import { initMediaManager } from './media-manager.js';
 import { initCronManager } from './cron-manager.js';
 import { initDeviceManager } from './device-manager.js';
 import { initTelephonyManager } from './telephony-manager.js';
+import { initTelephonyWizard } from './telephony-wizard.js';
 import { initCellularManager } from './cellular-manager.js';
 import { initSMSInbox, openSMSInbox, pollUnread as pollSMSUnread } from './sms-inbox.js';
 import { initContactsManager } from './contacts-manager.js';
@@ -629,6 +630,7 @@ async function initApp() {
     initCronManager();
     initDeviceManager();
     initTelephonyManager();
+    initTelephonyWizard();
     initCellularManager();
     initSMSInbox();
     initContactsManager();
