@@ -23,7 +23,14 @@ data class SmsThread(
     val lastMessage: String,
     val lastTimestamp: String,
     val unreadCount: Int,
-    val direction: String
+    val direction: String,
+    val lineNumber: String
+)
+
+data class SmsLine(
+    val number: String,
+    val gatewayId: String,
+    val label: String
 )
 
 data class SmsMsg(
@@ -73,6 +80,14 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
     private val _smsModel = MutableStateFlow("claude-sonnet-4-5")
     val smsModel: StateFlow<String> = _smsModel.asStateFlow()
 
+    // Our sendable lines (enabled gateways' enabled ports with a phone number)
+    private val _lines = MutableStateFlow<List<SmsLine>>(emptyList())
+    val lines: StateFlow<List<SmsLine>> = _lines.asStateFlow()
+
+    // Selected "from" line for outbound SMS; null = use backend default gateway
+    private val _selectedFromNumber = MutableStateFlow<String?>(null)
+    val selectedFromNumber: StateFlow<String?> = _selectedFromNumber.asStateFlow()
+
     private var pollJob: Job? = null
 
     fun initialize(origin: String, op: String) {
@@ -83,6 +98,7 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         loadStatus()
         loadUnreadCount()
         loadSmsPreferences()
+        loadLines()
     }
 
     fun loadThreads() {
@@ -101,7 +117,8 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                         lastMessage = obj["last_message"]?.jsonPrimitive?.content ?: "",
                         lastTimestamp = obj["last_timestamp"]?.jsonPrimitive?.content ?: "",
                         unreadCount = obj["unread_count"]?.jsonPrimitive?.intOrNull ?: 0,
-                        direction = obj["direction"]?.jsonPrimitive?.content ?: ""
+                        direction = obj["direction"]?.jsonPrimitive?.content ?: "",
+                        lineNumber = obj["line_number"]?.jsonPrimitive?.content ?: ""
                     )
                 }
             } catch (_: Exception) {
@@ -110,6 +127,47 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
                 _isLoading.value = false
             }
         }
+    }
+
+    fun loadLines() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                val response = api.get("/asterisk/gateways")
+                val root = json.parseToJsonElement(response).jsonObject
+                val gatewaysArray = root["gateways"]?.jsonArray ?: return@launch
+                val collected = mutableListOf<SmsLine>()
+                gatewaysArray.forEach { gwEl ->
+                    val gw = gwEl.jsonObject
+                    val gwEnabled = gw["enabled"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+                    if (!gwEnabled) return@forEach
+                    val gwId = gw["id"]?.jsonPrimitive?.content ?: ""
+                    val gwName = gw["name"]?.jsonPrimitive?.content ?: gwId
+                    val ports = gw["ports"]?.jsonArray ?: return@forEach
+                    ports.forEach { portEl ->
+                        val port = portEl.jsonObject
+                        val portEnabled = port["enabled"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+                        val phoneNumber = port["phone_number"]?.jsonPrimitive?.content ?: ""
+                        if (portEnabled && phoneNumber.isNotBlank()) {
+                            collected.add(
+                                SmsLine(
+                                    number = phoneNumber,
+                                    gatewayId = gwId,
+                                    label = "$gwName · $phoneNumber"
+                                )
+                            )
+                        }
+                    }
+                }
+                _lines.value = collected
+            } catch (_: Exception) {
+                _lines.value = emptyList()
+            }
+        }
+    }
+
+    fun setFromNumber(n: String?) {
+        _selectedFromNumber.value = n
     }
 
     fun loadMessages(phone: String) {
@@ -145,7 +203,9 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         _isSending.value = true
         viewModelScope.launch {
             try {
-                val body = """{"operator":"$operator","to":"$phone","message":"${message.replace("\"", "\\\"")}"}"""
+                val from = _selectedFromNumber.value
+                val fromPart = if (!from.isNullOrBlank()) ",\"from_number\":\"${from.replace("\"", "\\\"")}\"" else ""
+                val body = """{"operator":"$operator","to":"$phone","message":"${message.replace("\"", "\\\"")}"$fromPart}"""
                 api.post("/sms/send", body)
                 _actionMessage.value = "Message sent"
                 loadMessages(phone)
@@ -163,7 +223,9 @@ class SmsViewModel(application: Application) : AndroidViewModel(application) {
         _isSending.value = true
         viewModelScope.launch {
             try {
-                val body = """{"operator":"$operator","to":"$to","message":"${message.replace("\"", "\\\"")}"}"""
+                val from = _selectedFromNumber.value
+                val fromPart = if (!from.isNullOrBlank()) ",\"from_number\":\"${from.replace("\"", "\\\"")}\"" else ""
+                val body = """{"operator":"$operator","to":"$to","message":"${message.replace("\"", "\\\"")}"$fromPart}"""
                 api.post("/sms/send", body)
                 _actionMessage.value = "Message sent"
                 loadThreads()
