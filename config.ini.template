@@ -71,3 +71,12 @@ default_operator = Default
 google_tts_synthesize = https://texttospeech.googleapis.com/v1/text:synthesize
 google_tts_voices = https://texttospeech.googleapis.com/v1/voices
 google_veo = veo-3.1-generate-preview
+
+[computer_use]
+# native_mode = true  -> CU drives the real desktop; false -> sandboxed Xvfb
+native_mode = true
+# chrome_path = /opt/google/chrome/chrome
+model_default = claude-opus-4-6
+gemini_model_default = gemini-2.5-computer-use-preview-10-2025
+max_iterations = 100
+session_timeout_s = 300

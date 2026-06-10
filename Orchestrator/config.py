@@ -148,6 +148,29 @@ GOOGLE_VEO_MODEL    = CFG.get("models", "google_veo", fallback="veo-model-placeh
 GOOGLE_TTS_SYNTHESIZE_URL = CFG.get("models", "google_tts_synthesize", fallback="https://texttospeech.googleapis.com/v1/text:synthesize")
 GOOGLE_TTS_VOICES_URL     = CFG.get("models", "google_tts_voices", fallback="https://texttospeech.googleapis.com/v1/voices")
 
+# ── Computer Use (CU) — production pass 2026-06-10 ──────────────────────────
+# Single source of truth for CU defaults. Replaces the literals that used to
+# live in browser/config.py, gemini_cu/config.py, and two chat_routes sites.
+CU_MODEL_DEFAULT        = CFG.get("computer_use", "model_default", fallback="claude-opus-4-6").strip()
+CU_GEMINI_MODEL_DEFAULT = CFG.get("computer_use", "gemini_model_default",
+                                  fallback="gemini-2.5-computer-use-preview-10-2025").strip()
+CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
+CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
+CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=100)
+CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallback=300)
+
+# CU-capability filters: which model ids from each vendor's live catalog can
+# drive the computer tool. Regex anchored at start (re.match). Data, not code —
+# when a vendor ships a new CU-capable family, extend the pattern here.
+#   anthropic: opus/sonnet at major version >= 4 (computer_20251124 tool)
+#   google:    any Gemini id containing "computer-use"
+#   openai:    the Responses-API CUA model family
+CU_MODEL_FILTERS = {
+    "anthropic": r"claude-(opus|sonnet)-([4-9]|\d{2,})",
+    "google":    r"gemini-.*computer-use",
+    "openai":    r"computer-use-preview",
+}
+
 
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat
 
