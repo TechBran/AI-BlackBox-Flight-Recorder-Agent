@@ -9,7 +9,7 @@ Audio: 16kHz PCM16 (slin16) via AudioSocket — 2x quality of the SIM7600 8kHz p
 
 Endpoints:
   POST /asterisk/call                  — Outbound voice call via TG200
-  POST /asterisk/sms                   — Send SMS via TG200 HTTP API
+  POST /asterisk/sms                   — Send SMS via TG200 over AMI
   GET  /asterisk/status                — Asterisk + TG200 health
   POST /asterisk/hangup/{session_id}   — End call
   GET  /asterisk/channels              — List active Asterisk channels
@@ -61,7 +61,7 @@ class AsteriskCallRequest(BaseModel):
 
 
 class AsteriskSMSRequest(BaseModel):
-    """Request to send an SMS via TG200 HTTP API."""
+    """Request to send an SMS via the TG200 over AMI."""
     to: str
     message: str
     gateway_id: str = ""  # Empty = first available
@@ -453,36 +453,30 @@ async def handle_inbound_call(channel_id: str, caller_id: str, callee_id: str, a
 
 @app.post("/asterisk/sms")
 async def asterisk_send_sms(sms_request: AsteriskSMSRequest):
-    """Send an SMS via TG200 HTTP API."""
-    from Orchestrator.asterisk.gateway_manager import (
-        load_gateways, send_sms_via_gateway, get_gateway
-    )
+    """Send an SMS via the TG200 over AMI (Asterisk Manager Interface).
 
-    # Select gateway
-    if sms_request.gateway_id:
-        gateway = get_gateway(sms_request.gateway_id)
-        if not gateway:
-            return {"error": f"Gateway not found: {sms_request.gateway_id}"}
-    else:
-        gateways = load_gateways()
-        enabled = [gw for gw in gateways if gw.get("enabled", True)]
-        if not enabled:
-            return {"error": "No gateways configured"}
-        gateway = enabled[0]
+    Routed through the SAME SMS router path as POST /sms/send so outbound
+    from-number selection, span resolution and message storage all live in
+    one place.
+    """
+    from Orchestrator.sms import get_router
+
+    sms_router = get_router()
+    if sms_router is None:
+        return {"success": False, "error": "SMS system not started"}
 
     to_number = _normalize_phone(sms_request.to)
-    result = await send_sms_via_gateway(
-        gateway=gateway,
+    result = await sms_router.send_manual(
+        operator="system",
         to=to_number,
         message=sms_request.message,
-        port=sms_request.port,
+        gateway_id=sms_request.gateway_id or None,
     )
 
     return {
-        "success": result["success"],
+        "success": result.get("success", False),
         "error": result.get("error"),
         "to": to_number,
-        "gateway": gateway["name"],
     }
 
 

@@ -121,6 +121,10 @@ async def test_send_manual_default_gateway(monkeypatch):
     res = await router.send_manual("Brandon", "+14105550000", "manual msg")
     assert res["success"] is True
     assert m.get("a").sent == [("+14105550000", "manual msg", 2)]
+    # No from_number resolved -> line_number "", gateway_id from chosen client.
+    msg = store.messages[0]
+    assert msg["line_number"] == ""
+    assert msg["gateway_id"] == "a"
 
 
 @pytest.mark.asyncio
@@ -141,6 +145,34 @@ async def test_send_manual_resolves_from_number(monkeypatch):
     assert res["success"] is True
     assert m.get("b").sent == [("+14109990000", "hey", 3)]
     assert m.get("a").sent == []
+    # Outbound stored tagged with the resolved line + chosen gateway.
+    assert len(store.messages) == 1
+    msg = store.messages[0]
+    assert msg["direction"] == "outbound"
+    assert msg["line_number"] == "+14105554444"
+    assert msg["gateway_id"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_send_manual_explicit_gateway_id(monkeypatch):
+    m = AMIConnectionManager(client_factory=FakeClient)
+    await m.add_gateway(_gw("a", "10.0.0.1", numbers=["+14105551111", "+14105552222"]))
+    await m.add_gateway(_gw("b", "10.0.0.2", numbers=["+14105553333", "+14105554444"]))
+    store = FakeStore()
+    router = SMSRouter(m, store)
+    monkeypatch.setattr(
+        router, "_find_operator_by_phone", lambda phone: (None, None)
+    )
+
+    # Explicit gateway_id "b" -> that client (default span 2 when unresolved).
+    res = await router.send_manual(
+        "Brandon", "+14109990000", "via b", gateway_id="b"
+    )
+    assert res["success"] is True
+    assert m.get("b").sent == [("+14109990000", "via b", 2)]
+    assert m.get("a").sent == []
+    msg = store.messages[0]
+    assert msg["gateway_id"] == "b"
 
 
 @pytest.mark.asyncio

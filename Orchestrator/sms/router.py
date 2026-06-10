@@ -359,13 +359,17 @@ class SMSRouter:
             {"success": bool, "error": str | None, "message_id": int | None}
         """
         # Resolve which gateway client (and span) to use.
+        #   line_number tracks the originating line we end up using, so the
+        #   outbound is stored on the correct thread.
         client = None
+        line_number = ""
         if gateway_id:
             client = self.manager.get(gateway_id)
         elif from_number:
             res = self.manager.resolve_for_number(from_number)
             if res:
                 client, span = res
+                line_number = from_number
         else:
             client = self.manager.default()
 
@@ -373,15 +377,21 @@ class SMSRouter:
         if client is None:
             return {"success": False, "error": "No gateway available"}
 
+        # The chosen gateway's id (the client carries it; see manager._make_client).
+        resolved_gateway_id = getattr(client, "gateway_id", "") or (gateway_id or "")
+        # Fall back to whatever from-number we were given if we couldn't resolve a line.
+        if not line_number:
+            line_number = from_number or ""
+
         # Look up contact name
         _, contact = self._find_operator_by_phone(to)
         contact_name = contact.get("name", to) if contact else to
 
-        # Send via the chosen gateway client (span resolution refined in Task 3.3)
+        # Send via the chosen gateway client.
         result = await client.send_sms(to, message, span=int(span) if span else 2)
         status = "delivered" if result.get("success") else "failed"
 
-        # Store outbound message
+        # Store outbound message (tagged with the resolved line + chosen gateway)
         now = datetime.now(timezone.utc).isoformat()
         msg_id = self.store.store_message(
             operator=operator,
@@ -391,6 +401,8 @@ class SMSRouter:
             body=message,
             timestamp=now,
             status=status,
+            line_number=line_number,
+            gateway_id=resolved_gateway_id,
         )
 
         return {
