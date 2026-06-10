@@ -673,3 +673,154 @@ async def test_gateway_endpoint(gateway_id: str):
         "sip_registered": status["sip_registered"],
         "sim_slots": status["sim_slots"],
     }
+
+
+# =============================================================================
+# Setup Wizard (Tasks 5.3 + 5.4)
+#
+# Validate (live green/red checks), one-click Apply (write OUR Asterisk config +
+# reload + hot-reconnect the AMI client), test SMS/call, and a copy-paste config
+# preview (our-side Asterisk config + the TG-side GUI walk-through). The wizard
+# auto-configures OUR side; the TG side is a guided click-through.
+# =============================================================================
+
+class WizardTestSMSRequest(BaseModel):
+    """Body for the wizard test-SMS step."""
+    to: str
+    message: str = ""
+
+
+class WizardTestCallRequest(BaseModel):
+    """Body for the wizard test-call step."""
+    to: str
+
+
+@app.post("/asterisk/gateways/{gateway_id}/validate")
+async def validate_gateway_endpoint(gateway_id: str):
+    """Run live checks and return a structured green/red result for the wizard.
+
+    Reuses ``check_gateway_status`` for reachability (Boa HTTP), the trunk's SIP
+    registration and the per-SIM spans. ``ami_auth`` is whether this gateway's
+    AMI client is currently connected.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway, check_gateway_status
+    from Orchestrator.sms import get_ami_client
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    status = await check_gateway_status(gw)
+    ami = get_ami_client(gateway_id)
+
+    return {
+        "gateway_id": gateway_id,
+        "reachable": status["reachable"],
+        "ami_auth": bool(ami and ami.connected),
+        "spans": status["sim_slots"],
+        "trunk_online": status["sip_registered"],
+    }
+
+
+@app.post("/asterisk/gateways/{gateway_id}/apply")
+async def apply_gateway_endpoint(gateway_id: str):
+    """Write + reload OUR Asterisk config and hot-reconnect the AMI client.
+
+    If the reload failed (e.g. the install-time sudoers rule isn't present yet),
+    ``restart_recommended`` is True so the UI can prompt a full service restart.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway_decrypted
+    from Orchestrator.asterisk import provisioner
+    from Orchestrator.sms import get_manager
+
+    gw = get_gateway_decrypted(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    result = provisioner.apply_gateway(gw)
+
+    mgr = get_manager()
+    if mgr:
+        await mgr.reconnect(gateway_id)
+
+    reload_result = result.get("reload", {})
+    return {
+        "applied": True,
+        "config": result.get("written"),
+        "reload": reload_result,
+        "restart_recommended": not reload_result.get("ok", False),
+    }
+
+
+@app.post("/asterisk/gateways/{gateway_id}/test-sms")
+async def wizard_test_sms_endpoint(gateway_id: str, req: WizardTestSMSRequest):
+    """Send a test SMS through this gateway via the SMS router."""
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+    from Orchestrator.sms import get_router
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    router = get_router()
+    if router is None:
+        return {"success": False, "error": "SMS system not started"}
+
+    result = await router.send_manual(
+        operator="system",
+        to=_normalize_phone(req.to),
+        message=req.message or "BlackBox test SMS",
+        gateway_id=gateway_id,
+    )
+    return result
+
+
+@app.post("/asterisk/gateways/{gateway_id}/test-call")
+async def wizard_test_call_endpoint(gateway_id: str, req: WizardTestCallRequest):
+    """Initiate a test outbound call through this gateway.
+
+    Reuses the existing outbound-call path (``asterisk_outbound_call`` →
+    ``_handle_outbound_call``) so we never duplicate the call state machine; we
+    only pin the gateway's own trunk name.
+    """
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    call_request = AsteriskCallRequest(
+        to=req.to,
+        operator="system",
+        trunk=gw["trunk_name"],
+    )
+    return await asterisk_outbound_call(call_request)
+
+
+@app.get("/asterisk/gateways/{gateway_id}/config-preview")
+async def gateway_config_preview_endpoint(gateway_id: str):
+    """Return the copy-paste artifacts: OUR Asterisk config + TG GUI steps."""
+    from Orchestrator.asterisk.gateway_manager import get_gateway
+    from Orchestrator.asterisk import provisioner
+
+    gw = get_gateway(gateway_id)
+    if not gw:
+        return {"error": "Gateway not found"}
+
+    asterisk_conf = provisioner.render_pjsip(gw) + "\n\n" + provisioner.render_shared_dialplan()
+
+    ip = gw["ip"]
+    tg_steps = [
+        f"Open the NeoGate web GUI at http://{ip} and log in.",
+        "Under Gateway → VoIP Settings → VoIP Trunk, add a Service Provider / "
+        "peer trunk pointing at this server's IP on port 5060 "
+        "(no registration; IP-based authentication).",
+        "Create an AMI/API user (the same user/secret you entered here) with "
+        "SMS + Command permissions so the BlackBox can send SMS and read GSM "
+        "status.",
+        "Under Routes, send inbound GSM calls to the VoIP trunk, and allow "
+        "outbound calls from the trunk out to GSM.",
+        "Click Save & Apply on the NeoGate, then click Re-validate here.",
+    ]
+
+    return {"asterisk_conf": asterisk_conf, "tg_steps": tg_steps}
