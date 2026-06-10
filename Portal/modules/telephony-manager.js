@@ -5,6 +5,7 @@
 
 import { $, toast, toastSuccess, toastError } from './core-utils.js';
 import { getOperator } from './state-management.js';
+import { openWizard } from './telephony-wizard.js';
 
 // =============================================================================
 // State
@@ -244,6 +245,7 @@ function renderGatewayCard(gw) {
             ${phoneHtml}
             ${simHtml}
             <div class="gateway-actions">
+                <button class="btn gw-action-btn" data-action="wizard" data-gw-id="${gw.id}" data-gw-name="${escapeHtml(gw.name || '')}">Setup</button>
                 <button class="btn gw-action-btn" data-action="test" data-gw-id="${gw.id}">Test</button>
                 <button class="btn gw-action-btn" data-action="edit" data-gw-id="${gw.id}">Edit</button>
                 <button class="btn gw-action-btn gw-action-remove" data-action="remove" data-gw-id="${gw.id}">Remove</button>
@@ -555,6 +557,9 @@ function handleGatewayAction(e) {
     const gwId = btn.dataset.gwId;
 
     switch (action) {
+        case 'wizard':
+            openWizard(gwId, btn.dataset.gwName || '');
+            break;
         case 'test':
             testGateway(gwId);
             break;

@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui275"/> <!-- v275: telephony gateway form — section labels + per-line ports table styles -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui276"/> <!-- v276: telephony setup wizard — stepper modal (validate -> configure/apply -> done) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui275"></script> <!-- v275: telephony gateway form — fix field drift; add model, AMI creds, per-line table -->
+  <script type="module" src="/ui/app-modular.js?v=genui276"></script> <!-- v276: telephony setup wizard — stepper modal (validate -> configure/apply -> done) -->
 </head>
 <body>
   <div class="app">
@@ -1584,6 +1584,25 @@
               <div id="telephonyGatewayList">
                   <!-- Gateway cards rendered by JS -->
               </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Telephony Setup Wizard Modal -->
+  <div id="telephonyWizardModal" class="modal hide">
+      <div class="modal-card telephony-wizard-card">
+          <div class="modal-head">
+              <h3>Gateway Setup</h3>
+              <button id="wizCloseBtn" class="btn">&#10005;</button>
+          </div>
+          <div id="telephonyWizardStepper" class="telephony-wizard-stepper-wrap">
+              <!-- Stepper rendered by JS -->
+          </div>
+          <div id="telephonyWizardBody" class="telephony-wizard-body">
+              <!-- Step content rendered by JS -->
+          </div>
+          <div id="telephonyWizardFooter" class="telephony-wizard-footer-wrap">
+              <!-- Nav buttons rendered by JS -->
           </div>
       </div>
   </div>
