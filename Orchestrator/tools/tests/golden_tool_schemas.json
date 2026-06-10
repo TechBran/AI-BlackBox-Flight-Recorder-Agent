@@ -845,25 +845,29 @@
       "name": "search_snapshots"
     },
     {
+      "name": "send_sms",
       "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
       "input_schema": {
+        "type": "object",
         "properties": {
-          "message": {
-            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
-            "type": "string"
-          },
           "phone_number": {
-            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-            "type": "string"
+            "type": "string",
+            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+          },
+          "message": {
+            "type": "string",
+            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+          },
+          "from_number": {
+            "type": "string",
+            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
           }
         },
         "required": [
           "phone_number",
           "message"
-        ],
-        "type": "object"
-      },
-      "name": "send_sms"
+        ]
+      }
     },
     {
       "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
@@ -1562,24 +1566,28 @@
           }
         },
         {
-          "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
           "name": "send_sms",
+          "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
           "parameters": {
+            "type": "object",
             "properties": {
-              "message": {
-                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
-                "type": "string"
-              },
               "phone_number": {
-                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-                "type": "string"
+                "type": "string",
+                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+              },
+              "message": {
+                "type": "string",
+                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+              },
+              "from_number": {
+                "type": "string",
+                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
               }
             },
             "required": [
               "phone_number",
               "message"
-            ],
-            "type": "object"
+            ]
           }
         },
         {
@@ -2522,24 +2530,28 @@
           }
         },
         {
-          "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
           "name": "send_sms",
+          "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
           "parameters": {
+            "type": "object",
             "properties": {
-              "message": {
-                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
-                "type": "string"
-              },
               "phone_number": {
-                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-                "type": "string"
+                "type": "string",
+                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+              },
+              "message": {
+                "type": "string",
+                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+              },
+              "from_number": {
+                "type": "string",
+                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
               }
             },
             "required": [
               "phone_number",
               "message"
-            ],
-            "type": "object"
+            ]
           }
         },
         {
@@ -4113,26 +4125,30 @@
       "type": "function"
     },
     {
-      "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+      "type": "function",
       "name": "send_sms",
+      "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
       "parameters": {
+        "type": "object",
         "properties": {
-          "message": {
-            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
-            "type": "string"
-          },
           "phone_number": {
-            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-            "type": "string"
+            "type": "string",
+            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+          },
+          "message": {
+            "type": "string",
+            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+          },
+          "from_number": {
+            "type": "string",
+            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
           }
         },
         "required": [
           "phone_number",
           "message"
-        ],
-        "type": "object"
-      },
-      "type": "function"
+        ]
+      }
     },
     {
       "description": "Your tool discovery system. Use this to find and retrieve tools from the ToolVault. Actions: 'search' finds tools by what you need to do, 'read' gets the full spec for a specific tool, 'list' shows all available tools by category.",
@@ -5184,28 +5200,32 @@
       "type": "function"
     },
     {
+      "type": "function",
       "function": {
-        "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
         "name": "send_sms",
+        "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
         "parameters": {
+          "type": "object",
           "properties": {
-            "message": {
-              "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
-              "type": "string"
-            },
             "phone_number": {
-              "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
-              "type": "string"
+              "type": "string",
+              "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+            },
+            "message": {
+              "type": "string",
+              "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+            },
+            "from_number": {
+              "type": "string",
+              "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
             }
           },
           "required": [
             "phone_number",
             "message"
-          ],
-          "type": "object"
+          ]
         }
-      },
-      "type": "function"
+      }
     },
     {
       "function": {
