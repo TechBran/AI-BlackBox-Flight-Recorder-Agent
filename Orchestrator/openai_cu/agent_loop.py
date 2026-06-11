@@ -438,7 +438,20 @@ async def run_openai_cu_loop(
             if response is None:
                 print(f"[OPENAI CU] Step {step}: API ERROR: {e}")
                 _restore_turn_start_id()  # abnormal exit (C1)
-                yield {"type": "error", "data": {"message": f"OpenAI API error: {e}"}}
+                msg = f"OpenAI API error: {e}"
+                # model_not_found on the CUA model = the ORG lacks access, not
+                # a bad id: OpenAI gates computer-use-preview by account/usage
+                # tier (unlike Anthropic/Gemini CU, which any API key can use).
+                if "model_not_found" in str(e) and "computer-use" in str(model):
+                    msg = (
+                        f"Your OpenAI account does not have access to "
+                        f"'{model}'. OpenAI gates its Computer Use model "
+                        f"by usage tier / staged rollout — check your tier at "
+                        f"platform.openai.com (Settings → Limits) or request "
+                        f"access. Anthropic and Gemini CU models work with a "
+                        f"standard API key; use one of those meanwhile."
+                    )
+                yield {"type": "error", "data": {"message": msg}}
                 session.status = "error"
                 return
 
