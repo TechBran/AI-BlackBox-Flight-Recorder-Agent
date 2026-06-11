@@ -2,8 +2,8 @@
 
 This file is the ONLY place embedding-model literals (slugs, provider model
 ids, dims) may live. Everything else — providers, stores, routes, migration,
-frontends — derives from EMBEDDING_MODELS. Guard-tested (no hardcoded
-embedding-model literals elsewhere in the tree).
+frontends — derives from EMBEDDING_MODELS. A Task-16 guard test enforces
+that no embedding-model literal appears elsewhere in the tree.
 
 Same config-as-data pattern as CU_MODEL_FILTERS in Orchestrator/config.py:
 when a new embedding model ships, add an entry here — no code changes.
@@ -27,7 +27,7 @@ EMBEDDING_MODELS = {
         "label": "Qwen3 0.6B (local, light)", "ram_gb": 1.0, "cost_per_1m_tokens": 0.0,
         "privacy": "local", "quality_note": "Fast on CPU; fully offline",
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
-        "keep_alive": "-1",
+        "keep_alive": "-1m",  # negative duration = stay loaded; bare "-1" fails Go ParseDuration
     },
     "qwen3-embedding-8b": {
         "provider": "ollama", "model_id": "qwen3-embedding:8b", "dims": 4096,
