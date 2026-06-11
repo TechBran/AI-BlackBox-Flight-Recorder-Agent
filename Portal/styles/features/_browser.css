@@ -1116,6 +1116,10 @@
     border-radius: var(--radius-sm);
     font-size: 0.65rem;
     line-height: 1.45;
+    /* A fully-degraded box can fail 5+ checks; cap the banner itself so the
+       device selector + STOP/New rows are never clipped out of the drawer. */
+    max-height: 150px;
+    overflow-y: auto;
 }
 
 /* warn — muted neutral treatment (no amber token exists; per design rules
