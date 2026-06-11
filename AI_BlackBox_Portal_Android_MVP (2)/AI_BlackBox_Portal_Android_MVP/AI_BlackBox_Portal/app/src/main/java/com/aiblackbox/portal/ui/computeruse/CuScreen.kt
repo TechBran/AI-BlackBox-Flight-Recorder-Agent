@@ -318,6 +318,9 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
     // ── Polling — fetches screenshot bytes every POLL_MS ──
     fun startPolling() {
         if (_isPolling.value) return
+        // Re-sync the display resolution: a display restarted at a different
+        // size mid-session would otherwise keep stale tap mapping.
+        fetchDisplayResolution()
         _isPolling.value = true
         _statusText.value = "Live"
         viewModelScope.launch {
@@ -558,9 +561,11 @@ fun CuScreen(
     val preflight by viewModel.preflight.collectAsState()
     var preflightDismissed by remember { mutableStateOf(false) }
 
-    // Bottom clearance for the Composer overlay: fixed input-bar allowance +
-    // the real navigation-bar inset (replaces the old hardcoded 160/140dp)
-    val bottomClearance = 96.dp +
+    // Bottom clearance for the Composer overlay: measured Composer stack
+    // (16dp outer padding + 48dp input bubble + ~46dp pill row, per
+    // Composer.kt) + the real navigation-bar inset (replaces the old
+    // hardcoded 160/140dp).
+    val bottomClearance = 112.dp +
         WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     // ── Reusable sections — shared by the stacked (<840dp) and side-by-side
@@ -661,8 +666,12 @@ fun CuScreen(
                 androidx.compose.foundation.Image(
                     bitmap = bmp,
                     contentDescription = "Live remote desktop screenshot",
+                    // No fillMaxWidth before aspectRatio: with width pinned, a
+                    // short height budget (landscape phones in the >=840dp Row)
+                    // makes aspectRatio unsatisfiable -> silent fall-through ->
+                    // FillBounds squashes the desktop. Unpinned, aspectRatio
+                    // letterboxes via the height-based candidate instead.
                     modifier = Modifier
-                        .fillMaxWidth()
                         .aspectRatio(resW.toFloat() / resH.toFloat())
                         .onGloballyPositioned { imageSize = it.size }
                         .pointerInput(imageSize, resW, resH) {
