@@ -27,12 +27,14 @@ def test_cu_config_values_exist_and_typed():
 
 
 @pytest.mark.parametrize("backend,model_id,expected", [
-    # Anthropic: 4+-series opus/sonnet pass, haiku and 3.x fail
+    # Anthropic: 4+-series opus/sonnet/fable/mythos pass, haiku and 3.x fail
     ("anthropic", "claude-opus-4-6", True),
     ("anthropic", "claude-opus-4-8", True),
     ("anthropic", "claude-sonnet-4-6", True),
     ("anthropic", "claude-opus-5", True),            # future-shaped
     ("anthropic", "claude-sonnet-5-2", True),        # future-shaped
+    ("anthropic", "claude-fable-5", True),           # Mythos-class, live catalog
+    ("anthropic", "claude-mythos-5", True),
     ("anthropic", "claude-haiku-4-5-20251001", False),
     ("anthropic", "claude-3-5-sonnet-20241022", False),
     # Google: id must contain computer-use

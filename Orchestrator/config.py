@@ -162,11 +162,12 @@ CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallba
 # CU-capability filters: which model ids from each vendor's live catalog can
 # drive the computer tool. Regex anchored at start (re.match). Data, not code —
 # when a vendor ships a new CU-capable family, extend the pattern here.
-#   anthropic: opus/sonnet at major version >= 4 (computer_20251124 tool)
+#   anthropic: opus/sonnet/fable/mythos at major version >= 4
+#              (computer_20251124 tool; haiku excluded — no CU support)
 #   google:    any Gemini id containing "computer-use"
 #   openai:    the Responses-API CUA model family
 CU_MODEL_FILTERS = {
-    "anthropic": r"claude-(opus|sonnet)-([4-9]|\d{2,})",
+    "anthropic": r"claude-(opus|sonnet|fable|mythos)-([4-9]|\d{2,})",
     "google":    r"gemini-.*computer-use",
     "openai":    r"computer-use-preview",
 }
