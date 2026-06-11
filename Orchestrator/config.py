@@ -175,6 +175,14 @@ CU_MODEL_FILTERS = {
     "openai":    r"(computer-use-preview|gpt-5\.5($|-\d))",
 }
 
+# ── Embeddings — pluggable snapshot-embedding layer (2026-06-11) ─────────────
+# Runtime knobs only. Model data (slugs, provider model ids, dims, costs)
+# lives ONLY in Orchestrator/embeddings/registry.py — never hardcode an
+# embedding-model literal anywhere else.
+EMBEDDINGS_ACTIVE_DEFAULT = CFG.get("embeddings", "active", fallback="gemini-embedding-001").strip()
+EMBEDDINGS_STORES_DIR     = str(Path("Manifest") / "embeddings")  # per-model binary vector stores
+OLLAMA_BASE_URL           = CFG.get("embeddings", "ollama_url", fallback="http://localhost:11434").strip()
+
 
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat
 

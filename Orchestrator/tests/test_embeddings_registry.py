@@ -1,0 +1,77 @@
+"""Pluggable embeddings — registry shape + config section (Task 1).
+
+Per docs/plans/2026-06-11-pluggable-embeddings.md Task 1: the registry in
+Orchestrator/embeddings/registry.py is the SINGLE source of truth for
+embedding-model data (same config-as-data pattern as CU_MODEL_FILTERS).
+"""
+import re
+
+import pytest
+
+from Orchestrator import config
+from Orchestrator.embeddings.registry import EMBEDDING_MAX_CHARS, EMBEDDING_MODELS
+
+VALID_PROVIDERS = {"gemini", "openai", "ollama"}
+VALID_PRIVACY = {"cloud", "local"}
+
+
+def test_registry_not_empty():
+    assert isinstance(EMBEDDING_MODELS, dict) and EMBEDDING_MODELS
+
+
+@pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))
+def test_entry_has_required_fields(slug):
+    entry = EMBEDDING_MODELS[slug]
+    assert entry["provider"] in VALID_PROVIDERS
+    assert isinstance(entry["model_id"], str) and entry["model_id"]
+    assert isinstance(entry["dims"], int) and entry["dims"] > 0
+    assert isinstance(entry["label"], str) and entry["label"]
+    assert isinstance(entry["ram_gb"], float)
+    assert isinstance(entry["cost_per_1m_tokens"], float)
+    assert entry["privacy"] in VALID_PRIVACY
+    assert isinstance(entry["quality_note"], str)
+    assert entry["query_instruction"] is None or isinstance(entry["query_instruction"], str)
+    assert entry["keep_alive"] is None or isinstance(entry["keep_alive"], str)
+
+
+@pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))
+def test_cloud_zero_ram_local_zero_cost(slug):
+    entry = EMBEDDING_MODELS[slug]
+    if entry["privacy"] == "cloud":
+        assert entry["ram_gb"] == 0.0, f"{slug}: cloud models must declare ram_gb=0"
+    else:
+        assert entry["cost_per_1m_tokens"] == 0.0, f"{slug}: local models must declare cost=0"
+
+
+@pytest.mark.parametrize("slug,dims", [
+    ("gemini-embedding-001", 3072),
+    ("openai-text-embedding-3-large", 3072),
+    ("qwen3-embedding-0.6b", 1024),
+    ("qwen3-embedding-8b", 4096),
+])
+def test_exact_slugs_present_with_dims(slug, dims):
+    assert slug in EMBEDDING_MODELS
+    assert EMBEDDING_MODELS[slug]["dims"] == dims
+
+
+@pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))
+def test_slugs_are_kebab_case(slug):
+    assert re.fullmatch(r"[a-z0-9.\-]+", slug), f"slug {slug!r} is not kebab-case"
+
+
+def test_embedding_max_chars():
+    assert EMBEDDING_MAX_CHARS == 10000
+
+
+def test_config_active_default_is_registry_slug():
+    assert config.EMBEDDINGS_ACTIVE_DEFAULT in EMBEDDING_MODELS
+
+
+def test_config_stores_dir_ends_with_manifest_embeddings():
+    assert isinstance(config.EMBEDDINGS_STORES_DIR, str)
+    assert config.EMBEDDINGS_STORES_DIR.endswith("Manifest/embeddings")
+
+
+def test_config_ollama_base_url():
+    assert isinstance(config.OLLAMA_BASE_URL, str)
+    assert config.OLLAMA_BASE_URL.startswith("http")
