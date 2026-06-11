@@ -900,6 +900,14 @@ Test: `resolve_backend("gemini-2.5-computer-use-preview-10-2025") == "google"`, 
 
 ### Task 12: Headless runner + delete legacy loop
 
+> **AMENDMENT (Task 7 quality review):** also in scope here — the Gemini loop body still
+> blocks the event loop per step (`executor.execute(...)` runs subprocess + `time.sleep`
+> jitter sync; `_capture_screenshot` wraps a blocking `subprocess.run` + PIL resize in an
+> `async def`). While consolidating, wrap the sync action execution and screenshot capture
+> in `asyncio.to_thread(...)` in the Gemini driver (and keep the Anthropic driver's
+> existing threading semantics unchanged) so a running CU step no longer stalls other
+> Orchestrator requests for 0.5–2s.
+
 **Files:**
 - Create: `Orchestrator/browser/headless.py` — `async def run_cu_task(task_id, operator, prompt, device_id="blackbox", model="", system_prompt=None, url=None) -> dict`
 - Modify: `Orchestrator/tasks.py` (~line 284, 998: USE_COMPUTER execution)

@@ -32,7 +32,7 @@ async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
         f"Screenshots captured: {', '.join(screenshots)}"
     )
     async with httpx.AsyncClient(timeout=30) as client:
-        await client.post(
+        resp = await client.post(
             "http://localhost:9091/chat/save",
             json={
                 "operator": operator,
@@ -41,6 +41,9 @@ async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
                 "model": DEFAULT_CU_MODEL,
             }
         )
+    # httpx does not raise on 4xx/5xx — without this a rejected save would
+    # log success while the snapshot was silently never minted.
+    resp.raise_for_status()
     print(f"[GEMINI CU] Snapshot saved for task {task_id}")
 
 
