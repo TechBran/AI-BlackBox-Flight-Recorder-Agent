@@ -230,10 +230,18 @@ def test_cu_streams_require_operator():
 
 
 def test_browser_prompt_no_unsatisfiable_tool():
-    """The legacy loop only exposes the computer tool — a get_current_time
-    'first action' instruction is unsatisfiable; datetime is injected at run time."""
-    from Orchestrator.browser import agent_loop
-    assert "get_current_time" not in agent_loop.DEFAULT_SYSTEM_PROMPT
+    """Task 12: the legacy computer-tool-only loop is deleted; the headless
+    runner's default prompt is the chat path's COMPUTER_USE_SYSTEM_PROMPT.
+    Guard the same invariant in the new shape: if the prompt instructs a
+    get_current_time 'first action', the (shared) Anthropic driver must be
+    able to execute that tool — otherwise the instruction is unsatisfiable."""
+    import inspect
+    from Orchestrator.browser import driver_anthropic
+    from Orchestrator.routes.chat_routes import COMPUTER_USE_SYSTEM_PROMPT
+    if "get_current_time" in COMPUTER_USE_SYSTEM_PROMPT:
+        src = inspect.getsource(driver_anthropic.run_anthropic_cu_loop)
+        assert "get_current_time" in src, (
+            "CU prompt instructs get_current_time but the driver cannot execute it")
 
 
 # ---------------------------------------------------------------------------

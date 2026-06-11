@@ -477,7 +477,7 @@ class ActionExecutor:
     def _action_zoom(self, region=None, **kw) -> dict:
         if not region or len(region) != 4:
             return {"success": False, "message": "Zoom requires region [x0, y0, x1, y1]"}
-        # Actual zoom/crop is handled in agent_loop when building the tool_result
+        # Actual zoom/crop is handled in driver_anthropic when building the tool_result
         return {"success": True, "message": f"Zoom region: {region}"}
 
 

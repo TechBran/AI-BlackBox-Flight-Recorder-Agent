@@ -1,50 +1,121 @@
 """Golden (characterization) test for the /browser/run USE_COMPUTER task path.
 
 Pins the externally observable contract of `tasks.process_browser_use` /
-`tasks.process_task` BEFORE the CU consolidation (Tasks 10-12) replaces the
-legacy `browser/agent_loop.BrowserSession` with a headless runner. This test
-must stay green across that refactor — it is the proof of behavioral
-equivalence for every consumer of the task contract (Portal poller, the
-`use_computer` ToolVault tool, the scheduler).
+`tasks.process_task`. Written BEFORE the CU consolidation (Tasks 10-12);
+Task 12 replaced the legacy `browser/agent_loop.BrowserSession` with the
+headless runner (`browser/headless.run_cu_task`) and re-pointed ONLY the
+fixture seams below — the CONTRACT assertion blocks are byte-unchanged.
+This test is the proof of behavioral equivalence for every consumer of the
+task contract (Portal poller, the `use_computer` ToolVault tool, the
+scheduler).
 
-Contract pinned here (current code, verified by reading process_browser_use
-and the process_task worker dispatch in tasks.py):
+Contract pinned here:
   - task.status == COMPLETED, task.progress == 100
   - task.result_url == result_data["final_screenshot"]
   - result_data keys: result_text, screenshots (list), final_screenshot,
     steps, tokens{input,output} — MERGED over the pre-existing result_data
     (the original "url" key survives)
 
-Assertion blocks are split into CONTRACT (must survive Task 12 byte-unchanged)
-and LEGACY SEAM PINS (tied to the BrowserSession implementation; Task 12
-re-points the fixture seams and may relax those specific assertions).
+Assertion blocks are split into CONTRACT (survived Task 12 byte-unchanged)
+and SEAM PINS (tied to the current headless-runner implementation).
 
 Isolation (this is a live production box):
   - task_db is replaced with an in-memory fake (no Portal/tasks.db rows)
-  - task_queue is replaced (nothing left for a worker to pick up)
-  - BrowserSession.start/stop are stubbed (no Xvfb/Chrome)
-  - _call_api returns a canned end_turn response (no Anthropic HTTP)
-  - capture_screenshot/save_screenshot_to_uploads patched in the agent_loop
+  - the persistent per-operator CU session is destroyed between tests
+    (screenshot counters / token totals would otherwise leak — all three
+    tests use operator="system")
+  - ComputerUseSession.ensure_browser/destroy stubbed (no Xvfb/Chrome)
+  - httpx is replaced in sys.modules with a fake whose SSE stream returns a
+    canned end_turn response (no Anthropic HTTP)
+  - capture_screenshot/save_screenshot_to_uploads patched in the headless
     namespace (no files written to Portal/uploads)
-  - requests.post stubbed (the post-success auto-snapshot POST to /chat must
-    never reach the live Orchestrator on :9091)
+  - chat_routes seams (_get_tools, build_cu_context, _cu_save_to_blackbox)
+    stubbed — no ToolVault embedding, fossil retrieval, or real auto-mint
+  - requests.post stubbed (the post-success auto-snapshot POST to /chat/save
+    must never reach the live Orchestrator on :9091)
 """
 import io
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 from Orchestrator import tasks as tasks_mod
-from Orchestrator.browser import agent_loop
-from Orchestrator.browser.agent_loop import BrowserSession
+from Orchestrator.browser import headless
+from Orchestrator.browser.session_manager import ComputerUseSession, destroy_session
 from Orchestrator.models import Task, TaskStatus, TaskType
+from Orchestrator.routes import chat_routes
 
 GOLDEN_API_RESPONSE = {
     "content": [{"type": "text", "text": "Golden run complete"}],
     "stop_reason": "end_turn",
     "usage": {"input_tokens": 11, "output_tokens": 7},
 }
+
+
+def _golden_sse_lines():
+    """The Anthropic streaming-SSE rendering of GOLDEN_API_RESPONSE."""
+    events = [
+        {"type": "content_block_start", "content_block": {"type": "text"}},
+        {"type": "content_block_delta",
+         "delta": {"type": "text_delta",
+                   "text": GOLDEN_API_RESPONSE["content"][0]["text"]}},
+        {"type": "content_block_stop"},
+        {"type": "message_delta",
+         "delta": {"stop_reason": GOLDEN_API_RESPONSE["stop_reason"]},
+         "usage": GOLDEN_API_RESPONSE["usage"]},
+    ]
+    return ["data: " + json.dumps(e) for e in events]
+
+
+class _FakeHTTPX:
+    """Stand-in for the httpx module: the driver's only external API seam.
+    `client.stream(...)` records the call and replays the golden SSE body."""
+
+    class TimeoutException(Exception):
+        pass
+
+    class ConnectError(Exception):
+        pass
+
+    def __init__(self, api_calls: list):
+        self._api_calls = api_calls
+
+    def AsyncClient(self, **kwargs):
+        api_calls = self._api_calls
+
+        class _Resp:
+            status_code = 200
+
+            async def aiter_lines(self):
+                for line in _golden_sse_lines():
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        class _StreamCtx:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            def stream(self, method, api_url, headers=None, json=None):
+                api_calls.append({"method": method, "url": api_url,
+                                  "headers": headers, "payload": json})
+                return _StreamCtx()
+
+        return _Client()
 
 
 def _tiny_png() -> bytes:
@@ -74,57 +145,68 @@ def golden_env(monkeypatch):
     monkeypatch.setattr(tasks_mod, "task_db", fake_db)
     monkeypatch.setattr(tasks_mod, "task_queue", [])
 
+    # -- per-operator session isolation: fresh CU session for each test -------
+    monkeypatch.setattr(ComputerUseSession, "destroy", lambda self: None)
+    destroy_session("system")
+
     # -- no real display / Chrome --------------------------------------------
-    monkeypatch.setattr(BrowserSession, "start", lambda self, url="about:blank": True)
-    monkeypatch.setattr(BrowserSession, "stop", lambda self: None)
+    async def _ensure_browser(self, url="about:blank"):
+        return True
 
-    # -- Anthropic seam: loop terminates immediately with end_turn ------------
+    monkeypatch.setattr(ComputerUseSession, "ensure_browser", _ensure_browser)
+    monkeypatch.setattr(headless, "NATIVE_MODE", True)  # skip Xvfb health check
+    monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
+
+    # -- Anthropic seam: fake httpx, loop terminates with end_turn -------------
     api_calls = []
+    monkeypatch.setitem(sys.modules, "httpx", _FakeHTTPX(api_calls))
 
-    async def fake_call_api(self, system, messages, tools):
-        api_calls.append({"system": system, "messages": messages, "tools": tools})
-        return dict(GOLDEN_API_RESPONSE)
-
-    monkeypatch.setattr(BrowserSession, "_call_api", fake_call_api)
-
-    # -- screenshot seams, patched where agent_loop LOOKS THEM UP -------------
-    # Task 12 NOTE: when agent_loop.py is deleted, re-point these seams at the
-    # replacement runner's module. The replacement path also keeps a persistent
-    # per-operator CU session — reset/patch it between tests or screenshot
-    # counters will leak across tests (all three use operator="system").
-    monkeypatch.setattr(agent_loop, "capture_screenshot", lambda *a, **k: _tiny_png())
+    # -- screenshot seams, patched where headless LOOKS THEM UP ---------------
+    monkeypatch.setattr(headless, "capture_screenshot", lambda *a, **k: _tiny_png())
 
     saved_urls = []
 
     def fake_save(png_bytes, ident, step):
-        # Signature-agnostic: legacy passes (task_id, step); the Task-12 runner
-        # passes (f"cu_{operator}", session.screenshot_count).
+        # Signature-agnostic: the runner passes (f"cu_{operator}",
+        # session.screenshot_count).
         assert png_bytes.startswith(b"\x89PNG"), "capture seam must yield real PNG bytes"
         url = f"/ui/uploads/golden_{ident}_step{step:03d}.png"
         saved_urls.append(url)
         return url
 
-    monkeypatch.setattr(agent_loop, "save_screenshot_to_uploads", fake_save)
+    monkeypatch.setattr(headless, "save_screenshot_to_uploads", fake_save)
 
-    # -- no real pacing: the loop's page-load/UI-settle sleeps are pure waste
-    # here (2s+ per test). wait_for() does not route through asyncio.sleep.
+    # -- chat_routes seams (resolved lazily by runner/driver at call time):
+    #    no ToolVault embedding, no fossil retrieval, no real BlackBox mint
+    monkeypatch.setattr(chat_routes, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(chat_routes, "build_cu_context", lambda *a, **k: ("", {}))
+
+    async def _no_save(*a, **k):
+        return None
+
+    monkeypatch.setattr(chat_routes, "_cu_save_to_blackbox", _no_save)
+
+    # -- no real pacing: the runner's Chrome-settle sleep is pure waste here.
+    # wait_for() does not route through asyncio.sleep.
     async def _instant(_secs):
         return None
 
-    monkeypatch.setattr(agent_loop.asyncio, "sleep", _instant)
+    monkeypatch.setattr(headless.asyncio, "sleep", _instant)
 
     # -- auto-snapshot POST must never reach the live server ------------------
     chat_posts = []
 
     def fake_post(url, *args, **kwargs):
         chat_posts.append(url)
-        return SimpleNamespace(status_code=200)
+        return SimpleNamespace(status_code=200, raise_for_status=lambda: None)
 
     monkeypatch.setattr("requests.post", fake_post)
 
-    return SimpleNamespace(
+    yield SimpleNamespace(
         db=fake_db, api_calls=api_calls, saved_urls=saved_urls, chat_posts=chat_posts
     )
+
+    destroy_session("system")
 
 
 def _make_task(**kwargs) -> Task:
@@ -165,13 +247,15 @@ def test_use_computer_golden_result_contract(golden_env):
     # New keys are MERGED over the original result_data — "url" survives
     assert rd["url"] == "https://example.com"
 
-    # --- LEGACY SEAM PINS (Task 12 re-points seams; may relax these) ---------
+    # --- SEAM PINS (Task 12: re-pointed to the headless runner) --------------
     # Single API round-trip → exactly the initial screenshot, one step
     assert len(golden_env.api_calls) == 1
     assert rd["steps"] == 1
     assert rd["screenshots"] == golden_env.saved_urls
-    # No screenshot files were written for real (fake_save returned URLs only)
-    assert golden_env.saved_urls == [f"/ui/uploads/golden_{task.task_id}_step000.png"]
+    # Initial screenshot only, chat-path naming: cu_{operator} + session count
+    assert golden_env.saved_urls == ["/ui/uploads/golden_cu_system_step001.png"]
+    # The auto-snapshot went to /chat/save (direct persistence), not /chat
+    assert golden_env.chat_posts == ["http://localhost:9091/chat/save"]
 
 
 def test_worker_dispatch_routes_use_computer(golden_env):

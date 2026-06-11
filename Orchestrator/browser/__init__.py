@@ -12,14 +12,13 @@ from Orchestrator.browser.display import VirtualDisplay
 from Orchestrator.browser.chrome import ChromeInstance
 from Orchestrator.browser.screenshot import capture_screenshot, screenshot_to_base64, save_screenshot_to_uploads
 from Orchestrator.browser.actions import ActionExecutor
-from Orchestrator.browser.agent_loop import BrowserSession
 from Orchestrator.browser.session_manager import (
     ComputerUseSession, get_or_create_session,
     destroy_session, cleanup_inactive_sessions, strip_screenshots_from_history
 )
 
 __all__ = [
-    "VirtualDisplay", "ChromeInstance", "ActionExecutor", "BrowserSession",
+    "VirtualDisplay", "ChromeInstance", "ActionExecutor",
     "ComputerUseSession", "get_or_create_session",
     "destroy_session", "cleanup_inactive_sessions", "strip_screenshots_from_history",
     "capture_screenshot", "screenshot_to_base64", "save_screenshot_to_uploads",

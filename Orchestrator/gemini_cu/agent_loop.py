@@ -183,8 +183,11 @@ async def _capture_screenshot(session: GeminiCUSession) -> bytes:
         from Orchestrator.browser.config import ACTIVE_DISPLAY
         # Capture at native resolution, then resize to Gemini's expected 1440x900
         # (NOT 1280x720 which is Anthropic's resolution)
-        png_bytes = capture_screenshot_display(ACTIVE_DISPLAY)
-        png_bytes = resize_screenshot(png_bytes, GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT)
+        # to_thread: capture is a blocking subprocess + PIL resize — keep the
+        # event loop free for other Orchestrator requests during a CU step.
+        png_bytes = await asyncio.to_thread(capture_screenshot_display, ACTIVE_DISPLAY)
+        png_bytes = await asyncio.to_thread(
+            resize_screenshot, png_bytes, GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT)
         return png_bytes
     elif session.environment == "android":
         from Orchestrator.adb.commands import ADBCommands
@@ -208,45 +211,54 @@ async def _execute_predefined_action(session: GeminiCUSession,
         if action_name == "click_at":
             x, y = args.get("x", 0), args.get("y", 0)
             print(f"[GEMINI CU] click_at: ({x},{y}) [gemini 0-999] → native {executor.to_native(x, y)}")
-            return executor.execute("left_click", coordinate=[x, y])
+            # to_thread on every executor.execute: the executor runs blocking
+            # subprocesses (ydotool/xdotool) + sync sleep jitter — don't stall
+            # the event loop for 0.5-2s per action.
+            return await asyncio.to_thread(
+                executor.execute, "left_click", coordinate=[x, y])
         elif action_name == "type_text_at":
             x, y = args.get("x", 0), args.get("y", 0)
-            executor.execute("left_click", coordinate=[x, y])
+            await asyncio.to_thread(
+                executor.execute, "left_click", coordinate=[x, y])
             await asyncio.sleep(0.2)
             if args.get("clear_before_typing", False):
-                executor.execute("key", text="ctrl+a")
+                await asyncio.to_thread(executor.execute, "key", text="ctrl+a")
                 await asyncio.sleep(0.1)
-            executor.execute("type", text=args.get("text", ""))
+            await asyncio.to_thread(
+                executor.execute, "type", text=args.get("text", ""))
             return {"success": True, "message": f"Typed at ({x},{y})"}
         elif action_name == "hover_at":
             x, y = args.get("x", 0), args.get("y", 0)
-            return executor.execute("mouse_move", coordinate=[x, y])
+            return await asyncio.to_thread(
+                executor.execute, "mouse_move", coordinate=[x, y])
         elif action_name == "key_combination":
             keys = args.get("keys", "")
             # Gemini sends "Control+A"; the executor's key action expects
             # xdotool-style combos ("ctrl+a")
             keys = _map_gemini_keys(keys)
-            return executor.execute("key", text=keys)
+            return await asyncio.to_thread(executor.execute, "key", text=keys)
         elif action_name == "scroll_at":
             x, y = args.get("x", 0), args.get("y", 0)
             direction = args.get("direction", "down")
             magnitude = args.get("magnitude", 3)
-            return executor.execute(
+            return await asyncio.to_thread(
+                executor.execute,
                 "scroll", coordinate=[x, y],
                 direction=direction, amount=max(1, int(magnitude)))
         elif action_name == "scroll_document":
             direction = args.get("direction", "down")
             # Screen center in gemini 0-999 space
-            return executor.execute(
+            return await asyncio.to_thread(
+                executor.execute,
                 "scroll", coordinate=[500, 500],
                 direction=direction, amount=5)
         elif action_name == "navigate":
             url = args.get("url", "")
-            executor.execute("key", text="ctrl+l")
+            await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
             await asyncio.sleep(0.2)
-            executor.execute("type", text=url)
+            await asyncio.to_thread(executor.execute, "type", text=url)
             await asyncio.sleep(0.1)
-            executor.execute("key", text="Return")
+            await asyncio.to_thread(executor.execute, "key", text="Return")
             return {"success": True, "action": "navigate", "url": url}
         elif action_name == "wait_5_seconds":
             await asyncio.sleep(5)
@@ -254,7 +266,8 @@ async def _execute_predefined_action(session: GeminiCUSession,
         elif action_name == "drag_and_drop":
             sx, sy = args.get("x", 0), args.get("y", 0)
             dx, dy = args.get("destination_x", 0), args.get("destination_y", 0)
-            return executor.execute(
+            return await asyncio.to_thread(
+                executor.execute,
                 "left_click_drag",
                 start_coordinate=[sx, sy], coordinate=[dx, dy])
         else:
@@ -461,11 +474,11 @@ async def run_gemini_cu_loop(
     # Navigate to URL if browser/desktop mode
     if url and session.environment in ("browser", "desktop"):
         executor = ActionExecutor()
-        executor.execute("key", text="ctrl+l")
+        await asyncio.to_thread(executor.execute, "key", text="ctrl+l")
         await asyncio.sleep(0.2)
-        executor.execute("type", text=url)
+        await asyncio.to_thread(executor.execute, "type", text=url)
         await asyncio.sleep(0.1)
-        executor.execute("key", text="Return")
+        await asyncio.to_thread(executor.execute, "key", text="Return")
         await asyncio.sleep(2)
         screenshot_bytes = await _capture_screenshot(session)
         screenshot_url = _save_screenshot(screenshot_bytes, session)

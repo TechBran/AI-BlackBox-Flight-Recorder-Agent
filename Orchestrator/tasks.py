@@ -988,27 +988,35 @@ def process_checkpoint_task(task: Task):
                    progress=0)
 
 def process_browser_use(task: Task):
-    """Process a Sovereign Browser task using Anthropic Computer Use."""
+    """Process a Computer Use task via the headless runner (one CU loop)."""
     import asyncio
 
     update_task(task.task_id, progress=20)
-    print(f"[WORKER] Starting Sovereign Browser task {task.task_id}")
+    print(f"[WORKER] Starting Computer Use task {task.task_id}")
 
     try:
-        from Orchestrator.browser.agent_loop import BrowserSession
+        from Orchestrator.browser.headless import run_cu_task
         from Orchestrator.browser.config import SESSION_TIMEOUT
 
         prompt = task.prompt or ""
-        url = (task.result_data or {}).get("url")
+        task_rd = task.result_data or {}
+        url = task_rd.get("url")
         operator = task.operator or "system"
 
-        session = BrowserSession(task_id=task.task_id, operator=operator)
         update_task(task.task_id, progress=30)
 
-        # Run the async agent loop in a new event loop
+        # Run the async headless runner in a new event loop (worker thread)
         result = asyncio.run(
             asyncio.wait_for(
-                session.run(prompt=prompt, url=url),
+                run_cu_task(
+                    task_id=task.task_id,
+                    operator=operator,
+                    prompt=prompt,
+                    device_id=task_rd.get("device_id") or "blackbox",
+                    model=task_rd.get("model") or "",
+                    system_prompt=task_rd.get("system_prompt"),
+                    url=url,
+                ),
                 timeout=SESSION_TIMEOUT + 30
             )
         )
@@ -1032,7 +1040,8 @@ def process_browser_use(task: Task):
             )
             print(f"[WORKER] Browser task {task.task_id} completed: {result.get('steps', 0)} steps, {len(result.get('screenshots', []))} screenshots")
 
-            # Auto-snapshot: send summary to /chat for auto-mint
+            # Auto-snapshot: persist summary via /chat/save (direct save +
+            # auto-mint — no LLM round-trip like the old /chat POST)
             try:
                 import requests as req
                 screenshots = result.get("screenshots", [])
@@ -1045,18 +1054,18 @@ def process_browser_use(task: Task):
                     f"Result:\n{result.get('result_text', '')[:1000]}\n\n"
                     f"Screenshots captured: {', '.join(screenshots[-5:])}"
                 )
-                req.post(
-                    "http://localhost:9091/chat",
+                resp = req.post(
+                    "http://localhost:9091/chat/save",
                     json={
                         "operator": operator,
-                        "messages": [{"role": "user", "content": summary}],
-                        "provider": "google",
-                        "model": "gemini-2.5-flash",
-                        "streaming": False,
+                        "user_message": f"Computer Use task: {(task.prompt or '')[:300]}",
+                        "assistant_response": summary,
+                        "model": "computer-use",
                     },
                     timeout=30
                 )
-                print(f"[WORKER] Auto-snapshot sent for CU task {task.task_id}")
+                resp.raise_for_status()
+                print(f"[WORKER] Auto-snapshot saved for CU task {task.task_id}")
             except Exception as snap_err:
                 print(f"[WORKER] Auto-snapshot failed (non-fatal): {snap_err}")
         else:
