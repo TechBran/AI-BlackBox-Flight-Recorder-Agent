@@ -234,3 +234,27 @@ def test_browser_prompt_no_unsatisfiable_tool():
     'first action' instruction is unsatisfiable; datetime is injected at run time."""
     from Orchestrator.browser import agent_loop
     assert "get_current_time" not in agent_loop.DEFAULT_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Backend dispatcher — catalog rules drive routing, not string sniffing
+# (plan task 11)
+# ---------------------------------------------------------------------------
+
+def test_resolve_backend():
+    from Orchestrator.browser.dispatch import resolve_backend
+    assert resolve_backend("gemini-2.5-computer-use-preview-10-2025") == "google"
+    assert resolve_backend("computer-use-preview") == "openai"
+    assert resolve_backend("claude-opus-4-6") == "anthropic"
+    assert resolve_backend("") == "anthropic"          # empty -> CU_MODEL_DEFAULT
+    assert resolve_backend(None) == "anthropic"
+    assert resolve_backend("totally-unknown-model") == "anthropic"  # fallthrough
+
+
+def test_chat_routes_no_gemini_string_sniffing():
+    """Dispatch must go through resolve_backend, not `\"gemini\" in model`."""
+    import inspect
+    from Orchestrator.routes import chat_routes
+    src = inspect.getsource(chat_routes)
+    assert '"gemini" in model' not in src, (
+        "chat_routes must dispatch CU via Orchestrator.browser.dispatch.resolve_backend")

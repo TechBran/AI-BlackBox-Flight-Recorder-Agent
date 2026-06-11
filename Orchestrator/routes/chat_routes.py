@@ -41,6 +41,7 @@ from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_search, perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
+from Orchestrator.browser.dispatch import resolve_backend
 
 # =============================================================================
 # Tool Definitions — Generated from tool_registry.py (single source of truth)
@@ -5420,9 +5421,11 @@ async def chat_stream(request: Request):
                 stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
             elif provider == "computer-use":
                 _get_device_id = request.query_params.get("device_id", "blackbox")
-                if model and "gemini" in model:
+                backend = resolve_backend(model)
+                if backend == "google":
                     stream = stream_gemini_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
                 else:
+                    # "anthropic" today; "openai" wired in CU plan task 13
                     stream = stream_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
             else:
                 stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
@@ -5500,10 +5503,12 @@ async def chat_stream_post(request: Request):
             elif provider == "xai":
                 stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
             elif provider == "computer-use":
-                if model and "gemini" in model:
+                backend = resolve_backend(model)
+                if backend == "google":
                     stream = stream_gemini_computer_use(context_messages, model, operator=operator,
                                                          session_id=cu_session_id, device_id=cu_device_id)
                 else:
+                    # "anthropic" today; "openai" wired in CU plan task 13
                     stream = stream_computer_use(context_messages, model, operator=operator,
                                                   session_id=cu_session_id, device_id=cu_device_id)
             else:
