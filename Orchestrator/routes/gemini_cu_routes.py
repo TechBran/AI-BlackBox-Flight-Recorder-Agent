@@ -18,7 +18,8 @@ router = APIRouter(prefix="/gemini-cu", tags=["gemini-cu"])
 async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
                                prompt: str, result_text: str,
                                screenshots: List[str], steps: int):
-    """Save Gemini CU task result as a BlackBox snapshot via /chat auto-mint."""
+    """Save Gemini CU task result as a BlackBox snapshot via /chat/save
+    direct persistence + auto-mint (no LLM round-trip)."""
     import httpx
     summary = (
         f"GEMINI COMPUTER USE — TASK RESULT\n\n"
@@ -32,13 +33,12 @@ async def _snapshot_cu_result(task_id: str, operator: str, device_id: str,
     )
     async with httpx.AsyncClient(timeout=30) as client:
         await client.post(
-            "http://localhost:9091/chat",
+            "http://localhost:9091/chat/save",
             json={
                 "operator": operator,
-                "messages": [{"role": "user", "content": summary}],
-                "provider": "google",
-                "model": "gemini-2.5-flash",
-                "streaming": False,
+                "user_message": f"Gemini Computer Use task on {device_id}: {prompt}",
+                "assistant_response": summary,
+                "model": DEFAULT_CU_MODEL,
             }
         )
     print(f"[GEMINI CU] Snapshot saved for task {task_id}")

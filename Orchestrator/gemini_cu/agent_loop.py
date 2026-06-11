@@ -9,10 +9,13 @@ import json
 import time
 import base64
 import os
+from datetime import datetime
 from typing import Optional, Dict, Any, List, AsyncGenerator
 
 from google import genai
 from google.genai import types
+
+from Orchestrator.browser.actions import ActionExecutor, COORD_SPACE_GEMINI
 
 from Orchestrator.gemini_cu.config import (
     DEFAULT_CU_MODEL, MAX_ITERATIONS, MAX_WALL_CLOCK,
@@ -196,103 +199,64 @@ async def _execute_predefined_action(session: GeminiCUSession,
                                       action_name: str, args: dict) -> dict:
     """Execute a predefined Gemini CU action."""
     if session.environment in ("browser", "desktop"):
-        from Orchestrator.browser.actions import ActionExecutor
-        executor = ActionExecutor()
-
-        # Gemini CU uses normalized 0-999 coords. Convert to Gemini's CU display
-        # space (1440x900), then ActionExecutor._scale_coord() scales to real desktop.
-        # But ActionExecutor scales from Anthropic's 1280x720 — so we must scale
-        # directly to real desktop pixels here, bypassing the double scale.
-        from Orchestrator.browser.config import NATIVE_WIDTH, NATIVE_HEIGHT
-        W, H = NATIVE_WIDTH, NATIVE_HEIGHT  # Real desktop: 1920x1080
-
-        def _gemini_to_real(gx, gy):
-            """Convert Gemini normalized 0-999 coords directly to real desktop pixels."""
-            return int(gx / 999 * W), int(gy / 999 * H)
+        # All desktop input routes through ActionExecutor with the gemini-999
+        # coordinate space: it converts normalized 0-999 coords to native pixels
+        # at LIVE resolution (to_native) and picks ydotool on Wayland / xdotool
+        # on X11 automatically.
+        executor = ActionExecutor(coord_space=COORD_SPACE_GEMINI)
 
         if action_name == "click_at":
-            raw_x, raw_y = args.get("x", 0), args.get("y", 0)
-            rx, ry = _gemini_to_real(raw_x, raw_y)
-            print(f"[GEMINI CU] click_at: raw=({raw_x},{raw_y}) → real=({rx},{ry}) [display={W}x{H}]")
-            from Orchestrator.browser.actions import _run_xdotool, _jitter
-            import time
-            _run_xdotool("mousemove", "--sync", str(rx), str(ry))
-            time.sleep(_jitter())
-            _run_xdotool("click", "1")
-            return {"success": True, "message": f"Left click at ({rx},{ry})"}
+            x, y = args.get("x", 0), args.get("y", 0)
+            print(f"[GEMINI CU] click_at: ({x},{y}) [gemini 0-999] → native {executor.to_native(x, y)}")
+            return executor.execute("left_click", coordinate=[x, y])
         elif action_name == "type_text_at":
-            rx, ry = _gemini_to_real(args.get("x", 0), args.get("y", 0))
-            from Orchestrator.browser.actions import _run_xdotool, _jitter
-            import time
-            _run_xdotool("mousemove", "--sync", str(rx), str(ry))
-            time.sleep(_jitter())
-            _run_xdotool("click", "1")
+            x, y = args.get("x", 0), args.get("y", 0)
+            executor.execute("left_click", coordinate=[x, y])
             await asyncio.sleep(0.2)
             if args.get("clear_before_typing", False):
-                _run_xdotool("key", "--clearmodifiers", "ctrl+a")
+                executor.execute("key", text="ctrl+a")
                 await asyncio.sleep(0.1)
-            _run_xdotool("type", "--clearmodifiers", "--delay", "12", args.get("text", ""))
-            return {"success": True, "message": f"Typed at ({rx},{ry})"}
+            executor.execute("type", text=args.get("text", ""))
+            return {"success": True, "message": f"Typed at ({x},{y})"}
         elif action_name == "hover_at":
-            rx, ry = _gemini_to_real(args.get("x", 0), args.get("y", 0))
-            from Orchestrator.browser.actions import _run_xdotool
-            _run_xdotool("mousemove", "--sync", str(rx), str(ry))
-            return {"success": True, "message": f"Hover at ({rx},{ry})"}
+            x, y = args.get("x", 0), args.get("y", 0)
+            return executor.execute("mouse_move", coordinate=[x, y])
         elif action_name == "key_combination":
             keys = args.get("keys", "")
-            # Gemini sends "Control+A", xdotool expects "ctrl+a"
+            # Gemini sends "Control+A"; the executor's key action expects
+            # xdotool-style combos ("ctrl+a")
             keys = _map_gemini_keys(keys)
-            from Orchestrator.browser.actions import _run_xdotool
-            _run_xdotool("key", "--clearmodifiers", keys)
-            return {"success": True, "message": f"Key: {keys}"}
+            return executor.execute("key", text=keys)
         elif action_name == "scroll_at":
-            rx, ry = _gemini_to_real(args.get("x", 0), args.get("y", 0))
+            x, y = args.get("x", 0), args.get("y", 0)
             direction = args.get("direction", "down")
             magnitude = args.get("magnitude", 3)
-            from Orchestrator.browser.actions import _run_xdotool, _jitter
-            import time
-            _run_xdotool("mousemove", "--sync", str(rx), str(ry))
-            time.sleep(_jitter())
-            button_map = {"up": "4", "down": "5", "left": "6", "right": "7"}
-            button = button_map.get(direction, "5")
-            clicks = max(1, int(magnitude))
-            for _ in range(clicks):
-                _run_xdotool("click", button)
-                time.sleep(0.02)
-            return {"success": True, "message": f"Scroll {direction} x{clicks} at ({rx},{ry})"}
+            return executor.execute(
+                "scroll", coordinate=[x, y],
+                direction=direction, amount=max(1, int(magnitude)))
         elif action_name == "scroll_document":
-            from Orchestrator.browser.actions import _run_xdotool
             direction = args.get("direction", "down")
-            button = "5" if direction == "down" else "4"
-            for _ in range(5):
-                _run_xdotool("click", button)
-                import time; time.sleep(0.02)
-            return {"success": True, "message": f"Scroll document {direction}"}
+            # Screen center in gemini 0-999 space
+            return executor.execute(
+                "scroll", coordinate=[500, 500],
+                direction=direction, amount=5)
         elif action_name == "navigate":
             url = args.get("url", "")
-            from Orchestrator.browser.actions import _run_xdotool
-            _run_xdotool("key", "--clearmodifiers", "ctrl+l")
+            executor.execute("key", text="ctrl+l")
             await asyncio.sleep(0.2)
-            _run_xdotool("type", "--clearmodifiers", "--delay", "12", url)
+            executor.execute("type", text=url)
             await asyncio.sleep(0.1)
-            _run_xdotool("key", "--clearmodifiers", "Return")
+            executor.execute("key", text="Return")
             return {"success": True, "action": "navigate", "url": url}
         elif action_name == "wait_5_seconds":
             await asyncio.sleep(5)
             return {"success": True, "action": "wait"}
         elif action_name == "drag_and_drop":
-            sx, sy = _gemini_to_real(args.get("x", 0), args.get("y", 0))
-            dx, dy = _gemini_to_real(args.get("destination_x", 0), args.get("destination_y", 0))
-            from Orchestrator.browser.actions import _run_xdotool, _jitter
-            import time
-            _run_xdotool("mousemove", "--sync", str(sx), str(sy))
-            time.sleep(_jitter(50))
-            _run_xdotool("mousedown", "1")
-            time.sleep(0.1)
-            _run_xdotool("mousemove", "--sync", str(dx), str(dy))
-            time.sleep(0.1)
-            _run_xdotool("mouseup", "1")
-            return {"success": True, "message": f"Drag ({sx},{sy}) -> ({dx},{dy})"}
+            sx, sy = args.get("x", 0), args.get("y", 0)
+            dx, dy = args.get("destination_x", 0), args.get("destination_y", 0)
+            return executor.execute(
+                "left_click_drag",
+                start_coordinate=[sx, sy], coordinate=[dx, dy])
         else:
             return {"success": False, "error": f"Unknown browser action: {action_name}"}
 
@@ -380,13 +344,10 @@ def _save_screenshot(png_bytes: bytes, session: GeminiCUSession) -> str:
 def _default_system_prompt(session: GeminiCUSession) -> str:
     """Generate a default system prompt based on environment."""
     if session.environment == "android":
-        return (
+        base = (
             "You are a Computer Use agent controlling an Android device via touch input. "
             "You can see the screen through screenshots and interact via tap, swipe, "
             "type, and other actions.\n\n"
-            "TEMPORAL AWARENESS — FIRST ACTION:\n"
-            "Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. "
-            "Do this before any other actions.\n\n"
             "SCROLL CONVENTIONS (browser-style, mapped to touch for you):\n"
             "- scroll_at direction='down' = scroll page down (see more content below)\n"
             "- scroll_at direction='up' = scroll page up (see content above)\n"
@@ -400,29 +361,24 @@ def _default_system_prompt(session: GeminiCUSession) -> str:
             "- Complete the user's task step by step, taking a new screenshot after each action."
         )
     elif session.environment == "desktop":
-        return (
+        base = (
             "You are the AI BlackBox — a Computer Use agent controlling a Linux desktop. "
             "You can see the screen through screenshots and interact via click, type, "
             "scroll, and navigation actions.\n\n"
-            "TEMPORAL AWARENESS — FIRST ACTION:\n"
-            "Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. "
-            "Do this before any other actions.\n\n"
-            "The desktop is a real Linux machine (display :0, 1920x1080). "
+            "The desktop is a real Linux machine. "
             "Your coordinates are normalized 0-999. (0,0) = top-left, (999,999) = bottom-right.\n\n"
             "Click in the CENTER of UI elements for best accuracy. "
             "Complete the user's task step by step, taking a screenshot after each action "
             "to verify the result. If a page is loading, use wait_5_seconds before retrying."
         )
     else:
-        return (
+        base = (
             "You are a Computer Use agent controlling a web browser. "
             "You can see the screen through screenshots and interact via click, type, "
             "scroll, and navigation actions. Complete the user's task step by step. "
-            "If a page is loading, use wait_5_seconds before retrying.\n\n"
-            "TEMPORAL AWARENESS — FIRST ACTION:\n"
-            "Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. "
-            "Do this before any other actions."
+            "If a page is loading, use wait_5_seconds before retrying."
         )
+    return base + f"\n\nCurrent date/time: {datetime.now().isoformat(timespec='seconds')}"
 
 
 async def run_gemini_cu_loop(
@@ -504,7 +460,6 @@ async def run_gemini_cu_loop(
 
     # Navigate to URL if browser/desktop mode
     if url and session.environment in ("browser", "desktop"):
-        from Orchestrator.browser.actions import ActionExecutor
         executor = ActionExecutor()
         executor.execute("key", text="ctrl+l")
         await asyncio.sleep(0.2)
@@ -537,7 +492,7 @@ async def run_gemini_cu_loop(
         # Call Gemini API
         print(f"[GEMINI CU] Step {step}: calling API with {len(contents)} content blocks, system_instruction={len(str(config.system_instruction or ''))} chars")
         try:
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model=model_name,
                 contents=contents,
                 config=config,
