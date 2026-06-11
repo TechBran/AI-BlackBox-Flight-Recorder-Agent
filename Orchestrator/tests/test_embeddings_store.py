@@ -6,6 +6,7 @@ ordered id list, self-healing on open, plus the active-model pointer file.
 All tests run against tmp_path — never the real Manifest/.
 """
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
     VectorStore,
     get_active_slug,
+    get_store,
     list_stores,
     set_active_slug,
 )
@@ -155,6 +157,160 @@ def test_empty_store_search_returns_empty(tmp_path):
     assert store.search(QUERY, k=5) == []
     # open() on a nonexistent dir creates nothing until first append
     assert not (tmp_path / "unit-test-model").exists()
+
+
+# ── dims guard on open (C1) ──────────────────────────────────────────────────
+
+def test_reopen_with_wrong_dims_raises_and_leaves_files_untouched(tmp_path):
+    _populated_store(tmp_path)  # written with dims=4
+    store_dir = tmp_path / "unit-test-model"
+    vectors_before = (store_dir / "vectors.f32").read_bytes()
+    ids_before = (store_dir / "ids.json").read_bytes()
+    meta_before = (store_dir / "meta.json").read_bytes()
+
+    # Reopening with the wrong dims must refuse — the self-heal would
+    # otherwise reinterpret row boundaries and silently corrupt the store.
+    with pytest.raises(ValueError):
+        VectorStore("unit-test-model", 8, tmp_path).open()
+
+    assert (store_dir / "vectors.f32").read_bytes() == vectors_before
+    assert (store_dir / "ids.json").read_bytes() == ids_before
+    assert (store_dir / "meta.json").read_bytes() == meta_before
+
+
+# ── non-finite vectors rejected (I1) ─────────────────────────────────────────
+
+def test_append_nonfinite_vector_raises_store_unchanged(tmp_path):
+    store = _make_store(tmp_path)
+    store.append("snap-a", [1.0, 0.0, 0.0, 0.0])
+    with pytest.raises(ValueError):
+        store.append("snap-nan", [float("nan"), 0.0, 0.0, 0.0])
+    with pytest.raises(ValueError):
+        store.append("snap-inf", [0.0, float("inf"), 0.0, 0.0])
+    assert store.count == 1
+    assert store.ids() == {"snap-a"}
+    vec_file = tmp_path / "unit-test-model" / "vectors.f32"
+    assert vec_file.stat().st_size == ROW_BYTES
+
+
+# ── append_many (I2) ─────────────────────────────────────────────────────────
+
+def test_append_many_in_order_and_searchable(tmp_path):
+    store = _make_store(tmp_path)
+    appended = store.append_many(list(THREE_VECTORS.items()))
+    assert appended == 3
+    assert store.count == 3
+    # rows land in input order
+    assert json.loads(
+        (tmp_path / "unit-test-model" / "ids.json").read_text()
+    ) == list(THREE_VECTORS)
+    results = store.search(QUERY, k=3)
+    assert [sid for sid, _ in results] == ["snap-a", "snap-c", "snap-b"]
+
+
+def test_append_many_skips_existing_and_intra_batch_duplicates(tmp_path):
+    store = _make_store(tmp_path)
+    store.append("snap-a", THREE_VECTORS["snap-a"])
+    appended = store.append_many([
+        ("snap-a", [0.0, 0.0, 1.0, 0.0]),        # dup of existing — skipped
+        ("snap-b", THREE_VECTORS["snap-b"]),
+        ("snap-b", [0.0, 0.0, 0.0, 1.0]),        # intra-batch dup — first wins
+        ("snap-c", THREE_VECTORS["snap-c"]),
+    ])
+    assert appended == 2
+    assert store.count == 3
+    vec_file = tmp_path / "unit-test-model" / "vectors.f32"
+    assert vec_file.stat().st_size == 3 * ROW_BYTES
+    # first write won for both duplicates
+    a_hit = store.search([1.0, 0.0, 0.0, 0.0], k=1)[0]
+    assert a_hit[0] == "snap-a" and a_hit[1] == pytest.approx(1.0, abs=1e-5)
+    b_hit = store.search([0.0, 1.0, 0.0, 0.0], k=1)[0]
+    assert b_hit[0] == "snap-b" and b_hit[1] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_append_many_bad_dims_appends_nothing(tmp_path):
+    store = _make_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.append_many([
+            ("snap-a", THREE_VECTORS["snap-a"]),
+            ("snap-bad", [1.0, 2.0]),  # wrong dims aborts the WHOLE batch
+            ("snap-c", THREE_VECTORS["snap-c"]),
+        ])
+    assert store.count == 0
+    # all-or-nothing: validation failed before any write, so no files appeared
+    assert not (tmp_path / "unit-test-model").exists()
+
+
+# ── get_store canonical-instance factory (I3) ────────────────────────────────
+
+def test_get_store_returns_same_instance_for_same_key(tmp_path):
+    a = get_store("unit-test-model", dims=DIMS, base_dir=tmp_path)
+    b = get_store("unit-test-model", dims=DIMS, base_dir=tmp_path)
+    assert a is b
+
+
+def test_get_store_different_base_dir_different_instance(tmp_path):
+    a = get_store("unit-test-model", dims=DIMS, base_dir=tmp_path / "one")
+    b = get_store("unit-test-model", dims=DIMS, base_dir=tmp_path / "two")
+    assert a is not b
+
+
+def test_get_store_dims_default_from_registry(tmp_path):
+    slug = "qwen3-embedding-0.6b"
+    store = get_store(slug, base_dir=tmp_path)
+    assert store.dims == EMBEDDING_MODELS[slug]["dims"]
+
+
+def test_get_store_unknown_slug_without_dims_raises(tmp_path):
+    with pytest.raises(ValueError):
+        get_store("not-a-registered-model", base_dir=tmp_path)
+
+
+# ── cache invalidation + lock regressions (I4) ───────────────────────────────
+
+def test_search_sees_rows_appended_after_cache_warm(tmp_path):
+    # Guards the `self._matrix = None` invalidation on append: without it the
+    # first search pins a stale matrix and later rows never rank.
+    store = _make_store(tmp_path)
+    store.append("snap-a", [1.0, 0.0, 0.0, 0.0])
+    assert store.search([1.0, 0.0, 0.0, 0.0], k=2)[0][0] == "snap-a"  # warm cache
+    store.append("snap-b", [0.0, 1.0, 0.0, 0.0])
+    results = store.search([0.0, 1.0, 0.0, 0.0], k=2)
+    assert [sid for sid, _ in results] == ["snap-b", "snap-a"]
+
+
+def test_concurrent_appends_and_searches_stay_consistent(tmp_path):
+    store = _make_store(tmp_path)
+    n_threads, n_ops = 4, 25
+    errors = []
+
+    def worker(t):
+        try:
+            for i in range(n_ops):
+                vec = np.zeros(DIMS, dtype=np.float32)
+                vec[(t + i) % DIMS] = 1.0
+                store.append(f"snap-{t}-{i}", vec)
+                store.search(vec, k=3)
+        except Exception as e:  # surfaced via assert below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert errors == []
+    total = n_threads * n_ops
+    assert store.count == total
+    # on-disk state consistent: a fresh instance reopens without healing
+    store_dir = tmp_path / "unit-test-model"
+    assert (store_dir / "vectors.f32").stat().st_size == total * ROW_BYTES
+    reopened = VectorStore("unit-test-model", DIMS, tmp_path).open()
+    assert reopened.count == total
+    assert reopened.ids() == {
+        f"snap-{t}-{i}" for t in range(n_threads) for i in range(n_ops)
+    }
 
 
 # ── active pointer ───────────────────────────────────────────────────────────

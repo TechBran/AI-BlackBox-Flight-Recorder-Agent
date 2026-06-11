@@ -1,6 +1,7 @@
 """Binary per-model vector stores — replaces inline-JSON embeddings.
 
-Layout under {base_dir}/{slug}/ (base_dir defaults to config.EMBEDDINGS_STORES_DIR):
+Layout under {base_dir}/{slug}/ (get_store() defaults base_dir to
+config.EMBEDDINGS_STORES_DIR):
   vectors.f32 — raw little-endian float32, row-major N×dims
   ids.json    — ordered snap_id list; row i ↔ vector i
   meta.json   — {slug, dims, normalized: True, count, last_updated} (ISO-8601 UTC)
@@ -44,7 +45,11 @@ def _atomic_write_json(path: Path, obj) -> None:
 
 
 class VectorStore:
-    """Append-only float32 vector store for one embedding model."""
+    """Append-only float32 vector store for one embedding model.
+
+    One live instance per (base_dir, slug) — always obtain stores via
+    get_store(); constructing VectorStore directly is for tests only.
+    """
 
     def __init__(self, slug: str, dims: int, base_dir):
         self.slug = slug
@@ -84,6 +89,22 @@ class VectorStore:
         return self
 
     def _load_locked(self) -> None:
+        # Dims guard MUST precede self-heal: healing across a dims mismatch
+        # reinterprets row boundaries (rows = bytes // wrong_row_bytes),
+        # rewrites meta to the wrong dims, and silently corrupts searches.
+        if self.meta_path.exists():
+            try:
+                stored_dims = json.loads(
+                    self.meta_path.read_text(encoding="utf-8")
+                )["dims"]
+            except (json.JSONDecodeError, KeyError, TypeError, OSError,
+                    UnicodeDecodeError):
+                stored_dims = None  # unreadable meta: heal below rebuilds it
+            if stored_dims is not None and stored_dims != self.dims:
+                raise ValueError(
+                    f"{self.slug}: store dims {stored_dims} != requested {self.dims}"
+                )
+
         self._matrix = None
         self._ids = []
         if self.ids_path.exists():
@@ -123,31 +144,62 @@ class VectorStore:
 
     def append(self, snap_id: str, vector) -> None:
         """L2-normalize and append one row; idempotent on snap_id."""
-        if len(vector) != self.dims:
-            raise ValueError(
-                f"{self.slug}: vector has {len(vector)} dims, store expects {self.dims}"
-            )
+        self.append_many([(snap_id, vector)])
+
+    def append_many(self, items: list[tuple[str, "np.ndarray | list"]]) -> int:
+        """Append a batch of (snap_id, vector) rows; returns rows written.
+
+        Validation is all-or-nothing: every item is checked (dims, finiteness)
+        BEFORE any byte is written, so one bad item aborts the whole batch.
+        Duplicate snap_ids (against the store or earlier in the batch — first
+        wins) are skipped silently, matching append()'s idempotency. The whole
+        batch costs ONE fsync set: one vectors.f32 append, one ids.json
+        rewrite, one meta rewrite, one matrix invalidation.
+        """
+        prepared = []
+        for snap_id, vector in items:
+            vec = np.asarray(vector, dtype=np.float32)
+            if vec.shape != (self.dims,):
+                raise ValueError(
+                    f"{self.slug}: vector has {len(vector)} dims, "
+                    f"store expects {self.dims}"
+                )
+            # NaN/Inf would rank #1 in every search forever (NaN compares
+            # poison argsort) — reject before normalize.
+            if not np.isfinite(vec).all():
+                raise ValueError(f"{snap_id}: non-finite vector")
+            prepared.append((snap_id, vec))
+
         with self._lock:
             self._ensure_open_locked()
-            if snap_id in self._id_set:
-                return  # idempotent: first write wins
-            vec = np.asarray(vector, dtype=np.float32)
-            norm = float(np.linalg.norm(vec))
-            if norm > 0:
-                vec = vec / norm
+            new_ids: list[str] = []
+            new_rows: list[bytes] = []
+            seen: set[str] = set()
+            for snap_id, vec in prepared:
+                if snap_id in self._id_set or snap_id in seen:
+                    continue  # idempotent: first write wins
+                seen.add(snap_id)
+                norm = float(np.linalg.norm(vec))
+                if norm > 0:
+                    vec = vec / norm
+                new_ids.append(snap_id)
+                new_rows.append(vec.astype("<f4").tobytes())
+            if not new_ids:
+                return 0
 
             self.dir.mkdir(parents=True, exist_ok=True)
             with open(self.vectors_path, "ab") as f:
-                f.write(vec.astype("<f4").tobytes())
+                f.write(b"".join(new_rows))
                 f.flush()
                 os.fsync(f.fileno())
-            # Vector row is durable before ids.json names it — a crash between
-            # the two leaves an orphan row that open() heals away.
-            self._ids.append(snap_id)
-            self._id_set.add(snap_id)
+            # Vector rows are durable before ids.json names them — a crash
+            # between the two leaves orphan rows that open() heals away.
+            self._ids.extend(new_ids)
+            self._id_set.update(new_ids)
             _atomic_write_json(self.ids_path, self._ids)
             self._write_meta_locked()
             self._matrix = None  # re-read lazily on next search
+            return len(new_ids)
 
     def _write_meta_locked(self) -> None:
         _atomic_write_json(self.meta_path, {
@@ -216,6 +268,38 @@ class VectorStore:
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────
+
+_STORES: dict[tuple[str, str], VectorStore] = {}
+_STORES_LOCK = threading.Lock()
+
+
+def get_store(slug: str, dims: int = None, base_dir=None) -> VectorStore:
+    """Canonical-instance factory: ONE live VectorStore per (base_dir, slug).
+
+    Two instances on the same directory would race each other's files, so all
+    production code must come through here. dims defaults from
+    EMBEDDING_MODELS[slug]; base_dir defaults to config.EMBEDDINGS_STORES_DIR.
+    The key uses the realpath of base_dir so aliased paths share an instance.
+    """
+    if dims is None:
+        try:
+            dims = EMBEDDING_MODELS[slug]["dims"]
+        except KeyError:
+            raise ValueError(
+                f"unknown embedding model slug {slug!r}; "
+                f"known: {sorted(EMBEDDING_MODELS)}"
+            ) from None
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    key = (os.path.realpath(base), slug)
+    with _STORES_LOCK:
+        store = _STORES.get(key)
+        if store is None:
+            # open() before caching: a dims-mismatch refusal must not leave a
+            # poisoned entry behind.
+            store = VectorStore(slug, dims, base).open()
+            _STORES[key] = store
+        return store
+
 
 def list_stores(base_dir) -> list:
     """[{slug, dims, count, last_updated}] from meta.json files; skips malformed dirs."""
