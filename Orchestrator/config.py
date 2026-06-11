@@ -638,23 +638,32 @@ ANTHROPIC_MODEL_DEFAULT = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 # effort="xhigh" is Opus 4.7's recommended level for agentic/coding work; Sonnet 4.6 maxes at "high".
 # Haiku 4.5 is deliberately omitted — it doesn't support effort or adaptive thinking.
 ANTHROPIC_THINKING_MODELS = {
+    "claude-fable-5",   # Mythos-class: thinking always on; explicit {type: "adaptive"} accepted
+    "claude-mythos-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
 }
 ANTHROPIC_EFFORT_MAP = {
+    "claude-fable-5": "xhigh",    # recommended for agentic/coding on the Claude 5 tier
+    "claude-mythos-5": "xhigh",
     "claude-opus-4-8": "xhigh",   # mirror 4.7 — newest Opus tier
     "claude-opus-4-7": "xhigh",   # Opus 4.7-only tier between "high" and "max"
     "claude-opus-4-6": "high",
     "claude-sonnet-4-6": "high",  # Sonnet caps at "high" — xhigh/max are Opus-tier only
 }
 # Opus 4.7 removed `temperature`, `top_p`, `top_k` — sending any returns 400.
-# Opus 4.8 mirrors that constraint by default.
-ANTHROPIC_NO_SAMPLING_MODELS = {"claude-opus-4-8", "claude-opus-4-7"}
-# Opus 4.7 omits thinking text by default — set display="summarized" to get visible thinking.
+# Opus 4.8 and the Claude 5 tier (Fable/Mythos) carry the same constraint.
+ANTHROPIC_NO_SAMPLING_MODELS = {
+    "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7",
+}
+# Opus 4.7+ omit thinking text by default — set display="summarized" to get visible thinking.
+# Fable/Mythos 5 likewise default to "omitted" (summaries only; raw CoT never returned).
 # Other models stream thinking text as-is without the flag.
-ANTHROPIC_THINKING_DISPLAY_MODELS = {"claude-opus-4-8", "claude-opus-4-7"}
+ANTHROPIC_THINKING_DISPLAY_MODELS = {
+    "claude-fable-5", "claude-mythos-5", "claude-opus-4-8", "claude-opus-4-7",
+}
 GEMINI_MODEL_DEFAULT    = os.getenv("GOOGLE_GEMINI_MODEL", "gemini-3.1-pro-preview")
 XAI_MODEL_DEFAULT       = os.getenv("XAI_MODEL", "grok-4.3")  # Bumped 2026-05-18: prior default grok-4-1-fast-reasoning is on xAI's May 2026 deprecation list (auto-redirected to grok-4.3 server-side)
 DEFAULT_PROVIDER        = (os.getenv("DEFAULT_PROVIDER") or "google").strip().lower()
