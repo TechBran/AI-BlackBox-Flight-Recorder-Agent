@@ -289,7 +289,12 @@ Commit `feat(onboarding): embeddings wizard step — picker, ollama pull, migrat
 **Files:**
 - Modify: `Portal/modules/updates-manager.js` (CRLF!), `Portal/index.html` (card container in `.updates-section` + version bump `?v=genui282`), relevant `Portal/styles/` feature css
 
-**Spec.** On `initUpdatesPanel()` (menu open), additionally fetch `/embeddings/status`. Render a card when noteworthy: `health=superseded` → "New embedding model available (<successor>) — open the setup wizard to migrate" + button; `health=broken` → urgent styling + "Search degraded — embedding model unavailable. Auto-migration: <detail>" + button; `job.state=running` → progress line "Re-embedding N/M…". Button → `window.location.href = "/onboarding/?step=embeddings"`. `health=ok` + no job → render nothing. Failure of the status fetch must not break the updates panel (try/catch, card hidden).
+**Spec.** On `initUpdatesPanel()` (menu open), additionally fetch `/embeddings/status`. Render a card when noteworthy; **two affordances** (Brandon 2026-06-11):
+
+- **[Update] button** — one-click direct action, no wizard detour: `POST /embeddings/migrate {target: successor}`. The card copy *explains what will happen* before they click: "Your system will transfer embeddings to <successor> in the background. Search keeps working the whole time; the switch happens automatically when it finishes and survives restarts." (24/7 appliance — background is the normal mode.)
+- **[Manage] button** — the managed path: `window.location.href = "/onboarding/?step=embeddings"` (wizard embeddings section, full control).
+
+States: `health=superseded` → info card with both buttons; `health=broken` → urgent styling, auto-migration already underway per watcher — show what/why detail + [Manage] only; `job.state=running` → progress line "Re-embedding N/M…" + [Manage]; `health=ok` + no job → render nothing. Failure of the status fetch must not break the updates panel (try/catch, card hidden).
 
 Commit `feat(portal): embeddings notification card in updates section → wizard deep-link`.
 
@@ -300,7 +305,7 @@ Commit `feat(portal): embeddings notification card in updates section → wizard
 **Files (CRLF, base `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/`):**
 - Modify: `ui/updates/UpdatesScreen.kt`, `ui/updates/UpdatesViewModel.kt`, data layer (model + API call beside the existing `UpdateStatus` fetch — follow its exact pattern)
 
-**Spec.** `EmbeddingsStatus` DTO (subset: active, health{state, detail, successor}, job{state, done, total}). ViewModel fetches it alongside `/update/status` (independent failure → null → no card). `EmbeddingsCard` composable mirroring Portal's three states (superseded / broken / migrating) using the existing Card/StatusCard idioms in the file; tap action: `Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))`.
+**Spec.** `EmbeddingsStatus` DTO (subset: active, health{state, detail, successor}, job{state, done, total}). ViewModel fetches it alongside `/update/status` (independent failure → null → no card). `EmbeddingsCard` composable mirroring Portal's three states and **the same two affordances**: **[Update]** → `POST /embeddings/migrate {target: successor}` directly from the card (copy explains the background transfer + restart survival before tapping), shown only for `superseded`; **[Manage]** → `Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))`, shown in all states. Use the existing Card/StatusCard idioms in the file.
 
 **Gate:** `ANDROID_HOME=$HOME/Android/Sdk ./gradlew compileDebugKotlin` from the app dir. Commit `feat(android): embeddings card in UpdatesScreen → wizard deep-link`.
 
