@@ -389,8 +389,13 @@ export async function blobToDataURL(blob) {
  * Orchestrator/routes/admin_routes.py). Once hydrated, these arrays are
  * REPLACED with the live catalog.
  *
- * Non-chat entries (computer-use, agents, gemini-agents, realtime) are
- * NOT centralized — they're subsystem-pinned model lists with different
+ * The computer-use entry is ALSO hydrated (from /models/computer-use,
+ * CU production pass 2026-06-10) — its models carry a `backend` field
+ * ("anthropic" | "google" | "openai") used for <optgroup> rendering and
+ * the window.__cuModelBackends lookup consumed by cu-drawer.js.
+ *
+ * Remaining non-chat entries (agents, gemini-agents, realtime) are NOT
+ * centralized — they're subsystem-pinned model lists with different
  * lifecycles than chat models, so they remain hardcoded here.
  */
 const MODEL_CONFIG = {
@@ -433,11 +438,11 @@ const MODEL_CONFIG = {
     },
     "computer-use": {
         name: "Computer Use",
-        models: [
-            { id: "claude-opus-4-7", name: "Claude Opus 4.7 (Sovereign)", default: true },
-            { id: "claude-opus-4-6", name: "Claude Opus 4.6" },
-            { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-            { id: "gemini-2.5-computer-use-preview-10-2025", name: "Gemini CU Preview" }
+        models: [  // Offline fallback — replaced by /models/computer-use fetch
+            { id: "", name: "(Auto - Latest)", default: true, backend: "anthropic" },
+            { id: "claude-opus-4-6", name: "Claude Opus 4.6", backend: "anthropic" },
+            { id: "gemini-2.5-computer-use-preview-10-2025", name: "Gemini CU Preview", backend: "google" },
+            { id: "computer-use-preview", name: "OpenAI Computer Use", backend: "openai" }
         ]
     },
     agents: {
@@ -488,11 +493,28 @@ export function updateModelDropdown(provider) {
     // Clear and rebuild dropdown
     modelEl.innerHTML = "";
 
+    // Models carrying a `backend` field (computer-use catalog) are grouped
+    // under <optgroup> by vendor. Models without `backend` render flat,
+    // exactly as before — the 4 chat providers are unaffected. The Auto
+    // entry (id "") always renders flat BEFORE the groups.
+    const BACKEND_LABELS = { anthropic: "Anthropic", google: "Google", openai: "OpenAI" };
+    const backendGroups = {};
     config.models.forEach((model, index) => {
         const option = document.createElement("option");
         option.value = model.id;
         option.textContent = model.name;
-        modelEl.appendChild(option);
+        if (model.backend && model.id !== "") {
+            let group = backendGroups[model.backend];
+            if (!group) {
+                group = document.createElement("optgroup");
+                group.label = BACKEND_LABELS[model.backend] || model.backend;
+                backendGroups[model.backend] = group;
+                modelEl.appendChild(group);
+            }
+            group.appendChild(option);
+        } else {
+            modelEl.appendChild(option);
+        }
         if (index === 0) {
             console.log(`[ModelSelect] Added first option: ${model.name} (id: ${model.id})`);
         }
@@ -510,6 +532,47 @@ export function updateModelDropdown(provider) {
 
     window.__model = modelEl.value || "";
     console.log(`[ModelSelect] Updated for provider ${provider}, model: ${window.__model || "(auto)"}, options: ${modelEl.options.length}`);
+
+    // Expose id -> backend lookup for cu-drawer.js (Task 15). Built from
+    // whatever models array is current — hydrated catalog or offline
+    // fallback — so the lookup always exists when CU is selected.
+    if (provider === "computer-use") {
+        window.__cuModelBackends = Object.fromEntries(
+            config.models.filter(m => m.backend).map(m => [m.id, m.backend])
+        );
+    }
+}
+
+/**
+ * Build the hydrated models array for MODEL_CONFIG[provider].models from a
+ * raw /models/{provider} catalog. Always prepends the "(Auto)" placeholder.
+ *
+ * For computer-use the catalog entries carry a `backend` field which is
+ * preserved (drives <optgroup> rendering + window.__cuModelBackends), and
+ * the Auto label names the server's default model (resolved server-side
+ * when id "" is sent — CU_MODEL_DEFAULT). All other providers keep the
+ * exact pre-existing mapping: { id, name } with a generic Auto label.
+ *
+ * @param {string} provider - provider key
+ * @param {Array<{id: string, name?: string, backend?: string}>} rawModels
+ * @param {string} [defaultId] - the catalog's default_id (CU only)
+ * @returns {Array<object>} hydrated models array
+ */
+function buildHydratedModels(provider, rawModels, defaultId) {
+    if (provider === "computer-use") {
+        const def = rawModels.find(m => m.id === defaultId);
+        const defaultName = def ? (def.name || def.id) : (defaultId || "Latest");
+        const auto = { id: "", name: `(Auto - ${defaultName})`, default: true };
+        if (def && def.backend) auto.backend = def.backend;
+        return [
+            auto,
+            ...rawModels.map(m => ({ id: m.id, name: m.name || m.id, backend: m.backend }))
+        ];
+    }
+    return [
+        { id: "", name: "(Auto - Latest)", default: true },
+        ...rawModels.map(m => ({ id: m.id, name: m.name || m.id }))
+    ];
 }
 
 /**
@@ -523,7 +586,7 @@ export function updateModelDropdown(provider) {
  * but sessionStorage lets us skip the round-trip entirely on
  * provider-switch within a tab).
  *
- * @param {string} provider - one of "google" | "anthropic" | "openai" | "xai"
+ * @param {string} provider - one of "google" | "anthropic" | "openai" | "xai" | "computer-use"
  * @returns {Promise<boolean>} true if MODEL_CONFIG was updated (from cache or fetch)
  */
 export async function fetchAvailableModels(provider) {
@@ -534,10 +597,7 @@ export async function fetchAvailableModels(provider) {
     try {
         const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
         if (cached && Date.now() - cached.ts < CACHE_TTL_MS && Array.isArray(cached.models)) {
-            MODEL_CONFIG[provider].models = [
-                { id: "", name: "(Auto - Latest)", default: true },
-                ...cached.models.map(m => ({ id: m.id, name: m.name || m.id }))
-            ];
+            MODEL_CONFIG[provider].models = buildHydratedModels(provider, cached.models, cached.default_id);
             console.log(`[ModelSelect] Cache hit for ${provider} (${cached.models.length} models, age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
             return true;
         }
@@ -549,15 +609,14 @@ export async function fetchAvailableModels(provider) {
         if (response.ok) {
             const data = await response.json();
             if (data.models && data.models.length > 0) {
-                MODEL_CONFIG[provider].models = [
-                    { id: "", name: "(Auto - Latest)", default: true },
-                    ...data.models.map(m => ({ id: m.id, name: m.name || m.id }))
-                ];
-                // Cache the live result for 5 min
+                MODEL_CONFIG[provider].models = buildHydratedModels(provider, data.models, data.default_id);
+                // Cache the live result for 5 min (default_id rides along so
+                // cache-hit hydration can rebuild the CU Auto label)
                 try {
                     sessionStorage.setItem(cacheKey, JSON.stringify({
                         ts: Date.now(),
                         models: data.models,
+                        default_id: data.default_id,
                         source: data.source || "live"
                     }));
                 } catch (_) { /* sessionStorage full or disabled — ignore */ }
