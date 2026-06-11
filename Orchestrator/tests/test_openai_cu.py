@@ -353,3 +353,187 @@ def test_openai_cu_default_matches_dispatch_filter():
     assert re.match(CU_MODEL_FILTERS["openai"], OPENAI_CU_MODEL_DEFAULT)
     from Orchestrator.browser.dispatch import resolve_backend
     assert resolve_backend(OPENAI_CU_MODEL_DEFAULT) == "openai"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes C1/C2/I1 — abnormal-exit continuity, screenshot fallback,
+# per-turn context refresh
+# ---------------------------------------------------------------------------
+
+def _message_response(rid="resp_done", text="all done"):
+    return SimpleNamespace(
+        id=rid,
+        output=[SimpleNamespace(
+            type="message",
+            content=[SimpleNamespace(type="output_text", text=text)])],
+        usage=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_start", [None, "resp_prior"])
+async def test_estop_mid_turn_restores_turn_start_id(
+        patched_loop, monkeypatch, turn_start):
+    """E-stop after step 1's create: the session id must roll back to its
+    TURN-START value, not stay pointing at resp_1 (whose computer_calls were
+    never answered — continuing from it would 400 forever)."""
+    session = FakeSession()
+    if turn_start is not None:
+        session.openai_previous_response_id = turn_start
+    r1 = _scripted_two_step()[0]  # one computer_call
+
+    class StopAfterCreate:
+        def __init__(self, api_key=None, **kw):
+            self.responses = self
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            session.stop_requested = True  # E-stop lands mid-turn
+            return r1
+
+    monkeypatch.setattr(O, "AsyncOpenAI", StopAfterCreate)
+    events = await _collect(O.run_openai_cu_loop(session, "task"))
+    assert "cu_stopped" in [e["type"] for e in events]
+    assert session.openai_previous_response_id == turn_start
+
+
+@pytest.mark.asyncio
+async def test_api_error_restores_id_and_yields_error(patched_loop, monkeypatch):
+    """Non-retriable API error -> id back at turn start + error event."""
+    session = FakeSession()
+    session.openai_previous_response_id = "resp_prior"
+
+    class Raising:
+        def __init__(self, api_key=None, **kw):
+            self.responses = self
+
+        async def create(self, **kwargs):
+            raise Exception("boom 500")
+
+    monkeypatch.setattr(O, "AsyncOpenAI", Raising)
+    events = await _collect(O.run_openai_cu_loop(session, "task"))
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and "boom 500" in errors[0]["data"]["message"]
+    assert session.openai_previous_response_id == "resp_prior"
+    assert session.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_stale_response_id_retries_fresh_once(patched_loop, monkeypatch):
+    """'No tool output found' on create -> ONE retry without
+    previous_response_id and with the developer message re-included."""
+    session = FakeSession()
+    session.openai_previous_response_id = "resp_poisoned"
+    created = []
+
+    class StaleThenOk:
+        def __init__(self, api_key=None, **kw):
+            self.responses = self
+            self.calls = []
+            created.append(self)
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise Exception(
+                    "Error code: 400 - No tool output found for computer "
+                    "call call_x.")
+            return _message_response()
+
+    monkeypatch.setattr(O, "AsyncOpenAI", StaleThenOk)
+    events = await _collect(O.run_openai_cu_loop(session, "task"))
+
+    first, second = created[0].calls
+    assert first["previous_response_id"] == "resp_poisoned"
+    assert "previous_response_id" not in second           # fresh conversation
+    assert second["input"][0]["role"] == "developer"      # instructions re-sent
+    assert [e for e in events if e["type"] == "done"]
+    assert session.openai_previous_response_id == "resp_done"
+
+
+@pytest.mark.asyncio
+async def test_post_action_screenshot_retry_once_then_continue(
+        patched_loop, monkeypatch):
+    """Post-action capture raises once, the retry succeeds -> loop continues
+    and finishes normally."""
+    calls = {"n": 0}
+
+    def flaky_capture():
+        calls["n"] += 1
+        if calls["n"] == 2:  # first post-action attempt fails
+            raise RuntimeError("scrot died")
+        return b"PNG-%d" % calls["n"]
+
+    monkeypatch.setattr(O, "capture_screenshot", flaky_capture)
+    session = FakeSession()
+    events = await _collect(O.run_openai_cu_loop(session, "click"))
+    done = [e for e in events if e["type"] == "done"]
+    assert done and done[0]["data"]["content"] == "CUA done"
+    assert calls["n"] == 3  # initial + failed post-action + successful retry
+    out = [i for i in FakeAsyncOpenAI.last.responses.calls[1]["input"]
+           if i.get("type") == "computer_call_output"][0]
+    assert out["output"]["type"] == "computer_screenshot"
+
+
+@pytest.mark.asyncio
+async def test_post_action_screenshot_persistent_failure_reuses_last_good(
+        patched_loop, monkeypatch):
+    """Capture keeps failing after a good initial screenshot -> the previous
+    good bytes are sent (shape-valid computer_screenshot, never input_text)."""
+    calls = {"n": 0}
+    good = b"GOOD-INITIAL-PNG"
+
+    def capture():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise RuntimeError("scrot died")
+
+    monkeypatch.setattr(O, "capture_screenshot", capture)
+    session = FakeSession()
+    events = await _collect(O.run_openai_cu_loop(session, "click"))
+    out = [i for i in FakeAsyncOpenAI.last.responses.calls[1]["input"]
+           if i.get("type") == "computer_call_output"][0]
+    assert out["output"]["type"] == "computer_screenshot"
+    assert out["output"]["image_url"] == (
+        "data:image/png;base64," + O.screenshot_to_base64(good))
+    assert [e for e in events if e["type"] == "done"]  # loop survived
+    assert calls["n"] == 3  # initial + post-action attempt + retry
+
+
+@pytest.mark.asyncio
+async def test_capture_never_succeeds_aborts_cleanly(patched_loop, monkeypatch):
+    """No screenshot has EVER succeeded -> clean error, id stays at its
+    turn-start value (never poisoned), no API call issued."""
+    def always_fail():
+        raise RuntimeError("no display")
+
+    monkeypatch.setattr(O, "capture_screenshot", always_fail)
+    session = FakeSession()
+    session.openai_previous_response_id = "resp_prior"
+    events = await _collect(O.run_openai_cu_loop(session, "click"))
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and "screenshot" in errors[0]["data"]["message"].lower()
+    assert session.openai_previous_response_id == "resp_prior"
+    assert FakeAsyncOpenAI.last is None or FakeAsyncOpenAI.last.responses.calls == []
+
+
+@pytest.mark.asyncio
+async def test_continuation_turn_carries_context_refresh(patched_loop):
+    """Turn 2+ with a system_prompt: the per-turn fossil context must reach
+    the model as an extra input_text part on the user message — the
+    developer message is first-turn-only (I1)."""
+    session = FakeSession()
+    session.openai_previous_response_id = "resp_prev_turn"
+    FakeAsyncOpenAI._scripted = [_message_response()]
+    await _collect(O.run_openai_cu_loop(
+        session, "second turn", system_prompt="CTX"))
+    first = FakeAsyncOpenAI.last.responses.calls[0]
+    roles = [i.get("role") for i in first["input"]]
+    assert "developer" not in roles
+    user = [i for i in first["input"] if i.get("role") == "user"][0]
+    texts = [p["text"] for p in user["content"] if p["type"] == "input_text"]
+    assert texts[0] == "second turn"                 # prompt part first
+    assert any("CTX" in t for t in texts[1:])        # context refresh after
+    assert "[Context refresh]" in texts[1]

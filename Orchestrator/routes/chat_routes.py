@@ -4051,12 +4051,21 @@ async def _openai_cu_agent_loop(session, operator: str, user_text: str,
 
     except asyncio.CancelledError:
         print(f"[OPENAI-CU-BG] Task cancelled (E-stop) for {operator} at step {session.current_step}")
+        # C1: cancellation can land between responses.create and the
+        # computer_call_output answer — the stored previous_response_id would
+        # then 400 every future turn ("No tool output found..."). The wrapper
+        # doesn't know the turn-start id, so clear it: the cancelled turn
+        # loses chat continuity (acceptable trade for a working session).
+        session.openai_previous_response_id = None
         session.status = "stopped"
         session.final_response = result_text or f"[Task stopped at step {session.current_step}]"
         await emit({"type": "cu_stopped", "data": {"step": session.current_step, "reason": "Task cancelled"}})
     except Exception as e:
         import traceback
         traceback.print_exc()
+        # C1: same poisoned-continuity guard as the CancelledError path —
+        # the driver may have died between create and answer.
+        session.openai_previous_response_id = None
         session.status = "error"
         session.error_message = str(e)
         await emit({"type": "error", "data": f"OpenAI CU error: {str(e)}"})

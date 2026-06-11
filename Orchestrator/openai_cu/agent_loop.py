@@ -270,6 +270,21 @@ def _safety_check_dict(check) -> dict:
     }
 
 
+def _is_stale_continuity_error(e: Exception) -> bool:
+    """True when responses.create failed because previous_response_id is
+    unusable: either poisoned (a prior turn died between create and the
+    computer_call_output answer -> "No tool output found for computer
+    call...") or expired/missing (404 — OpenAI retains stored responses
+    ~30 days). Both are unrecoverable for that id; the only fix is a fresh
+    conversation."""
+    msg = str(e)
+    if "No tool output found" in msg:
+        return True
+    if getattr(e, "status_code", None) == 404:
+        return True
+    return "previous response" in msg.lower() and "not found" in msg.lower()
+
+
 async def run_openai_cu_loop(
     session,
     prompt: str,
@@ -296,6 +311,19 @@ async def run_openai_cu_loop(
     # Multi-turn continuity across chat turns: previous_response_id chains
     # the server-side conversation. None on a fresh session.
     previous_response_id = getattr(session, "openai_previous_response_id", None)
+
+    # C1 (poisoned continuity): mid-turn, session.openai_previous_response_id
+    # points at a response whose computer_calls have NOT been answered yet.
+    # If this turn exits abnormally (E-stop, wall-clock timeout, iteration
+    # exhaustion, API error), continuing from that id 400s forever ("No tool
+    # output found for computer call..."). So on every abnormal exit we
+    # restore the id captured at TURN START: a clean prior turn remains
+    # continuable, and on a fresh session it clears to None. Post-E-stop
+    # turns deliberately lose this turn's continuity.
+    turn_start_response_id = previous_response_id
+
+    def _restore_turn_start_id():
+        session.openai_previous_response_id = turn_start_response_id
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     tools = [{
@@ -330,28 +358,36 @@ async def run_openai_cu_loop(
     # previous_response_id continuity the developer message from the first
     # turn persists server-side, so only inject it on a fresh conversation.
     input_items = []
+    user_content = [{"type": "input_text", "text": prompt}]
     if not previous_response_id:
         input_items.append({
             "role": "developer",
             "content": [{"type": "input_text",
                          "text": system_prompt or _default_system_prompt()}],
         })
-    input_items.append({
-        "role": "user",
-        "content": [
-            {"type": "input_text", "text": prompt},
-            {"type": "input_image",
-             "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}"},
-        ],
+    elif system_prompt:
+        # I1: on continuation turns the first turn's developer message
+        # persists server-side, but the PER-TURN fossil context built by
+        # stream_openai_computer_use for this prompt would otherwise never
+        # reach the model. Append it as an extra input_text part on the user
+        # message (user message items accept multiple input_text parts).
+        user_content.append({"type": "input_text",
+                             "text": f"[Context refresh]\n{system_prompt}"})
+    user_content.append({
+        "type": "input_image",
+        "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}",
     })
+    input_items.append({"role": "user", "content": user_content})
 
     # ── Agent loop ──
     for step in range(1, MAX_ITERATIONS + 1):
         if session.stop_requested:
+            _restore_turn_start_id()  # abnormal exit (C1)
             yield {"type": "cu_stopped", "data": {"step": step}}
             break
 
         if time.time() - start_time > MAX_WALL_CLOCK:
+            _restore_turn_start_id()  # abnormal exit (C1)
             yield {"type": "error", "data": {"message": "Wall clock timeout (30 min)"}}
             break
 
@@ -371,10 +407,40 @@ async def run_openai_cu_loop(
         try:
             response = await client.responses.create(**kwargs)
         except Exception as e:
-            print(f"[OPENAI CU] Step {step}: API ERROR: {e}")
-            yield {"type": "error", "data": {"message": f"OpenAI API error: {e}"}}
-            session.status = "error"
-            return
+            response = None
+            if kwargs.get("previous_response_id") and _is_stale_continuity_error(e):
+                # Belt-and-braces (C1): the chained id is poisoned (a dead
+                # turn left unanswered computer_calls) or expired (404).
+                # Retry ONCE as a fresh conversation: developer message
+                # re-included, current screenshot, no previous_response_id.
+                print(f"[OPENAI CU] Stale previous_response_id "
+                      f"({previous_response_id}); retrying fresh: {e}")
+                previous_response_id = None
+                turn_start_response_id = None  # the poisoned id is unrecoverable
+                session.openai_previous_response_id = None
+                input_items = [
+                    {"role": "developer",
+                     "content": [{"type": "input_text",
+                                  "text": system_prompt or _default_system_prompt()}]},
+                    {"role": "user",
+                     "content": [
+                         {"type": "input_text", "text": prompt},
+                         {"type": "input_image",
+                          "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}"},
+                     ]},
+                ]
+                kwargs = dict(kwargs, input=input_items)
+                kwargs.pop("previous_response_id", None)
+                try:
+                    response = await client.responses.create(**kwargs)
+                except Exception as retry_err:
+                    e = retry_err
+            if response is None:
+                print(f"[OPENAI CU] Step {step}: API ERROR: {e}")
+                _restore_turn_start_id()  # abnormal exit (C1)
+                yield {"type": "error", "data": {"message": f"OpenAI API error: {e}"}}
+                session.status = "error"
+                return
 
         previous_response_id = response.id
         session.openai_previous_response_id = response.id
@@ -427,24 +493,47 @@ async def run_openai_cu_loop(
                 output_item["acknowledged_safety_checks"] = checks
                 yield {"type": "cu_safety", "data": {"checks": checks, "step": step}}
 
+            # C2: computer_call_output.output MUST be a computer_screenshot —
+            # the API has no text variant, so a text fallback would 400 and
+            # kill the loop. On capture failure: retry once; if that fails,
+            # reuse the last good screenshot (shape-valid — the model sees an
+            # unchanged screen and will re-screenshot); if no screenshot has
+            # ever succeeded, abort the turn cleanly.
+            new_shot = None
             try:
-                screenshot_bytes = await _capture_cu_screenshot()
+                new_shot = await _capture_cu_screenshot()
+            except Exception as e:
+                print(f"[OPENAI CU] Post-action screenshot failed ({e}); retrying once")
+                try:
+                    new_shot = await _capture_cu_screenshot()
+                except Exception as retry_err:
+                    print(f"[OPENAI CU] Screenshot retry failed ({retry_err}); "
+                          f"reusing last good screenshot")
+
+            if new_shot is not None:
+                screenshot_bytes = new_shot
                 yield {"type": "cu_screenshot",
                        "data": {"url": _save_screenshot(screenshot_bytes, session),
                                 "step": step}}
-                output_item["output"] = {
-                    "type": "computer_screenshot",
-                    "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}",
-                }
-            except Exception as e:
-                print(f"[OPENAI CU] Post-action screenshot failed: {e}")
-                # Still answer the call so the API contract holds; the model
-                # sees the failure as text in place of the screenshot.
-                output_item["output"] = {
-                    "type": "input_text",
-                    "text": f"Screenshot failed: {e}",
-                }
+            elif screenshot_bytes is None:
+                # Defensive: normally unreachable (the initial-capture guard
+                # returns before the loop), but never send an invalid shape.
+                _restore_turn_start_id()  # abnormal exit (C1)
+                yield {"type": "error",
+                       "data": {"message": "Screen capture is failing and no "
+                                           "previous screenshot exists; aborting turn."}}
+                session.status = "error"
+                return
+
+            output_item["output"] = {
+                "type": "computer_screenshot",
+                "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}",
+            }
             input_items.append(output_item)
+    else:
+        # for-else: MAX_ITERATIONS exhausted without a clean done/stop break —
+        # the last response's computer_calls were never answered (C1).
+        _restore_turn_start_id()
 
     session.status = "complete"
     yield {"type": "usage", "data": session.total_tokens}
