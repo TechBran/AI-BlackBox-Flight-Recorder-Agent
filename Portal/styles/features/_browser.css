@@ -1196,6 +1196,17 @@
     .cu-drawer-row {
         flex-wrap: wrap;
     }
+
+    /* Wrapped rows need vertical room: the 110px desktop cap would clip the
+       controls row (incl. E-Stop) once it wraps to two lines. max-height is
+       only the expand-animation cap, so a generous value is safe. */
+    .cu-drawer.visible {
+        max-height: 200px;
+    }
+
+    .cu-drawer.visible.has-banner {
+        max-height: 360px;
+    }
 }
 
 @media (max-width: 480px) {
