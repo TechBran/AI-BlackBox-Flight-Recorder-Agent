@@ -1173,6 +1173,31 @@
 }
 
 /* ─── Responsive ─── */
+@media (max-width: 640px) {
+    /* Interactive viewer goes true fullscreen on small screens */
+    .cu-interact-modal {
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        max-width: none;
+        max-height: none;
+        border-radius: 0;
+    }
+
+    /* Typing bar pinned to the bottom; solid background so the
+       screen content doesn't bleed through behind it */
+    .cu-interact-typing-bar {
+        position: sticky;
+        bottom: 0;
+        background: var(--neutral-100, #1a1a1a);
+    }
+
+    /* Drawer rows overflow the operator bubble at narrow widths — wrap */
+    .cu-drawer-row {
+        flex-wrap: wrap;
+    }
+}
+
 @media (max-width: 480px) {
     .cu-drawer-session-id {
         display: none;

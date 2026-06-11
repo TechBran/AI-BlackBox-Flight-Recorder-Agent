@@ -13,11 +13,37 @@ let pollingInterval = null;
 let isOpen = false;
 let isFetching = false;  // Prevent overlapping fetches
 const POLL_MS = 1500;
-const DISPLAY_WIDTH = 1280;
-const DISPLAY_HEIGHT = 720;
+const DISPLAY_WIDTH = 1280;   // fallback default — live value fetched from /browser/status
+const DISPLAY_HEIGHT = 720;   // fallback default — live value fetched from /browser/status
+let displayW = DISPLAY_WIDTH;
+let displayH = DISPLAY_HEIGHT;
 
 /** Get device_id for interactive action requests. */
 function _getDeviceId() { return getCUDeviceId() || 'blackbox'; }
+
+/**
+ * Fetch the live CU display resolution from /browser/status (fire-and-forget).
+ * Native mode reports `cu_resolution` ("1280x720"); non-native mode reports
+ * `resolution`. On any failure (fetch error, display down, unparseable shape)
+ * the 1280x720 defaults are kept silently.
+ */
+function _fetchDisplayResolution() {
+    fetch('/browser/status')
+        .then((res) => res.json())
+        .then((data) => {
+            const resStr = data && (data.cu_resolution || data.resolution);
+            if (typeof resStr !== 'string') return;
+            const m = resStr.match(/^(\d+)x(\d+)$/);
+            if (!m) return;
+            const w = parseInt(m[1], 10);
+            const h = parseInt(m[2], 10);
+            if (w > 0 && h > 0) {
+                displayW = w;
+                displayH = h;
+            }
+        })
+        .catch(() => { /* keep defaults */ });
+}
 
 function createModal() {
     if (modal) return modal;
@@ -79,6 +105,8 @@ function createModal() {
     const typingInput = modal.querySelector('.cu-interact-typing-input');
     typingInput.addEventListener('input', handleTypingInput);
     typingInput.addEventListener('keydown', handleTypingKeyDown);
+    typingInput.addEventListener('focus', _attachKeyboardOffset);
+    typingInput.addEventListener('blur', _detachKeyboardOffset);
 
     // Quick key buttons (Enter, Tab, Backspace, Escape)
     modal.querySelectorAll('.cu-interact-key-btn').forEach(btn => {
@@ -113,6 +141,7 @@ export function open(initialScreenshotUrl) {
     modal.setAttribute('tabindex', '-1');
     modal.focus();
 
+    _fetchDisplayResolution();
     refreshScreenshot();
     pollingInterval = setInterval(refreshScreenshot, POLL_MS);
     document.addEventListener('keydown', globalEscHandler);
@@ -128,7 +157,42 @@ export function close() {
         pollingInterval = null;
     }
 
+    _detachKeyboardOffset();
     document.removeEventListener('keydown', globalEscHandler);
+}
+
+// =============================================================================
+// Soft Keyboard Offset (visualViewport)
+// =============================================================================
+
+/** Active visualViewport resize handler (null when detached). */
+let vvResizeHandler = null;
+
+/**
+ * Keep the typing bar above the soft keyboard while the input is focused.
+ * Uses the visualViewport API; no-op on browsers without it.
+ */
+function _attachKeyboardOffset() {
+    if (!window.visualViewport || vvResizeHandler) return;
+    const bar = modal.querySelector('.cu-interact-typing-bar');
+    if (!bar) return;
+    vvResizeHandler = () => {
+        const vv = window.visualViewport;
+        const kb = window.innerHeight - vv.height - vv.offsetTop;
+        bar.style.transform = kb > 0 ? `translateY(-${kb}px)` : '';
+    };
+    window.visualViewport.addEventListener('resize', vvResizeHandler);
+    vvResizeHandler();
+}
+
+/** Remove the keyboard offset listener and reset the bar position. */
+function _detachKeyboardOffset() {
+    if (vvResizeHandler && window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', vvResizeHandler);
+    }
+    vvResizeHandler = null;
+    const bar = modal ? modal.querySelector('.cu-interact-typing-bar') : null;
+    if (bar) bar.style.transform = '';
 }
 
 function globalEscHandler(e) {
@@ -167,8 +231,8 @@ function handleScreenClick(e) {
     const screen = modal.querySelector('.cu-interact-screen');
     const rect = screen.getBoundingClientRect();
 
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * DISPLAY_WIDTH);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * DISPLAY_HEIGHT);
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * displayW);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * displayH);
 
     showClickIndicator(e.clientX - rect.left, e.clientY - rect.top, rect);
 
@@ -187,8 +251,8 @@ function handleScreenScroll(e) {
     const screen = modal.querySelector('.cu-interact-screen');
     const rect = screen.getBoundingClientRect();
 
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * DISPLAY_WIDTH);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * DISPLAY_HEIGHT);
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * displayW);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * displayH);
     const direction = e.deltaY > 0 ? 'down' : 'up';
     const clicks = Math.min(Math.ceil(Math.abs(e.deltaY) / 50), 5);
 

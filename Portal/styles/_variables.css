@@ -45,6 +45,17 @@
   --neutral-950: #dddddd;
   --neutral-1000: #e0e0e0;
 
+  /* ── Spacing Scale ── */
+  /* Was referenced by feature CSS (_browser.css) but never defined;
+     declarations using these were silently invalid (resolved as 0/initial).
+     Values chosen to match the px paddings the affected components actually
+     render with elsewhere. */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
   /* ── Border-Radius Scale ── */
   --radius-xs: 4px;
   --radius-sm: 6px;
