@@ -189,12 +189,12 @@ async def test_two_step_loop_contract(patched_loop):
     first, second = client.responses.calls
 
     # ── First call: tool decl + model default + no previous_response_id ──
-    assert first["model"] == OPENAI_CU_MODEL_DEFAULT
+    assert first["model"] == OPENAI_CU_MODEL_DEFAULT == "gpt-5.5"
     tool = first["tools"][0]
-    assert tool["type"] == "computer_use_preview"
-    assert tool["display_width"] == OPENAI_CU_WIDTH == 1280
-    assert tool["display_height"] == OPENAI_CU_HEIGHT == 720
-    assert tool["environment"] == "browser"
+    # Current contract: bare computer tool — no display/environment fields
+    # (coords follow the screenshot's own pixel space; we send 1280x720).
+    assert tool == {"type": "computer"}
+    assert OPENAI_CU_WIDTH == 1280 and OPENAI_CU_HEIGHT == 720
     assert first.get("reasoning") == {"summary": "concise"}
     assert first.get("truncation") == "auto"
     assert "previous_response_id" not in first
@@ -207,6 +207,7 @@ async def test_two_step_loop_contract(patched_loop):
     assert out["call_id"] == "call_1"
     assert out["output"]["type"] == "computer_screenshot"
     assert out["output"]["image_url"].startswith("data:image/png;base64,")
+    assert out["output"]["detail"] == "original"
     acked = out["acknowledged_safety_checks"]
     assert [c["id"] for c in acked] == ["sc_1"]
     assert acked[0]["code"] == "malicious_instructions"
@@ -537,3 +538,52 @@ async def test_continuation_turn_carries_context_refresh(patched_loop):
     assert texts[0] == "second turn"                 # prompt part first
     assert any("CTX" in t for t in texts[1:])        # context refresh after
     assert "[Context refresh]" in texts[1]
+
+
+@pytest.mark.asyncio
+async def test_batched_actions_one_output_per_call(patched_loop):
+    """gpt-5.5 batches multiple actions into one computer_call via the
+    `actions` array; the driver executes them in order and answers the
+    call_id with ONE screenshot output (detail=original)."""
+    r1 = SimpleNamespace(
+        id="resp_b1",
+        output=[SimpleNamespace(
+            type="computer_call",
+            call_id="call_b1",
+            action=None,  # new contract: batch rides in `actions`
+            actions=[
+                SimpleNamespace(type="click", x=10, y=20, button="left"),
+                SimpleNamespace(type="type", text="hello"),
+            ],
+            pending_safety_checks=[],
+        )],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=2),
+    )
+    r2 = SimpleNamespace(
+        id="resp_b2",
+        output=[SimpleNamespace(
+            type="message",
+            content=[SimpleNamespace(type="output_text", text="batched done")],
+        )],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=1),
+    )
+    FakeAsyncOpenAI._scripted = [r1, r2]
+
+    session = FakeSession()
+    events = await _collect(O.run_openai_cu_loop(session, "do two things"))
+
+    # Both batched actions executed, in order
+    assert patched_loop["executor_calls"] == [
+        ("left_click", {"coordinate": [10, 20]}),
+        ("type", {"text": "hello"}),
+    ]
+    # Exactly ONE computer_call_output answers the call, detail=original
+    second = FakeAsyncOpenAI.last.responses.calls[1]
+    outputs = [i for i in second["input"] if i.get("type") == "computer_call_output"]
+    assert len(outputs) == 1
+    assert outputs[0]["call_id"] == "call_b1"
+    assert outputs[0]["output"]["detail"] == "original"
+    # One cu_action event per batched action
+    action_events = [e for e in events if e["type"] == "cu_action"]
+    assert [e["data"]["action"] for e in action_events] == ["click", "type"]
+    assert any(e["type"] == "done" for e in events)

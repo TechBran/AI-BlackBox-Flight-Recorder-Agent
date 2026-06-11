@@ -165,11 +165,14 @@ CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallba
 #   anthropic: opus/sonnet/fable/mythos at major version >= 4
 #              (computer_20251124 tool; haiku excluded — no CU support)
 #   google:    any Gemini id containing "computer-use"
-#   openai:    the Responses-API CUA model family
+#   openai:    gpt-5.5 (+ dated snapshots) carries the built-in `computer`
+#              tool; -pro is excluded (undocumented for computer use).
+#              computer-use-preview kept for orgs still on the deprecated,
+#              access-gated preview model.
 CU_MODEL_FILTERS = {
     "anthropic": r"claude-(opus|sonnet|fable|mythos)-([4-9]|\d{2,})",
     "google":    r"gemini-.*computer-use",
-    "openai":    r"computer-use-preview",
+    "openai":    r"(computer-use-preview|gpt-5\.5($|-\d))",
 }
 
 

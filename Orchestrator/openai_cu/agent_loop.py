@@ -1,21 +1,24 @@
 """
-OpenAI CUA Agent Loop — Responses API with the computer_use_preview tool.
+OpenAI Computer Use Agent Loop — Responses API with the built-in `computer`
+tool on gpt-5.5 (the dedicated, access-gated computer-use-preview model is
+deprecated; legacy support retained behind COMPUTER_USE_TOOL_TYPE).
 
 Loop shape (mirrors run_gemini_cu_loop's event contract):
     response = client.responses.create(
-        model="computer-use-preview",
-        tools=[{"type": "computer_use_preview",
-                "display_width": 1280, "display_height": 720,
-                "environment": "browser"}],
+        model="gpt-5.5",
+        tools=[{"type": "computer"}],   # bare — no display/environment fields
         input=[...],
         reasoning={"summary": "concise"},
         truncation="auto",
     )
-    -> execute each computer_call via ActionExecutor (DEFAULT anthropic-1280
-       coordinate space: OpenAI's pixel coords live in the 1280x720 display we
-       declare, the same space Anthropic uses)
-    -> reply with a computer_call_output input item carrying a fresh
-       {"type": "computer_screenshot", "image_url": "data:image/png;base64,..."}
+    -> each computer_call carries an `actions` ARRAY (gpt-5.5 batches; the
+       legacy preview model sent a single `action`) — execute the batch in
+       order via ActionExecutor (DEFAULT anthropic-1280 coordinate space:
+       coordinates follow the pixel space of the 1280x720 screenshots we
+       send, the same space Anthropic uses)
+    -> reply with ONE computer_call_output per call_id carrying a fresh
+       {"type": "computer_screenshot", "image_url": "data:image/png;base64,...",
+        "detail": "original"}
        plus previous_response_id=response.id for continuity.
 
 Key differences from Anthropic/Gemini:
@@ -326,12 +329,18 @@ async def run_openai_cu_loop(
         session.openai_previous_response_id = turn_start_response_id
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    tools = [{
-        "type": COMPUTER_USE_TOOL_TYPE,
-        "display_width": OPENAI_CU_WIDTH,
-        "display_height": OPENAI_CU_HEIGHT,
-        "environment": OPENAI_CU_ENVIRONMENT,
-    }]
+    if COMPUTER_USE_TOOL_TYPE == "computer":
+        # Current contract (gpt-5.5): bare tool, no display/environment —
+        # coordinates follow the pixel space of the screenshots we send.
+        tools = [{"type": "computer"}]
+    else:
+        # Legacy deprecated computer-use-preview tool (access-gated orgs).
+        tools = [{
+            "type": COMPUTER_USE_TOOL_TYPE,
+            "display_width": OPENAI_CU_WIDTH,
+            "display_height": OPENAI_CU_HEIGHT,
+            "environment": OPENAI_CU_ENVIRONMENT,
+        }]
 
     # ── Optional URL navigation before the first screenshot ──
     if url:
@@ -439,14 +448,13 @@ async def run_openai_cu_loop(
                 print(f"[OPENAI CU] Step {step}: API ERROR: {e}")
                 _restore_turn_start_id()  # abnormal exit (C1)
                 msg = f"OpenAI API error: {e}"
-                # model_not_found on the CUA model = the ORG lacks access, not
-                # a bad id: OpenAI gates computer-use-preview by account/usage
-                # tier (unlike Anthropic/Gemini CU, which any API key can use).
-                if "model_not_found" in str(e) and "computer-use" in str(model):
+                # model_not_found = the ORG lacks access to this model id
+                # (e.g. the deprecated, tier-gated computer-use-preview, or a
+                # gpt-5.5 rollout the account hasn't reached). Not a bad id.
+                if "model_not_found" in str(e):
                     msg = (
                         f"Your OpenAI account does not have access to "
-                        f"'{model}'. OpenAI gates its Computer Use model "
-                        f"by usage tier / staged rollout — check your tier at "
+                        f"'{model}'. Check your account tier at "
                         f"platform.openai.com (Settings → Limits) or request "
                         f"access. Anthropic and Gemini CU models work with a "
                         f"standard API key; use one of those meanwhile."
@@ -482,16 +490,25 @@ async def run_openai_cu_loop(
         # ── Execute calls, reply with computer_call_output items ──
         input_items = []
         for call in computer_calls:
-            action = getattr(call, "action", None)
-            a_type = getattr(action, "type", "unknown")
-            yield {"type": "cu_action",
-                   "data": {"action": a_type, "params": _action_params(action),
-                            "step": step}}
+            # gpt-5.5 batches multiple actions into one computer_call via the
+            # `actions` array; the deprecated preview model sent a single
+            # `action`. Execute the batch in order, then answer the call_id
+            # with ONE screenshot output.
+            batch = list(getattr(call, "actions", None) or [])
+            single = getattr(call, "action", None)
+            if not batch and single is not None:
+                batch = [single]
 
-            result = await _execute_openai_action(action)
-            if not result.get("success", True):
-                print(f"[OPENAI CU] Action {a_type} failed: {result}")
-            await asyncio.sleep(0.5)
+            for action in batch:
+                a_type = getattr(action, "type", "unknown")
+                yield {"type": "cu_action",
+                       "data": {"action": a_type, "params": _action_params(action),
+                                "step": step}}
+
+                result = await _execute_openai_action(action)
+                if not result.get("success", True):
+                    print(f"[OPENAI CU] Action {a_type} failed: {result}")
+                await asyncio.sleep(0.5)
 
             output_item = {
                 "type": "computer_call_output",
@@ -541,6 +558,9 @@ async def run_openai_cu_loop(
             output_item["output"] = {
                 "type": "computer_screenshot",
                 "image_url": f"data:image/png;base64,{screenshot_to_base64(screenshot_bytes)}",
+                # Full-resolution interpretation — docs: "prefer detail:
+                # 'original' on screenshot inputs" for computer use accuracy.
+                "detail": "original",
             }
             input_items.append(output_item)
     else:

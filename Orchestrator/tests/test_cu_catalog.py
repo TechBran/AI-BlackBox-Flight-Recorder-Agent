@@ -42,7 +42,11 @@ def test_cu_config_values_exist_and_typed():
     ("google", "gemini-3-computer-use-preview", True),  # future-shaped
     ("google", "gemini-2.5-flash", False),
     ("google", "gemini-3.1-pro-preview", False),
-    # OpenAI: computer-use-preview family only
+    # OpenAI: gpt-5.5 carries the built-in computer tool (2026-06 contract);
+    # the deprecated, access-gated computer-use-preview stays selectable.
+    ("openai", "gpt-5.5", True),
+    ("openai", "gpt-5.5-2026-04-23", True),       # dated snapshot
+    ("openai", "gpt-5.5-pro", False),             # undocumented for computer use
     ("openai", "computer-use-preview", True),
     ("openai", "computer-use-preview-2025-03-11", True),
     ("openai", "gpt-5.1", False),
@@ -111,7 +115,7 @@ def test_cu_catalog_partial_vendor_failure(monkeypatch):
     ids = {m["id"] for m in out["models"]}
     assert "claude-sonnet-4-6" in ids                            # anthropic live
     assert "gemini-2.5-computer-use-preview-10-2025" in ids      # google backfill
-    assert "computer-use-preview" in ids                         # openai backfill
+    assert "gpt-5.5" in ids                                      # openai backfill
     assert out["backends"] == {
         "anthropic": "live", "google": "error", "openai": "error"}
 
@@ -129,7 +133,7 @@ def test_cu_catalog_openai_backfill_when_filtered_empty(monkeypatch):
     out = admin_routes.get_available_models("computer-use")
     assert out["source"] == "live"
     openai_models = [m for m in out["models"] if m["backend"] == "openai"]
-    assert [m["id"] for m in openai_models] == ["computer-use-preview"]
+    assert [m["id"] for m in openai_models] == ["gpt-5.5"]
     assert out["backends"]["openai"] == "fallback"
     assert out["backends"]["anthropic"] == "live"
     assert out["backends"]["google"] == "live"

@@ -622,7 +622,7 @@ _FALLBACK_MODELS = {
         {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "backend": "anthropic"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "backend": "anthropic"},
         {"id": "gemini-2.5-computer-use-preview-10-2025", "name": "Gemini CU Preview", "backend": "google"},
-        {"id": "computer-use-preview", "name": "OpenAI Computer Use", "backend": "openai"},
+        {"id": "gpt-5.5", "name": "GPT-5.5 (Computer Use)", "backend": "openai"},
     ],
 }
 

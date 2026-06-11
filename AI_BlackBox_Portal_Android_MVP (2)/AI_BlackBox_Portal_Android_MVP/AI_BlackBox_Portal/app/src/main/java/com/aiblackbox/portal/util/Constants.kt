@@ -138,7 +138,7 @@ object Constants {
             "" to "Auto - Latest",
             "claude-opus-4-6" to "Claude Opus 4.6",
             "gemini-2.5-computer-use-preview-10-2025" to "Gemini CU Preview",
-            "computer-use-preview" to "OpenAI Computer Use"
+            "gpt-5.5" to "GPT-5.5 (Computer Use)"
         ),
         "robotics" to listOf(
             "gemini-robotics-er-1.5-preview" to "Gemini Robotics-ER 1.5"

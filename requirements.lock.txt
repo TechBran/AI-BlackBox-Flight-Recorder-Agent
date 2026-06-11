@@ -52,7 +52,7 @@ mss==10.1.0
 multidict==6.7.0
 numpy==2.4.2
 oauthlib==3.3.1
-openai==2.9.0
+openai==2.41.1
 packaging==26.1
 pillow==12.0.0
 pip==25.3
