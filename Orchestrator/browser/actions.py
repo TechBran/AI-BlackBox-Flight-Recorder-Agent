@@ -20,7 +20,7 @@ import io
 
 from Orchestrator.browser.config import (
     DISPLAY_NUMBER, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-    NATIVE_MODE, ACTIVE_DISPLAY, get_scale_factors,
+    NATIVE_MODE, ACTIVE_DISPLAY,
     get_native_env
 )
 from Orchestrator.browser.display import get_display
@@ -139,15 +139,6 @@ def _jitter(base_ms: float = 0) -> float:
     return (base_ms + random.uniform(20, 80)) / 1000.0
 
 
-def _scale_coord(coord):
-    """Scale a coordinate pair from CU model space to real display space."""
-    if not NATIVE_MODE or coord is None:
-        return coord
-    sx, sy = get_scale_factors()
-    x, y = coord
-    return [int(x * sx), int(y * sy)]
-
-
 def _run_xdotool(*args, display_number: int = ACTIVE_DISPLAY) -> subprocess.CompletedProcess:
     """Run an xdotool command on the active display."""
     if NATIVE_MODE:
@@ -212,9 +203,40 @@ class ActionExecutor:
     ydotool (Wayland-compatible) or xdotool (X11-only) accordingly.
     """
 
-    def __init__(self, display_number: int = DISPLAY_NUMBER):
+    def __init__(self, display_number: int = DISPLAY_NUMBER, coord_space: str = "anthropic-1280"):
         self.display_number = display_number
+        # "anthropic-1280": model coords in a 1280x720 virtual screen (Anthropic CU)
+        # "gemini-999":     model coords normalized to 0-999 on both axes (Gemini CU)
+        self.coord_space = coord_space
         self.use_ydotool = _use_ydotool()
+
+    def to_native(self, x: int, y: int) -> tuple:
+        """Convert model-space coordinates to native desktop pixels using the
+        LIVE resolution (never the stale import-time constants).
+
+        Imports are deliberately lazy so monkeypatched
+        Orchestrator.browser.config.detect_native_resolution (tests) and live
+        resolution changes are both honored at call time.
+        """
+        from Orchestrator.browser.config import (
+            detect_native_resolution, CU_DISPLAY_WIDTH, CU_DISPLAY_HEIGHT, NATIVE_MODE,
+        )
+        if not NATIVE_MODE:
+            return int(x), int(y)
+        w, h = detect_native_resolution()
+        if self.coord_space == "gemini-999":
+            return int(x / 999 * w), int(y / 999 * h)
+        # anthropic-1280 (default): same math + int() truncation as the old
+        # module-level _scale_coord (x * (w / CU_DISPLAY_WIDTH)) — bit-identical.
+        sx, sy = w / CU_DISPLAY_WIDTH, h / CU_DISPLAY_HEIGHT
+        return int(x * sx), int(y * sy)
+
+    def _scale_coord(self, coord):
+        """Scale a coordinate pair from model space to real display space."""
+        if coord is None:
+            return coord
+        x, y = coord
+        return self.to_native(x, y)
 
     def execute(self, action: str, **params) -> dict:
         """Execute a single CU action. Returns {success, message}."""
@@ -303,7 +325,7 @@ class ActionExecutor:
 
     def _action_left_click(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
         self._click_button(1)
@@ -311,7 +333,7 @@ class ActionExecutor:
 
     def _action_right_click(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
         self._click_button(3)
@@ -319,7 +341,7 @@ class ActionExecutor:
 
     def _action_middle_click(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
         self._click_button(2)
@@ -327,7 +349,7 @@ class ActionExecutor:
 
     def _action_double_click(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
         self._click_button_repeat(1, 2, 80)
@@ -335,7 +357,7 @@ class ActionExecutor:
 
     def _action_triple_click(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
         self._click_button_repeat(1, 3, 80)
@@ -358,7 +380,7 @@ class ActionExecutor:
 
     def _action_mouse_move(self, coordinate=None, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
         return {"success": True, "message": f"Mouse moved to {coordinate}"}
 
@@ -366,7 +388,7 @@ class ActionExecutor:
 
     def _action_scroll(self, coordinate=None, direction="down", amount=3, **kw) -> dict:
         if coordinate:
-            x, y = _scale_coord(coordinate)
+            x, y = self._scale_coord(coordinate)
             self._move(x, y)
             time.sleep(_jitter())
 
@@ -399,8 +421,8 @@ class ActionExecutor:
 
     def _action_left_click_drag(self, start_coordinate=None, coordinate=None, **kw) -> dict:
         if start_coordinate and coordinate:
-            sx, sy = _scale_coord(start_coordinate)
-            ex, ey = _scale_coord(coordinate)
+            sx, sy = self._scale_coord(start_coordinate)
+            ex, ey = self._scale_coord(coordinate)
             self._move(sx, sy)
             time.sleep(_jitter(50))
             self._button_down(1)
