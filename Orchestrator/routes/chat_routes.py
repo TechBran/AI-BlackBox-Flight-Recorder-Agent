@@ -3866,6 +3866,242 @@ async def _gemini_cu_agent_loop(session, operator: str, user_text: str,
                 pass
 
 
+# =============================================================================
+# OpenAI Computer Use — Chat Provider Streaming
+# =============================================================================
+
+async def stream_openai_computer_use(messages: List[Dict], model: str,
+                                      operator: str,
+                                      session_id: str = None,
+                                      device_id: str = "blackbox"):
+    """Launch the OpenAI CUA agent loop as a background asyncio.Task and
+    consume events from its queue. Mirrors stream_gemini_computer_use for
+    identical UX, but uses the browser/session_manager ComputerUseSession
+    (same one the Anthropic path uses — so /chat/cu-status and /chat/cu-stop
+    work for it automatically).
+
+    Yields SSE events:
+      cu_session, cu_screenshot, cu_action, cu_step, cu_safety, cu_stopped,
+      cu_queued, cu_queue_next, content, usage, done, error, heartbeat
+    """
+    import asyncio
+    from Orchestrator.browser.session_manager import get_or_create_session
+    from Orchestrator.config import OPENAI_API_KEY
+    from Orchestrator.openai_cu.config import OPENAI_CU_MODEL_DEFAULT
+
+    if not OPENAI_API_KEY:
+        yield {"type": "error", "data": "OPENAI_API_KEY not set"}
+        return
+
+    if not model:
+        model = OPENAI_CU_MODEL_DEFAULT
+
+    # ── Local desktop only for now ──
+    if device_id != "blackbox":
+        yield {"type": "error", "data": "OpenAI CU supports the local desktop only for now"}
+        return
+
+    # ── Desktop conflict guard (mirror of Gemini's Anthropic-session check) ──
+    try:
+        from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
+        gemini_session = gemini_get_session(operator)
+        if gemini_session and gemini_session.status == "running":
+            yield {"type": "error", "data": "Cannot start OpenAI CU — Gemini CU task running on this desktop. Stop it first."}
+            return
+    except Exception:
+        pass
+
+    # ── Get/create persistent session (shared with the Anthropic path) ──
+    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    session.touch()
+
+    # ── Emit session ID ──
+    yield {"type": "cu_session", "data": {"session_id": session.session_id, "device_id": session.device_id}}
+
+    # ── Extract user text ──
+    incoming_user_text = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                incoming_user_text = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
+            else:
+                incoming_user_text = content
+            break
+
+    # ── Queue/reconnect detection (same pattern as Anthropic/Gemini CU) ──
+    if session.status in ("running", "starting") and (not session.agent_task or not session.agent_task.done() or session.status == "starting"):
+        if incoming_user_text and incoming_user_text != "[reconnect]" and incoming_user_text != session.user_message:
+            position = session.enqueue_prompt(incoming_user_text)
+            print(f"[OPENAI-CU-STREAM] Queued prompt #{position} for {operator}: {incoming_user_text[:60]}")
+            yield {"type": "cu_queued", "data": {"position": position, "prompt": incoming_user_text[:100]}}
+            return
+        if session.status == "running":
+            print(f"[OPENAI-CU-STREAM] Reconnecting to running task for {operator} (step {session.current_step}/{session.total_steps})")
+            yield {"type": "cu_step", "data": {"step": session.current_step, "total": session.total_steps, "reconnect": True}}
+        else:
+            print(f"[OPENAI-CU-STREAM] Task still starting for {operator}")
+            yield {"type": "cu_step", "data": {"step": 0, "total": 0, "reconnect": True}}
+    elif session.status == "running":
+        session.reset_task_state()
+        yield {"type": "error", "data": "Previous task ended unexpectedly. Please retry."}
+        return
+    elif session.status == "complete" and session.final_response and incoming_user_text == session.user_message:
+        print(f"[OPENAI-CU-STREAM] Returning completed result for {operator} (reconnect)")
+        yield {"type": "done", "data": {"thinking": "", "content": session.final_response}}
+        return
+    else:
+        if session.status == "complete":
+            print(f"[OPENAI-CU-STREAM] New message for {operator}, resetting completed session")
+            session.reset_task_state()
+
+        user_text = incoming_user_text
+        if not user_text:
+            yield {"type": "error", "data": "No user message found"}
+            return
+
+        session.reset_task_state()
+        # Rebind the event queue to the server loop (see fresh_event_queue —
+        # a headless run may have left it bound to a dead loop).
+        session.fresh_event_queue()
+        session.status = "starting"
+        session.user_message = user_text
+
+        # ── Build system prompt with fossil context ──
+        from Orchestrator.openai_cu.agent_loop import _default_system_prompt
+        system_prompt = _default_system_prompt()
+
+        cu_fossil_context, cu_provenance = build_cu_context(user_text, operator)
+        session.provenance = cu_provenance
+        if cu_fossil_context:
+            system_prompt += "\n\n" + cu_fossil_context
+            print(f"[OPENAI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
+
+        # ── Launch background task ──
+        session.agent_task = asyncio.create_task(
+            _openai_cu_agent_loop(session, operator, user_text, model, system_prompt)
+        )
+        print(f"[OPENAI-CU-STREAM] Background task launched for {operator} (local desktop)")
+
+    # ── Queue consumer loop ──
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(session.event_queue.get(), timeout=120)
+            except asyncio.TimeoutError:
+                yield {"type": "heartbeat", "data": {"step": session.current_step, "total": session.total_steps}}
+                continue
+
+            if event is None:
+                break
+
+            yield event
+    except (asyncio.CancelledError, GeneratorExit):
+        print(f"[OPENAI-CU-STREAM] Client disconnected for {operator}, task continues in background")
+
+
+async def _openai_cu_agent_loop(session, operator: str, user_text: str,
+                                 model: str, system_prompt: str):
+    """Background agent loop for OpenAI CU. Pushes events to
+    session.event_queue, same pattern as _cu_agent_loop()/_gemini_cu_agent_loop().
+    """
+    from Orchestrator.openai_cu import run_openai_cu_loop
+
+    async def emit(evt):
+        try:
+            session.event_queue.put_nowait(evt)
+        except asyncio.QueueFull:
+            pass
+
+    result_text = ""
+    try:
+        session.status = "running"
+        print(f"[OPENAI-CU-BG] Starting agent loop for {operator}: model={model}, prompt={user_text[:80]}")
+
+        async for event in run_openai_cu_loop(session, user_text, model, system_prompt):
+            event_type = event.get("type")
+
+            if event_type == "cu_step":
+                session.current_step = event["data"]["step"]
+                session.total_steps = event["data"]["total"]
+            elif event_type == "content":
+                result_text += event["data"].get("text", "")
+            elif event_type == "done":
+                result_text = event["data"].get("content", result_text)
+            elif event_type == "error":
+                session.status = "error"
+                session.error_message = event["data"].get("message", str(event["data"]))
+
+            await emit(event)
+
+        # Save result and sync usage (browser-session shape)
+        session.final_response = result_text or "(Agent completed without text response)"
+        session.usage = {
+            "prompt_tokens": session.total_tokens.get("input", 0),
+            "completion_tokens": session.total_tokens.get("output", 0),
+        }
+
+        if not session.prompt_queue:
+            session.status = "complete"
+
+        await emit({"type": "done", "data": {"thinking": "", "content": session.final_response}})
+
+        # Save to BlackBox history
+        await _cu_save_to_blackbox(operator, user_text, result_text, session)
+
+    except asyncio.CancelledError:
+        print(f"[OPENAI-CU-BG] Task cancelled (E-stop) for {operator} at step {session.current_step}")
+        session.status = "stopped"
+        session.final_response = result_text or f"[Task stopped at step {session.current_step}]"
+        await emit({"type": "cu_stopped", "data": {"step": session.current_step, "reason": "Task cancelled"}})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        session.status = "error"
+        session.error_message = str(e)
+        await emit({"type": "error", "data": f"OpenAI CU error: {str(e)}"})
+    finally:
+        # ── Auto-dequeue ──
+        if session.prompt_queue and not session.stop_requested:
+            next_prompt = session.dequeue_prompt()
+            remaining = len(session.prompt_queue)
+            print(f"[OPENAI-CU-BG] Auto-dequeuing next prompt for {operator} ({remaining} remaining)")
+
+            saved_history = session.conversation_history
+            session.reset_task_state()
+            session.conversation_history = saved_history
+            session.status = "running"
+            session.user_message = next_prompt
+
+            await emit({"type": "cu_queue_next", "data": {"prompt": next_prompt[:100], "remaining": remaining}})
+            await asyncio.sleep(0)
+
+            # Build system prompt for next turn (continuity flows through
+            # session.openai_previous_response_id inside the driver)
+            from Orchestrator.openai_cu.agent_loop import _default_system_prompt
+            next_system = _default_system_prompt()
+            cu_fossil_context, cu_provenance = build_cu_context(next_prompt, operator)
+            session.provenance = cu_provenance
+            if cu_fossil_context:
+                next_system += "\n\n" + cu_fossil_context
+
+            await _openai_cu_agent_loop(session, operator, next_prompt, model, next_system)
+            return  # Recursive call handles its own sentinel
+
+        # Sentinel
+        try:
+            session.event_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            try:
+                session.event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                session.event_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+
 def _cu_safe_params(data: dict) -> str:
     """Format CU params for logging/display without flooding."""
     safe = {}
@@ -5428,8 +5664,9 @@ async def chat_stream(request: Request):
                 backend = resolve_backend(model)
                 if backend == "google":
                     stream = stream_gemini_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
+                elif backend == "openai":
+                    stream = stream_openai_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
                 else:
-                    # "anthropic" today; "openai" wired in CU plan task 13
                     stream = stream_computer_use(context_messages, model, operator=operator, session_id=None, device_id=_get_device_id)
             else:
                 stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
@@ -5511,8 +5748,10 @@ async def chat_stream_post(request: Request):
                 if backend == "google":
                     stream = stream_gemini_computer_use(context_messages, model, operator=operator,
                                                          session_id=cu_session_id, device_id=cu_device_id)
+                elif backend == "openai":
+                    stream = stream_openai_computer_use(context_messages, model, operator=operator,
+                                                         session_id=cu_session_id, device_id=cu_device_id)
                 else:
-                    # "anthropic" today; "openai" wired in CU plan task 13
                     stream = stream_computer_use(context_messages, model, operator=operator,
                                                   session_id=cu_session_id, device_id=cu_device_id)
             else:
@@ -5698,10 +5937,12 @@ async def cu_status(request: Request):
     cu_model = request.query_params.get("model", "")
 
     session = None
-    if cu_model and "gemini" in cu_model:
+    if cu_model and resolve_backend(cu_model) == "google":
         from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
         session = gemini_get_session(operator)
     if not session:
+        # Anthropic AND OpenAI share the browser session manager, so
+        # status works for both automatically.
         from Orchestrator.browser.session_manager import get_operator_session
         session = get_operator_session(operator)
     if not session:
@@ -5737,10 +5978,12 @@ async def cu_stop(request: Request):
     cu_model = body.get("model", "")
 
     session = None
-    if cu_model and "gemini" in cu_model:
+    if cu_model and resolve_backend(cu_model) == "google":
         from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
         session = gemini_get_session(operator)
     if not session:
+        # Anthropic AND OpenAI share the browser session manager, so
+        # stop works for both automatically.
         from Orchestrator.browser.session_manager import get_session
         session = get_session(operator, session_id)
     if not session:

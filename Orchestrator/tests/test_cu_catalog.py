@@ -260,9 +260,22 @@ def test_resolve_backend():
 
 
 def test_chat_routes_no_gemini_string_sniffing():
-    """Dispatch must go through resolve_backend, not `\"gemini\" in model`."""
+    """Dispatch AND session lookup (cu-status/cu-stop) must go through
+    resolve_backend — no `\"gemini\" in <anything>` sniffing anywhere."""
     import inspect
     from Orchestrator.routes import chat_routes
     src = inspect.getsource(chat_routes)
-    assert '"gemini" in model' not in src, (
-        "chat_routes must dispatch CU via Orchestrator.browser.dispatch.resolve_backend")
+    assert not re.search(r'["\']gemini["\'] in', src), (
+        "chat_routes must route CU via Orchestrator.browser.dispatch.resolve_backend, "
+        "not string-sniff model ids (includes /chat/cu-status and /chat/cu-stop)")
+
+
+def test_cu_filter_patterns_disjoint():
+    """Every catalog id must match EXACTLY ONE CU_MODEL_FILTERS pattern —
+    pattern-disjointness insurance so resolve_backend is never ambiguous."""
+    from Orchestrator.routes.admin_routes import _FALLBACK_MODELS
+    for m in _FALLBACK_MODELS["computer-use"]:
+        matches = [b for b, pat in CU_MODEL_FILTERS.items()
+                   if re.match(pat, m["id"])]
+        assert matches == [m["backend"]], (
+            f"{m['id']!r} matched {matches}, expected exactly [{m['backend']!r}]")
