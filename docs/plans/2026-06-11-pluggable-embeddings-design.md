@@ -42,7 +42,7 @@ Manifest/embeddings/
     ...
 ```
 
-- **Active store** named by `config.ini [embeddings] active = <store-slug>`; cutover is a one-line flip + in-memory swap.
+- **Active store** named by `Manifest/embeddings/active.json` (runtime state, like `operator_state.json`; atomic write). `config.ini [embeddings] active` is only the first-boot default seed - configparser rewrites would destroy customer comments, so code never writes config.ini. Cutover = atomic `active.json` write + in-memory swap.
 - Vectors are **L2-normalized at write time** → cosine similarity becomes a single numpy mat-vec dot product over the mmapped array (milliseconds; ~28–114MB RAM, active store only).
 - **Append protocol:** append vector row, fsync, then append id. On startup, if `len(ids) != rows`, truncate both to `min` — self-healing, no torn state.
 - `snapshot_index.json` keeps byte offsets/operator/timestamps and **shrinks 408MB → ~5MB**; mint no longer rewrites 408MB of JSON.
@@ -80,7 +80,7 @@ At mint, embed with the **active** model and append to the active store. If the 
 1. Diff target store's `ids.json` against the snapshot index → missing snap_ids.
 2. For each: read text from the volume by byte offset, embed (`purpose="document"`), append. Rate-limited for cloud; sequential for local CPU.
 3. **Catch-up loop:** new mints land in the *active* store during the job, so re-diff and fill until the delta is empty.
-4. **Atomic cutover:** config flip + in-memory store swap. Old store untouched → rollback = flip back.
+4. **Atomic cutover:** atomic `active.json` write + in-memory store swap. Old store untouched → rollback = flip back.
 
 Resumable by construction — progress *is* the store contents; a restart re-diffs and continues. Search never goes dark (old model serves until cutover).
 
@@ -106,11 +106,14 @@ Health states drive behavior:
 
 State exposed in `GET /embeddings/status`; banner rendered by Portal (and wizard).
 
-## 8. Onboarding wizard + Portal settings
+## 8. Surfaces: wizard owns everything; update sections notify and deep-link
 
-- **Wizard "Memory & Search" step:** four cards — quality / dims / RAM / cost / privacy (cloud vs local) per model. Picking local triggers Ollama install (if absent) + `ollama pull` with streamed progress; picking cloud validates the BYOK key with a probe embed.
-- **Portal settings:** same picker, change-on-the-fly. Shows per-store freshness; for an existing store the button reads "Backfill 312 snapshots (~4 min) and switch" instead of a full migration warning. Progress bar fed by `GET /embeddings/status`.
-- Android: read-only status surface at most; switching is an appliance-admin action (Portal). Out of scope for v1.
+Placement rules (Brandon, 2026-06-11):
+
+- **Onboarding wizard = the single management surface.** A new "embeddings" step (`Portal/onboarding/steps/embeddings.js` + `StepName`/`ALL_STEPS` in `Orchestrator/onboarding/state.py`) holds the full module: model cards (quality / dims / RAM / cost / privacy), Ollama presence check + model pull with streamed progress, BYOK probe validation, per-store freshness table, the backfill/switch action ("Backfill 312 snapshots (~4 min) and switch" when a store already exists), and live migration progress. The wizard supports post-onboarding re-entry via deep link `/onboarding/?step=embeddings` (`onboarding.js` already parses `location.search`).
+- **Portal update section** (menu modal `.updates-section`, `Portal/modules/updates-manager.js`): gains an embeddings notification card driven by `GET /embeddings/status` - rendered for `superseded` / `broken` health states and while a migration is running - with a button that deep-links to the wizard step.
+- **Android update section** (`ui/updates/UpdatesScreen.kt`, already documented as "parallel to updates-manager.js"): the same card with the same states; tapping opens `{origin}/onboarding/?step=embeddings`.
+- Update notifications always *direct back to the wizard*; neither update panel embeds its own picker.
 
 ## 9. Error handling
 
