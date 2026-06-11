@@ -805,6 +805,14 @@ git commit -m "feat(cu): Gemini driver parity — ActionExecutor routing, async 
 **Files:**
 - Modify: `Orchestrator/browser/agent_loop.py` (`DEFAULT_SYSTEM_PROMPT` line 25)
 - Modify: `Orchestrator/routes/chat_routes.py` (`stream_computer_use` line 3886, `stream_gemini_computer_use` line 4149: `operator: str = "Brandon"` → `operator: str`)
+- Modify: `Orchestrator/scheduler/executor.py` (AMENDMENT from Task 3 review: lines ~159 `_execute_cu_job` payload and ~380 `_resolve_model_name` CU branch hardcode `"claude-opus-4-6"` — both → `CU_MODEL_DEFAULT`, matching how the sibling branches already use `*_MODEL_DEFAULT`.)
+- AMENDMENT (Task 3 quality review) — harden `test_no_scattered_cu_model_literals`:
+  the value-equality asserts (`bconfig.CU_MODEL == CU_MODEL_DEFAULT`) cannot catch a
+  re-hardcoded literal while the config fallback is the same string. Replace/extend with
+  source scans: for `browser/config.py`, `gemini_cu/config.py`, and `scheduler/executor.py`,
+  `assert not re.search(r'=\s*["\\'](claude-|gemini-\d)', inspect.getsource(mod))`;
+  for chat_routes use the formatting-robust `re.search(r'model\s*=\s*["\\']claude-', src)`
+  instead of the exact-string check.
 - Test: extend `Orchestrator/tests/test_cu_catalog.py`
 
 **Steps:** same TDD rhythm — test that `DEFAULT_SYSTEM_PROMPT` has no `get_current_time` and that the two functions have no `"Brandon"` default (`inspect.signature(...).parameters["operator"].default is inspect.Parameter.empty`). Verify all call sites already pass `operator=` explicitly (grep `stream_computer_use(` and `stream_gemini_computer_use(`) — they do (lines ~5967–6054). Run suite, commit:
