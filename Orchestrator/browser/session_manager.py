@@ -74,7 +74,8 @@ class ComputerUseSession:
         Awaiting a queue bound to the other (possibly dead) loop raises
         "bound to a different event loop". EVERY launch site must call this
         right before starting its driver task. Paired call sites:
-        browser/headless.py (run_cu_task) and chat_routes.stream_computer_use.
+        browser/headless.py (run_cu_task), chat_routes.stream_computer_use,
+        and chat_routes.stream_openai_computer_use.
         """
         self.event_queue = asyncio.Queue(maxsize=2000)
         return self.event_queue

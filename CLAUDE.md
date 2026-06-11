@@ -710,6 +710,11 @@ curl http://localhost:9091/agent/apps
 - `POST /chat` - Send chat message
 - `WS /ws/agent/{session_id}` - Claude Code WebSocket
 
+### Computer Use (production pass 2026-06-10)
+- `GET /models/computer-use` - Live CU model catalog (Anthropic+Google+OpenAI, capability-filtered, per-model `backend` field; frontends hydrate from this)
+- `GET /cu/preflight` - Machine-readiness checks with customer-facing remediation strings (`?skip_screenshot=true` for the fast path)
+- CU defaults/filters live in `Orchestrator/config.py` (`[computer_use]` section of config.ini); drivers in `Orchestrator/browser/driver_anthropic.py`, `gemini_cu/`, `openai_cu/`; one headless runner (`browser/headless.py`) serves `/browser/run`, the `use_computer` tool, and the scheduler
+
 ## Slash Commands
 
 - `/snapshot-dev [operator]` — Mint a development snapshot of completed work via `/chat/save` auto-mint. Operator resolves dynamically (single → auto; multiple → AskUserQuestion dropdown; see `resolve-operator`); pass an explicit operator as arg to override. **Invoke automatically at the end of substantial work (see "When to Create Snapshots" above).**
