@@ -129,12 +129,16 @@ object Constants {
         "grok-live" to listOf(
             "" to "Grok Live"
         ),
+        // Offline fallback only — replaced by GET /models/computer-use hydration
+        // (ChatViewModel.fetchLiveModels, CU production pass 2026-06). Mirrors the
+        // Portal's fallback in Portal/modules/state-management.js. No backend field
+        // is possible in this Pair structure — offline backend partitioning relies
+        // on CuScreen.cuModelsForBackend's id-substring heuristic.
         "computer-use" to listOf(
-            "claude-opus-4-7" to "Claude Opus 4.7 (Sovereign)",
+            "" to "Auto - Latest",
             "claude-opus-4-6" to "Claude Opus 4.6",
-            "claude-sonnet-4-6" to "Claude Sonnet 4.6",
-            "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-            "gemini-2.5-computer-use-preview-10-2025" to "Gemini CU Preview"
+            "gemini-2.5-computer-use-preview-10-2025" to "Gemini CU Preview",
+            "computer-use-preview" to "OpenAI Computer Use"
         ),
         "robotics" to listOf(
             "gemini-robotics-er-1.5-preview" to "Gemini Robotics-ER 1.5"

@@ -137,6 +137,11 @@ fun BlackBoxNavGraph(
             val cuStatus by vm.cuStatus.collectAsState()
             val cuActionLabel by vm.cuActionLabel.collectAsState()
             val messages by vm.messages.collectAsState()
+            // CU model hydration (Task 17): live catalog + id→backend map from
+            // GET /models/computer-use, fetched by ChatViewModel when the
+            // provider flips to "computer-use" (NativeMainActivity route effect).
+            val liveModels by vm.liveModels.collectAsState()
+            val cuModelBackends by vm.cuModelBackends.collectAsState()
 
             CuScreen(
                 origin = origin,
@@ -145,6 +150,8 @@ fun BlackBoxNavGraph(
                 cuStepTotal = cuStepTotal,
                 cuStatus = cuStatus,
                 cuActionLabel = cuActionLabel,
+                liveModels = liveModels,
+                cuModelBackends = cuModelBackends,
                 onModelChange = onModelChange,
                 onDeviceChange = { deviceId -> vm.setCuDeviceId(deviceId) },
                 onStopCu = { vm.stopCuTask() },

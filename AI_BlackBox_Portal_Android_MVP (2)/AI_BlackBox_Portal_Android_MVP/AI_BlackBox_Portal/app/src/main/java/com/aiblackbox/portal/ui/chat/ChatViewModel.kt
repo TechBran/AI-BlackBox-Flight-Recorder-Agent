@@ -117,6 +117,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _liveModels = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val liveModels: StateFlow<List<Pair<String, String>>> = _liveModels.asStateFlow()
 
+    // ── CU model backends (id → "anthropic" | "google" | "openai") ──
+    // Populated only when fetching /models/computer-use (CU production pass
+    // 2026-06: the CU catalog entries carry a `backend` field). Includes the
+    // "" (Auto) key mapped to the server default's backend. Empty for every
+    // other provider — CuScreen falls back to its id-substring heuristic.
+    private val _cuModelBackends = MutableStateFlow<Map<String, String>>(emptyMap())
+    val cuModelBackends: StateFlow<Map<String, String>> = _cuModelBackends.asStateFlow()
+
     // ── Computer Use state ──
     // SSE-driven screenshot URL (from CU agent loop)
     private val _cuScreenshotUrl = MutableStateFlow<String?>(null)
@@ -1240,7 +1248,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         "anthropic" -> "anthropic"
         "openai" -> "openai"
         "xai" -> "xai"
-        else -> null // Voice/agent/CU providers don't have model endpoints
+        // CU production pass 2026-06: the backend exposes GET /models/computer-use
+        // (merged live Anthropic/Google/OpenAI CU catalogs with `backend` field).
+        "computer-use" -> "computer-use"
+        else -> null // Voice/agent providers don't have model endpoints
     }
 
     // In-memory cache for fetched model lists (5min TTL — same as web sessionStorage).
@@ -1249,9 +1260,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
     private val MODELS_CACHE_TTL_MS = 5 * 60 * 1_000L
 
+    // CU backends map cached alongside modelsCache (same key + lifetime).
+    // Caching choice: a parallel map (vs widening modelsCache's value type)
+    // keeps the existing 4-provider cache code path byte-identical; the raw
+    // JSON isn't retained so the map can't be re-derived on a cache hit.
+    private val cuBackendsCache = mutableMapOf<String, Map<String, String>>()
+
     private fun fetchLiveModels(provider: String) {
         val currentApi = api ?: return
         val apiProvider = mapProviderForApi(provider)
+        if (provider != "computer-use") {
+            // Leaving CU (or never on it): stale id→backend pairs must not
+            // survive into another provider's model list.
+            _cuModelBackends.value = emptyMap()
+        }
         if (apiProvider == null) {
             // No live models for this provider — clear so Constants fallback is used
             _liveModels.value = emptyList()
@@ -1263,6 +1285,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val now = System.currentTimeMillis()
         if (cached != null && now - cached.first < MODELS_CACHE_TTL_MS) {
             _liveModels.value = cached.second
+            if (apiProvider == "computer-use") {
+                _cuModelBackends.value = cuBackendsCache[apiProvider] ?: emptyMap()
+            }
             Log.d(TAG, "Models cache hit for $provider (age ${(now - cached.first) / 1000}s)")
             return
         }
@@ -1281,10 +1306,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (_: Exception) { null }
                 }
                 if (models.isNotEmpty()) {
-                    // Prepend "Auto" option
-                    val withAuto = listOf("" to "Auto - Latest") + models
-                    _liveModels.value = withAuto
-                    modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
+                    if (apiProvider == "computer-use") {
+                        // CU: backend partition map + default-aware Auto label
+                        // (mirrors Portal buildHydratedModels, state-management.js)
+                        val backends = modelsArr.mapNotNull { el ->
+                            try {
+                                val m = el.jsonObject
+                                val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                                val backend = m["backend"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                                id to backend
+                            } catch (_: Exception) { null }
+                        }.toMap().toMutableMap()
+                        val defaultId = obj["default_id"]?.jsonPrimitive?.content
+                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
+                        // Auto ("") resolves server-side to the default model →
+                        // it lives in the default model's backend group.
+                        backends[""] = defaultId?.let { backends[it] } ?: "anthropic"
+                        val autoLabel = if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
+                        val withAuto = listOf("" to autoLabel) + models
+                        // Order matters: models first, then backends — a recompose
+                        // between the two emissions sees (new list, empty map) and
+                        // falls back to the offline heuristic, never a stale pairing.
+                        _liveModels.value = withAuto
+                        _cuModelBackends.value = backends
+                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
+                        cuBackendsCache[apiProvider] = backends
+                    } else {
+                        // Prepend "Auto" option
+                        val withAuto = listOf("" to "Auto - Latest") + models
+                        _liveModels.value = withAuto
+                        modelsCache[apiProvider] = System.currentTimeMillis() to withAuto
+                    }
                     Log.d(TAG, "Fetched ${models.size} live models for $provider (source=${obj["source"]?.jsonPrimitive?.content ?: "?"})")
                 }
             } catch (e: Exception) {

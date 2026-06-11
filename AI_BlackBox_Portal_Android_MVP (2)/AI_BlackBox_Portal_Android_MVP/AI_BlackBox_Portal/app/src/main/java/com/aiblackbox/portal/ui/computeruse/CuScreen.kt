@@ -398,6 +398,13 @@ fun CuScreen(
     cuStepTotal: Int = 0,
     cuStatus: String = "idle",
     cuActionLabel: String = "",
+    // Live CU catalog from ChatViewModel (GET /models/computer-use hydration).
+    // liveModels is only trusted when cuModelBackends is non-empty — the
+    // backends map is exclusively populated by a successful CU fetch, so a
+    // stale chat-provider list can never leak into the CU dropdown. Empty
+    // (offline) → Constants.MODEL_CONFIG["computer-use"] + id heuristic.
+    liveModels: List<Pair<String, String>> = emptyList(),
+    cuModelBackends: Map<String, String> = emptyMap(),
     onModelChange: (String) -> Unit = {},
     onDeviceChange: (String) -> Unit = {},
     onStopCu: () -> Unit = {},
@@ -484,6 +491,8 @@ fun CuScreen(
         CuProviderModelRow(
             selectedBackend = selectedProvider,
             model = model,
+            liveModels = liveModels,
+            cuModelBackends = cuModelBackends,
             providerExpanded = providerDropdownExpanded,
             modelExpanded = modelDropdownExpanded,
             onProviderExpandedChange = { providerDropdownExpanded = it },
@@ -492,7 +501,7 @@ fun CuScreen(
                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.selectProvider(backend)
                 // Auto-select first model for new backend
-                val firstModel = cuModelsForBackend(backend).firstOrNull()?.first
+                val firstModel = cuModelsForBackend(backend, liveModels, cuModelBackends).firstOrNull()?.first
                 if (firstModel != null) onModelChange(firstModel)
                 providerDropdownExpanded = false
             },
@@ -1025,15 +1034,35 @@ private data class CuProviderOption(val id: String, val name: String)
 private val CU_BACKENDS = listOf(
     CuProviderOption("anthropic", "Anthropic"),
     CuProviderOption("google", "Google"),
+    CuProviderOption("openai", "OpenAI"),
 )
 
-/** Partition CU models from Constants.MODEL_CONFIG by backend. */
-private fun cuModelsForBackend(backend: String): List<Pair<String, String>> {
+/**
+ * Partition CU models by backend.
+ *
+ * Hydrated path (CU production pass 2026-06): when [backends] (the id→backend
+ * map from GET /models/computer-use, via ChatViewModel.cuModelBackends) is
+ * non-empty, partition [liveModels] by it. The map carries "" → the server
+ * default's backend, so the Auto entry lands in that backend's group.
+ *
+ * Offline path: backends map empty → Constants.MODEL_CONFIG["computer-use"]
+ * fallback partitioned by id-substring heuristic (Auto "" goes to anthropic,
+ * matching the server's anthropic-default).
+ */
+private fun cuModelsForBackend(
+    backend: String,
+    liveModels: List<Pair<String, String>> = emptyList(),
+    backends: Map<String, String> = emptyMap(),
+): List<Pair<String, String>> {
+    if (backends.isNotEmpty() && liveModels.isNotEmpty()) {
+        return liveModels.filter { (id, _) -> (backends[id] ?: "anthropic") == backend }
+    }
     val all = Constants.MODEL_CONFIG["computer-use"] ?: return emptyList()
     return all.filter { (id, _) ->
         when (backend) {
             "google" -> id.startsWith("gemini")
-            else -> !id.startsWith("gemini") // anthropic = everything non-gemini
+            "openai" -> id.isNotEmpty() && !id.startsWith("gemini") && !id.startsWith("claude")
+            else -> id.isEmpty() || id.startsWith("claude") // anthropic = Auto + claude
         }
     }
 }
@@ -1042,6 +1071,8 @@ private fun cuModelsForBackend(backend: String): List<Pair<String, String>> {
 private fun CuProviderModelRow(
     selectedBackend: String,
     model: String,
+    liveModels: List<Pair<String, String>>,
+    cuModelBackends: Map<String, String>,
     providerExpanded: Boolean,
     modelExpanded: Boolean,
     onProviderExpandedChange: (Boolean) -> Unit,
@@ -1050,7 +1081,7 @@ private fun CuProviderModelRow(
     onModelSelected: (String) -> Unit,
 ) {
     val backendName = CU_BACKENDS.find { it.id == selectedBackend }?.name ?: "Anthropic"
-    val models = cuModelsForBackend(selectedBackend)
+    val models = cuModelsForBackend(selectedBackend, liveModels, cuModelBackends)
     val modelName = models.find { it.first == model }?.second ?: models.firstOrNull()?.second ?: "Auto"
 
     Row(
