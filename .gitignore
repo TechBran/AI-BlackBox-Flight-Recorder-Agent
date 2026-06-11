@@ -267,3 +267,6 @@ typescript
 
 # git worktrees (superpowers isolated workspaces)
 .worktrees/
+
+# secrets dir / worktree convenience symlink — must never be committed
+credentials
