@@ -189,6 +189,8 @@ def test_no_scattered_cu_model_literals():
     from Orchestrator.browser import config as bconfig
     from Orchestrator.gemini_cu import config as gconfig
 
+    # Value-equality (documents intent; cannot catch a re-hardcoded literal
+    # while the config fallback happens to be the same string).
     assert bconfig.CU_MODEL == CU_MODEL_DEFAULT
     assert gconfig.DEFAULT_CU_MODEL == CU_GEMINI_MODEL_DEFAULT
     assert not hasattr(gconfig, "GEMINI_CU_MODEL_PRO"), "retired gemini-3-pro-preview ref must be deleted"
@@ -196,5 +198,39 @@ def test_no_scattered_cu_model_literals():
 
     import inspect
     from Orchestrator.routes import chat_routes
+    from Orchestrator.scheduler import executor
+
+    # Source scans — these DO catch re-hardcoded literals.
+    # Pattern covers assignments (= "..."), dict values (: "..."), and bare
+    # returns (return "...") — the executor's two historical CU hardcodes were
+    # a dict value and a return, which a plain `=`-only scan would miss.
+    literal_rx = re.compile(r'(?:[=:]|return)\s*["\'](claude-|gemini-\d)')
+    for mod in (bconfig, gconfig, executor):
+        assert not literal_rx.search(inspect.getsource(mod)), (
+            f"{mod.__name__} must not embed model-id literals; "
+            "use Orchestrator.config *_MODEL_DEFAULT")
+
     src = inspect.getsource(chat_routes)
     assert 'model = "claude-opus-4-6"' not in src, "chat_routes must use CU_MODEL_DEFAULT"
+    # Formatting-robust scan scoped to the CU (opus) family: the two
+    # `model = "claude-sonnet-4-5"` literals remaining in chat_routes are the
+    # anthropic *chat* provider defaults, out of CU-production-pass scope.
+    assert not re.search(r'model\s*=\s*["\']claude-opus', src), (
+        "chat_routes must not hardcode a CU model id; use CU_MODEL_DEFAULT")
+
+
+def test_cu_streams_require_operator():
+    """Operator must be caller-supplied — never a hard-coded seed default."""
+    import inspect
+    from Orchestrator.routes import chat_routes
+    for fn in (chat_routes.stream_computer_use, chat_routes.stream_gemini_computer_use):
+        p = inspect.signature(fn).parameters["operator"]
+        assert p.default is inspect.Parameter.empty, (
+            f"{fn.__name__} must not default operator")
+
+
+def test_browser_prompt_no_unsatisfiable_tool():
+    """The legacy loop only exposes the computer tool — a get_current_time
+    'first action' instruction is unsatisfiable; datetime is injected at run time."""
+    from Orchestrator.browser import agent_loop
+    assert "get_current_time" not in agent_loop.DEFAULT_SYSTEM_PROMPT

@@ -6,6 +6,7 @@ import asyncio
 import time
 import io
 import httpx
+from datetime import datetime
 from typing import Optional
 
 from Orchestrator.browser.config import (
@@ -25,10 +26,7 @@ from Orchestrator.browser.actions import ActionExecutor
 DEFAULT_SYSTEM_PROMPT = """You are a browser automation agent. You control a Chrome browser to accomplish tasks.
 You can see the browser through screenshots and interact using mouse clicks, keyboard input, and scrolling.
 Be methodical: observe the screen, plan your action, execute it, then observe the result.
-When the task is complete, respond with a clear summary of what was accomplished.
-
-TEMPORAL AWARENESS — FIRST ACTION:
-Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses. Knowing the exact date and time is critical for interpreting snapshots and understanding temporal context."""
+When the task is complete, respond with a clear summary of what was accomplished."""
 
 
 class BrowserSession:
@@ -61,6 +59,9 @@ class BrowserSession:
         Returns {success, result_text, screenshots, final_screenshot, steps, tokens}.
         """
         system = system_prompt or DEFAULT_SYSTEM_PROMPT
+        # Inject at run time (not import time) — the loop exposes only the
+        # computer tool, so the model cannot fetch the time itself.
+        system = f"{system}\n\nCurrent date/time: {datetime.now().isoformat(timespec='seconds')}"
 
         # Start browser
         start_url = url or "about:blank"

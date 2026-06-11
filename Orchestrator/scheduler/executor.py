@@ -153,10 +153,12 @@ async def _execute_cu_job(job_name: str, content: str, operator: str) -> str:
     Passes the original operator so the backend curates full context
     (snapshots, preferences, history) for the CU agent.
     """
+    from Orchestrator.config import CU_MODEL_DEFAULT
+
     payload = {
         "messages": [{"role": "user", "content": content}],
         "provider": "computer-use",
-        "model": "claude-opus-4-6",
+        "model": CU_MODEL_DEFAULT,
         "operator": operator,
     }
 
@@ -368,6 +370,7 @@ def _model_to_provider(model: str) -> str:
 def _resolve_model_name(model: str) -> str:
     """Resolve shorthand aliases to full model IDs."""
     from Orchestrator.config import (
+        CU_MODEL_DEFAULT,
         GEMINI_MODEL_DEFAULT,
         ANTHROPIC_MODEL_DEFAULT,
         OPENAI_MODEL_DEFAULT,
@@ -377,7 +380,7 @@ def _resolve_model_name(model: str) -> str:
     m = model.lower().strip()
 
     if m in ("computer-use", "cu"):
-        return "claude-opus-4-6"
+        return CU_MODEL_DEFAULT
     if m in ("gemini", "google"):
         return GEMINI_MODEL_DEFAULT
     if m in ("anthropic", "claude"):

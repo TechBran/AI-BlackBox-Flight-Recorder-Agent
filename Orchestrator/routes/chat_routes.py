@@ -3883,7 +3883,7 @@ async def _cu_agent_loop(session, history, system_prompt, tools, headers, model,
                 pass  # should never happen after drain
 
 
-async def stream_computer_use(messages: List[Dict], model: str, operator: str = "Brandon", session_id: str = None, device_id: str = "blackbox"):
+async def stream_computer_use(messages: List[Dict], model: str, operator: str, session_id: str = None, device_id: str = "blackbox"):
     """Launch the CU agent loop as a background asyncio.Task and consume
     events from its queue.  The task keeps running even if the SSE client
     disconnects.  Reconnecting yields buffered / live events from the
@@ -4147,7 +4147,7 @@ def _detect_device_switch(user_text: str, operator: str):
 
 
 async def stream_gemini_computer_use(messages: List[Dict], model: str,
-                                      operator: str = "Brandon",
+                                      operator: str,
                                       session_id: str = None,
                                       device_id: str = "blackbox"):
     """Launch the Gemini CU agent loop as a background asyncio.Task and consume
