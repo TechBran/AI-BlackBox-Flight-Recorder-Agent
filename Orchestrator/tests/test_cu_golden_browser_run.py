@@ -7,12 +7,17 @@ must stay green across that refactor — it is the proof of behavioral
 equivalence for every consumer of the task contract (Portal poller, the
 `use_computer` ToolVault tool, the scheduler).
 
-Contract pinned here (current code, verified by reading tasks.py:990-1093):
+Contract pinned here (current code, verified by reading process_browser_use
+and the process_task worker dispatch in tasks.py):
   - task.status == COMPLETED, task.progress == 100
   - task.result_url == result_data["final_screenshot"]
   - result_data keys: result_text, screenshots (list), final_screenshot,
     steps, tokens{input,output} — MERGED over the pre-existing result_data
     (the original "url" key survives)
+
+Assertion blocks are split into CONTRACT (must survive Task 12 byte-unchanged)
+and LEGACY SEAM PINS (tied to the BrowserSession implementation; Task 12
+re-points the fixture seams and may relax those specific assertions).
 
 Isolation (this is a live production box):
   - task_db is replaced with an in-memory fake (no Portal/tasks.db rows)
@@ -83,17 +88,30 @@ def golden_env(monkeypatch):
     monkeypatch.setattr(BrowserSession, "_call_api", fake_call_api)
 
     # -- screenshot seams, patched where agent_loop LOOKS THEM UP -------------
+    # Task 12 NOTE: when agent_loop.py is deleted, re-point these seams at the
+    # replacement runner's module. The replacement path also keeps a persistent
+    # per-operator CU session — reset/patch it between tests or screenshot
+    # counters will leak across tests (all three use operator="system").
     monkeypatch.setattr(agent_loop, "capture_screenshot", lambda *a, **k: _tiny_png())
 
     saved_urls = []
 
-    def fake_save(png_bytes, task_id, step):
+    def fake_save(png_bytes, ident, step):
+        # Signature-agnostic: legacy passes (task_id, step); the Task-12 runner
+        # passes (f"cu_{operator}", session.screenshot_count).
         assert png_bytes.startswith(b"\x89PNG"), "capture seam must yield real PNG bytes"
-        url = f"/ui/uploads/golden_{task_id}_step{step:03d}.png"
+        url = f"/ui/uploads/golden_{ident}_step{step:03d}.png"
         saved_urls.append(url)
         return url
 
     monkeypatch.setattr(agent_loop, "save_screenshot_to_uploads", fake_save)
+
+    # -- no real pacing: the loop's page-load/UI-settle sleeps are pure waste
+    # here (2s+ per test). wait_for() does not route through asyncio.sleep.
+    async def _instant(_secs):
+        return None
+
+    monkeypatch.setattr(agent_loop.asyncio, "sleep", _instant)
 
     # -- auto-snapshot POST must never reach the live server ------------------
     chat_posts = []
@@ -129,6 +147,8 @@ def test_use_computer_golden_result_contract(golden_env):
     tasks_mod.process_browser_use(task)
 
     final = golden_env.db.get_task(task.task_id)
+
+    # --- CONTRACT (must survive Task 12 byte-unchanged) ----------------------
     assert final.status == TaskStatus.COMPLETED
     assert final.progress == 100
     assert final.error_message is None
@@ -145,6 +165,7 @@ def test_use_computer_golden_result_contract(golden_env):
     # New keys are MERGED over the original result_data — "url" survives
     assert rd["url"] == "https://example.com"
 
+    # --- LEGACY SEAM PINS (Task 12 re-points seams; may relax these) ---------
     # Single API round-trip → exactly the initial screenshot, one step
     assert len(golden_env.api_calls) == 1
     assert rd["steps"] == 1
