@@ -577,13 +577,40 @@ git add Orchestrator/browser/preflight.py Orchestrator/tests/test_cu_preflight.p
 git commit -m "feat(cu): preflight readiness checks with remediation strings"
 ```
 
+> **AMENDMENT (post-review, 2026-06-10):** the original spec above shipped with plan
+> defects found in quality review; the corrected semantics (implemented in a follow-up
+> commit) are:
+> 1. The ydotool check MUST reuse `actions.py`'s actual runtime gating — call
+>    `actions._ydotool_available()` and report against `actions.YDOTOOL_BIN`
+>    (hardcoded `/usr/local/bin/ydotool`; apt's `/usr/bin/ydotool` 0.1.8 lacks
+>    `--absolute mousemove` and is deliberately NOT used) and `actions.YDOTOOL_SOCKET`
+>    (hardcoded; `_run_ydotool` overrides the env var). `_ydotool_socket_alive` deleted —
+>    a stale/exists-only socket check diverges from the S_ISSOCK+W_OK runtime check.
+> 2. Remediation strings: daemon unit is **`ydotoold.service`** (`systemctl enable --now
+>    ydotoold`); install remediation points at the BlackBox installer step
+>    (`Scripts/install.sh` builds ydotool v1.0.4 from source), NEVER `apt install ydotool`.
+> 3. `check_display` warns on missing XAUTHORITY/DBUS in native mode regardless of
+>    Wayland/X11 (X11 needs them too).
+> 4. `check_resolution` uses `force=not skip_screenshot` to avoid a second full Portal
+>    capture when the caller asked for the cheap path.
+> 5. `run_preflight` wraps each check in try/except → a check that raises degrades to
+>    a `fail` entry instead of 500ing the whole report.
+> 6. `check_chrome` detail names the path that actually matched.
+> 7. Added tests: aggregation precedence (fail>warn>ok), ydotool gating consistency
+>    (monkeypatch `actions._ydotool_available`), raising-check degradation.
+
 ---
 
 ### Task 5: `GET /cu/preflight` route + installer deps
 
 **Files:**
 - Modify: `Orchestrator/routes/browser_routes.py` (append)
-- Modify: `installer/install.sh` (find the apt package list; add `xdotool ydotool scrot`)
+- Modify: `Scripts/install.sh` (NOT `installer/install.sh` — that path was a plan error.
+  AMENDED per Task 4 review: ydotool is ALREADY handled by the installer — it builds
+  v1.0.4 from source and installs/enables `ydotoold.service` at ~lines 868–924. Do NOT
+  add apt `ydotool` or `systemctl enable --now ydotool`. Only ensure `xdotool` and
+  `scrot` are present in the apt package list; if they already are, no installer change
+  at all — verify and report.)
 - Test: `Orchestrator/tests/test_cu_preflight.py` (extend)
 
 **Step 1: Failing test** (append):
@@ -615,12 +642,9 @@ def cu_preflight(skip_screenshot: bool = False):
     return preflight.run_preflight(skip_screenshot=skip_screenshot)
 ```
 
-In `installer/install.sh`, locate the existing `apt-get install`/package-list block (grep for `apt`) and add `xdotool ydotool scrot` if absent. ydotool needs its systemd unit enabled — add alongside the existing service-setup steps:
-
-```bash
-# CU input backend for Wayland sessions (preflight check 'input')
-systemctl enable --now ydotool 2>/dev/null || true
-```
+In `Scripts/install.sh`, locate the existing apt package list and ensure `xdotool` and
+`scrot` are present (add only if absent). ydotool/ydotoold is already fully handled by
+the installer's source-build step (~lines 868–924) — make NO ydotool changes.
 
 **Step 4: Tests + full suite — PASS. Manual route check is deferred to merge (prod tree).**
 

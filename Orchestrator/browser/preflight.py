@@ -12,16 +12,18 @@ from Orchestrator.browser.config import (
     NATIVE_MODE, ACTIVE_DISPLAY, CHROME_PATH,
     detect_native_resolution, get_scale_factors, get_native_env,
 )
-from Orchestrator.browser.actions import _is_wayland_session
+# Reuse actions.py's ACTUAL runtime gating — YDOTOOL_BIN is hardcoded to the
+# installer-built /usr/local/bin/ydotool (apt's 0.1.8 lacks --absolute mousemove),
+# and _ydotool_available does the same S_ISSOCK+W_OK socket validation the
+# executor uses. Names imported into this namespace so tests can monkeypatch
+# preflight._ydotool_available.
+from Orchestrator.browser.actions import (
+    _is_wayland_session, _ydotool_available, YDOTOOL_BIN, YDOTOOL_SOCKET,
+)
 
 
 def _is_wayland() -> bool:
     return _is_wayland_session()
-
-
-def _ydotool_socket_alive() -> bool:
-    sock = os.environ.get("YDOTOOL_SOCKET", "/run/user/%d/.ydotool_socket" % os.getuid())
-    return os.path.exists(sock)
 
 
 def _check(id_, status, detail, remediation=""):
@@ -33,7 +35,7 @@ def check_display() -> dict:
     if not NATIVE_MODE:
         return _check("display", "ok", "Sandbox mode (Xvfb) — display managed internally")
     missing = [k for k in ("XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS") if k not in env]
-    if missing and _is_wayland():
+    if missing:
         return _check("display", "warn",
                       f"Display :{ACTIVE_DISPLAY}; session env missing {missing}",
                       "Log into the desktop session — the service picks it up automatically")
@@ -43,13 +45,17 @@ def check_display() -> dict:
 
 def check_input_backend() -> dict:
     if _is_wayland():
-        if not shutil.which("ydotool"):
-            return _check("input", "fail", "Wayland session, ydotool not installed",
-                          "Install ydotool: sudo apt install ydotool")
-        if not _ydotool_socket_alive():
-            return _check("input", "fail", "ydotool installed but daemon not running",
-                          "Start the daemon: systemctl enable --now ydotool")
-        return _check("input", "ok", "Wayland + ydotool daemon alive")
+        if _ydotool_available():
+            return _check("input", "ok",
+                          f"Wayland + ydotool daemon alive ({YDOTOOL_BIN})")
+        if not os.path.isfile(YDOTOOL_BIN):
+            return _check("input", "fail",
+                          f"ydotool not installed at {YDOTOOL_BIN} (apt's ydotool is "
+                          "too old — the BlackBox installer builds v1.0.4 from source)",
+                          "Re-run the BlackBox installer ydotool step (Scripts/install.sh)")
+        return _check("input", "fail",
+                      f"ydotool present but daemon socket {YDOTOOL_SOCKET} not usable",
+                      "Start the daemon: systemctl enable --now ydotoold")
     if not shutil.which("xdotool"):
         return _check("input", "fail", "X11 session, xdotool not installed",
                       "Install xdotool: sudo apt install xdotool")
@@ -69,8 +75,8 @@ def check_screenshot() -> dict:
                       "Install scrot (sudo apt install scrot) and verify the desktop session is active")
 
 
-def check_resolution() -> dict:
-    w, h = detect_native_resolution(force=True)
+def check_resolution(force: bool = True) -> dict:
+    w, h = detect_native_resolution(force=force)
     sx, sy = get_scale_factors()
     return _check("resolution", "ok", f"{w}x{h} native; scale {sx:.2f}x{sy:.2f}")
 
@@ -89,8 +95,11 @@ def check_api_keys() -> dict:
 
 
 def check_chrome() -> dict:
-    if os.path.isfile(CHROME_PATH) or shutil.which("google-chrome"):
+    if os.path.isfile(CHROME_PATH):
         return _check("chrome", "ok", f"Chrome at {CHROME_PATH}")
+    which_path = shutil.which("google-chrome")
+    if which_path:
+        return _check("chrome", "ok", f"Chrome at {which_path}")
     return _check("chrome", "warn", f"Chrome not found at {CHROME_PATH}",
                   "Only needed for sandbox mode; set computer_use.chrome_path in config.ini")
 
@@ -107,9 +116,28 @@ _RANK = {"ok": 0, "warn": 1, "fail": 2}
 
 
 def run_preflight(skip_screenshot: bool = False) -> dict:
-    checks = [check_display(), check_input_backend()]
+    # Lambdas resolve the check functions from module globals at CALL time, so
+    # tests can monkeypatch preflight.check_* and a raising check degrades to a
+    # fail entry instead of 500ing the whole report.
+    plan = [
+        ("display", lambda: check_display()),
+        ("input", lambda: check_input_backend()),
+    ]
     if not skip_screenshot:
-        checks.append(check_screenshot())
-    checks += [check_resolution(), check_api_keys(), check_chrome(), check_remote_tools()]
+        plan.append(("screenshot", lambda: check_screenshot()))
+    plan += [
+        # force=False on the cheap path — avoids a second expensive Portal capture
+        ("resolution", lambda: check_resolution(force=not skip_screenshot)),
+        ("api_keys", lambda: check_api_keys()),
+        ("chrome", lambda: check_chrome()),
+        ("remote", lambda: check_remote_tools()),
+    ]
+    checks = []
+    for check_id, fn in plan:
+        try:
+            checks.append(fn())
+        except Exception as e:
+            checks.append(_check(check_id, "fail", f"check crashed: {e}",
+                                 "Report this to support"))
     worst = max(checks, key=lambda c: _RANK[c["status"]])["status"]
     return {"status": worst, "checks": checks}
