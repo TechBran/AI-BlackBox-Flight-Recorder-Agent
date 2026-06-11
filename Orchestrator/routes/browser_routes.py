@@ -198,3 +198,11 @@ async def browser_screenshot_live(request: Request = None):
         return {"url": url, "timestamp": ts}
     except Exception as e:
         return {"error": str(e), "success": False}
+
+
+@app.get("/cu/preflight")
+def cu_preflight(skip_screenshot: bool = False):
+    """Machine-readiness report for Computer Use. Frontends render fails
+    as banners with the remediation text."""
+    from Orchestrator.browser import preflight
+    return preflight.run_preflight(skip_screenshot=skip_screenshot)

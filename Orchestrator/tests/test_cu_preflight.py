@@ -92,3 +92,15 @@ def test_raising_check_degrades(monkeypatch):
     assert display["status"] == "fail"
     assert "boom" in display["detail"]
     assert report["status"] == "fail"
+
+
+def test_preflight_route():
+    import Orchestrator.app  # noqa: F401 — registers routes onto the shared app
+    from fastapi.testclient import TestClient
+    from Orchestrator.checkpoint import app
+    with patch.object(preflight, "run_preflight",
+                      return_value={"status": "ok", "checks": []}) as m:
+        client = TestClient(app)
+        r = client.get("/cu/preflight")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
