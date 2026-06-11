@@ -2761,7 +2761,8 @@ window.__reconnectCU = function() {
     // Use sendStreamingChat with a reconnect message — the backend
     // will detect the running task and resume the event stream
     const messages = [{ role: 'user', content: '[reconnect]' }];
-    sendStreamingChat(messages, 'computer-use', window.__model || 'claude-opus-4-6', operator);
+    // Empty model id lets the server resolve CU_MODEL_DEFAULT
+    sendStreamingChat(messages, 'computer-use', window.__model || '', operator);
 };
 
 /**

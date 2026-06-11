@@ -153,24 +153,26 @@ function _createDrawer() {
 // =============================================================================
 
 /**
- * Check if the currently selected CU model is Gemini-based.
- * Gemini CU shows all devices (computers + Android). Anthropic shows computers only.
+ * Resolve the CU backend for the currently selected model.
+ * window.__cuModelBackends is populated by state-management's
+ * updateModelDropdown (model id -> backend, including the "" Auto
+ * entry mapped to the server default's backend). Defaults to
+ * 'anthropic' when the lookup or the model id is unknown.
  */
-function _isGeminiModel() {
-    const model = window.__model || '';
-    return model.toLowerCase().includes('gemini');
+function _modelBackend() {
+    return (window.__cuModelBackends || {})[window.__model || ''] || 'anthropic';
 }
 
 /**
  * Fetch Tailscale devices and populate the device dropdown.
- * - Anthropic (Opus): LOCAL + VNC only (computers)
- * - Gemini CU: all devices including ADB (Android + computers)
+ * - google (Gemini CU): all devices including ADB (Android + computers)
+ * - anthropic / openai: LOCAL + VNC only (computers)
  */
 async function _populateDevices() {
     const select = document.getElementById('cuDeviceSelect');
     if (!select) return;
 
-    const isGemini = _isGeminiModel();
+    const backend = _modelBackend();
 
     try {
         const res = await fetch('/devices/');
@@ -186,10 +188,10 @@ async function _populateDevices() {
         select.innerHTML = '';
 
         for (const d of devices) {
-            // Filter by model type:
-            // Anthropic (Opus): only LOCAL + VNC (computers)
-            // Gemini: all protocols (computers + Android via ADB)
-            if (!isGemini && d.protocol !== 'local' && d.protocol !== 'vnc') continue;
+            // Filter by backend capability:
+            // google (Gemini CU): all protocols (computers + Android via ADB)
+            // anthropic / openai: only LOCAL + VNC (computers)
+            if (backend !== 'google' && d.protocol !== 'local' && d.protocol !== 'vnc') continue;
             const opt = document.createElement('option');
             opt.value = d.id;
             // Local device is always online; show status for remote devices only
@@ -220,6 +222,72 @@ async function _populateDevices() {
     } catch (err) {
         console.warn('[CU-Drawer] Failed to populate devices:', err);
     }
+}
+
+// =============================================================================
+// Preflight Banner
+// =============================================================================
+
+/**
+ * Fetch /cu/preflight and show a banner inside the drawer when any check
+ * is non-ok. Fetched once per attach (the drawer detaches/reattaches on
+ * provider switch). Fetch failures are silent — offline boxes or backends
+ * without the endpoint (404) must not break the drawer.
+ * @param {HTMLElement} drawer
+ */
+async function _fetchPreflight(drawer) {
+    try {
+        const res = await fetch('/cu/preflight?skip_screenshot=true');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || data.status === 'ok' || !Array.isArray(data.checks)) return;
+        _renderPreflightBanner(drawer, data);
+    } catch (err) {
+        console.warn('[CU-Drawer] Preflight check unavailable:', err);
+    }
+}
+
+/**
+ * Render the preflight banner above the controls row.
+ * @param {HTMLElement} drawer
+ * @param {{status: string, checks: Array<{id: string, status: string, detail: string, remediation?: string}>}} data
+ */
+function _renderPreflightBanner(drawer, data) {
+    // Drawer may have detached while the fetch was in flight
+    if (!drawer || !drawer.isConnected || drawer.querySelector('.cu-drawer-banner')) return;
+
+    const banner = document.createElement('div');
+    banner.className = `cu-drawer-banner ${data.status === 'fail' ? 'fail' : 'warn'}`;
+
+    for (const check of data.checks) {
+        if (check.status === 'ok') continue;
+        const line = document.createElement('span');
+        line.className = 'cu-banner-check';
+        line.textContent = `${check.id}: ${check.detail}`;
+        banner.appendChild(line);
+        if (check.remediation) {
+            const rem = document.createElement('span');
+            rem.className = 'cu-banner-remediation';
+            rem.textContent = check.remediation;
+            banner.appendChild(rem);
+        }
+    }
+
+    const close = document.createElement('button');
+    close.className = 'cu-banner-close';
+    close.title = 'Dismiss';
+    close.textContent = '×';
+    close.addEventListener('click', (e) => {
+        e.stopPropagation();
+        banner.remove();
+        drawer.classList.remove('has-banner');
+    });
+    banner.appendChild(close);
+
+    // Insert before the controls row so STOP/New stay at the bottom
+    const controls = drawer.querySelector('.cu-drawer-controls');
+    drawer.insertBefore(banner, controls || null);
+    drawer.classList.add('has-banner');
 }
 
 // =============================================================================
@@ -293,7 +361,10 @@ function _attachDrawer() {
     if (_deviceRefreshInterval) clearInterval(_deviceRefreshInterval);
     _deviceRefreshInterval = setInterval(_populateDevices, 30000);
 
-    // Re-populate when model changes (Gemini shows Android, Anthropic doesn't)
+    // Preflight environment check (async, non-blocking, once per attach)
+    _fetchPreflight(_drawer);
+
+    // Re-populate when model changes (google backend shows Android, others don't)
     const modelEl = document.getElementById('modelSelect');
     if (modelEl) {
         modelEl.addEventListener('change', () => {

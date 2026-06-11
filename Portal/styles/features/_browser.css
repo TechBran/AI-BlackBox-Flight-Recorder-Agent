@@ -1100,6 +1100,74 @@
     color: #666;
 }
 
+/* ─── Preflight Banner ─── */
+/* Drawer needs extra room when the banner is present (base cap is 110px) */
+.cu-drawer.visible.has-banner {
+    max-height: 280px;
+}
+
+.cu-drawer-banner {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 4px;
+    padding: 4px 24px 4px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 0.65rem;
+    line-height: 1.45;
+}
+
+/* warn — muted neutral treatment (no amber token exists; per design rules
+   we reuse neutrals + reduced opacity rather than inventing a color) */
+.cu-drawer-banner.warn {
+    border: 1px solid var(--neutral-600);
+    background: var(--neutral-150);
+    color: var(--neutral-800);
+    opacity: 0.85;
+}
+
+/* fail — reuse the E-stop red treatment above */
+.cu-drawer-banner.fail {
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.12);
+    color: #fca5a5;
+}
+
+.cu-banner-check {
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.cu-banner-remediation {
+    color: var(--neutral-600);
+    font-weight: 400;
+    word-break: break-word;
+}
+
+.cu-drawer-banner.fail .cu-banner-remediation {
+    color: var(--neutral-700);
+}
+
+.cu-banner-close {
+    position: absolute;
+    top: 1px;
+    right: 3px;
+    padding: 2px 5px;
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity var(--transition-fast);
+}
+
+.cu-banner-close:hover {
+    opacity: 1;
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 480px) {
     .cu-drawer-session-id {
