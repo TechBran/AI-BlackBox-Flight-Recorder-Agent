@@ -33,5 +33,22 @@ def test_anthropic_space_scaling(fake_resolution, native, cu_xy, expected):
 ])
 def test_gemini_space_scaling(fake_resolution, native, gxy, expected):
     fake_resolution(*native)
-    ex = A.ActionExecutor(coord_space="gemini-999")
+    ex = A.ActionExecutor(coord_space=A.COORD_SPACE_GEMINI)
     assert ex.to_native(*gxy) == expected
+
+
+def test_unknown_coord_space_rejected():
+    """A typo'd space must fail loudly at construction, not mis-scale clicks."""
+    with pytest.raises(ValueError, match="gemini_999"):
+        A.ActionExecutor(coord_space="gemini_999")
+
+
+def test_scale_coord_none_passthrough(fake_resolution):
+    fake_resolution(1920, 1080)
+    assert A.ActionExecutor()._scale_coord(None) is None
+
+
+def test_non_native_mode_identity(monkeypatch):
+    monkeypatch.setattr("Orchestrator.browser.config.NATIVE_MODE", False)
+    ex = A.ActionExecutor(coord_space=A.COORD_SPACE_GEMINI)
+    assert ex.to_native(640, 360) == (640, 360)

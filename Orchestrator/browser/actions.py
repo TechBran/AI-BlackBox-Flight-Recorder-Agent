@@ -196,6 +196,13 @@ def _ydotool_key(text: str) -> bool:
     return True
 
 
+# Coordinate spaces — import these constants at construction sites instead of
+# retyping the string literals (a typo'd space would silently mis-scale clicks).
+COORD_SPACE_ANTHROPIC = "anthropic-1280"  # model coords in a 1280x720 virtual screen
+COORD_SPACE_GEMINI = "gemini-999"         # model coords normalized 0-999 on both axes
+_COORD_SPACES = (COORD_SPACE_ANTHROPIC, COORD_SPACE_GEMINI)
+
+
 class ActionExecutor:
     """Executes Anthropic Computer Use actions on the native display.
 
@@ -203,10 +210,11 @@ class ActionExecutor:
     ydotool (Wayland-compatible) or xdotool (X11-only) accordingly.
     """
 
-    def __init__(self, display_number: int = DISPLAY_NUMBER, coord_space: str = "anthropic-1280"):
+    def __init__(self, display_number: int = DISPLAY_NUMBER, coord_space: str = COORD_SPACE_ANTHROPIC):
         self.display_number = display_number
-        # "anthropic-1280": model coords in a 1280x720 virtual screen (Anthropic CU)
-        # "gemini-999":     model coords normalized to 0-999 on both axes (Gemini CU)
+        if coord_space not in _COORD_SPACES:
+            raise ValueError(
+                f"unknown coord_space {coord_space!r}; expected one of {_COORD_SPACES}")
         self.coord_space = coord_space
         self.use_ydotool = _use_ydotool()
 
@@ -224,7 +232,7 @@ class ActionExecutor:
         if not NATIVE_MODE:
             return int(x), int(y)
         w, h = detect_native_resolution()
-        if self.coord_space == "gemini-999":
+        if self.coord_space == COORD_SPACE_GEMINI:
             return int(x / 999 * w), int(y / 999 * h)
         # anthropic-1280 (default): same math + int() truncation as the old
         # module-level _scale_coord (x * (w / CU_DISPLAY_WIDTH)) — bit-identical.
