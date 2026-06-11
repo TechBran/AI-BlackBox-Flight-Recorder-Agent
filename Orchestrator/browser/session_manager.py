@@ -65,6 +65,20 @@ class ComputerUseSession:
         if self.agent_task and not self.agent_task.done():
             self.agent_task.cancel()
 
+    def fresh_event_queue(self) -> asyncio.Queue:
+        """Replace the event queue with a new one bound to the CALLING loop.
+
+        asyncio.Queue binds to the event loop on first await. Sessions persist
+        across turns AND across launch paths: the chat path runs on the server
+        loop, the headless task path runs via asyncio.run() in a worker thread.
+        Awaiting a queue bound to the other (possibly dead) loop raises
+        "bound to a different event loop". EVERY launch site must call this
+        right before starting its driver task. Paired call sites:
+        browser/headless.py (run_cu_task) and chat_routes.stream_computer_use.
+        """
+        self.event_queue = asyncio.Queue(maxsize=2000)
+        return self.event_queue
+
     def enqueue_prompt(self, text: str) -> int:
         """Add a prompt to the queue. Returns queue position (1-based)."""
         self.prompt_queue.append(text)

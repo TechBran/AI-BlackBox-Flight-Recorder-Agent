@@ -3468,6 +3468,10 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
 
         # Reset task state for new turn and mark as starting to prevent races
         session.reset_task_state()
+        # Rebind the event queue to the server loop: a headless task run
+        # (browser/headless.run_cu_task via asyncio.run in a worker thread) may
+        # have left it bound to its now-closed loop. See fresh_event_queue.
+        session.fresh_event_queue()
         session.status = "starting"  # Prevents concurrent requests from also entering new-message path
         session.user_message = user_text
 

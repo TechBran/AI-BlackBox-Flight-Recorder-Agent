@@ -144,3 +144,32 @@ async def test_non_anthropic_backend_rejected(runner_env):
 
     assert result["success"] is False
     assert "anthropic" in result["result_text"].lower()
+
+
+def test_fresh_event_queue_unbinds_dead_worker_loop():
+    """Regression (Task 12 review C1): a session whose event_queue was bound
+    inside a worker thread's asyncio.run() must be reusable from a NEW loop
+    after fresh_event_queue() — without it, the chat path's next CU turn dies
+    with "bound to a different event loop"."""
+    import asyncio
+
+    from Orchestrator.browser.session_manager import ComputerUseSession
+
+    session = ComputerUseSession("queue-rebind-op")
+
+    async def _bind_and_drain():
+        # Bind the queue to this (soon-to-be-dead) loop the same way the
+        # runner does: await get() against it.
+        session.event_queue.put_nowait(None)
+        await session.event_queue.get()
+
+    asyncio.run(_bind_and_drain())  # worker-thread style run; loop now closed
+
+    async def _chat_turn():
+        # What stream_computer_use now does before launching its driver:
+        session.fresh_event_queue()
+        session.event_queue.put_nowait({"type": "done"})
+        return await session.event_queue.get()
+
+    event = asyncio.run(_chat_turn())  # second, distinct loop
+    assert event == {"type": "done"}

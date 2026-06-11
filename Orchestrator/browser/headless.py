@@ -124,11 +124,12 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
 
     # ── Reset task state for this run ──
     session.reset_task_state()
-    # Rebind the event queue to THIS event loop: tasks.py runs us via
-    # asyncio.run() in a worker thread, but a session created earlier by the
-    # chat path carries a queue bound to the server loop (cross-loop await
-    # raises "bound to a different event loop").
-    session.event_queue = asyncio.Queue(maxsize=2000)
+    # Rebind the event queue to THIS event loop (worker thread's asyncio.run);
+    # see ComputerUseSession.fresh_event_queue for the cross-loop rationale.
+    session.fresh_event_queue()
+    # A headless task is one-shot: stale prompts queued by an earlier CHAT
+    # turn must not auto-dequeue into this task's result.
+    session.prompt_queue.clear()
     session.status = "starting"
     session.user_message = prompt
 
@@ -229,33 +230,41 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     done_seen = False
     tokens = {"input": 0, "output": 0}
 
-    while True:
-        event = await session.event_queue.get()
-        if event is None:
-            break  # sentinel — driver finished
-        etype = event.get("type")
-        data = event.get("data")
-        if etype == "cu_screenshot":
-            ss_url = (data or {}).get("url")
-            if ss_url:
-                screenshots.append(ss_url)
-        elif etype == "usage":
-            tokens["input"] += (data or {}).get("prompt_tokens", 0)
-            tokens["output"] += (data or {}).get("completion_tokens", 0)
-        elif etype == "done":
-            done_seen = True
-            result_text = (data or {}).get("content", "")
-        elif etype == "error":
-            error_msg = data if isinstance(data, str) else str(data)
-        elif etype == "cu_stopped":
-            stopped_reason = (data or {}).get("reason", "stopped")
-        # all other event types (thinking, content, cu_action, cu_step,
-        # cu_bash_output, ...) are streaming-UI concerns — ignored here
-
     try:
-        await session.agent_task  # surface any unexpected driver exception
-    except Exception as e:  # pragma: no cover — driver catches internally
-        error_msg = error_msg or str(e)
+        while True:
+            event = await session.event_queue.get()
+            if event is None:
+                break  # sentinel — driver finished
+            etype = event.get("type")
+            data = event.get("data")
+            if etype == "cu_screenshot":
+                ss_url = (data or {}).get("url")
+                if ss_url:
+                    screenshots.append(ss_url)
+            elif etype == "usage":
+                tokens["input"] += (data or {}).get("prompt_tokens", 0)
+                tokens["output"] += (data or {}).get("completion_tokens", 0)
+            elif etype == "done":
+                done_seen = True
+                result_text = (data or {}).get("content", "")
+            elif etype == "error":
+                error_msg = data if isinstance(data, str) else str(data)
+            elif etype == "cu_stopped":
+                stopped_reason = (data or {}).get("reason", "stopped")
+            # all other event types (thinking, content, cu_action, cu_step,
+            # cu_bash_output, ...) are streaming-UI concerns — ignored here
+
+        try:
+            await session.agent_task  # surface any unexpected driver exception
+        except Exception as e:  # pragma: no cover — driver catches internally
+            error_msg = error_msg or str(e)
+    finally:
+        # Own the driver task: if THIS coroutine is cancelled (outer wait_for
+        # timeout), don't rely on loop teardown to stop the driver — it would
+        # keep clicking with no consumer if a caller ever drives us on a
+        # long-lived loop instead of asyncio.run().
+        if session.agent_task and not session.agent_task.done():
+            session.agent_task.cancel()
 
     final_screenshot = screenshots[-1] if screenshots else None
     if error_msg:
