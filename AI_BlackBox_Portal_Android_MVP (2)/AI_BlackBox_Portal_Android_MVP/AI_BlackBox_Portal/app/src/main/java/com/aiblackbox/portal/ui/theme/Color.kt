@@ -69,6 +69,21 @@ val GlowGreen  = Color(0x4027D980)  // --shadow-glow-green @ 25% alpha
 val SolidGreen  = Color(0xFF27D980)
 
 // =============================================================================
+// Computer Use — CU accent + status tokens, ported from Portal's
+// #6c3bd1 / #8b5cf6 purple and _browser.css status colors.
+// Single source of truth for the CU palette (values match Portal exactly).
+// =============================================================================
+val CuAccent       = Color(0xFF8B5CF6)   // CU purple accent
+val CuAccentDark   = Color(0xFF6C3BD1)   // CU purple, dark variant
+val CuAccentDim    = Color(0xFFC4B5FD)   // CU purple, dim labels/text
+val CuAccentBg     = Color(0x146C3BD1)   // CU purple bg @ ~8% alpha
+val CuAccentBorder = Color(0x408B5CF6)   // CU purple border @ ~25% alpha
+val CuSuccess      = Color(0xFF4ADE80)   // CU status green
+val CuSuccessGlow  = Color(0x804ADE80)   // CU status green @ 50% for glow
+val CuError        = Color(0xFFF87171)   // CU status red
+val CuWarning      = Color(0xFFF97316)   // CU status orange
+
+// =============================================================================
 // Glass Morphism — ported from Portal --glass-* tokens
 // =============================================================================
 val GlassBg             = Color(0xBF141414)  // --glass-bg: rgba(20,20,20,0.75)

@@ -1324,9 +1324,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         backends[""] = defaultId?.let { backends[it] } ?: "anthropic"
                         val autoLabel = if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
                         val withAuto = listOf("" to autoLabel) + models
-                        // Order matters: models first, then backends — a recompose
-                        // between the two emissions sees (new list, empty map) and
-                        // falls back to the offline heuristic, never a stale pairing.
+                        // The two writes below have no suspension point between
+                        // them and run on the main thread, so composition never
+                        // observes the new list paired with a stale backends map
+                        // (the writes are atomic w.r.t. composition).
                         _liveModels.value = withAuto
                         _cuModelBackends.value = backends
                         modelsCache[apiProvider] = System.currentTimeMillis() to withAuto

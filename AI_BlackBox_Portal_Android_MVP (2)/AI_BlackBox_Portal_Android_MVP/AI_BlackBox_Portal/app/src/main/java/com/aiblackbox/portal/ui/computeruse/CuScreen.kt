@@ -23,6 +23,12 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -81,6 +87,13 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
+import com.aiblackbox.portal.ui.theme.CuAccent
+import com.aiblackbox.portal.ui.theme.CuAccentBg
+import com.aiblackbox.portal.ui.theme.CuAccentBorder
+import com.aiblackbox.portal.ui.theme.CuAccentDim
+import com.aiblackbox.portal.ui.theme.CuError
+import com.aiblackbox.portal.ui.theme.CuSuccess
+import com.aiblackbox.portal.ui.theme.CuWarning
 import com.aiblackbox.portal.ui.theme.DurationBase
 import com.aiblackbox.portal.ui.theme.DurationFast
 import com.aiblackbox.portal.ui.theme.EaseStandard
@@ -100,6 +113,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -107,24 +121,17 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 // =============================================================================
-// CU display coordinate space — matches Portal's cu-interact.js
+// CU display coordinate space — matches Portal's cu-interact.js.
+// These are defaults only; the live resolution is fetched from
+// /browser/status (cu_resolution/resolution) at initialize().
 // =============================================================================
 private const val DISPLAY_WIDTH = 1280
 private const val DISPLAY_HEIGHT = 720
 private const val POLL_MS = 2000L
 
-// CU purple accent — matches Portal's #6c3bd1 / #8b5cf6
-private val CuPurple = Color(0xFF8B5CF6)
-private val CuPurpleDark = Color(0xFF6C3BD1)
-private val CuPurpleDim = Color(0xFFC4B5FD)
-private val CuPurpleBg = Color(0x146C3BD1)       // ~8% alpha
-private val CuPurpleBorder = Color(0x408B5CF6)    // ~25% alpha
-
-// CU status colors — from Portal _browser.css
-private val CuGreen = Color(0xFF4ADE80)
-private val CuGreenGlow = Color(0x804ADE80)       // 50% for glow
-private val CuRed = Color(0xFFF87171)
-private val CuOrange = Color(0xFFF97316)
+// CU palette (CuAccent*/CuSuccess*/CuError/CuWarning) lives in
+// ui/theme/Color.kt as theme tokens — values identical to the old private
+// palette here (Portal #6c3bd1/#8b5cf6 + _browser.css status colors).
 
 // =============================================================================
 // Device data model
@@ -134,6 +141,21 @@ data class CuDevice(
     val name: String,
     val protocol: String,
     val status: String,
+)
+
+// =============================================================================
+// Preflight data model — GET /cu/preflight (mirrors Portal cu-drawer.js)
+// =============================================================================
+data class CuPreflightCheck(
+    val id: String,
+    val status: String,       // ok | warn | fail
+    val detail: String,
+    val remediation: String,
+)
+
+data class CuPreflight(
+    val status: String,       // worst of checks: ok | warn | fail
+    val checks: List<CuPreflightCheck>,
 )
 
 // =============================================================================
@@ -171,11 +193,23 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedProvider = MutableStateFlow("anthropic")
     val selectedProvider: StateFlow<String> = _selectedProvider.asStateFlow()
 
+    // Live CU display resolution from /browser/status (defaults 1280x720)
+    private val _cuResolutionW = MutableStateFlow(DISPLAY_WIDTH)
+    val cuResolutionW: StateFlow<Int> = _cuResolutionW.asStateFlow()
+    private val _cuResolutionH = MutableStateFlow(DISPLAY_HEIGHT)
+    val cuResolutionH: StateFlow<Int> = _cuResolutionH.asStateFlow()
+
+    // Preflight result (null = not fetched or fetch failed -> no banner)
+    private val _preflight = MutableStateFlow<CuPreflight?>(null)
+    val preflight: StateFlow<CuPreflight?> = _preflight.asStateFlow()
+
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
         baseUrl = origin
         api = BlackBoxApi(origin)
         fetchDevices()
+        fetchDisplayResolution()
+        fetchPreflight()
         // Load initial screenshot immediately so the viewer isn't blank
         refreshScreenshot()
     }
@@ -211,7 +245,8 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
                     val name = obj["name"]?.jsonPrimitive?.content ?: id
                     val protocol = obj["protocol"]?.jsonPrimitive?.content ?: "local"
                     val status = obj["status"]?.jsonPrimitive?.content ?: "unknown"
-                    // Anthropic: LOCAL + VNC only. Gemini: ALL (including ADB)
+                    // Anthropic: LOCAL + VNC only (openai deliberately takes
+                    // the same anthropic path). Gemini: ALL (including ADB)
                     if (!providerIsGemini && protocol != "local" && protocol != "vnc") return@mapNotNull null
                     CuDevice(id, name, protocol, status)
                 }
@@ -222,6 +257,60 @@ class CuViewModel(application: Application) : AndroidViewModel(application) {
                 _devices.value = listOf(
                     CuDevice("blackbox", "BlackBox (Local)", "local", "online")
                 )
+            }
+        }
+    }
+
+    // ── Display resolution — GET /browser/status (mirrors Portal cu-interact.js) ──
+    // Native mode reports `cu_resolution` ("1280x720"); non-native mode reports
+    // `resolution`. On any failure (fetch error, display down, unparseable
+    // shape) the 1280x720 defaults are kept silently.
+    fun fetchDisplayResolution() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                val raw = api.get("/browser/status")
+                val json = Json { ignoreUnknownKeys = true }
+                val obj = json.parseToJsonElement(raw).jsonObject
+                val resStr = listOf("cu_resolution", "resolution").firstNotNullOfOrNull { key ->
+                    (obj[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                } ?: return@launch
+                val match = Regex("^(\\d+)x(\\d+)$").find(resStr) ?: return@launch
+                val w = match.groupValues[1].toIntOrNull() ?: return@launch
+                val h = match.groupValues[2].toIntOrNull() ?: return@launch
+                if (w > 0 && h > 0) {
+                    _cuResolutionW.value = w
+                    _cuResolutionH.value = h
+                }
+            } catch (_: Exception) {
+                // Keep 1280x720 defaults
+            }
+        }
+    }
+
+    // ── Preflight — GET /cu/preflight (mirrors Portal cu-drawer.js banner) ──
+    // Fetch failures are silent: offline boxes or backends without the
+    // endpoint must not surface a banner.
+    fun fetchPreflight() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                val raw = api.get("/cu/preflight?skip_screenshot=true")
+                val json = Json { ignoreUnknownKeys = true }
+                val obj = json.parseToJsonElement(raw).jsonObject
+                val status = obj["status"]?.jsonPrimitive?.content ?: return@launch
+                val checks = obj["checks"]?.jsonArray?.mapNotNull { el ->
+                    val c = el.jsonObject
+                    CuPreflightCheck(
+                        id = c["id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
+                        status = c["status"]?.jsonPrimitive?.content ?: "ok",
+                        detail = c["detail"]?.jsonPrimitive?.content ?: "",
+                        remediation = c["remediation"]?.jsonPrimitive?.content ?: "",
+                    )
+                } ?: emptyList()
+                _preflight.value = CuPreflight(status, checks)
+            } catch (_: Exception) {
+                // Silent — no banner on network failure
             }
         }
     }
@@ -460,11 +549,26 @@ fun CuScreen(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
+    // Live CU display resolution (from /browser/status; defaults 1280x720)
+    val resW by viewModel.cuResolutionW.collectAsState()
+    val resH by viewModel.cuResolutionH.collectAsState()
+
+    // Preflight state — dismiss is screen-local, so the banner reappears on
+    // the next screen entry (parity with the Portal drawer banner)
+    val preflight by viewModel.preflight.collectAsState()
+    var preflightDismissed by remember { mutableStateOf(false) }
+
+    // Bottom clearance for the Composer overlay: fixed input-bar allowance +
+    // the real navigation-bar inset (replaces the old hardcoded 160/140dp)
+    val bottomClearance = 96.dp +
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    // ── Reusable sections — shared by the stacked (<840dp) and side-by-side
+    // (>=840dp) arrangements. Internals unchanged from the stacked-only
+    // layout; only the arrangement differs. ──
+
+    @Composable
+    fun TopControls() {
         // ── Header ──
         CuHeader(
             isPolling = isPolling || isAgentActive,
@@ -525,211 +629,292 @@ fun CuScreen(
                 deviceDropdownExpanded = false
             }
         )
+    }
 
-        // ── Collapsible Live View pill / Screenshot viewer ──
-        if (viewerExpanded) {
-            // Expanded: screenshot viewer with fixed 16:9 aspect ratio image
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                    .background(Neutral100, RoundedCornerShape(RadiusMd))
-                    .border(1.dp, Neutral200, RoundedCornerShape(RadiusMd))
-                    .clip(RoundedCornerShape(RadiusMd)),
-                contentAlignment = Alignment.Center
-            ) {
-                screenshotBitmap?.let { bmp ->
-                    // Direct bitmap rendering — no Coil, no URL loading, always reliable
-                    // Fixed 16:9 aspect ratio: taps map 1:1 to display coords
-                    androidx.compose.foundation.Image(
-                        bitmap = bmp,
-                        contentDescription = "Live remote desktop screenshot",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(DISPLAY_WIDTH.toFloat() / DISPLAY_HEIGHT.toFloat())
-                            .onGloballyPositioned { imageSize = it.size }
-                            .pointerInput(imageSize) {
-                                detectTapGestures { offset ->
-                                    if (imageSize.width > 0 && imageSize.height > 0) {
-                                        val x = (offset.x / imageSize.width * DISPLAY_WIDTH).toInt()
-                                            .coerceIn(0, DISPLAY_WIDTH)
-                                        val y = (offset.y / imageSize.height * DISPLAY_HEIGHT).toInt()
-                                            .coerceIn(0, DISPLAY_HEIGHT)
-                                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                                        viewModel.click(x, y)
-                                        showTypingInput = true
-                                    }
-                                }
-                            },
-                        contentScale = ContentScale.FillBounds
-                    )
-                } ?: Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        "Remote Desktop",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Neutral500,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Type a prompt below to command the agent",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Neutral700
-                    )
-                }
+    @Composable
+    fun PreflightBanner() {
+        // Banner only for the local blackbox display and only when checks are
+        // non-ok. Dismiss is local state: reappears on next screen entry
+        // (parity with the Portal drawer). Network failure -> preflight stays
+        // null -> no banner.
+        val pf = preflight
+        if (pf != null && pf.status != "ok" && !preflightDismissed && selectedDeviceId == "blackbox") {
+            CuPreflightBanner(preflight = pf, onDismiss = { preflightDismissed = true })
+        }
+    }
 
-                // Minimize button (top-right corner)
-                Box(
+    @Composable
+    fun ViewerArea(areaModifier: Modifier) {
+        // Expanded: screenshot viewer at the live display aspect ratio
+        Box(
+            modifier = areaModifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .background(Neutral100, RoundedCornerShape(RadiusMd))
+                .border(1.dp, Neutral200, RoundedCornerShape(RadiusMd))
+                .clip(RoundedCornerShape(RadiusMd)),
+            contentAlignment = Alignment.Center
+        ) {
+            screenshotBitmap?.let { bmp ->
+                // Direct bitmap rendering — no Coil, no URL loading, always reliable
+                // Live display aspect ratio: taps map 1:1 to display coords
+                androidx.compose.foundation.Image(
+                    bitmap = bmp,
+                    contentDescription = "Live remote desktop screenshot",
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(8.dp)
-                        .clip(RoundedCornerShape(RadiusSm))
-                        .background(Color.Black.copy(alpha = 0.6f))
-                        .clickable {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                            viewerExpanded = false
-                        }
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                ) {
-                    Text(
-                        "\u25BC Minimize",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = BbxWhite
-                    )
-                }
-            }
-
-            // ── Typing input — appears after tapping the screen ──
-            if (showTypingInput) {
-                CuTypingInput(
-                    text = typingText,
-                    onTextChange = { typingText = it },
-                    onSend = {
-                        if (typingText.isNotBlank()) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                            viewModel.typeText(typingText)
-                            typingText = ""
-                        }
-                    },
-                    onKey = { key ->
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                        viewModel.sendKey(key)
-                    },
-                    onDismiss = { showTypingInput = false }
+                        .fillMaxWidth()
+                        .aspectRatio(resW.toFloat() / resH.toFloat())
+                        .onGloballyPositioned { imageSize = it.size }
+                        .pointerInput(imageSize, resW, resH) {
+                            detectTapGestures { offset ->
+                                if (imageSize.width > 0 && imageSize.height > 0) {
+                                    val x = (offset.x / imageSize.width * resW).toInt()
+                                        .coerceIn(0, resW)
+                                    val y = (offset.y / imageSize.height * resH).toInt()
+                                        .coerceIn(0, resH)
+                                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                    viewModel.click(x, y)
+                                    showTypingInput = true
+                                }
+                            }
+                        },
+                    contentScale = ContentScale.FillBounds
                 )
-            }
-
-            // Quick actions row
-            CuQuickActions(
-                onSendKey = { key ->
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                    viewModel.sendKey(key)
-                },
-                onScroll = { direction ->
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                    viewModel.scroll(DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2, direction)
-                }
-            )
-
-            // Status bar
-            CuStatusBar(statusText = statusText, isPolling = isPolling || isAgentActive)
-        } else {
-            // Collapsed: compact pill — tap to expand
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(CuPurpleBg)
-                    .border(1.dp, CuPurpleBorder, RoundedCornerShape(20.dp))
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                        viewerExpanded = true
-                    }
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+            } ?: Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                // Pulsing green dot when live
-                val infiniteTransition = rememberInfiniteTransition(label = "pillPulse")
-                val pillAlpha by infiniteTransition.animateFloat(
-                    initialValue = 1f, targetValue = 0.4f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1500, easing = LinearEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "pillDotPulse"
-                )
-                if (isPolling || isAgentActive) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(CuGreen.copy(alpha = pillAlpha))
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
                 Text(
-                    "\u25B2 Live View",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = CuPurpleDim
+                    "Remote Desktop",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Neutral500,
+                    fontWeight = FontWeight.SemiBold
                 )
-                if (cuStepTotal > 0) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "Step $cuStep/$cuStepTotal",
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = Neutral500
-                    )
-                }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    statusText,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    "Type a prompt below to command the agent",
+                    style = MaterialTheme.typography.bodySmall,
                     color = Neutral700
                 )
             }
+
+            // Minimize button (top-right corner)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(RadiusSm))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .clickable {
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        viewerExpanded = false
+                    }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    "\u25BC Minimize",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = BbxWhite
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun ViewerControls() {
+        // ── Typing input — appears after tapping the screen ──
+        if (showTypingInput) {
+            CuTypingInput(
+                text = typingText,
+                onTextChange = { typingText = it },
+                onSend = {
+                    if (typingText.isNotBlank()) {
+                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        viewModel.typeText(typingText)
+                        typingText = ""
+                    }
+                },
+                onKey = { key ->
+                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    viewModel.sendKey(key)
+                },
+                onDismiss = { showTypingInput = false }
+            )
         }
 
-        // ── Chat messages (visible when viewer is collapsed, scrollable) ──
-        if (!viewerExpanded && messages.isNotEmpty()) {
-            val listState = rememberLazyListState()
-
-            // Auto-scroll to latest message
-            LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
-                if (messages.isNotEmpty()) {
-                    listState.animateScrollToItem(messages.size - 1)
-                }
+        // Quick actions row
+        CuQuickActions(
+            onSendKey = { key ->
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                viewModel.sendKey(key)
+            },
+            onScroll = { direction ->
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                viewModel.scroll(resW / 2, resH / 2, direction)
             }
+        )
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentPadding = PaddingValues(top = 4.dp, bottom = 160.dp)
-            ) {
-                items(
-                    items = messages,
-                    key = { it.id }
-                ) { message ->
-                    com.aiblackbox.portal.ui.components.ChatBubble(
-                        message = message,
-                        onSpeak = onSpeak,
-                        onSpeakWithId = onSpeakWithId
-                    )
+        // Status bar
+        CuStatusBar(
+            statusText = statusText,
+            isPolling = isPolling || isAgentActive,
+            displayW = resW,
+            displayH = resH
+        )
+    }
+
+    @Composable
+    fun CollapsedPill() {
+        // Collapsed: compact pill — tap to expand
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(CuAccentBg)
+                .border(1.dp, CuAccentBorder, RoundedCornerShape(20.dp))
+                .clickable {
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    viewerExpanded = true
+                }
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Pulsing green dot when live
+            val infiniteTransition = rememberInfiniteTransition(label = "pillPulse")
+            val pillAlpha by infiniteTransition.animateFloat(
+                initialValue = 1f, targetValue = 0.4f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1500, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "pillDotPulse"
+            )
+            if (isPolling || isAgentActive) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(CuSuccess.copy(alpha = pillAlpha))
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                "\u25B2 Live View",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = CuAccentDim
+            )
+            if (cuStepTotal > 0) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Step $cuStep/$cuStepTotal",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Neutral500
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                statusText,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = Neutral700
+            )
+        }
+    }
+
+    @Composable
+    fun MessagesList(listModifier: Modifier) {
+        val listState = rememberLazyListState()
+
+        // Auto-scroll to latest message
+        LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
+            if (messages.isNotEmpty()) {
+                listState.animateScrollToItem(messages.size - 1)
+            }
+        }
+
+        LazyColumn(
+            state = listState,
+            modifier = listModifier.fillMaxWidth(),
+            contentPadding = PaddingValues(top = 4.dp, bottom = bottomClearance)
+        ) {
+            items(
+                items = messages,
+                key = { it.id }
+            ) { message ->
+                com.aiblackbox.portal.ui.components.ChatBubble(
+                    message = message,
+                    onSpeak = onSpeak,
+                    onSpeakWithId = onSpeakWithId
+                )
+            }
+        }
+    }
+
+    // ── Screen-aware arrangement: side-by-side at >=840dp, stacked below.
+    // imePadding keeps the typing bar + status row above the keyboard. ──
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .imePadding()
+    ) {
+        if (maxWidth >= 840.dp) {
+            // Wide (tablet / landscape): live view left, chat + controls right
+            Row(Modifier.fillMaxSize()) {
+                Column(
+                    Modifier
+                        .weight(0.6f)
+                        .fillMaxHeight()
+                ) {
+                    PreflightBanner()
+                    if (viewerExpanded) {
+                        ViewerArea(Modifier.weight(1f))
+                        ViewerControls()
+                    } else {
+                        CollapsedPill()
+                        Spacer(Modifier.weight(1f))
+                    }
+                    Spacer(Modifier.height(bottomClearance))
+                }
+                Column(
+                    Modifier
+                        .weight(0.4f)
+                        .fillMaxHeight()
+                ) {
+                    TopControls()
+                    if (messages.isNotEmpty()) {
+                        MessagesList(Modifier.weight(1f))
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
                 }
             }
         } else {
-            // Bottom padding for Composer overlay
-            Spacer(Modifier.height(140.dp))
+            // Stacked (phone portrait): same composition as before this pass
+            Column(Modifier.fillMaxSize()) {
+                TopControls()
+                PreflightBanner()
+
+                // ── Collapsible Live View pill / Screenshot viewer ──
+                if (viewerExpanded) {
+                    ViewerArea(Modifier.weight(1f))
+                    ViewerControls()
+                } else {
+                    CollapsedPill()
+                }
+
+                // ── Chat messages (visible when viewer is collapsed, scrollable) ──
+                if (!viewerExpanded && messages.isNotEmpty()) {
+                    MessagesList(Modifier.weight(1f))
+                } else {
+                    // Bottom clearance for the Composer overlay (nav-bar aware)
+                    Spacer(Modifier.height(bottomClearance))
+                }
+            }
         }
     }
 }
@@ -763,10 +948,10 @@ private fun CuHeader(
     )
 
     val dotColor = when (cuStatus) {
-        "running" -> CuGreen.copy(alpha = pulseAlpha)
-        "complete" -> CuGreen
-        "stopped" -> CuOrange
-        else -> if (isPolling) CuGreen.copy(alpha = pulseAlpha) else Neutral500
+        "running" -> CuSuccess.copy(alpha = pulseAlpha)
+        "complete" -> CuSuccess
+        "stopped" -> CuWarning
+        else -> if (isPolling) CuSuccess.copy(alpha = pulseAlpha) else Neutral500
     }
 
     Row(
@@ -804,7 +989,7 @@ private fun CuHeader(
                 text = "$cuStep/$cuStepTotal",
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
-                color = CuPurpleDim
+                color = CuAccentDim
             )
         }
 
@@ -818,7 +1003,7 @@ private fun CuHeader(
         ) {
             CircularProgressIndicator(
                 modifier = Modifier.size(16.dp),
-                color = CuPurple,
+                color = CuAccent,
                 strokeWidth = 2.dp
             )
         }
@@ -848,12 +1033,12 @@ private fun CuHeader(
             label = "toggleScale"
         )
         val toggleBg by animateColorAsState(
-            targetValue = if (isPolling) CuRed.copy(alpha = 0.2f) else SolidGreen.copy(alpha = 0.2f),
+            targetValue = if (isPolling) CuError.copy(alpha = 0.2f) else SolidGreen.copy(alpha = 0.2f),
             animationSpec = tween(DurationBase, easing = EaseStandard),
             label = "toggleBg"
         )
         val toggleBorder by animateColorAsState(
-            targetValue = if (isPolling) CuRed.copy(alpha = 0.5f) else SolidGreen.copy(alpha = 0.5f),
+            targetValue = if (isPolling) CuError.copy(alpha = 0.5f) else SolidGreen.copy(alpha = 0.5f),
             animationSpec = tween(DurationBase, easing = EaseStandard),
             label = "toggleBorder"
         )
@@ -877,7 +1062,7 @@ private fun CuHeader(
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.5.sp,
-                color = if (isPolling) CuRed else SolidGreen
+                color = if (isPolling) CuError else SolidGreen
             )
         }
     }
@@ -949,7 +1134,7 @@ private fun CuDeviceSelector(
             fontSize = 10.sp,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 0.5.sp,
-            color = CuPurpleDim
+            color = CuAccentDim
         )
         Spacer(Modifier.width(8.dp))
 
@@ -958,8 +1143,8 @@ private fun CuDeviceSelector(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(RadiusSm))
-                    .background(CuPurpleBg)
-                    .border(1.dp, CuPurpleBorder, RoundedCornerShape(RadiusSm))
+                    .background(CuAccentBg)
+                    .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
                     .clickable { onExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
@@ -971,14 +1156,14 @@ private fun CuDeviceSelector(
                             .clip(CircleShape)
                             .background(
                                 if (selectedDevice?.status == "online" || selectedDeviceId == "blackbox")
-                                    CuGreen else Neutral500
+                                    CuSuccess else Neutral500
                             )
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
                         text = displayName,
                         fontSize = 12.sp,
-                        color = CuPurpleDim
+                        color = CuAccentDim
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -1004,7 +1189,7 @@ private fun CuDeviceSelector(
                                     modifier = Modifier
                                         .size(6.dp)
                                         .clip(CircleShape)
-                                        .background(if (isOnline) CuGreen else Neutral500)
+                                        .background(if (isOnline) CuSuccess else Neutral500)
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
@@ -1096,14 +1281,14 @@ private fun CuProviderModelRow(
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(RadiusSm))
-                    .background(CuPurpleBg)
-                    .border(1.dp, CuPurpleBorder, RoundedCornerShape(RadiusSm))
+                    .background(CuAccentBg)
+                    .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
                     .clickable { onProviderExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("PROVIDER:", fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp, color = CuPurpleDim)
+                    letterSpacing = 0.5.sp, color = CuAccentDim)
                 Spacer(Modifier.width(6.dp))
                 Text(backendName, fontSize = 12.sp, color = BbxWhite, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.width(4.dp))
@@ -1118,7 +1303,7 @@ private fun CuProviderModelRow(
                     DropdownMenuItem(
                         text = {
                             Text(p.name,
-                                color = if (p.id == selectedBackend) CuPurple else BbxWhite,
+                                color = if (p.id == selectedBackend) CuAccent else BbxWhite,
                                 fontWeight = if (p.id == selectedBackend) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp)
                         },
@@ -1133,14 +1318,14 @@ private fun CuProviderModelRow(
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(RadiusSm))
-                    .background(CuPurpleBg)
-                    .border(1.dp, CuPurpleBorder, RoundedCornerShape(RadiusSm))
+                    .background(CuAccentBg)
+                    .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
                     .clickable { onModelExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("MODEL:", fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp, color = CuPurpleDim)
+                    letterSpacing = 0.5.sp, color = CuAccentDim)
                 Spacer(Modifier.width(6.dp))
                 Text(modelName, fontSize = 12.sp, color = BbxWhite, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.width(4.dp))
@@ -1155,7 +1340,7 @@ private fun CuProviderModelRow(
                     DropdownMenuItem(
                         text = {
                             Text(name,
-                                color = if (id == model) CuPurple else BbxWhite,
+                                color = if (id == model) CuAccent else BbxWhite,
                                 fontWeight = if (id == model) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp)
                         },
@@ -1185,8 +1370,8 @@ private fun CuStopButton(onClick: () -> Unit) {
         modifier = Modifier
             .scale(scale)
             .clip(RoundedCornerShape(RadiusSm))
-            .background(CuRed.copy(alpha = 0.2f))
-            .border(1.dp, CuRed.copy(alpha = 0.5f), RoundedCornerShape(RadiusSm))
+            .background(CuError.copy(alpha = 0.2f))
+            .border(1.dp, CuError.copy(alpha = 0.5f), RoundedCornerShape(RadiusSm))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -1200,7 +1385,7 @@ private fun CuStopButton(onClick: () -> Unit) {
             fontSize = 10.sp,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = 0.5.sp,
-            color = CuRed
+            color = CuError
         )
     }
 }
@@ -1226,7 +1411,7 @@ private fun CuQuickActions(
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Text("KEYS:", fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.5.sp, color = CuPurpleDim,
+            letterSpacing = 0.5.sp, color = CuAccentDim,
             modifier = Modifier.padding(end = 2.dp))
 
         CuCompactButton(label = "\u21B5", onClick = { onSendKey("Return") })
@@ -1316,9 +1501,9 @@ private fun CuTypingInput(
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = BbxWhite,
                 unfocusedTextColor = BbxWhite,
-                focusedBorderColor = CuGreen,
-                unfocusedBorderColor = CuPurpleBorder,
-                cursorColor = CuGreen,
+                focusedBorderColor = CuSuccess,
+                unfocusedBorderColor = CuAccentBorder,
+                cursorColor = CuSuccess,
                 focusedContainerColor = Neutral100,
                 unfocusedContainerColor = Neutral100
             ),
@@ -1347,6 +1532,59 @@ private fun CuTypingInput(
 }
 
 // =============================================================================
+// Preflight Banner — mirrors Portal cu-drawer.js _renderPreflightBanner.
+// fail -> CU red tokens; warn -> existing neutral tokens (no new colors).
+// =============================================================================
+
+@Composable
+private fun CuPreflightBanner(
+    preflight: CuPreflight,
+    onDismiss: () -> Unit,
+) {
+    val isFail = preflight.status == "fail"
+    val borderColor = if (isFail) CuError.copy(alpha = 0.5f) else Neutral200
+    val bgColor = if (isFail) CuError.copy(alpha = 0.08f) else Neutral150
+    val textColor = if (isFail) CuError else BbxDim
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(RadiusSm))
+            .background(bgColor)
+            .border(1.dp, borderColor, RoundedCornerShape(RadiusSm))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            preflight.checks.filter { it.status != "ok" }.forEach { check ->
+                Text(
+                    text = "${check.id}: ${check.detail}",
+                    fontSize = 11.sp,
+                    color = textColor
+                )
+                if (check.remediation.isNotBlank()) {
+                    // Remediation line — muted
+                    Text(
+                        text = check.remediation,
+                        fontSize = 10.sp,
+                        color = Neutral700
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        // Dismiss — local state only; banner reappears on next screen entry
+        Text(
+            text = "\u00D7",
+            fontSize = 14.sp,
+            color = Neutral500,
+            modifier = Modifier.clickable(onClick = onDismiss)
+        )
+    }
+}
+
+// =============================================================================
 // Status Bar — mirrors .cu-interact-status
 // =============================================================================
 
@@ -1354,6 +1592,8 @@ private fun CuTypingInput(
 private fun CuStatusBar(
     statusText: String,
     isPolling: Boolean,
+    displayW: Int = DISPLAY_WIDTH,
+    displayH: Int = DISPLAY_HEIGHT,
 ) {
     Row(
         modifier = Modifier
@@ -1377,7 +1617,7 @@ private fun CuStatusBar(
 
         // Coordinate space hint — matches .cu-interact-hint
         Text(
-            text = "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}",
+            text = "${displayW}x${displayH}",
             fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             color = Neutral500
