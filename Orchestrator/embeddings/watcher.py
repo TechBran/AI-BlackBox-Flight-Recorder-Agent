@@ -4,6 +4,9 @@ One daily pass (plus POST /embeddings/health/check as the manual trigger)
 keeps the active embedding model honest:
 
 1. PROBE   — embed one short string with the active provider (30s hard cap).
+   A failure is re-probed ONCE after RETRY_PROBE_DELAY_S inside the same run:
+   one 429 burst (the provider burns its retries in seconds) must not be
+   enough to flip a working model's state. Only two failures = "broken".
 2. CATALOG — ask the active model's vendor whether the model is still listed
    and whether a newer same-family non-preview model exists (GA-over-preview
    rule). A catalog endpoint being UNREACHABLE is NOT a model failure: the
@@ -17,10 +20,17 @@ keeps the active embedding model honest:
    active store (mints proceed vector-less when the provider is down, §5).
    Failures are logged and retried next run, quarantine-style — never raised,
    never a state flip.
-5. AUTO-MIGRATE (broken only — self-preservation): first viable target wins:
+5. AUTO-MIGRATE (broken only — self-preservation): kicks ONLY on a
+   CONSECUTIVE broken run — the previous health.json must already say
+   "broken". The first failing run writes broken health plus a loud banner
+   and defers; the hourly broken recheck (below) confirms or recovers within
+   ~1h. When the gate passes, the first viable target wins:
      (1) registry-mapped same-provider vendor successor whose preflight is
          ready (cloud key present / ollama model pulled),
-     (2) the most-complete OTHER existing store whose provider is ready,
+     (2) the most-complete OTHER existing store whose provider is ready —
+         LOCAL stores outrank cloud ones regardless of count (an automatic
+         kick must never opt the operator into cloud spend while a local
+         store exists; cloud is eligible only when no local store is),
      (3) the lightest local registry model when the Ollama daemon has it,
      (4) none → stay broken, detail says why.
    health.json is written BEFORE the migration job is kicked so the operator
@@ -29,7 +39,10 @@ keeps the active embedding model honest:
    provider job stalls safely instead of cutting over to an empty store).
 
 health.json ({stores_dir}/health.json, the shape embeddings_routes reads):
-    {state, detail, successor, checked_at}   (+ healed when gap-heal appended)
+    {state, detail, successor, successor_slug, checked_at}
+    (+ healed when gap-heal appended; successor is display copy — possibly a
+    raw vendor id — while successor_slug is the registry slug or null, the
+    only thing an [Update] button may bind to)
 
 Successor heuristic: candidates are same-provider embed-capable catalog ids,
 never containing "-preview"/"-exp" (GA-over-preview, MEMORY rule); a candidate
@@ -42,7 +55,10 @@ text-embedding-3-large and banner every box forever.
 
 Scheduling: a plain asyncio loop task started from an async startup hook in
 startup.py — first run WATCHER_FIRST_DELAY_S after boot (startup is already
-index-rebuild heavy), then every WATCHER_INTERVAL_S. Chosen over registering
+index-rebuild heavy), then every WATCH_INTERVAL_OK_S while ok/superseded but
+every WATCH_INTERVAL_BROKEN_S while broken (so the consecutive-run migration
+gate confirms in ~1h, not a day — and recovery is noticed just as fast).
+Chosen over registering
 an APScheduler job: CronJobManager is user-facing persisted cron
 infrastructure (SQLite rows, history, delivery channels) and would surface an
 internal maintenance task as a user job, while the embeddings module already
@@ -50,6 +66,7 @@ runs its background work as loop tasks (migration engine, startup resume).
 Same-loop tasks also avoid the uvloop run_coroutine_threadsafe bridge.
 """
 import asyncio
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,10 +89,12 @@ from Orchestrator.volume import read_volume_bytes
 
 HEALTH_FILE = "health.json"        # same name embeddings_routes reads
 PROBE_TIMEOUT_S = 30.0             # 1-string probe cap (provider retries inside)
+RETRY_PROBE_DELAY_S = 60.0         # in-run re-probe gap; outlives a 429 burst
 CATALOG_TIMEOUT_S = 20.0           # ollama /api/tags fetch
 HEAL_CAP = 50                      # max gap-heal embeds per run
 WATCHER_FIRST_DELAY_S = 5 * 60     # don't pile onto startup
-WATCHER_INTERVAL_S = 24 * 3600     # daily
+WATCH_INTERVAL_OK_S = 24 * 3600    # daily while ok/superseded
+WATCH_INTERVAL_BROKEN_S = 3600     # hourly while broken: confirm/recover fast
 
 # Cloud preflight = key present (same contract as embeddings_routes).
 _CLOUD_KEY_ATTRS = {"gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY"}
@@ -203,15 +222,27 @@ async def _pick_migration_target(active: str, successor_slug: "str | None") -> t
         return successor_slug, "vendor successor of the broken model"
     reasons.append("no ready registry successor")
 
-    # 2. most-complete OTHER existing store whose provider is ready
+    # 2. most-complete OTHER existing store whose provider is ready — LOCAL
+    #    stores outrank cloud ones regardless of count: an automatic kick must
+    #    never opt the operator into cloud spend while a local store exists
+    #    (design-doc spend-consent rule); cloud is eligible only when none is.
     stores = [
         s for s in list_stores(Path(config.EMBEDDINGS_STORES_DIR))
         if s["slug"] != active and s["slug"] in EMBEDDING_MODELS
         and s["count"] > 0 and ready(s["slug"])
     ]
     if stores:
-        best = max(stores, key=lambda s: s["count"])
-        return best["slug"], f"most complete existing store ({best['count']} vectors)"
+        best = min(
+            stores,
+            key=lambda s: (
+                EMBEDDING_MODELS[s["slug"]]["privacy"] != "local",  # local first
+                -s["count"],                                        # then biggest
+            ),
+        )
+        privacy = EMBEDDING_MODELS[best["slug"]]["privacy"]
+        return best["slug"], (
+            f"most complete {privacy} ready store ({best['count']} vectors)"
+        )
     reasons.append("no other ready store")
 
     # 3. lightest local model when the daemon already has it pulled
@@ -275,23 +306,53 @@ def _write_health(health: dict) -> None:
     _atomic_write_json(base / HEALTH_FILE, health)
 
 
+def _previous_state() -> "str | None":
+    """state from the PREVIOUS run's health.json; None when absent/corrupt.
+
+    Read before this run overwrites the file — the consecutive-failing-runs
+    gate on auto-migration lives here.
+    """
+    try:
+        raw = json.loads(
+            (Path(config.EMBEDDINGS_STORES_DIR) / HEALTH_FILE).read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return raw.get("state") if isinstance(raw, dict) else None
+
+
 # ── the health check (daily job body AND the manual-trigger handler) ─────────
+
+async def _probe_active(active: str) -> tuple:
+    """One probe of the active provider: (ok, error_string_or_None)."""
+    try:
+        provider = get_provider(active)
+        await asyncio.wait_for(
+            provider.embed(["health probe"], "document"), PROBE_TIMEOUT_S
+        )
+        return True, None
+    except Exception as e:  # noqa: BLE001 — any probe failure counts as a miss
+        return False, f"{type(e).__name__}: {e}"
+
 
 async def run_health_check() -> dict:
     """One full watcher pass; writes health.json and returns the health dict."""
     active = get_active_slug()
     entry = EMBEDDING_MODELS.get(active)
 
-    # 1. probe the active model
-    probe_ok, probe_err = False, None
-    try:
-        provider = get_provider(active)
-        await asyncio.wait_for(
-            provider.embed(["health probe"], "document"), PROBE_TIMEOUT_S
+    # 1. probe the active model — one failure earns ONE in-run re-probe after
+    #    RETRY_PROBE_DELAY_S; a transient blip (429 burst, hiccup) must not be
+    #    declared "broken". Only a second miss in the same run is.
+    probe_ok, probe_err = await _probe_active(active)
+    if not probe_ok:
+        print(
+            f"[WATCHER] probe failed ({probe_err}); "
+            f"re-probing once in {RETRY_PROBE_DELAY_S:.0f}s"
         )
-        probe_ok = True
-    except Exception as e:  # noqa: BLE001 — any probe failure means "broken"
-        probe_err = f"{type(e).__name__}: {e}"
+        await asyncio.sleep(RETRY_PROBE_DELAY_S)
+        probe_ok, probe_err = await _probe_active(active)
 
     # 2. vendor catalog (active slug missing from the registry = config drift;
     #    there is no vendor to ask, so the probe alone decides)
@@ -333,12 +394,30 @@ async def run_health_check() -> dict:
     health = {
         "state": state,
         "detail": detail,
-        "successor": successor,
+        "successor": successor,            # display copy (may be a raw vendor id)
+        "successor_slug": successor_slug,  # registry slug or None — [Update] binds here
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # 6. broken → auto-migrate ("auto only when forced")
+    # 6. broken → auto-migrate ("auto only when forced") — but ONLY on a
+    #    consecutive broken run: the previous health.json must already say
+    #    broken. A first failing run writes broken health + a loud banner and
+    #    defers; the hourly broken recheck confirms (or sees recovery) in ~1h.
     if state == "broken":
+        if _previous_state() != "broken":
+            health["detail"] += (
+                "; auto-migration deferred until a consecutive failing "
+                "run confirms (recheck in "
+                f"{WATCH_INTERVAL_BROKEN_S // 3600}h)"
+            )
+            _write_health(health)
+            print("[WATCHER] " + "=" * 64)
+            print(
+                f"[WATCHER] EMBEDDINGS BROKEN (first detection): "
+                f"{health['detail']}"
+            )
+            print("[WATCHER] " + "=" * 64)
+            return health
         target, why = await _pick_migration_target(active, successor_slug)
         if target is None:
             health["detail"] += f"; no viable auto-migrate target ({why})"
@@ -371,6 +450,20 @@ async def run_health_check() -> dict:
 _WATCHER_TASK: "asyncio.Task | None" = None  # strong ref — loop refs are weak
 
 
+def _log_watcher_task_outcome(task: "asyncio.Task") -> None:
+    """Done-callback: the loop is written to run forever, so any non-cancel
+    termination is a silent watcher death — retrieve the exception and make
+    it a loud journal line (mirror of migrate's _log_engine_task_outcome)."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(
+            f"[WATCHER] ERROR: watcher task died with unretrieved exception: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
 def start_watcher() -> "asyncio.Task":
     """Schedule the daily loop on the running event loop (startup hook entry).
 
@@ -381,14 +474,22 @@ def start_watcher() -> "asyncio.Task":
     if _WATCHER_TASK is not None and not _WATCHER_TASK.done():
         return _WATCHER_TASK
     _WATCHER_TASK = asyncio.get_running_loop().create_task(_watch_forever())
+    _WATCHER_TASK.add_done_callback(_log_watcher_task_outcome)
     return _WATCHER_TASK
+
+
+def _next_interval(state: str) -> float:
+    """Sleep before the next run: hourly while broken (the consecutive-run
+    migration gate confirms — or recovery is noticed — fast), else daily."""
+    return WATCH_INTERVAL_BROKEN_S if state == "broken" else WATCH_INTERVAL_OK_S
 
 
 async def _watch_forever() -> None:
     await asyncio.sleep(WATCHER_FIRST_DELAY_S)  # don't pile onto startup
     while True:
+        state = "ok"
         try:
-            await run_health_check()
+            state = (await run_health_check()).get("state", "ok")
         except Exception as e:  # noqa: BLE001 — the loop must survive any run
             print(f"[WATCHER] health check run failed: {type(e).__name__}: {e}")
-        await asyncio.sleep(WATCHER_INTERVAL_S)
+        await asyncio.sleep(_next_interval(state))

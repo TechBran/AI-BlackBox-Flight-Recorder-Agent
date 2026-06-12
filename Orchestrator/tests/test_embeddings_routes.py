@@ -84,7 +84,9 @@ def test_status_shape(env, client):
 
     assert set(body.keys()) == STATUS_KEYS
     assert body["active"] == SLUG
-    assert body["health"] == {"state": "ok", "detail": "", "successor": None}
+    assert body["health"] == {
+        "state": "ok", "detail": "", "successor": None, "successor_slug": None,
+    }
     assert body["job"] is None  # Task 8 fills
     assert isinstance(body["stores"], list)
     for store in body["stores"]:
@@ -149,6 +151,7 @@ def test_health_present_is_reflected(env, client):
         "state": "superseded",
         "detail": "A newer Gemini embedding model is available",
         "successor": "some-newer-slug",
+        "successor_slug": "some-newer-slug",
     }), encoding="utf-8")
 
     body = client.get("/embeddings/status").json()
@@ -156,12 +159,15 @@ def test_health_present_is_reflected(env, client):
         "state": "superseded",
         "detail": "A newer Gemini embedding model is available",
         "successor": "some-newer-slug",
+        "successor_slug": "some-newer-slug",
     }
 
 
 def test_health_absent_defaults_ok(env, client):
     body = client.get("/embeddings/status").json()
-    assert body["health"] == {"state": "ok", "detail": "", "successor": None}
+    assert body["health"] == {
+        "state": "ok", "detail": "", "successor": None, "successor_slug": None,
+    }
 
 
 def test_health_corrupt_defaults_ok(env, client):
@@ -169,7 +175,9 @@ def test_health_corrupt_defaults_ok(env, client):
     (stores_dir / "health.json").write_text("{not valid json", encoding="utf-8")
 
     body = client.get("/embeddings/status").json()
-    assert body["health"] == {"state": "ok", "detail": "", "successor": None}
+    assert body["health"] == {
+        "state": "ok", "detail": "", "successor": None, "successor_slug": None,
+    }
 
 
 # ── models[].ready / blockers preflight ──────────────────────────────────────

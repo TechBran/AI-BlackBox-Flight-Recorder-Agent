@@ -31,7 +31,7 @@ OPENAI_ID = EMBEDDING_MODELS[OPENAI_SLUG]["model_id"]
 QWEN = "qwen3-embedding-0.6b"
 QWEN_ID = EMBEDDING_MODELS[QWEN]["model_id"]       # "qwen3-embedding:0.6b"
 
-HEALTH_KEYS = {"state", "detail", "successor", "checked_at"}
+HEALTH_KEYS = {"state", "detail", "successor", "successor_slug", "checked_at"}
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -77,20 +77,24 @@ def catalogs(monkeypatch):
 
 
 class FakeProvider:
-    """Deterministic vectors; can fail outright (probe) or per-substring (heal)."""
+    """Deterministic vectors; can fail outright (probe), for the first N calls
+    (transient blip), or per-substring (heal)."""
 
-    def __init__(self, dims, fail_all=False, fail_substring=None):
+    def __init__(self, dims, fail_all=False, fail_substring=None, fail_first_n=0):
         self.dims = dims
         self.fail_all = fail_all
         self.fail_substring = fail_substring
-        self.calls = []  # [(texts, purpose), ...]
+        self.fail_first_n = fail_first_n
+        self.attempts = 0  # every embed() call, including the failing ones
+        self.calls = []  # [(texts, purpose), ...] — successful calls only
 
     @property
     def embedded_texts(self):
         return [t for texts, _ in self.calls for t in texts]
 
     async def embed(self, texts, purpose):
-        if self.fail_all:
+        self.attempts += 1
+        if self.fail_all or self.attempts <= self.fail_first_n:
             raise EmbeddingProviderError("synthetic dead provider")
         if self.fail_substring is not None and any(
             self.fail_substring in t for t in texts
@@ -218,6 +222,7 @@ async def test_superseded_newest_same_family_successor(env, catalogs, fake_provi
     assert health["state"] == "superseded"
     # newest candidate wins; unmapped vendor id reported as a raw string
     assert health["successor"] == "models/gemini-embedding-003"
+    assert health["successor_slug"] is None  # display copy only — not in registry
     assert "models/gemini-embedding-003" in health["detail"]
     assert "still works" in health["detail"]
     assert _read_health_file(stores_dir)["state"] == "superseded"
@@ -300,12 +305,32 @@ GEMINI_002 = {
 def broken_provider(monkeypatch):
     fake = FakeProvider(ACTIVE_DIMS, fail_all=True)
     monkeypatch.setitem(providers._instances, ACTIVE, fake)
+    # the in-run re-probe must not really wait 60s in tests
+    monkeypatch.setattr(watcher, "RETRY_PROBE_DELAY_S", 0.01)
     return fake
+
+
+@pytest.fixture
+def prior_broken_health(env):
+    """health.json from a 'previous run' that already said broken — the
+    consecutive-failing-runs gate that lets auto-migration actually kick."""
+    _, stores_dir, _ = env
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / watcher.HEALTH_FILE).write_text(
+        json.dumps({
+            "state": "broken",
+            "detail": "previous run: probe failed",
+            "successor": None,
+            "successor_slug": None,
+            "checked_at": "2026-06-11T00:00:00+00:00",
+        }),
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.asyncio
 async def test_broken_prefers_ready_registry_successor(
-    env, catalogs, broken_provider, migration_spy, monkeypatch
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
 ):
     calls, health_at_call = migration_spy
     monkeypatch.setitem(EMBEDDING_MODELS, "gemini-embedding-002", GEMINI_002)
@@ -324,7 +349,7 @@ async def test_broken_prefers_ready_registry_successor(
 
 @pytest.mark.asyncio
 async def test_broken_falls_back_to_most_complete_ready_store(
-    env, catalogs, broken_provider, migration_spy, monkeypatch
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
 ):
     _, stores_dir, _ = env
     calls, _ = migration_spy
@@ -347,12 +372,36 @@ async def test_broken_falls_back_to_most_complete_ready_store(
 
     assert health["state"] == "broken"
     assert calls == [OPENAI_SLUG]
-    assert "most complete existing store (5 vectors)" in health["detail"]
+    assert "most complete cloud ready store (5 vectors)" in health["detail"]
+
+
+@pytest.mark.asyncio
+async def test_broken_fallback_prefers_local_store_over_bigger_cloud_store(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
+):
+    """Spend consent: a ready LOCAL store wins the emergency fallback even
+    when a ready cloud store holds more vectors."""
+    calls, _ = migration_spy
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")  # cloud ready
+    catalogs["ollama"] = [QWEN_ID]                             # local ready too
+    rng = np.random.default_rng(7)
+    get_store(OPENAI_SLUG).append_many(
+        [(f"O-{i}", rng.standard_normal(3072)) for i in range(8)]
+    )
+    get_store(QWEN).append_many(
+        [(f"Q-{i}", rng.standard_normal(1024)) for i in range(5)]
+    )
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == [QWEN]  # local 5 beats cloud 8
+    assert "most complete local ready store (5 vectors)" in health["detail"]
 
 
 @pytest.mark.asyncio
 async def test_broken_falls_back_to_local_0_6b(
-    env, catalogs, broken_provider, migration_spy
+    env, catalogs, broken_provider, migration_spy, prior_broken_health
 ):
     calls, health_at_call = migration_spy
     catalogs["ollama"] = [QWEN_ID]  # daemon up, model pulled — only viable target
@@ -367,7 +416,7 @@ async def test_broken_falls_back_to_local_0_6b(
 
 @pytest.mark.asyncio
 async def test_broken_with_no_viable_target_stays_broken(
-    env, catalogs, broken_provider, migration_spy
+    env, catalogs, broken_provider, migration_spy, prior_broken_health
 ):
     _, stores_dir, _ = env
     calls, _ = migration_spy
@@ -386,7 +435,7 @@ async def test_broken_with_no_viable_target_stays_broken(
 
 @pytest.mark.asyncio
 async def test_broken_while_migration_already_running(
-    env, catalogs, broken_provider, monkeypatch
+    env, catalogs, broken_provider, prior_broken_health, monkeypatch
 ):
     _, stores_dir, _ = env
     catalogs["ollama"] = [QWEN_ID]
@@ -403,6 +452,67 @@ async def test_broken_while_migration_already_running(
     assert "already running" in health["detail"]
     # the rewrite landed on disk too
     assert "already running" in _read_health_file(stores_dir)["detail"]
+
+
+# ── broken: false-broken debounce ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_first_broken_run_writes_health_but_defers_migration(
+    env, catalogs, broken_provider, migration_spy, capsys
+):
+    """A single failing run (both probes) is NOT enough to auto-migrate, even
+    with a viable target standing by — the kick needs a consecutive broken run."""
+    _, stores_dir, _ = env
+    calls, _ = migration_spy
+    catalogs["ollama"] = [QWEN_ID]  # a viable local fallback IS available
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == []  # debounced: no migration on the first failing run
+    assert broken_provider.attempts == 2  # probe + the one in-run re-probe
+    assert "deferred" in health["detail"]
+    assert _read_health_file(stores_dir)["state"] == "broken"
+    assert "EMBEDDINGS BROKEN" in capsys.readouterr().out  # loud banner
+
+
+@pytest.mark.asyncio
+async def test_consecutive_broken_runs_kick_migration(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health
+):
+    """Previous health.json already broken + still failing → migration kicks."""
+    calls, health_at_call = migration_spy
+    catalogs["ollama"] = [QWEN_ID]
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == [QWEN]
+    assert health_at_call[0]["state"] == "broken"  # written before the kick
+
+
+@pytest.mark.asyncio
+async def test_transient_probe_blip_is_absorbed(env, catalogs, monkeypatch):
+    """First probe fails, the in-run re-probe succeeds → ok, never broken."""
+    _, stores_dir, _ = env
+    fake = FakeProvider(ACTIVE_DIMS, fail_first_n=1)
+    monkeypatch.setitem(providers._instances, ACTIVE, fake)
+    monkeypatch.setattr(watcher, "RETRY_PROBE_DELAY_S", 0.01)
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "ok"
+    assert fake.attempts == 2  # failed probe + successful re-probe
+    assert _read_health_file(stores_dir)["state"] == "ok"
+
+
+def test_recheck_interval_hourly_only_while_broken():
+    """Broken state rechecks in 1h (confirm/recover fast); else daily."""
+    assert watcher.WATCH_INTERVAL_BROKEN_S == 3600
+    assert watcher.WATCH_INTERVAL_OK_S == 24 * 3600
+    assert watcher._next_interval("broken") == watcher.WATCH_INTERVAL_BROKEN_S
+    assert watcher._next_interval("ok") == watcher.WATCH_INTERVAL_OK_S
+    assert watcher._next_interval("superseded") == watcher.WATCH_INTERVAL_OK_S
 
 
 # ── gap-heal (ok state only) ─────────────────────────────────────────────────
@@ -469,10 +579,31 @@ async def test_health_file_round_trips_through_routes_reader(
     await watcher.run_health_check()
 
     via_routes = _read_health(stores_dir)
-    assert set(via_routes.keys()) == {"state", "detail", "successor"}
+    assert set(via_routes.keys()) == {"state", "detail", "successor", "successor_slug"}
     assert via_routes["state"] == "superseded"
     assert via_routes["successor"] == "models/gemini-embedding-002"
+    assert via_routes["successor_slug"] is None  # vendor id unmapped in registry
     assert "newer" in via_routes["detail"]
+
+
+@pytest.mark.asyncio
+async def test_registry_mapped_successor_slug_round_trips(
+    env, catalogs, fake_provider, monkeypatch
+):
+    """A registry-mapped successor carries its slug in successor_slug — the
+    ONLY field the Task 14/15 [Update] button may bind to — alongside the
+    display successor, and it survives the routes reader."""
+    _, stores_dir, _ = env
+    monkeypatch.setitem(EMBEDDING_MODELS, "gemini-embedding-002", GEMINI_002)
+    catalogs["gemini"] = [ACTIVE_ID, "models/gemini-embedding-002"]
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "superseded"
+    assert health["successor"] == "gemini-embedding-002"       # mapped → slug shown
+    assert health["successor_slug"] == "gemini-embedding-002"  # registry-bound
+    assert _read_health_file(stores_dir)["successor_slug"] == "gemini-embedding-002"
+    assert _read_health(stores_dir)["successor_slug"] == "gemini-embedding-002"
 
 
 # ── route: manual trigger ────────────────────────────────────────────────────
@@ -491,11 +622,14 @@ def test_health_check_route_returns_health_dict(env, catalogs, fake_provider, ap
         body = resp.json()
         assert body["state"] == "ok"
         assert body["successor"] is None
+        assert body["successor_slug"] is None
         assert body["checked_at"]
 
         # the fresh health.json is what /embeddings/status now serves
         status_health = client.get("/embeddings/status").json()["health"]
-        assert status_health == {"state": "ok", "detail": "", "successor": None}
+        assert status_health == {
+            "state": "ok", "detail": "", "successor": None, "successor_slug": None,
+        }
 
 
 # ── scheduling ───────────────────────────────────────────────────────────────
@@ -511,3 +645,36 @@ async def test_start_watcher_is_idempotent(monkeypatch):
     task1.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task1
+
+
+@pytest.mark.asyncio
+async def test_watcher_task_death_logs_loud_error(monkeypatch, capsys):
+    """A watcher task dying with a non-CancelledError must leave a loud
+    [WATCHER] ERROR journal line (mirror of migrate's engine done-callback)."""
+    monkeypatch.setattr(watcher, "_WATCHER_TASK", None)
+
+    async def boom():
+        raise RuntimeError("synthetic watcher death")
+
+    monkeypatch.setattr(watcher, "_watch_forever", boom)
+    task = watcher.start_watcher()
+    with pytest.raises(RuntimeError, match="synthetic watcher death"):
+        await task
+    await asyncio.sleep(0)  # let the done-callback fire
+
+    out = capsys.readouterr().out
+    assert "[WATCHER] ERROR" in out
+    assert "synthetic watcher death" in out
+
+
+@pytest.mark.asyncio
+async def test_watcher_task_cancel_is_not_an_error(monkeypatch, capsys):
+    monkeypatch.setattr(watcher, "_WATCHER_TASK", None)
+
+    task = watcher.start_watcher()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert "[WATCHER] ERROR" not in capsys.readouterr().out

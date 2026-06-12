@@ -46,7 +46,9 @@ VALIDATE_TIMEOUT_S = 15.0  # wizard-click probe cap; see review note in /validat
 router = APIRouter(prefix="/embeddings", tags=["embeddings"])
 
 HEALTH_FILE = "health.json"  # written by the Task 9 watcher; we only read it
-_DEFAULT_HEALTH = {"state": "ok", "detail": "", "successor": None}
+_DEFAULT_HEALTH = {
+    "state": "ok", "detail": "", "successor": None, "successor_slug": None,
+}
 
 # Cloud-provider preflight: config attribute that must be truthy + the
 # customer-facing remediation string shown when it isn't (/cu/preflight style).
@@ -67,7 +69,8 @@ def _read_health(base: Path) -> dict:
     return {
         "state": raw.get("state", "ok"),
         "detail": raw.get("detail", ""),
-        "successor": raw.get("successor"),
+        "successor": raw.get("successor"),             # display-only string
+        "successor_slug": raw.get("successor_slug"),   # registry slug or None
     }
 
 
