@@ -3,9 +3,9 @@
 Per docs/plans/2026-06-11-pluggable-embeddings.md Task 5: monitoring's
 generate_embedding / semantic_search become delegates onto
 Orchestrator.embeddings.search, which serves searches from the active binary
-VectorStore (with a temporary inline-JSON fallback for the pre-transcode
-window). Behavior preservation is the whole point — these tests pin the
-legacy contracts: None on embed failure, [] on query-embed failure, operator
+VectorStore (the ONLY source — Task 16 removed the inline-JSON fallback).
+Behavior preservation is the whole point — these tests pin the legacy
+contracts: None on embed failure, [] on query-embed failure, operator
 "" / "system" sees ALL, [(snap_id, score)] top-k sorted desc.
 
 ALL providers are fakes injected via providers._instances; all stores live in
@@ -194,34 +194,25 @@ def test_semantic_search_failure_returns_empty_list(capsys):
     assert "[SEMANTIC] Query embedding failed" in out
 
 
-# ── store-empty inline fallback (pre-transcode window; removed in Task 16) ──
+# ── empty store: [] — the Task-5 inline fallback is GONE (Task 16) ──────────
 
-def test_store_empty_falls_back_to_inline_index_embeddings(monkeypatch):
+def test_store_empty_returns_empty_even_with_inline_vectors(monkeypatch):
+    """Ratchet for the Task-16 fallback removal: inline `embedding` vectors in
+    the snapshot index must be IGNORED — an empty active store yields [],
+    never a legacy inline-cosine scan."""
     rng = _rng()
     vec_by_id = _vectors_by_id(8, rng)
     query = [float(x) for x in rng.standard_normal(DIMS)]
     _install_fake(GEMINI_SLUG, query)
 
-    operator_of = lambda i: "alice" if i < 4 else "bob"
-    index = _index_for(vec_by_id, operator_of, with_embeddings=True)
-    # One entry without an embedding must be skipped (legacy behavior)
-    no_vec_sid = "SNAP-20260101-0000"
-    del index[no_vec_sid]["embedding"]
+    index = _index_for(vec_by_id, lambda i: "alice", with_embeddings=True)
     monkeypatch.setattr("Orchestrator.fossils.load_snapshot_index", lambda: index)
 
-    assert search.get_active_store().count == 0  # nothing transcoded yet
+    assert search.get_active_store().count == 0  # nothing embedded yet
 
-    embedded = {sid: v for sid, v in vec_by_id.items() if sid != no_vec_sid}
-    results = search.semantic_search("q", k=5)
-    expected = _naive_topk(embedded, query, k=5)
-    assert [sid for sid, _ in results] == [sid for sid, _ in expected]
-    for (_, got), (_, want) in zip(results, expected):
-        assert got == pytest.approx(want, abs=1e-9)
-
-    # operator filter applies on the fallback path too
-    alice_ids = {sid for sid, e in index.items() if e["operator"] == "alice"}
-    alice_results = search.semantic_search("q", operator="alice", k=10)
-    assert {sid for sid, _ in alice_results} == alice_ids & set(embedded)
+    assert search.semantic_search("q", k=5) == []
+    assert search.semantic_search("q", operator="alice", k=5) == []
+    assert search.semantic_search("q", operator="system", k=5) == []
 
 
 # ── swap_active cutover seam ─────────────────────────────────────────────────
@@ -319,12 +310,15 @@ def test_concurrent_embeds_run_in_parallel_not_serialized():
     assert elapsed < 0.9, f"embeds serialized: 4x0.3s took {elapsed:.2f}s wall"
 
 
-# ── store-open failure: fall back, never raise (I1) ──────────────────────────
+# ── store-open failure: log + [], never raise (I1) ───────────────────────────
 
-def test_semantic_search_store_open_failure_falls_back_to_inline(monkeypatch, capsys):
+def test_semantic_search_store_open_failure_returns_empty_never_raises(
+    monkeypatch, capsys
+):
     """I1 regression guard: a corrupt/dims-mismatched active store must not
     raise into legacy callers (agent_context.py catches ValueError believing
-    it means bad operator input) — fall back to the inline index scan."""
+    it means bad operator input) — log + return []. Inline `embedding`
+    vectors in the index must NOT resurrect results (fallback gone, Task 16)."""
     rng = _rng()
     vec_by_id = _vectors_by_id(5, rng)
     query = [float(x) for x in rng.standard_normal(DIMS)]
@@ -338,31 +332,8 @@ def test_semantic_search_store_open_failure_falls_back_to_inline(monkeypatch, ca
 
     monkeypatch.setattr(search, "get_active_store", boom)
 
-    results = search.semantic_search("q", k=3)  # must not raise
-    expected = _naive_topk(vec_by_id, query, k=3)
-    assert [sid for sid, _ in results] == [sid for sid, _ in expected]
-    for (_, got), (_, want) in zip(results, expected):
-        assert got == pytest.approx(want, abs=1e-9)
+    assert search.semantic_search("q", k=3) == []  # must not raise
     assert "[SEMANTIC] active store unavailable" in capsys.readouterr().out
-
-
-def test_semantic_search_store_open_failure_slim_index_returns_empty(monkeypatch):
-    """Same store-open failure but the snapshot index carries no inline
-    embeddings (post-transcode slim index): returns [] without raising."""
-    rng = _rng()
-    vec_by_id = _vectors_by_id(4, rng)
-    query = [float(x) for x in rng.standard_normal(DIMS)]
-    _install_fake(GEMINI_SLUG, query)
-
-    index = _index_for(vec_by_id, lambda i: "alice", with_embeddings=False)
-    monkeypatch.setattr("Orchestrator.fossils.load_snapshot_index", lambda: index)
-
-    def boom():
-        raise ValueError("dims mismatch")
-
-    monkeypatch.setattr(search, "get_active_store", boom)
-
-    assert search.semantic_search("q", k=5) == []  # must not raise
 
 
 # ── monitoring delegates ─────────────────────────────────────────────────────
@@ -386,6 +357,7 @@ def test_monitoring_semantic_search_delegates():
 
 
 def test_monitoring_keeps_cosine_similarity():
-    # kept until Task 16 (fallback + tests depend on it)
+    # test-only since Task 16 dropped the inline fallback: the transcode
+    # golden-parity test scores through it as the legacy reference impl
     assert monitoring.cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
     assert monitoring.cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)

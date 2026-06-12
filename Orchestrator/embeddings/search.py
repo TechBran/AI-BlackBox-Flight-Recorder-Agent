@@ -12,10 +12,10 @@ search, APScheduler jobs) flows through this module. It owns:
   None on embed failure, [] on query-embed failure, operator "" or "system"
   sees ALL snapshots, results are [(snap_id, score)] top-k sorted desc)
 
-Pre-transcode window: until Task 4's transcode has run on a box, the active
-store is empty and inline `entry["embedding"]` vectors still live in the
-snapshot index — `semantic_search` falls back to the legacy pure-python
-cosine loop in that case (removed in Task 16).
+The active VectorStore is the ONLY search source: the Task-5 inline-JSON
+fallback (pre-transcode window) was removed in Task 16 — Task 4's transcode
+moves inline vectors into the binary store on the first post-merge boot, so
+an empty store simply means nothing is embedded yet and yields [].
 """
 import asyncio
 import threading
@@ -120,60 +120,24 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[s
 
     # Opening the store can raise (corrupt dir, dims mismatch) — legacy
     # semantic_search never raised, and callers like agent_context.py catch
-    # ValueError believing it means bad operator input. Fall back instead.
+    # ValueError believing it means bad operator input. Log + empty instead
+    # (protective catch kept from Task 5; the inline-scan fallback it used to
+    # feed was removed in Task 16).
     try:
         store = get_active_store()
     except Exception as e:
-        print(f"[SEMANTIC] active store unavailable ({e}): falling back to inline index scan")
-        store = None
-    if store is not None and store.count > 0:
-        allowed_ids = None
-        if operator and operator != "system":
-            from Orchestrator.fossils import load_snapshot_index  # lazy: avoid cycle
-            allowed_ids = {
-                snap_id
-                for snap_id, entry in load_snapshot_index().items()
-                if entry.get("operator") == operator
-            }
-        return store.search(query_embedding, k, allowed_ids)
-
-    # TODO(Task 16): remove inline fallback — covers the pre-transcode window
-    # (active store empty, inline "embedding" vectors still in the snapshot
-    # index) and the store-unavailable path above.
-    return _inline_fallback_search(query_embedding, operator, k)
-
-
-# ── legacy inline-JSON fallback (TEMPORARY — deleted in Task 16) ─────────────
-
-def _cosine(vec1, vec2) -> float:
-    """Pure-python cosine — local copy of monitoring.cosine_similarity so the
-    fallback scores are bit-identical to the legacy path without importing
-    monitoring (which lazily imports this module)."""
-    import math
-
-    if not vec1 or not vec2 or len(vec1) != len(vec2):
-        return 0.0
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-    magnitude1 = math.sqrt(sum(a * a for a in vec1))
-    magnitude2 = math.sqrt(sum(b * b for b in vec2))
-    if magnitude1 == 0 or magnitude2 == 0:
-        return 0.0
-    return dot_product / (magnitude1 * magnitude2)
-
-
-def _inline_fallback_search(query_embedding, operator: str, k: int) -> list[tuple[str, float]]:
-    """Replicates the legacy monitoring.semantic_search index loop."""
-    from Orchestrator.fossils import load_snapshot_index  # lazy: avoid cycle
-
-    index = load_snapshot_index()
-    if not index:
+        print(f"[SEMANTIC] active store unavailable ({e}): returning no results")
         return []
-    scores = []
-    for snap_id, data in index.items():
-        if operator and operator != "system" and data.get("operator") != operator:
-            continue
-        if not data.get("embedding"):
-            continue
-        scores.append((snap_id, _cosine(query_embedding, data["embedding"])))
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return scores[:k]
+    if store.count == 0:
+        # Nothing embedded yet (fresh box, or a just-switched model whose
+        # backfill hasn't landed a row) — skip the index load entirely.
+        return []
+    allowed_ids = None
+    if operator and operator != "system":
+        from Orchestrator.fossils import load_snapshot_index  # lazy: avoid cycle
+        allowed_ids = {
+            snap_id
+            for snap_id, entry in load_snapshot_index().items()
+            if entry.get("operator") == operator
+        }
+    return store.search(query_embedding, k, allowed_ids)

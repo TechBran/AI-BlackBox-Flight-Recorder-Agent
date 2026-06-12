@@ -91,16 +91,17 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
 
     # Disk gate FIRST when work is needed: the slim rewrite needs a tmp copy
     # and the backup needs a full copy; 1.5x the index size is the floor.
-    # On insufficient space we touch NOTHING — the system keeps working
-    # because search falls back to the inline vectors (Task 5) until a later
-    # boot finds enough room.
+    # On insufficient space we touch NOTHING — the inline vectors stay in the
+    # index for the rerun on a later boot that finds enough room. Until then
+    # the active store is empty and semantic search returns no results (the
+    # Task-5 inline fallback was removed in Task 16).
     free = _disk_free(index_path.parent)
     needed = int(index_bytes_before * DISK_HEADROOM)
     if free < needed:
         print(
             f"[TRANSCODE] insufficient disk: free={_fmt_bytes(free)} "
             f"need>={_fmt_bytes(needed)} — SKIPPING migration (index untouched, "
-            f"inline-embedding fallback stays active; free up space and restart)"
+            f"semantic search has no vectors until then; free up space and restart)"
         )
         return {"skipped": True, "reason": "disk"}
 

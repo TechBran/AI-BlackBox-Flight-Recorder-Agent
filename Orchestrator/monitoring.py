@@ -354,7 +354,13 @@ def generate_embedding(text: str, max_retries: int = 3) -> Optional[List[float]]
     return generate_embedding_sync(text, purpose="document")
 
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculate cosine similarity between two vectors."""
+    """Calculate cosine similarity between two vectors.
+
+    No production consumer remains since Task 16 dropped the inline-JSON
+    search fallback — kept as a stable reference implementation for the
+    golden-parity tests (test_embeddings_transcode.py scores migrated
+    vectors through it to prove store-search bit-parity with legacy).
+    """
     if not vec1 or not vec2 or len(vec1) != len(vec2):
         return 0.0
 
@@ -376,8 +382,8 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> List[Tuple[s
     This is needed for outbound calls where the AI needs context from prior conversations.
 
     Delegates to Orchestrator.embeddings.search (pluggable-embeddings Task 5):
-    the active binary VectorStore serves searches, with a temporary inline-JSON
-    fallback for the pre-transcode window.
+    the active binary VectorStore is the only search source (the inline-JSON
+    fallback was removed in Task 16).
     """
     from Orchestrator.embeddings import search as _embeddings_search  # lazy: avoid startup cycle
     return _embeddings_search.semantic_search(query, operator=operator, k=k)
