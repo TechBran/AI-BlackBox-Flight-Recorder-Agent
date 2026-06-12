@@ -23,9 +23,12 @@ Failure containment: a batch that exhausts the provider's own retries (4
 attempts inside providers.py) is quarantined for THIS RUN — its snap_ids go to
 `skipped`, the job keeps going and still completes. Quarantined ids remain
 missing() in the store, so a later run (re-POST, watcher gap-heal, resume)
-retries them. A permanently-failing text can therefore never stall the job.
-Any NON-provider exception parks the job in `stalled` with the error recorded;
-re-POSTing resumes via the diff (progress truth = store contents).
+retries them. A permanently-failing text can therefore never stall the job —
+with one guard: if EVERY missing snapshot was quarantined and the job appended
+NOTHING (dead provider: revoked key, daemon down), it stalls instead of
+cutting over to a near-empty store. Any NON-provider exception parks the job
+in `stalled` with the error recorded; re-POSTing resumes via the diff
+(progress truth = store contents).
 
 One job at a time, module-level singleton (CU session-manager pattern).
 State is persisted to {stores_dir}/migration_state.json every PERSIST_EVERY
@@ -55,6 +58,7 @@ BATCH_SLEEP_S = 0.2     # cloud rate-limit pause between batches
 _JOB: dict | None = None          # None = idle / never run this process
 _JOB_LOCK = threading.Lock()      # guards _JOB mutation + reads (copy out)
 _CANCEL = threading.Event()       # cooperative cancel, checked between batches
+_JOB_TASK: "asyncio.Task | None" = None   # strong ref to the scheduled engine task
 
 
 def _state_path() -> Path:
@@ -69,6 +73,9 @@ def get_job_status() -> dict | None:
         snap = dict(_JOB)
         snap["skipped"] = list(snap["skipped"])
         snap["raced"] = list(snap["raced"])
+        # Computed, never persisted: lets the wizard show "cancelling —
+        # finishing current batch" between the cancel POST and the transition.
+        snap["cancel_requested"] = _CANCEL.is_set()
         return snap
 
 
@@ -137,6 +144,36 @@ def _begin_job(target_slug: str) -> None:
         _persist_locked()
 
 
+def _log_engine_task_outcome(task: "asyncio.Task") -> None:
+    """Done-callback on the engine task: a death the engine's own exception
+    handling never saw (so the job dict still says "running") would otherwise
+    be silent — retrieve the exception and make it a loud journal line."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(
+            f"[MIGRATE] ERROR: engine task died with unretrieved exception: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+def _launch(target_slug: str) -> "asyncio.Task":
+    """Schedule the engine on the running loop and RETAIN the Task.
+
+    The event loop holds only WEAK references to tasks: an engine task nobody
+    references can be garbage-collected mid-run, dying silently and leaving
+    _JOB stuck "running" (permanent 409 until restart). _JOB_TASK is the
+    strong reference; both launch sites (route POST + startup resume) route
+    through here. Claims nothing — caller runs _begin_job first.
+    """
+    global _JOB_TASK
+    task = asyncio.get_running_loop().create_task(_run_engine(target_slug))
+    task.add_done_callback(_log_engine_task_outcome)
+    _JOB_TASK = task
+    return task
+
+
 # ── public API ───────────────────────────────────────────────────────────────
 
 async def start_migration(target_slug: str) -> dict:
@@ -152,7 +189,7 @@ async def start_migration(target_slug: str) -> dict:
             f"known: {sorted(EMBEDDING_MODELS)}"
         )
     _begin_job(target_slug)
-    asyncio.get_running_loop().create_task(_run_engine(target_slug))
+    _launch(target_slug)
     return get_job_status()
 
 
@@ -184,8 +221,9 @@ def resume_if_interrupted() -> "asyncio.Task | None":
 
     If migration_state.json says state=="running", the process died mid-job:
     re-diff-and-fill is safe by construction (store contents are the resume
-    truth), so schedule run_migration(target) on the running loop. Must be
-    called with an event loop running (async startup hook).
+    truth), so claim the job and schedule the engine on the running loop via
+    _launch (which retains the Task). Must be called with an event loop
+    running (async startup hook).
     """
     try:
         persisted = json.loads(_state_path().read_text(encoding="utf-8"))
@@ -198,7 +236,8 @@ def resume_if_interrupted() -> "asyncio.Task | None":
         print(f"[MIGRATE] interrupted job targets unknown slug {target!r}; not resuming")
         return None
     print(f"[MIGRATE] resuming interrupted migration to {target}")
-    return asyncio.get_running_loop().create_task(run_migration(target))
+    _begin_job(target)
+    return _launch(target)
 
 
 # ── engine ───────────────────────────────────────────────────────────────────
@@ -218,7 +257,9 @@ async def _run_engine(target_slug: str) -> dict:
         while True:
             # Re-diff each pass: new mints land in the index (and the active
             # store) during the job — the loop converges when nothing is missing.
-            index = load_snapshot_index()
+            # Off the loop: the cold parse reads + json-loads the whole index
+            # (already called from worker threads elsewhere).
+            index = await asyncio.to_thread(load_snapshot_index)
             missing = [
                 sid for sid in target.missing(list(index.keys()))
                 if sid not in quarantined
@@ -227,8 +268,11 @@ async def _run_engine(target_slug: str) -> dict:
                 break
             _set_total_from_missing(len(missing))
 
-            # Volume bytes are read ONCE per pass (~35MB) and sliced per snapshot.
-            vol_bytes = read_volume_bytes(Path(config.VOL_PATH))
+            # Volume bytes are read ONCE per pass (~35MB) and sliced per
+            # snapshot — off the loop, a 35MB disk read blocks every request.
+            vol_bytes = await asyncio.to_thread(
+                read_volume_bytes, Path(config.VOL_PATH)
+            )
 
             for i in range(0, len(missing), BATCH_SIZE):
                 if _CANCEL.is_set():
@@ -278,7 +322,9 @@ async def _run_engine(target_slug: str) -> dict:
                         for sid, vec in zip(good_ids, vectors)
                         if sid not in already_present
                     ]
-                    target.append_many(rows)
+                    # fsync-heavy store writes off the loop — this loop also
+                    # serves voice/WS traffic (store is thread-safe by design)
+                    await asyncio.to_thread(target.append_many, rows)
                     job_appended.update(sid for sid, _ in rows)
                     appends_since_persist += len(rows)
                     persist_now = appends_since_persist >= PERSIST_EVERY
@@ -287,6 +333,22 @@ async def _run_engine(target_slug: str) -> dict:
                         appends_since_persist = 0
 
                 await asyncio.sleep(BATCH_SLEEP_S)
+
+        # ── cutover guard: dead provider must not activate an empty store ────
+        # Every batch quarantined and nothing appended (revoked key, daemon
+        # down): the empty diff is failure, not completion. Cutting over would
+        # swap live searches onto a near-empty store — and boot auto-resume
+        # would do it unattended. A pure switch-back where everything was
+        # already present (quarantined empty too) is the fast path and still
+        # cuts over below.
+        if not job_appended and quarantined:
+            msg = (
+                f"provider failed for all {len(quarantined)} snapshots; "
+                f"cutover aborted - active store unchanged"
+            )
+            print(f"[MIGRATE] ERROR: {msg}")
+            _finish_job("stalled", error=msg)
+            return get_job_status()
 
         # ── cutover (in-process, both parts, this order) ─────────────────────
         set_active_slug(target_slug)        # 1. persist the pointer (disk)

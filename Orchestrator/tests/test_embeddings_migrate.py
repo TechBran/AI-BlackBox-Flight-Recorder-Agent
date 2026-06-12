@@ -32,6 +32,8 @@ JOB_KEYS = {
     "target", "state", "done", "total", "started_at", "finished_at",
     "error", "skipped", "raced",
 }
+# get_job_status() adds the computed cancel flag; the persisted file does not.
+STATUS_KEYS = JOB_KEYS | {"cancel_requested"}
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -48,6 +50,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
     monkeypatch.setattr(config, "VOL_PATH", volume_path)
     monkeypatch.setattr(migrate, "_JOB", None)
+    monkeypatch.setattr(migrate, "_JOB_TASK", None)
     monkeypatch.setattr(migrate, "_CANCEL", threading.Event())
     monkeypatch.setattr(migrate, "BATCH_SLEEP_S", 0.0)
     monkeypatch.setattr(search, "_active_store", None)
@@ -166,8 +169,9 @@ async def test_full_migration_embeds_all_and_cuts_over(env, fake_provider):
 
     # singleton status reflects the finished job
     status = migrate.get_job_status()
-    assert set(status.keys()) == JOB_KEYS
+    assert set(status.keys()) == STATUS_KEYS
     assert status["state"] == "done" and status["done"] == 10
+    assert status["cancel_requested"] is False
 
 
 @pytest.mark.asyncio
@@ -286,6 +290,50 @@ async def test_failing_batch_is_quarantined_job_still_completes(
     assert "quarantining" in capsys.readouterr().out
 
 
+# ── all-quarantined cutover guard (dead provider must not cut over) ──────────
+
+@pytest.mark.asyncio
+async def test_all_batches_quarantined_aborts_cutover(env, fake_provider, capsys):
+    """Dead provider (revoked key, daemon down): every batch fails, nothing is
+    appended — the job must STALL, never cut over to a near-empty store."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    fake_provider.fail_substring = "snapshot body"  # matches every text
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "stalled"
+    assert "cutover aborted" in result["error"]
+    assert "active store unchanged" in result["error"]
+    assert f"all {len(bodies)} snapshots" in result["error"]
+    assert sorted(result["skipped"]) == sorted(bodies)
+    # NO cutover: disk pointer untouched, in-memory search store never swapped
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG
+    assert search._active_store is None
+    assert get_store(TARGET, base_dir=stores_dir).count == 0
+    assert "[MIGRATE] ERROR" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_switch_back_with_nothing_missing_still_cuts_over(env, fake_provider):
+    """Fast path: everything already present (no appends AND no skips) is a
+    completed switch-back, not a failure — the guard must not fire."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    target = get_store(TARGET, base_dir=stores_dir)
+    rng = np.random.default_rng(11)
+    target.append_many(
+        [(sid, rng.standard_normal(TARGET_DIMS)) for sid in bodies]
+    )
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert result["done"] == 0 and result["skipped"] == []
+    assert fake_provider.calls == []  # nothing embedded
+    assert get_active_slug(base_dir=stores_dir) == TARGET
+
+
 # ── raced-mint detection (Task 6 advisory) ───────────────────────────────────
 
 @pytest.mark.asyncio
@@ -371,6 +419,7 @@ async def test_resume_if_interrupted_relaunches_running_state(env, fake_provider
     task = migrate.resume_if_interrupted()
 
     assert isinstance(task, asyncio.Task)
+    assert task is migrate._JOB_TASK  # resume routes through _launch too
     await task
     assert migrate.get_job_status()["state"] == "done"
     assert get_store(TARGET, base_dir=stores_dir).ids() == set(bodies)
@@ -392,6 +441,31 @@ async def test_resume_noop_when_not_interrupted(env):
         json.dumps({"target": "gone-model", "state": "running"}), encoding="utf-8"
     )
     assert migrate.resume_if_interrupted() is None
+
+
+# ── task reference retention (loop holds only weak refs) ────────────────────
+
+@pytest.mark.asyncio
+async def test_start_migration_retains_engine_task(env, monkeypatch, capsys):
+    """start_migration must keep a strong module-level ref to the engine Task
+    (the loop's refs are weak — a GC'd task dies silently, _JOB stays
+    "running" and every later POST 409s until restart)."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=3)
+    gated = GatedProvider(TARGET_DIMS)
+    monkeypatch.setitem(providers._instances, TARGET, gated)
+
+    job = await migrate.start_migration(TARGET)
+
+    assert job["state"] == "running"
+    assert migrate._JOB_TASK is not None and not migrate._JOB_TASK.done()
+
+    gated.release.set()
+    result = await migrate._JOB_TASK
+    assert result["state"] == "done"
+    await asyncio.sleep(0)  # let the done-callback run
+    assert migrate._JOB_TASK.exception() is None
+    assert "[MIGRATE] ERROR" not in capsys.readouterr().out
 
 
 # ── routes ───────────────────────────────────────────────────────────────────
@@ -451,8 +525,9 @@ def test_migrate_409_status_job_and_cancel_flow(env, app, monkeypatch):
         resp = client.post("/embeddings/migrate", json={"target": TARGET})
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == JOB_KEYS
+        assert set(body.keys()) == STATUS_KEYS
         assert body["state"] == "running" and body["target"] == TARGET
+        assert body["cancel_requested"] is False
 
         # one job at a time
         resp2 = client.post("/embeddings/migrate", json={"target": TARGET})
@@ -467,6 +542,9 @@ def test_migrate_409_status_job_and_cancel_flow(env, app, monkeypatch):
         # cancel endpoint
         resp3 = client.post("/embeddings/migrate/cancel")
         assert resp3.json() == {"cancelled": True}
+        # wizard signal: "cancelling — finishing current batch"
+        job = client.get("/embeddings/status").json()["job"]
+        assert job["cancel_requested"] is True
         gated.release.set()  # unblock the in-flight batch
         _wait_for_state("cancelled")
 
