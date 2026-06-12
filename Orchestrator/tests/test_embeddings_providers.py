@@ -35,8 +35,8 @@ OLLAMA_DIMS = EMBEDDING_MODELS[OLLAMA_SLUG]["dims"]
 
 @pytest.fixture(autouse=True)
 def _fresh_provider_cache():
-    """Tests mutate provider instances (_sleep, _client, _transport) —
-    never let that leak through the factory cache."""
+    """Tests mutate provider instances (_sleep, _client_factory, _transport)
+    — never let that leak through the factory cache."""
     providers._instances.clear()
     yield
     providers._instances.clear()
@@ -67,6 +67,16 @@ def _ollama_with_mock_transport(provider, requests_seen, dims, status=200):
 
     provider._transport = httpx.MockTransport(handler)
     return provider
+
+
+def _openai_mock_client(resp):
+    """Stand-in for AsyncOpenAI: supports `async with` (the provider creates
+    and closes a client per _embed call) and a mocked embeddings.create."""
+    client = MagicMock()
+    client.embeddings.create = AsyncMock(return_value=resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
 
 
 # ── Gemini: purpose → task_type mapping ──────────────────────────────────────
@@ -185,14 +195,40 @@ async def test_openai_batch_order_preserved():
         SimpleNamespace(index=0, embedding=vec_a),
         SimpleNamespace(index=1, embedding=vec_b),
     ])
-    client = MagicMock()
-    client.embeddings.create = AsyncMock(return_value=resp)
-    provider._client = client
+    client = _openai_mock_client(resp)
+    provider._client_factory = lambda: client
     result = await provider.embed(["a", "b", "c"], purpose="document")
     assert result == [vec_a, vec_b, vec_c]
     client.embeddings.create.assert_awaited_once_with(
         model=EMBEDDING_MODELS[OPENAI_SLUG]["model_id"], input=["a", "b", "c"]
     )
+
+
+@pytest.mark.asyncio
+async def test_openai_client_created_per_call():
+    # ephemeral-loop safety: a cached client's httpx pool binds to the first
+    # event loop and dies with it; the provider must build a fresh client per
+    # _embed call. Two embeds → two factory invocations, each entered+exited.
+    provider = get_provider(OPENAI_SLUG)
+    resp = SimpleNamespace(
+        data=[SimpleNamespace(index=0, embedding=[0.0] * OPENAI_DIMS)]
+    )
+    clients = []
+
+    def factory():
+        client = _openai_mock_client(resp)
+        clients.append(client)
+        return client
+
+    provider._client_factory = factory
+    await provider.embed(["first"], purpose="document")
+    await provider.embed(["second"], purpose="document")
+    assert len(clients) == 2
+    assert clients[0] is not clients[1]
+    for client in clients:
+        client.__aenter__.assert_awaited_once()
+        client.__aexit__.assert_awaited_once()  # closed, not leaked
+        client.embeddings.create.assert_awaited_once()
 
 
 # ── truncation ───────────────────────────────────────────────────────────────
@@ -269,6 +305,23 @@ async def test_dims_mismatch_raises_provider_error_without_retry():
         with pytest.raises(EmbeddingProviderError):
             await provider.embed(["hello"], purpose="document")
     assert fake.call_count == 1  # guard fires after a "successful" call — no retries
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_count_mismatch_raises_provider_error_without_retry():
+    # provider returns fewer vectors than texts — malformed response, not a
+    # transient fault: must raise EmbeddingProviderError with no retries
+    provider = get_provider(OPENAI_SLUG)
+    sleeps = _record_sleeps(provider)
+    resp = SimpleNamespace(
+        data=[SimpleNamespace(index=0, embedding=[0.0] * OPENAI_DIMS)]
+    )  # 1 vector for 2 texts
+    client = _openai_mock_client(resp)
+    provider._client_factory = lambda: client
+    with pytest.raises(EmbeddingProviderError, match="got 1 vectors for 2 texts"):
+        await provider.embed(["a", "b"], purpose="document")
+    assert client.embeddings.create.await_count == 1
     assert sleeps == []
 
 

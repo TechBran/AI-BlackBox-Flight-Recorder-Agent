@@ -72,7 +72,10 @@ class _BaseProvider:
                     raise EmbeddingProviderError(
                         f"{self.slug}: embedding failed after {_MAX_ATTEMPTS} attempts: {e}"
                     ) from e
-                print(f"[EMBEDDING] {self.slug} attempt {attempt + 1}/{_MAX_ATTEMPTS} failed: {e}")
+                print(
+                    f"[EMBEDDING] {self.slug} attempt {attempt + 1}/{_MAX_ATTEMPTS} "
+                    f"failed: {type(e).__name__}: {e}"
+                )
                 await self._sleep(_BACKOFF_SECONDS[attempt])
 
         # dims guard outside the retry loop: a wrong-sized vector is a
@@ -110,18 +113,19 @@ class GeminiProvider(_BaseProvider):
 class OpenAIProvider(_BaseProvider):
     def __init__(self, slug, entry):
         super().__init__(slug, entry)
-        self._client = None  # lazy: AsyncOpenAI() raises without an API key
-
-    def _get_client(self):
-        if self._client is None:
-            self._client = openai.AsyncOpenAI(api_key=config.OPENAI_API_KEY or None)
-        return self._client
+        # client per call — cached clients bind their connection pool to the
+        # creating event loop; the sync mint bridge uses ephemeral loops (see
+        # CU cross-loop queue scar). Factory is injectable for tests; the
+        # client is only constructed inside _embed (lazy: AsyncOpenAI() raises
+        # without an API key, and import must work without one).
+        self._client_factory = lambda: openai.AsyncOpenAI(
+            api_key=config.OPENAI_API_KEY or None
+        )
 
     async def _embed(self, texts, purpose):
         # purpose unused: the OpenAI embeddings API has no task types
-        resp = await self._get_client().embeddings.create(
-            model=self.model_id, input=texts
-        )
+        async with self._client_factory() as client:
+            resp = await client.embeddings.create(model=self.model_id, input=texts)
         items = sorted(resp.data, key=lambda item: item.index)
         return [list(item.embedding) for item in items]
 
