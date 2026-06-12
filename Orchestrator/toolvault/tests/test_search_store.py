@@ -81,6 +81,27 @@ def test_semantic_search_store_skips_missing_and_empty_vectors():
     assert names == ["aligned"]
 
 
+def test_cosine_similarity_dims_mismatch_scores_zero():
+    """Length mismatch must score 0.0, never raise (mixed-dims cache)."""
+    assert embeddings.cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
+    assert embeddings.cosine_similarity([1.0, 0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+def test_semantic_search_store_mixed_dims_skip_not_crash():
+    """Mid-migration the store can hold vectors from two models with
+    different dims (entries not yet re-embedded under the new slug). The
+    similarity path must skip-not-crash: mismatched entries score 0.0."""
+    store = _store({
+        "fresh": [1.0, 0.0],            # matches the 2-dim query → cosine 1.0
+        "stale_old_model": [0.6, 0.8, 0.0],  # 3-dim leftover → cosine 0.0
+    })
+    results = embeddings.semantic_search_store(QUERY_VEC, store, limit=10)
+    scores = dict(results)
+    assert scores["fresh"] == pytest.approx(1.0)
+    assert scores["stale_old_model"] == 0.0
+    assert [n for n, _ in results][0] == "fresh"
+
+
 def test_semantic_search_store_deterministic():
     store = _store({
         "a": [1.0, 0.0],

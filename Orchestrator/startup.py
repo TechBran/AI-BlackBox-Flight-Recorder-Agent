@@ -227,6 +227,88 @@ def startup_check_index():
 
 
 @app.on_event("startup")
+def startup_embeddings_transcode():
+    """One-time migration: inline index embeddings → binary vector store.
+
+    Registered immediately AFTER startup_check_index so the snapshot index
+    has been created/rebuilt/healed before we slim it (FastAPI runs startup
+    hooks in registration order). Runs synchronously ON PURPOSE: no request
+    is served until startup hooks return, so nothing can mint a snapshot
+    (rewriting the index) while transcode holds the full index in memory —
+    a background thread here could clobber a freshly minted entry. The cost
+    is one ~408MB JSON parse on merge-day boot; every later boot hits the
+    slim-index no-op path instantly.
+
+    NEVER raises — a transcode failure must not block boot. NOTE: there is
+    no inline-vector fallback (removed in Task 16); until a rerun succeeds,
+    semantic search returns no results and keyword search carries the load.
+    """
+    try:
+        from Orchestrator.embeddings.transcode import transcode_inline_embeddings
+        result = transcode_inline_embeddings()
+        if result.get("skipped"):
+            logger.info(
+                "[TRANSCODE] skipped: %s",
+                result.get("reason", "no inline embeddings in index"),
+            )
+        else:
+            logger.info(
+                "[TRANSCODE] migrated=%d dropped=%d index %d->%d bytes",
+                result["migrated"], result["dropped"],
+                result["index_bytes_before"], result["index_bytes_after"],
+            )
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error(
+            "[TRANSCODE] startup transcode failed (non-fatal, index left "
+            "untouched): %s", e,
+        )
+
+
+@app.on_event("startup")
+async def startup_embeddings_migration_resume():
+    """Relaunch an embeddings migration that a restart interrupted (Task 8).
+
+    migration_state.json saying state=="running" means the process died
+    mid-job. The job is resumable by construction (progress truth = the
+    target store's contents; the engine re-diffs), so we just schedule
+    run_migration(target) as a background task. Async hook ON PURPOSE:
+    resume_if_interrupted() needs the running event loop to create_task —
+    the job must outlive startup, not block it.
+
+    NEVER raises — a resume failure must not block boot (the operator can
+    re-POST /embeddings/migrate; the stores are untouched).
+    """
+    try:
+        from Orchestrator.embeddings.migrate import resume_if_interrupted
+        task = resume_if_interrupted()
+        if task is not None:
+            logger.info("[MIGRATE] resumed interrupted embeddings migration")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[MIGRATE] startup resume check failed (non-fatal): %s", e)
+
+
+@app.on_event("startup")
+async def startup_embeddings_watcher():
+    """Schedule the daily embedding-model deprecation watcher (Task 9).
+
+    A plain asyncio loop task on the app's event loop: first health check
+    runs ~5 minutes after boot (startup is already index-rebuild heavy),
+    then daily. Registered AFTER the migration-resume hook so a resumed
+    job claims the migration singleton before any watcher-initiated
+    auto-migrate could race it.
+
+    NEVER raises — the watcher is maintenance, not boot criteria;
+    POST /embeddings/health/check is the manual fallback.
+    """
+    try:
+        from Orchestrator.embeddings.watcher import start_watcher
+        start_watcher()
+        logger.info("[WATCHER] embeddings deprecation watcher scheduled (daily)")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[WATCHER] failed to schedule watcher (non-fatal): %s", e)
+
+
+@app.on_event("startup")
 def startup_assert_sudoers_current():
     """Auto-update /etc/sudoers.d/blackbox-system if the template in this
     git checkout adds grants that aren't already present. Uses the

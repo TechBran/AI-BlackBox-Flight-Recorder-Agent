@@ -118,9 +118,9 @@ You have access to BlackBox capabilities via MCP tools. These give you memory, s
 
 **Critical mechanics — read `.claude/commands/snapshot-dev.md` for the full procedure:**
 - POST to `/chat/save` (NOT `/chat` — that wastes an LLM round-trip; `/chat/save` is direct persistence and ~400× cheaper).
-- Auto-mint (`turns_threshold=1`) fires `perform_mint()` immediately, which generates a 3072-dim `gemini-embedding-001` embedding inline before returning. The snapshot is searchable the instant the curl returns.
+- Auto-mint (`turns_threshold=1`) fires `perform_mint()` immediately, which generates an embedding from the active embedding model (see `Orchestrator/embeddings/registry.py`; status at `GET /embeddings/status`) inline before returning. The snapshot is searchable the instant the curl returns.
 - DO NOT manually call `/mint` afterward — that creates a duplicate.
-- VERIFY embedding generated: tail journalctl for `[EMBEDDING] Successfully generated embedding (3072 dimensions)`. If you see "Failed", flag to the user.
+- VERIFY embedding generated: tail journalctl for `[EMBEDDING] Successfully generated embedding (N dimensions)` — N must match the active model's dims. Failures log `[EMBEDDING] Warning: Failed to generate embedding` (mint path, checkpoint.py) or `[EMBEDDING] <slug>: embedding generation failed` (provider layer); flag either to the user.
 
 ### When to Register Apps
 

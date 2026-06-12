@@ -20,6 +20,16 @@
 //   failed                 — show last error + [Rollback] enabled
 //   interrupted            — recovery banner (audit C3) + manual rollback
 //   error                  — fetch error itself (network down, etc.)
+//
+// Embeddings notification card (pluggable embeddings, Task 14): on every
+// menu open this module ALSO fetches /embeddings/status and renders a card
+// into #embeddingsCard when noteworthy (health superseded/broken, or a
+// migration job running). [Update] POSTs /embeddings/migrate directly;
+// [Manage] deep-links to /onboarding/?step=embeddings (wizard owns the full
+// management surface). Any failure of that fetch hides the card and never
+// breaks the updates panel.
+
+import { toastError } from "./core-utils.js";
 
 let _state = "loading";
 let _lastStatus = null;  // last /update/status response
@@ -34,6 +44,9 @@ export async function initUpdatesPanel() {
         _wireButtons();
         _isInitialized = true;
     }
+    // Fire-and-forget (it catches everything internally): the embeddings
+    // card must never delay or break the updates panel itself.
+    _refreshEmbeddingsCard();
     await refreshPanel();
 }
 
@@ -285,6 +298,158 @@ async function _onRollbackClick() {
         openHealthPollModal(`Rolled back to ${tag}. Restarting service…`);
     } catch (e) {
         window.alert(`Rollback error: ${e.message}`);
+    }
+}
+
+// ── Embeddings notification card (pluggable embeddings, Task 14) ───────
+//
+// Contract (GET /embeddings/status, Orchestrator/routes/embeddings_routes.py):
+//   health: { state: "ok"|"superseded"|"broken", detail, successor,
+//             successor_slug }
+//   job:    { state, done, total, target, error, cancel_requested } | null
+// Card precedence: broken (urgent, [Manage] only, progress shown when the
+// watcher's auto-migration is underway) > job running (progress + [Manage])
+// > superseded ([Update] when successor_slug known + [Manage]) > hidden.
+
+let _embedPollTimer = null;   // 5s job-progress poll; self-clears (see below)
+let _embedWarnedOnce = false; // one console.warn per page load, never spam
+
+async function _refreshEmbeddingsCard() {
+    const container = document.getElementById("embeddingsCard");
+    if (!container) return;  // panel not in DOM (menu modal not built yet)
+    try {
+        const r = await fetch("/embeddings/status");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const status = await r.json();
+        _renderEmbeddingsCard(container, status);
+    } catch (e) {
+        // Failure can NEVER break the updates panel: hide the card, warn once.
+        _hideEmbeddingsCard(container);
+        if (!_embedWarnedOnce) {
+            _embedWarnedOnce = true;
+            console.warn("[updates] embeddings status unavailable:", e.message);
+        }
+    }
+}
+
+function _hideEmbeddingsCard(container) {
+    container.classList.add("hide");
+    container.innerHTML = "";
+    _stopEmbedPoll();
+}
+
+function _renderEmbeddingsCard(container, status) {
+    const health = status.health || {};
+    const job = status.job;
+    const jobRunning = !!(job && job.state === "running");
+
+    let html = "";
+    if (health.state === "broken") {
+        // Urgent: the watcher has already kicked off auto-migration — show
+        // the what/why detail (and live progress if the job is visible).
+        html = `
+            <div class="embeddings-card embeddings-card-broken">
+                <div class="embeddings-card-title">⚠ Search memory needs attention</div>
+                <p class="embeddings-card-copy">${_esc(health.detail || "The active embedding model stopped working. Automatic recovery is migrating your search memory to a working model.")}</p>
+                ${jobRunning ? `<p class="embeddings-card-progress">${_embedProgressLine(job)}</p>` : ""}
+                <div class="embeddings-card-actions">
+                    <button id="btnEmbeddingsManage" class="btn">Manage</button>
+                </div>
+            </div>`;
+    } else if (jobRunning) {
+        html = `
+            <div class="embeddings-card embeddings-card-info">
+                <div class="embeddings-card-title">⟳ Search memory update in progress</div>
+                <p class="embeddings-card-progress">${_embedProgressLine(job)}</p>
+                <div class="embeddings-card-actions">
+                    <button id="btnEmbeddingsManage" class="btn">Manage</button>
+                </div>
+            </div>`;
+    } else if (health.state === "superseded") {
+        const successorLabel = health.successor || health.successor_slug || "a newer model";
+        html = `
+            <div class="embeddings-card embeddings-card-info">
+                <div class="embeddings-card-title">⬆ Search memory update available</div>
+                <p class="embeddings-card-copy">Your system will transfer embeddings to ${_esc(successorLabel)} in the background. Search keeps working the whole time; the switch happens automatically when it finishes and survives restarts.</p>
+                <div class="embeddings-card-actions">
+                    ${health.successor_slug ? `<button id="btnEmbeddingsUpdate" class="btn btn-primary">Update</button>` : ""}
+                    <button id="btnEmbeddingsManage" class="btn">Manage</button>
+                </div>
+            </div>`;
+    }
+
+    if (!html) {
+        _hideEmbeddingsCard(container);  // health ok + no job → nothing to say
+        return;
+    }
+    container.innerHTML = html;
+    container.classList.remove("hide");
+
+    const btnManage = document.getElementById("btnEmbeddingsManage");
+    if (btnManage) {
+        btnManage.addEventListener("click", () => {
+            window.location.href = "/onboarding/?step=embeddings";
+        });
+    }
+    const btnUpdate = document.getElementById("btnEmbeddingsUpdate");
+    if (btnUpdate) {
+        btnUpdate.addEventListener("click",
+            () => _onEmbeddingsUpdateClick(btnUpdate, health.successor_slug));
+    }
+
+    if (jobRunning) _startEmbedPoll();
+    else _stopEmbedPoll();
+}
+
+function _embedProgressLine(job) {
+    const done = Number(job.done) || 0;
+    const total = Number(job.total) || 0;
+    const cancelling = job.cancel_requested ? " (cancelling…)" : "";
+    return `Re-embedding ${done}/${total}…${cancelling}`;
+}
+
+async function _onEmbeddingsUpdateClick(btn, targetSlug) {
+    if (!targetSlug || btn.disabled) return;
+    btn.disabled = true;  // double-click guard while the POST is in flight
+    try {
+        const r = await fetch("/embeddings/migrate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: targetSlug }),
+        });
+        if (r.ok || r.status === 409) {
+            // 200: job claimed. 409: one is already running. Either way the
+            // fresh status carries the running job → card shows migrating.
+            await _refreshEmbeddingsCard();
+            return;
+        }
+        throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+        toastError(`Could not start embedding update: ${e.message}`);
+        btn.disabled = false;
+    }
+}
+
+function _startEmbedPoll() {
+    if (_embedPollTimer) return;
+    _embedPollTimer = setInterval(() => {
+        const container = document.getElementById("embeddingsCard");
+        const menu = document.getElementById("menuModal");
+        // Self-clear when the card left the DOM or the menu modal closed —
+        // no progress polling in the background.
+        if (!container || !container.isConnected
+            || !menu || menu.classList.contains("hide")) {
+            _stopEmbedPoll();
+            return;
+        }
+        _refreshEmbeddingsCard();  // catches its own errors
+    }, 5000);
+}
+
+function _stopEmbedPoll() {
+    if (_embedPollTimer) {
+        clearInterval(_embedPollTimer);
+        _embedPollTimer = null;
     }
 }
 

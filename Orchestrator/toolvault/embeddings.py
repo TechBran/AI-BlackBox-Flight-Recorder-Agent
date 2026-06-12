@@ -1,10 +1,29 @@
 """
 ToolVault Embeddings - Semantic vector generation and search.
 
-Uses the same Gemini embedding-001 model as the snapshot system
-(3072-dimensional vectors). The key difference: snapshots embed
-the entire snapshot body, while ToolVault embeds only the DESCRIPTION
-field — a focused, high-signal target for semantic retrieval.
+Vector generation rides the SHARED embedding provider layer
+(``Orchestrator.embeddings.search.generate_embedding_sync``): whatever model
+is active for snapshot embeddings (gemini / openai / ollama-qwen3) also
+embeds tool descriptions. The key difference from snapshots: ToolVault
+embeds only the DESCRIPTION field — a focused, high-signal target for
+semantic retrieval.
+
+Cache scheme (``ToolVault/embeddings.json`` — the only cached artifact)::
+
+    { "<tool_name>": {"hash":   "<sha256 of the description>",
+                      "model":  "<active model slug at embed time>",
+                      "vector": [...]} }
+
+An entry is fresh only when BOTH its ``hash`` matches the current description
+AND its ``model`` matches the current ACTIVE slug — switching embedding models
+therefore invalidates the whole cache cleanly (the migration job's cutover
+hook re-syncs it). Legacy pre-slug entries (``model`` holding an old genai
+model-id literal, or missing entirely) never match a registry slug and are
+treated as stale: re-embedded lazily on the next sync.
+
+Imports of the shared layer are LAZY (inside functions): the embeddings
+package and toolvault must never import each other at module level (the
+ToolResult→context.py import cycle bit this codebase before).
 
 This enables the core ToolVault promise: given a natural language
 prompt like "send a text message", find the right tool (send_sms)
@@ -15,17 +34,11 @@ import hashlib
 import json
 import math
 import os
-import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from Orchestrator.toolvault.config import (
     PROJECT_ROOT,
-    EMBEDDING_MODEL,
-    EMBEDDING_TASK_TYPE_DOC,
-    EMBEDDING_TASK_TYPE_QUERY,
-    EMBEDDING_MAX_CHARS,
-    EMBEDDING_MAX_RETRIES,
     KEYWORD_WEIGHT,
     SEMANTIC_WEIGHT,
     DEFAULT_SEARCH_LIMIT,
@@ -36,75 +49,45 @@ from Orchestrator.toolvault.config import (
 # Embedding cache store (Task 2.1)
 # ---------------------------------------------------------------------------
 # The store is the ONLY cached artifact in ToolVault v2. Tool modules are the
-# source of truth; embeddings are regenerated only when a tool's DESCRIPTION
-# changes (detected via sha256 hash). Format:
-#   { "<tool_name>": {"hash": "<sha256>", "model": "<model>", "vector": [..]} }
+# source of truth; embeddings are regenerated when a tool's DESCRIPTION
+# changes (sha256 hash) OR the active embedding model changes (slug). Format:
+#   { "<tool_name>": {"hash": "<sha256>", "model": "<slug>", "vector": [..]} }
 #
 # Module global so tests can override it (read at call time, not captured).
 EMBEDDINGS_PATH = PROJECT_ROOT / "ToolVault" / "embeddings.json"
 
 
 # ---------------------------------------------------------------------------
-# Embedding Generation
+# Embedding Generation (shared provider layer; lazy imports — no cycle)
 # ---------------------------------------------------------------------------
 
-def generate_embedding(
-    text: str,
-    task_type: str = EMBEDDING_TASK_TYPE_DOC,
-    max_retries: int = EMBEDDING_MAX_RETRIES,
-) -> Optional[List[float]]:
-    """Generate a 3072-dim embedding vector for text.
+def _active_slug() -> str:
+    """The shared layer's active embedding-model slug (lazy import)."""
+    from Orchestrator.embeddings.search import get_active_slug
 
-    Uses the same model and pattern as monitoring.py:generate_embedding(),
-    but with configurable task_type:
-      - "retrieval_document" for indexing tool descriptions
-      - "retrieval_query" for search queries
-
-    Args:
-        text: Text to embed (truncated to EMBEDDING_MAX_CHARS)
-        task_type: Gemini task type hint
-        max_retries: Number of retry attempts on failure
-
-    Returns:
-        List of 3072 floats, or None on failure.
-    """
-    import google.generativeai as genai
-
-    # Truncate if needed
-    if len(text) > EMBEDDING_MAX_CHARS:
-        text = text[:EMBEDDING_MAX_CHARS] + "..."
-
-    for attempt in range(max_retries):
-        try:
-            result = genai.embed_content(
-                model=EMBEDDING_MODEL,
-                content=text,
-                task_type=task_type,
-            )
-            return result["embedding"]
-        except Exception as e:
-            print(f"[TOOLVAULT-EMB] Attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(1)
-            else:
-                print(f"[TOOLVAULT-EMB] Failed after {max_retries} attempts")
-                return None
+    return get_active_slug()
 
 
 def embed_tool_description(description: str) -> Optional[List[float]]:
-    """Generate an embedding specifically for a tool description.
+    """Embed a tool description via the shared active provider.
 
-    Uses retrieval_document task type (this text will be searched against).
+    purpose="document": this text will be searched against. Truncation and
+    retry/backoff live in the provider layer. Returns None on failure — the
+    shared layer's contract, identical to the old in-module behavior.
     """
-    return generate_embedding(description, task_type=EMBEDDING_TASK_TYPE_DOC)
+    from Orchestrator.embeddings.search import generate_embedding_sync
+
+    return generate_embedding_sync(description, purpose="document")
 
 
 def embed_query(query: str) -> Optional[List[float]]:
-    """Generate an embedding for a search query.
+    """Embed a search query via the shared active provider.
 
-    Uses retrieval_query task type (optimized for finding relevant docs).
+    purpose="query": optimized for finding relevant docs. None on failure.
     """
-    return generate_embedding(query, task_type=EMBEDDING_TASK_TYPE_QUERY)
+    from Orchestrator.embeddings.search import generate_embedding_sync
+
+    return generate_embedding_sync(query, purpose="query")
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +148,11 @@ def sync_embeddings(
     """Sync the embedding cache against the canonical tool list.
 
     For each tool, the DESCRIPTION is hashed (sha256). A tool is re-embedded
-    only when its hash changed (or ``force=True``, or no usable cached vector
-    exists). Tools no longer present in ``canonical`` are pruned. The store is
-    written atomically and returned.
+    when its hash changed, its cached entry was embedded under a different
+    model slug than the currently ACTIVE one (model switch → clean
+    invalidation; legacy entries without a slug never match), ``force=True``,
+    or no usable cached vector exists. Tools no longer present in
+    ``canonical`` are pruned. The store is written atomically and returned.
 
     Embed failures (``embed_tool_description`` returns ``None``) never crash:
     any prior entry is kept intact; new tools are simply skipped.
@@ -183,6 +168,7 @@ def sync_embeddings(
     existing = load_embeddings_store(path)
     new_store: Dict[str, Any] = {}
 
+    active = _active_slug()
     embedded = 0
     skipped = 0
     canonical_names = set()
@@ -198,6 +184,7 @@ def sync_embeddings(
         prior = existing.get(name)
         prior_ok = (
             isinstance(prior, dict)
+            and prior.get("model") == active
             and prior.get("hash") == h
             and bool(prior.get("vector"))
         )
@@ -209,7 +196,7 @@ def sync_embeddings(
 
         vec = embed_tool_description(description)
         if vec:
-            new_store[name] = {"hash": h, "model": EMBEDDING_MODEL, "vector": vec}
+            new_store[name] = {"hash": h, "model": active, "vector": vec}
             embedded += 1
         else:
             # Embed failed: keep any prior entry intact; otherwise skip the tool.
@@ -234,6 +221,9 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Calculate cosine similarity between two vectors.
 
     Returns 0.0-1.0 score. Same implementation as monitoring.py.
+    A length mismatch scores 0.0 (skip-not-crash): mid-migration the store
+    can hold mixed-dims vectors from two models — stale entries simply
+    never rank until the sync re-embeds them.
     """
     if not vec1 or not vec2 or len(vec1) != len(vec2):
         return 0.0

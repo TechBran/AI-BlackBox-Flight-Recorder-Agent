@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.UpdateStatus
 import com.aiblackbox.portal.data.repository.UpdateRepository
 import kotlinx.coroutines.Job
@@ -56,6 +57,19 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     private val _restartPollLabel = MutableStateFlow<String?>(null)
     val restartPollLabel: StateFlow<String?> = _restartPollLabel.asStateFlow()
 
+    // Embeddings notification card (parity with the Portal card in
+    // updates-manager.js). null = status unavailable or not yet fetched →
+    // card absent; an embeddings failure can NEVER break the updates panel.
+    private val _embeddings = MutableStateFlow<EmbeddingsStatus?>(null)
+    val embeddings: StateFlow<EmbeddingsStatus?> = _embeddings.asStateFlow()
+
+    private val _embeddingsUpdateInFlight = MutableStateFlow(false)
+    val embeddingsUpdateInFlight: StateFlow<Boolean> = _embeddingsUpdateInFlight.asStateFlow()
+
+    /** One-shot error message for the screen's snackbar; cleared after shown. */
+    private val _embeddingsError = MutableStateFlow<String?>(null)
+    val embeddingsError: StateFlow<String?> = _embeddingsError.asStateFlow()
+
     private var streamJob: Job? = null
     private var pollJob: Job? = null
 
@@ -70,6 +84,7 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     fun refreshStatus(forceFresh: Boolean) {
         val r = repo ?: return
         _state.value = UpdatesUiState.Loading
+        refreshEmbeddings()
         viewModelScope.launch {
             try {
                 val status = if (forceFresh) r.preflight() else r.getStatus()
@@ -79,6 +94,52 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
                 _state.value = UpdatesUiState.Error(e.message ?: "unknown error")
             }
         }
+    }
+
+    // ── Embeddings notification card ────────────────────────────────────
+
+    /**
+     * Independent fetch of GET /embeddings/status. Failure → null → the card
+     * simply doesn't render; it never touches the main updates state (the
+     * Portal card has the same fail-quiet contract).
+     */
+    fun refreshEmbeddings() {
+        val r = repo ?: return
+        viewModelScope.launch {
+            _embeddings.value = try {
+                r.getEmbeddingsStatus()
+            } catch (e: Exception) {
+                Log.w(TAG, "embeddings status unavailable: ${e.message}")
+                null
+            }
+        }
+    }
+
+    /**
+     * [Update] on the superseded card: POST /embeddings/migrate, then refetch
+     * status — 200 and 409 both mean a job is running now, so the refreshed
+     * card shows live progress (mirrors _onEmbeddingsUpdateClick in the
+     * Portal's updates-manager.js).
+     */
+    fun startEmbeddingsMigration(targetSlug: String) {
+        val r = repo ?: return
+        if (_embeddingsUpdateInFlight.value) return  // double-tap guard
+        _embeddingsUpdateInFlight.value = true
+        viewModelScope.launch {
+            try {
+                r.startEmbeddingsMigration(targetSlug)
+                refreshEmbeddings()
+            } catch (e: Exception) {
+                Log.e(TAG, "embeddings migrate failed", e)
+                _embeddingsError.value = "Could not start embedding update: ${e.message}"
+            } finally {
+                _embeddingsUpdateInFlight.value = false
+            }
+        }
+    }
+
+    fun clearEmbeddingsError() {
+        _embeddingsError.value = null
     }
 
     private fun mapStatusToState(status: UpdateStatus): UpdatesUiState {

@@ -121,6 +121,9 @@ app.include_router(update_router)
 from Orchestrator.routes.onboarding_routes import router as onboarding_router
 app.include_router(onboarding_router)
 
+from Orchestrator.routes.embeddings_routes import router as embeddings_router
+app.include_router(embeddings_router)
+
 from Orchestrator.routes.credentials_routes import router as credentials_router
 app.include_router(credentials_router)
 

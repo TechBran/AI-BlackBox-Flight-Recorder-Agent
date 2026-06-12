@@ -3,7 +3,7 @@
 // a step-grid landing page (Phase 2.10 — not yet implemented).
 
 const STEPS = [
-    "welcome", "tailscale", "api_keys",
+    "welcome", "tailscale", "api_keys", "embeddings",
     "optional_integrations", "transcription", "pair_phone", "cli_agents", "operator", "done",
 ];
 
@@ -16,6 +16,7 @@ const STEP_LABELS = {
     welcome: "WELCOME",
     tailscale: "TAILNET",
     api_keys: "KEYS",
+    embeddings: "MEMORY & SEARCH",
     optional_integrations: "EXTRAS",
     transcription: "SPEECH",
     pair_phone: "PAIR",
@@ -26,6 +27,17 @@ const STEP_LABELS = {
 
 const params = new URLSearchParams(location.search);
 const MODE = params.get("mode") === "manage" ? "manage" : "setup";
+
+// Deep-link revisit mode (Task 13, pluggable embeddings): ?step=<name> for any
+// known step jumps straight to that step after state load and works even after
+// onboarding completion (the updates cards link to /onboarding/?step=embeddings).
+// Behavior choice (documented per plan): revisit mode NEVER mutates backend
+// onboarding state — POST /step/complete|skip auto-advances current_step
+// server-side, which would rewind a mid-onboarding user and means nothing once
+// the wizard is done. Earlier steps are NOT marked complete, and completing or
+// skipping the deep-linked step renders a terminal "all set — you can close
+// this page" panel instead of advancing into the rest of the wizard.
+const REVISIT_STEP = STEPS.includes(params.get("step")) ? params.get("step") : null;
 
 let state = null;
 let currentStepIdx = 0;
@@ -169,7 +181,34 @@ function updateProgress() {
     if (stepLabel) stepLabel.textContent = STEP_LABELS[STEPS[currentStepIdx]] || "";
 }
 
+// Terminal panel for revisit mode — shown instead of advancing the wizard.
+function renderRevisitDone() {
+    const container = document.getElementById("ob-step-container");
+    container.innerHTML = `
+        <section class="ob-step">
+            <div class="ob-step-body">
+                <h1 class="ob-step-title">All set.</h1>
+                <p class="ob-step-lede">
+                    Your changes are saved. You can close this page, or head
+                    back to the BlackBox portal.
+                </p>
+                <nav class="ob-step-nav" aria-label="Step navigation">
+                    <a class="ob-cta" href="/ui">
+                        Back to BlackBox <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
+                    </a>
+                    <button type="button" class="ob-skip" id="ob-revisit-reopen">
+                        Reopen this section <span aria-hidden="true">&rarr;</span>
+                    </button>
+                </nav>
+            </div>
+        </section>
+    `;
+    const reopen = document.getElementById("ob-revisit-reopen");
+    if (reopen) reopen.addEventListener("click", () => renderStep());
+}
+
 async function next() {
+    if (REVISIT_STEP) { renderRevisitDone(); return; }
     if (currentStepIdx >= STEPS.length - 1) return;
     if (busy) return;
     busy = true;
@@ -205,6 +244,7 @@ async function back() {
 }
 
 async function skip() {
+    if (REVISIT_STEP) { renderRevisitDone(); return; }
     if (currentStepIdx >= STEPS.length - 1) return;
     if (busy) return;
     busy = true;
@@ -230,7 +270,12 @@ async function skip() {
 (async () => {
     try {
         await fetchState();
-        if (state.is_complete && MODE === "setup") {
+        if (REVISIT_STEP) {
+            // Deep-linked revisit: jump straight to the requested step,
+            // bypassing the completed→/ui redirect (post-onboarding re-entry
+            // is the whole point of the link).
+            currentStepIdx = STEPS.indexOf(REVISIT_STEP);
+        } else if (state.is_complete && MODE === "setup") {
             location.href = "/ui";
             return;
         }
