@@ -12,6 +12,8 @@ POST /embeddings/validate       — probe-embed one short string with a model's
 POST /embeddings/migrate        — start the diff-and-fill migration job
                                   (404 unknown slug, 409 if one is running).
 POST /embeddings/migrate/cancel — cooperative cancel of the running job.
+POST /embeddings/health/check   — run the Task 9 watcher health check now
+                                  (manual trigger for ops/tests/the wizard).
 
 Status is strictly read-only: it must never create store directories or files
 as a side effect (probing is cheap and safe to poll).
@@ -37,6 +39,7 @@ from Orchestrator.embeddings.store import (
     get_store,
     list_stores,
 )
+from Orchestrator.embeddings.watcher import run_health_check
 
 VALIDATE_TIMEOUT_S = 15.0  # wizard-click probe cap; see review note in /validate
 
@@ -203,3 +206,14 @@ async def embeddings_migrate(req: MigrateRequest):
 async def embeddings_migrate_cancel():
     """Cooperatively cancel the running migration; false when nothing runs."""
     return {"cancelled": request_cancel()}
+
+
+@router.post("/health/check")
+async def embeddings_health_check():
+    """Run the watcher health check now and return the fresh health dict.
+
+    Same body as the daily scheduled run (probe + catalog + gap-heal /
+    auto-migrate side effects included); health.json is rewritten before
+    this returns, so a following GET /embeddings/status reflects it.
+    """
+    return await run_health_check()

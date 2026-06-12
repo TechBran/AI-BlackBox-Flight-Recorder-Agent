@@ -240,6 +240,22 @@ def resume_if_interrupted() -> "asyncio.Task | None":
     return _launch(target)
 
 
+# ── shared volume-slice helper (engine + Task 9 watcher gap-heal) ────────────
+
+def slice_snapshot_text(snap_id: str, index: dict, vol_bytes: bytes) -> "str | None":
+    """Snapshot body text sliced from the volume by index byte offsets.
+
+    None when the recorded range is invalid for this volume (stale index
+    entry, truncated volume) — callers quarantine/skip those ids.
+    """
+    entry = index.get(snap_id, {})
+    bs = entry.get("byte_start", 0)
+    be = entry.get("byte_end", 0)
+    if bs >= len(vol_bytes) or be > len(vol_bytes) or be <= bs:
+        return None
+    return vol_bytes[bs:be].decode("utf-8", errors="replace")
+
+
 # ── engine ───────────────────────────────────────────────────────────────────
 
 async def _run_engine(target_slug: str) -> dict:
@@ -282,18 +298,16 @@ async def _run_engine(target_slug: str) -> dict:
                 batch_ids = missing[i:i + BATCH_SIZE]
                 texts, good_ids = [], []
                 for sid in batch_ids:
-                    entry = index.get(sid, {})
-                    bs = entry.get("byte_start", 0)
-                    be = entry.get("byte_end", 0)
-                    if bs >= len(vol_bytes) or be > len(vol_bytes) or be <= bs:
+                    text = slice_snapshot_text(sid, index, vol_bytes)
+                    if text is None:
                         print(
-                            f"[MIGRATE] {sid}: invalid byte range ({bs},{be}) "
-                            f"for {len(vol_bytes)}-byte volume — skipping this run"
+                            f"[MIGRATE] {sid}: invalid byte range for "
+                            f"{len(vol_bytes)}-byte volume — skipping this run"
                         )
                         quarantined.add(sid)
                         _quarantine_ids([sid])
                         continue
-                    texts.append(vol_bytes[bs:be].decode("utf-8", errors="replace"))
+                    texts.append(text)
                     good_ids.append(sid)
 
                 if good_ids:

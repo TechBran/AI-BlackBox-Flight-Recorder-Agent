@@ -287,6 +287,27 @@ async def startup_embeddings_migration_resume():
 
 
 @app.on_event("startup")
+async def startup_embeddings_watcher():
+    """Schedule the daily embedding-model deprecation watcher (Task 9).
+
+    A plain asyncio loop task on the app's event loop: first health check
+    runs ~5 minutes after boot (startup is already index-rebuild heavy),
+    then daily. Registered AFTER the migration-resume hook so a resumed
+    job claims the migration singleton before any watcher-initiated
+    auto-migrate could race it.
+
+    NEVER raises — the watcher is maintenance, not boot criteria;
+    POST /embeddings/health/check is the manual fallback.
+    """
+    try:
+        from Orchestrator.embeddings.watcher import start_watcher
+        start_watcher()
+        logger.info("[WATCHER] embeddings deprecation watcher scheduled (daily)")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[WATCHER] failed to schedule watcher (non-fatal): %s", e)
+
+
+@app.on_event("startup")
 def startup_assert_sudoers_current():
     """Auto-update /etc/sudoers.d/blackbox-system if the template in this
     git checkout adds grants that aren't already present. Uses the

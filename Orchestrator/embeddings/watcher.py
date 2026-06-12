@@ -1,0 +1,394 @@
+"""Deprecation watcher — daily health check, "auto only when forced" (Task 9).
+
+One daily pass (plus POST /embeddings/health/check as the manual trigger)
+keeps the active embedding model honest:
+
+1. PROBE   — embed one short string with the active provider (30s hard cap).
+2. CATALOG — ask the active model's vendor whether the model is still listed
+   and whether a newer same-family non-preview model exists (GA-over-preview
+   rule). A catalog endpoint being UNREACHABLE is NOT a model failure: the
+   check is skipped with a note in detail — a dead listing API must never
+   flip a working model's state.
+3. STATE (the design-table contract, §7):
+     probe ok + listed + no successor → ok          (+ gap-heal, below)
+     probe ok + (delisted OR successor) → superseded (banner only; NO auto-spend)
+     probe failing                      → broken     (auto-migrate, below)
+4. GAP-HEAL (ok only) — embed up to HEAL_CAP index ids missing from the
+   active store (mints proceed vector-less when the provider is down, §5).
+   Failures are logged and retried next run, quarantine-style — never raised,
+   never a state flip.
+5. AUTO-MIGRATE (broken only — self-preservation): first viable target wins:
+     (1) registry-mapped same-provider vendor successor whose preflight is
+         ready (cloud key present / ollama model pulled),
+     (2) the most-complete OTHER existing store whose provider is ready,
+     (3) the lightest local registry model when the Ollama daemon has it,
+     (4) none → stay broken, detail says why.
+   health.json is written BEFORE the migration job is kicked so the operator
+   sees what/why even if the job dies early. A migration already running is
+   noted in detail (the all-skipped guard in migrate.py means a broken-
+   provider job stalls safely instead of cutting over to an empty store).
+
+health.json ({stores_dir}/health.json, the shape embeddings_routes reads):
+    {state, detail, successor, checked_at}   (+ healed when gap-heal appended)
+
+Successor heuristic: candidates are same-provider embed-capable catalog ids,
+never containing "-preview"/"-exp" (GA-over-preview, MEMORY rule); a candidate
+counts only when it has the SAME name skeleton (digit runs masked) and a
+STRICTLY HIGHER version tuple than the active model id. Deliberately narrower
+than "any other embedding model sorted desc": the live Gemini catalog still
+lists text-embedding-004 (deprecated) and OpenAI lists text-embedding-ada-002
+— a naive pick would brand those as "successors" of gemini-embedding-001 /
+text-embedding-3-large and banner every box forever.
+
+Scheduling: a plain asyncio loop task started from an async startup hook in
+startup.py — first run WATCHER_FIRST_DELAY_S after boot (startup is already
+index-rebuild heavy), then every WATCHER_INTERVAL_S. Chosen over registering
+an APScheduler job: CronJobManager is user-facing persisted cron
+infrastructure (SQLite rows, history, delivery channels) and would surface an
+internal maintenance task as a user job, while the embeddings module already
+runs its background work as loop tasks (migration engine, startup resume).
+Same-loop tasks also avoid the uvloop run_coroutine_threadsafe bridge.
+"""
+import asyncio
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import google.generativeai as genai
+import httpx
+import openai
+
+from Orchestrator import config
+from Orchestrator.embeddings.migrate import slice_snapshot_text, start_migration
+from Orchestrator.embeddings.providers import get_provider
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
+from Orchestrator.embeddings.store import (
+    _atomic_write_json,
+    get_active_slug,
+    get_store,
+    list_stores,
+)
+from Orchestrator.volume import read_volume_bytes
+
+HEALTH_FILE = "health.json"        # same name embeddings_routes reads
+PROBE_TIMEOUT_S = 30.0             # 1-string probe cap (provider retries inside)
+CATALOG_TIMEOUT_S = 20.0           # ollama /api/tags fetch
+HEAL_CAP = 50                      # max gap-heal embeds per run
+WATCHER_FIRST_DELAY_S = 5 * 60     # don't pile onto startup
+WATCHER_INTERVAL_S = 24 * 3600     # daily
+
+# Cloud preflight = key present (same contract as embeddings_routes).
+_CLOUD_KEY_ATTRS = {"gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY"}
+
+
+# ── vendor catalog seams (each one mockable in tests — NO network there) ─────
+
+async def _gemini_catalog() -> list[str]:
+    """Embed-capable model names from the live Gemini catalog (sync SDK)."""
+    models = await asyncio.to_thread(lambda: list(genai.list_models()))
+    return [
+        m.name for m in models
+        if "embedContent" in (getattr(m, "supported_generation_methods", None) or [])
+    ]
+
+
+async def _openai_catalog() -> list[str]:
+    """All model ids from the OpenAI catalog (embedding filter is the caller's)."""
+    async with openai.AsyncOpenAI(api_key=config.OPENAI_API_KEY or None) as client:
+        page = await client.models.list()
+        return [m.id for m in page.data]
+
+
+async def _ollama_tags() -> list[str]:
+    """Locally pulled model names from the Ollama daemon."""
+    async with httpx.AsyncClient(timeout=CATALOG_TIMEOUT_S) as client:
+        resp = await client.get(f"{config.OLLAMA_BASE_URL}/api/tags")
+        resp.raise_for_status()
+        return [m.get("name", "") for m in resp.json().get("models", [])]
+
+
+# ── successor heuristic ──────────────────────────────────────────────────────
+
+_DIGITS_RX = re.compile(r"\d+")
+
+
+def _skeleton(model_id: str) -> str:
+    """Model id with digit runs masked: gemini-embedding-001 → gemini-embedding-#."""
+    return _DIGITS_RX.sub("#", model_id)
+
+
+def _version_key(model_id: str) -> tuple:
+    """All digit runs as an int tuple — the 'how new is it' sort key."""
+    return tuple(int(n) for n in _DIGITS_RX.findall(model_id))
+
+
+def _pick_successor(current_id: str, catalog_ids: list[str]) -> "str | None":
+    """Newest same-skeleton, strictly-newer, non-preview candidate; else None."""
+    candidates = [
+        cid for cid in catalog_ids
+        if cid != current_id
+        and "-preview" not in cid and "-exp" not in cid   # GA-over-preview rule
+        and _skeleton(cid) == _skeleton(current_id)
+        and _version_key(cid) > _version_key(current_id)
+    ]
+    return max(candidates, key=_version_key) if candidates else None
+
+
+def _registry_slug_for(provider_name: str, vendor_id: str) -> "str | None":
+    """Registry slug whose entry matches a vendor model id; None if unmapped."""
+    for slug, entry in EMBEDDING_MODELS.items():
+        if entry["provider"] == provider_name and entry["model_id"] == vendor_id:
+            return slug
+    return None
+
+
+def _local_fallback_slug() -> "str | None":
+    """Lightest local (ollama) registry model — the broken-path last resort.
+
+    Derived from the registry (min ram_gb), never a slug literal: registry.py
+    is the only place embedding-model literals may live (Task 16 ratchet).
+    """
+    locals_ = [
+        (entry["ram_gb"], slug)
+        for slug, entry in EMBEDDING_MODELS.items()
+        if entry["provider"] == "ollama"
+    ]
+    return min(locals_)[1] if locals_ else None
+
+
+# ── catalog check ────────────────────────────────────────────────────────────
+
+async def _catalog_check(entry: dict) -> tuple:
+    """(listed, successor_vendor_id, note) for the active registry entry.
+
+    Catalog UNREACHABLE ≠ model dead: listed stays True, successor None, and
+    note records that the check was skipped (surfaces in an ok-state detail).
+    """
+    provider_name = entry["provider"]
+    model_id = entry["model_id"]
+    try:
+        if provider_name == "gemini":
+            ids = await _gemini_catalog()      # already embed-capable only
+            candidates = ids
+        elif provider_name == "openai":
+            ids = await _openai_catalog()
+            candidates = [i for i in ids if "embedding" in i]
+        else:  # ollama — local models don't deprecate; just confirm presence
+            return (model_id in await _ollama_tags()), None, None
+    except Exception as e:  # noqa: BLE001 — any listing failure = skip, not dead
+        return True, None, f"catalog check skipped ({type(e).__name__}: {e})"
+    return model_id in ids, _pick_successor(model_id, candidates), None
+
+
+# ── broken-path target selection ─────────────────────────────────────────────
+
+async def _pick_migration_target(active: str, successor_slug: "str | None") -> tuple:
+    """(target_slug, why) per the broken-path precedence; (None, reasons)."""
+    try:
+        tags = await _ollama_tags()
+    except Exception:  # noqa: BLE001 — daemon unreachable = local not ready
+        tags = None
+
+    def ready(slug: str) -> bool:
+        entry = EMBEDDING_MODELS[slug]
+        attr = _CLOUD_KEY_ATTRS.get(entry["provider"])
+        if attr is not None:
+            return bool(getattr(config, attr, ""))
+        return tags is not None and entry["model_id"] in tags
+
+    reasons = []
+
+    # 1. registry-mapped same-provider vendor successor with a ready preflight
+    if successor_slug is not None and ready(successor_slug):
+        return successor_slug, "vendor successor of the broken model"
+    reasons.append("no ready registry successor")
+
+    # 2. most-complete OTHER existing store whose provider is ready
+    stores = [
+        s for s in list_stores(Path(config.EMBEDDINGS_STORES_DIR))
+        if s["slug"] != active and s["slug"] in EMBEDDING_MODELS
+        and s["count"] > 0 and ready(s["slug"])
+    ]
+    if stores:
+        best = max(stores, key=lambda s: s["count"])
+        return best["slug"], f"most complete existing store ({best['count']} vectors)"
+    reasons.append("no other ready store")
+
+    # 3. lightest local model when the daemon already has it pulled
+    fallback = _local_fallback_slug()
+    if fallback is not None and fallback != active and ready(fallback):
+        return fallback, "local fallback (Ollama model present)"
+    reasons.append("local fallback not ready")
+
+    return None, "; ".join(reasons)
+
+
+# ── gap-heal ─────────────────────────────────────────────────────────────────
+
+async def _gap_heal(active: str) -> int:
+    """Embed up to HEAL_CAP active-store gaps (vector-less mints); rows appended.
+
+    NEVER raises: a heal failure is logged and retried on the next daily run
+    (quarantine-style, matching migrate's skip semantics) — the model is
+    healthy, so the state stays ok regardless.
+    """
+    from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
+
+    try:
+        store = get_store(active)
+        index = await asyncio.to_thread(load_snapshot_index)
+        missing = store.missing(list(index.keys()))[:HEAL_CAP]
+        if not missing:
+            return 0
+        # One volume read, sliced per snapshot — same pattern as the migration
+        # engine (and the same shared slice helper).
+        vol_bytes = await asyncio.to_thread(read_volume_bytes, Path(config.VOL_PATH))
+        good_ids, texts = [], []
+        for sid in missing:
+            text = slice_snapshot_text(sid, index, vol_bytes)
+            if text is None:
+                print(f"[WATCHER] gap-heal: {sid} has an invalid byte range - skipping")
+                continue
+            good_ids.append(sid)
+            texts.append(text)
+        if not good_ids:
+            return 0
+        provider = get_provider(active)
+        vectors = await provider.embed(texts, "document")
+        # append is idempotent + lock-guarded, so concurrent mint appends are
+        # safe; fsync-heavy write goes off the loop.
+        appended = await asyncio.to_thread(
+            store.append_many, list(zip(good_ids, vectors))
+        )
+        print(f"[WATCHER] gap-heal: embedded {appended} missing vector(s) for {active}")
+        return appended
+    except Exception as e:  # noqa: BLE001 — heal failure must not flip the state
+        print(f"[WATCHER] gap-heal failed (will retry next run): {type(e).__name__}: {e}")
+        return 0
+
+
+# ── health.json ──────────────────────────────────────────────────────────────
+
+def _write_health(health: dict) -> None:
+    base = Path(config.EMBEDDINGS_STORES_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(base / HEALTH_FILE, health)
+
+
+# ── the health check (daily job body AND the manual-trigger handler) ─────────
+
+async def run_health_check() -> dict:
+    """One full watcher pass; writes health.json and returns the health dict."""
+    active = get_active_slug()
+    entry = EMBEDDING_MODELS.get(active)
+
+    # 1. probe the active model
+    probe_ok, probe_err = False, None
+    try:
+        provider = get_provider(active)
+        await asyncio.wait_for(
+            provider.embed(["health probe"], "document"), PROBE_TIMEOUT_S
+        )
+        probe_ok = True
+    except Exception as e:  # noqa: BLE001 — any probe failure means "broken"
+        probe_err = f"{type(e).__name__}: {e}"
+
+    # 2. vendor catalog (active slug missing from the registry = config drift;
+    #    there is no vendor to ask, so the probe alone decides)
+    if entry is not None:
+        listed, successor_raw, catalog_note = await _catalog_check(entry)
+    else:
+        listed, successor_raw, catalog_note = True, None, None
+
+    successor_slug = (
+        _registry_slug_for(entry["provider"], successor_raw)
+        if entry is not None and successor_raw is not None
+        else None
+    )
+    # Registry slug when mapped; otherwise the raw vendor id is still REPORTED
+    # (banner copy) but never auto-migrated to (target selection is stricter).
+    successor = successor_slug or successor_raw
+
+    # 3. state decision (the design table)
+    if not probe_ok:
+        state = "broken"
+        detail = f"active model {active} failed its health probe: {probe_err}"
+    elif not listed:
+        state = "superseded"
+        detail = (
+            f"active model {active} is no longer listed in the "
+            f"{entry['provider']} catalog"
+            + (f"; successor available: {successor}" if successor else "")
+        )
+    elif successor is not None:
+        state = "superseded"
+        detail = (
+            f"a newer {entry['provider']} embedding model is available: "
+            f"{successor}; {active} still works (no automatic switch)"
+        )
+    else:
+        state = "ok"
+        detail = catalog_note or ""
+
+    health = {
+        "state": state,
+        "detail": detail,
+        "successor": successor,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # 6. broken → auto-migrate ("auto only when forced")
+    if state == "broken":
+        target, why = await _pick_migration_target(active, successor_slug)
+        if target is None:
+            health["detail"] += f"; no viable auto-migrate target ({why})"
+            _write_health(health)
+        else:
+            health["detail"] += f"; auto-migrating to {target}: {why}"
+            _write_health(health)  # operator sees what/why BEFORE the job runs
+            try:
+                await start_migration(target)
+            except RuntimeError as e:  # a job is already running — note it
+                health["detail"] += f" (migration not started: {e})"
+                _write_health(health)
+        print(f"[WATCHER] state=broken: {health['detail']}")
+        return health
+
+    # 5. ok → heal small vector gaps in the active store
+    if state == "ok":
+        healed = await _gap_heal(active)
+        if healed:
+            health["healed"] = healed
+
+    # 7. persist + report
+    _write_health(health)
+    print(f"[WATCHER] state={state}" + (f": {detail}" if detail else ""))
+    return health
+
+
+# ── scheduling (asyncio loop task; see module docstring for the choice) ──────
+
+_WATCHER_TASK: "asyncio.Task | None" = None  # strong ref — loop refs are weak
+
+
+def start_watcher() -> "asyncio.Task":
+    """Schedule the daily loop on the running event loop (startup hook entry).
+
+    Idempotent: a live loop task is reused. Must be called with an event loop
+    running (async startup hook).
+    """
+    global _WATCHER_TASK
+    if _WATCHER_TASK is not None and not _WATCHER_TASK.done():
+        return _WATCHER_TASK
+    _WATCHER_TASK = asyncio.get_running_loop().create_task(_watch_forever())
+    return _WATCHER_TASK
+
+
+async def _watch_forever() -> None:
+    await asyncio.sleep(WATCHER_FIRST_DELAY_S)  # don't pile onto startup
+    while True:
+        try:
+            await run_health_check()
+        except Exception as e:  # noqa: BLE001 — the loop must survive any run
+            print(f"[WATCHER] health check run failed: {type(e).__name__}: {e}")
+        await asyncio.sleep(WATCHER_INTERVAL_S)
