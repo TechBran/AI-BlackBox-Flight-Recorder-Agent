@@ -375,7 +375,10 @@ async def _run_engine(target_slug: str) -> dict:
                 f"with old-model vectors: {raced} — their search ranking may be "
                 f"slightly off until re-embedded"
             )
-        _toolvault_cutover_hook(target_slug)
+        try:
+            _toolvault_cutover_hook(target_slug)
+        except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
+            print(f"[MIGRATE] toolvault cutover hook raised (non-fatal): {e}")
         _finish_job("done", raced=raced)
         print(f"[MIGRATE] cutover complete: active model is now {target_slug}")
         return get_job_status()
@@ -397,6 +400,43 @@ def _quarantine_ids(snap_ids: list[str]) -> None:
         _persist_locked()
 
 
-def _toolvault_cutover_hook(target_slug: str) -> None:
-    """Re-embed ToolVault descriptions under the new model — Task 11 wires this."""
-    print("[MIGRATE] toolvault re-embed hook (Task 11 wires this)")
+def _toolvault_cutover_hook(target_slug: str) -> "threading.Thread | None":
+    """Re-embed ToolVault tool descriptions under the new active model.
+
+    Fire-and-forget: the work runs in a daemon thread — sync_embeddings makes
+    one blocking embed call per stale description (seconds for ~50 tools),
+    far too long to hold the event loop this engine shares with voice/WS
+    traffic. ToolVault imports are LAZY (the embeddings package must never
+    import toolvault at module level — import-cycle guard). Exceptions are
+    contained at both the spawn and inside the thread body: a ToolVault
+    hiccup must never fail the cutover. Idempotent: sync_embeddings diffs on
+    (model slug, description hash) — a re-fire after a resume-after-crash
+    just re-embeds whatever is still stale (wasteful at worst, never
+    harmful). Returns the Thread (tests join it) or None if spawning failed.
+    """
+    def _run():
+        try:
+            from Orchestrator.toolvault import embeddings as tv_embeddings
+            from Orchestrator.toolvault import registry as tv_registry
+
+            canonical = tv_registry.load_canonical()
+            store = tv_embeddings.sync_embeddings(canonical)
+            print(
+                f"[MIGRATE] toolvault re-embed under {target_slug} complete: "
+                f"{len(store)} tool vectors cached"
+            )
+        except Exception as e:  # noqa: BLE001 — never propagate out of the hook
+            print(
+                f"[MIGRATE] toolvault re-embed failed (non-fatal): "
+                f"{type(e).__name__}: {e}"
+            )
+
+    try:
+        thread = threading.Thread(
+            target=_run, name="toolvault-cutover-reembed", daemon=True
+        )
+        thread.start()
+        return thread
+    except Exception as e:  # noqa: BLE001
+        print(f"[MIGRATE] could not launch toolvault re-embed (non-fatal): {e}")
+        return None

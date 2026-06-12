@@ -36,7 +36,28 @@ JOB_KEYS = {
 STATUS_KEYS = JOB_KEYS | {"cancel_requested"}
 
 
+# The real Task 11 hook, captured at import time so the hook-specific tests
+# can exercise it even though the autouse fixture below stubs the module attr.
+REAL_TOOLVAULT_HOOK = migrate._toolvault_cutover_hook
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def toolvault_hook(monkeypatch):
+    """Stub the ToolVault cutover hook with a recorder.
+
+    The real hook (Task 11) spawns a daemon thread that re-embeds the REAL
+    ToolVault store via the active provider — migration tests must never
+    touch it (or the network). The recorded targets double as the
+    fired-at-cutover assertion.
+    """
+    calls = []
+    monkeypatch.setattr(
+        migrate, "_toolvault_cutover_hook", lambda slug: calls.append(slug)
+    )
+    return calls
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
@@ -175,13 +196,77 @@ async def test_full_migration_embeds_all_and_cuts_over(env, fake_provider):
 
 
 @pytest.mark.asyncio
-async def test_toolvault_hook_stub_fires_at_cutover(env, fake_provider, capsys):
+async def test_toolvault_hook_fires_at_cutover_with_target(env, fake_provider, toolvault_hook):
     index_path, stores_dir, volume_path = env
     _build_volume(index_path, volume_path, n=2)
 
-    await migrate.run_migration(TARGET)
+    result = await migrate.run_migration(TARGET)
 
-    assert "toolvault re-embed hook (Task 11 wires this)" in capsys.readouterr().out
+    assert result["state"] == "done"
+    assert toolvault_hook == [TARGET]
+
+
+@pytest.mark.asyncio
+async def test_toolvault_hook_raise_does_not_fail_migration(
+    env, fake_provider, monkeypatch, capsys
+):
+    """A ToolVault hiccup inside the hook must never fail the cutover."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=2)
+
+    def boom(slug):
+        raise RuntimeError("toolvault on fire")
+
+    monkeypatch.setattr(migrate, "_toolvault_cutover_hook", boom)
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"            # migration still completes
+    assert result["error"] is None
+    assert get_active_slug(base_dir=stores_dir) == TARGET  # cutover landed
+    assert "toolvault cutover hook raised (non-fatal)" in capsys.readouterr().out
+
+
+def test_real_toolvault_hook_calls_sync_and_is_idempotent(monkeypatch):
+    """The real hook re-embeds via toolvault's sync_embeddings (patched at
+    the lazy-import site) on a joinable daemon thread; a re-fire (resume
+    after a cutover crash) just syncs again — wasteful, never harmful."""
+    import Orchestrator.toolvault.embeddings as tv_embeddings
+    import Orchestrator.toolvault.registry as tv_registry
+
+    canonical = [{"name": "t", "description": "d"}]
+    synced = []
+    monkeypatch.setattr(tv_registry, "load_canonical", lambda: canonical)
+    monkeypatch.setattr(
+        tv_embeddings, "sync_embeddings",
+        lambda canon, path=None, **kw: synced.append(canon) or {},
+    )
+
+    thread = REAL_TOOLVAULT_HOOK(TARGET)
+    assert thread is not None
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert synced == [canonical]
+
+    thread2 = REAL_TOOLVAULT_HOOK(TARGET)   # idempotent re-fire
+    thread2.join(timeout=5)
+    assert synced == [canonical, canonical]
+
+
+def test_real_toolvault_hook_contains_toolvault_exception(monkeypatch, capsys):
+    """A raise inside ToolVault never propagates out of the hook thread."""
+    import Orchestrator.toolvault.registry as tv_registry
+
+    def explode():
+        raise RuntimeError("registry exploded")
+
+    monkeypatch.setattr(tv_registry, "load_canonical", explode)
+
+    thread = REAL_TOOLVAULT_HOOK(TARGET)
+    assert thread is not None
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert "toolvault re-embed failed (non-fatal)" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -244,7 +329,7 @@ async def test_catch_up_picks_up_mid_job_mint(env, fake_provider):
 # ── cancel + resume ──────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_cancel_keeps_partial_store_and_restart_completes(env, fake_provider):
+async def test_cancel_keeps_partial_store_and_restart_completes(env, fake_provider, toolvault_hook):
     index_path, stores_dir, volume_path = env
     bodies = _build_volume(index_path, volume_path)
     fake_provider.hook = lambda _texts: migrate.request_cancel()
@@ -256,12 +341,14 @@ async def test_cancel_keeps_partial_store_and_restart_completes(env, fake_provid
     assert result["finished_at"]
     target = get_store(TARGET, base_dir=stores_dir)
     assert target.count == 8  # partial progress kept
-    # NO cutover on cancel
+    # NO cutover on cancel — and the toolvault re-embed never fires
     assert get_active_slug(base_dir=stores_dir) == OLD_SLUG
+    assert toolvault_hook == []
 
     # re-start resumes via the diff and completes
     result2 = await migrate.run_migration(TARGET)
     assert result2["state"] == "done"
+    assert toolvault_hook == [TARGET]
     assert result2["done"] == 2  # only the remaining delta
     assert target.ids() == set(bodies)
     assert get_active_slug(base_dir=stores_dir) == TARGET
@@ -293,7 +380,7 @@ async def test_failing_batch_is_quarantined_job_still_completes(
 # ── all-quarantined cutover guard (dead provider must not cut over) ──────────
 
 @pytest.mark.asyncio
-async def test_all_batches_quarantined_aborts_cutover(env, fake_provider, capsys):
+async def test_all_batches_quarantined_aborts_cutover(env, fake_provider, capsys, toolvault_hook):
     """Dead provider (revoked key, daemon down): every batch fails, nothing is
     appended — the job must STALL, never cut over to a near-empty store."""
     index_path, stores_dir, volume_path = env
@@ -303,6 +390,7 @@ async def test_all_batches_quarantined_aborts_cutover(env, fake_provider, capsys
     result = await migrate.run_migration(TARGET)
 
     assert result["state"] == "stalled"
+    assert toolvault_hook == []  # no cutover → no toolvault re-embed
     assert "cutover aborted" in result["error"]
     assert "active store unchanged" in result["error"]
     assert f"all {len(bodies)} snapshots" in result["error"]

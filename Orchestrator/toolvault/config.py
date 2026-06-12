@@ -21,12 +21,10 @@ TOOLVAULT_DIR = PROJECT_ROOT / "ToolVault"
 # ---------------------------------------------------------------------------
 # Embedding configuration
 # ---------------------------------------------------------------------------
-EMBEDDING_MODEL = "models/gemini-embedding-001"
-EMBEDDING_TASK_TYPE_DOC = "retrieval_document"   # For indexing tool descriptions
-EMBEDDING_TASK_TYPE_QUERY = "retrieval_query"     # For search queries
-EMBEDDING_DIMENSIONS = 3072                       # Gemini embedding-001 output size
-EMBEDDING_MAX_CHARS = 10000                       # Truncate before embedding
-EMBEDDING_MAX_RETRIES = 3
+# Model, dims, truncation and retries all live in the SHARED embedding layer
+# (Orchestrator/embeddings/registry.py + providers.py). ToolVault resolves
+# the active model lazily via Orchestrator.embeddings.search.get_active_slug()
+# — never hardcode an embedding-model literal here (guard-tested in Task 16).
 
 # ---------------------------------------------------------------------------
 # Search configuration

@@ -1,12 +1,15 @@
-"""Tests for the ToolVault v2 hash-keyed embedding sync (Task 2.1).
+"""Tests for the ToolVault v2 hash-keyed embedding sync (Task 2.1 + Task 11).
 
-The sync re-embeds a tool's DESCRIPTION only when its sha256 hash changes,
-keeping ``ToolVault/embeddings.json`` as the only cached artifact. Stale
-tools (no longer in the canonical list) are pruned.
+The sync re-embeds a tool's DESCRIPTION when its sha256 hash changes OR when
+the cached entry was embedded under a different model slug than the currently
+active one (model switch invalidates cleanly; legacy pre-slug entries never
+match → stale), keeping ``ToolVault/embeddings.json`` as the only cached
+artifact. Stale tools (no longer in the canonical list) are pruned.
 
 Tests are hermetic: ``embeddings.embed_tool_description`` is monkeypatched to
-a deterministic fake (never hits the network), and the store lives in
-``tmp_path`` via ``embeddings.EMBEDDINGS_PATH``.
+a deterministic fake (never hits the network), ``embeddings._active_slug`` is
+pinned (never reads the box's active.json), and the store lives in
+``tmp_path`` via the ``path`` parameter.
 """
 
 import json
@@ -14,10 +17,11 @@ import json
 import pytest
 
 from Orchestrator.toolvault import embeddings
-from Orchestrator.toolvault.config import EMBEDDING_MODEL
 
 
 FAKE_VECTOR = [0.1, 0.2, 0.3]
+SLUG_A = "slug-a"
+SLUG_B = "slug-b"
 
 
 def _canonical(n):
@@ -26,6 +30,18 @@ def _canonical(n):
         {"name": f"tool_{i}", "description": f"description for tool {i}"}
         for i in range(n)
     ]
+
+
+@pytest.fixture(autouse=True)
+def active_slug(monkeypatch):
+    """Pin the active model slug (mutable holder so tests can switch models).
+
+    ``holder["real"]`` keeps the unpatched function for the one test that
+    exercises the real shared-layer resolution.
+    """
+    holder = {"slug": SLUG_A, "real": embeddings._active_slug}
+    monkeypatch.setattr(embeddings, "_active_slug", lambda: holder["slug"])
+    return holder
 
 
 @pytest.fixture
@@ -61,7 +77,7 @@ def test_load_corrupt_json_returns_empty(store_path):
 
 
 def test_save_then_load_roundtrip(store_path):
-    store = {"tool_0": {"hash": "abc", "model": EMBEDDING_MODEL, "vector": [1.0]}}
+    store = {"tool_0": {"hash": "abc", "model": SLUG_A, "vector": [1.0]}}
     embeddings.save_embeddings_store(store, store_path)
     assert embeddings.load_embeddings_store(store_path) == store
 
@@ -89,7 +105,7 @@ def test_first_sync_embeds_all(store_path, patched_embed):
         assert entry["hash"] == embeddings._emb_hash(
             next(t["description"] for t in canon if t["name"] == name)
         )
-        assert entry["model"] == EMBEDDING_MODEL
+        assert entry["model"] == SLUG_A
         assert entry["vector"] == FAKE_VECTOR
 
     # Persisted to disk
@@ -173,3 +189,94 @@ def test_embed_failure_new_tool_skipped(store_path, monkeypatch):
     store = embeddings.sync_embeddings(canon, store_path)
     # New tool that failed to embed is simply absent — no crash.
     assert "tool_0" not in store
+
+
+# ---------------------------------------------------------------------------
+# Task 11: shared provider layer + model-slug cache keying
+# ---------------------------------------------------------------------------
+
+def test_embed_routes_through_shared_layer(monkeypatch):
+    """embed_tool_description / embed_query call the shared provider layer
+    with the right purpose. Patched at the lazy-import site (the search
+    module attribute is read at call time)."""
+    from Orchestrator.embeddings import search as shared_search
+
+    calls = []
+
+    def fake_sync(text, purpose="document"):
+        calls.append((text, purpose))
+        return list(FAKE_VECTOR)
+
+    monkeypatch.setattr(shared_search, "generate_embedding_sync", fake_sync)
+
+    assert embeddings.embed_tool_description("desc text") == FAKE_VECTOR
+    assert embeddings.embed_query("query text") == FAKE_VECTOR
+    assert calls == [("desc text", "document"), ("query text", "query")]
+
+
+def test_embed_failure_semantics_none_passthrough(monkeypatch):
+    """Shared-layer failure (None) surfaces as None — old contract preserved."""
+    from Orchestrator.embeddings import search as shared_search
+
+    monkeypatch.setattr(
+        shared_search, "generate_embedding_sync", lambda text, purpose="document": None
+    )
+    assert embeddings.embed_tool_description("x") is None
+    assert embeddings.embed_query("x") is None
+
+
+def test_active_slug_reads_shared_layer(monkeypatch, active_slug):
+    """The real (unpinned) _active_slug resolves via the shared search module."""
+    from Orchestrator.embeddings import search as shared_search
+
+    monkeypatch.setattr(shared_search, "get_active_slug", lambda: "some-slug")
+    assert active_slug["real"]() == "some-slug"
+
+
+def test_model_switch_invalidates_cache(store_path, patched_embed, active_slug):
+    """Entries written under slug A are stale once the active model is B."""
+    canon = _canonical(3)
+    store = embeddings.sync_embeddings(canon, store_path)
+    assert patched_embed["count"] == 3
+    assert all(e["model"] == SLUG_A for e in store.values())
+
+    active_slug["slug"] = SLUG_B
+    store = embeddings.sync_embeddings(canon, store_path)
+
+    assert patched_embed["count"] == 6  # every tool re-embedded
+    assert all(e["model"] == SLUG_B for e in store.values())
+
+    # idempotent under the new slug: a third sync re-embeds nothing
+    embeddings.sync_embeddings(canon, store_path)
+    assert patched_embed["count"] == 6
+
+
+def test_old_format_entry_pre_slug_is_stale(store_path, patched_embed):
+    """A legacy entry (model = old genai literal) re-embeds despite a
+    matching description hash."""
+    canon = _canonical(1)
+    h = embeddings._emb_hash(canon[0]["description"])
+    embeddings.save_embeddings_store(
+        {"tool_0": {"hash": h, "model": "models/gemini-embedding-001",
+                    "vector": [9.9, 9.9]}},
+        store_path,
+    )
+
+    store = embeddings.sync_embeddings(canon, store_path)
+
+    assert patched_embed["count"] == 1
+    assert store["tool_0"]["model"] == SLUG_A
+    assert store["tool_0"]["vector"] == FAKE_VECTOR
+
+
+def test_old_format_entry_missing_model_field_is_stale(store_path, patched_embed):
+    canon = _canonical(1)
+    h = embeddings._emb_hash(canon[0]["description"])
+    embeddings.save_embeddings_store(
+        {"tool_0": {"hash": h, "vector": [9.9, 9.9]}}, store_path
+    )
+
+    store = embeddings.sync_embeddings(canon, store_path)
+
+    assert patched_embed["count"] == 1
+    assert store["tool_0"]["model"] == SLUG_A
