@@ -12,11 +12,13 @@ Crash-safety analysis (ordering is deliberate — do not reorder):
      leaves the original (fat) index intact; the rerun is idempotent because
      VectorStore.append_many dedupes by snap_id (and open() self-heals any
      torn trailing row), so only the missing vectors are appended.
-  2. The backup copy happens after store writes, before the index swap. A
-     crash after the backup but before os.replace leaves the original index
-     in place; the rerun skips re-copying (a good backup is never overwritten
-     — re-copying here would be safe since the index is still fat, but on the
-     post-replace rerun it would clobber the backup with the slimmed file).
+  2. The backup is written tmp + fsync + os.replace after store writes,
+     before the index swap. A crash mid-copy leaves only a *.tmp leftover,
+     never a torn .bak, so a .bak that exists is always a complete copy —
+     which is what makes the rerun's exists() skip-guard safe (a good backup
+     is never overwritten; re-copying would be harmless while the index is
+     still fat, but on the post-replace rerun it would clobber the backup
+     with the slimmed file).
   3. os.replace is atomic. A crash after it is simply the completed state:
      the rerun finds no "embedding" keys and no-ops.
 """
@@ -64,8 +66,9 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
     "migrated" counts vectors newly appended THIS run (a resumed run after a
     crash reports only the rows it actually added — append_many dedupes the
     rest). "dropped" counts vectors with stale dims (pre-2026 768-dim
-    leftovers) or non-finite values; entries whose "embedding" is None/empty
-    were vector-less already and count as neither.
+    leftovers), non-finite values, or unparseable garbage (non-numeric
+    elements); entries whose "embedding" is None/empty were vector-less
+    already and count as neither.
     """
     index_path = Path(index_path if index_path is not None else config.SNAPSHOT_INDEX)
     base_dir = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
@@ -106,6 +109,7 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
     dropped = 0
     dropped_dims: dict[int, int] = {}
     dropped_nonfinite = 0
+    dropped_unparseable = 0
     batch: list[tuple[str, np.ndarray]] = []
     for snap_id, entry in index.items():
         if not isinstance(entry, dict):
@@ -113,11 +117,19 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
         vec = entry.get("embedding")
         if not vec:
             continue  # None/empty: vector-less already — neither migrated nor dropped
-        if len(vec) != store.dims:
+        try:
+            arr = np.asarray(vec, dtype=np.float32)
+        except (TypeError, ValueError):
+            # Non-numeric legacy garbage (string elements, dicts, ragged
+            # nests) raising here would abort the migration on EVERY boot —
+            # a permanent stall. Drop it like the other stale vectors.
             dropped += 1
-            dropped_dims[len(vec)] = dropped_dims.get(len(vec), 0) + 1
+            dropped_unparseable += 1
             continue
-        arr = np.asarray(vec, dtype=np.float32)
+        if arr.ndim != 1 or arr.shape[0] != store.dims:
+            dropped += 1
+            dropped_dims[int(arr.size)] = dropped_dims.get(int(arr.size), 0) + 1
+            continue
         if not np.isfinite(arr).all():
             # append_many is all-or-nothing per batch; one NaN row must not
             # abort 499 good neighbours. Pre-filter and count it as dropped.
@@ -134,16 +146,25 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
     if dropped:
         print(
             f"[TRANSCODE] dropped {dropped} stale vectors "
-            f"(dims histogram: {dropped_dims}, non-finite: {dropped_nonfinite}) "
+            f"(dims histogram: {dropped_dims}, non-finite: {dropped_nonfinite}, "
+            f"unparseable: {dropped_unparseable}) "
             f"— pre-2026 leftovers are stale by design, not migrated"
         )
 
     # ── 2. backup the original index (never overwrite a good backup) ─────────
+    # Written tmp + fsync + os.replace (same pattern as the slim write below)
+    # so a torn .bak cannot exist: the .bak appears complete via atomic rename
+    # or not at all. That is what makes the exists() skip-guard safe.
     backup_path = index_path.with_name(index_path.name + BACKUP_SUFFIX)
     if backup_path.exists():
         print(f"[TRANSCODE] backup {backup_path.name} already exists — keeping it")
     else:
-        shutil.copy2(index_path, backup_path)
+        backup_tmp = backup_path.with_name(backup_path.name + ".tmp")
+        with open(index_path, "rb") as src, open(backup_tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(backup_tmp, backup_path)
         print(f"[TRANSCODE] backed up original index to {backup_path.name}")
 
     # ── 3. atomic slim-index swap (tmp + fsync + os.replace) ─────────────────

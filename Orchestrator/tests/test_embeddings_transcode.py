@@ -10,6 +10,8 @@ ALL tests run against tmp_path fixtures — never the real Manifest/.
 """
 import json
 import logging
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -156,6 +158,44 @@ def test_backup_contains_original_bytes(tmp_path):
     assert backup.read_bytes() == original
 
 
+def test_backup_write_is_atomic_crash_never_leaves_torn_backup(tmp_path, monkeypatch):
+    """A crash while finalizing the backup must leave the fat index untouched
+    and NO .bak at all (at most a *.tmp leftover). A torn .bak would be
+    preserved forever by the rerun's exists() skip-guard and then trusted as
+    the only copy of the original after the slim swap. Inject one failure into
+    the backup's os.replace, then rerun clean: byte-complete backup required."""
+    index = _build_index()
+    index_path = _write_index(tmp_path, index)
+    original = index_path.read_bytes()
+    base_dir = tmp_path / "embeddings"
+    backup = tmp_path / BACKUP_NAME
+
+    real_replace = os.replace
+    failed = {"once": False}
+
+    def replace_failing_once_for_backup(src, dst, *args, **kwargs):
+        if not failed["once"] and Path(dst) == backup:
+            failed["once"] = True
+            raise OSError("simulated crash finalizing backup")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(transcode_mod.os, "replace", replace_failing_once_for_backup)
+
+    with pytest.raises(OSError, match="simulated crash"):
+        transcode_inline_embeddings(index_path=index_path, base_dir=base_dir)
+
+    assert index_path.read_bytes() == original  # fat index untouched
+    assert not backup.exists()  # never a torn .bak — atomic rename or nothing
+
+    # rerun without the failure: completes and the backup is byte-complete
+    result = transcode_inline_embeddings(index_path=index_path, base_dir=base_dir)
+    assert result["skipped"] is False
+    assert result["migrated"] == 0  # store writes from run 1 already landed
+    assert backup.read_bytes() == original
+    assert not backup.with_name(backup.name + ".tmp").exists()  # tmp consumed
+    assert get_store(SLUG, base_dir=base_dir).count == 10
+
+
 # ── slim index ───────────────────────────────────────────────────────────────
 
 def test_slim_index_strips_embeddings_keeps_fields(tmp_path):
@@ -201,6 +241,67 @@ def test_wrong_dims_dropped_none_and_empty_not_counted(tmp_path):
     slim = json.loads(index_path.read_text(encoding="utf-8"))
     assert set(slim) == set(index)
     assert all("embedding" not in e for e in slim.values())
+
+
+def test_garbage_vectors_dropped_as_unparseable(tmp_path, capsys):
+    """Non-numeric legacy garbage (string elements, dicts) used to make
+    np.asarray raise and abort the migration on EVERY boot. It must be dropped
+    (counted as 'unparseable') and the run must complete with the clean rows."""
+    rng = _rng()
+    index = _build_index(n=10, rng=rng)
+    index["SNAP-GARBAGE-STRINGS"] = _entry(93, ["not", "a", "vector"])
+    index["SNAP-GARBAGE-DICT"] = _entry(94, {"weird": "dict"})
+    index_path = _write_index(tmp_path, index)
+    base_dir = tmp_path / "embeddings"
+
+    result = transcode_inline_embeddings(index_path=index_path, base_dir=base_dir)
+    assert result["skipped"] is False
+    assert result["migrated"] == 10
+    assert result["dropped"] == 2
+
+    store = get_store(SLUG, base_dir=base_dir)
+    assert store.count == 10
+    assert not {"SNAP-GARBAGE-STRINGS", "SNAP-GARBAGE-DICT"} & store.ids()
+    assert "unparseable: 2" in capsys.readouterr().out
+
+    # all 12 entries survive in the slim index, none with an embedding key
+    slim = json.loads(index_path.read_text(encoding="utf-8"))
+    assert set(slim) == set(index)
+    assert all("embedding" not in e for e in slim.values())
+
+
+# ── batch boundaries ─────────────────────────────────────────────────────────
+
+def test_batch_boundary_mid_loop_flushes(tmp_path, monkeypatch):
+    """BATCH_SIZE=4 over the 10-row fixture: two mid-loop flushes + a 2-row
+    remainder — the same mid-loop flush branch production hits 13 times at
+    BATCH_SIZE=500. Count, index order and search parity must survive the
+    multiple append_many calls."""
+    rng = _rng()
+    index = _build_index(rng=rng)
+    query = [float(x) for x in rng.standard_normal(DIMS)]
+    index_path = _write_index(tmp_path, index)
+    base_dir = tmp_path / "embeddings"
+
+    monkeypatch.setattr(transcode_mod, "BATCH_SIZE", 4)
+    old_top5 = _old_path_topk(index, query, k=5)  # BEFORE transcode
+
+    result = transcode_inline_embeddings(index_path=index_path, base_dir=base_dir)
+    assert result["skipped"] is False
+    assert result["migrated"] == 10
+    assert result["dropped"] == 0
+
+    store = get_store(SLUG, base_dir=base_dir)
+    assert store.count == 10
+    # rows land in index order across all three flushes (ids.json is the
+    # store's ordered row list: row i <-> vector i)
+    ids_on_disk = json.loads((base_dir / SLUG / "ids.json").read_text(encoding="utf-8"))
+    assert ids_on_disk == list(index)
+
+    new_top5 = store.search(query, k=5)
+    assert [sid for sid, _ in new_top5] == [sid for sid, _ in old_top5]
+    for (_, new_score), (_, old_score) in zip(new_top5, old_top5):
+        assert new_score == pytest.approx(old_score, abs=1e-5)
 
 
 # ── disk gate ────────────────────────────────────────────────────────────────
