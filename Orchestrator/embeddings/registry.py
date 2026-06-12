@@ -7,6 +7,9 @@ that no embedding-model literal appears elsewhere in the tree.
 
 Same config-as-data pattern as CU_MODEL_FILTERS in Orchestrator/config.py:
 when a new embedding model ships, add an entry here — no code changes.
+
+Never repoint model_id under an existing slug — slugs key persistent vector
+stores and the ToolVault cache.
 """
 
 EMBEDDING_MODELS = {
@@ -38,3 +41,9 @@ EMBEDDING_MODELS = {
     },
 }
 EMBEDDING_MAX_CHARS = 10000  # truncate document text before embedding (existing behavior)
+
+# The store that historical inline 3072-dim index vectors transcode into
+# (every inline vector ever written came from the legacy Gemini default).
+# Deliberately NOT the active slug — an operator may already have pointed
+# the active model elsewhere by the time the transcode runs.
+LEGACY_INLINE_SLUG = "gemini-embedding-001"

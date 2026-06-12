@@ -2,8 +2,8 @@
 
 The legacy snapshot index (Manifest/snapshot_index.json, ~408MB in production)
 stores a 3072-float "embedding" list inline on every embedded entry. This
-module moves those vectors into the gemini-embedding-001 binary store and
-rewrites the index slim (same entries, every "embedding" key removed). It runs
+module moves those vectors into the registry.LEGACY_INLINE_SLUG binary store
+and rewrites the index slim (same entries, every "embedding" key removed). It runs
 from a startup hook on merge day and must be paranoid: idempotent, atomic,
 backup-keeping, and disk-space-gated.
 
@@ -30,12 +30,13 @@ from pathlib import Path
 import numpy as np
 
 from Orchestrator import config
+from Orchestrator.embeddings.registry import LEGACY_INLINE_SLUG
 from Orchestrator.embeddings.store import get_store
 
 # Every inline vector ever written to the index came from the legacy Gemini
-# default model — this migration targets that store unconditionally (NOT the
-# active slug, which an operator may already have pointed elsewhere).
-LEGACY_SLUG = "gemini-embedding-001"
+# default model — this migration targets the registry's LEGACY_INLINE_SLUG
+# store unconditionally (NOT the active slug, which an operator may already
+# have pointed elsewhere).
 BACKUP_SUFFIX = ".bak.pre-embeddings-v2"
 BATCH_SIZE = 500          # bounds peak numpy copy, one fsync set per batch
 DISK_HEADROOM = 1.5       # need free >= 1.5x index size before doing anything
@@ -104,7 +105,7 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
         return {"skipped": True, "reason": "disk"}
 
     # ── 1. vectors → binary store (idempotent by snap_id) ────────────────────
-    store = get_store(LEGACY_SLUG, base_dir=base_dir)
+    store = get_store(LEGACY_INLINE_SLUG, base_dir=base_dir)
     migrated = 0
     dropped = 0
     dropped_dims: dict[int, int] = {}
@@ -184,7 +185,7 @@ def transcode_inline_embeddings(index_path=None, base_dir=None) -> dict:
     print(
         f"[TRANSCODE] migrated={migrated} dropped={dropped} index "
         f"{_fmt_bytes(index_bytes_before)}->{_fmt_bytes(index_bytes_after)} "
-        f"({len(index)} entries, {LEGACY_SLUG} store now {store.count} rows)"
+        f"({len(index)} entries, {LEGACY_INLINE_SLUG} store now {store.count} rows)"
     )
     return {
         "migrated": migrated,
