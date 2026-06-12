@@ -256,6 +256,27 @@ def test_validate_unknown_slug_404(env, client):
     assert resp.status_code == 404
 
 
+def test_validate_slow_provider_times_out_ok_false(env, client, monkeypatch):
+    """A wedged daemon must not hold the wizard click for the provider's full
+    retry envelope (~8 min) — the route caps the probe at VALIDATE_TIMEOUT_S."""
+    import asyncio
+
+    from Orchestrator.routes import embeddings_routes
+
+    class _HangingProvider:
+        async def embed(self, texts, purpose):
+            await asyncio.sleep(60)
+
+    monkeypatch.setitem(providers._instances, SLUG, _HangingProvider())
+    monkeypatch.setattr(embeddings_routes, "VALIDATE_TIMEOUT_S", 0.2)
+
+    resp = client.post("/embeddings/validate", json={"slug": SLUG})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "timed out" in body["error"]
+
+
 # ── no side effects ──────────────────────────────────────────────────────────
 
 def test_status_creates_no_dirs_or_files(env, client):

@@ -12,6 +12,7 @@ POST /embeddings/validate — probe-embed one short string with a model's
 Status is strictly read-only: it must never create store directories or files
 as a side effect (probing is cheap and safe to poll).
 """
+import asyncio
 import json
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from Orchestrator.embeddings.store import (
     get_store,
     list_stores,
 )
+
+VALIDATE_TIMEOUT_S = 15.0  # wizard-click probe cap; see review note in /validate
 
 router = APIRouter(prefix="/embeddings", tags=["embeddings"])
 
@@ -81,7 +84,9 @@ def _model_preflight(entry: dict) -> tuple[bool, list[str]]:
 
 
 @router.get("/status")
-async def embeddings_status():
+def embeddings_status():
+    # Plain def: nothing here awaits, and FastAPI runs sync routes in the
+    # threadpool, so the cold-start index parse never stalls the event loop.
     from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
 
     base = Path(config.EMBEDDINGS_STORES_DIR)
@@ -146,7 +151,19 @@ async def embeddings_validate(req: ValidateRequest):
         )
     try:
         provider = get_provider(req.slug)
-        vectors = await provider.embed(["probe"], "document")
+        # Hard 15s cap: a cold/wedged local daemon otherwise holds the wizard's
+        # "use this model" click for the provider's full retry envelope (~8 min).
+        vectors = await asyncio.wait_for(
+            provider.embed(["probe"], "document"), timeout=VALIDATE_TIMEOUT_S
+        )
         return {"ok": True, "dims": len(vectors[0])}
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "error": (
+                f"Validation timed out after {VALIDATE_TIMEOUT_S:.0f}s - provider "
+                "unreachable or model still loading; try again"
+            ),
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
