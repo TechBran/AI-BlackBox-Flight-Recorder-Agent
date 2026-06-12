@@ -4,12 +4,15 @@ import android.util.Log
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.SSEClient
 import com.aiblackbox.portal.data.api.SSEEvent
+import com.aiblackbox.portal.data.model.EmbeddingsMigrateRequest
+import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.UpdateRollbackResponse
 import com.aiblackbox.portal.data.model.UpdateStartRequest
 import com.aiblackbox.portal.data.model.UpdateStartResponse
 import com.aiblackbox.portal.data.model.UpdateStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
+import java.io.IOException
 
 /**
  * Repository for the update pipeline backend (Orchestrator/routes/update_routes.py).
@@ -54,6 +57,33 @@ class UpdateRepository(private val api: BlackBoxApi) {
         } catch (e: Exception) {
             Log.d(TAG, "health probe failed (expected during restart): ${e.message}")
             false
+        }
+    }
+
+    // ── Embeddings notification card (pluggable embeddings) ────────────
+    // Parity with Portal/modules/updates-manager.js: the updates panel also
+    // surfaces embedding-store health from GET /embeddings/status and can
+    // kick a migration directly via POST /embeddings/migrate.
+
+    /** GET /embeddings/status — watcher health + live migration job. */
+    suspend fun getEmbeddingsStatus(): EmbeddingsStatus =
+        json.decodeFromString(EmbeddingsStatus.serializer(), api.get("/embeddings/status"))
+
+    /**
+     * POST /embeddings/migrate {target}. 200 = job claimed; 409 = a job is
+     * already running — either way the next status fetch carries the running
+     * job, so 409 is swallowed (same handling as the Portal card). Any other
+     * failure propagates to the caller's error surface.
+     */
+    suspend fun startEmbeddingsMigration(target: String) {
+        val body = json.encodeToString(
+            EmbeddingsMigrateRequest.serializer(),
+            EmbeddingsMigrateRequest(target = target)
+        )
+        try {
+            api.post("/embeddings/migrate", body)
+        } catch (e: IOException) {
+            if (e.message?.startsWith("HTTP 409") != true) throw e
         }
     }
 

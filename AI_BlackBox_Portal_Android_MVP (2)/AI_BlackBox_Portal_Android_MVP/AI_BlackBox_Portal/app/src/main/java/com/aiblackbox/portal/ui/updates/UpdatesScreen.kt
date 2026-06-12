@@ -2,6 +2,8 @@
 
 package com.aiblackbox.portal.ui.updates
 
+import android.content.Intent
+import android.net.Uri
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +58,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aiblackbox.portal.data.model.EmbeddingsJob
+import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.UpdateCommit
 import com.aiblackbox.portal.data.model.UpdateStatus
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -69,6 +74,7 @@ import com.aiblackbox.portal.ui.theme.Neutral500
 import com.aiblackbox.portal.ui.theme.Neutral700
 import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.RadiusSm
+import kotlinx.coroutines.delay
 
 // State-specific accent colors mirroring the web Portal's _updates.css
 private val OkGreen = Color(0xFF50C878)
@@ -86,11 +92,35 @@ fun UpdatesScreen(
     val logLines by viewModel.logLines.collectAsState()
     val logModalOpen by viewModel.logModalOpen.collectAsState()
     val restartLabel by viewModel.restartPollLabel.collectAsState()
+    val embeddings by viewModel.embeddings.collectAsState()
+    val embeddingsUpdateInFlight by viewModel.embeddingsUpdateInFlight.collectAsState()
+    val embeddingsError by viewModel.embeddingsError.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val view = LocalView.current
+    val context = LocalContext.current
 
     LaunchedEffect(origin) { viewModel.initialize(origin) }
+
+    // 5s job-progress poll while a migration runs and this screen is visible
+    // (parity with the Portal card's interval). Keyed on the running flag:
+    // disposal or the job finishing cancels/ends the loop automatically.
+    val embeddingsJobRunning = embeddings?.job?.state == "running"
+    LaunchedEffect(embeddingsJobRunning) {
+        while (embeddingsJobRunning) {
+            delay(5000)
+            viewModel.refreshEmbeddings()
+        }
+    }
+
+    // One-shot error surface for the [Update] POST (snackbar host already
+    // lives in this Scaffold).
+    LaunchedEffect(embeddingsError) {
+        embeddingsError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearEmbeddingsError()
+        }
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -164,6 +194,27 @@ fun UpdatesScreen(
                     onRollback = {
                         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         viewModel.rollback()
+                    },
+                )
+            }
+
+            // Embeddings notification card — parity with the Portal card in
+            // updates-manager.js. Absent unless health is broken/superseded
+            // or a migration job is running; a failed status fetch leaves
+            // embeddings null and never breaks this screen.
+            embeddings?.let { emb ->
+                EmbeddingsCard(
+                    status = emb,
+                    updateInFlight = embeddingsUpdateInFlight,
+                    onUpdate = { slug ->
+                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        viewModel.startEmbeddingsMigration(slug)
+                    },
+                    onManage = {
+                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))
+                        )
                     },
                 )
             }
@@ -355,6 +406,130 @@ private fun InterruptedCard(lastState: com.aiblackbox.portal.data.model.UpdateSt
             shape = RoundedCornerShape(RadiusSm),
         ) { Text("Rollback now") }
     }
+}
+
+// ── Embeddings notification card (pluggable embeddings) ────────────────
+//
+// Mirrors _renderEmbeddingsCard in Portal/modules/updates-manager.js,
+// including precedence: broken (urgent, [Manage] only, progress shown when
+// the watcher's auto-migration is underway) > job running (progress +
+// [Manage]) > superseded ([Update] when successor_slug known + [Manage]) >
+// hidden. A stalled job renders nothing — the wizard owns stalled.
+
+@Composable
+private fun EmbeddingsCard(
+    status: EmbeddingsStatus,
+    updateInFlight: Boolean,
+    onUpdate: (String) -> Unit,
+    onManage: () -> Unit,
+) {
+    val health = status.health
+    val job = status.job
+    val jobRunning = job != null && job.state == "running"
+
+    when {
+        health.state == "broken" -> {
+            Spacer(Modifier.height(16.dp))
+            Card(ErrRed) {
+                Text(
+                    "⚠ Search memory needs attention",
+                    color = ErrRed,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    health.detail.ifBlank {
+                        "The active embedding model stopped working. Automatic recovery " +
+                            "is migrating your search memory to a working model."
+                    },
+                    color = BbxDim,
+                    fontSize = 13.sp,
+                )
+                if (jobRunning && job != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        embeddingsProgressLine(job),
+                        color = BbxDim,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                EmbeddingsManageButton(onManage)
+            }
+        }
+        jobRunning && job != null -> {
+            Spacer(Modifier.height(16.dp))
+            Card(InfoBlue) {
+                Text(
+                    "⟳ Search memory update in progress",
+                    color = InfoBlue,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    embeddingsProgressLine(job),
+                    color = BbxDim,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.height(12.dp))
+                EmbeddingsManageButton(onManage)
+            }
+        }
+        health.state == "superseded" -> {
+            val successorLabel = health.successor?.takeIf { it.isNotBlank() }
+                ?: health.successorSlug?.takeIf { it.isNotBlank() }
+                ?: "a newer model"
+            Spacer(Modifier.height(16.dp))
+            Card(InfoBlue) {
+                Text(
+                    "⬆ Search memory update available",
+                    color = InfoBlue,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Your system will transfer embeddings to $successorLabel in the " +
+                        "background. Search keeps working the whole time; the switch " +
+                        "happens automatically when it finishes and survives restarts.",
+                    color = BbxDim,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val slug = health.successorSlug
+                    if (slug != null) {
+                        Button(
+                            onClick = { onUpdate(slug) },
+                            enabled = !updateInFlight,
+                            colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
+                            shape = RoundedCornerShape(RadiusSm),
+                        ) { Text("Update", color = BbxWhite, fontWeight = FontWeight.SemiBold) }
+                    }
+                    EmbeddingsManageButton(onManage)
+                }
+            }
+        }
+        // else: health ok + no running job → no card.
+    }
+}
+
+@Composable
+private fun EmbeddingsManageButton(onManage: () -> Unit) {
+    Button(
+        onClick = onManage,
+        colors = ButtonDefaults.buttonColors(containerColor = Neutral200, contentColor = BbxWhite),
+        shape = RoundedCornerShape(RadiusSm),
+    ) { Text("Manage") }
+}
+
+private fun embeddingsProgressLine(job: EmbeddingsJob): String {
+    val cancelling = if (job.cancelRequested) " (cancelling…)" else ""
+    return "Re-embedding ${job.done}/${job.total}…$cancelling"
 }
 
 // ── Card primitives ────────────────────────────────────────────────────
