@@ -31,6 +31,7 @@ StepName = Literal[
     "welcome",
     "tailscale",
     "api_keys",
+    "embeddings",
     "optional_integrations",
     "transcription",
     "pair_phone",
@@ -40,7 +41,7 @@ StepName = Literal[
 ]
 
 ALL_STEPS: list[StepName] = [
-    "welcome", "tailscale", "api_keys",
+    "welcome", "tailscale", "api_keys", "embeddings",
     "optional_integrations", "transcription",
     "pair_phone", "cli_agents", "operator", "done",
 ]

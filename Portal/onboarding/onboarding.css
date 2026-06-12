@@ -2594,3 +2594,123 @@ body::after {
 .ob-update-banner-major strong {
     color: rgba(255, 220, 150, 0.95);
 }
+
+/* ── Task 13 (pluggable embeddings): Memory & Search wizard step ────
+ * Model picker grid + migration/pull progress. Cards reuse the
+ * .ob-cli-agent-* family (same selectable-card shape as CLI agents /
+ * transcription); only step-specific bits are added here. Banners
+ * mirror .ob-update-banner; progress bar mirrors .ob-progress-bar-track
+ * scaled up for in-content use.
+ */
+.ob-emb-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0 0.5rem;
+}
+.ob-emb-badges {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+.ob-emb-badge-cloud {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.7);
+}
+.ob-emb-fresh {
+    margin: 0;
+    font-size: 0.8em;
+    color: rgba(180, 220, 255, 0.85);
+}
+.ob-emb-fresh-ok      { color: rgba(180, 240, 200, 0.85); }
+.ob-emb-fresh-subdued { color: rgba(255, 255, 255, 0.45); }
+.ob-emb-blockers {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.82em;
+    color: rgba(255, 220, 150, 0.9);
+    line-height: 1.5;
+}
+.ob-emb-blockers li { margin: 0.15rem 0; }
+
+.ob-emb-progress-track {
+    height: 8px;
+    background: var(--ob-surface-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--radius-full, 9999px);
+    position: relative;
+    overflow: hidden;
+}
+.ob-emb-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--ob-accent, #cc0000);
+    box-shadow: var(--ob-accent-glow, 0 0 24px rgba(204, 0, 0, 0.16));
+    border-radius: inherit;
+    transition: width 400ms var(--ob-ease-out, ease-out);
+}
+.ob-emb-pullwrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 100%;
+}
+
+.ob-emb-jobpanel {
+    margin: 1.5rem 0 0.5rem;
+    padding: 1.25rem 1.4rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-md, 8px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+.ob-emb-jobtitle {
+    margin: 0;
+    font-family: var(--ob-font-display, ui-serif, "Fraunces", serif);
+    font-size: 1.2em;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.92);
+}
+.ob-emb-jobtitle em { color: var(--ob-accent, #cc0000); font-style: normal; }
+.ob-emb-jobmeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    font-family: var(--ob-font-body, ui-monospace, monospace);
+    font-size: 0.82em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.7);
+}
+.ob-emb-done-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.25rem;
+}
+
+.ob-emb-banner {
+    margin: 1.25rem 0 0;
+    padding: 0.85rem 1rem;
+    border-radius: var(--radius-md, 8px);
+    font-size: 0.9em;
+}
+.ob-emb-banner p {
+    margin: 0 0 0.5rem;
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 1.5;
+}
+.ob-emb-banner p:last-child { margin-bottom: 0; }
+.ob-emb-banner-info {
+    background: rgba(108, 160, 220, 0.08);
+    border-left: 3px solid rgba(108, 160, 220, 0.6);
+}
+.ob-emb-banner-broken {
+    background: rgba(255, 100, 100, 0.08);
+    border-left: 3px solid rgba(255, 100, 100, 0.7);
+}
+.ob-emb-banner-btn {
+    padding: 0.45rem 1rem;
+    font-size: 0.9em;
+}
