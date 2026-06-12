@@ -39,6 +39,13 @@ _MAX_ATTEMPTS = len(_BACKOFF_SECONDS) + 1   # initial attempt + 3 retries
 
 _GEMINI_TASK_TYPES = {"document": "retrieval_document", "query": "retrieval_query"}
 
+# Per-request deadline for Gemini embeds. request_options={"timeout": ...} is
+# the real gRPC deadline (frees the SDK call server-side); the asyncio.wait_for
+# at 2x in GeminiProvider._embed is the outer guard that unpins the embed-pool
+# worker even if the gRPC deadline never fires (DNS/connect hangs outside the
+# deadline scope) — without it a hung embed pins a worker forever.
+GEMINI_EMBED_TIMEOUT_S = 60.0
+
 
 def _truncate(text: str) -> str:
     if len(text) > EMBEDDING_MAX_CHARS:
@@ -100,11 +107,19 @@ class GeminiProvider(_BaseProvider):
         task_type = _GEMINI_TASK_TYPES[purpose]
         vectors = []
         for text in texts:  # one call per text; SDK batching optional later
-            result = await asyncio.to_thread(  # sync SDK — keep the loop free
-                genai.embed_content,
-                model=self.model_id,
-                content=text,
-                task_type=task_type,
+            # Double timeout (see GEMINI_EMBED_TIMEOUT_S): gRPC deadline via
+            # request_options + wait_for outer guard. wait_for's TimeoutError
+            # feeds the retry loop like any other transient failure (the
+            # orphaned to_thread worker dies when the gRPC deadline fires).
+            result = await asyncio.wait_for(
+                asyncio.to_thread(  # sync SDK — keep the loop free
+                    genai.embed_content,
+                    model=self.model_id,
+                    content=text,
+                    task_type=task_type,
+                    request_options={"timeout": GEMINI_EMBED_TIMEOUT_S},
+                ),
+                timeout=GEMINI_EMBED_TIMEOUT_S * 2,
             )
             vectors.append(list(result["embedding"]))
         return vectors

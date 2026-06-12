@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from Orchestrator import config, fossils
-from Orchestrator.embeddings import migrate, providers, search
+from Orchestrator.embeddings import migrate, ollama_io, providers, search
 from Orchestrator.embeddings.providers import EmbeddingProviderError
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import get_active_slug, get_store
@@ -75,6 +75,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(migrate, "_CANCEL", threading.Event())
     monkeypatch.setattr(migrate, "BATCH_SLEEP_S", 0.0)
     monkeypatch.setattr(search, "_active_store", None)
+    # Hermetic ollama seams (test_embeddings_routes.py recipe): the route
+    # tests below GET /embeddings/status, whose _ollama_state() would
+    # otherwise probe a real daemon on :11434.
+    monkeypatch.setattr(ollama_io, "binary_installed", lambda: False)
+    monkeypatch.setattr(ollama_io, "daemon_version", lambda: None)
+    monkeypatch.setattr(ollama_io, "local_models", lambda: [])
+    monkeypatch.setattr(ollama_io, "ram_preflight", lambda ram_gb: None)
     return index_path, stores_dir, volume_path
 
 

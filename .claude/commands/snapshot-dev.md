@@ -6,7 +6,7 @@ Mint a snapshot of the current session's completed work into the BlackBox volume
 
 1. POST to `/chat/save` (NOT `/chat` — that wastes an LLM round-trip).
 2. Backend's auto-mint trigger (`turns_threshold=1`) fires `perform_mint()` immediately.
-3. `perform_mint()` generates a 3072-dim `gemini-embedding-001` embedding inline before returning, so the snapshot is searchable the moment the curl returns.
+3. `perform_mint()` generates an embedding from the active embedding model (see `Orchestrator/embeddings/registry.py`; status at `GET /embeddings/status`) inline before returning, so the snapshot is searchable the moment the curl returns.
 4. Snapshot ID returned in the response body.
 
 ## Default Behavior
@@ -17,7 +17,7 @@ Mint a snapshot of the current session's completed work into the BlackBox volume
   automatically, and when multiple operators exist you present an AskUserQuestion
   dropdown (pre-selecting `default`) to pick whose work this snapshot records.
 - **Trigger:** invoked manually via `/snapshot-dev`, OR organically by Claude at the end of any non-trivial task per the CLAUDE.md instruction.
-- **Cost:** ~one Gemini embedding call (~$0.00013 at 3072 dims). No LLM completion call.
+- **Cost:** ~one embedding call with the active model (cents-level for cloud models, free for local Ollama models). No LLM completion call.
 
 ## Operator Override
 
@@ -65,7 +65,11 @@ curl -s -X POST http://localhost:9091/chat/save \
 #     ...
 #   }
 
-# 3. Verify embedding generated (proof point — must show 3072 dimensions, not "Failed")
+# 3. Verify embedding generated (proof point — the mint path logs
+#    "[EMBEDDING] Successfully generated embedding (N dimensions)" where N is
+#    the active model's dims per GET /embeddings/status; failures log
+#    "[EMBEDDING] Warning: Failed to generate embedding" from checkpoint.py or
+#    "[EMBEDDING] <slug>: embedding generation failed" from the provider layer)
 sudo journalctl -u blackbox.service --since "30 seconds ago" --no-pager 2>&1 | \
   grep -E "MINT|EMBEDDING|SNAP-YYYYMMDD-NNNN" | head -10
 ```
@@ -80,7 +84,7 @@ When the snapshot mints, report to the user:
 |---|---|
 | **snap_id** | `SNAP-YYYYMMDD-NNNN` |
 | **operator** | (the one used) |
-| **embedding** | 3072 dimensions ✓ (or warn if `Failed to generate`) |
+| **embedding** | N dimensions ✓ — matches the active model's dims (or warn if `Failed to generate`) |
 | **media artifacts** | (count if any auto-attached) |
 | **search hint** | (1-2 phrases the user can grep for later) |
 
@@ -90,7 +94,7 @@ When the snapshot mints, report to the user:
 - ❌ Don't manually call `/mint` afterward — auto-mint already fired, you'd create a duplicate.
 - ❌ Don't hard-code an operator (e.g. `Brandon`). Resolve via `get_current_operator`: use the single operator automatically; only AskUserQuestion (dropdown) when it reports `needs_selection` (multiple operators).
 - ❌ Don't truncate the summary — semantic search quality depends on full context. The 30k char cap is a hard ceiling, not a target.
-- ❌ Don't use stale model names (`gemini-2.5-pro`, `text-embedding-004`). Current defaults: `gemini-3.1-pro-preview-customtools` (chat), `gemini-embedding-001` (embeddings). The `model` field in the SaveRequest is just metadata; use whichever model actually produced the response (e.g. `claude-opus-4-7`).
+- ❌ Don't use stale model names (`gemini-2.5-pro`, `text-embedding-004`). Current defaults: `gemini-3.1-pro-preview-customtools` (chat); embeddings use the active model from `Orchestrator/embeddings/registry.py` (check `GET /embeddings/status`). The `model` field in the SaveRequest is just metadata; use whichever model actually produced the response (e.g. `claude-opus-4-7`).
 
 ## When To Auto-Trigger (per CLAUDE.md)
 

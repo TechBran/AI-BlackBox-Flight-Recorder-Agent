@@ -358,6 +358,28 @@ def test_preflight_installed_daemon_down(env, client, monkeypatch):
         assert m["blockers"] == [START_BLOCKER]
 
 
+def test_preflight_daemon_up_without_binary_is_not_blocked(env, client, monkeypatch):
+    """Containerized Ollama: the daemon is reachable with no `ollama` binary
+    on PATH. install/start blockers must NOT fire — the model check (and the
+    rest of the matrix) proceeds against the live daemon."""
+    _mock_ollama(monkeypatch, installed=False, running=True, models=[])
+    by_slug = _local_models_by_slug(client)
+    assert by_slug[LIGHT]["blockers"] == [
+        "Pull the model from the setup wizard (≈1 GB download)"
+    ]
+    assert by_slug[LIGHT]["ready"] is False
+
+    # ...and with the weights present + RAM fine it is fully ready
+    _mock_ollama(
+        monkeypatch, installed=False, running=True,
+        models=[LIGHT_ID, EMBEDDING_MODELS[HEAVY]["model_id"]],
+        available_ram=int(64e9),
+    )
+    for m in _local_models_by_slug(client).values():
+        assert m["ready"] is True
+        assert m["blockers"] == []
+
+
 def test_preflight_up_model_missing(env, client, monkeypatch):
     _mock_ollama(monkeypatch, installed=True, running=True, models=[])
     by_slug = _local_models_by_slug(client)

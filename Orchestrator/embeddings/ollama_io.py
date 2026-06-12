@@ -29,8 +29,9 @@ from Orchestrator import config
 GET_TIMEOUT = httpx.Timeout(2.0, connect=2.0)   # status probes: fail fast
 PULL_TIMEOUT = httpx.Timeout(None, connect=5.0)  # pulls are long: no read timeout
 
-# ~1 GiB + margin per declared GB — registry ram_gb is a model-size declaration,
-# not an exact byte count, so a small headroom factor beats false positives.
+# Bytes per declared GB: 1 GB + 7% margin (≈ 1 GiB) — registry ram_gb is a
+# model-size declaration, not an exact byte count, so a small headroom factor
+# beats false positives.
 RAM_BYTES_PER_GB = 1.07e9
 
 # Test seams (providers.py `_transport` pattern): httpx.MockTransport here.

@@ -7,6 +7,7 @@ fix), and a dims sanity guard. ALL network is mocked — zero live calls,
 zero real sleeps.
 """
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -92,6 +93,7 @@ async def test_gemini_document_maps_to_retrieval_document():
         model=EMBEDDING_MODELS[GEMINI_SLUG]["model_id"],
         content="hello world",
         task_type="retrieval_document",
+        request_options={"timeout": providers.GEMINI_EMBED_TIMEOUT_S},
     )
 
 
@@ -106,6 +108,7 @@ async def test_gemini_query_maps_to_retrieval_query():
         model=EMBEDDING_MODELS[GEMINI_SLUG]["model_id"],
         content="find the css fix",
         task_type="retrieval_query",
+        request_options={"timeout": providers.GEMINI_EMBED_TIMEOUT_S},
     )
 
 
@@ -118,6 +121,26 @@ async def test_gemini_one_call_per_text():
     assert len(result) == 3
     assert fake.call_count == 3
     assert [c.kwargs["content"] for c in fake.call_args_list] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_hanging_call_times_out_to_provider_error(monkeypatch):
+    """Review note (Task 16): a hung Gemini embed must not pin an embed-pool
+    worker forever. The asyncio.wait_for outer guard (2x the gRPC deadline,
+    patched short here) turns the hang into retried TimeoutErrors and finally
+    an EmbeddingProviderError — never an indefinite block."""
+    provider = get_provider(GEMINI_SLUG)
+    sleeps = _record_sleeps(provider)
+    monkeypatch.setattr(providers, "GEMINI_EMBED_TIMEOUT_S", 0.02)
+
+    def hang(**kwargs):
+        time.sleep(0.5)  # well past 2x the patched deadline
+        return {"embedding": [0.0] * GEMINI_DIMS}
+
+    with patch.object(providers.genai, "embed_content", hang):
+        with pytest.raises(EmbeddingProviderError, match="failed after 4 attempts"):
+            await provider.embed(["stuck"], purpose="document")
+    assert sleeps == [1.0, 2.0, 4.0]  # full retry envelope, no real sleeping
 
 
 # ── purpose validation ───────────────────────────────────────────────────────
