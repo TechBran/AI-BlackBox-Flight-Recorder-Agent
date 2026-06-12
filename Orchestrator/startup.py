@@ -227,6 +227,43 @@ def startup_check_index():
 
 
 @app.on_event("startup")
+def startup_embeddings_transcode():
+    """One-time migration: inline index embeddings → binary vector store.
+
+    Registered immediately AFTER startup_check_index so the snapshot index
+    has been created/rebuilt/healed before we slim it (FastAPI runs startup
+    hooks in registration order). Runs synchronously ON PURPOSE: no request
+    is served until startup hooks return, so nothing can mint a snapshot
+    (rewriting the index) while transcode holds the full index in memory —
+    a background thread here could clobber a freshly minted entry. The cost
+    is one ~408MB JSON parse on merge-day boot; every later boot hits the
+    slim-index no-op path instantly.
+
+    NEVER raises — a transcode failure must not block boot (search keeps
+    its inline-embedding fallback while inline vectors still exist).
+    """
+    try:
+        from Orchestrator.embeddings.transcode import transcode_inline_embeddings
+        result = transcode_inline_embeddings()
+        if result.get("skipped"):
+            logger.info(
+                "[TRANSCODE] skipped: %s",
+                result.get("reason", "no inline embeddings in index"),
+            )
+        else:
+            logger.info(
+                "[TRANSCODE] migrated=%d dropped=%d index %d->%d bytes",
+                result["migrated"], result["dropped"],
+                result["index_bytes_before"], result["index_bytes_after"],
+            )
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error(
+            "[TRANSCODE] startup transcode failed (non-fatal, index left "
+            "untouched): %s", e,
+        )
+
+
+@app.on_event("startup")
 def startup_assert_sudoers_current():
     """Auto-update /etc/sudoers.d/blackbox-system if the template in this
     git checkout adds grants that aren't already present. Uses the
