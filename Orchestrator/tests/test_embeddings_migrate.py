@@ -1,0 +1,474 @@
+"""Tests for the migration job — diff-and-fill + atomic cutover (Task 8).
+
+Isolation recipe (same as test_embeddings_routes.py): all filesystem state in
+tmp_path (index, stores dir, volume file), fossils' import-time SNAPSHOT_INDEX
+binding + mtime cache patched on the fossils module, provider faked via
+providers._instances, and migrate's module-level singleton job state reset per
+test. The fake volume is a real bytes file with known byte offsets so the
+volume-slice read path is exercised for real.
+"""
+import asyncio
+import json
+import threading
+import time
+
+import numpy as np
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from Orchestrator import config, fossils
+from Orchestrator.embeddings import migrate, providers, search
+from Orchestrator.embeddings.providers import EmbeddingProviderError
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
+from Orchestrator.embeddings.store import get_active_slug, get_store
+from Orchestrator.routes.embeddings_routes import router
+
+OLD_SLUG = "gemini-embedding-001"          # config default active model
+TARGET = "qwen3-embedding-0.6b"            # migration target (1024 dims)
+TARGET_DIMS = EMBEDDING_MODELS[TARGET]["dims"]
+
+JOB_KEYS = {
+    "target", "state", "done", "total", "started_at", "finished_at",
+    "error", "skipped", "raced",
+}
+
+
+# ── fixtures ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    """Isolated index + stores + volume; migrate/search singletons reset."""
+    index_path = tmp_path / "snapshot_index.json"
+    stores_dir = tmp_path / "embeddings"
+    volume_path = tmp_path / "volume.txt"
+    monkeypatch.setattr(fossils, "SNAPSHOT_INDEX", index_path)
+    monkeypatch.setattr(fossils, "_index_cache", None)
+    monkeypatch.setattr(fossils, "_index_cache_mtime", 0.0)
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
+    monkeypatch.setattr(config, "VOL_PATH", volume_path)
+    monkeypatch.setattr(migrate, "_JOB", None)
+    monkeypatch.setattr(migrate, "_CANCEL", threading.Event())
+    monkeypatch.setattr(migrate, "BATCH_SLEEP_S", 0.0)
+    monkeypatch.setattr(search, "_active_store", None)
+    return index_path, stores_dir, volume_path
+
+
+@pytest.fixture
+def fake_provider(monkeypatch):
+    fake = FakeProvider(TARGET_DIMS)
+    monkeypatch.setitem(providers._instances, TARGET, fake)
+    return fake
+
+
+class FakeProvider:
+    """Deterministic per-text vectors; per-call hook for mid-job injections."""
+
+    def __init__(self, dims):
+        self.dims = dims
+        self.calls = []          # [(texts, purpose), ...]
+        self.hook = None         # sync fn(texts) called BEFORE embedding
+        self.fail_substring = None   # text containing this → EmbeddingProviderError
+        self.raise_unexpected = None  # exception raised on first call (then cleared)
+
+    @property
+    def embedded_texts(self):
+        return [t for texts, _ in self.calls for t in texts]
+
+    async def embed(self, texts, purpose):
+        if self.hook is not None:
+            hook, self.hook = self.hook, None  # one-shot
+            hook(texts)
+        if self.raise_unexpected is not None:
+            exc, self.raise_unexpected = self.raise_unexpected, None
+            raise exc
+        if self.fail_substring is not None and any(
+            self.fail_substring in t for t in texts
+        ):
+            raise EmbeddingProviderError("synthetic provider failure")
+        self.calls.append((list(texts), purpose))
+        return [self._vec(t) for t in texts]
+
+    def _vec(self, text):
+        rng = np.random.default_rng(sum(text.encode()) % (2**32))
+        return [float(x) for x in rng.standard_normal(self.dims)]
+
+
+def _build_volume(index_path, volume_path, n=10):
+    """Concatenated snapshot bodies with correct byte offsets in the index.
+
+    Returns {snap_id: body_text} for asserting embedded text content.
+    """
+    index, bodies, blob = {}, {}, b""
+    for i in range(n):
+        sid = f"SNAP-{i}"
+        body = f"=== snapshot body {i} — conversation text for {sid} ===\n"
+        raw = body.encode("utf-8")
+        index[sid] = {
+            "byte_start": len(blob), "byte_end": len(blob) + len(raw),
+            "operator": "Brandon", "timestamp": "2026-06-11T00:00:00Z",
+            "type": "normal",
+        }
+        blob += raw
+        bodies[sid] = body
+    volume_path.write_bytes(blob)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    fossils._index_cache = None
+    return bodies
+
+
+def _append_snapshot(index_path, volume_path, sid, body):
+    """Mint simulation: append body to the volume + entry to the index."""
+    raw = body.encode("utf-8")
+    start = volume_path.stat().st_size
+    volume_path.write_bytes(volume_path.read_bytes() + raw)
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index[sid] = {
+        "byte_start": start, "byte_end": start + len(raw),
+        "operator": "Brandon", "timestamp": "2026-06-11T00:00:00Z",
+        "type": "normal",
+    }
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    fossils._index_cache = None
+    return body
+
+
+def _stores_dir(env):
+    return env[1]
+
+
+# ── full migration ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_full_migration_embeds_all_and_cuts_over(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert result["done"] == 10 and result["total"] == 10
+    assert result["skipped"] == [] and result["raced"] == []
+    assert result["error"] is None
+    assert result["finished_at"]
+
+    # every text embedded as a document, content == exact volume slices
+    assert all(purpose == "document" for _, purpose in fake_provider.calls)
+    assert sorted(fake_provider.embedded_texts) == sorted(bodies.values())
+
+    # store filled
+    target = get_store(TARGET, base_dir=stores_dir)
+    assert target.ids() == set(bodies)
+
+    # cutover: disk pointer AND in-memory search store both flipped
+    assert get_active_slug(base_dir=stores_dir) == TARGET
+    assert search.get_active_store().slug == TARGET
+
+    # singleton status reflects the finished job
+    status = migrate.get_job_status()
+    assert set(status.keys()) == JOB_KEYS
+    assert status["state"] == "done" and status["done"] == 10
+
+
+@pytest.mark.asyncio
+async def test_toolvault_hook_stub_fires_at_cutover(env, fake_provider, capsys):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=2)
+
+    await migrate.run_migration(TARGET)
+
+    assert "toolvault re-embed hook (Task 11 wires this)" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_unknown_slug_raises_value_error(env):
+    with pytest.raises(ValueError, match="no-such-model"):
+        await migrate.run_migration("no-such-model")
+    assert migrate.get_job_status() is None  # bad slug never claims the job
+
+
+# ── switch-back delta ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_switch_back_only_embeds_the_delta(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    pre_ids = [f"SNAP-{i}" for i in range(6)]
+    target = get_store(TARGET, base_dir=stores_dir)
+    rng = np.random.default_rng(7)
+    target.append_many([(sid, rng.standard_normal(TARGET_DIMS)) for sid in pre_ids])
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert result["done"] == 4 and result["total"] == 4
+    embedded = fake_provider.embedded_texts
+    assert sorted(embedded) == sorted(bodies[f"SNAP-{i}"] for i in range(6, 10))
+    assert target.ids() == set(bodies)
+
+
+# ── catch-up convergence ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_catch_up_picks_up_mid_job_mint(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path)
+    old_store = get_store(OLD_SLUG, base_dir=stores_dir)
+    new_body = {}
+
+    def mint_during_pass_one(_texts):
+        # A mint lands during pass 1: index entry + volume bytes + a vector in
+        # the ACTIVE (old) store — exactly what checkpoint.py does live.
+        body = _append_snapshot(
+            index_path, volume_path, "SNAP-NEW", "=== freshly minted mid-job ===\n"
+        )
+        new_body["SNAP-NEW"] = body
+        old_store.append("SNAP-NEW", np.random.default_rng(1).standard_normal(3072))
+
+    fake_provider.hook = mint_during_pass_one
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert result["done"] == 11  # 10 originals + the mid-job mint
+    target = get_store(TARGET, base_dir=stores_dir)
+    assert "SNAP-NEW" in target.ids()
+    assert new_body["SNAP-NEW"] in fake_provider.embedded_texts
+    assert get_active_slug(base_dir=stores_dir) == TARGET
+
+
+# ── cancel + resume ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_cancel_keeps_partial_store_and_restart_completes(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    fake_provider.hook = lambda _texts: migrate.request_cancel()
+
+    result = await migrate.run_migration(TARGET)
+
+    # batch 1 (8 ids) embedded before the flag is seen at the next batch gate
+    assert result["state"] == "cancelled"
+    assert result["finished_at"]
+    target = get_store(TARGET, base_dir=stores_dir)
+    assert target.count == 8  # partial progress kept
+    # NO cutover on cancel
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG
+
+    # re-start resumes via the diff and completes
+    result2 = await migrate.run_migration(TARGET)
+    assert result2["state"] == "done"
+    assert result2["done"] == 2  # only the remaining delta
+    assert target.ids() == set(bodies)
+    assert get_active_slug(base_dir=stores_dir) == TARGET
+
+
+# ── quarantine (permanently-failing text must not stall the job) ─────────────
+
+@pytest.mark.asyncio
+async def test_failing_batch_is_quarantined_job_still_completes(
+    env, fake_provider, monkeypatch, capsys
+):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    monkeypatch.setattr(migrate, "BATCH_SIZE", 1)  # isolate the poison text
+    fake_provider.fail_substring = "snapshot body 3 "
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"           # completes, never spins
+    assert result["skipped"] == ["SNAP-3"]
+    target = get_store(TARGET, base_dir=stores_dir)
+    assert target.ids() == set(bodies) - {"SNAP-3"}
+    # quarantined ids stay missing() so a later run/watcher retries them
+    assert target.missing(list(bodies)) == ["SNAP-3"]
+    assert get_active_slug(base_dir=stores_dir) == TARGET
+    assert "quarantining" in capsys.readouterr().out
+
+
+# ── raced-mint detection (Task 6 advisory) ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_foreign_append_is_detected_as_raced(env, fake_provider, capsys):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path)
+    target = get_store(TARGET, base_dir=stores_dir)
+
+    def foreign_append(_texts):
+        # Simulates a mint embedded under the OLD model landing in the TARGET
+        # store (dims aside, the mechanism is: not preexisting, in the index,
+        # NOT written by the job).
+        target.append("SNAP-9", np.random.default_rng(2).standard_normal(TARGET_DIMS))
+
+    fake_provider.hook = foreign_append
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert result["raced"] == ["SNAP-9"]
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "raced the cutover" in out and "SNAP-9" in out
+
+
+# ── stalled on unexpected error, re-run completes ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_unexpected_error_stalls_then_rerun_completes(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    fake_provider.raise_unexpected = RuntimeError("disk on fire")
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "stalled"
+    assert result["error"] == "disk on fire"
+    assert result["finished_at"]
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG  # no cutover
+
+    result2 = await migrate.run_migration(TARGET)
+    assert result2["state"] == "done"
+    assert get_store(TARGET, base_dir=stores_dir).ids() == set(bodies)
+
+
+# ── persistence + startup resume ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_state_file_written_during_and_after_run(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path)
+    state_path = stores_dir / migrate.STATE_FILE
+    seen_running = {}
+
+    def capture_mid_run(_texts):
+        seen_running.update(json.loads(state_path.read_text(encoding="utf-8")))
+
+    fake_provider.hook = capture_mid_run
+
+    await migrate.run_migration(TARGET)
+
+    # mid-run: persisted as a live, resumable job
+    assert seen_running["state"] == "running"
+    assert seen_running["target"] == TARGET
+    # post-run: final transition persisted with full field set
+    final = json.loads(state_path.read_text(encoding="utf-8"))
+    assert set(final.keys()) == JOB_KEYS
+    assert final["state"] == "done"
+    assert final["done"] == 10 and final["total"] == 10
+    assert final["started_at"] and final["finished_at"]
+
+
+@pytest.mark.asyncio
+async def test_resume_if_interrupted_relaunches_running_state(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path)
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / migrate.STATE_FILE).write_text(json.dumps({
+        "target": TARGET, "state": "running", "done": 3, "total": 10,
+        "started_at": "2026-06-11T00:00:00+00:00", "finished_at": None,
+        "error": None, "skipped": [], "raced": [],
+    }), encoding="utf-8")
+
+    task = migrate.resume_if_interrupted()
+
+    assert isinstance(task, asyncio.Task)
+    await task
+    assert migrate.get_job_status()["state"] == "done"
+    assert get_store(TARGET, base_dir=stores_dir).ids() == set(bodies)
+
+
+@pytest.mark.asyncio
+async def test_resume_noop_when_not_interrupted(env):
+    index_path, stores_dir, volume_path = env
+    # no state file at all
+    assert migrate.resume_if_interrupted() is None
+    # a finished job is not relaunched
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / migrate.STATE_FILE).write_text(
+        json.dumps({"target": TARGET, "state": "done"}), encoding="utf-8"
+    )
+    assert migrate.resume_if_interrupted() is None
+    # unknown target is refused, not resumed
+    (stores_dir / migrate.STATE_FILE).write_text(
+        json.dumps({"target": "gone-model", "state": "running"}), encoding="utf-8"
+    )
+    assert migrate.resume_if_interrupted() is None
+
+
+# ── routes ───────────────────────────────────────────────────────────────────
+
+class GatedProvider(FakeProvider):
+    """Holds every embed call until .release is set (thread-safe poll)."""
+
+    def __init__(self, dims):
+        super().__init__(dims)
+        self.release = threading.Event()
+
+    async def embed(self, texts, purpose):
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        return await super().embed(texts, purpose)
+
+
+@pytest.fixture
+def app():
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+def _wait_for_state(state, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = migrate.get_job_status()
+        if status is not None and status["state"] == state:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(f"job never reached state {state!r}: {migrate.get_job_status()}")
+
+
+def test_migrate_unknown_slug_404(env, app):
+    with TestClient(app) as client:
+        resp = client.post("/embeddings/migrate", json={"target": "no-such-model"})
+    assert resp.status_code == 404
+
+
+def test_cancel_when_idle_is_false(env, app):
+    with TestClient(app) as client:
+        resp = client.post("/embeddings/migrate/cancel")
+    assert resp.status_code == 200
+    assert resp.json() == {"cancelled": False}
+
+
+def test_migrate_409_status_job_and_cancel_flow(env, app, monkeypatch):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path)
+    gated = GatedProvider(TARGET_DIMS)
+    monkeypatch.setitem(providers._instances, TARGET, gated)
+
+    # context manager = ONE persistent portal loop, so the background task
+    # created by the POST survives across requests
+    with TestClient(app) as client:
+        resp = client.post("/embeddings/migrate", json={"target": TARGET})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body.keys()) == JOB_KEYS
+        assert body["state"] == "running" and body["target"] == TARGET
+
+        # one job at a time
+        resp2 = client.post("/embeddings/migrate", json={"target": TARGET})
+        assert resp2.status_code == 409
+        assert "already running" in resp2.json()["detail"]
+
+        # status carries the live job
+        job = client.get("/embeddings/status").json()["job"]
+        assert job is not None and job["state"] == "running"
+        assert job["target"] == TARGET
+
+        # cancel endpoint
+        resp3 = client.post("/embeddings/migrate/cancel")
+        assert resp3.json() == {"cancelled": True}
+        gated.release.set()  # unblock the in-flight batch
+        _wait_for_state("cancelled")
+
+    # after cancel: no cutover, job visible as cancelled in status state
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG

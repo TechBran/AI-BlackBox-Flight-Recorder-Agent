@@ -264,6 +264,29 @@ def startup_embeddings_transcode():
 
 
 @app.on_event("startup")
+async def startup_embeddings_migration_resume():
+    """Relaunch an embeddings migration that a restart interrupted (Task 8).
+
+    migration_state.json saying state=="running" means the process died
+    mid-job. The job is resumable by construction (progress truth = the
+    target store's contents; the engine re-diffs), so we just schedule
+    run_migration(target) as a background task. Async hook ON PURPOSE:
+    resume_if_interrupted() needs the running event loop to create_task —
+    the job must outlive startup, not block it.
+
+    NEVER raises — a resume failure must not block boot (the operator can
+    re-POST /embeddings/migrate; the stores are untouched).
+    """
+    try:
+        from Orchestrator.embeddings.migrate import resume_if_interrupted
+        task = resume_if_interrupted()
+        if task is not None:
+            logger.info("[MIGRATE] resumed interrupted embeddings migration")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[MIGRATE] startup resume check failed (non-fatal): %s", e)
+
+
+@app.on_event("startup")
 def startup_assert_sudoers_current():
     """Auto-update /etc/sudoers.d/blackbox-system if the template in this
     git checkout adds grants that aren't already present. Uses the

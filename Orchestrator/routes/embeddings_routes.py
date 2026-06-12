@@ -1,13 +1,17 @@
-"""Embeddings management endpoints (Task 7).
+"""Embeddings management endpoints (Tasks 7-8).
 
-GET  /embeddings/status   — full module state: active model, watcher health,
-                            migration job, on-disk stores, registry models with
-                            preflight readiness, ollama daemon state. The JSON
-                            shape is a BINDING contract consumed by the
-                            onboarding wizard step, the Portal updates card and
-                            the Android updates card (Tasks 13-15).
-POST /embeddings/validate — probe-embed one short string with a model's
-                            provider before the wizard commits to it.
+GET  /embeddings/status         — full module state: active model, watcher
+                                  health, migration job, on-disk stores,
+                                  registry models with preflight readiness,
+                                  ollama daemon state. The JSON shape is a
+                                  BINDING contract consumed by the onboarding
+                                  wizard step, the Portal updates card and the
+                                  Android updates card (Tasks 13-15).
+POST /embeddings/validate       — probe-embed one short string with a model's
+                                  provider before the wizard commits to it.
+POST /embeddings/migrate        — start the diff-and-fill migration job
+                                  (404 unknown slug, 409 if one is running).
+POST /embeddings/migrate/cancel — cooperative cancel of the running job.
 
 Status is strictly read-only: it must never create store directories or files
 as a side effect (probing is cheap and safe to poll).
@@ -20,6 +24,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from Orchestrator import config
+from Orchestrator.embeddings.migrate import (
+    get_job_status,
+    request_cancel,
+    start_migration,
+)
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
@@ -126,7 +135,7 @@ def embeddings_status():
     return {
         "active": get_active_slug(base_dir=base),
         "health": _read_health(base),
-        "job": None,  # Task 8 fills this with the live MigrationJob state
+        "job": get_job_status(),  # live migration job state; None when idle
         "stores": stores,
         "models": models,
         # Task 10 fills real installed/running/models detection from the daemon.
@@ -167,3 +176,30 @@ async def embeddings_validate(req: ValidateRequest):
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+class MigrateRequest(BaseModel):
+    target: str
+
+
+@router.post("/migrate")
+async def embeddings_migrate(req: MigrateRequest):
+    """Start a diff-and-fill migration to the target model.
+
+    404 unknown slug, 409 when a job is already running (one job at a time),
+    otherwise the freshly-claimed job dict (state == "running").
+    """
+    if req.target not in EMBEDDING_MODELS:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown embedding model slug: {req.target!r}"
+        )
+    try:
+        return await start_migration(req.target)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/migrate/cancel")
+async def embeddings_migrate_cancel():
+    """Cooperatively cancel the running migration; false when nothing runs."""
+    return {"cancelled": request_cancel()}
