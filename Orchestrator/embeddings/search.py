@@ -61,17 +61,20 @@ def swap_active(slug: str) -> VectorStore:
 
 # ── sync→async bridge ────────────────────────────────────────────────────────
 
-# Provider coroutines always run on this ONE dedicated worker thread via
-# asyncio.run (fresh ephemeral loop per call — safe because providers create
-# their network clients per call; see providers.py). Callers are sync
-# functions invoked from plain threads (checkpoint mint path, APScheduler
-# executors) and occasionally from the uvloop event-loop thread itself; in the
-# latter case the blocking .result() stalls the loop for the duration of the
-# embed call — exactly what the legacy blocking monitoring.generate_embedding
-# did, so this preserves (not worsens) existing behavior. Never call
-# _run_async FROM the "emb" thread itself: with max_workers=1 that would
-# deadlock (all production callers are external, so this cannot happen today).
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="emb")
+# Provider coroutines run via per-call asyncio.run on this pool's threads
+# (fresh ephemeral loop per call — safe because providers create their network
+# clients per call; see providers.py — so no loop-bound state leaks between
+# calls or threads). Callers are sync functions invoked from plain threads
+# (checkpoint mint path, APScheduler executors) and occasionally from the
+# uvloop event-loop thread itself; in the latter case the blocking .result()
+# stalls the loop for the duration of the embed call — same as the legacy
+# blocking monitoring.generate_embedding. Four workers bound concurrent embeds
+# without serializing mints behind searches: a single worker queues every
+# embed box-wide behind the slowest in-flight call (e.g. a provider retry
+# storm). Never call generate_embedding_sync FROM the pool's own "emb"
+# threads: N nested calls from pool threads would exhaust the pool and
+# deadlock (no caller does this — all production callers are external).
+_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="emb")
 
 
 def _run_async(coro):
@@ -115,8 +118,15 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[s
         print("[SEMANTIC] Query embedding failed, falling back to keyword search")
         return []
 
-    store = get_active_store()
-    if store.count > 0:
+    # Opening the store can raise (corrupt dir, dims mismatch) — legacy
+    # semantic_search never raised, and callers like agent_context.py catch
+    # ValueError believing it means bad operator input. Fall back instead.
+    try:
+        store = get_active_store()
+    except Exception as e:
+        print(f"[SEMANTIC] active store unavailable ({e}): falling back to inline index scan")
+        store = None
+    if store is not None and store.count > 0:
         allowed_ids = None
         if operator and operator != "system":
             from Orchestrator.fossils import load_snapshot_index  # lazy: avoid cycle
@@ -127,9 +137,9 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[s
             }
         return store.search(query_embedding, k, allowed_ids)
 
-    # TODO(Task 16): remove inline fallback — covers only the pre-transcode
-    # window where the active store is empty but the snapshot index still
-    # carries inline "embedding" vectors.
+    # TODO(Task 16): remove inline fallback — covers the pre-transcode window
+    # (active store empty, inline "embedding" vectors still in the snapshot
+    # index) and the store-unavailable path above.
     return _inline_fallback_search(query_embedding, operator, k)
 
 

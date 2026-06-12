@@ -15,6 +15,7 @@ real Manifest/ access.
 import asyncio
 import math
 import threading
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -282,6 +283,86 @@ def test_generate_embedding_sync_from_plain_thread():
     t.join(timeout=30)
     assert not t.is_alive()
     assert out["vec"] == query
+
+
+def test_concurrent_embeds_run_in_parallel_not_serialized():
+    """C1 regression guard: a single-worker pool serializes every embed
+    box-wide (4 concurrent 0.3s embeds = ~1.2s wall). The 4-worker pool must
+    run them in parallel (~0.3s); threshold 0.9s leaves CI-noise headroom
+    while still failing decisively at max_workers=1."""
+
+    class SlowProvider(FakeProvider):
+        async def embed(self, texts, purpose):
+            await asyncio.sleep(0.3)
+            return await super().embed(texts, purpose)
+
+    providers._instances[GEMINI_SLUG] = SlowProvider([0.5] * DIMS)
+
+    results = {}
+    threads = [
+        threading.Thread(
+            target=lambda i=i: results.setdefault(
+                i, search.generate_embedding_sync(f"text {i}")
+            )
+        )
+        for i in range(4)
+    ]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    elapsed = time.monotonic() - start
+
+    assert all(not t.is_alive() for t in threads)
+    assert all(results[i] == [0.5] * DIMS for i in range(4))
+    assert elapsed < 0.9, f"embeds serialized: 4x0.3s took {elapsed:.2f}s wall"
+
+
+# ── store-open failure: fall back, never raise (I1) ──────────────────────────
+
+def test_semantic_search_store_open_failure_falls_back_to_inline(monkeypatch, capsys):
+    """I1 regression guard: a corrupt/dims-mismatched active store must not
+    raise into legacy callers (agent_context.py catches ValueError believing
+    it means bad operator input) — fall back to the inline index scan."""
+    rng = _rng()
+    vec_by_id = _vectors_by_id(5, rng)
+    query = [float(x) for x in rng.standard_normal(DIMS)]
+    _install_fake(GEMINI_SLUG, query)
+
+    index = _index_for(vec_by_id, lambda i: "alice", with_embeddings=True)
+    monkeypatch.setattr("Orchestrator.fossils.load_snapshot_index", lambda: index)
+
+    def boom():
+        raise ValueError("dims mismatch")
+
+    monkeypatch.setattr(search, "get_active_store", boom)
+
+    results = search.semantic_search("q", k=3)  # must not raise
+    expected = _naive_topk(vec_by_id, query, k=3)
+    assert [sid for sid, _ in results] == [sid for sid, _ in expected]
+    for (_, got), (_, want) in zip(results, expected):
+        assert got == pytest.approx(want, abs=1e-9)
+    assert "[SEMANTIC] active store unavailable" in capsys.readouterr().out
+
+
+def test_semantic_search_store_open_failure_slim_index_returns_empty(monkeypatch):
+    """Same store-open failure but the snapshot index carries no inline
+    embeddings (post-transcode slim index): returns [] without raising."""
+    rng = _rng()
+    vec_by_id = _vectors_by_id(4, rng)
+    query = [float(x) for x in rng.standard_normal(DIMS)]
+    _install_fake(GEMINI_SLUG, query)
+
+    index = _index_for(vec_by_id, lambda i: "alice", with_embeddings=False)
+    monkeypatch.setattr("Orchestrator.fossils.load_snapshot_index", lambda: index)
+
+    def boom():
+        raise ValueError("dims mismatch")
+
+    monkeypatch.setattr(search, "get_active_store", boom)
+
+    assert search.semantic_search("q", k=5) == []  # must not raise
 
 
 # ── monitoring delegates ─────────────────────────────────────────────────────
