@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from Orchestrator import config, fossils
-from Orchestrator.embeddings import providers
+from Orchestrator.embeddings import ollama_io, providers
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import get_store, set_active_slug
 from Orchestrator.routes.embeddings_routes import router
@@ -43,6 +43,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(fossils, "_index_cache_mtime", 0.0)
     monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
     set_active_slug(SLUG, base_dir=stores_dir)
+    # Hermetic ollama world (no real daemon probes from these tests): binary
+    # absent, daemon down, RAM fine. test_embeddings_ollama.py exercises the
+    # real seams; here they would make assertions environment-dependent.
+    monkeypatch.setattr(ollama_io, "binary_installed", lambda: False)
+    monkeypatch.setattr(ollama_io, "daemon_version", lambda: None)
+    monkeypatch.setattr(ollama_io, "local_models", lambda: [])
+    monkeypatch.setattr(ollama_io, "ram_preflight", lambda ram_gb: None)
     return index_path, stores_dir
 
 
@@ -108,7 +115,14 @@ def test_status_shape(env, client):
         assert isinstance(model["ready"], bool)
         assert isinstance(model["blockers"], list)
 
-    assert body["ollama"] == {"installed": False, "running": False, "models": []}
+    # required-keys style (Task 10 made the block real and added `pull`);
+    # values reflect the hermetic mocks in the env fixture
+    ollama = body["ollama"]
+    assert {"installed", "running", "models", "pull"} <= set(ollama.keys())
+    assert ollama["installed"] is False
+    assert ollama["running"] is False
+    assert ollama["models"] == []
+    assert ollama["pull"] is None
 
 
 def test_stores_reflect_fixture_store(env, client):
@@ -213,13 +227,17 @@ def test_openai_ready_with_key_blocked_without(env, client, monkeypatch):
         assert m["blockers"] == ["Add an OpenAI API key in onboarding → API Keys"]
 
 
-def test_ollama_models_always_blocked_stub(env, client):
-    """Task 10 replaces the stub with real installed/running/pulled checks."""
+def test_ollama_models_blocked_when_not_installed(env, client):
+    """env fixture mocks the ollama_io seams: binary absent + daemon down →
+    every local model is blocked on the install one-liner. The full blocker
+    matrix lives in test_embeddings_ollama.py."""
     ollama_models = _models_by_provider(client)["ollama"]
     assert ollama_models  # registry has local models
     for m in ollama_models:
         assert m["ready"] is False
-        assert m["blockers"] == ["Ollama integration arrives in a later update"]
+        assert m["blockers"] == [
+            "Install Ollama: curl -fsSL https://ollama.com/install.sh | sh"
+        ]
 
 
 # ── POST /embeddings/validate ────────────────────────────────────────────────

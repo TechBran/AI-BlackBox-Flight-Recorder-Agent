@@ -14,6 +14,10 @@ POST /embeddings/migrate        — start the diff-and-fill migration job
 POST /embeddings/migrate/cancel — cooperative cancel of the running job.
 POST /embeddings/health/check   — run the Task 9 watcher health check now
                                   (manual trigger for ops/tests/the wizard).
+POST /embeddings/ollama/pull    — pull a local model's weights from the Ollama
+                                  library (registry slug in, 409 if a pull is
+                                  already streaming; progress surfaces in
+                                  status as `ollama.pull`).
 
 Status is strictly read-only: it must never create store directories or files
 as a side effect (probing is cheap and safe to poll).
@@ -26,6 +30,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from Orchestrator import config
+from Orchestrator.embeddings import ollama_io
 from Orchestrator.embeddings.migrate import (
     get_job_status,
     request_cancel,
@@ -86,16 +91,59 @@ def _safe_missing(slug: str, dims: int, base: Path, index_ids: set) -> int | Non
         return None
 
 
-def _model_preflight(entry: dict) -> tuple[bool, list[str]]:
-    """ready/blockers for one registry entry, preflight-style."""
+def _ollama_state() -> dict:
+    """The status `ollama` block, probed exactly ONCE per status call (it also
+    feeds every local model's preflight). The daemon GETs are sync — the
+    status route is a plain `def` running in the threadpool, so no event-loop
+    bridge is needed (decision documented in ollama_io's module docstring)."""
+    running = ollama_io.daemon_version() is not None
+    return {
+        "installed": ollama_io.binary_installed(),
+        "running": running,
+        "models": ollama_io.local_models() if running else [],
+        "pull": ollama_io.pull_status(),
+    }
+
+
+def _model_preflight(entry: dict, ollama: dict) -> tuple[bool, list[str]]:
+    """ready/blockers for one registry entry, preflight-style.
+
+    Ollama blockers, in order — install/start are mutually exclusive (first
+    failing wins between them), everything else applicable is appended so the
+    wizard can show the full punch list:
+    1. binary missing AND daemon unreachable → install one-liner
+    2. daemon unreachable (binary present)   → start one-liner
+       (model-pulled state is unknowable while the daemon is down, so no
+       speculative pull blocker stacks on top of install/start)
+    3. model not pulled → wizard shows its Pull button on this blocker;
+       ram_gb doubles as the download-size estimate (a quantized model file
+       ≈ its RAM footprint; the registry has no separate size field)
+    4. free RAM short → ollama_io.ram_preflight remediation string
+    """
     provider = entry["provider"]
     if provider in _CLOUD_KEY_PREFLIGHT:
         attr, remediation = _CLOUD_KEY_PREFLIGHT[provider]
         if getattr(config, attr, ""):
             return True, []
         return False, [remediation]
-    # Ollama stub — Task 10 replaces with installed/running/pulled/RAM checks.
-    return False, ["Ollama integration arrives in a later update"]
+
+    blockers: list[str] = []
+    if not ollama["running"]:
+        if ollama["installed"]:
+            blockers.append("Start it: sudo systemctl start ollama")
+        else:
+            blockers.append(
+                "Install Ollama: curl -fsSL https://ollama.com/install.sh | sh"
+            )
+    elif entry["model_id"] not in ollama["models"]:
+        blockers.append(
+            f"Pull the model from the setup wizard "
+            f"(≈{entry['ram_gb']:g} GB download)"
+        )
+    ram_blocker = ollama_io.ram_preflight(entry["ram_gb"])
+    if ram_blocker is not None:
+        blockers.append(ram_blocker)
+    return (not blockers), blockers
 
 
 @router.get("/status")
@@ -106,6 +154,7 @@ def embeddings_status():
 
     base = Path(config.EMBEDDINGS_STORES_DIR)
     index_ids = set(load_snapshot_index().keys())
+    ollama_state = _ollama_state()
 
     stores = []
     for meta in list_stores(base):
@@ -120,7 +169,7 @@ def embeddings_status():
     models = []
     for slug, entry in EMBEDDING_MODELS.items():
         store_exists = (base / slug / META_FILE).is_file()
-        ready, blockers = _model_preflight(entry)
+        ready, blockers = _model_preflight(entry, ollama_state)
         models.append({
             "slug": slug,
             "label": entry["label"],
@@ -144,8 +193,7 @@ def embeddings_status():
         "job": get_job_status(),  # live migration job state; None when idle
         "stores": stores,
         "models": models,
-        # Task 10 fills real installed/running/models detection from the daemon.
-        "ollama": {"installed": False, "running": False, "models": []},
+        "ollama": ollama_state,
     }
 
 
@@ -209,6 +257,36 @@ async def embeddings_migrate(req: MigrateRequest):
 async def embeddings_migrate_cancel():
     """Cooperatively cancel the running migration; false when nothing runs."""
     return {"cancelled": request_cancel()}
+
+
+class OllamaPullRequest(BaseModel):
+    model: str  # REGISTRY SLUG — same currency as validate/migrate
+
+
+@router.post("/ollama/pull")
+async def embeddings_ollama_pull(req: OllamaPullRequest):
+    """Pull a local model's weights from the Ollama library.
+
+    The body carries a REGISTRY SLUG (consistency with every other endpoint);
+    the raw ollama model id is resolved here. 404 unknown slug, 400 for a
+    non-ollama slug (nothing to pull), 409 when a pull is already streaming,
+    otherwise the freshly-claimed pull state — progress is then polled via
+    GET /embeddings/status (`ollama.pull`).
+    """
+    entry = EMBEDDING_MODELS.get(req.model)
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown embedding model slug: {req.model!r}"
+        )
+    if entry["provider"] != "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.model!r} is not an Ollama model; nothing to pull",
+        )
+    try:
+        return await ollama_io.start_pull(entry["model_id"])
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/health/check")
