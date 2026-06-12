@@ -94,6 +94,28 @@ if ! [[ -x /usr/bin/tailscale ]]; then
     exit 1
 fi
 
+# ── Step 1d: Ollama install (pluggable embeddings — local model runtime) ──
+# Pre-installs the Ollama daemon on every BlackBox so the onboarding wizard's
+# "Memory & Search" step only needs one-click model pulls (POST
+# /embeddings/ollama/pull streams progress), never a terminal. The orchestrator
+# itself cannot install it at runtime (no root; ProtectSystem). Models are NOT
+# pre-pulled here — the 0.6B/8B downloads (0.7-6 GB) only happen if the
+# customer picks a local model in the wizard. Idempotent on re-run; non-fatal
+# on failure (cloud embedding models still work; wizard shows the remediation).
+if ! command -v ollama >/dev/null 2>&1; then
+    echo "[install] Installing Ollama (local embedding runtime)..."
+    if curl -fsSL https://ollama.com/install.sh | sh; then
+        systemctl enable --now ollama 2>/dev/null || true
+        echo "[install] Ollama installed + service enabled"
+    else
+        echo "[install] WARN: Ollama install failed — local embedding models will"
+        echo "[install]       show an install blocker in the wizard (cloud models unaffected)"
+    fi
+else
+    echo "[install] Ollama already installed (skipping)"
+    systemctl enable --now ollama 2>/dev/null || true
+fi
+
 # ── Step 1c: nvm + Node.js + CLI agent binaries (audit E20) ──
 # CLI Agent feature spawns claude / gemini / codex via tmux PTY bridge
 # (Orchestrator/routes/cli_agent_routes.py PROVIDER_BIN). Binaries are
