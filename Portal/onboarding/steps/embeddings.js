@@ -155,6 +155,11 @@ async function tick() {
         return;
     }
     const fresh = await fetchJson("/embeddings/status");
+    // The await yields — the wizard may have navigated away mid-fetch.
+    if (!root || !root.isConnected) {
+        stopPolling();
+        return;
+    }
     if (!fresh) return; // transient fetch hiccup — keep last known state
     status = fresh;
 
@@ -591,6 +596,14 @@ async function startMigrate(target, btn) {
             if (btn) btn.disabled = false;
             return;
         }
+        // The 200 body IS the freshly-claimed job dict — seed it so the
+        // progress panel renders even if the follow-up refresh hiccups.
+        try {
+            const seeded = await r.json();
+            if (seeded && seeded.state && status) status.job = seeded;
+        } catch (_) {
+            // body optional — the refresh below covers it
+        }
     } catch (e) {
         migrating = false;
         showHint(`Network error starting the migration: ${e.message}`, true);
@@ -625,6 +638,9 @@ function renderJobPanel() {
     if (etaJobKey !== job.started_at) {
         etaJobKey = job.started_at;
         etaSamples = [];
+        // New job identity — a cancel clicked on a PREVIOUS job must not
+        // pre-disable this one's Cancel button.
+        cancelClicked = false;
     }
     etaSamples.push({ t: Date.now(), done: job.done || 0 });
     if (etaSamples.length > 30) etaSamples.shift();
@@ -778,6 +794,7 @@ function renderJobStalled(job) {
                 </button>
             </p>
         </div>
+        <div id="ob-emb-hint-slot"></div>
     `;
     const retry = contentEl().querySelector("#ob-emb-stalled-retry");
     retry.addEventListener("click", () => startMigrate(job.target, retry));
