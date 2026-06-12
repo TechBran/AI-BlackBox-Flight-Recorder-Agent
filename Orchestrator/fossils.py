@@ -483,7 +483,9 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
         operator: Operator/user name
         timestamp: UTC timestamp
         snap_type: Type of snapshot ("normal", "checkpoint", etc.)
-        embedding: Optional embedding vector for semantic search
+        embedding: Optional embedding vector for semantic search — appended to
+            the ACTIVE VectorStore (Manifest/embeddings/), NEVER stored inline
+            in the JSON entry (post-transcode indexes stay slim)
         media_artifacts: Optional list of media artifact metadata dicts containing:
             - type: "image", "video", or "music"
             - url: URL path (e.g., /ui/uploads/sunset-over-mountains_abc123.png)
@@ -506,10 +508,33 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
             "type": snap_type
         }
 
-        # Add embedding if provided
-        if embedding:
-            index[snap_id]["embedding"] = embedding
-            print(f"[INDEX] Stored embedding for {snap_id} ({len(embedding)} dimensions)")
+        # Vector write seam (pluggable embeddings): the vector goes to the
+        # ACTIVE binary store, never into the JSON entry. A mint must NEVER
+        # fail because of the vector layer — every store-side error below is
+        # logged and the vector dropped (the migration job's catch-up loop
+        # re-embeds missing ids later).
+        if embedding is not None:
+            store = None
+            try:
+                # Lazy import (monitoring.py's delegate pattern): fossils is
+                # imported very early at startup, before the embeddings stack.
+                from Orchestrator.embeddings.search import get_active_store
+                store = get_active_store()
+            except Exception as e:
+                print(f"[INDEX] active store unavailable; snapshot {snap_id} minted without vector: {e}")
+            if store is not None:
+                if len(embedding) != store.dims:
+                    # Cutover race: embedding generated under the old model,
+                    # store swapped before this index update landed.
+                    print(f"[INDEX] embedding has {len(embedding)} dims but active store expects {store.dims}; snapshot {snap_id} minted without vector (catch-up re-embeds it)")
+                else:
+                    try:
+                        # append invalidates the store's matrix cache; next
+                        # search re-reads the file (page-cache warm, tens of ms)
+                        store.append(snap_id, embedding)
+                        print(f"[INDEX] Stored embedding for {snap_id} in {store.slug} store ({len(embedding)} dimensions)")
+                    except Exception as e:
+                        print(f"[INDEX] store append failed; snapshot {snap_id} minted without vector: {e}")
 
         # Add media artifacts if provided
         if media_artifacts:
