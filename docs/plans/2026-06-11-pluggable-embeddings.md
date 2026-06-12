@@ -334,6 +334,7 @@ Commit `test(embeddings): literal ratchets; drop inline-JSON fallback; docs foll
 4. **Live verification on the appliance (prod runs from main checkout):**
    - `df -h` first — transcode needs ~1.5× 408MB free.
    - `sudo systemctl restart blackbox.service` (pre-authorized); journalctl: watch for transcode log lines (`migrated=6975`, index shrink report), then `[EMBEDDING]` on next mint.
+   - EXPECTED on first boot only: ToolVault re-embeds all ~49 tool descriptions (`[TOOLVAULT-EMB] embedded=49 ...`, ~30s background) — the cache re-keys from the old model-id literal to the registry slug. This is the one-time slug re-key, NOT a failure; second boot is a no-op.
    - `ls -lh Manifest/snapshot_index.json` (~5MB) + `Manifest/embeddings/gemini-embedding-001/` populated; `.bak.pre-embeddings-v2` present.
    - Search probe: `search_snapshots` via chat for a known phrase → results sane, latency subjectively instant.
    - `curl :9091/embeddings/status | python3 -m json.tool` — active store, counts, health ok.

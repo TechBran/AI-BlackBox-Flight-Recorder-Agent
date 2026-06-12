@@ -239,8 +239,9 @@ def startup_embeddings_transcode():
     is one ~408MB JSON parse on merge-day boot; every later boot hits the
     slim-index no-op path instantly.
 
-    NEVER raises — a transcode failure must not block boot (search keeps
-    its inline-embedding fallback while inline vectors still exist).
+    NEVER raises — a transcode failure must not block boot. NOTE: there is
+    no inline-vector fallback (removed in Task 16); until a rerun succeeds,
+    semantic search returns no results and keyword search carries the load.
     """
     try:
         from Orchestrator.embeddings.transcode import transcode_inline_embeddings
