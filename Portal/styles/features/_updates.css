@@ -133,6 +133,48 @@
     line-height: 1.4;
 }
 
+/* ── Embeddings notification card (pluggable embeddings, Task 14) ────── */
+
+.embeddings-card-container.hide {
+    display: none;
+}
+.embeddings-card {
+    margin-top: 0.6rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: var(--radius-md, 8px);
+    background: rgba(255, 255, 255, 0.04);
+    border-left: 3px solid var(--color-info, #6ca0dc);
+}
+.embeddings-card-broken {
+    border-left-color: var(--color-error, #e57373);
+    background: rgba(229, 115, 115, 0.08);
+}
+.embeddings-card-title {
+    font-weight: 500;
+    font-size: 0.92em;
+    color: rgba(255, 255, 255, 0.9);
+}
+.embeddings-card-broken .embeddings-card-title {
+    color: var(--color-error, #e57373);
+}
+.embeddings-card-copy {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.82em;
+    line-height: 1.4;
+    margin: 0.3rem 0 0.5rem;
+}
+.embeddings-card-progress {
+    color: var(--color-info, #6ca0dc);
+    font-size: 0.85em;
+    margin: 0.3rem 0 0.5rem;
+    animation: updates-pulse 1.5s ease-in-out infinite;
+}
+.embeddings-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
 /* ── SSE log modal ──────────────────────────────────────────────────── */
 
 .updates-log-modal {
