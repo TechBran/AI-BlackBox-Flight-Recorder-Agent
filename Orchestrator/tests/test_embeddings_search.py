@@ -346,6 +346,9 @@ def test_active_threshold_prefers_registry_then_fallback(monkeypatch):
     assert search.active_threshold(fallback=0.7) == 0.60
     monkeypatch.delitem(EMBEDDING_MODELS["gemini-embedding-001"], "semantic_threshold")
     assert search.active_threshold(fallback=0.55) == 0.55
+    # unknown active slug (e.g. active.json points at a since-removed model) → fallback
+    monkeypatch.setattr(search, "get_active_slug", lambda: "nonexistent-slug")
+    assert search.active_threshold(fallback=0.42) == 0.42
 
 
 # ── monitoring delegates ─────────────────────────────────────────────────────

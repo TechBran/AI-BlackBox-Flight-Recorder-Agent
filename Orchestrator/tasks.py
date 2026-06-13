@@ -1333,7 +1333,9 @@ def process_chat_task(task: Task):
         RF  = CFG.getint("context", "recent_fossils_per_user", fallback=8)
         KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=6)
         SF  = CFG.getint("context", "semantic_fossils_per_user", fallback=15)
-        ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.7)
+        ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.60)
+        from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
+        ST = active_threshold(ST)
         CP  = CFG.getint("context", "checkpoint_snapshots", fallback=1)
         CAP = CFG.getint("context", "max_fossil_chars", fallback=4000)
 
