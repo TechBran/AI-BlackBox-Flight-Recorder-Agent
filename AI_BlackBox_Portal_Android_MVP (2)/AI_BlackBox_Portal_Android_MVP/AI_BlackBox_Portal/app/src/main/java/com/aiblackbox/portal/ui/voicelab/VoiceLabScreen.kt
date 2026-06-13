@@ -67,6 +67,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.repository.DesignPreview
 import com.aiblackbox.portal.data.repository.ElevenVoice
+import com.aiblackbox.portal.data.repository.SharedVoice
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
 import com.aiblackbox.portal.ui.components.GlassCard
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -161,6 +162,8 @@ fun VoiceLabScreen(
                     CloneZone(viewModel, context, view)
                     Spacer(Modifier.height(16.dp))
                     DesignZone(viewModel, view)
+                    Spacer(Modifier.height(16.dp))
+                    BrowseLibraryZone(viewModel, view)
                     Spacer(Modifier.height(16.dp))
                     ManageZone(viewModel, view)
                 }
@@ -622,7 +625,133 @@ private fun DesignPreviewCard(
 }
 
 // =============================================================================
-// Zone 3 — Manage
+// Zone 3 — Browse Library (community voices)
+// =============================================================================
+
+@Composable
+private fun BrowseLibraryZone(viewModel: VoiceLabViewModel, view: android.view.View) {
+    val query by viewModel.libraryQuery.collectAsState()
+    val results by viewModel.libraryResults.collectAsState()
+    val searching by viewModel.librarySearching.collectAsState()
+    val searched by viewModel.librarySearched.collectAsState()
+    val addingId by viewModel.libraryAddingId.collectAsState()
+
+    SectionCard(title = "🌎  Browse library") {
+        Text(
+            "Search ElevenLabs' community voice library and add voices to your account.",
+            color = BbxDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(12.dp))
+        FieldLabel("Search voices")
+        InputBox(
+            value = query,
+            onValueChange = { viewModel.setLibraryQuery(it) },
+            placeholder = "e.g. calm narrator, deep male, British…",
+            singleLine = true,
+        )
+        Spacer(Modifier.height(12.dp))
+        PrimaryButton(
+            label = if (searching) "Searching…" else "Search",
+            enabled = query.isNotBlank() && !searching,
+            loading = searching,
+            onClick = {
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                viewModel.searchLibrary(query)
+            },
+        )
+
+        if (searched && results.isEmpty() && !searching) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "No voices found. Try a different search.",
+                color = Neutral500,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+
+        if (results.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "${results.size} result(s)",
+                style = MaterialTheme.typography.labelMedium,
+                color = BbxDim,
+            )
+            Spacer(Modifier.height(10.dp))
+            results.forEach { voice ->
+                LibraryVoiceCard(
+                    voice = voice,
+                    absoluteUrl = viewModel.absoluteUrl(voice.previewUrl),
+                    adding = addingId == voice.voiceId,
+                    addDisabled = addingId != null,
+                    onAdd = {
+                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        viewModel.addLibraryVoice(voice)
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryVoiceCard(
+    voice: SharedVoice,
+    absoluteUrl: String,
+    adding: Boolean,
+    addDisabled: Boolean,
+    onAdd: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(RadiusMd))
+            .background(Neutral100)
+            .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    voice.name,
+                    color = BbxWhite,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+                val sub = listOf(voice.accent, voice.gender, voice.age)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" · ")
+                if (sub.isNotBlank()) {
+                    Text(sub, color = Neutral500, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        if (voice.description.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                voice.description,
+                color = Neutral500,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+            )
+        }
+        if (absoluteUrl.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            // Reuse the shared waveform player (AudioPlaybackManager-backed).
+            AudioPlayerBar(audioUrl = absoluteUrl, modifier = Modifier.fillMaxWidth())
+        }
+        Spacer(Modifier.height(10.dp))
+        PillAction(
+            label = if (adding) "Adding…" else "Add",
+            enabled = !addDisabled,
+            onClick = onAdd,
+        )
+    }
+}
+
+// =============================================================================
+// Zone 4 — Manage
 // =============================================================================
 
 @Composable

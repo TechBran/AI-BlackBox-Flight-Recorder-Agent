@@ -9,6 +9,7 @@ import com.aiblackbox.portal.data.repository.CloneResult
 import com.aiblackbox.portal.data.repository.DesignPreview
 import com.aiblackbox.portal.data.repository.ElevenLabsStatus
 import com.aiblackbox.portal.data.repository.ElevenVoice
+import com.aiblackbox.portal.data.repository.SharedVoice
 import com.aiblackbox.portal.data.repository.VoiceLabException
 import com.aiblackbox.portal.data.repository.VoiceLabRepository
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
@@ -99,6 +100,18 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
     val myVoices: StateFlow<List<ElevenVoice>> = _myVoices.asStateFlow()
     private val _voicesLoading = MutableStateFlow(false)
     val voicesLoading: StateFlow<Boolean> = _voicesLoading.asStateFlow()
+
+    // ── Browse Library zone ────────────────────────────────────────────────────
+    private val _libraryQuery = MutableStateFlow("")
+    val libraryQuery: StateFlow<String> = _libraryQuery.asStateFlow()
+    private val _libraryResults = MutableStateFlow<List<SharedVoice>>(emptyList())
+    val libraryResults: StateFlow<List<SharedVoice>> = _libraryResults.asStateFlow()
+    private val _librarySearching = MutableStateFlow(false)
+    val librarySearching: StateFlow<Boolean> = _librarySearching.asStateFlow()
+    private val _librarySearched = MutableStateFlow(false)
+    val librarySearched: StateFlow<Boolean> = _librarySearched.asStateFlow()
+    private val _libraryAddingId = MutableStateFlow<String?>(null)
+    val libraryAddingId: StateFlow<String?> = _libraryAddingId.asStateFlow()
 
     companion object {
         private const val MAX_RECORD_MS = 5 * 60_000L // 5 min cap
@@ -341,6 +354,49 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
                 _message.value = "Delete failed: ${e.message}"
             } catch (e: Exception) {
                 _message.value = "Delete failed: ${e.message}"
+            }
+        }
+    }
+
+    // ── Browse Library ─────────────────────────────────────────────────────────
+    fun setLibraryQuery(q: String) { _libraryQuery.value = q }
+
+    /** Search the public community library (search on submit/button — no debounce). */
+    fun searchLibrary(query: String = _libraryQuery.value) {
+        val repo = repo ?: return
+        if (_librarySearching.value) return
+        _libraryQuery.value = query
+        _librarySearching.value = true
+        viewModelScope.launch {
+            try {
+                _libraryResults.value = repo.searchLibrary(query)
+                _librarySearched.value = true
+            } catch (e: VoiceLabException) {
+                _message.value = e.message ?: "Library search failed"
+            } catch (e: Exception) {
+                _message.value = e.message ?: "Library search failed"
+            } finally {
+                _librarySearching.value = false
+            }
+        }
+    }
+
+    /** Add a library voice to the account, then refresh My Voices + snackbar. */
+    fun addLibraryVoice(sv: SharedVoice) {
+        val repo = repo ?: return
+        if (_libraryAddingId.value != null) return
+        _libraryAddingId.value = sv.voiceId
+        viewModelScope.launch {
+            try {
+                repo.addLibraryVoice(sv.publicOwnerId, sv.voiceId, sv.name)
+                _message.value = "\"${sv.name}\" added to your voices."
+                loadVoices() // reuse the existing My Voices refresh
+            } catch (e: VoiceLabException) {
+                _message.value = "Add failed: ${e.message}"
+            } catch (e: Exception) {
+                _message.value = "Add failed: ${e.message}"
+            } finally {
+                _libraryAddingId.value = null
             }
         }
     }

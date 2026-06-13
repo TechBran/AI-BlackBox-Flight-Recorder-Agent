@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -16,6 +17,7 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.IOException
+import java.net.URLEncoder
 
 // =============================================================================
 // VoiceLabRepository — ElevenLabs Voice Lab (Task 25)
@@ -84,6 +86,22 @@ data class CloneResult(
 data class DeleteResult(
     val ok: Boolean,
     val inUse: List<String> = emptyList(),
+)
+
+/**
+ * One community-library voice (GET /elevenlabs/library). `publicOwnerId` + `voiceId`
+ * are the coordinates the add endpoint needs; accent/gender/age build the sub-line.
+ * All strings are non-null (defaulted to "") so the UI never NPEs on sparse rows.
+ */
+data class SharedVoice(
+    val publicOwnerId: String,
+    val voiceId: String,
+    val name: String,
+    val previewUrl: String = "",
+    val accent: String = "",
+    val gender: String = "",
+    val age: String = "",
+    val description: String = "",
 )
 
 class VoiceLabRepository(private val api: BlackBoxApi) {
@@ -240,6 +258,48 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
                 inUse = inUse,
             )
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /elevenlabs/library?search=&page_size=  → community voice library
+    //   No key on the backend → {voices:[], has_more:false} (gated by status).
+    // -------------------------------------------------------------------------
+    suspend fun searchLibrary(query: String, pageSize: Int = 30): List<SharedVoice> {
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val raw = api.get("/elevenlabs/library?search=$q&page_size=$pageSize")
+        val o = json.parseToJsonElement(raw).jsonObject
+        return (o["voices"]?.jsonArray ?: JsonArray(emptyList())).mapNotNull { el ->
+            val vo = el.jsonObject
+            val owner = vo["public_owner_id"]?.jsonPrimitive?.contentOrNull
+            val vid = vo["voice_id"]?.jsonPrimitive?.contentOrNull
+            // Both coordinates are required to add the voice; skip rows missing either.
+            if (owner.isNullOrBlank() || vid.isNullOrBlank()) return@mapNotNull null
+            SharedVoice(
+                publicOwnerId = owner,
+                voiceId = vid,
+                name = vo["name"]?.jsonPrimitive?.contentOrNull ?: vid,
+                previewUrl = vo["preview_url"]?.jsonPrimitive?.contentOrNull ?: "",
+                accent = vo["accent"]?.jsonPrimitive?.contentOrNull ?: "",
+                gender = vo["gender"]?.jsonPrimitive?.contentOrNull ?: "",
+                age = vo["age"]?.jsonPrimitive?.contentOrNull ?: "",
+                description = vo["description"]?.jsonPrimitive?.contentOrNull ?: "",
+            )
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // POST /elevenlabs/library/add  (json {public_owner_id, voice_id, name})
+    //   → {ok, voice_id}. Backend busts the voice cache on success.
+    // -------------------------------------------------------------------------
+    suspend fun addLibraryVoice(publicOwnerId: String, voiceId: String, name: String): String {
+        val payload = buildJsonObject {
+            put("public_owner_id", publicOwnerId)
+            put("voice_id", voiceId)
+            put("name", name)
+        }.toString()
+        val raw = postOrThrow("/elevenlabs/library/add", payload)
+        val o = json.parseToJsonElement(raw).jsonObject
+        return o["voice_id"]?.jsonPrimitive?.contentOrNull ?: ""
     }
 
     // -------------------------------------------------------------------------
