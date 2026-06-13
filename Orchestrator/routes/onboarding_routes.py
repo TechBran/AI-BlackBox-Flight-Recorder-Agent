@@ -156,6 +156,11 @@ def current_config() -> CurrentConfigResponse:
             "last4": _redact(env.get("PERPLEXITY_API_KEY")),
             "validated_at": val_at.get("perplexity"),
         },
+        "elevenlabs": {
+            "present": bool(env.get("ELEVENLABS_API_KEY")),
+            "last4": _redact(env.get("ELEVENLABS_API_KEY")),
+            "validated_at": val_at.get("elevenlabs"),
+        },
         "gmail": {
             "present": bool(env.get("GOOGLE_OAUTH_CLIENT_ID") and env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
             "client_id": env.get("GOOGLE_OAUTH_CLIENT_ID") or None,  # public per Google OAuth docs
