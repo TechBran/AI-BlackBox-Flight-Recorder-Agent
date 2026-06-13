@@ -1747,6 +1747,42 @@ function setupVoiceLibraryTrigger() {
 }
 
 /**
+ * Create + status-gate the "🎙 Voice Lab" trigger that sits beside the "Browse
+ * voice library…" button under the TTS picker. Opens the ElevenLabs Voice Lab
+ * panel (clone / design / manage). Gated on GET /elevenlabs/status `configured`
+ * — without a key the button stays hidden. The module is dynamically imported on
+ * first click to avoid a static import cycle (voice-lab.js imports
+ * populateVoiceCatalog from here, same as voice-library.js).
+ */
+function setupVoiceLabTrigger() {
+    const row = document.querySelector(".voice-preferences-section .voice-selector-row");
+    if (!row || document.getElementById("btnVoiceLab")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "btnVoiceLab";
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "🎙 Voice Lab";
+    btn.style.display = "none";  // revealed only when ElevenLabs is configured
+
+    // Place it right after the "Browse voice library…" trigger if that exists,
+    // otherwise just after the selector row. Both triggers coexist in this area.
+    const libBtn = document.getElementById("btnBrowseVoiceLibrary");
+    (libBtn || row).insertAdjacentElement("afterend", btn);
+
+    btn.addEventListener("click", async () => {
+        const { openVoiceLab } = await import("../voice-lab.js");
+        openVoiceLab();
+    });
+
+    // Reveal only if an ElevenLabs key is configured.
+    fetch("/elevenlabs/status")
+        .then(r => r.ok ? r.json() : null)
+        .then(s => { if (s && s.configured) btn.style.display = ""; })
+        .catch(() => { /* no key / endpoint absent -> stay hidden */ });
+}
+
+/**
  * Initialize voice selector dropdown and preview button
  */
 export function initVoiceSelector() {
@@ -1759,6 +1795,9 @@ export function initVoiceSelector() {
     // The modal module is dynamically imported on first click to avoid a static
     // import cycle (voice-library.js imports populateVoiceCatalog from here).
     setupVoiceLibraryTrigger();
+    // "🎙 Voice Lab" trigger — clone / design / manage voices. Same gating +
+    // dynamic-import pattern; sits beside the browse-library button.
+    setupVoiceLabTrigger();
 
     if (voiceSelect) {
         // Build options from the backend catalog (SoT), then sync the
