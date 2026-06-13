@@ -123,6 +123,37 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * ElevenLabs Music — full songs up to 5 min, vocals supported, no restricted
+     * vocabulary. Mirrors [generateMusic] and reuses the SAME task-result/playback
+     * state via [pollTask] so the result UI is shared across both providers.
+     */
+    fun generateElevenLabsMusic(
+        prompt: String,
+        musicLengthMs: Int = 30000,
+        forceInstrumental: Boolean = false
+    ) {
+        val api = api ?: return
+        _state.value = GenState.SUBMITTING
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                val body = buildJsonObject {
+                    put("prompt", prompt)
+                    put("music_length_ms", musicLengthMs)
+                    put("force_instrumental", forceInstrumental)
+                    put("operator", currentOperator)
+                }.toString()
+                val response = api.post("/generate/elevenlabs_music", body)
+                val taskResponse = api.json.decodeFromString(TaskResponse.serializer(), response)
+                pollTask(taskResponse.taskId)
+            } catch (e: Exception) {
+                _state.value = GenState.FAILED
+                _error.value = e.message
+            }
+        }
+    }
+
     private fun pollTask(taskId: String) {
         val repo = taskRepo ?: return
         _state.value = GenState.POLLING
