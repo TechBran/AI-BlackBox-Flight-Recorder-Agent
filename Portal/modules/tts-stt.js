@@ -309,7 +309,6 @@ class StreamingTTSQueue {
         if (!speakableText) return null;
 
         try {
-            const isGemini = this.voiceConfig.provider !== "openai";
             const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
             const r = await fetch("/tts/batch", {
@@ -319,7 +318,7 @@ class StreamingTTSQueue {
                     text: speakableText,
                     provider: this.voiceConfig.provider,
                     voice: this.voiceConfig.voice,
-                    model: isGemini ? getGeminiModel(this.voiceConfig.provider) : TTS_MODEL,
+                    model: ttsModelForProvider(this.voiceConfig.provider),
                     format: TTS_FMT,
                     operator: operator
                 })
@@ -439,7 +438,7 @@ class StreamingTTSQueue {
             return;
         }
 
-        const isGemini = this.voiceConfig.provider !== "openai";
+        const isGemini = isGeminiProvider(this.voiceConfig.provider);
         const audioFormat = isGemini ? "wav" : TTS_FMT;
 
         let audioDataURL;
@@ -665,6 +664,30 @@ export function getGeminiModel(provider) {
 }
 
 /**
+ * True only for Gemini TTS providers. OpenAI AND ElevenLabs are single-call
+ * `/tts` providers (MP3 byte-stream, no WAV stitch, no gemini model). Use this
+ * instead of `provider !== "openai"` so ElevenLabs is never mis-routed as Gemini.
+ * @param {string} provider - Provider name
+ * @returns {boolean}
+ */
+export function isGeminiProvider(provider) {
+    return provider === "gemini-pro" || provider === "gemini-flash";
+}
+
+/**
+ * Resolve the `model` field for a /tts/batch request. Gemini providers get a
+ * Gemini TTS model; ElevenLabs sends "" (backend defaults to eleven_v3); OpenAI
+ * gets the OpenAI TTS model.
+ * @param {string} provider - Provider name
+ * @returns {string} Model name ("" for ElevenLabs)
+ */
+export function ttsModelForProvider(provider) {
+    if (isGeminiProvider(provider)) return getGeminiModel(provider);
+    if (provider === "elevenlabs") return "";
+    return TTS_MODEL;
+}
+
+/**
  * Sync voice dropdown to current operator's preference
  */
 export async function syncVoiceDropdown() {
@@ -778,14 +801,20 @@ export async function generateTTSAudio(text) {
 export async function generateTTSAudioWithVoice(text, voiceConfig) {
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
-    if (voiceConfig.provider === "openai") {
+    // OpenAI AND ElevenLabs are single-call /tts providers (MP3 stream). Gemini
+    // falls through to the task-queue path below.
+    if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs") {
+        const isEleven = voiceConfig.provider === "elevenlabs";
         const r = await fetch("/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 text: text,
-                model: TTS_MODEL,
-                voice: voiceConfig.voice,
+                // ElevenLabs: no OpenAI model; backend defaults to eleven_v3.
+                ...(isEleven ? {} : { model: TTS_MODEL }),
+                provider: voiceConfig.provider,
+                // Preserve the elevenlabs: prefix so the backend detects the provider.
+                voice: isEleven ? `elevenlabs:${voiceConfig.voice}` : voiceConfig.voice,
                 format: TTS_FMT
             })
         });
@@ -794,7 +823,7 @@ export async function generateTTSAudioWithVoice(text, voiceConfig) {
             const blob = await r.blob();
             return URL.createObjectURL(blob);
         }
-        console.error("OpenAI TTS failed:", r.status, await r.text());
+        console.error(`${voiceConfig.provider} TTS failed:`, r.status, await r.text());
         return null;
     } else {
         // Gemini TTS
@@ -956,7 +985,6 @@ export async function speak(text, btn) {
         setBubbleState(btn, true);
 
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
         ttsState.isPlaying = true;
@@ -968,7 +996,7 @@ export async function speak(text, btn) {
                 text: text,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: operator
             })
@@ -1059,7 +1087,6 @@ export async function speakToBubble(text, bubbleElement, btn) {
         }
 
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
 
         // Voice-aware cache key so switching voices regenerates audio
         const contentKey = simpleHash(speakableText + ':' + voiceConfig.provider + ':' + voiceConfig.voice);
@@ -1090,7 +1117,7 @@ export async function speakToBubble(text, bubbleElement, btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: localStorage.getItem("bbx_operator") || ""
             })
@@ -1484,7 +1511,6 @@ export async function speakThinkingContent(btn) {
 
         const speakableText = text.trim();
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
         // Single batch request — backend handles chunking + parallel + stitching
@@ -1499,7 +1525,7 @@ export async function speakThinkingContent(btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: operator
             })

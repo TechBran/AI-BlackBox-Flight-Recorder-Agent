@@ -109,12 +109,70 @@ def restart_service():
         import traceback
         return {"status": "error", "error": str(e), "trace": traceback.format_exc()}
 
+def _elevenlabs_synth_chunked(text: str, voice: str, model_id: str | None,
+                              voice_settings: dict | None) -> bytes:
+    """Synthesize ElevenLabs speech, chunking by the model's live char cap.
+
+    One ``synthesize`` call when ``text`` fits the cap; otherwise split via the
+    shared ``chunk_text_for_tts`` helper and concatenate the per-chunk MP3 bytes
+    (browsers play concatenated MP3 frames fine for streaming playback). The
+    ``elevenlabs:`` prefix on ``voice`` is tolerated by ``synthesize`` itself.
+    """
+    from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
+    from Orchestrator.elevenlabs import tts as el_tts
+
+    cap = el_tts.max_chars_for(model_id or ELEVENLABS_TTS_MODEL_DEFAULT)
+    if len(text) <= cap:
+        return el_tts.synthesize(text, voice, model_id=model_id, voice_settings=voice_settings)
+    parts = [
+        el_tts.synthesize(chunk, voice, model_id=model_id, voice_settings=voice_settings)
+        for chunk in chunk_text_for_tts(text, max_chars=cap)
+    ]
+    return b"".join(parts)
+
+
 @app.post("/tts")
 def tts_openai(body: dict = Body(...)):
-    """Text-to-speech using OpenAI TTS API.
+    """Text-to-speech using OpenAI TTS API (default) or ElevenLabs.
+
+    ElevenLabs voices (``voice`` prefixed ``elevenlabs:`` OR ``provider ==
+    "elevenlabs"``) are handled FIRST and routed through the quality-first
+    ``elevenlabs.tts.synthesize`` path -- the OpenAI code below is untouched for
+    every non-ElevenLabs voice.
+
     By default, returns audio stream (for browser compatibility).
     Set return_json=true in body to get JSON with audio_url (for MCP/API use).
     """
+    # --- ElevenLabs branch (checked before OpenAI so the OpenAI path is intact) ---
+    if (body.get("voice") or "").startswith("elevenlabs:") or body.get("provider") == "elevenlabs":
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "No text provided")
+        voice = (body.get("voice") or "").strip()
+        model_id = (body.get("model") or "").strip() or None  # None -> synthesize defaults to eleven_v3
+        voice_settings = body.get("voice_settings")
+        try:
+            audio = _elevenlabs_synth_chunked(text, voice, model_id, voice_settings)
+        except Exception as e:
+            print(f"[ELEVENLABS] /tts synthesis failed: {e}")
+            return {"status": "fallback", "detail": str(e)}
+
+        if not body.get("return_json"):
+            return StreamingResponse(iter([audio]), media_type="audio/mpeg")
+
+        filename = f"{uuid.uuid4()}_tts.mp3"
+        save_path = UPLOADS_DIR / filename
+        with open(save_path, "wb") as f:
+            f.write(audio)
+        return {
+            "status": "success",
+            "audio_url": f"/ui/uploads/{filename}",
+            "voice": voice,
+            "model": model_id or "eleven_v3",
+            "format": "mp3",
+            "size_bytes": len(audio),
+        }
+
     if AUDIO_ENGINE == "browser": return {"status": "fallback"}
     api_key = OPENAI_API_KEY.strip()
     if not api_key: return {"status": "fallback", "message": "OPENAI_API_KEY not configured"}
@@ -173,7 +231,7 @@ async def tts_batch(body: dict = Body(...)):
 
     Accepts:
         text (str): Full text to synthesize
-        provider (str): "openai", "gemini-pro", or "gemini-flash" (default: "openai")
+        provider (str): "openai", "gemini-pro", "gemini-flash", or "elevenlabs" (default: "openai")
         voice (str): Voice name (default: config TTS_VOICE)
         model (str): Model override (provider-specific)
         format (str): "mp3" or "wav" (default: config TTS_FORMAT)
@@ -252,8 +310,34 @@ async def tts_batch(body: dict = Body(...)):
         # Gemini always returns WAV; override format for stitching logic
         audio_format = "wav"
 
+    # --- ElevenLabs provider ---
+    elif provider == "elevenlabs":
+        from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
+        from Orchestrator.elevenlabs import tts as el_tts
+
+        # Re-chunk by the model's LIVE per-request cap (not the generic
+        # max_chunk_chars used above) so we make the fewest synthesize calls.
+        el_model = model or ELEVENLABS_TTS_MODEL_DEFAULT
+        cap = el_tts.max_chars_for(el_model)
+        chunks = chunk_text_for_tts(text, max_chars=cap)
+        num_chunks = len(chunks)
+        voice_settings = body.get("voice_settings")
+
+        def _el_tts_chunk(chunk_text: str) -> bytes:
+            return el_tts.synthesize(
+                chunk_text, voice,
+                model_id=model if model else None,
+                voice_settings=voice_settings,
+            )
+
+        futures = [loop.run_in_executor(_tts_executor, _el_tts_chunk, chunk) for chunk in chunks]
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
+        # ElevenLabs returns MP3; concatenated frames play fine (no WAV stitch).
+        audio_format = "mp3"
+
     else:
-        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', or 'gemini-flash'.")
+        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', or 'elevenlabs'.")
 
     # Check for errors in results
     errors = [(i, r) for i, r in enumerate(results) if isinstance(r, Exception)]

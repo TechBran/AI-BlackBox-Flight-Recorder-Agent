@@ -1,6 +1,6 @@
 {
   "name": "list_tts_voices",
-  "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+  "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
   "category": "audio",
   "groups": [
     "chat",
