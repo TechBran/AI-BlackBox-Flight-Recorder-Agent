@@ -5480,8 +5480,10 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     Returns:
         Tuple of (context_string, provenance_dict)
     """
-    CU_RF, CU_KF, CU_SF, CU_ST = 4, 3, 5, 0.7
+    CU_RF, CU_KF, CU_SF, CU_ST = 4, 3, 5, 0.60
     CU_CP, CU_CAP, CU_MA = 2, 10000, 5
+    from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
+    CU_ST = active_threshold(CU_ST)
 
     vol_txt = read_text_safe(VOL_PATH)
     recent_snaps = get_recent_fossils_for_operator(vol_txt, operator, CU_RF, CU_CAP)

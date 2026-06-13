@@ -100,7 +100,9 @@ def build_fossil_context(
     RF  = CFG.getint("context", "recent_fossils_per_user", fallback=5)
     KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=4)
     SF  = CFG.getint("context", "semantic_fossils_per_user", fallback=8)
-    ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.7)
+    ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.60)
+    from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
+    ST = active_threshold(ST)
     CP  = CFG.getint("context", "checkpoint_snapshots", fallback=2)
     CAP = CFG.getint("context", "max_fossil_chars", fallback=10000)
 

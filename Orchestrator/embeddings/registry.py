@@ -17,7 +17,7 @@ EMBEDDING_MODELS = {
         "provider": "gemini", "model_id": "models/gemini-embedding-001", "dims": 3072,
         "label": "Gemini (cloud)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.15,
         "privacy": "cloud", "quality_note": "Current default; auto-tracked for deprecation",
-        "query_instruction": None, "keep_alive": None,
+        "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
     },
     "openai-text-embedding-3-large": {
         "provider": "openai", "model_id": "text-embedding-3-large", "dims": 3072,
@@ -31,6 +31,7 @@ EMBEDDING_MODELS = {
         "privacy": "local", "quality_note": "Fast on CPU; fully offline",
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "-1m",  # negative duration = stay loaded; bare "-1" fails Go ParseDuration
+        "semantic_threshold": 0.54,
     },
     "qwen3-embedding-8b": {
         "provider": "ollama", "model_id": "qwen3-embedding:8b", "dims": 4096,

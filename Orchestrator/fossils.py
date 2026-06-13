@@ -128,7 +128,7 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") ->
     return results
 
 
-def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.7) -> List[str]:
+def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.60) -> List[str]:
     """Pure semantic retrieval with threshold filtering.
 
     Returns snapshots where semantic similarity >= threshold, up to k results.
@@ -138,7 +138,7 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
         query: Search query text
         operator: Filter by operator (empty string = all operators)
         k: Maximum number of results to return
-        threshold: Minimum similarity score (0.0-1.0), default 0.7
+        threshold: Minimum similarity score (0.0-1.0), default 0.60
 
     Returns:
         List of snapshot texts, sorted by similarity (highest first)
@@ -155,7 +155,10 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
     filtered_results = filtered_results[:k]
 
     if not filtered_results:
-        print(f"[SEMANTIC] No results above threshold {threshold} (had {len(semantic_results)} candidates)")
+        best = max((s for _, s in semantic_results), default=None)
+        print(f"[SEMANTIC] 0 of {len(semantic_results)} candidates cleared threshold "
+              f"{threshold} (best={best:.3f})" if best is not None
+              else f"[SEMANTIC] no candidates (empty store?) at threshold {threshold}")
         return []
 
     # Load index and volume for text retrieval

@@ -40,6 +40,16 @@ def get_active_store() -> VectorStore:
         return _active_store
 
 
+def active_threshold(fallback: float) -> float:
+    """Per-model semantic-similarity floor; `fallback` (the config global) when
+    the active model declares none. Registry is the only place model-specific
+    values live (Task-16 ratchet), so a model whose score distribution differs
+    (Gemini retrieval_query vs Qwen instruct-prefixed) carries its own floor."""
+    entry = EMBEDDING_MODELS.get(get_active_slug(), {})
+    value = entry.get("semantic_threshold")
+    return float(value) if value is not None else float(fallback)
+
+
 def swap_active(slug: str) -> VectorStore:
     """Point live searches at another model's store (migration cutover seam).
 

@@ -336,6 +336,18 @@ def test_semantic_search_store_open_failure_returns_empty_never_raises(
     assert "[SEMANTIC] active store unavailable" in capsys.readouterr().out
 
 
+# ── per-model semantic threshold resolver ────────────────────────────────────
+
+def test_active_threshold_prefers_registry_then_fallback(monkeypatch):
+    from Orchestrator.embeddings import search
+    from Orchestrator.embeddings.registry import EMBEDDING_MODELS
+    monkeypatch.setattr(search, "get_active_slug", lambda: "gemini-embedding-001")
+    monkeypatch.setitem(EMBEDDING_MODELS["gemini-embedding-001"], "semantic_threshold", 0.60)
+    assert search.active_threshold(fallback=0.7) == 0.60
+    monkeypatch.delitem(EMBEDDING_MODELS["gemini-embedding-001"], "semantic_threshold")
+    assert search.active_threshold(fallback=0.55) == 0.55
+
+
 # ── monitoring delegates ─────────────────────────────────────────────────────
 
 def test_monitoring_generate_embedding_delegates():
