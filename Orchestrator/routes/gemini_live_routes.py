@@ -1026,7 +1026,7 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                     })
 
                 print(f"[GEMINI-LIVE] Video generation task created: {task.task_id}")
-            elif name == "generate_music":
+            elif name == "lyria_music":
                 prompt = args.get("prompt", "")
                 negative_prompt = args.get("negativePrompt", "")
                 sample_count = args.get("sampleCount", 1)

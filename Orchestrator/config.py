@@ -298,7 +298,7 @@ OUTPUT_SPEC_TOOLS_STATIC = (
     '    - negativePrompt (optional): Things to avoid in the video\n'
     '  Note: Videos take 5-20 minutes to generate.\n\n'
     "MUSIC GENERATION TOOL (Google Lyria):\n"
-    '  Tool: generate_music\n'
+    '  Tool: lyria_music\n'
     '  Parameters:\n'
     '    - prompt (required): Description using ONLY instruments, tempo, and texture\n'
     '    - negativePrompt (optional): Things to exclude\n'

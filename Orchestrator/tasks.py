@@ -1646,11 +1646,11 @@ def process_chat_task(task: Task):
             print(f"[SMS-MODE] Response: {len(ui_reply)} chars")
 
         # Multi-Provider Native Output Rendering - supports MULTIPLE generations of each type
-        if "generate_image:" in ui_reply or "generate_video:" in ui_reply or "generate_music:" in ui_reply:
+        if "generate_image:" in ui_reply or "generate_video:" in ui_reply or "lyria_music:" in ui_reply:
             print(f"[{provider.upper()}] Detected multimodal generation command(s)")
 
             # Process ALL image generation commands (not just the first one)
-            image_pattern = r'generate_image:\s*(.+?)(?=\n\n|generate_video:|generate_music:|generate_image:|$)'
+            image_pattern = r'generate_image:\s*(.+?)(?=\n\n|generate_video:|lyria_music:|generate_image:|$)'
             for image_match in re.finditer(image_pattern, ui_reply, re.DOTALL):
                 image_prompt = image_match.group(1).strip()
                 if not image_prompt:
@@ -1669,7 +1669,7 @@ def process_chat_task(task: Task):
                 print(f"[MULTIMODAL] Image generation queued: {img_task.task_id}")
 
             # Process ALL video generation commands
-            video_pattern = r'generate_video:\s*(.+?)(?=\n\n|generate_image:|generate_music:|generate_video:|$)'
+            video_pattern = r'generate_video:\s*(.+?)(?=\n\n|generate_image:|lyria_music:|generate_video:|$)'
             for video_match in re.finditer(video_pattern, ui_reply, re.DOTALL):
                 video_prompt = video_match.group(1).strip()
                 if not video_prompt:
@@ -1687,7 +1687,7 @@ def process_chat_task(task: Task):
                 print(f"[MULTIMODAL] Video generation queued: {vid_task.task_id}")
 
             # Process ALL music generation commands
-            music_pattern = r'generate_music:\s*(.+?)(?=\n\n|generate_image:|generate_video:|generate_music:|$)'
+            music_pattern = r'lyria_music:\s*(.+?)(?=\n\n|generate_image:|generate_video:|lyria_music:|$)'
             for music_match in re.finditer(music_pattern, ui_reply, re.DOTALL):
                 music_prompt = music_match.group(1).strip()
                 if not music_prompt:

@@ -142,7 +142,7 @@ You have senses. Use them:
 - Always analyze generated images to verify output
 
 **Hearing** (generate/analyze audio):
-- `generate_music` → Create 30-second music with Lyria
+- `lyria_music` → Create 30-second music with Lyria
 - `analyze_audio` → "Listen" to audio and describe it
 - `speech_to_text` → Transcribe speech from audio files
 
@@ -320,7 +320,7 @@ Error: "429 Too Many Requests"
 2. **Generate Assets in Parallel:**
    ```bash
    # Music (fast - 1-2 minutes)
-   generate_music(prompt, operator)
+   lyria_music(prompt, operator)
 
    # Images (fast - seconds)
    generate_image(prompt, operator)
@@ -453,7 +453,7 @@ function startProduction() {
 
 **Music:**
 ```
-1. generate_music(prompt)
+1. lyria_music(prompt)
 2. Wait for completion (1-2 min)
 3. analyze_audio(file, "Describe instrumentation, mood, tempo")
 4. Verify: Epic/cinematic quality? Right mood?

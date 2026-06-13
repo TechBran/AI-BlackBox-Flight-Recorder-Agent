@@ -732,7 +732,7 @@ export class GeminiAgentHandler {
             'get_context': '\uD83E\uDDE0',
             'generate_image': '\uD83C\uDFA8',
             'generate_video': '\uD83C\uDFAC',
-            'generate_music': '\uD83C\uDFB5',
+            'lyria_music': '\uD83C\uDFB5',
             'analyze_image': '\uD83D\uDC41\uFE0F',
             'analyze_video': '\uD83C\uDFAC',
             'analyze_audio': '\uD83C\uDFA7',

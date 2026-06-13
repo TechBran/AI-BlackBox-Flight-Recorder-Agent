@@ -27,7 +27,7 @@ BATCH_A = [
     "web_fetch",
     "generate_image",
     "generate_video",
-    "generate_music",
+    "lyria_music",
     "extend_video",
     "get_media",
     "list_media",

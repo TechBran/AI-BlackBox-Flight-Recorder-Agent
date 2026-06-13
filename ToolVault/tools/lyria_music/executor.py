@@ -1,4 +1,4 @@
-"""Executor for generate_music (migrated from blackbox_tools._execute_generate_music)."""
+"""Executor for lyria_music (migrated from blackbox_tools._execute_generate_music)."""
 import aiohttp
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult

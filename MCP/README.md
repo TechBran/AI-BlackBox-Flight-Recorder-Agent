@@ -68,7 +68,7 @@ nano ~/.claude/mcp.json
 | `generate_image` | Generate images from text prompts |
 | `generate_video` | Generate videos using Veo 3.1 (text-to-video or image-to-video) |
 | `extend_video` | Extend existing videos with Veo 3.1 |
-| `generate_music` | Generate 30-second music with Google Lyria |
+| `lyria_music` | Generate 30-second music with Google Lyria |
 | `text_to_speech` | Convert text to speech (OpenAI TTS) |
 | `speech_to_text` | Transcribe audio to text (OpenAI Whisper) |
 

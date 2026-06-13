@@ -867,7 +867,7 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
                 })
 
             print(f"[REALTIME] Video generation task created: {task.task_id}")
-        elif name == "generate_music":
+        elif name == "lyria_music":
             prompt = arguments.get("prompt", "")
             negative_prompt = arguments.get("negativePrompt", "")
             sample_count = arguments.get("sampleCount", 1)

@@ -1,7 +1,7 @@
 """Executor for elevenlabs_music — full-song generation via ElevenLabs Music.
 
-A SEPARATE music tool alongside generate_music (Lyria); both coexist
-(provider-explicit naming). Mirrors generate_music's task-dispatch shape: POST to
+A SEPARATE music tool alongside lyria_music (Lyria); both coexist
+(provider-explicit naming). Mirrors lyria_music's task-dispatch shape: POST to
 the /generate/elevenlabs_music route, get a task_id back, tell the caller to poll
 get_task_status. Either `prompt` or `composition_plan` is required (enforced here
 AND server-side).
