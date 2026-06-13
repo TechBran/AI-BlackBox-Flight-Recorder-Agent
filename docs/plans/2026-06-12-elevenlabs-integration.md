@@ -625,6 +625,10 @@ End-to-end: clone in Voice Lab → `/tts/catalog` shows the voice (cache busted,
 
 **Commit:** `feat(phone): ElevenLabs ulaw TTS option for announcements/recap calls`.
 
+### Task 32 — EXECUTION FINDINGS (2026-06-13)
+
+**Capability READY; phone-side seam does not exist yet → deferred.** `elevenlabs/tts.py` `synthesize(..., output_format="ulaw_8000")` works (live-verified: 23,680 bytes raw 8kHz μ-law mono, header-less, ready for TG200/Asterisk playback). BUT the phone stack (`Orchestrator/phone/bridge.py`) is **realtime-audio-native**: call audio is the conversational model's own output streamed as μ-law (`on_ai_audio → AudioConverter.ai_to_phone → send_audio`), and morning recap calls use `openai_realtime` to speak directly. There is **no discrete "synthesize a TTS announcement clip and play it on the call" path** to swap an ElevenLabs μ-law voice into. Per the design's own decision (realtime conversational agents stay provider-native), and YAGNI, no speculative phone-flow integration was built. When/if a TTS-clip-playback path is added (e.g. canned announcements, IVR prompts), the μ-law capability is already in place — just call `synthesize(text, voice, output_format="ulaw_8000")` and feed the bytes to `send_audio`. → future-work.
+
 ## Task 33: Docs + CLAUDE.md
 
 - Update `CLAUDE.md`: multimodal section gains ElevenLabs capabilities (music/SFX/clone/design/changer/isolator + diarized STT); tool names provider-explicit; note `lyria_music` rename.
