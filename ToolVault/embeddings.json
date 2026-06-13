@@ -1,7 +1,7 @@
 {
   "analyze_audio": {
     "hash": "3d465249d8816282416920181550f8e1b576d41527b2afd225e0108f57e6a2f1",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.0018340863,
       -0.0062594316,
@@ -3079,7 +3079,7 @@
   },
   "analyze_image": {
     "hash": "d409532acb45d2f660550e376ae12eed6d574a6ad4e37e69cd62ec2f9c148dae",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.009055363,
       0.0046749813,
@@ -6157,7 +6157,7 @@
   },
   "analyze_video": {
     "hash": "9f16535ec96ae7e9afaee5492e523c3199df2a45c984207454ef1c39407c106e",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.015721885,
       0.0066528097,
@@ -9235,7 +9235,7 @@
   },
   "browse_index": {
     "hash": "368ba18744e010dfe4b9974d5ead620d2a9ef4cad3f9be7ba01a2963e72102fe",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.014822088,
       0.008747211,
@@ -12313,7 +12313,7 @@
   },
   "chat_with_context": {
     "hash": "250b76675b26419923f8daed59f1168b6e52606ac7ffab3a1e33fb87c42add4d",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0127873635,
       0.020472554,
@@ -15391,7 +15391,7 @@
   },
   "control_android_device": {
     "hash": "2e5c33f9938c190280a43911ed8a585798080f93fe1cd55a8a08d3af1388c232",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.012517507,
       -0.007523114,
@@ -18469,7 +18469,7 @@
   },
   "create_cron_job": {
     "hash": "ecfb121bf79c3820d6608174108a8d8b811060c2fb2a6e8b46efa5721dd212ef",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.0038309442,
       0.024499414,
@@ -21547,7 +21547,7 @@
   },
   "edit_cron_job": {
     "hash": "512ce0a4eb9cc28fc5f17157d24542a5983d953729ea4a13fb85429ddcc13c80",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0069101998,
       -0.005996367,
@@ -24625,7 +24625,7 @@
   },
   "extend_video": {
     "hash": "fabd2522e66407a4b3cc6ada634bef330cc95f6372bd89b18376ba14950adb7b",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.009576219,
       0.018198634,
@@ -27703,7 +27703,7 @@
   },
   "gemini_pro_tts": {
     "hash": "4f87d041e15ab3f80aa5028b6e5f9baea025e09103d3506356353a65604ee2cf",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0021788934,
       -0.002480624,
@@ -30781,7 +30781,7 @@
   },
   "generate_image": {
     "hash": "f566f8986562e60b01e369d0fae785ffc6422534c7957e21f4775e9be742a8f6",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.0029263413,
       0.01606899,
@@ -33859,7 +33859,7 @@
   },
   "generate_music": {
     "hash": "b8ab75ec38b226978854a93ca2831ae9b9263f28652c91bc797f92535b08f6d7",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0019173071,
       -0.0031867889,
@@ -36937,7 +36937,7 @@
   },
   "generate_video": {
     "hash": "ce1385951be0ebfe0ec9cd81bda7bb72d82eb6d0359f212c5cc3357ba03cb695",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.00077148894,
       0.017103512,
@@ -40015,7 +40015,7 @@
   },
   "get_context": {
     "hash": "bc15aeee60a85d0ef43f2c92a60077fbbb737fcf2149fb382072750631823fb2",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.02011573,
       0.019564932,
@@ -43093,7 +43093,7 @@
   },
   "get_current_operator": {
     "hash": "9140bbc49f6b9c145f7024eabea8bc3576430224941b210fbeb9c3db37f77e93",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.017914474,
       -0.013276369,
@@ -46171,7 +46171,7 @@
   },
   "get_current_time": {
     "hash": "c79edc24abc31a392ea5842ce5eb13d658b16a09412ec00f98e93fee22405230",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.046779558,
       -0.010013838,
@@ -49249,7 +49249,7 @@
   },
   "get_index_stats": {
     "hash": "0ef11d05ccebea91b563acc1127b513a370514bf24e5f8ffd1c6e5b1cca805b3",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.02706364,
       -0.0078624,
@@ -52327,7 +52327,7 @@
   },
   "get_media": {
     "hash": "e027f0dc4940535daef713cbad6cccd8387739d5c85647b80b041c371ad6264a",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.023451064,
       0.008314832,
@@ -55405,7 +55405,7 @@
   },
   "get_music_status": {
     "hash": "fe5890641b79d1e11823635e1d99dbdfd6c71c4392290ab1d9c755a245b070ce",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.0030770167,
       0.01758212,
@@ -58483,7 +58483,7 @@
   },
   "get_snapshot": {
     "hash": "9eb723e0c24564157b6b8a554f40b1cdf1d3ecc1e97800aeeba354436c837fa9",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.019478979,
       0.016852258,
@@ -61561,7 +61561,7 @@
   },
   "get_task_status": {
     "hash": "6a93583968591d5c9859fc74c225a8485b944c9c722c2c153eb1138907c79b08",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.017621523,
       0.013402432,
@@ -64639,7 +64639,7 @@
   },
   "gmail_labels": {
     "hash": "a21a9c2cfeda39625159d6c5ead99ca40cd5ae0b5aac860e8e43029af3d1032e",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.011776508,
       -0.011360615,
@@ -67717,7 +67717,7 @@
   },
   "gmail_read": {
     "hash": "66d1d8172524318cad6867c69dcaaf1d1d56f446c0ebb2559da5267d04bb0a42",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0028862436,
       -0.004240012,
@@ -70795,7 +70795,7 @@
   },
   "gmail_reply": {
     "hash": "33ad24ebe5efe1d5aa8a6ff9c59c6b8d82f7b896d394907e4b48f7d1d975c0e3",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.020528616,
       0.01050299,
@@ -73873,7 +73873,7 @@
   },
   "gmail_search": {
     "hash": "1bd4e13713349439ef28f08e88d40b33035ac3a8ee621318b56a21abd3121610",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.019807026,
       0.014449518,
@@ -76951,7 +76951,7 @@
   },
   "gmail_send": {
     "hash": "158bed09649d520c1ba69f864b81e7962becc70f176eb898fc4bae2654d102ca",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0056591234,
       0.018096821,
@@ -80029,7 +80029,7 @@
   },
   "list_devices": {
     "hash": "09af9093b555ce3a57449ae6d799684a8d2e625131dd48a661320dc305ea2796",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.006646625,
       -0.009581989,
@@ -83107,7 +83107,7 @@
   },
   "list_media": {
     "hash": "c865fb3472c36346f07960c62c65d151c6bafc7c442c0a394b975ed5d4cffb3d",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.017830519,
       0.026482077,
@@ -86185,7 +86185,7 @@
   },
   "list_operators": {
     "hash": "8f5c3f61fad34dc9e3a02c4d025559e50d5bade345949f7bf88f64860f96d396",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.030855792,
       0.0020046725,
@@ -89263,7 +89263,7 @@
   },
   "list_recent_snapshots": {
     "hash": "a12049bd6a3d875919b7d672280eefb1b8ee4351ec215c6634936705a9b23c1e",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.013403824,
       0.033612113,
@@ -92341,7 +92341,7 @@
   },
   "list_tts_voices": {
     "hash": "0d10c647326ea9c1b962a37c017ec12bb105dd7f5048e780158c4b97f9049f88",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.009642117,
       -0.0012589116,
@@ -95419,7 +95419,7 @@
   },
   "make_phone_call": {
     "hash": "e0e2eadee66b2f7956b916dd43796c149d3796607e2e860d524f2219143d1775",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.016086677,
       -0.009962662,
@@ -98497,7 +98497,7 @@
   },
   "make_voice_call": {
     "hash": "ce06aaa7d42c709f06d7f1bfd6ce254021813ebcea8c7832db6cb3691e8be0ce",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.011798889,
       0.0054653664,
@@ -101575,7 +101575,7 @@
   },
   "mint_snapshot": {
     "hash": "6d92d955217c547eab8a824440bb89a62e46f12a545e3171db6ba5a869b56e91",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.01881317,
       0.02713603,
@@ -104653,7 +104653,7 @@
   },
   "refresh_index": {
     "hash": "5cfb0058eec3854257fc2b38acea74328ce3aca83801229d0ccd387d51d8df50",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.03352057,
       0.018808646,
@@ -107731,7 +107731,7 @@
   },
   "roll_dice": {
     "hash": "c91e1184fb5f7f9c16f58c69c7c0aa82fce923eb97acceeb03cd69c660113fbe",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0049103196,
       -0.018621068,
@@ -110809,7 +110809,7 @@
   },
   "save_contact": {
     "hash": "5bf59eaad5166c86cbd899bd186f28ee758c1b6b8a9c098a025f35d894941716",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.016356107,
       0.0058686603,
@@ -113887,7 +113887,7 @@
   },
   "search_contacts": {
     "hash": "961b737824d9ea5b67f124fd0b58e2a3ff7d5d96b14c995c5b88abc79467f961",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.025909897,
       -0.006516813,
@@ -116965,7 +116965,7 @@
   },
   "search_cron_jobs": {
     "hash": "6147ac14be3bd10ef4c9667088839fb1d04263f3aa5411ad9e6bd29702e03e23",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.02079092,
       0.017719783,
@@ -120043,7 +120043,7 @@
   },
   "search_media": {
     "hash": "11dd1a137ab66797759c34e82f39544523bd027e5236b3a5d412abd95d832cc4",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.026533483,
       -0.00019673762,
@@ -123121,7 +123121,7 @@
   },
   "search_snapshots": {
     "hash": "a9cbf86dbc098ee7c1d95e3aa670e3eb39a663c73d4cf8ced3a27a293d5920e1",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.021300478,
       0.019496158,
@@ -126199,7 +126199,7 @@
   },
   "seek_snapshot_direct": {
     "hash": "045f23a280247c8c279ca4ca30e1e0822a6f14d9b576be1271465e55c165c178",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.005112307,
       -0.0029335099,
@@ -129277,7 +129277,7 @@
   },
   "send_sms": {
     "hash": "1bff36d5778755b7d5f9f46320f286364b2d601514e24d09b69341cdf09f4b7b",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0131911915,
       0.014292821,
@@ -132355,7 +132355,7 @@
   },
   "speech_to_text": {
     "hash": "92beeb108ed1fbe49d13e3fbff867fb0b31666d153b7fb5e1c764269e1bda4fb",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.009599949,
       -0.008786892,
@@ -135433,7 +135433,7 @@
   },
   "text_to_speech": {
     "hash": "4895f9865e536a2ea8d559bc0af8dbed5b123fee4958c1635a6ba629df10eb29",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.009774028,
       -0.014268594,
@@ -138511,7 +138511,7 @@
   },
   "toolvault": {
     "hash": "5d752ece064a6485fa6006666c824a2aed504b45db4db5394c8237494accdf54",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.025932347,
       -0.007466765,
@@ -141589,7 +141589,7 @@
   },
   "use_computer": {
     "hash": "b959ee0528f254337066b575d04ee1eb9f34758be23f7175bf92cd8bb65243a4",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       0.004361067,
       -0.004746314,
@@ -144667,7 +144667,7 @@
   },
   "web_fetch": {
     "hash": "31289d8fcc92f48ab501c5cb9e60c462f70f2044e5e863dc60ea3ff866f957e9",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.004984655,
       -0.00034829468,
@@ -147745,7 +147745,7 @@
   },
   "web_search": {
     "hash": "051e571a4d9b10efb6a9ed40ae3e68750e175998f1c68936a8f1d6ed94e47ef9",
-    "model": "models/gemini-embedding-001",
+    "model": "gemini-embedding-001",
     "vector": [
       -0.0125837885,
       -0.010322067,
