@@ -46,6 +46,16 @@ _GEMINI_TASK_TYPES = {"document": "retrieval_document", "query": "retrieval_quer
 # deadline scope) — without it a hung embed pins a worker forever.
 GEMINI_EMBED_TIMEOUT_S = 60.0
 
+# Ollama runs models on local CPU; a cold large model (e.g. Qwen3-8B, ~4.7GB)
+# loading off disk AND embedding a batch of 8 full documents is LEGITIMATELY
+# slow — measured ~51s warm, longer cold/under memory contention. Unlike a
+# cloud API (where a long read means a hung connection), a slow local read is
+# the model working. A 120s cap timed out the first cold 8B batch and the
+# disconnect left Ollama still computing, so every retry hit a busy daemon —
+# the whole 4-attempt envelope failed. Read cap is generous; connect stays
+# short so a genuinely dead daemon still fails fast.
+OLLAMA_READ_TIMEOUT_S = 600.0
+
 
 def _truncate(text: str) -> str:
     if len(text) > EMBEDDING_MAX_CHARS:
@@ -147,7 +157,7 @@ class OpenAIProvider(_BaseProvider):
 
 class OllamaProvider(_BaseProvider):
     # local CPU embeds of large batches are slow; connects should fail fast
-    TIMEOUT = httpx.Timeout(120.0, connect=5.0)
+    TIMEOUT = httpx.Timeout(OLLAMA_READ_TIMEOUT_S, connect=5.0)
 
     def __init__(self, slug, entry):
         super().__init__(slug, entry)

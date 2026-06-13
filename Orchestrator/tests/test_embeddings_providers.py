@@ -190,6 +190,14 @@ async def test_ollama_keep_alive_passthrough():
     assert seen[0]["json"]["keep_alive"] == EMBEDDING_MODELS[OLLAMA_SLUG]["keep_alive"]
 
 
+def test_ollama_read_timeout_is_generous_for_local_cpu_inference():
+    # Ratchet: a cold Qwen3-8B batch-of-8 on CPU measured >120s and timed out
+    # the whole retry envelope. The read cap must stay generous so legitimate
+    # slow local inference completes; connect stays short to catch a dead daemon.
+    assert OllamaProvider.TIMEOUT.read >= 300.0
+    assert OllamaProvider.TIMEOUT.connect <= 10.0
+
+
 @pytest.mark.asyncio
 async def test_ollama_keep_alive_omitted_when_none():
     entry = {
