@@ -41,9 +41,12 @@ from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
     META_FILE,
     get_active_slug,
+    get_keep_alive,
     get_store,
     list_stores,
+    set_keep_alive,
 )
+from Orchestrator.embeddings.store import is_warm as store_is_warm
 from Orchestrator.embeddings.watcher import run_health_check
 
 VALIDATE_TIMEOUT_S = 15.0  # wizard-click probe cap; see review note in /validate
@@ -170,6 +173,9 @@ def embeddings_status():
     for slug, entry in EMBEDDING_MODELS.items():
         store_exists = (base / slug / META_FILE).is_file()
         ready, blockers = _model_preflight(entry, ollama_state)
+        # keep_alive toggle is local-only (Ollama); null for cloud models
+        is_local = entry["provider"] == "ollama"
+        keep_alive = get_keep_alive(slug, base_dir=base) if is_local else None
         models.append({
             "slug": slug,
             "label": entry["label"],
@@ -185,6 +191,8 @@ def embeddings_status():
             ),
             "ready": ready,
             "blockers": blockers,
+            "keep_alive": keep_alive,
+            "warm": store_is_warm(keep_alive) if is_local else None,
         })
 
     return {
@@ -298,3 +306,58 @@ async def embeddings_health_check():
     this returns, so a following GET /embeddings/status reflects it.
     """
     return await run_health_check()
+
+
+# Strong ref so a fire-and-forget warm-up task isn't GC'd mid-load (the
+# weak-task-ref scar shared with migrate/watcher/ollama pull).
+_WARMUP_TASK = None
+
+
+def _log_warmup_outcome(task):
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(f"[EMBEDDINGS] keep_alive warm-up embed failed (non-fatal): {exc}")
+
+
+async def _warmup_model(slug: str):
+    # One tiny embed to force Ollama to load the model now, so 'warm' is true
+    # immediately rather than on the next mint. Best-effort: a failure here
+    # never affects the toggle (the keep_alive override is already written).
+    try:
+        await get_provider(slug).embed(["warmup"], "document")
+    except Exception as e:  # noqa: BLE001 — best-effort, logged not raised
+        print(f"[EMBEDDINGS] keep_alive warm-up for {slug!r} failed (non-fatal): {e}")
+
+
+class KeepAliveRequest(BaseModel):
+    slug: str   # REGISTRY SLUG (local/Ollama model)
+    warm: bool  # True = pin resident in RAM; False = unload when idle
+
+
+@router.post("/keep_alive")
+async def embeddings_keep_alive(req: KeepAliveRequest):
+    """Set a LOCAL model's keep_alive policy (the wizard's warm/cold toggle).
+
+    warm=True pins the model in RAM for instant embeds (costs ram_gb); warm=False
+    frees the RAM and reloads on demand. 404 unknown slug, 400 for a cloud model
+    (no keep_alive). On warm=True a best-effort background warm-up embed loads
+    the model now; the override itself takes effect on the next embed regardless.
+    """
+    entry = EMBEDDING_MODELS.get(req.slug)
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown embedding model slug: {req.slug!r}"
+        )
+    if entry["provider"] != "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.slug!r} is a cloud model; keep_alive is Ollama-only",
+        )
+    value = set_keep_alive(req.slug, req.warm)
+    if req.warm:
+        global _WARMUP_TASK
+        _WARMUP_TASK = asyncio.create_task(_warmup_model(req.slug))
+        _WARMUP_TASK.add_done_callback(_log_warmup_outcome)
+    return {"slug": req.slug, "warm": req.warm, "keep_alive": value}

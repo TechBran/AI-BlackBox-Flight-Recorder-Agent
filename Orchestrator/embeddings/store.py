@@ -342,3 +342,59 @@ def set_active_slug(slug: str, base_dir=None) -> None:
     base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
     base.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(base / ACTIVE_FILE, {"active": slug})
+
+
+# ── Per-box keep_alive override (local Ollama models) ────────────────────────
+# How long Ollama keeps a model resident after the last embed. WARM pins it in
+# RAM for instant embeds; COLD frees the RAM and reloads on demand (the first
+# embed after idle pays the cold-load cost). The registry ships a conservative
+# default per model (small boxes can't afford to pin a 6GB model); this is the
+# per-box override the wizard toggle writes, stored as runtime state in Manifest
+# (NOT config.ini, which code never rewrites). Only meaningful for ollama models.
+KEEP_ALIVE_FILE = "keep_alive.json"
+KEEP_ALIVE_WARM = "-1m"   # negative duration = stay resident indefinitely
+KEEP_ALIVE_COLD = "5m"    # unload 5 minutes after the last embed
+
+
+def get_keep_alive(slug: str, base_dir=None, fallback=None) -> "str | None":
+    """Effective keep_alive for slug: per-box override, else the registry
+    default, else `fallback` (for synthetic entries not in the registry)."""
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    try:
+        overrides = json.loads((base / KEEP_ALIVE_FILE).read_text(encoding="utf-8"))
+        if isinstance(overrides, dict) and slug in overrides:
+            return overrides[slug]
+    except (FileNotFoundError, NotADirectoryError, json.JSONDecodeError):
+        pass
+    entry = EMBEDDING_MODELS.get(slug)
+    if entry is not None:
+        return entry.get("keep_alive")
+    return fallback
+
+
+def set_keep_alive(slug: str, warm: bool, base_dir=None) -> str:
+    """Write the per-box keep_alive override for a LOCAL model; returns the
+    value written. WARM → resident forever; cold → idle-unload."""
+    entry = EMBEDDING_MODELS.get(slug)
+    if entry is None:
+        raise ValueError(f"unknown embedding model slug {slug!r}")
+    if entry["provider"] != "ollama":
+        raise ValueError(f"{slug!r} is not a local model; keep_alive is Ollama-only")
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / KEEP_ALIVE_FILE
+    try:
+        overrides = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(overrides, dict):
+            overrides = {}
+    except (FileNotFoundError, NotADirectoryError, json.JSONDecodeError):
+        overrides = {}
+    value = KEEP_ALIVE_WARM if warm else KEEP_ALIVE_COLD
+    overrides[slug] = value
+    _atomic_write_json(path, overrides)
+    return value
+
+
+def is_warm(value) -> bool:
+    """True when a keep_alive value means 'stay resident' (negative duration)."""
+    return isinstance(value, str) and value.strip().startswith("-")

@@ -53,6 +53,7 @@ let validation = null;    // /embeddings/validate result for selectedSlug
 let validating = false;   // probe in flight
 let migrating = false;    // migrate POST in flight (button debounce)
 let pulling = false;      // pull POST in flight (button debounce)
+let keepAliveBusy = null; // slug whose keep_alive toggle POST is in flight
 let cancelClicked = false; // local echo until job.cancel_requested arrives
 let pollTimer = null;
 let etaSamples = [];      // [{t(ms), done}] for the rate-based ETA
@@ -352,7 +353,37 @@ function renderCard(m) {
             ${costRow}
             ${freshnessHtml(m)}
             ${blockersHtml}
+            ${warmToggleHtml(m)}
             <div class="ob-cli-agent-actions">${cardActionsHtml(m, isActive, isSelected)}</div>
+        </div>
+    `;
+}
+
+// Warm/cold keep_alive toggle — local (Ollama) models only, once pulled.
+// WARM pins the model in RAM for instant embeddings; COLD frees the RAM and
+// reloads on demand (the first snapshot after idle is slower). Backed by
+// POST /embeddings/keep_alive; status carries m.warm (bool) / m.keep_alive.
+function warmToggleHtml(m) {
+    if (m.privacy !== "local" || m.warm === null || m.warm === undefined) return "";
+    // Only offer warm/cold when the model can actually be loaded: pulled,
+    // daemon up, RAM sufficient (m.ready), or it's the live active model.
+    if (!m.ready && m.slug !== status.active) return "";
+    const on = m.warm === true;
+    const busy = keepAliveBusy === m.slug;
+    return `
+        <div class="ob-emb-warmrow">
+            <button type="button" class="ob-emb-warm-toggle" data-slug="${escapeHtml(m.slug)}"
+                    role="switch" aria-checked="${on ? "true" : "false"}"
+                    aria-label="Keep ${escapeHtml(m.label)} loaded in RAM"
+                    ${busy ? "disabled" : ""}>
+                <span class="ob-emb-warm-track ${on ? "ob-emb-warm-on" : ""}">
+                    <span class="ob-emb-warm-knob"></span>
+                </span>
+                <span class="ob-emb-warm-name">Keep loaded (warm)${busy ? "&hellip;" : ""}</span>
+            </button>
+            <p class="ob-emb-warm-help">${on
+                ? `Resident in RAM (&approx;${escapeHtml(fmtNum(m.ram_gb))} GB) &mdash; every snapshot embeds instantly.`
+                : `Unloaded when idle &mdash; frees &approx;${escapeHtml(fmtNum(m.ram_gb))} GB, but the first snapshot after a quiet spell reloads the model and takes longer. Turn on if you have the RAM to spare.`}</p>
         </div>
     `;
 }
@@ -464,6 +495,36 @@ function wireCardActions(grid) {
             startPull(selectedSlug);
         });
     }
+    // keep_alive toggles can appear on multiple cards → wire each by data-slug.
+    grid.querySelectorAll(".ob-emb-warm-toggle").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation(); // card click would re-select
+            setKeepAlive(btn.dataset.slug, btn.getAttribute("aria-checked") !== "true");
+        });
+    });
+}
+
+// ── keep_alive (warm/cold) toggle ────────────────────────────────
+
+async function setKeepAlive(slug, warm) {
+    if (keepAliveBusy || !slug) return;
+    keepAliveBusy = slug;
+    renderGrid();
+    try {
+        const r = await fetch("/embeddings/keep_alive", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ slug, warm }),
+        });
+        if (!r.ok) {
+            showHint(`Couldn't change the warm/cold setting: ${await safeDetail(r)}`, true);
+        }
+    } catch (e) {
+        showHint(`Network error changing warm/cold: ${e.message}`, true);
+    }
+    keepAliveBusy = null;
+    await refreshStatus(); // reflect the new warm state from the server
+    renderGrid();
 }
 
 function choose(slug) {

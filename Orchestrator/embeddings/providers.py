@@ -168,7 +168,13 @@ class OllamaProvider(_BaseProvider):
         if purpose == "query" and instruction is not None:
             texts = [instruction + t for t in texts]
         payload = {"model": self.model_id, "input": texts}
-        keep_alive = self.entry.get("keep_alive")
+        # Effective keep_alive = per-box override (wizard toggle) → registry
+        # default → this entry's value (synthetic test entries). Read fresh per
+        # call so a live toggle takes effect on the next embed without a restart.
+        from Orchestrator.embeddings import store  # lazy: avoid import cycle
+        keep_alive = store.get_keep_alive(
+            self.slug, fallback=self.entry.get("keep_alive")
+        )
         if keep_alive is not None:  # omit the key entirely when None
             payload["keep_alive"] = keep_alive
         async with httpx.AsyncClient(

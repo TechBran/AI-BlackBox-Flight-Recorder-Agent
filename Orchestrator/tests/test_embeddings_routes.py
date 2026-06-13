@@ -28,6 +28,7 @@ STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama"}
 MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
     "quality_note", "store_exists", "missing", "ready", "blockers",
+    "keep_alive", "warm",
 }
 STORE_KEYS = {"slug", "dims", "count", "missing", "last_updated"}
 

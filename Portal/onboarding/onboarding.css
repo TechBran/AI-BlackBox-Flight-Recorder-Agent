@@ -2714,3 +2714,52 @@ body::after {
     padding: 0.45rem 1rem;
     font-size: 0.9em;
 }
+
+/* keep_alive warm/cold toggle (local model cards) */
+.ob-emb-warmrow {
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ob-emb-warm-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+}
+.ob-emb-warm-toggle:disabled { cursor: progress; opacity: 0.6; }
+.ob-emb-warm-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 18px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.18);
+    transition: background 0.18s ease;
+}
+.ob-emb-warm-track.ob-emb-warm-on {
+    background: rgba(120, 200, 140, 0.75);
+}
+.ob-emb-warm-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.18s ease;
+}
+.ob-emb-warm-on .ob-emb-warm-knob { transform: translateX(16px); }
+.ob-emb-warm-name { font-size: 0.9em; font-weight: 500; }
+.ob-emb-warm-help {
+    margin: 0.35rem 0 0;
+    font-size: 0.82em;
+    line-height: 1.35;
+    opacity: 0.72;
+}
