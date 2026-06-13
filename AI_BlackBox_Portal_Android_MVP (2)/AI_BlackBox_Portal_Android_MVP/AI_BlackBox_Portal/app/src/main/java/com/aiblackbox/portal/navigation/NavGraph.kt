@@ -33,6 +33,7 @@ import com.aiblackbox.portal.ui.telephony.TelephonyScreen
 import com.aiblackbox.portal.ui.sms.SmsInboxScreen
 import com.aiblackbox.portal.ui.contacts.ContactsScreen
 import com.aiblackbox.portal.ui.voice.VoiceScreen
+import com.aiblackbox.portal.ui.voicelab.VoiceLabScreen
 import com.aiblackbox.portal.ui.updates.UpdatesScreen
 
 object Routes {
@@ -56,6 +57,7 @@ object Routes {
     const val AGENT = "agent"
     const val GEMINI_AGENT = "gemini_agent"
     const val VOICE = "voice"
+    const val VOICE_LAB = "voice_lab"
     const val SMS_INBOX = "sms_inbox"
     const val CONTACTS = "contacts"
     const val UPDATES = "updates"
@@ -201,6 +203,7 @@ fun BlackBoxNavGraph(
             )
         }
         composable(Routes.VOICE) { VoiceScreen(origin = origin) }
+        composable(Routes.VOICE_LAB) { VoiceLabScreen(origin = origin) }
         composable(Routes.SMS_INBOX) { SmsInboxScreen(origin = origin, operator = operator) }
         composable(Routes.CONTACTS) { ContactsScreen(origin = origin, operator = operator) }
         composable(Routes.UPDATES) { UpdatesScreen(origin = origin) }
