@@ -1636,6 +1636,162 @@ async def generate_elevenlabs_music_async(body: dict = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/generate/elevenlabs_sound_effect")
+async def generate_elevenlabs_sound_effect(body: dict = Body(...)):
+    """Generate a sound effect from a text description (ElevenLabs sound-generation).
+
+    SYNCHRONOUS — generation takes only seconds, so this returns the saved audio
+    URL directly (no task_id). Body: ``text`` (required), optional
+    ``duration_seconds`` (0.1-30), ``prompt_influence`` (0-1), ``loop`` (seamless
+    ambience), ``operator``. Saves the mp3 to uploads + indexes it for media tools.
+    """
+    from Orchestrator.elevenlabs import sfx as el_sfx
+    from Orchestrator.media_index import add_media_entry
+    from Orchestrator.tasks import generate_prompt_slug
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="`text` is required.")
+
+    try:
+        mp3_bytes = el_sfx.generate(
+            text,
+            duration_seconds=body.get("duration_seconds"),
+            prompt_influence=body.get("prompt_influence"),
+            loop=bool(body.get("loop", False)),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: Failed to generate ElevenLabs sound effect: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    slug = generate_prompt_slug(text)
+    filename = f"{slug}_{uuid.uuid4().hex}_sfx.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(mp3_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[SFX] Saved ElevenLabs sound effect: {filename} ({len(mp3_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt=text,
+        filename=filename,
+        file_size=len(mp3_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "sound_effect",
+            "duration_seconds": body.get("duration_seconds"),
+            "loop": bool(body.get("loop", False)),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(mp3_bytes)}
+
+
+@app.post("/elevenlabs/voice-changer")
+async def elevenlabs_voice_changer(body: dict = Body(...)):
+    """Re-voice an existing recording into a target ElevenLabs voice (speech-to-speech).
+
+    SYNCHRONOUS. Body: ``audio_path`` (required, a local/session file),
+    ``target_voice`` (required — accepts ``elevenlabs:<id>`` or a raw voice id),
+    optional ``output_format``, ``operator``. The original delivery/emotion is
+    preserved. Saves the result to uploads + indexes it for media tools.
+    """
+    from Orchestrator.elevenlabs import transform as el_transform
+    from Orchestrator.media_index import add_media_entry
+
+    audio_path = (body.get("audio_path") or "").strip()
+    target_voice = (body.get("target_voice") or "").strip()
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="`audio_path` is required.")
+    if not target_voice:
+        raise HTTPException(status_code=400, detail="`target_voice` is required.")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+
+    try:
+        audio_bytes = el_transform.change_voice(
+            audio_path,
+            target_voice,
+            output_format=body.get("output_format"),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: ElevenLabs voice changer failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    filename = f"voice_changed_{uuid.uuid4().hex}.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(audio_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[VOICE-CHANGER] Saved: {filename} ({len(audio_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt=f"voice-changed -> {target_voice}",
+        filename=filename,
+        file_size=len(audio_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "voice_changer",
+            "target_voice": target_voice,
+            "source_audio": os.path.basename(audio_path),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(audio_bytes)}
+
+
+@app.post("/elevenlabs/isolate")
+async def elevenlabs_isolate(body: dict = Body(...)):
+    """Strip background noise from a recording, isolating the voice (audio-isolation).
+
+    SYNCHRONOUS. Body: ``audio_path`` (required, a local/session file),
+    ``operator`` (optional). Saves the cleaned audio to uploads + indexes it.
+    """
+    from Orchestrator.elevenlabs import transform as el_transform
+    from Orchestrator.media_index import add_media_entry
+
+    audio_path = (body.get("audio_path") or "").strip()
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="`audio_path` is required.")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+
+    try:
+        audio_bytes = el_transform.isolate(audio_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: ElevenLabs voice isolation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    filename = f"voice_isolated_{uuid.uuid4().hex}.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(audio_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[ISOLATE] Saved: {filename} ({len(audio_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt="voice-isolated (background noise removed)",
+        filename=filename,
+        file_size=len(audio_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "voice_isolator",
+            "source_audio": os.path.basename(audio_path),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(audio_bytes)}
+
+
 @app.post("/generate/gemini_tts")  # Note: renamed from /generate/gemini-tts
 async def generate_gemini_tts_async(inp: GeminiProTTSIn):
     """Queue Gemini Pro TTS generation"""

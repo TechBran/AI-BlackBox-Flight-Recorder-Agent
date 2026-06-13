@@ -1,0 +1,36 @@
+{
+  "name": "elevenlabs_sound_effects",
+  "description": "Generate a sound effect (0.1-30s) from a text description using ElevenLabs - e.g. 'rain on a tin roof', 'sci-fi door whoosh'. Set loop=true for seamless looping ambience (rain, engine hum).",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text description of the sound effect to generate, e.g. 'rain on a tin roof', 'sci-fi door whoosh', 'distant thunderclap'."
+      },
+      "duration_seconds": {
+        "type": "number",
+        "description": "Desired length in seconds (0.1-30). Optional - the model picks a fitting length when omitted."
+      },
+      "loop": {
+        "type": "boolean",
+        "description": "Produce a seamlessly looping clip for continuous ambience (rain, engine hum). Default false."
+      },
+      "prompt_influence": {
+        "type": "number",
+        "description": "How strictly to follow the prompt vs. add creative variation (0-1). Higher = closer to the prompt. Optional."
+      }
+    },
+    "required": [
+      "text"
+    ]
+  },
+  "example": "elevenlabs_sound_effects(text=\"heavy rain on a tin roof\", duration_seconds=10, loop=true)"
+}
