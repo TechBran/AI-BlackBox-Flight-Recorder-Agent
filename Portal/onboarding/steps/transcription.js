@@ -32,11 +32,18 @@
 const PROVIDERS = [
     {
         id: "openai",
+        vendor: "OpenAI",
         needsHint: "Add your OpenAI API key in the Keys step.",
     },
     {
         id: "google",
+        vendor: "Google Cloud",
         needsHint: "Upload a Google service-account JSON (Keys / Extras).",
+    },
+    {
+        id: "elevenlabs",
+        vendor: "ElevenLabs",
+        needsHint: "Add your ElevenLabs API key in the Keys / Extras step.",
     },
 ];
 
@@ -149,8 +156,11 @@ function renderGrid(container) {
 function renderCard(cat, meta) {
     // cat may be undefined if /stt/catalog failed — degrade gracefully.
     const id = meta.id;
-    const label = (cat && cat.label) || (id === "openai" ? "OpenAI" : "Google");
-    const vendor = id === "openai" ? "OpenAI" : "Google Cloud";
+    // Label + vendor come from the live catalog / per-provider meta — never a
+    // hardcoded openai/google ternary, so a new provider (e.g. elevenlabs)
+    // renders with its own name rather than being mislabeled.
+    const label = (cat && cat.label) || meta.vendor || id;
+    const vendor = meta.vendor || (cat && cat.label) || id;
     const blurb = (cat && cat.blurb) || "";
     const available = !!(cat && cat.available);
     const models = (cat && cat.models) || {};
