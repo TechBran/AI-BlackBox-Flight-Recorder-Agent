@@ -21,8 +21,12 @@ async def _post_stt(base_url, audio_file, content_type, provider, diarize):
     without mocking aiohttp internals. Behavior matches the original inline POST.
     """
     import aiohttp
+    # Read into memory so the file handle closes immediately (passing an open
+    # handle to FormData leaks it until GC).
+    with open(audio_file, 'rb') as fh:
+        file_bytes = fh.read()
     data = aiohttp.FormData()
-    data.add_field('file', open(audio_file, 'rb'),
+    data.add_field('file', file_bytes,
                    filename=audio_file.name, content_type=content_type)
     if provider:
         data.add_field('provider', provider)
