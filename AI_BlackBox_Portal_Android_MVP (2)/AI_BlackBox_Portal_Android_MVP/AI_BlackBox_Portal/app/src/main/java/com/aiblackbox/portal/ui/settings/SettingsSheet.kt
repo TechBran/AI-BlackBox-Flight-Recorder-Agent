@@ -164,6 +164,7 @@ fun SettingsSheet(
                     FullWidthMenuButton("\uD83C\uDFB5 Generate Music") { onNavigate("music_gen"); onDismiss() }
                     FullWidthMenuButton("\uD83D\uDD0A Google SSML") { onNavigate("google_ssml"); onDismiss() }
                     FullWidthMenuButton("\uD83C\uDF99\uFE0F Gemini Pro TTS") { onNavigate("gemini_pro_tts"); onDismiss() }
+                    FullWidthMenuButton("\uD83C\uDF99\uFE0F Voice Lab") { onNavigate("voice_lab"); onDismiss() }
                 }
             }
 
@@ -494,7 +495,15 @@ fun SettingsSheet(
                 ) {
                     Text(if (previewing) "…" else "▶", color = SolidGreen)
                 }
-            } // end Row (voice dropdown + ▶ preview)
+                // Voice Lab affordance — put it where web users (and Brandon) expect
+                // it: beside the voice picker. The screen itself gates on ElevenLabs
+                // status, so always-show is safe. (Menu item at "Generation" stays too.)
+                IconButton(
+                    onClick = { onNavigate("voice_lab"); onDismiss() }
+                ) {
+                    Text("🎙️", color = SolidGreen)
+                }
+            } // end Row (voice dropdown + ▶ preview + Voice Lab)
 
             Spacer(Modifier.height(16.dp))
 

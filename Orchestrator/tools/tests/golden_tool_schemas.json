@@ -295,30 +295,6 @@
       "name": "generate_image"
     },
     {
-      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-      "input_schema": {
-        "properties": {
-          "negativePrompt": {
-            "description": "Things to exclude (e.g., 'vocals, singing')",
-            "type": "string"
-          },
-          "prompt": {
-            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-            "type": "string"
-          },
-          "sampleCount": {
-            "description": "Variations to generate (1-4, default 1)",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "prompt"
-        ],
-        "type": "object"
-      },
-      "name": "generate_music"
-    },
-    {
       "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
       "input_schema": {
         "properties": {
@@ -427,7 +403,7 @@
       "input_schema": {
         "properties": {
           "task_id": {
-            "description": "The task ID returned by generate_image/generate_video/generate_music",
+            "description": "The task ID returned by generate_image/generate_video/lyria_music",
             "type": "string"
           }
         },
@@ -635,13 +611,37 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
       "input_schema": {
         "properties": {},
         "required": [],
         "type": "object"
       },
       "name": "list_tts_voices"
+    },
+    {
+      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+      "input_schema": {
+        "properties": {
+          "negativePrompt": {
+            "description": "Things to exclude (e.g., 'vocals, singing')",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+            "type": "string"
+          },
+          "sampleCount": {
+            "description": "Variations to generate (1-4, default 1)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "lyria_music"
     },
     {
       "description": "DELEGATE a real phone call to a separate AI voice agent via the TG200 cellular gateway. You are NOT making the call yourself \u2014 you are BRIEFING another AI agent who will have a real-time voice conversation on your behalf. Use 'role' to define WHO the agent IS (their persona/character), and 'greeting' for WHAT task to accomplish on this call. Use search_contacts first to find the number.",
@@ -845,36 +845,53 @@
       "name": "search_snapshots"
     },
     {
-      "name": "send_sms",
       "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
       "input_schema": {
-        "type": "object",
         "properties": {
-          "phone_number": {
-            "type": "string",
-            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+          "from_number": {
+            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway.",
+            "type": "string"
           },
           "message": {
-            "type": "string",
-            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
+            "type": "string"
           },
-          "from_number": {
-            "type": "string",
-            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
+          "phone_number": {
+            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
+            "type": "string"
           }
         },
         "required": [
           "phone_number",
           "message"
-        ]
-      }
+        ],
+        "type": "object"
+      },
+      "name": "send_sms"
     },
     {
-      "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+      "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
       "input_schema": {
         "properties": {
           "audio_path": {
             "description": "Path to audio file (local path)",
+            "type": "string"
+          },
+          "diarize": {
+            "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+            "type": "boolean"
+          },
+          "mint": {
+            "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+            "type": "boolean"
+          },
+          "provider": {
+            "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+            "enum": [
+              "openai",
+              "google",
+              "elevenlabs"
+            ],
             "type": "string"
           }
         },
@@ -886,7 +903,7 @@
       "name": "speech_to_text"
     },
     {
-      "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
       "input_schema": {
         "properties": {
           "model": {
@@ -898,7 +915,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
             "type": "string"
           }
         },
@@ -1208,30 +1225,6 @@
           }
         },
         {
-          "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-          "name": "generate_music",
-          "parameters": {
-            "properties": {
-              "negativePrompt": {
-                "description": "Things to exclude (e.g., 'vocals, singing')",
-                "type": "string"
-              },
-              "prompt": {
-                "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-                "type": "string"
-              },
-              "sampleCount": {
-                "description": "Variations to generate (1-4, default 1)",
-                "type": "integer"
-              }
-            },
-            "required": [
-              "prompt"
-            ],
-            "type": "object"
-          }
-        },
-        {
           "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
           "name": "generate_video",
           "parameters": {
@@ -1363,6 +1356,30 @@
               }
             },
             "required": [],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+          "name": "lyria_music",
+          "parameters": {
+            "properties": {
+              "negativePrompt": {
+                "description": "Things to exclude (e.g., 'vocals, singing')",
+                "type": "string"
+              },
+              "prompt": {
+                "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+                "type": "string"
+              },
+              "sampleCount": {
+                "description": "Variations to generate (1-4, default 1)",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
             "type": "object"
           }
         },
@@ -1566,28 +1583,28 @@
           }
         },
         {
-          "name": "send_sms",
           "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+          "name": "send_sms",
           "parameters": {
-            "type": "object",
             "properties": {
-              "phone_number": {
-                "type": "string",
-                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+              "from_number": {
+                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway.",
+                "type": "string"
               },
               "message": {
-                "type": "string",
-                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
+                "type": "string"
               },
-              "from_number": {
-                "type": "string",
-                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
+              "phone_number": {
+                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
+                "type": "string"
               }
             },
             "required": [
               "phone_number",
               "message"
-            ]
+            ],
+            "type": "object"
           }
         },
         {
@@ -1989,30 +2006,6 @@
           }
         },
         {
-          "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-          "name": "generate_music",
-          "parameters": {
-            "properties": {
-              "negativePrompt": {
-                "description": "Things to exclude (e.g., 'vocals, singing')",
-                "type": "string"
-              },
-              "prompt": {
-                "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-                "type": "string"
-              },
-              "sampleCount": {
-                "description": "Variations to generate (1-4, default 1)",
-                "type": "integer"
-              }
-            },
-            "required": [
-              "prompt"
-            ],
-            "type": "object"
-          }
-        },
-        {
           "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
           "name": "generate_video",
           "parameters": {
@@ -2118,7 +2111,7 @@
           "parameters": {
             "properties": {
               "task_id": {
-                "description": "The task ID returned by generate_image/generate_video/generate_music",
+                "description": "The task ID returned by generate_image/generate_video/lyria_music",
                 "type": "string"
               }
             },
@@ -2322,11 +2315,35 @@
           }
         },
         {
-          "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+          "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
           "name": "list_tts_voices",
           "parameters": {
             "properties": {},
             "required": [],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+          "name": "lyria_music",
+          "parameters": {
+            "properties": {
+              "negativePrompt": {
+                "description": "Things to exclude (e.g., 'vocals, singing')",
+                "type": "string"
+              },
+              "prompt": {
+                "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+                "type": "string"
+              },
+              "sampleCount": {
+                "description": "Variations to generate (1-4, default 1)",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
             "type": "object"
           }
         },
@@ -2530,37 +2547,54 @@
           }
         },
         {
-          "name": "send_sms",
           "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+          "name": "send_sms",
           "parameters": {
-            "type": "object",
             "properties": {
-              "phone_number": {
-                "type": "string",
-                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+              "from_number": {
+                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway.",
+                "type": "string"
               },
               "message": {
-                "type": "string",
-                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+                "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
+                "type": "string"
               },
-              "from_number": {
-                "type": "string",
-                "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
+              "phone_number": {
+                "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
+                "type": "string"
               }
             },
             "required": [
               "phone_number",
               "message"
-            ]
+            ],
+            "type": "object"
           }
         },
         {
-          "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+          "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
           "name": "speech_to_text",
           "parameters": {
             "properties": {
               "audio_path": {
                 "description": "Path to audio file (local path)",
+                "type": "string"
+              },
+              "diarize": {
+                "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+                "type": "boolean"
+              },
+              "mint": {
+                "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+                "type": "boolean"
+              },
+              "provider": {
+                "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+                "enum": [
+                  "openai",
+                  "google",
+                  "elevenlabs"
+                ],
                 "type": "string"
               }
             },
@@ -2571,7 +2605,7 @@
           }
         },
         {
-          "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+          "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
           "name": "text_to_speech",
           "parameters": {
             "properties": {
@@ -2584,7 +2618,7 @@
                 "type": "string"
               },
               "voice": {
-                "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+                "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
                 "type": "string"
               }
             },
@@ -2935,30 +2969,6 @@
       "name": "generate_image"
     },
     {
-      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-      "inputSchema": {
-        "properties": {
-          "negativePrompt": {
-            "description": "Things to exclude (e.g., 'vocals, singing')",
-            "type": "string"
-          },
-          "prompt": {
-            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-            "type": "string"
-          },
-          "sampleCount": {
-            "description": "Variations to generate (1-4, default 1)",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "prompt"
-        ],
-        "type": "object"
-      },
-      "name": "generate_music"
-    },
-    {
       "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
       "inputSchema": {
         "properties": {
@@ -3085,7 +3095,7 @@
       "inputSchema": {
         "properties": {
           "task_id": {
-            "description": "The task ID returned by generate_music",
+            "description": "The task ID returned by lyria_music",
             "type": "string"
           }
         },
@@ -3122,7 +3132,7 @@
       "inputSchema": {
         "properties": {
           "task_id": {
-            "description": "The task ID returned by generate_image/generate_video/generate_music",
+            "description": "The task ID returned by generate_image/generate_video/lyria_music",
             "type": "string"
           }
         },
@@ -3315,13 +3325,37 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
       "inputSchema": {
         "properties": {},
         "required": [],
         "type": "object"
       },
       "name": "list_tts_voices"
+    },
+    {
+      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+      "inputSchema": {
+        "properties": {
+          "negativePrompt": {
+            "description": "Things to exclude (e.g., 'vocals, singing')",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+            "type": "string"
+          },
+          "sampleCount": {
+            "description": "Variations to generate (1-4, default 1)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "lyria_music"
     },
     {
       "description": "Create a new snapshot (memory) in the BlackBox via AI processing. Content is sent through /chat for synthesis, then auto-mint captures the result.",
@@ -3400,11 +3434,28 @@
       "name": "seek_snapshot_direct"
     },
     {
-      "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+      "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
       "inputSchema": {
         "properties": {
           "audio_path": {
             "description": "Path to audio file (local path)",
+            "type": "string"
+          },
+          "diarize": {
+            "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+            "type": "boolean"
+          },
+          "mint": {
+            "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+            "type": "boolean"
+          },
+          "provider": {
+            "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+            "enum": [
+              "openai",
+              "google",
+              "elevenlabs"
+            ],
             "type": "string"
           }
         },
@@ -3416,7 +3467,7 @@
       "name": "speech_to_text"
     },
     {
-      "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
       "inputSchema": {
         "properties": {
           "model": {
@@ -3428,7 +3479,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
             "type": "string"
           }
         },
@@ -3746,31 +3797,6 @@
       "type": "function"
     },
     {
-      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-      "name": "generate_music",
-      "parameters": {
-        "properties": {
-          "negativePrompt": {
-            "description": "Things to exclude (e.g., 'vocals, singing')",
-            "type": "string"
-          },
-          "prompt": {
-            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-            "type": "string"
-          },
-          "sampleCount": {
-            "description": "Variations to generate (1-4, default 1)",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "prompt"
-        ],
-        "type": "object"
-      },
-      "type": "function"
-    },
-    {
       "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
       "name": "generate_video",
       "parameters": {
@@ -3912,6 +3938,31 @@
           }
         },
         "required": [],
+        "type": "object"
+      },
+      "type": "function"
+    },
+    {
+      "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+      "name": "lyria_music",
+      "parameters": {
+        "properties": {
+          "negativePrompt": {
+            "description": "Things to exclude (e.g., 'vocals, singing')",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+            "type": "string"
+          },
+          "sampleCount": {
+            "description": "Variations to generate (1-4, default 1)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
         "type": "object"
       },
       "type": "function"
@@ -4125,30 +4176,30 @@
       "type": "function"
     },
     {
-      "type": "function",
-      "name": "send_sms",
       "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+      "name": "send_sms",
       "parameters": {
-        "type": "object",
         "properties": {
-          "phone_number": {
-            "type": "string",
-            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+          "from_number": {
+            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway.",
+            "type": "string"
           },
           "message": {
-            "type": "string",
-            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+            "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
+            "type": "string"
           },
-          "from_number": {
-            "type": "string",
-            "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
+          "phone_number": {
+            "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
+            "type": "string"
           }
         },
         "required": [
           "phone_number",
           "message"
-        ]
-      }
+        ],
+        "type": "object"
+      },
+      "type": "function"
     },
     {
       "description": "Your tool discovery system. Use this to find and retrieve tools from the ToolVault. Actions: 'search' finds tools by what you need to do, 'read' gets the full spec for a specific tool, 'list' shows all available tools by category.",
@@ -4585,33 +4636,6 @@
     },
     {
       "function": {
-        "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
-        "name": "generate_music",
-        "parameters": {
-          "properties": {
-            "negativePrompt": {
-              "description": "Things to exclude (e.g., 'vocals, singing')",
-              "type": "string"
-            },
-            "prompt": {
-              "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
-              "type": "string"
-            },
-            "sampleCount": {
-              "description": "Variations to generate (1-4, default 1)",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "prompt"
-          ],
-          "type": "object"
-        }
-      },
-      "type": "function"
-    },
-    {
-      "function": {
         "description": "Generate videos using Google's Veo 3.1. Supports THREE modes: (1) text-to-video (just prompt), (2) image-to-video (pass image_url to animate an image), (3) video-extension (pass video_url to extend/continue an existing video). Returns a task_id (takes 5-20 minutes).",
         "name": "generate_video",
         "parameters": {
@@ -4733,7 +4757,7 @@
         "parameters": {
           "properties": {
             "task_id": {
-              "description": "The task ID returned by generate_image/generate_video/generate_music",
+              "description": "The task ID returned by generate_image/generate_video/lyria_music",
               "type": "string"
             }
           },
@@ -4967,11 +4991,38 @@
     },
     {
       "function": {
-        "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+        "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
         "name": "list_tts_voices",
         "parameters": {
           "properties": {},
           "required": [],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
+        "name": "lyria_music",
+        "parameters": {
+          "properties": {
+            "negativePrompt": {
+              "description": "Things to exclude (e.g., 'vocals, singing')",
+              "type": "string"
+            },
+            "prompt": {
+              "description": "TRANSLATED description using ONLY: Instruments (piano, guitar, drums, bass, synth, strings, brass, etc.) + Tempo (fast, slow, moderate, driving, laid-back) + Texture (warm, bright, dark, smooth, aggressive, dense, sparse). FORBIDDEN: genre names, style words, artist names.",
+              "type": "string"
+            },
+            "sampleCount": {
+              "description": "Variations to generate (1-4, default 1)",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "prompt"
+          ],
           "type": "object"
         }
       },
@@ -5200,41 +5251,58 @@
       "type": "function"
     },
     {
-      "type": "function",
       "function": {
-        "name": "send_sms",
         "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+        "name": "send_sms",
         "parameters": {
-          "type": "object",
           "properties": {
-            "phone_number": {
-              "type": "string",
-              "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format"
+            "from_number": {
+              "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway.",
+              "type": "string"
             },
             "message": {
-              "type": "string",
-              "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+              "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments).",
+              "type": "string"
             },
-            "from_number": {
-              "type": "string",
-              "description": "Which of your own numbers/SIMs to send from. Omit to use the default gateway."
+            "phone_number": {
+              "description": "Phone number in E.164 format (e.g., +15551234567) or 10-digit US format",
+              "type": "string"
             }
           },
           "required": [
             "phone_number",
             "message"
-          ]
+          ],
+          "type": "object"
         }
-      }
+      },
+      "type": "function"
     },
     {
       "function": {
-        "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+        "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
         "name": "speech_to_text",
         "parameters": {
           "properties": {
             "audio_path": {
               "description": "Path to audio file (local path)",
+              "type": "string"
+            },
+            "diarize": {
+              "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+              "type": "boolean"
+            },
+            "mint": {
+              "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+              "type": "boolean"
+            },
+            "provider": {
+              "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+              "enum": [
+                "openai",
+                "google",
+                "elevenlabs"
+              ],
               "type": "string"
             }
           },
@@ -5248,7 +5316,7 @@
     },
     {
       "function": {
-        "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+        "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
         "name": "text_to_speech",
         "parameters": {
           "properties": {
@@ -5261,7 +5329,7 @@
               "type": "string"
             },
             "voice": {
-              "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+              "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
               "type": "string"
             }
           },

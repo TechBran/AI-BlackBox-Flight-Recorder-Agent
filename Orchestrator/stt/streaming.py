@@ -24,11 +24,23 @@ def map_google_result(text: str, is_final: bool):
     return {"type": "stt_final" if is_final else "stt_delta", "text": text}
 
 
+def map_elevenlabs_message(event: dict):
+    """ElevenLabs Scribe realtime -> uniform client event (or None to ignore).
+    partial_transcript text is CUMULATIVE (verified live), committed is the final."""
+    mt = event.get("message_type")
+    if mt == "partial_transcript":
+        return {"type": "stt_delta", "text": event.get("text", "")}
+    if mt == "committed_transcript":
+        return {"type": "stt_final", "text": event.get("text", "")}
+    return None  # session_started, errors, unknown -> ignore
+
+
 class InterimAccumulator:
     """Normalizes per-provider interim semantics so stt_delta.text is ALWAYS
     cumulative (the full interim transcript so far). OpenAI delta events are
-    incremental and get accumulated; Google interim results are already
-    cumulative and pass through. Both reset the buffer on a final."""
+    incremental and get accumulated; Google interim results and ElevenLabs
+    partial_transcript events are already cumulative and pass through. All
+    reset the buffer on a final."""
 
     def __init__(self):
         self._buf = ""
@@ -50,4 +62,15 @@ class InterimAccumulator:
             self._buf = ""
         else:
             self._buf = m["text"]
+        return m
+
+    def elevenlabs(self, event: dict):
+        m = map_elevenlabs_message(event)
+        if m is None:
+            return None
+        if m["type"] == "stt_delta":
+            self._buf = m["text"]   # cumulative: replace, don't append
+            return m
+        # stt_final
+        self._buf = ""
         return m

@@ -33,6 +33,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,11 +52,13 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.components.GlassCard
+import com.aiblackbox.portal.ui.voice.LabeledDropdown
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -64,6 +70,7 @@ import com.aiblackbox.portal.ui.theme.Neutral100
 import com.aiblackbox.portal.ui.theme.Neutral200
 import com.aiblackbox.portal.ui.theme.Neutral300
 import com.aiblackbox.portal.ui.theme.Neutral500
+import com.aiblackbox.portal.ui.theme.Neutral700
 import com.aiblackbox.portal.ui.theme.PillShape
 import com.aiblackbox.portal.ui.theme.RadiusLg
 import com.aiblackbox.portal.ui.theme.RadiusMd
@@ -126,6 +133,18 @@ private val MUSIC_PRESETS = listOf(
 // Green tint for music info banner (matches Portal's music-gen-info)
 private val MusicGreenTint = Color(0xFF27D980)
 
+/**
+ * Music generation backends. Lyria (Google) = 30s instrumental, restricted
+ * vocabulary. ElevenLabs = up to 5 min, vocals, any genre/style/mood/lyrics.
+ */
+private enum class MusicModel(val id: String, val label: String) {
+    LYRIA("lyria", "Lyria-002 (Google)"),
+    ELEVENLABS("elevenlabs", "ElevenLabs Music")
+}
+
+private val MUSIC_MODEL_OPTIONS: List<Pair<String, String>> =
+    MusicModel.entries.map { it.id to it.label }
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MusicGenScreen(
@@ -134,9 +153,13 @@ fun MusicGenScreen(
     viewModel: GenerationViewModel = viewModel()
 ) {
     val view = LocalView.current
+    var selectedModel by remember { mutableStateOf(MusicModel.LYRIA) }
     var prompt by remember { mutableStateOf("") }
     var negPrompt by remember { mutableStateOf("") }
     var selectedPreset by remember { mutableStateOf<String?>(null) }
+    // ElevenLabs-only params
+    var durationSec by remember { mutableStateOf(30f) }
+    var forceInstrumental by remember { mutableStateOf(false) }
     val state by viewModel.state.collectAsState()
     val resultUrl by viewModel.resultUrl.collectAsState()
     val error by viewModel.error.collectAsState()
@@ -158,82 +181,107 @@ fun MusicGenScreen(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Lyria-002",
+            when (selectedModel) {
+                MusicModel.LYRIA -> "Lyria-002 · 30s instrumental"
+                MusicModel.ELEVENLABS -> "ElevenLabs Music · up to 5 min, vocals"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = Neutral500
         )
         Spacer(Modifier.height(16.dp))
 
-        // Genre Presets card
+        // Model selector
         GlassCard(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(RadiusMd)
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text(
-                    "Genre Presets",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                    color = BbxDim
+            Column(modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 4.dp)) {
+                LabeledDropdown(
+                    label = "Model",
+                    options = MUSIC_MODEL_OPTIONS,
+                    selectedId = selectedModel.id,
+                    onSelect = { id ->
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        selectedModel = MusicModel.entries.firstOrNull { it.id == id } ?: MusicModel.LYRIA
+                    }
                 )
-                Spacer(Modifier.height(10.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    MUSIC_PRESETS.forEach { preset ->
-                        val selected = selectedPreset == preset.key
-                        val interactionSource = remember { MutableInteractionSource() }
-                        val pressed by interactionSource.collectIsPressedAsState()
-                        val chipScale by animateFloatAsState(
-                            targetValue = if (pressed) 0.92f else 1f,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "presetScale"
-                        )
-                        val chipBg by animateColorAsState(
-                            targetValue = if (selected) MusicGreenTint.copy(alpha = 0.15f) else Neutral200,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "presetBg"
-                        )
-                        val chipBorder by animateColorAsState(
-                            targetValue = if (selected) MusicGreenTint.copy(alpha = 0.5f) else Neutral300,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "presetBorder"
-                        )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
 
-                        Box(
-                            modifier = Modifier
-                                .scale(chipScale)
-                                .clip(PillShape)
-                                .background(chipBg)
-                                .border(1.dp, chipBorder, PillShape)
-                                .clickable(
-                                    interactionSource = interactionSource,
-                                    indication = null
-                                ) {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                    if (selected) {
-                                        // Deselect
-                                        selectedPreset = null
-                                    } else {
-                                        selectedPreset = preset.key
-                                        prompt = preset.prompt
-                                    }
-                                }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                preset.label,
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                color = if (selected) MusicGreenTint else Neutral500
+        // Genre Presets card — Lyria only (its prompts are tuned for the
+        // restricted instrument/tempo/texture vocabulary).
+        if (selectedModel == MusicModel.LYRIA) {
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(RadiusMd)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        "Genre Presets",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = BbxDim
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        MUSIC_PRESETS.forEach { preset ->
+                            val selected = selectedPreset == preset.key
+                            val interactionSource = remember { MutableInteractionSource() }
+                            val pressed by interactionSource.collectIsPressedAsState()
+                            val chipScale by animateFloatAsState(
+                                targetValue = if (pressed) 0.92f else 1f,
+                                animationSpec = tween(DurationBase, easing = EaseStandard),
+                                label = "presetScale"
                             )
+                            val chipBg by animateColorAsState(
+                                targetValue = if (selected) MusicGreenTint.copy(alpha = 0.15f) else Neutral200,
+                                animationSpec = tween(DurationBase, easing = EaseStandard),
+                                label = "presetBg"
+                            )
+                            val chipBorder by animateColorAsState(
+                                targetValue = if (selected) MusicGreenTint.copy(alpha = 0.5f) else Neutral300,
+                                animationSpec = tween(DurationBase, easing = EaseStandard),
+                                label = "presetBorder"
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .scale(chipScale)
+                                    .clip(PillShape)
+                                    .background(chipBg)
+                                    .border(1.dp, chipBorder, PillShape)
+                                    .clickable(
+                                        interactionSource = interactionSource,
+                                        indication = null
+                                    ) {
+                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                        if (selected) {
+                                            // Deselect
+                                            selectedPreset = null
+                                        } else {
+                                            selectedPreset = preset.key
+                                            prompt = preset.prompt
+                                        }
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    preset.label,
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                    ),
+                                    color = if (selected) MusicGreenTint else Neutral500
+                                )
+                            }
                         }
                     }
                 }
             }
+            Spacer(Modifier.height(16.dp))
         }
-        Spacer(Modifier.height(16.dp))
 
         // Prompt input
         GlassCard(
@@ -258,7 +306,11 @@ fun MusicGenScreen(
                 ) {
                     if (prompt.isEmpty()) {
                         Text(
-                            "Describe the music you want to create...",
+                            when (selectedModel) {
+                                MusicModel.LYRIA -> "Describe the music you want to create..."
+                                MusicModel.ELEVENLABS ->
+                                    "any genre, style, mood, or lyrics — e.g. 'upbeat synthwave with vocals about flying'"
+                            },
                             color = Neutral500,
                             style = MaterialTheme.typography.bodyLarge
                         )
@@ -278,44 +330,131 @@ fun MusicGenScreen(
                         cursorBrush = SolidColor(BbxAccent)
                     )
                 }
-                Spacer(Modifier.height(14.dp))
 
-                // Negative prompt
-                Text(
-                    "Exclude (optional)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = BbxDim
-                )
-                Spacer(Modifier.height(6.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .clip(RoundedCornerShape(RadiusMd))
-                        .background(Neutral100)
-                        .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
-                        .padding(12.dp)
-                ) {
-                    if (negPrompt.isEmpty()) {
-                        Text(
-                            "vocals, singing...",
-                            color = Neutral500,
-                            style = MaterialTheme.typography.bodyMedium
+                // Negative prompt — Lyria only (ElevenLabs has no restricted
+                // vocabulary, so it has no exclude field).
+                if (selectedModel == MusicModel.LYRIA) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "Exclude (optional)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = BbxDim
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clip(RoundedCornerShape(RadiusMd))
+                            .background(Neutral100)
+                            .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
+                            .padding(12.dp)
+                    ) {
+                        if (negPrompt.isEmpty()) {
+                            Text(
+                                "vocals, singing...",
+                                color = Neutral500,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        BasicTextField(
+                            value = negPrompt,
+                            onValueChange = { negPrompt = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = BbxWhite),
+                            cursorBrush = SolidColor(BbxAccent)
                         )
                     }
-                    BasicTextField(
-                        value = negPrompt,
-                        onValueChange = { negPrompt = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = BbxWhite),
-                        cursorBrush = SolidColor(BbxAccent)
-                    )
                 }
             }
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
 
-        Spacer(Modifier.height(14.dp))
+        // ElevenLabs-only params: duration + instrumental toggle.
+        if (selectedModel == MusicModel.ELEVENLABS) {
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(RadiusMd)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    // Duration slider (3–300s → music_length_ms)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Duration",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                            color = BbxDim
+                        )
+                        Text(
+                            "${durationSec.toInt()}s",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            color = Neutral700
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Slider(
+                        value = durationSec,
+                        onValueChange = { durationSec = it },
+                        valueRange = 3f..300f,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = BbxAccent,
+                            activeTrackColor = BbxAccent,
+                            inactiveTrackColor = Neutral300
+                        )
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("3s", style = MaterialTheme.typography.labelSmall, color = Neutral500)
+                        Text("5 min", style = MaterialTheme.typography.labelSmall, color = Neutral500)
+                    }
+                    Spacer(Modifier.height(14.dp))
+
+                    // Instrumental-only toggle (force_instrumental)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Instrumental only",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                color = BbxDim
+                            )
+                            Text(
+                                "No vocals",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Neutral500
+                            )
+                        }
+                        Switch(
+                            checked = forceInstrumental,
+                            onCheckedChange = {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                forceInstrumental = it
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = BbxWhite,
+                                checkedTrackColor = BbxAccent,
+                                uncheckedThumbColor = Neutral500,
+                                uncheckedTrackColor = Neutral200
+                            )
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        Spacer(Modifier.height(4.dp))
 
         // Generate button
         val btnInteraction = remember { MutableInteractionSource() }
@@ -343,7 +482,14 @@ fun MusicGenScreen(
                     enabled = btnEnabled
                 ) {
                     view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                    viewModel.generateMusic(prompt, negPrompt)
+                    when (selectedModel) {
+                        MusicModel.LYRIA -> viewModel.generateMusic(prompt, negPrompt)
+                        MusicModel.ELEVENLABS -> viewModel.generateElevenLabsMusic(
+                            prompt = prompt,
+                            musicLengthMs = (durationSec.toInt()) * 1000,
+                            forceInstrumental = forceInstrumental
+                        )
+                    }
                 }
                 .padding(vertical = 14.dp),
             contentAlignment = Alignment.Center
@@ -488,6 +634,8 @@ fun MusicGenScreen(
                                 prompt = ""
                                 negPrompt = ""
                                 selectedPreset = null
+                                durationSec = 30f
+                                forceInstrumental = false
                             }
                             .padding(vertical = 12.dp),
                         contentAlignment = Alignment.Center

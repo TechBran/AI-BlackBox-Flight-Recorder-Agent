@@ -1,6 +1,6 @@
 // Optional integrations step — fourth screen of the onboarding wizard.
 // Gmail OAuth (active) + Google Cloud service-account file (active) +
-// Twilio / ElevenLabs (v1.1 deferred placeholders).
+// ElevenLabs API key (active) + Twilio (v1.1 deferred placeholder).
 // Save & continue is always enabled — every integration here is optional.
 //
 // Rehydration: on mount we fetch /onboarding/current-config + /onboarding/credentials.
@@ -8,6 +8,8 @@
 // we render an "Already configured" Gmail card with a Replace button. If a
 // service-account JSON is in credentials/ + linked via GOOGLE_APPLICATION_CREDENTIALS
 // we render the credential card in its configured state with Replace + Remove.
+// If ELEVENLABS_API_KEY is present (current-config providers.elevenlabs.present)
+// we render the ElevenLabs card in its configured state with a Replace button.
 
 const GMAIL_PROVIDER = {
     id: "gmail",
@@ -26,18 +28,24 @@ const CREDENTIAL_PROVIDER = {
     consoleUrl: "https://console.cloud.google.com/iam-admin/serviceaccounts",
 };
 
+// API-key card (active). Mirrors the Gmail card's validate→save→rehydrate
+// flow, but with a single password input instead of OAuth client id/secret.
+// Validation hits the same /onboarding/validate dispatch (provider:"elevenlabs")
+// which returns detail={tier, credits_remaining, features} so we can tell the
+// customer exactly what their plan unlocks.
+const ELEVENLABS_PROVIDER = {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    description: "Premium voice synthesis — high-fidelity text-to-speech, AI music, sound effects, and voice cloning. Optional: v1 already ships Google + OpenAI TTS.",
+    consoleUrl: "https://elevenlabs.io/app/settings/api-keys",
+};
+
 const PLACEHOLDER_INTEGRATIONS = [
     {
         id: "twilio",
         label: "Twilio",
         description: "Inbound + outbound phone calls and SMS via Twilio webhooks.",
         v1_1_note: "Available in v1.1. v1 uses your TG200 cellular modem for phone + SMS — no setup needed.",
-    },
-    {
-        id: "elevenlabs",
-        label: "ElevenLabs",
-        description: "Premium voice synthesis for text-to-speech in agent voices.",
-        v1_1_note: "Available in v1.1. v1 uses Google + OpenAI TTS for high-quality speech.",
     },
 ];
 
@@ -61,6 +69,7 @@ export async function render(container, { next, back, skip }) {
     }
 
     const gmailCfg = currentConfig?.providers?.gmail || null;
+    const elevenCfg = currentConfig?.providers?.elevenlabs || null;
     // E15 (Brandon 2026-05-17): generate the exact redirect URIs the customer
     // needs to add to their Google OAuth client. We expose both localhost (for
     // when the wizard is accessed locally on the BlackBox) and the tailnet
@@ -91,6 +100,16 @@ export async function render(container, { next, back, skip }) {
             uploading: false,
             error: null,
         },
+        elevenlabs: {
+            api_key: "",
+            status: "idle",
+            result: null,
+            // current-config surfaces ELEVENLABS_API_KEY presence as
+            // providers.elevenlabs.present (redacted last4 only — never the key).
+            wasPresent: !!(elevenCfg && elevenCfg.present),
+            keyLast4: elevenCfg?.last4 || null,
+            replacing: false,
+        },
     };
 
     container.innerHTML = `
@@ -115,6 +134,7 @@ export async function render(container, { next, back, skip }) {
                 <div class="ob-providers" id="ob-integrations">
                     ${renderGmailCardForState(GMAIL_PROVIDER, state)}
                     ${renderCredCard(CREDENTIAL_PROVIDER, state)}
+                    ${renderElevenLabsCardForState(ELEVENLABS_PROVIDER, state)}
                     ${PLACEHOLDER_INTEGRATIONS.map(renderPlaceholderCard).join("")}
                 </div>
                 <div class="ob-cta-row">
@@ -136,6 +156,7 @@ export async function render(container, { next, back, skip }) {
 
     wireGmailCardForState(container, state, GMAIL_PROVIDER);
     wireCredCard(container, state, CREDENTIAL_PROVIDER);
+    wireElevenLabsCardForState(container, state, ELEVENLABS_PROVIDER);
     wireSave(container, state, next);
     document.getElementById("ob-extras-back").addEventListener("click", back);
     document.getElementById("ob-extras-skip").addEventListener("click", skip);
@@ -301,6 +322,229 @@ function renderPlaceholderCard(p) {
             <p class="ob-integration-deferred-note">${escapeHtml(p.v1_1_note)}</p>
         </div>
     `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ElevenLabs API-key card (active) — mirrors the Gmail card's dispatcher /
+// configured / input / wire / validate quartet, with a single password input.
+// Validate hits /onboarding/validate (provider:"elevenlabs"); the actual save
+// is deferred to the wizard's "Save & continue" (wireSave) just like Gmail.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Dispatcher: configured-state card (already in .env) or input-state card.
+function renderElevenLabsCardForState(p, state) {
+    const s = state.elevenlabs;
+    if (s.wasPresent && !s.replacing) {
+        return renderElevenLabsCardConfigured(p, s);
+    }
+    return renderElevenLabsCard(p, s);
+}
+
+// Configured-state card: shown when ELEVENLABS_API_KEY is already in .env.
+// Replace swaps to the input form (see startReplacingElevenLabs).
+function renderElevenLabsCardConfigured(p, s) {
+    const keyPreview = formatSecretPreview(s.keyLast4);
+    return `
+        <div class="ob-provider-card ob-integration-card ob-provider-configured" data-provider="${p.id}">
+            <div class="ob-provider-header">
+                <div class="ob-provider-label">${escapeHtml(p.label)}</div>
+                <a class="ob-provider-link" href="${escapeHtml(p.consoleUrl)}" target="_blank" rel="noopener">
+                    ElevenLabs API keys <span aria-hidden="true">↗</span>
+                </a>
+            </div>
+            <p class="ob-integration-desc">${escapeHtml(p.description)}</p>
+            <div class="ob-provider-configured-row">
+                <span class="ob-status-pill ob-status-pill-ok">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
+                    ElevenLabs configured
+                </span>
+                <button type="button" class="ob-replace-btn" data-provider="${p.id}">Replace</button>
+            </div>
+            <dl class="ob-gmail-configured-detail">
+                <dt>API key</dt>
+                <dd><code>${escapeHtml(keyPreview)}</code></dd>
+            </dl>
+        </div>
+    `;
+}
+
+// Input-state card: single password input + reveal + validate, matching the
+// Gmail secret field's row layout and status block.
+function renderElevenLabsCard(p, s) {
+    return `
+        <div class="ob-provider-card ob-integration-card" data-provider="${p.id}">
+            <div class="ob-provider-header">
+                <div class="ob-provider-label">${escapeHtml(p.label)}</div>
+                <a class="ob-provider-link" href="${escapeHtml(p.consoleUrl)}" target="_blank" rel="noopener">
+                    ElevenLabs API keys <span aria-hidden="true">↗</span>
+                </a>
+            </div>
+            <p class="ob-integration-desc">${escapeHtml(p.description)}</p>
+            <div class="ob-gmail-fields">
+                <label class="ob-field-label" for="ob-elevenlabs-key">ElevenLabs API key</label>
+                <p class="ob-step-helper">
+                    Unlocks premium voices, AI music, sound effects, and voice cloning.
+                    Grab a key from your
+                    <a href="${escapeHtml(p.consoleUrl)}" target="_blank" rel="noopener">ElevenLabs API keys</a>
+                    page and paste it below.
+                </p>
+                <div class="ob-provider-input-row">
+                    <input
+                        type="password"
+                        class="ob-provider-input"
+                        id="ob-elevenlabs-key"
+                        placeholder="sk_..."
+                        autocomplete="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                    />
+                    <button type="button" class="ob-reveal-btn" id="ob-elevenlabs-reveal" aria-label="Show or hide API key">&#128065;</button>
+                    <button type="button" class="ob-validate-btn" id="ob-elevenlabs-validate" disabled>Validate</button>
+                </div>
+            </div>
+            <div class="ob-provider-status" id="ob-elevenlabs-status" data-status="idle"></div>
+        </div>
+    `;
+}
+
+// Wire either the configured-state Replace button OR the input-state form.
+function wireElevenLabsCardForState(container, state, p) {
+    const s = state.elevenlabs;
+    if (s.wasPresent && !s.replacing) {
+        const replaceBtn = container.querySelector(
+            `.ob-provider-card[data-provider="${p.id}"] .ob-replace-btn`
+        );
+        if (replaceBtn) {
+            replaceBtn.addEventListener("click", () => startReplacingElevenLabs(p, state, container));
+        }
+        return;
+    }
+    wireElevenLabsCard(container, state, p);
+}
+
+// Swap the card from configured -> input state when Replace is clicked.
+function startReplacingElevenLabs(p, state, container) {
+    state.elevenlabs.replacing = true;
+    state.elevenlabs.wasPresent = false;
+    state.elevenlabs.keyLast4 = null;
+    state.elevenlabs.status = "idle";
+    state.elevenlabs.result = null;
+    state.elevenlabs.api_key = "";
+
+    const card = container.querySelector(`.ob-provider-card[data-provider="${p.id}"]`);
+    if (card) {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = renderElevenLabsCard(p, state.elevenlabs).trim();
+        const newCard = tmp.firstElementChild;
+        card.replaceWith(newCard);
+        wireElevenLabsCard(container, state, p);
+        const newInput = container.querySelector("#ob-elevenlabs-key");
+        if (newInput) newInput.focus();
+    }
+}
+
+function wireElevenLabsCard(container, state, p) {
+    const keyInput = container.querySelector("#ob-elevenlabs-key");
+    const revealBtn = container.querySelector("#ob-elevenlabs-reveal");
+    const validateBtn = container.querySelector("#ob-elevenlabs-validate");
+    const statusEl = container.querySelector("#ob-elevenlabs-status");
+
+    if (!keyInput || !revealBtn || !validateBtn || !statusEl) return;
+
+    function updateValidateButton() {
+        validateBtn.disabled = !state.elevenlabs.api_key;
+    }
+
+    function resetStatus() {
+        if (state.elevenlabs.status !== "idle") {
+            state.elevenlabs.status = "idle";
+            state.elevenlabs.result = null;
+            statusEl.dataset.status = "idle";
+            statusEl.innerHTML = "";
+        }
+    }
+
+    keyInput.addEventListener("input", () => {
+        state.elevenlabs.api_key = keyInput.value.trim();
+        resetStatus();
+        updateValidateButton();
+    });
+    revealBtn.addEventListener("click", () => {
+        const isPassword = keyInput.type === "password";
+        keyInput.type = isPassword ? "text" : "password";
+        revealBtn.innerHTML = isPassword ? "&#128584;" : "&#128065;";
+    });
+    validateBtn.addEventListener("click", () => validateElevenLabs(container, state));
+}
+
+async function validateElevenLabs(container, state) {
+    const validateBtn = container.querySelector("#ob-elevenlabs-validate");
+    const statusEl = container.querySelector("#ob-elevenlabs-status");
+    const keyInput = container.querySelector("#ob-elevenlabs-key");
+
+    if (state.elevenlabs.status === "validating") return;
+    state.elevenlabs.status = "validating";
+    statusEl.dataset.status = "validating";
+    statusEl.innerHTML = `<span class="ob-status-pill ob-status-pill-validating">Checking your ElevenLabs key&hellip;</span>`;
+    validateBtn.disabled = true;
+    keyInput.disabled = true;
+
+    try {
+        const r = await fetch("/onboarding/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                provider: "elevenlabs",
+                credentials: { api_key: state.elevenlabs.api_key },
+            }),
+        });
+        const result = await r.json();
+        state.elevenlabs.result = result;
+        if (result.ok) {
+            state.elevenlabs.status = "ok";
+            statusEl.dataset.status = "ok";
+            // detail = {tier, credits_remaining, features} — surface what the
+            // plan unlocks so the customer sees the value of their key.
+            const detail = result.detail || {};
+            const tier = detail.tier ? escapeHtml(String(detail.tier)) : "unknown";
+            const features = detail.features ? escapeHtml(String(detail.features)) : "";
+            const credits = Number.isFinite(detail.credits_remaining)
+                ? `<p class="ob-step-helper">${detail.credits_remaining.toLocaleString()} credits remaining this period.</p>`
+                : "";
+            statusEl.innerHTML = `
+                <span class="ob-status-pill ob-status-pill-ok">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
+                    Key valid — ${tier} plan${features ? ` &middot; ${features}` : ""} &middot; ${result.latency_ms}ms
+                </span>
+                ${credits}
+            `;
+        } else {
+            state.elevenlabs.status = "error";
+            statusEl.dataset.status = "error";
+            // Mirror Gmail: prefer detail when present, fall back to error,
+            // strip any "FooError:" prefix, and cap length.
+            const raw = result.detail || result.error || "validation failed";
+            const errMsg = String(raw).replace(/^\w+Error:\s*/, "");
+            statusEl.innerHTML = `
+                <span class="ob-status-pill ob-status-pill-error">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">!</span>
+                    ${escapeHtml(errMsg.slice(0, 160))}
+                </span>
+            `;
+        }
+    } catch (e) {
+        state.elevenlabs.status = "error";
+        statusEl.dataset.status = "error";
+        statusEl.innerHTML = `
+            <span class="ob-status-pill ob-status-pill-error">
+                <span class="ob-status-pill-glyph" aria-hidden="true">!</span>
+                Network error: ${escapeHtml(e.message.slice(0, 120))}
+            </span>
+        `;
+    } finally {
+        keyInput.disabled = false;
+        validateBtn.disabled = !state.elevenlabs.api_key;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -712,13 +956,16 @@ function wireSave(container, state, next) {
         const orig = saveBtn.innerHTML;
         saveBtn.innerHTML = "Saving&hellip;";
 
-        // Only POST Gmail credentials when newly validated. If the customer
-        // is keeping pre-existing creds (wasPresent + !replacing), the keys
-        // already in .env stay untouched.
+        // Only POST credentials that were newly validated this session. If the
+        // customer is keeping pre-existing creds (wasPresent + !replacing), the
+        // keys already in .env stay untouched.
         const secrets = {};
         if (state.gmail.status === "ok") {
             secrets.GOOGLE_OAUTH_CLIENT_ID = state.gmail.client_id;
             secrets.GOOGLE_OAUTH_CLIENT_SECRET = state.gmail.client_secret;
+        }
+        if (state.elevenlabs.status === "ok") {
+            secrets.ELEVENLABS_API_KEY = state.elevenlabs.api_key;
         }
 
         try {

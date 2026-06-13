@@ -1,0 +1,29 @@
+{
+  "name": "elevenlabs_voice_changer",
+  "description": "Re-voice an existing recording into any ElevenLabs voice (speech-to-speech), preserving the original delivery/emotion.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "audio_path": {
+        "type": "string",
+        "description": "Local path to the source recording to re-voice (e.g. a session upload file)."
+      },
+      "target_voice": {
+        "type": "string",
+        "description": "The ElevenLabs voice to convert into. Accepts an 'elevenlabs:<id>' or a raw voice id."
+      }
+    },
+    "required": [
+      "audio_path",
+      "target_voice"
+    ]
+  },
+  "example": "elevenlabs_voice_changer(audio_path=\"/path/to/clip.mp3\", target_voice=\"elevenlabs:21m00Tcm4TlvDq8ikWAM\")"
+}

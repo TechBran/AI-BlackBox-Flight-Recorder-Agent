@@ -309,7 +309,6 @@ class StreamingTTSQueue {
         if (!speakableText) return null;
 
         try {
-            const isGemini = this.voiceConfig.provider !== "openai";
             const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
             const r = await fetch("/tts/batch", {
@@ -319,7 +318,7 @@ class StreamingTTSQueue {
                     text: speakableText,
                     provider: this.voiceConfig.provider,
                     voice: this.voiceConfig.voice,
-                    model: isGemini ? getGeminiModel(this.voiceConfig.provider) : TTS_MODEL,
+                    model: ttsModelForProvider(this.voiceConfig.provider),
                     format: TTS_FMT,
                     operator: operator
                 })
@@ -439,7 +438,7 @@ class StreamingTTSQueue {
             return;
         }
 
-        const isGemini = this.voiceConfig.provider !== "openai";
+        const isGemini = isGeminiProvider(this.voiceConfig.provider);
         const audioFormat = isGemini ? "wav" : TTS_FMT;
 
         let audioDataURL;
@@ -665,6 +664,30 @@ export function getGeminiModel(provider) {
 }
 
 /**
+ * True only for Gemini TTS providers. OpenAI AND ElevenLabs are single-call
+ * `/tts` providers (MP3 byte-stream, no WAV stitch, no gemini model). Use this
+ * instead of `provider !== "openai"` so ElevenLabs is never mis-routed as Gemini.
+ * @param {string} provider - Provider name
+ * @returns {boolean}
+ */
+export function isGeminiProvider(provider) {
+    return provider === "gemini-pro" || provider === "gemini-flash";
+}
+
+/**
+ * Resolve the `model` field for a /tts/batch request. Gemini providers get a
+ * Gemini TTS model; ElevenLabs sends "" (backend defaults to eleven_v3); OpenAI
+ * gets the OpenAI TTS model.
+ * @param {string} provider - Provider name
+ * @returns {string} Model name ("" for ElevenLabs)
+ */
+export function ttsModelForProvider(provider) {
+    if (isGeminiProvider(provider)) return getGeminiModel(provider);
+    if (provider === "elevenlabs") return "";
+    return TTS_MODEL;
+}
+
+/**
  * Sync voice dropdown to current operator's preference
  */
 export async function syncVoiceDropdown() {
@@ -778,14 +801,20 @@ export async function generateTTSAudio(text) {
 export async function generateTTSAudioWithVoice(text, voiceConfig) {
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
-    if (voiceConfig.provider === "openai") {
+    // OpenAI AND ElevenLabs are single-call /tts providers (MP3 stream). Gemini
+    // falls through to the task-queue path below.
+    if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs") {
+        const isEleven = voiceConfig.provider === "elevenlabs";
         const r = await fetch("/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 text: text,
-                model: TTS_MODEL,
-                voice: voiceConfig.voice,
+                // ElevenLabs: no OpenAI model; backend defaults to eleven_v3.
+                ...(isEleven ? {} : { model: TTS_MODEL }),
+                provider: voiceConfig.provider,
+                // Preserve the elevenlabs: prefix so the backend detects the provider.
+                voice: isEleven ? `elevenlabs:${voiceConfig.voice}` : voiceConfig.voice,
                 format: TTS_FMT
             })
         });
@@ -794,7 +823,7 @@ export async function generateTTSAudioWithVoice(text, voiceConfig) {
             const blob = await r.blob();
             return URL.createObjectURL(blob);
         }
-        console.error("OpenAI TTS failed:", r.status, await r.text());
+        console.error(`${voiceConfig.provider} TTS failed:`, r.status, await r.text());
         return null;
     } else {
         // Gemini TTS
@@ -956,7 +985,6 @@ export async function speak(text, btn) {
         setBubbleState(btn, true);
 
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
         ttsState.isPlaying = true;
@@ -968,7 +996,7 @@ export async function speak(text, btn) {
                 text: text,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: operator
             })
@@ -1059,7 +1087,6 @@ export async function speakToBubble(text, bubbleElement, btn) {
         }
 
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
 
         // Voice-aware cache key so switching voices regenerates audio
         const contentKey = simpleHash(speakableText + ':' + voiceConfig.provider + ':' + voiceConfig.voice);
@@ -1090,7 +1117,7 @@ export async function speakToBubble(text, bubbleElement, btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: localStorage.getItem("bbx_operator") || ""
             })
@@ -1484,7 +1511,6 @@ export async function speakThinkingContent(btn) {
 
         const speakableText = text.trim();
         const voiceConfig = getTTSVoice();
-        const isGemini = voiceConfig.provider !== "openai";
         const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
         // Single batch request — backend handles chunking + parallel + stitching
@@ -1499,7 +1525,7 @@ export async function speakThinkingContent(btn) {
                 text: speakableText,
                 provider: voiceConfig.provider,
                 voice: voiceConfig.voice,
-                model: isGemini ? getGeminiModel(voiceConfig.provider) : TTS_MODEL,
+                model: ttsModelForProvider(voiceConfig.provider),
                 format: TTS_FMT,
                 operator: operator
             })
@@ -1651,8 +1677,13 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
  * Build the TTS voice dropdown from the backend catalog (single source of truth).
  * Falls back to whatever static <option>s are already in the DOM if the fetch fails
  * or returns an empty catalog.
+ *
+ * Exported so the voice-library browse modal can re-run it after adding a voice
+ * (the new voice appears in /tts/catalog once the provider's voices-cache is
+ * busted server-side). Pass `selectId` to select a specific catalog id (e.g.
+ * the freshly-added `elevenlabs:<voice_id>`) if it exists in the rebuilt list.
  */
-async function populateVoiceCatalog() {
+export async function populateVoiceCatalog(selectId = null) {
     const sel = document.getElementById("ttsVoiceSelect");
     if (!sel) return;
     try {
@@ -1673,10 +1704,82 @@ async function populateVoiceCatalog() {
             }
             sel.appendChild(og);
         }
-        sel.value = [...sel.options].some(o => o.value === prev) ? prev : TTS_DEFAULT_VOICE;
+        const want = selectId && [...sel.options].some(o => o.value === selectId) ? selectId : prev;
+        sel.value = [...sel.options].some(o => o.value === want) ? want : TTS_DEFAULT_VOICE;
+        if (selectId && sel.value === selectId) {
+            // Persist the freshly-added voice as the operator's preference and
+            // notify listeners (mirrors the manual onchange handler).
+            sel.dispatchEvent(new Event("change"));
+        }
     } catch (e) {
         console.error("voice catalog fetch failed, keeping static options", e);
     }
+}
+
+/**
+ * Create + status-gate the "🔍 Browse voice library…" trigger that sits under
+ * the TTS voice picker. Gated on GET /elevenlabs/status `configured` — if no
+ * ElevenLabs key is set, the button stays hidden (the whole feature hides).
+ */
+function setupVoiceLibraryTrigger() {
+    const row = document.querySelector(".voice-preferences-section .voice-selector-row");
+    if (!row || document.getElementById("btnBrowseVoiceLibrary")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "btnBrowseVoiceLibrary";
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "🔍 Browse voice library…";
+    btn.style.display = "none";  // revealed only when ElevenLabs is configured
+    // Place it just after the selector row (above/near the per-operator hint).
+    row.insertAdjacentElement("afterend", btn);
+
+    btn.addEventListener("click", async () => {
+        const { openVoiceLibrary } = await import("../voice-library.js");
+        openVoiceLibrary();
+    });
+
+    // Reveal only if an ElevenLabs key is configured.
+    fetch("/elevenlabs/status")
+        .then(r => r.ok ? r.json() : null)
+        .then(s => { if (s && s.configured) btn.style.display = ""; })
+        .catch(() => { /* no key / endpoint absent -> stay hidden */ });
+}
+
+/**
+ * Create + status-gate the "🎙 Voice Lab" trigger that sits beside the "Browse
+ * voice library…" button under the TTS picker. Opens the ElevenLabs Voice Lab
+ * panel (clone / design / manage). Gated on GET /elevenlabs/status `configured`
+ * — without a key the button stays hidden. The module is dynamically imported on
+ * first click to avoid a static import cycle (voice-lab.js imports
+ * populateVoiceCatalog from here, same as voice-library.js).
+ */
+function setupVoiceLabTrigger() {
+    const row = document.querySelector(".voice-preferences-section .voice-selector-row");
+    if (!row || document.getElementById("btnVoiceLab")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "btnVoiceLab";
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "🎙 Voice Lab";
+    btn.style.display = "none";  // revealed only when ElevenLabs is configured
+
+    // Place it right after the "Browse voice library…" trigger if that exists,
+    // otherwise just after the selector row. Both triggers coexist in this area.
+    const libBtn = document.getElementById("btnBrowseVoiceLibrary");
+    (libBtn || row).insertAdjacentElement("afterend", btn);
+
+    btn.addEventListener("click", async () => {
+        const { openVoiceLab } = await import("../voice-lab.js");
+        openVoiceLab();
+    });
+
+    // Reveal only if an ElevenLabs key is configured.
+    fetch("/elevenlabs/status")
+        .then(r => r.ok ? r.json() : null)
+        .then(s => { if (s && s.configured) btn.style.display = ""; })
+        .catch(() => { /* no key / endpoint absent -> stay hidden */ });
 }
 
 /**
@@ -1685,6 +1788,16 @@ async function populateVoiceCatalog() {
 export function initVoiceSelector() {
     const voiceSelect = document.getElementById("ttsVoiceSelect");
     const previewBtn = document.getElementById("btnPreviewVoice");
+
+    // "🔍 Browse voice library…" trigger — opens the ElevenLabs shared-library
+    // modal. Only meaningful when an ElevenLabs key is configured, so it is
+    // created hidden and revealed after /elevenlabs/status reports configured.
+    // The modal module is dynamically imported on first click to avoid a static
+    // import cycle (voice-library.js imports populateVoiceCatalog from here).
+    setupVoiceLibraryTrigger();
+    // "🎙 Voice Lab" trigger — clone / design / manage voices. Same gating +
+    // dynamic-import pattern; sits beside the browse-library button.
+    setupVoiceLabTrigger();
 
     if (voiceSelect) {
         // Build options from the backend catalog (SoT), then sync the

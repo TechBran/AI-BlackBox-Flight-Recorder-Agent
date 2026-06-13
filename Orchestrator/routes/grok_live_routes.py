@@ -737,7 +737,7 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                 print(f"[GROK-LIVE] ✗ WARNING: No portal_ws connection!")
 
             print(f"[GROK-LIVE] Video generation task created: {task.task_id}")
-        elif name == "generate_music":
+        elif name == "lyria_music":
             prompt = arguments.get("prompt", "")
             negative_prompt = arguments.get("negativePrompt", "")
             sample_count = arguments.get("sampleCount", 1)

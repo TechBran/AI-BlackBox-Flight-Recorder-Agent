@@ -11,7 +11,7 @@
     "properties": {
       "task_id": {
         "type": "string",
-        "description": "The task ID returned by generate_music"
+        "description": "The task ID returned by lyria_music"
       }
     },
     "required": [

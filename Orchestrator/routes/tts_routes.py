@@ -109,12 +109,70 @@ def restart_service():
         import traceback
         return {"status": "error", "error": str(e), "trace": traceback.format_exc()}
 
+def _elevenlabs_synth_chunked(text: str, voice: str, model_id: str | None,
+                              voice_settings: dict | None) -> bytes:
+    """Synthesize ElevenLabs speech, chunking by the model's live char cap.
+
+    One ``synthesize`` call when ``text`` fits the cap; otherwise split via the
+    shared ``chunk_text_for_tts`` helper and concatenate the per-chunk MP3 bytes
+    (browsers play concatenated MP3 frames fine for streaming playback). The
+    ``elevenlabs:`` prefix on ``voice`` is tolerated by ``synthesize`` itself.
+    """
+    from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
+    from Orchestrator.elevenlabs import tts as el_tts
+
+    cap = el_tts.max_chars_for(model_id or ELEVENLABS_TTS_MODEL_DEFAULT)
+    if len(text) <= cap:
+        return el_tts.synthesize(text, voice, model_id=model_id, voice_settings=voice_settings)
+    parts = [
+        el_tts.synthesize(chunk, voice, model_id=model_id, voice_settings=voice_settings)
+        for chunk in chunk_text_for_tts(text, max_chars=cap)
+    ]
+    return b"".join(parts)
+
+
 @app.post("/tts")
 def tts_openai(body: dict = Body(...)):
-    """Text-to-speech using OpenAI TTS API.
+    """Text-to-speech using OpenAI TTS API (default) or ElevenLabs.
+
+    ElevenLabs voices (``voice`` prefixed ``elevenlabs:`` OR ``provider ==
+    "elevenlabs"``) are handled FIRST and routed through the quality-first
+    ``elevenlabs.tts.synthesize`` path -- the OpenAI code below is untouched for
+    every non-ElevenLabs voice.
+
     By default, returns audio stream (for browser compatibility).
     Set return_json=true in body to get JSON with audio_url (for MCP/API use).
     """
+    # --- ElevenLabs branch (checked before OpenAI so the OpenAI path is intact) ---
+    if (body.get("voice") or "").startswith("elevenlabs:") or body.get("provider") == "elevenlabs":
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "No text provided")
+        voice = (body.get("voice") or "").strip()
+        model_id = (body.get("model") or "").strip() or None  # None -> synthesize defaults to eleven_v3
+        voice_settings = body.get("voice_settings")
+        try:
+            audio = _elevenlabs_synth_chunked(text, voice, model_id, voice_settings)
+        except Exception as e:
+            print(f"[ELEVENLABS] /tts synthesis failed: {e}")
+            return {"status": "fallback", "detail": str(e)}
+
+        if not body.get("return_json"):
+            return StreamingResponse(iter([audio]), media_type="audio/mpeg")
+
+        filename = f"{uuid.uuid4()}_tts.mp3"
+        save_path = UPLOADS_DIR / filename
+        with open(save_path, "wb") as f:
+            f.write(audio)
+        return {
+            "status": "success",
+            "audio_url": f"/ui/uploads/{filename}",
+            "voice": voice,
+            "model": model_id or "eleven_v3",
+            "format": "mp3",
+            "size_bytes": len(audio),
+        }
+
     if AUDIO_ENGINE == "browser": return {"status": "fallback"}
     api_key = OPENAI_API_KEY.strip()
     if not api_key: return {"status": "fallback", "message": "OPENAI_API_KEY not configured"}
@@ -173,7 +231,7 @@ async def tts_batch(body: dict = Body(...)):
 
     Accepts:
         text (str): Full text to synthesize
-        provider (str): "openai", "gemini-pro", or "gemini-flash" (default: "openai")
+        provider (str): "openai", "gemini-pro", "gemini-flash", or "elevenlabs" (default: "openai")
         voice (str): Voice name (default: config TTS_VOICE)
         model (str): Model override (provider-specific)
         format (str): "mp3" or "wav" (default: config TTS_FORMAT)
@@ -252,8 +310,34 @@ async def tts_batch(body: dict = Body(...)):
         # Gemini always returns WAV; override format for stitching logic
         audio_format = "wav"
 
+    # --- ElevenLabs provider ---
+    elif provider == "elevenlabs":
+        from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
+        from Orchestrator.elevenlabs import tts as el_tts
+
+        # Re-chunk by the model's LIVE per-request cap (not the generic
+        # max_chunk_chars used above) so we make the fewest synthesize calls.
+        el_model = model or ELEVENLABS_TTS_MODEL_DEFAULT
+        cap = el_tts.max_chars_for(el_model)
+        chunks = chunk_text_for_tts(text, max_chars=cap)
+        num_chunks = len(chunks)
+        voice_settings = body.get("voice_settings")
+
+        def _el_tts_chunk(chunk_text: str) -> bytes:
+            return el_tts.synthesize(
+                chunk_text, voice,
+                model_id=model if model else None,
+                voice_settings=voice_settings,
+            )
+
+        futures = [loop.run_in_executor(_tts_executor, _el_tts_chunk, chunk) for chunk in chunks]
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
+        # ElevenLabs returns MP3; concatenated frames play fine (no WAV stitch).
+        audio_format = "mp3"
+
     else:
-        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', or 'gemini-flash'.")
+        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', or 'elevenlabs'.")
 
     # Check for errors in results
     errors = [(i, r) for i, r in enumerate(results) if isinstance(r, Exception)]
@@ -306,17 +390,49 @@ async def tts_stitch(chunks: List[UploadFile] = File(...)):
 
 
 @app.post("/stt")
-async def stt(file: UploadFile = File(...)):
+async def stt(
+    file: UploadFile = File(...),
+    provider: str = Form(None),
+    diarize: bool = Form(False),
+):
     from Orchestrator.stt.file_transcribe import transcribe_bytes
+    from Orchestrator.stt.resolve import resolve_stt_provider
     try:
         audio_bytes = await file.read()
     except Exception as e:
         raise HTTPException(400, f"Failed to read upload: {e}")
+
+    filename = file.filename or "audio.webm"
+    content_type = file.content_type or "audio/webm"
+
+    # Diarized rich payload only when ElevenLabs is the resolved provider AND the
+    # caller explicitly asked for diarization. Back-compat: flat `text` stays at
+    # the top level so existing single-field consumers keep working unchanged.
+    resolved = (provider or "").strip().lower() or resolve_stt_provider()
+    if resolved == "elevenlabs" and diarize:
+        from Orchestrator.elevenlabs import stt as el_stt
+        try:
+            rich = el_stt.transcribe_bytes(audio_bytes, filename, diarize=True)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"STT upstream error: {e}")
+        return {
+            "text": rich["text"],                # BACK-COMPAT: flat text top-level
+            "provider": "elevenlabs",
+            "segments": rich["segments"],
+            "speakers": rich["speakers"],
+            "diarized_text": el_stt.format_diarized(rich),
+            "events": rich["events"],
+            "language": rich["language"],
+        }
+
     try:
         text = transcribe_bytes(
             audio_bytes,
-            file.content_type or "audio/webm",
-            filename=file.filename or "audio.webm",
+            content_type,
+            provider=provider,
+            filename=filename,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e))
@@ -366,9 +482,13 @@ async def stt_json(body: dict = Body(...)):
     except Exception as e:
         raise HTTPException(400, f"Failed to decode/convert audio: {e}")
 
-    # Transcribe via resolved provider (OpenAI or Google)
+    # Transcribe via resolved provider (OpenAI, Google, or ElevenLabs). Flat text
+    # only — this path serves Gemini Live quick transcription; diarization (YAGNI
+    # here) lives on /stt. An explicit provider in the body is honored.
     try:
-        text = transcribe_bytes(wav_bytes, "audio/wav", filename="audio.wav")
+        text = transcribe_bytes(
+            wav_bytes, "audio/wav", provider=body.get("provider"), filename="audio.wav"
+        )
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -790,9 +910,25 @@ async def get_google_voices(operator: Optional[str] = None):
 @app.get("/tts/catalog")
 async def tts_catalog():
     """Grouped TTS voice catalog -- single source of truth for the voice picker
-    (web Portal + Android both fetch this). See config.build_tts_catalog()."""
+    (web Portal + Android both fetch this). See config.build_tts_catalog().
+
+    When an ElevenLabs key is configured, a 4th dynamic group ("ElevenLabs") is
+    APPENDED from the live voice catalog: My Voices first (star-prefixed), then
+    Premade. Fail-open -- if the catalog is unreachable the group is simply
+    absent and the three static groups are returned unchanged."""
     from Orchestrator.config import build_tts_catalog
-    return {"groups": build_tts_catalog()}
+    groups = build_tts_catalog()
+    try:
+        from Orchestrator.elevenlabs import catalog as el_catalog
+        v = el_catalog.get_voices()
+        if v:
+            my = [dict(x, name=f"⭐ {x['name']}") for x in v["my_voices"]]  # star-prefix My Voices
+            voices = my + v["premade"]
+            if voices:
+                groups.append({"id": "elevenlabs", "label": "ElevenLabs", "dynamic": True, "voices": voices})
+    except Exception:
+        pass  # fail-open: ElevenLabs group simply absent if catalog unreachable
+    return {"groups": groups}
 
 @app.get("/stt/catalog")
 async def stt_catalog():
@@ -1453,6 +1589,207 @@ async def get_music_status():
         "output_format": "WAV 48kHz stereo",
         "duration": "30 seconds"
     }
+
+
+@app.post("/generate/elevenlabs_music")
+async def generate_elevenlabs_music_async(body: dict = Body(...)):
+    """Queue ElevenLabs Music generation (full songs, up to 5 min, w/ vocals).
+
+    A SEPARATE music endpoint from /generate/lyria_music — both coexist
+    (provider-explicit naming). Exactly one of ``prompt`` / ``composition_plan``
+    is required; the rest (``music_length_ms``, ``force_instrumental``, ``seed``,
+    ``operator``) are optional. Returns a task_id — poll get_task_status.
+    """
+    try:
+        prompt = body.get("prompt")
+        composition_plan = body.get("composition_plan")
+        if (prompt is None) == (composition_plan is None):
+            raise HTTPException(
+                status_code=400,
+                detail="Provide exactly one of `prompt` or `composition_plan`."
+            )
+
+        # Persist only the generation params the processor consumes.
+        params = {
+            "prompt": prompt,
+            "composition_plan": composition_plan,
+            "music_length_ms": body.get("music_length_ms"),
+            "force_instrumental": bool(body.get("force_instrumental", False)),
+            "seed": body.get("seed"),
+            "operator": body.get("operator"),
+        }
+        task = create_task(
+            TaskType.ELEVENLABS_MUSIC,
+            operator=body.get("operator"),
+            prompt=prompt,
+            result_data=params
+        )
+        return {
+            "task_id": task.task_id,
+            "status": task.status,
+            "message": "ElevenLabs music generation queued"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Failed to queue ElevenLabs music: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate/elevenlabs_sound_effect")
+async def generate_elevenlabs_sound_effect(body: dict = Body(...)):
+    """Generate a sound effect from a text description (ElevenLabs sound-generation).
+
+    SYNCHRONOUS — generation takes only seconds, so this returns the saved audio
+    URL directly (no task_id). Body: ``text`` (required), optional
+    ``duration_seconds`` (0.1-30), ``prompt_influence`` (0-1), ``loop`` (seamless
+    ambience), ``operator``. Saves the mp3 to uploads + indexes it for media tools.
+    """
+    from Orchestrator.elevenlabs import sfx as el_sfx
+    from Orchestrator.media_index import add_media_entry
+    from Orchestrator.tasks import generate_prompt_slug
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="`text` is required.")
+
+    try:
+        mp3_bytes = el_sfx.generate(
+            text,
+            duration_seconds=body.get("duration_seconds"),
+            prompt_influence=body.get("prompt_influence"),
+            loop=bool(body.get("loop", False)),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: Failed to generate ElevenLabs sound effect: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    slug = generate_prompt_slug(text)
+    filename = f"{slug}_{uuid.uuid4().hex}_sfx.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(mp3_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[SFX] Saved ElevenLabs sound effect: {filename} ({len(mp3_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt=text,
+        filename=filename,
+        file_size=len(mp3_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "sound_effect",
+            "duration_seconds": body.get("duration_seconds"),
+            "loop": bool(body.get("loop", False)),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(mp3_bytes)}
+
+
+@app.post("/elevenlabs/voice-changer")
+async def elevenlabs_voice_changer(body: dict = Body(...)):
+    """Re-voice an existing recording into a target ElevenLabs voice (speech-to-speech).
+
+    SYNCHRONOUS. Body: ``audio_path`` (required, a local/session file),
+    ``target_voice`` (required — accepts ``elevenlabs:<id>`` or a raw voice id),
+    optional ``output_format``, ``operator``. The original delivery/emotion is
+    preserved. Saves the result to uploads + indexes it for media tools.
+    """
+    from Orchestrator.elevenlabs import transform as el_transform
+    from Orchestrator.media_index import add_media_entry
+
+    audio_path = (body.get("audio_path") or "").strip()
+    target_voice = (body.get("target_voice") or "").strip()
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="`audio_path` is required.")
+    if not target_voice:
+        raise HTTPException(status_code=400, detail="`target_voice` is required.")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+
+    try:
+        audio_bytes = el_transform.change_voice(
+            audio_path,
+            target_voice,
+            output_format=body.get("output_format"),
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: ElevenLabs voice changer failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    filename = f"voice_changed_{uuid.uuid4().hex}.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(audio_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[VOICE-CHANGER] Saved: {filename} ({len(audio_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt=f"voice-changed -> {target_voice}",
+        filename=filename,
+        file_size=len(audio_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "voice_changer",
+            "target_voice": target_voice,
+            "source_audio": os.path.basename(audio_path),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(audio_bytes)}
+
+
+@app.post("/elevenlabs/isolate")
+async def elevenlabs_isolate(body: dict = Body(...)):
+    """Strip background noise from a recording, isolating the voice (audio-isolation).
+
+    SYNCHRONOUS. Body: ``audio_path`` (required, a local/session file),
+    ``operator`` (optional). Saves the cleaned audio to uploads + indexes it.
+    """
+    from Orchestrator.elevenlabs import transform as el_transform
+    from Orchestrator.media_index import add_media_entry
+
+    audio_path = (body.get("audio_path") or "").strip()
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="`audio_path` is required.")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"Audio file not found: {audio_path}")
+
+    try:
+        audio_bytes = el_transform.isolate(audio_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        print(f"ERROR: ElevenLabs voice isolation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    filename = f"voice_isolated_{uuid.uuid4().hex}.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(audio_bytes)
+    audio_url = f"/ui/uploads/{filename}"
+    print(f"[ISOLATE] Saved: {filename} ({len(audio_bytes)} bytes)")
+
+    add_media_entry(
+        url=audio_url,
+        media_type="audio",
+        prompt="voice-isolated (background noise removed)",
+        filename=filename,
+        file_size=len(audio_bytes),
+        extra_metadata={
+            "provider": "elevenlabs",
+            "kind": "voice_isolator",
+            "source_audio": os.path.basename(audio_path),
+        },
+    )
+
+    return {"status": "success", "audio_url": audio_url, "size_bytes": len(audio_bytes)}
 
 
 @app.post("/generate/gemini_tts")  # Note: renamed from /generate/gemini-tts

@@ -35,6 +35,8 @@
 @import url('./features/_cli_agents_modal.css');
 @import url('./features/_voice_agents_modal.css');
 @import url('./features/_gmail_modal.css');
+@import url('./features/_voice-library.css');
+@import url('./features/_voice-lab.css');
 @import url('./features/_updates.css');
 @import url('./features/_collapsibles.css');
 @import url('./features/_system_controls.css');

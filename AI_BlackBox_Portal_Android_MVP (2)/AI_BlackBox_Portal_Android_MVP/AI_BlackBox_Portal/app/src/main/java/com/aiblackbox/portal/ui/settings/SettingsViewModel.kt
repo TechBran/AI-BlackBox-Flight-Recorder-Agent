@@ -70,11 +70,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 val repo = com.aiblackbox.portal.data.repository.TtsRepository(api)
                 val text = "Hello! This is a preview of the selected voice."
                 val cfg = com.aiblackbox.portal.data.repository.TtsRepository.parseVoice(voiceId)
-                val url = if (cfg.provider == "openai") {
-                    repo.generateTts(text, cfg.voice, cfg.model).audio_url
-                } else {
-                    val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model)
-                    repo.pollGeminiTaskForUrl(sub.task_id)
+                val url = when (cfg.provider) {
+                    "openai" -> repo.generateTts(text, cfg.voice, cfg.model).audio_url
+                    "elevenlabs" -> repo.generateElevenLabsTts(text, cfg.voice).audio_url
+                    else -> {
+                        val sub = repo.generateGeminiTts(text, cfg.voice, cfg.model)
+                        repo.pollGeminiTaskForUrl(sub.task_id)
+                    }
                 }
                 if (url.isNotBlank()) playPreview(url)
                 else throw Exception("No audio url returned")

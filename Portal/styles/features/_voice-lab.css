@@ -1,0 +1,395 @@
+/* Voice Lab panel — ElevenLabs clone / design / manage (Task 24 of the
+ * ElevenLabs integration). Three stacked zones in one modal. Reuses the base
+ * .modal / .modal-card / .modal-head shell; everything below is the body +
+ * zone-specific controls. Tokens only — no hardcoded colors. Mirrors the
+ * sibling _voice-library.css conventions. */
+
+.voice-lab-card {
+  width: 680px;
+  max-width: 94vw;
+  /* tall content (three zones + scrolling voice list) capped to viewport so the
+     head stays pinned while the body scrolls internally */
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.voice-lab-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg, 16px);
+  padding: var(--space-lg, 16px);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ── A zone (clone / design / manage) ── */
+.vlab-zone {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+  padding-bottom: var(--space-lg, 16px);
+  border-bottom: 1px solid var(--neutral-300, #333);
+}
+.vlab-zone:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.vlab-zone-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text, #fff);
+}
+
+.vlab-zone-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+  line-height: 1.4;
+}
+
+/* ── Generic inputs ── */
+.vlab-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--border, #333);
+  border-radius: var(--radius-md, 8px);
+  color: var(--text, #fff);
+  font-size: 14px;
+  transition: border-color var(--transition-fast, 0.15s ease);
+}
+.vlab-input:focus {
+  outline: none;
+  border-color: var(--accent, #ff4a4a);
+}
+.vlab-input::placeholder {
+  color: var(--neutral-600, #666);
+}
+.vlab-textarea {
+  resize: vertical;
+  min-height: 44px;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+/* ── Rows / buttons ── */
+.vlab-row {
+  display: flex;
+  gap: var(--space-sm, 8px);
+  align-items: center;
+}
+.vlab-row-end {
+  justify-content: flex-end;
+}
+
+.vlab-btn {
+  padding: 8px 14px;
+  background: var(--neutral-200, #222);
+  border: 1px solid var(--neutral-400, #444);
+  border-radius: var(--radius-md, 8px);
+  color: var(--text, #fff);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast, 0.15s ease),
+              border-color var(--transition-fast, 0.15s ease),
+              filter var(--transition-fast, 0.15s ease),
+              opacity var(--transition-fast, 0.15s ease);
+}
+.vlab-btn:hover:not(:disabled) {
+  background: var(--neutral-300, #333);
+  border-color: var(--neutral-600, #666);
+}
+.vlab-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.vlab-btn-accent {
+  background: var(--accent, #ff4a4a);
+  border-color: var(--accent, #ff4a4a);
+  color: #fff;
+}
+.vlab-btn-accent:hover:not(:disabled) {
+  background: var(--accent, #ff4a4a);
+  border-color: var(--accent, #ff4a4a);
+  filter: brightness(1.1);
+}
+
+/* A subtle text-only action (Discard) */
+.vlab-link-btn {
+  background: none;
+  border: none;
+  color: var(--neutral-700, #888);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-decoration: underline;
+}
+.vlab-link-btn:hover { color: var(--text, #fff); }
+
+/* ── Preview ▶ button (shared: design previews + my-voice rows + recording playback) ── */
+.vlab-preview-btn {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--neutral-200, #222);
+  border: 1px solid var(--neutral-400, #444);
+  border-radius: var(--radius-md, 8px);
+  color: var(--text, #fff);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s ease),
+              border-color var(--transition-fast, 0.15s ease);
+}
+.vlab-preview-btn:hover:not(:disabled) {
+  background: var(--neutral-300, #333);
+  border-color: var(--neutral-600, #666);
+}
+.vlab-preview-btn.playing {
+  background: var(--accent, #ff4a4a);
+  border-color: var(--accent, #ff4a4a);
+}
+.vlab-preview-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Zone 1: Clone ── */
+.vlab-clone-methods {
+  display: flex;
+  gap: var(--space-md, 12px);
+  flex-wrap: wrap;
+}
+.vlab-method {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+  padding: var(--space-md, 12px);
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--neutral-300, #333);
+  border-radius: var(--radius-md, 8px);
+}
+.vlab-method-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--neutral-800, #aaa);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vlab-rec-btn.recording {
+  background: var(--accent, #ff4a4a);
+  border-color: var(--accent, #ff4a4a);
+  color: #fff;
+  animation: vlabRecPulse 1.2s ease-in-out infinite;
+}
+@keyframes vlabRecPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.vlab-rec-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--text, #fff);
+  min-width: 40px;
+}
+.vlab-rec-hint {
+  font-size: 11px;
+  color: var(--neutral-700, #888);
+}
+.vlab-rec-playback {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 8px);
+}
+.vlab-rec-meta {
+  flex: 1;
+  font-size: 12px;
+  color: var(--neutral-800, #aaa);
+}
+
+.vlab-file-input {
+  font-size: 12px;
+  color: var(--neutral-800, #aaa);
+}
+.vlab-file-input::file-selector-button {
+  margin-right: 8px;
+  padding: 6px 12px;
+  background: var(--neutral-200, #222);
+  border: 1px solid var(--neutral-400, #444);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text, #fff);
+  font-size: 12px;
+  cursor: pointer;
+}
+.vlab-file-input::file-selector-button:hover {
+  background: var(--neutral-300, #333);
+}
+.vlab-upload-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vlab-upload-item {
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vlab-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm, 8px);
+  font-size: 13px;
+  color: var(--neutral-900, #ccc);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.vlab-consent input {
+  margin-top: 2px;
+  accent-color: var(--accent, #ff4a4a);
+  cursor: pointer;
+}
+
+/* Upgrade explainer (free tier — no instant cloning) */
+.vlab-upgrade {
+  padding: var(--space-md, 12px);
+  background: var(--neutral-100, #141414);
+  border: 1px dashed var(--neutral-400, #444);
+  border-radius: var(--radius-md, 8px);
+}
+.vlab-upgrade p { margin: 0 0 6px; font-size: 13px; color: var(--text, #fff); }
+.vlab-upgrade p:last-child { margin-bottom: 0; }
+.vlab-upgrade-sub { color: var(--neutral-700, #888) !important; font-size: 12px !important; line-height: 1.5; }
+
+/* ── Zone 2: Design ── */
+.vlab-sample-text {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--neutral-700, #888);
+  line-height: 1.4;
+  padding: 0 2px;
+}
+.vlab-previews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+}
+.vlab-preview-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md, 12px);
+  padding: var(--space-md, 12px);
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--neutral-300, #333);
+  border-radius: var(--radius-md, 8px);
+  transition: border-color var(--transition-fast, 0.15s ease);
+}
+.vlab-preview-card.selected {
+  border-color: var(--accent, #ff4a4a);
+}
+.vlab-preview-meta { flex: 1; min-width: 0; }
+.vlab-preview-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #fff);
+}
+.vlab-preview-sub {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+}
+.vlab-use-btn { flex-shrink: 0; }
+
+.vlab-save-row {
+  display: flex;
+  gap: var(--space-sm, 8px);
+  align-items: center;
+}
+.vlab-save-row .vlab-input { flex: 1; }
+
+/* ── Zone 3: My Voices ── */
+.vlab-status {
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+  min-height: 16px;
+  padding: 0 2px;
+}
+.vlab-my-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+}
+.vlab-empty {
+  text-align: center;
+  color: var(--neutral-600, #666);
+  font-size: 13px;
+  padding: 20px 0;
+}
+.vlab-voice-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md, 12px);
+  padding: var(--space-md, 12px);
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--neutral-300, #333);
+  border-radius: var(--radius-md, 8px);
+  transition: border-color var(--transition-fast, 0.15s ease),
+              background var(--transition-fast, 0.15s ease);
+}
+.vlab-voice-row:hover {
+  border-color: var(--neutral-500, #555);
+  background: var(--neutral-150, #1a1a1a);
+}
+.vlab-voice-main { flex: 1; min-width: 0; }
+.vlab-voice-name {
+  font-weight: 600;
+  color: var(--text, #fff);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vlab-voice-desc {
+  font-size: 12px;
+  color: var(--neutral-600, #666);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vlab-delete-btn {
+  flex-shrink: 0;
+  color: var(--neutral-800, #aaa);
+}
+.vlab-delete-btn:hover:not(:disabled) {
+  border-color: var(--accent, #ff4a4a);
+  color: var(--accent, #ff4a4a);
+}
+
+.vlab-foot-hint {
+  font-size: 12px;
+  color: var(--neutral-600, #666);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* The "🎙 Voice Lab" trigger that sits under the voice picker (next to the
+   "🔍 Browse voice library…" trigger). Hidden by default; revealed only when
+   /elevenlabs/status reports configured. */
+#btnVoiceLab {
+  margin-top: var(--space-sm, 8px);
+  margin-left: var(--space-sm, 8px);
+}

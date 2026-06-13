@@ -1,0 +1,24 @@
+{
+  "name": "elevenlabs_isolate_voice",
+  "description": "Strip background noise from a recording, isolating the voice. Also useful to clean a noisy sample BEFORE cloning (or just use the clone tool's built-in remove_background_noise).",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "audio_path": {
+        "type": "string",
+        "description": "Local path to the noisy recording to clean (e.g. a session upload file)."
+      }
+    },
+    "required": [
+      "audio_path"
+    ]
+  },
+  "example": "elevenlabs_isolate_voice(audio_path=\"/path/to/noisy_clip.mp3\")"
+}

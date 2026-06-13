@@ -1,5 +1,5 @@
 {
-  "name": "generate_music",
+  "name": "lyria_music",
   "description": "Generate 30-second instrumental music using Lyria-002. CRITICAL: Translate user requests into allowed vocabulary. The API REJECTS genre names, style words, and artist references. ONLY USE: instrument names + tempo + texture. Example: 'EDM' -> 'Synthesizer arpeggios with pulsing bass, fast driving tempo'.",
   "category": "media_generation",
   "groups": [
@@ -32,5 +32,5 @@
       "prompt"
     ]
   },
-  "example": "generate_music(prompt=\"...\")"
+  "example": "lyria_music(prompt=\"...\")"
 }

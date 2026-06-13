@@ -1,0 +1,15 @@
+{
+  "name": "elevenlabs_list_voices",
+  "description": "List the ElevenLabs voices available in this account: the user's own/cloned/designed voices ('My Voices') and the premade/library voices. Use when the user asks what voices they have, which voice to use, or to confirm a clone/design landed in their voice selector.",
+  "category": "audio",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": "A summary of My Voices (name + elevenlabs:<id>) and the count of premade voices; full lists in data.",
+  "example": "elevenlabs_list_voices()",
+  "notes": "Reads the live ElevenLabs catalog (cached). No key configured -> reports there are no voices available."
+}

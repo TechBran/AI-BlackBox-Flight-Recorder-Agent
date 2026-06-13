@@ -1,6 +1,6 @@
 {
   "name": "text_to_speech",
-  "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+  "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
   "category": "audio",
   "groups": [
     "chat",
@@ -17,7 +17,7 @@
       },
       "voice": {
         "type": "string",
-        "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)"
+        "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured."
       },
       "model": {
         "type": "string",

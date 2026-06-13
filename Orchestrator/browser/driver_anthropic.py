@@ -392,7 +392,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
                     await emit({"type": "video_task", "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration}})
 
-                elif tool_name == "generate_music":
+                elif tool_name == "lyria_music":
                     prompt = tool_input.get("prompt", "")
                     sample_count = tool_input.get("sampleCount", 1)
                     task = create_task(TaskType.LYRIA_MUSIC, operator="system", prompt=prompt,

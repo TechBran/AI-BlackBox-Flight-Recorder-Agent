@@ -2,6 +2,8 @@
 
 Complete guide for using Gemini Pro TTS with emotional cues for cinematic voice acting.
 
+> **ElevenLabs voices are DYNAMIC — never hardcode them.** Unlike the static Gemini/OpenAI lists below, ElevenLabs voices (premade + your cloned/designed voices + added library voices) come live from `GET /tts/catalog` (the `elevenlabs` group; ids are `elevenlabs:<voice_id>`, ⭐ = My Voices). To synthesize, pass an `elevenlabs:<id>` voice to `text_to_speech`/`/tts`. To discover/manage them, use the Portal Voice Lab panel, the voice-library browse modal, or the `elevenlabs_list_voices`/`elevenlabs_clone_voice`/`elevenlabs_design_voice` tools. Defaults are quality-first (`eleven_v3`). Requires `ELEVENLABS_API_KEY`; check `GET /elevenlabs/status` for tier/capabilities. See `docs/plans/2026-06-12-elevenlabs-integration-design.md`.
+
 ## Male Voices (16 voices)
 
 - **Puck** (Upbeat) - Young, energetic - Perfect for anxious teens (Morty!)

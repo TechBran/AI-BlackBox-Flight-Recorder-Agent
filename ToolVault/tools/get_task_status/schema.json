@@ -14,7 +14,7 @@
     "properties": {
       "task_id": {
         "type": "string",
-        "description": "The task ID returned by generate_image/generate_video/generate_music"
+        "description": "The task ID returned by generate_image/generate_video/lyria_music"
       }
     },
     "required": [

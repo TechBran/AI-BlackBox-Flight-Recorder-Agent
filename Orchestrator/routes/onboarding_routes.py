@@ -88,7 +88,7 @@ class CurrentConfigResponse(BaseModel):
 
 
 class ValidateRequest(BaseModel):
-    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "tailscale", "gmail"]
+    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "tailscale", "gmail", "elevenlabs"]
     credentials: dict[str, str] = {}  # provider-specific shape; tailscale needs none
 
 
@@ -155,6 +155,11 @@ def current_config() -> CurrentConfigResponse:
             "present": bool(env.get("PERPLEXITY_API_KEY")),
             "last4": _redact(env.get("PERPLEXITY_API_KEY")),
             "validated_at": val_at.get("perplexity"),
+        },
+        "elevenlabs": {
+            "present": bool(env.get("ELEVENLABS_API_KEY")),
+            "last4": _redact(env.get("ELEVENLABS_API_KEY")),
+            "validated_at": val_at.get("elevenlabs"),
         },
         "gmail": {
             "present": bool(env.get("GOOGLE_OAUTH_CLIENT_ID") and env.get("GOOGLE_OAUTH_CLIENT_SECRET")),
@@ -294,6 +299,8 @@ def validate(req: ValidateRequest) -> ValidateResponse:
             result = validators.validate_tailscale()
         elif req.provider == "gmail":
             result = validators.validate_gmail_oauth(creds["client_id"], creds["client_secret"])
+        elif req.provider == "elevenlabs":
+            result = validators.validate_elevenlabs(creds["api_key"])
         else:
             raise HTTPException(status_code=400, detail=f"unknown provider {req.provider}")
     except KeyError as e:

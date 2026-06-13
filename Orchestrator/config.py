@@ -298,7 +298,7 @@ OUTPUT_SPEC_TOOLS_STATIC = (
     '    - negativePrompt (optional): Things to avoid in the video\n'
     '  Note: Videos take 5-20 minutes to generate.\n\n'
     "MUSIC GENERATION TOOL (Google Lyria):\n"
-    '  Tool: generate_music\n'
+    '  Tool: lyria_music\n'
     '  Parameters:\n'
     '    - prompt (required): Description using ONLY instruments, tempo, and texture\n'
     '    - negativePrompt (optional): Things to exclude\n'
@@ -516,6 +516,18 @@ def build_tts_catalog() -> list:
         gemini_group("gemini-pro", "Gemini Pro TTS"),
     ]
 
+# ElevenLabs TTS quality-first defaults (env-overridable). Brandon's directive:
+# default to the flagship model + highest output quality the plan allows; cheaper
+# tiers are EXPLICIT, never silent. On a tier-gate 4xx the synth path retries ONCE
+# at mp3_44100_128 and PRINTS a visible downgrade notice (see elevenlabs/tts.py).
+ELEVENLABS_TTS_MODEL_DEFAULT = os.getenv("ELEVENLABS_TTS_MODEL_DEFAULT", "eleven_v3")
+ELEVENLABS_TTS_FORMAT_DEFAULT = os.getenv("ELEVENLABS_TTS_FORMAT_DEFAULT", "mp3_44100_192")
+
+# ElevenLabs Music (POST /v1/music). Songs run long (up to 5 min) so 128 is the
+# sensible default — it avoids the 192-tier-gate downgrade round-trip and the
+# extra bytes buy nothing audible over a multi-minute track.
+ELEVENLABS_MUSIC_FORMAT_DEFAULT = os.getenv("ELEVENLABS_MUSIC_FORMAT_DEFAULT", "mp3_44100_128")
+
 GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
 
 # Gemini Live allowlists for server-side validation of client-supplied params.
@@ -687,6 +699,8 @@ STT_OPENAI_FILE    = os.getenv("STT_OPENAI_FILE",   "gpt-4o-transcribe").strip()
 STT_OPENAI_DELAY   = os.getenv("STT_OPENAI_DELAY",  "low").strip()
 STT_GOOGLE_MODEL   = os.getenv("STT_GOOGLE_MODEL",  "chirp_2").strip()
 STT_GOOGLE_REGION  = os.getenv("STT_GOOGLE_REGION", "us-central1").strip()
+ELEVENLABS_STT_STREAM_MODEL = os.getenv("ELEVENLABS_STT_STREAM_MODEL", "scribe_v2_realtime")
+ELEVENLABS_STT_FILE_MODEL = os.getenv("ELEVENLABS_STT_FILE_MODEL", "scribe_v2")
 STT_OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
 STT_GOOGLE_AVAILABLE = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_APPLICATION_CREDENTIALS))
 

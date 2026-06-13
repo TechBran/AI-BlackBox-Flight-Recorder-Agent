@@ -674,7 +674,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                         "tool_use_id": tool_id,
                         "content": result_message
                     })
-                elif tool_name == "generate_music":
+                elif tool_name == "lyria_music":
                     prompt = tool_input.get("prompt", "")
                     negative_prompt = tool_input.get("negativePrompt", "")
                     sample_count = tool_input.get("sampleCount", 1)
@@ -1269,7 +1269,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Executing search_media: query='{query}', type={media_type}")
                     search_result = execute_search_media(query=query, media_type=media_type, limit=limit)
                     result = json.dumps(search_result, indent=2)
-                elif func_name == "generate_music":
+                elif func_name == "lyria_music":
                     prompt = func_args.get("prompt", "")
                     negative_prompt = func_args.get("negativePrompt", "")
                     sample_count = func_args.get("sampleCount", 1)
@@ -2023,7 +2023,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
-                            elif func_name == "generate_music":
+                            elif func_name == "lyria_music":
                                 prompt = func_args.get("prompt", "")
                                 negative_prompt = func_args.get("negativePrompt", "")
                                 sample_count = func_args.get("sampleCount", 1)
@@ -2747,7 +2747,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     "content": result_message
                                 })
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
-                            elif tool_name == "generate_music":
+                            elif tool_name == "lyria_music":
                                 prompt = tool_input.get("prompt", "")
                                 negative_prompt = tool_input.get("negativePrompt", "")
                                 sample_count = tool_input.get("sampleCount", 1)
@@ -3058,7 +3058,7 @@ These are ALL the tools available to you. Use ONLY these exact tool names — no
 ### Media Generation (async — returns task_id, poll with get_task_status)
 - **generate_image** — Create images from text prompts (fast, seconds)
 - **generate_video** — Create videos with Veo 3.1 (5-20 minutes, quota-limited)
-- **generate_music** — Create 30-second music tracks with Lyria (1-2 minutes)
+- **lyria_music** — Create 30-second music tracks with Lyria (1-2 minutes)
 - **extend_video** — Extend an existing video with Veo 3.1 (5-20 minutes)
 
 ### Media Analysis
@@ -4545,7 +4545,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 })
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
-                            elif func_name == "generate_music":
+                            elif func_name == "lyria_music":
                                 prompt = func_args.get("prompt", "")
                                 negative_prompt = func_args.get("negativePrompt", "")
                                 sample_count = func_args.get("sampleCount", 1)
@@ -5188,7 +5188,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = json.dumps(result, indent=2)
                                 yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
 
-                            elif func_name == "generate_music":
+                            elif func_name == "lyria_music":
                                 prompt = func_args.get("prompt", "")
                                 negative_prompt = func_args.get("negativePrompt", "")
                                 sample_count = func_args.get("sampleCount", 1)
@@ -5836,7 +5836,7 @@ async def chat_save(request: Request):
         # Track queued media tasks to return to frontend
         media_tasks = []
 
-        # OLD TEXT-PARSING METHOD REMOVED - Now using tool calling (generate_image, generate_video, generate_music tools)
+        # OLD TEXT-PARSING METHOD REMOVED - Now using tool calling (generate_image, generate_video, lyria_music tools)
         # Images, videos, and music are now generated via proper tool calls handled in streaming endpoints
         # Tool definitions generated from Orchestrator/tools/tool_registry.py
 

@@ -1,6 +1,6 @@
 {
   "name": "speech_to_text",
-  "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+  "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags — ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
   "category": "audio",
   "groups": [
     "chat",
@@ -14,6 +14,23 @@
       "audio_path": {
         "type": "string",
         "description": "Path to audio file (local path)"
+      },
+      "provider": {
+        "type": "string",
+        "enum": [
+          "openai",
+          "google",
+          "elevenlabs"
+        ],
+        "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default."
+      },
+      "diarize": {
+        "type": "boolean",
+        "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript."
+      },
+      "mint": {
+        "type": "boolean",
+        "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later."
       }
     },
     "required": [

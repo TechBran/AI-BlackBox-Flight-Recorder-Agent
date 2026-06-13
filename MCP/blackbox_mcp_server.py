@@ -674,7 +674,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "details": result
                 }, indent=2))]
 
-            elif name == "generate_music":
+            elif name == "lyria_music":
                 prompt = arguments["prompt"]
                 operator = await resolve_operator(arguments.get("operator"))
 

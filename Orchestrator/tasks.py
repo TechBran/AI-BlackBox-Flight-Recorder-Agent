@@ -124,7 +124,7 @@ def get_recent_media_artifacts(operator: str, limit: int = 10) -> List[Dict]:
     subsequent operations like image-to-video conversion.
     """
     artifacts = []
-    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC}
+    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
 
     # Get all tasks for this operator (or system operator for tool-generated media)
     all_tasks = task_db.get_all_tasks(operator=operator)
@@ -176,7 +176,7 @@ def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str
         List of artifact metadata dicts ready for snapshot index
     """
     artifacts = []
-    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC}
+    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
 
     # Get all tasks for this operator
     all_tasks = task_db.get_all_tasks(operator=operator)
@@ -277,6 +277,8 @@ def process_task(task: Task):
             process_gemini_tts(task)
         elif task.task_type == TaskType.LYRIA_MUSIC:
             process_lyria_music(task)
+        elif task.task_type == TaskType.ELEVENLABS_MUSIC:
+            process_elevenlabs_music(task)
         elif task.task_type == TaskType.CHAT:
             process_chat_task(task)
         elif task.task_type == TaskType.CHECKPOINT:
@@ -954,6 +956,85 @@ def process_lyria_music(task: Task):
                progress=100)
     print(f"[WORKER] Lyria music generated: {len(urls)} variation(s), {total_bytes} bytes total")
 
+def process_elevenlabs_music(task: Task):
+    """Generate a full song using ElevenLabs Music (POST /v1/music).
+
+    A SEPARATE music task from Lyria — full songs w/ vocals, up to 5 minutes,
+    commercially cleared, no restricted vocabulary. Generation blocks (seconds to
+    ~a minute) so it runs here in the worker like Lyria, returning an mp3 URL.
+    Either ``prompt`` or ``composition_plan`` drives generation (validated upstream
+    and again in compose()).
+    """
+    from Orchestrator.elevenlabs import music as el_music
+    update_task(task.task_id, progress=20)
+
+    inp = task.result_data or {}
+    prompt = inp.get("prompt")
+    composition_plan = inp.get("composition_plan")
+    music_length_ms = inp.get("music_length_ms")
+    force_instrumental = bool(inp.get("force_instrumental", False))
+    seed = inp.get("seed")
+
+    label = prompt or "composition_plan"
+    print(f"[WORKER] Generating ElevenLabs music: {str(label)[:80]}...")
+    update_task(task.task_id, progress=40)
+
+    mp3_bytes = el_music.compose(
+        prompt=prompt,
+        composition_plan=composition_plan,
+        music_length_ms=music_length_ms,
+        force_instrumental=force_instrumental,
+        seed=seed,
+    )
+
+    update_task(task.task_id, progress=80)
+
+    # Save with a prompt-based slug (composition_plan has no prompt — use a label).
+    slug = generate_prompt_slug(prompt or "elevenlabs_song")
+    filename = f"{slug}_{task.task_id}_music.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(mp3_bytes)
+    url = f"/ui/uploads/{filename}"
+    print(f"[WORKER] Saved ElevenLabs song: {filename} ({len(mp3_bytes)} bytes)")
+
+    # Index the media file for search/list tools.
+    add_media_entry(
+        url=url,
+        media_type="audio",
+        prompt=prompt or "(composition_plan)",
+        task_id=task.task_id,
+        filename=filename,
+        file_size=len(mp3_bytes),
+        extra_metadata={
+            "model": "music_v1",
+            "provider": "elevenlabs",
+            "music_length_ms": music_length_ms,
+            "force_instrumental": force_instrumental,
+        }
+    )
+
+    result_data = task.result_data or {}
+    result_data["all_urls"] = [url]
+    result_data["variation_count"] = 1
+    result_data["artifact"] = {
+        "type": "music",
+        "url": url,
+        "all_urls": [url],
+        "task_id": task.task_id,
+        "prompt": prompt or "(composition_plan)",
+        "model": "music_v1",
+        "provider": "elevenlabs",
+        "total_bytes": len(mp3_bytes),
+        "created_at": now_utc_iso()
+    }
+
+    update_task(task.task_id,
+               status=TaskStatus.COMPLETED,
+               result_url=url,
+               result_data=result_data,
+               progress=100)
+    print(f"[WORKER] ElevenLabs music generated: {url} ({len(mp3_bytes)} bytes)")
+
 def process_checkpoint_task(task: Task):
     """Process a checkpoint creation task"""
     try:
@@ -1565,11 +1646,11 @@ def process_chat_task(task: Task):
             print(f"[SMS-MODE] Response: {len(ui_reply)} chars")
 
         # Multi-Provider Native Output Rendering - supports MULTIPLE generations of each type
-        if "generate_image:" in ui_reply or "generate_video:" in ui_reply or "generate_music:" in ui_reply:
+        if "generate_image:" in ui_reply or "generate_video:" in ui_reply or "lyria_music:" in ui_reply:
             print(f"[{provider.upper()}] Detected multimodal generation command(s)")
 
             # Process ALL image generation commands (not just the first one)
-            image_pattern = r'generate_image:\s*(.+?)(?=\n\n|generate_video:|generate_music:|generate_image:|$)'
+            image_pattern = r'generate_image:\s*(.+?)(?=\n\n|generate_video:|lyria_music:|generate_image:|$)'
             for image_match in re.finditer(image_pattern, ui_reply, re.DOTALL):
                 image_prompt = image_match.group(1).strip()
                 if not image_prompt:
@@ -1588,7 +1669,7 @@ def process_chat_task(task: Task):
                 print(f"[MULTIMODAL] Image generation queued: {img_task.task_id}")
 
             # Process ALL video generation commands
-            video_pattern = r'generate_video:\s*(.+?)(?=\n\n|generate_image:|generate_music:|generate_video:|$)'
+            video_pattern = r'generate_video:\s*(.+?)(?=\n\n|generate_image:|lyria_music:|generate_video:|$)'
             for video_match in re.finditer(video_pattern, ui_reply, re.DOTALL):
                 video_prompt = video_match.group(1).strip()
                 if not video_prompt:
@@ -1606,7 +1687,7 @@ def process_chat_task(task: Task):
                 print(f"[MULTIMODAL] Video generation queued: {vid_task.task_id}")
 
             # Process ALL music generation commands
-            music_pattern = r'generate_music:\s*(.+?)(?=\n\n|generate_image:|generate_video:|generate_music:|$)'
+            music_pattern = r'lyria_music:\s*(.+?)(?=\n\n|generate_image:|generate_video:|lyria_music:|$)'
             for music_match in re.finditer(music_pattern, ui_reply, re.DOTALL):
                 music_prompt = music_match.group(1).strip()
                 if not music_prompt:

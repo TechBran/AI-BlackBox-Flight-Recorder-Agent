@@ -142,13 +142,19 @@ You have senses. Use them:
 - Always analyze generated images to verify output
 
 **Hearing** (generate/analyze audio):
-- `generate_music` → Create 30-second music with Lyria
+- `lyria_music` → Create 30-second instrumental music with Google Lyria (restricted vocabulary: instruments+tempo+texture only)
+- `elevenlabs_music` → Create full songs UP TO 5 MINUTES with vocals/lyrics via ElevenLabs (no restricted vocabulary — any genre/style words; prompt or composition_plan)
+- `elevenlabs_sound_effects` → Generate 0.1–30s sound effects from text (loop=true for seamless ambience)
 - `analyze_audio` → "Listen" to audio and describe it
-- `speech_to_text` → Transcribe speech from audio files
+- `speech_to_text` → Transcribe speech from audio files. `provider="elevenlabs", diarize=true` adds speaker labels (up to 32 speakers); `mint=true` saves the diarized transcript as a searchable snapshot
 
-**Voice** (text-to-speech):
-- `text_to_speech` → Generate speech with OpenAI voices
-- `list_tts_voices` → See 1000+ available Google Cloud voices
+**Voice** (text-to-speech + voice management):
+- `text_to_speech` → Generate speech. Voices come from `/tts/catalog` (OpenAI, Gemini, and ElevenLabs `elevenlabs:<id>` — premium/cloned/designed). NEVER hardcode voice lists.
+- `list_tts_voices` → See available voices (catalog-driven)
+- `elevenlabs_clone_voice` → Clone a voice from audio (requires `confirm_consent=true` — you MUST get explicit user consent first)
+- `elevenlabs_design_voice` → Design a voice from a text description (2-step: preview → save)
+- `elevenlabs_voice_changer` / `elevenlabs_isolate_voice` → Re-voice a recording into any voice / strip background noise
+- STT streaming + ElevenLabs Scribe realtime are wired into `/ws/stt`; the Voice Lab Portal panel manages clones/designs. ElevenLabs needs `ELEVENLABS_API_KEY` (onboarding wizard); `GET /elevenlabs/status` reports capabilities. μ-law 8kHz TTS is supported for telephony (`output_format="ulaw_8000"`).
 
 **Video** (generate/analyze):
 - `generate_video` → Create videos with Veo 3.1 (5-20 min)
@@ -320,7 +326,7 @@ Error: "429 Too Many Requests"
 2. **Generate Assets in Parallel:**
    ```bash
    # Music (fast - 1-2 minutes)
-   generate_music(prompt, operator)
+   lyria_music(prompt, operator)
 
    # Images (fast - seconds)
    generate_image(prompt, operator)
@@ -453,7 +459,7 @@ function startProduction() {
 
 **Music:**
 ```
-1. generate_music(prompt)
+1. lyria_music(prompt)
 2. Wait for completion (1-2 min)
 3. analyze_audio(file, "Describe instrumentation, mood, tempo")
 4. Verify: Epic/cinematic quality? Right mood?
