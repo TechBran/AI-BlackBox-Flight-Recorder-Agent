@@ -49,12 +49,51 @@ def auth_headers(key: str | None = None) -> dict:
 
 
 def map_error(status_code: int, body: dict | None) -> str:
-    """Normalize ElevenLabs error responses to one-line BlackBox messages."""
-    detail = (body or {}).get("detail")
-    status = detail.get("status") if isinstance(detail, dict) else None
-    if status in _ERROR_HINTS:
-        return _ERROR_HINTS[status]
+    """Normalize ElevenLabs error responses to one-line BlackBox messages.
+
+    Handles BOTH wire shapes the API uses:
+    - HTTP error bodies: ``{"detail": {"status": "quota_exceeded"}}`` or
+      ``{"detail": "some message"}``.
+    - Realtime-WS error frames: ``{"message_type": "auth_error", "error": "..."}``
+      (verified live: a bad key yields exactly this shape).
+    """
+    body = body or {}
+    detail = body.get("detail")
+    # Taxonomy-code candidates from every known location; first match wins.
+    candidates = [
+        detail.get("status") if isinstance(detail, dict) else None,
+        body.get("status"),
+        body.get("message_type"),  # realtime WS frames carry the code here
+    ]
+    code = next((c for c in candidates if c in _ERROR_HINTS), None)
+    if code:
+        return _ERROR_HINTS[code]
     if status_code == 401:
         return _ERROR_HINTS["auth_error"]
-    msg = detail.get("message") if isinstance(detail, dict) else (detail or "")
+    # Human-message fallback across both shapes.
+    if isinstance(detail, dict):
+        msg = detail.get("message") or ""
+    elif isinstance(detail, str):
+        msg = detail
+    else:
+        msg = ""
+    msg = msg or body.get("error") or body.get("message") or ""
     return f"ElevenLabs error {status_code}: {str(msg)[:160]}"
+
+
+def classify_realtime_frame(event: dict | None) -> str | None:
+    """Return the taxonomy code if a Scribe realtime frame is an error frame,
+    else None.
+
+    Error frames carry the code in ``message_type`` (e.g. ``"auth_error"``)
+    and/or a top-level ``"error"`` string. Normal frames
+    (``partial_transcript``, ``committed_transcript``, ``session_started``)
+    have neither, so this returns None for them.
+    """
+    event = event or {}
+    mt = event.get("message_type", "") or ""
+    if mt in _ERROR_HINTS or "error" in mt:
+        return mt
+    if event.get("error"):
+        return mt or "error"
+    return None

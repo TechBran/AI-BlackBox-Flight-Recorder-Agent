@@ -43,7 +43,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from Orchestrator.checkpoint import app
 from Orchestrator import config
-from Orchestrator.elevenlabs.client import resolve_api_key, WS_BASE_URL, auth_headers, map_error
+from Orchestrator.elevenlabs.client import (
+    resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
+)
 from Orchestrator.stt.resolve import resolve_stt_provider
 from Orchestrator.stt.streaming import map_openai_event, map_google_result, InterimAccumulator
 from Orchestrator.whisper_filter import is_whisper_hallucination
@@ -338,22 +340,20 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 except (ValueError, TypeError):
                     continue
                 # Surface Scribe error-class messages instead of swallowing them.
-                # Error-shaped frames carry an "error"/"status" field or a
-                # message_type containing "error" (the provider taxonomy:
-                # auth_error, quota_exceeded, session_time_limit_exceeded, ...).
-                # map_error reads the {"detail": {"status": ...}} shape, so wrap
-                # the extracted code accordingly.
-                mt = event.get("message_type", "")
-                status = event.get("status") or event.get("error")
-                if status or "error" in mt:
-                    code = status or mt
+                # classify_realtime_frame encapsulates the provider taxonomy
+                # (auth_error, quota_exceeded, session_time_limit_exceeded, ...)
+                # and the real WS error-frame shape verified live:
+                # {"message_type": "auth_error", "error": "..."}. map_error reads
+                # that shape directly, so we hand it the raw event.
+                err_code = classify_realtime_frame(event)
+                if err_code:
                     print(f"[STT/WS] elevenlabs ERROR message: {json.dumps(event)[:500]}")
                     # session_time_limit_exceeded ends the session normally (the
                     # provider closes the socket); forward any final already sent
                     # and let the relay exit on the close — no client error.
-                    if code != "session_time_limit_exceeded":
+                    if err_code != "session_time_limit_exceeded":
                         await websocket.send_json(
-                            {"type": "stt_error", "message": map_error(0, {"detail": {"status": code}})}
+                            {"type": "stt_error", "message": map_error(0, event)}
                         )
                         return
                     continue
