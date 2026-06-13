@@ -611,7 +611,7 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
       "input_schema": {
         "properties": {},
         "required": [],
@@ -870,11 +870,28 @@
       "name": "send_sms"
     },
     {
-      "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+      "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
       "input_schema": {
         "properties": {
           "audio_path": {
             "description": "Path to audio file (local path)",
+            "type": "string"
+          },
+          "diarize": {
+            "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+            "type": "boolean"
+          },
+          "mint": {
+            "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+            "type": "boolean"
+          },
+          "provider": {
+            "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+            "enum": [
+              "openai",
+              "google",
+              "elevenlabs"
+            ],
             "type": "string"
           }
         },
@@ -886,7 +903,7 @@
       "name": "speech_to_text"
     },
     {
-      "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
       "input_schema": {
         "properties": {
           "model": {
@@ -898,7 +915,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
             "type": "string"
           }
         },
@@ -2298,7 +2315,7 @@
           }
         },
         {
-          "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+          "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
           "name": "list_tts_voices",
           "parameters": {
             "properties": {},
@@ -2555,12 +2572,29 @@
           }
         },
         {
-          "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+          "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
           "name": "speech_to_text",
           "parameters": {
             "properties": {
               "audio_path": {
                 "description": "Path to audio file (local path)",
+                "type": "string"
+              },
+              "diarize": {
+                "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+                "type": "boolean"
+              },
+              "mint": {
+                "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+                "type": "boolean"
+              },
+              "provider": {
+                "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+                "enum": [
+                  "openai",
+                  "google",
+                  "elevenlabs"
+                ],
                 "type": "string"
               }
             },
@@ -2571,7 +2605,7 @@
           }
         },
         {
-          "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+          "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
           "name": "text_to_speech",
           "parameters": {
             "properties": {
@@ -2584,7 +2618,7 @@
                 "type": "string"
               },
               "voice": {
-                "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+                "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
                 "type": "string"
               }
             },
@@ -3291,7 +3325,7 @@
       "name": "list_recent_snapshots"
     },
     {
-      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+      "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
       "inputSchema": {
         "properties": {},
         "required": [],
@@ -3400,11 +3434,28 @@
       "name": "seek_snapshot_direct"
     },
     {
-      "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+      "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
       "inputSchema": {
         "properties": {
           "audio_path": {
             "description": "Path to audio file (local path)",
+            "type": "string"
+          },
+          "diarize": {
+            "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+            "type": "boolean"
+          },
+          "mint": {
+            "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+            "type": "boolean"
+          },
+          "provider": {
+            "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+            "enum": [
+              "openai",
+              "google",
+              "elevenlabs"
+            ],
             "type": "string"
           }
         },
@@ -3416,7 +3467,7 @@
       "name": "speech_to_text"
     },
     {
-      "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+      "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
       "inputSchema": {
         "properties": {
           "model": {
@@ -3428,7 +3479,7 @@
             "type": "string"
           },
           "voice": {
-            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+            "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
             "type": "string"
           }
         },
@@ -4940,7 +4991,7 @@
     },
     {
       "function": {
-        "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info.",
+        "description": "List available text-to-speech voices from Google Cloud TTS. Returns a large list of voices with language and gender info. When ElevenLabs is configured, ElevenLabs voices (premium and cloned) are also available for text_to_speech via ids prefixed elevenlabs:<voice_id>.",
         "name": "list_tts_voices",
         "parameters": {
           "properties": {},
@@ -5229,12 +5280,29 @@
     },
     {
       "function": {
-        "description": "Transcribe audio to text using OpenAI Whisper. Supports wav, mp3, m4a, ogg, flac, webm.",
+        "description": "Transcribe audio to text. provider='elevenlabs' adds speaker diarization (up to 32 speakers), word timestamps, and audio-event tags \u2014 ideal for meetings, calls, and interviews. Supports wav, mp3, m4a, ogg, flac, webm.",
         "name": "speech_to_text",
         "parameters": {
           "properties": {
             "audio_path": {
               "description": "Path to audio file (local path)",
+              "type": "string"
+            },
+            "diarize": {
+              "description": "ElevenLabs only: label who said what (up to 32 speakers). Returns a speaker-attributed transcript.",
+              "type": "boolean"
+            },
+            "mint": {
+              "description": "Save the transcript to the BlackBox as a searchable, speaker-attributed snapshot (uses the current operator). Great for meetings and calls you want to recall later.",
+              "type": "boolean"
+            },
+            "provider": {
+              "description": "Transcription provider. 'elevenlabs' enables diarization. Omit to use the configured default.",
+              "enum": [
+                "openai",
+                "google",
+                "elevenlabs"
+              ],
               "type": "string"
             }
           },
@@ -5248,7 +5316,7 @@
     },
     {
       "function": {
-        "description": "Convert text to speech using OpenAI TTS HD. Returns an audio URL. Voices: alloy, echo, fable, onyx, nova, shimmer.",
+        "description": "Convert text to speech. Returns an audio URL. OpenAI TTS HD voices: alloy, echo, fable, onyx, nova, shimmer. ElevenLabs voices are also available when configured -- pass the prefixed id as voice (e.g. elevenlabs:<voice_id> for premium or cloned voices); list_tts_voices shows the available ElevenLabs voice ids.",
         "name": "text_to_speech",
         "parameters": {
           "properties": {
@@ -5261,7 +5329,7 @@
               "type": "string"
             },
             "voice": {
-              "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx)",
+              "description": "Voice: alloy, echo, fable, onyx, nova, shimmer (default: onyx). Or an ElevenLabs voice id prefixed elevenlabs:<voice_id> (premium/cloned voices) when ElevenLabs is configured.",
               "type": "string"
             }
           },
