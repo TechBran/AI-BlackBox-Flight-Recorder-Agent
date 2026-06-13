@@ -76,6 +76,7 @@ class TtsRepository(private val api: BlackBoxApi) {
                 val model = when (provider) {
                     "gemini-flash" -> "gemini-2.5-flash-tts"
                     "gemini-pro" -> "gemini-2.5-pro-tts"
+                    "elevenlabs" -> ""  // model chosen server-side (eleven_v3 default)
                     else -> "tts-1-hd"
                 }
                 VoiceConfig(provider, voice, model)
@@ -114,6 +115,38 @@ class TtsRepository(private val api: BlackBoxApi) {
         }
 
         val response = api.post("/tts/batch", body)
+        return json.decodeFromString(TtsResponse.serializer(), response)
+    }
+
+    // =========================================================================
+    // ElevenLabs TTS — POST /tts with return_json (synchronous, returns audio_url).
+    // The backend routes any voice prefixed "elevenlabs:" to ElevenLabs synthesis
+    // (quality-first eleven_v3). Without this, elevenlabs voices fell into the
+    // Gemini/Cloud branch and the raw voice_id was rejected as a Google voice name.
+    // =========================================================================
+    suspend fun generateElevenLabsTts(
+        text: String,
+        voiceId: String,
+        operator: String = "Brandon"
+    ): TtsResponse {
+        val sanitized = text
+            .take(TTS_MAX_CHARS)
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+
+        // voiceId is the raw id (prefix stripped by parseVoice); re-prefix so the
+        // backend detects the ElevenLabs provider.
+        val body = buildString {
+            append("{\"text\":\"$sanitized\"")
+            append(",\"voice\":\"elevenlabs:$voiceId\"")
+            append(",\"provider\":\"elevenlabs\"")
+            append(",\"return_json\":true")
+            append(",\"operator\":\"$operator\"")
+            append("}")
+        }
+
+        val response = api.post("/tts", body)
         return json.decodeFromString(TtsResponse.serializer(), response)
     }
 
@@ -184,6 +217,10 @@ class TtsRepository(private val api: BlackBoxApi) {
         Log.d(TAG, "generateWithVoice: provider=${config.provider}, voice=${config.voice}")
 
         return when (config.provider) {
+            "elevenlabs" -> {
+                // ElevenLabs TTS — synchronous, returns audio_url directly
+                generateElevenLabsTts(text = text, voiceId = config.voice, operator = operator)
+            }
             "gemini-pro", "gemini-flash" -> {
                 // Gemini TTS is async — start task (polling handled by caller)
                 val result = generateGeminiTts(
