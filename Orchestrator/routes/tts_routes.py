@@ -826,9 +826,25 @@ async def get_google_voices(operator: Optional[str] = None):
 @app.get("/tts/catalog")
 async def tts_catalog():
     """Grouped TTS voice catalog -- single source of truth for the voice picker
-    (web Portal + Android both fetch this). See config.build_tts_catalog()."""
+    (web Portal + Android both fetch this). See config.build_tts_catalog().
+
+    When an ElevenLabs key is configured, a 4th dynamic group ("ElevenLabs") is
+    APPENDED from the live voice catalog: My Voices first (star-prefixed), then
+    Premade. Fail-open -- if the catalog is unreachable the group is simply
+    absent and the three static groups are returned unchanged."""
     from Orchestrator.config import build_tts_catalog
-    return {"groups": build_tts_catalog()}
+    groups = build_tts_catalog()
+    try:
+        from Orchestrator.elevenlabs import catalog as el_catalog
+        v = el_catalog.get_voices()
+        if v:
+            my = [dict(x, name=f"⭐ {x['name']}") for x in v["my_voices"]]  # star-prefix My Voices
+            voices = my + v["premade"]
+            if voices:
+                groups.append({"id": "elevenlabs", "label": "ElevenLabs", "dynamic": True, "voices": voices})
+    except Exception:
+        pass  # fail-open: ElevenLabs group simply absent if catalog unreachable
+    return {"groups": groups}
 
 @app.get("/stt/catalog")
 async def stt_catalog():

@@ -516,6 +516,13 @@ def build_tts_catalog() -> list:
         gemini_group("gemini-pro", "Gemini Pro TTS"),
     ]
 
+# ElevenLabs TTS quality-first defaults (env-overridable). Brandon's directive:
+# default to the flagship model + highest output quality the plan allows; cheaper
+# tiers are EXPLICIT, never silent. On a tier-gate 4xx the synth path retries ONCE
+# at mp3_44100_128 and PRINTS a visible downgrade notice (see elevenlabs/tts.py).
+ELEVENLABS_TTS_MODEL_DEFAULT = os.getenv("ELEVENLABS_TTS_MODEL_DEFAULT", "eleven_v3")
+ELEVENLABS_TTS_FORMAT_DEFAULT = os.getenv("ELEVENLABS_TTS_FORMAT_DEFAULT", "mp3_44100_192")
+
 GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
 
 # Gemini Live allowlists for server-side validation of client-supplied params.
