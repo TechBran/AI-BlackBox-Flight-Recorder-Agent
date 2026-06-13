@@ -204,6 +204,7 @@ class TaskType(str, Enum):
     GOOGLE_TTS = "google_tts"
     GEMINI_TTS = "gemini_tts"
     LYRIA_MUSIC = "lyria_music"  # Google Lyria-002 music generation
+    ELEVENLABS_MUSIC = "elevenlabs_music"  # ElevenLabs Music — full songs w/ vocals, up to 5 min
     CHAT = "chat"
     CHECKPOINT = "checkpoint"
     AGENT_CHAT = "agent_chat"  # Claude Code CLI sessions

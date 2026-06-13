@@ -1591,6 +1591,51 @@ async def get_music_status():
     }
 
 
+@app.post("/generate/elevenlabs_music")
+async def generate_elevenlabs_music_async(body: dict = Body(...)):
+    """Queue ElevenLabs Music generation (full songs, up to 5 min, w/ vocals).
+
+    A SEPARATE music endpoint from /generate/lyria_music — both coexist
+    (provider-explicit naming). Exactly one of ``prompt`` / ``composition_plan``
+    is required; the rest (``music_length_ms``, ``force_instrumental``, ``seed``,
+    ``operator``) are optional. Returns a task_id — poll get_task_status.
+    """
+    try:
+        prompt = body.get("prompt")
+        composition_plan = body.get("composition_plan")
+        if (prompt is None) == (composition_plan is None):
+            raise HTTPException(
+                status_code=400,
+                detail="Provide exactly one of `prompt` or `composition_plan`."
+            )
+
+        # Persist only the generation params the processor consumes.
+        params = {
+            "prompt": prompt,
+            "composition_plan": composition_plan,
+            "music_length_ms": body.get("music_length_ms"),
+            "force_instrumental": bool(body.get("force_instrumental", False)),
+            "seed": body.get("seed"),
+            "operator": body.get("operator"),
+        }
+        task = create_task(
+            TaskType.ELEVENLABS_MUSIC,
+            operator=body.get("operator"),
+            prompt=prompt,
+            result_data=params
+        )
+        return {
+            "task_id": task.task_id,
+            "status": task.status,
+            "message": "ElevenLabs music generation queued"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR: Failed to queue ElevenLabs music: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate/gemini_tts")  # Note: renamed from /generate/gemini-tts
 async def generate_gemini_tts_async(inp: GeminiProTTSIn):
     """Queue Gemini Pro TTS generation"""

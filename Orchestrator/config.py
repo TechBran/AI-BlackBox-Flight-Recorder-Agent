@@ -523,6 +523,11 @@ def build_tts_catalog() -> list:
 ELEVENLABS_TTS_MODEL_DEFAULT = os.getenv("ELEVENLABS_TTS_MODEL_DEFAULT", "eleven_v3")
 ELEVENLABS_TTS_FORMAT_DEFAULT = os.getenv("ELEVENLABS_TTS_FORMAT_DEFAULT", "mp3_44100_192")
 
+# ElevenLabs Music (POST /v1/music). Songs run long (up to 5 min) so 128 is the
+# sensible default — it avoids the 192-tier-gate downgrade round-trip and the
+# extra bytes buy nothing audible over a multi-minute track.
+ELEVENLABS_MUSIC_FORMAT_DEFAULT = os.getenv("ELEVENLABS_MUSIC_FORMAT_DEFAULT", "mp3_44100_128")
+
 GEMINI_LIVE_DEFAULT_VOICE = "Orus"      # Default voice for phone
 
 # Gemini Live allowlists for server-side validation of client-supplied params.

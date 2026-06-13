@@ -1,0 +1,37 @@
+{
+  "name": "elevenlabs_music",
+  "description": "Generate full songs UP TO 5 MINUTES with vocals and lyrics using ElevenLabs Music (commercially cleared). Unlike lyria_music there is NO restricted vocabulary - use any genre/style/mood words freely. Params: a natural-language `prompt` + optional `music_length_ms` (3000-300000), `force_instrumental`, OR a structured `composition_plan` (sections with styles + lyric lines) for produced work.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Natural-language description of the song - any genre, style, mood, instruments, vocals, or lyric themes (no restricted vocabulary). Mutually exclusive with composition_plan."
+      },
+      "music_length_ms": {
+        "type": "integer",
+        "description": "Desired song length in milliseconds (3000-300000, i.e. 3 seconds to 5 minutes). Optional; the model picks a fitting length when omitted."
+      },
+      "force_instrumental": {
+        "type": "boolean",
+        "description": "Force a purely instrumental track with no vocals/lyrics (default false)."
+      },
+      "composition_plan": {
+        "type": "object",
+        "description": "Structured plan for produced work: sections with per-section styles and lyric lines. Mutually exclusive with prompt - provide one or the other, not both."
+      }
+    }
+  },
+  "example": "elevenlabs_music(prompt=\"upbeat indie pop anthem with bright guitars and soaring vocals\", music_length_ms=30000)"
+}

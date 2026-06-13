@@ -277,6 +277,8 @@ def process_task(task: Task):
             process_gemini_tts(task)
         elif task.task_type == TaskType.LYRIA_MUSIC:
             process_lyria_music(task)
+        elif task.task_type == TaskType.ELEVENLABS_MUSIC:
+            process_elevenlabs_music(task)
         elif task.task_type == TaskType.CHAT:
             process_chat_task(task)
         elif task.task_type == TaskType.CHECKPOINT:
@@ -953,6 +955,85 @@ def process_lyria_music(task: Task):
                result_data=result_data,
                progress=100)
     print(f"[WORKER] Lyria music generated: {len(urls)} variation(s), {total_bytes} bytes total")
+
+def process_elevenlabs_music(task: Task):
+    """Generate a full song using ElevenLabs Music (POST /v1/music).
+
+    A SEPARATE music task from Lyria — full songs w/ vocals, up to 5 minutes,
+    commercially cleared, no restricted vocabulary. Generation blocks (seconds to
+    ~a minute) so it runs here in the worker like Lyria, returning an mp3 URL.
+    Either ``prompt`` or ``composition_plan`` drives generation (validated upstream
+    and again in compose()).
+    """
+    from Orchestrator.elevenlabs import music as el_music
+    update_task(task.task_id, progress=20)
+
+    inp = task.result_data or {}
+    prompt = inp.get("prompt")
+    composition_plan = inp.get("composition_plan")
+    music_length_ms = inp.get("music_length_ms")
+    force_instrumental = bool(inp.get("force_instrumental", False))
+    seed = inp.get("seed")
+
+    label = prompt or "composition_plan"
+    print(f"[WORKER] Generating ElevenLabs music: {str(label)[:80]}...")
+    update_task(task.task_id, progress=40)
+
+    mp3_bytes = el_music.compose(
+        prompt=prompt,
+        composition_plan=composition_plan,
+        music_length_ms=music_length_ms,
+        force_instrumental=force_instrumental,
+        seed=seed,
+    )
+
+    update_task(task.task_id, progress=80)
+
+    # Save with a prompt-based slug (composition_plan has no prompt — use a label).
+    slug = generate_prompt_slug(prompt or "elevenlabs_song")
+    filename = f"{slug}_{task.task_id}_music.mp3"
+    save_path = UPLOADS_DIR / filename
+    save_path.write_bytes(mp3_bytes)
+    url = f"/ui/uploads/{filename}"
+    print(f"[WORKER] Saved ElevenLabs song: {filename} ({len(mp3_bytes)} bytes)")
+
+    # Index the media file for search/list tools.
+    add_media_entry(
+        url=url,
+        media_type="audio",
+        prompt=prompt or "(composition_plan)",
+        task_id=task.task_id,
+        filename=filename,
+        file_size=len(mp3_bytes),
+        extra_metadata={
+            "model": "music_v1",
+            "provider": "elevenlabs",
+            "music_length_ms": music_length_ms,
+            "force_instrumental": force_instrumental,
+        }
+    )
+
+    result_data = task.result_data or {}
+    result_data["all_urls"] = [url]
+    result_data["variation_count"] = 1
+    result_data["artifact"] = {
+        "type": "music",
+        "url": url,
+        "all_urls": [url],
+        "task_id": task.task_id,
+        "prompt": prompt or "(composition_plan)",
+        "model": "music_v1",
+        "provider": "elevenlabs",
+        "total_bytes": len(mp3_bytes),
+        "created_at": now_utc_iso()
+    }
+
+    update_task(task.task_id,
+               status=TaskStatus.COMPLETED,
+               result_url=url,
+               result_data=result_data,
+               progress=100)
+    print(f"[WORKER] ElevenLabs music generated: {url} ({len(mp3_bytes)} bytes)")
 
 def process_checkpoint_task(task: Task):
     """Process a checkpoint creation task"""
