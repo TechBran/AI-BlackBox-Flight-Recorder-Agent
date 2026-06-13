@@ -19,6 +19,13 @@ EMBEDDING_MODELS = {
         "privacy": "cloud", "quality_note": "Current default; auto-tracked for deprecation",
         "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
     },
+    "gemini-embedding-2": {
+        "provider": "gemini", "model_id": "models/gemini-embedding-2", "dims": 3072,
+        "label": "Gemini 2 (cloud, multimodal)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.20,
+        "privacy": "cloud", "quality_note": "Newest Gemini embedding (multimodal); re-embed required to switch",
+        "query_instruction": None, "keep_alive": None,
+        # semantic_threshold intentionally omitted → global 0.60 until measured post-migration
+    },
     "openai-text-embedding-3-large": {
         "provider": "openai", "model_id": "text-embedding-3-large", "dims": 3072,
         "label": "OpenAI (cloud)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.13,

@@ -518,6 +518,14 @@ def test_recheck_interval_hourly_only_while_broken():
     """Broken state rechecks in 1h (confirm/recover fast); else daily."""
     assert watcher.WATCH_INTERVAL_BROKEN_S == 3600
     assert watcher.WATCH_INTERVAL_OK_S == 24 * 3600
+
+
+def test_registry_maps_gemini_embedding_2_vendor_id():
+    """Registering gemini-embedding-2 maps its vendor id → slug, so the watcher
+    resolves successor_slug (which lights up the one-click Upgrade button on the
+    superseded banner across every surface)."""
+    from Orchestrator.embeddings.watcher import _registry_slug_for
+    assert _registry_slug_for("gemini", "models/gemini-embedding-2") == "gemini-embedding-2"
     assert watcher._next_interval("broken") == watcher.WATCH_INTERVAL_BROKEN_S
     assert watcher._next_interval("ok") == watcher.WATCH_INTERVAL_OK_S
     assert watcher._next_interval("superseded") == watcher.WATCH_INTERVAL_OK_S
