@@ -687,6 +687,8 @@ STT_OPENAI_FILE    = os.getenv("STT_OPENAI_FILE",   "gpt-4o-transcribe").strip()
 STT_OPENAI_DELAY   = os.getenv("STT_OPENAI_DELAY",  "low").strip()
 STT_GOOGLE_MODEL   = os.getenv("STT_GOOGLE_MODEL",  "chirp_2").strip()
 STT_GOOGLE_REGION  = os.getenv("STT_GOOGLE_REGION", "us-central1").strip()
+ELEVENLABS_STT_STREAM_MODEL = os.getenv("ELEVENLABS_STT_STREAM_MODEL", "scribe_v2_realtime")
+ELEVENLABS_STT_FILE_MODEL = os.getenv("ELEVENLABS_STT_FILE_MODEL", "scribe_v2")
 STT_OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
 STT_GOOGLE_AVAILABLE = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GOOGLE_APPLICATION_CREDENTIALS))
 

@@ -28,3 +28,21 @@ def test_google_final_returns_full_and_resets():
     acc.google("Hello", is_final=False)
     assert acc.google("Hello world", is_final=True) == {"type":"stt_final","text":"Hello world"}
     assert acc.google("Next", is_final=False) == {"type":"stt_delta","text":"Next"}
+
+def test_elevenlabs_partial_passthrough_cumulative():
+    acc = InterimAccumulator()
+    # ElevenLabs partial_transcript text is cumulative (verified live); replace, don't append
+    assert acc.elevenlabs({"message_type":"partial_transcript","text":"hello"}) == {"type":"stt_delta","text":"hello"}
+    assert acc.elevenlabs({"message_type":"partial_transcript","text":"hello world"}) == {"type":"stt_delta","text":"hello world"}
+
+def test_elevenlabs_committed_returns_full_and_resets():
+    acc = InterimAccumulator()
+    acc.elevenlabs({"message_type":"partial_transcript","text":"hello"})
+    assert acc.elevenlabs({"message_type":"committed_transcript","text":"hello world."}) == {"type":"stt_final","text":"hello world."}
+    # after a committed final, the buffer resets so the next utterance starts fresh
+    assert acc.elevenlabs({"message_type":"partial_transcript","text":"next"}) == {"type":"stt_delta","text":"next"}
+
+def test_elevenlabs_ignored_messages_return_none():
+    acc = InterimAccumulator()
+    assert acc.elevenlabs({"message_type":"session_started","session_id":"x","config":{}}) is None
+    assert acc.elevenlabs({"message_type":"some_unknown_type"}) is None
