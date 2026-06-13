@@ -1,0 +1,32 @@
+{
+  "name": "elevenlabs_design_voice",
+  "description": "Design a brand-new synthetic voice from a text description using ElevenLabs Voice Design (text-to-voice). Two steps: (1) call with just a voice_description to generate 3 candidate preview voices; (2) call again with the chosen generated_voice_id AND a name to save it as a real voice in the BlackBox voice selector. Use when the user wants to invent a voice from a description (e.g. 'a gravelly old wizard') rather than clone a real recording.",
+  "category": "audio",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "voice_description": {
+        "type": "string",
+        "description": "Describe the voice to design (e.g. 'a warm middle-aged British female narrator'). Required for the preview step; reused as the saved voice's description."
+      },
+      "text": {
+        "type": "string",
+        "description": "Optional sample text the previews speak (100-1000 chars). Omit to let ElevenLabs auto-generate the sample text."
+      },
+      "generated_voice_id": {
+        "type": "string",
+        "description": "Step 2 only: the generated_voice_id of the preview the user picked (from the step-1 results)."
+      },
+      "name": {
+        "type": "string",
+        "description": "Step 2 only: the display name to save the chosen preview under."
+      }
+    },
+    "required": ["voice_description"]
+  },
+  "returns": "Step 1: 3 preview voices (each with a generated_voice_id + audio_url). Step 2: the saved voice's id (elevenlabs:<id>).",
+  "example": "elevenlabs_design_voice(voice_description=\"a gravelly old wizard\") then elevenlabs_design_voice(voice_description=\"a gravelly old wizard\", generated_voice_id=\"<id>\", name=\"Gandalf\")",
+  "notes": "Two-step flow: preview first, then save the chosen generated_voice_id with a name. Providing a generated_voice_id without a name returns an error asking for the name."
+}

@@ -1,0 +1,24 @@
+{
+  "name": "elevenlabs_delete_voice",
+  "description": "Delete a voice from the ElevenLabs account (removes it from the BlackBox voice selector). Use when the user wants to remove a cloned, designed, or library voice they no longer need. Requires confirm=true; warns if the voice was an operator's saved TTS preference.",
+  "category": "audio",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "voice_id": {
+        "type": "string",
+        "description": "The voice id to delete. Accepts the elevenlabs:<id> prefixed form or the raw id."
+      },
+      "confirm": {
+        "type": "boolean",
+        "description": "Must be true to actually delete. Confirm with the user first — deletion is permanent."
+      }
+    },
+    "required": ["voice_id", "confirm"]
+  },
+  "returns": "Confirmation the voice was deleted, plus a warning if it was in use by any operator.",
+  "example": "elevenlabs_delete_voice(voice_id=\"elevenlabs:abc123\", confirm=true)",
+  "notes": "Deletion is permanent. The in-use check is advisory (lists operators whose saved TTS voice was this one); it never blocks the delete."
+}

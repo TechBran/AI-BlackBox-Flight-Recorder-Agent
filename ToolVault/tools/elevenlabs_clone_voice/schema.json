@@ -1,0 +1,33 @@
+{
+  "name": "elevenlabs_clone_voice",
+  "description": "Clone a voice from local audio sample file(s) using ElevenLabs Instant Voice Cloning. The cloned voice becomes available in the BlackBox voice selector for text-to-speech. Use when the user wants to create a custom voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+  "category": "audio",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Display name for the cloned voice (how it will appear in the voice selector)."
+      },
+      "audio_paths": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Local file paths to one or more audio samples to clone from (e.g. session-upload paths). More/cleaner samples improve the clone."
+      },
+      "confirm_consent": {
+        "type": "boolean",
+        "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first — refuse otherwise."
+      },
+      "description": {
+        "type": "string",
+        "description": "Optional short description of the voice."
+      }
+    },
+    "required": ["name", "audio_paths", "confirm_consent"]
+  },
+  "returns": "The cloned voice's id (prefixed elevenlabs:<id>) and a confirmation it is now in the voice selector.",
+  "example": "elevenlabs_clone_voice(name=\"My Narrator\", audio_paths=[\"/path/to/sample.mp3\"], confirm_consent=true)",
+  "notes": "Consent gate is enforced in the executor: without confirm_consent=true NO voice is created. Cloning consumes account voice slots — Starter tier is limited."
+}
