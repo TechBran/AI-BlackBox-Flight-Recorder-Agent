@@ -93,6 +93,7 @@ from Orchestrator.routes.browser_routes import *
 from Orchestrator.routes.internet_routes import *
 from Orchestrator.routes.gmail_routes import *
 from Orchestrator.routes.toolvault_routes import *
+from Orchestrator.routes.elevenlabs_routes import *
 
 from Orchestrator.routes.device_routes import router as device_router
 app.include_router(device_router)

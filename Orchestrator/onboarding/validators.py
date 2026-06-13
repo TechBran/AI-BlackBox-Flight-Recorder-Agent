@@ -5,7 +5,8 @@ to confirm the supplied credential works. Returns ValidationResult with
 ok/error/latency_ms so the wizard can show clean per-provider feedback.
 
 Tier-1 (v1 wizard): OpenAI, Anthropic, Google, xAI, Perplexity, Tailscale, Gmail.
-Tier-2 (v1.1): Twilio, ElevenLabs, Asterisk.
+Wizard-active (Tier-1): ElevenLabs (key validator below — surfaces plan tier + cloning gate).
+Tier-2 (v1.1): Twilio, Asterisk.
 """
 from __future__ import annotations
 
@@ -127,6 +128,29 @@ def validate_perplexity(api_key: str) -> ValidationResult:
                 messages=[{"role": "user", "content": "hi"}],
             )
             return {"model": resp.model, "id": resp.id}
+    return _measure(_fn)
+
+
+def validate_elevenlabs(api_key: str) -> ValidationResult:
+    """GET /v1/user - cheap metadata call. Surfaces plan tier + feature gates
+    (IVC needs Starter+, PVC Creator+) so the wizard tells the customer what
+    their key actually unlocks, not just that it works."""
+    def _fn():
+        import requests
+        r = requests.get("https://api.elevenlabs.io/v1/user",
+                         headers={"xi-api-key": api_key}, timeout=10)
+        if r.status_code == 401:
+            raise RuntimeError("Invalid ElevenLabs API key")
+        r.raise_for_status()
+        sub = r.json().get("subscription", {}) or {}
+        tier = sub.get("tier", "free")
+        ivc = bool(sub.get("can_use_instant_voice_cloning"))
+        return {
+            "tier": tier,
+            "credits_remaining": (sub.get("character_limit", 0) or 0) - (sub.get("character_count", 0) or 0),
+            "features": ("voice cloning available" if ivc
+                         else "voice cloning not available on this plan"),
+        }
     return _measure(_fn)
 
 
