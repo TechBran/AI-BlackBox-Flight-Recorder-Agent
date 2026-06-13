@@ -1,0 +1,213 @@
+/* Voice Library browse modal — ElevenLabs shared community library
+ * (Task 19 of the ElevenLabs integration). Search the public library, preview a
+ * voice (click-to-play), add it to the account. Reuses the base .modal /
+ * .modal-card / .modal-head shell; everything below is the body + result cards.
+ * Tokens only — no hardcoded colors. */
+
+.voice-library-card {
+  width: 720px;
+  max-width: 94vw;
+  /* tall content (scrolling result list) capped to viewport so the head/search
+     stay pinned while the list scrolls internally */
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.voice-library-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md, 12px);
+  padding: var(--space-lg, 16px);
+  min-height: 0; /* allow the inner results region to flex+scroll */
+}
+
+/* ── Search row ── */
+.voice-library-search-row {
+  display: flex;
+  gap: var(--space-sm, 8px);
+  align-items: center;
+}
+
+.voice-library-search {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--border, #333);
+  border-radius: var(--radius-md, 8px);
+  color: var(--text, #fff);
+  font-size: 14px;
+  transition: border-color var(--transition-fast, 0.15s ease);
+}
+
+.voice-library-search:focus {
+  outline: none;
+  border-color: var(--accent, #ff4a4a);
+}
+
+.voice-library-search::placeholder {
+  color: var(--neutral-600, #666);
+}
+
+.voice-library-filter {
+  padding: 10px 12px;
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--border, #333);
+  border-radius: var(--radius-md, 8px);
+  color: var(--neutral-900, #ccc);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── Status / count line ── */
+.voice-library-status {
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+  min-height: 16px;
+  padding: 0 2px;
+}
+
+/* ── Results list (scrolls) ── */
+.voice-library-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+  overflow-y: auto;
+  min-height: 120px;
+  /* fade the bottom edge so it reads as scrollable */
+  padding-right: 4px;
+}
+
+.voice-library-empty {
+  text-align: center;
+  color: var(--neutral-600, #666);
+  font-size: 13px;
+  padding: 32px 0;
+}
+
+/* ── A single result card ── */
+.vl-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md, 12px);
+  padding: var(--space-md, 12px);
+  background: var(--neutral-100, #141414);
+  border: 1px solid var(--neutral-300, #333);
+  border-radius: var(--radius-md, 8px);
+  transition: border-color var(--transition-fast, 0.15s ease),
+              background var(--transition-fast, 0.15s ease);
+}
+
+.vl-card:hover {
+  border-color: var(--neutral-500, #555);
+  background: var(--neutral-150, #1a1a1a);
+}
+
+.vl-card-main {
+  flex: 1;
+  min-width: 0; /* let text truncate instead of pushing buttons out */
+}
+
+.vl-card-name {
+  font-weight: 600;
+  color: var(--text, #fff);
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vl-card-sub {
+  font-size: 12px;
+  color: var(--neutral-700, #888);
+  margin-top: 2px;
+  text-transform: capitalize;
+}
+
+.vl-card-desc {
+  font-size: 12px;
+  color: var(--neutral-600, #666);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vl-card-actions {
+  display: flex;
+  gap: var(--space-sm, 8px);
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Preview ▶ button — neutral, square-ish */
+.vl-preview-btn {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--neutral-200, #222);
+  border: 1px solid var(--neutral-400, #444);
+  border-radius: var(--radius-md, 8px);
+  color: var(--text, #fff);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.15s ease),
+              border-color var(--transition-fast, 0.15s ease);
+}
+
+.vl-preview-btn:hover {
+  background: var(--neutral-300, #333);
+  border-color: var(--neutral-600, #666);
+}
+
+.vl-preview-btn.playing {
+  background: var(--accent, #ff4a4a);
+  border-color: var(--accent, #ff4a4a);
+}
+
+/* Add button — accent action */
+.vl-add-btn {
+  padding: 8px 14px;
+  background: var(--accent, #ff4a4a);
+  border: 1px solid var(--accent, #ff4a4a);
+  border-radius: var(--radius-md, 8px);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter var(--transition-fast, 0.15s ease),
+              opacity var(--transition-fast, 0.15s ease);
+}
+
+.vl-add-btn:hover {
+  filter: brightness(1.1);
+}
+
+.vl-add-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  filter: none;
+}
+
+.vl-add-btn.added {
+  background: transparent;
+  color: var(--neutral-700, #888);
+  border-color: var(--neutral-400, #444);
+  cursor: default;
+}
+
+.voice-library-hint {
+  font-size: 12px;
+  color: var(--neutral-600, #666);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* The "🔍 Browse voice library…" trigger that sits under the voice picker.
+   Hidden by default; revealed only when /elevenlabs/status reports configured. */
+#btnBrowseVoiceLibrary {
+  margin-top: var(--space-sm, 8px);
+}

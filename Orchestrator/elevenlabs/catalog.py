@@ -159,6 +159,85 @@ def get_user(force: bool = False) -> dict | None:
     return _cached("user", force, produce)
 
 
+def _normalize_shared_voice(voice: dict) -> dict:
+    """Map a raw /v1/shared-voices entry to the library-card shape.
+
+    Unlike ``_normalize_voice`` (account voices, which carry a ``labels`` dict),
+    shared-library voices expose accent/gender/age as TOP-LEVEL fields, so the
+    sub-line is built from those directly. ``public_owner_id`` + ``voice_id`` are
+    the coordinates the add endpoint needs; both are preserved verbatim.
+    """
+    return {
+        "public_owner_id": voice.get("public_owner_id"),
+        "voice_id": voice.get("voice_id"),
+        "name": voice.get("name"),
+        "preview_url": voice.get("preview_url"),
+        "accent": voice.get("accent"),
+        "gender": voice.get("gender"),
+        "age": voice.get("age"),
+        "description": voice.get("description") or "",
+        "category": voice.get("category"),
+        "language": voice.get("language"),
+    }
+
+
+def get_shared_voices(
+    search: str | None = None,
+    page_size: int = 30,
+    gender: str | None = None,
+    category: str | None = None,
+) -> dict | None:
+    """GET /v1/shared-voices -- the public community library.
+
+    Returns ``{"voices": [normalized], "has_more": bool}`` or ``None`` if no key
+    (graceful: the browse feature simply hides). NOT cached -- searches are
+    one-shot/ad-hoc and each query is distinct, so caching would only stale.
+    """
+    if not _has_key():
+        return None
+    params: dict = {"page_size": page_size}
+    if search:
+        params["search"] = search
+    if gender:
+        params["gender"] = gender
+    if category:
+        params["category"] = category
+    data = _get_json("/v1/shared-voices", params=params)
+    return {
+        "voices": [_normalize_shared_voice(v) for v in (data.get("voices") or [])],
+        "has_more": bool(data.get("has_more")),
+    }
+
+
+def add_shared_voice(public_owner_id: str, voice_id: str, name: str) -> dict | None:
+    """POST /v1/voices/add/{public_owner_id}/{voice_id} -- copy a library voice
+    into THIS account.
+
+    Body ``{"new_name": name}`` -> ``{"voice_id": <new id in account>}``. On
+    success busts the voices cache so the new voice appears in /tts/catalog on
+    the very next fetch. Raises ``RuntimeError(map_error(...))`` on non-2xx.
+    Returns ``None`` if no key (matches the GET's graceful-hide contract).
+    """
+    if not _has_key():
+        return None
+    resp = requests.post(
+        f"{client.BASE_URL}/v1/voices/add/{public_owner_id}/{voice_id}",
+        headers=client.auth_headers(),
+        json={"new_name": name},
+        timeout=15,
+    )
+    if not (200 <= resp.status_code < 300):
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        raise RuntimeError(client.map_error(resp.status_code, body))
+    bust_voices_cache()
+    data = resp.json()
+    return {"voice_id": data.get("voice_id")}
+
+
 def bust_voices_cache() -> None:
     """Clear ONLY the voices cache entry (e.g. after a clone/design mutation)."""
     _cache.pop("voices", None)

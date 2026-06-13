@@ -1677,8 +1677,13 @@ export function attachThinkingAudioPlayer(panel, audioDataURL, btn, autoplay = f
  * Build the TTS voice dropdown from the backend catalog (single source of truth).
  * Falls back to whatever static <option>s are already in the DOM if the fetch fails
  * or returns an empty catalog.
+ *
+ * Exported so the voice-library browse modal can re-run it after adding a voice
+ * (the new voice appears in /tts/catalog once the provider's voices-cache is
+ * busted server-side). Pass `selectId` to select a specific catalog id (e.g.
+ * the freshly-added `elevenlabs:<voice_id>`) if it exists in the rebuilt list.
  */
-async function populateVoiceCatalog() {
+export async function populateVoiceCatalog(selectId = null) {
     const sel = document.getElementById("ttsVoiceSelect");
     if (!sel) return;
     try {
@@ -1699,10 +1704,46 @@ async function populateVoiceCatalog() {
             }
             sel.appendChild(og);
         }
-        sel.value = [...sel.options].some(o => o.value === prev) ? prev : TTS_DEFAULT_VOICE;
+        const want = selectId && [...sel.options].some(o => o.value === selectId) ? selectId : prev;
+        sel.value = [...sel.options].some(o => o.value === want) ? want : TTS_DEFAULT_VOICE;
+        if (selectId && sel.value === selectId) {
+            // Persist the freshly-added voice as the operator's preference and
+            // notify listeners (mirrors the manual onchange handler).
+            sel.dispatchEvent(new Event("change"));
+        }
     } catch (e) {
         console.error("voice catalog fetch failed, keeping static options", e);
     }
+}
+
+/**
+ * Create + status-gate the "🔍 Browse voice library…" trigger that sits under
+ * the TTS voice picker. Gated on GET /elevenlabs/status `configured` — if no
+ * ElevenLabs key is set, the button stays hidden (the whole feature hides).
+ */
+function setupVoiceLibraryTrigger() {
+    const row = document.querySelector(".voice-preferences-section .voice-selector-row");
+    if (!row || document.getElementById("btnBrowseVoiceLibrary")) return;
+
+    const btn = document.createElement("button");
+    btn.id = "btnBrowseVoiceLibrary";
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "🔍 Browse voice library…";
+    btn.style.display = "none";  // revealed only when ElevenLabs is configured
+    // Place it just after the selector row (above/near the per-operator hint).
+    row.insertAdjacentElement("afterend", btn);
+
+    btn.addEventListener("click", async () => {
+        const { openVoiceLibrary } = await import("../voice-library.js");
+        openVoiceLibrary();
+    });
+
+    // Reveal only if an ElevenLabs key is configured.
+    fetch("/elevenlabs/status")
+        .then(r => r.ok ? r.json() : null)
+        .then(s => { if (s && s.configured) btn.style.display = ""; })
+        .catch(() => { /* no key / endpoint absent -> stay hidden */ });
 }
 
 /**
@@ -1711,6 +1752,13 @@ async function populateVoiceCatalog() {
 export function initVoiceSelector() {
     const voiceSelect = document.getElementById("ttsVoiceSelect");
     const previewBtn = document.getElementById("btnPreviewVoice");
+
+    // "🔍 Browse voice library…" trigger — opens the ElevenLabs shared-library
+    // modal. Only meaningful when an ElevenLabs key is configured, so it is
+    // created hidden and revealed after /elevenlabs/status reports configured.
+    // The modal module is dynamically imported on first click to avoid a static
+    // import cycle (voice-library.js imports populateVoiceCatalog from here).
+    setupVoiceLibraryTrigger();
 
     if (voiceSelect) {
         // Build options from the backend catalog (SoT), then sync the

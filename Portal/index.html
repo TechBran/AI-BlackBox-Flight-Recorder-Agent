@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui285"/> <!-- v285: ElevenLabs voices route through /tts + /tts/batch synthesis -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui286"/> <!-- v286: ElevenLabs voice-library browse modal (_voice-library.css @imported in main.css) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,12 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui285"></script> <!-- v285: ElevenLabs voices route through /tts + /tts/batch synthesis -->
+  <script type="module" src="/ui/app-modular.js?v=genui286"></script> <!-- v286: ElevenLabs voice-library browse modal -->
+  <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
+       tts-stt.js dynamically imports openVoiceLibrary() from this module on
+       first click; preloaded here (URL matches the relative dynamic import so
+       the browser dedupes). Page-level no-store meta tags keep it fresh. -->
+  <link rel="modulepreload" href="/ui/voice-library.js"/>
 </head>
 <body>
   <div class="app">
