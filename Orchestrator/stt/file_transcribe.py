@@ -2,10 +2,13 @@
 """
 file_transcribe.py - Multi-provider file (batch) speech-to-text.
 
-Exposes transcribe_bytes() which resolves an STT provider (OpenAI or Google
-Chirp 2) and delegates to the matching helper. The OpenAI path posts the audio
-to the transcriptions endpoint; the Google path uses the speech_v2 SDK (lazily
-imported so this module loads even when google-cloud-speech is not installed).
+Exposes transcribe_bytes() which resolves an STT provider (OpenAI, Google
+Chirp 2, or ElevenLabs Scribe) and delegates to the matching helper. The OpenAI
+path posts the audio to the transcriptions endpoint; the Google path uses the
+speech_v2 SDK (lazily imported so this module loads even when
+google-cloud-speech is not installed); the ElevenLabs path posts to Scribe batch
+(lazy import) and returns just the flat transcript text — diarization is exposed
+only by the /stt route, not through this str-contract entry point.
 """
 from __future__ import annotations
 
@@ -27,9 +30,25 @@ def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str | N
     provider = provider or resolve_stt_provider()
     if not provider:
         raise RuntimeError("no STT provider configured")
+    if provider == "elevenlabs":
+        return _elevenlabs_transcribe(audio_bytes, filename)
     if provider == "google":
         return _google_transcribe(audio_bytes, content_type, filename)
     return _openai_transcribe(audio_bytes, content_type, filename)
+
+
+def _elevenlabs_transcribe(audio_bytes: bytes, filename: str) -> str:
+    """Transcribe via ElevenLabs Scribe (batch) and return the FLAT transcript.
+
+    Lazy import of the provider module avoids load-order issues. Diarization is
+    disabled here on purpose: this preserves the str return contract every
+    existing caller (/stt/json, Gemini Live, /stt/translate) depends on. The
+    rich diarized payload is exposed only by the /stt endpoint when explicitly
+    asked (provider=elevenlabs + diarize=true).
+    """
+    from Orchestrator.elevenlabs import stt as el_stt
+    normalized = el_stt.transcribe_bytes(audio_bytes, filename, diarize=False)
+    return (normalized.get("text") or "").strip()
 
 
 def _openai_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:

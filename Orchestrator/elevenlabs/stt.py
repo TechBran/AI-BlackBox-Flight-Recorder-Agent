@@ -9,8 +9,10 @@ speaker turns by grouping consecutive words by ``speaker_id``, then exposes:
       segments, speakers, events, raw words passthrough).
   format_diarized(normalized) -> a human-readable, one-line-per-turn transcript
       with 1-indexed "Speaker N" labels (first-appearance order) + [mm:ss] stamps.
-  transcribe_file(path, ...) -> POST a local audio file to /v1/speech-to-text and
-      return normalize_transcript(resp).
+  transcribe_bytes(audio_bytes, filename, ...) -> POST in-memory audio bytes to
+      /v1/speech-to-text and return normalize_transcript(resp) (the shared core).
+  transcribe_file(path, ...) -> read the file bytes and delegate to
+      transcribe_bytes (so the HTTP/normalize logic lives exactly once).
 
 All HTTP auth + error mapping flow through ``client`` so they exist exactly once;
 ``transcribe_file`` raises ``RuntimeError(client.map_error(...))`` on any non-2xx
@@ -48,8 +50,8 @@ _MIME_BY_EXT = {
 }
 
 
-def _guess_mime(path: str) -> str:
-    ext = os.path.splitext(path)[1].lower()
+def _guess_mime(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
     return _MIME_BY_EXT.get(ext, "application/octet-stream")
 
 
@@ -151,16 +153,22 @@ def format_diarized(normalized: dict) -> str:
     return "\n".join(lines)
 
 
-def transcribe_file(
-    path: str,
+def transcribe_bytes(
+    audio_bytes: bytes,
+    filename: str = "audio.wav",
     *,
     diarize: bool = True,
     language: str | None = None,
     tag_audio_events: bool = True,
     model_id: str | None = None,
 ) -> dict:
-    """POST a local audio file to ``/v1/speech-to-text`` and return the
+    """POST in-memory audio ``bytes`` to ``/v1/speech-to-text`` and return the
     normalized transcript.
+
+    This is the shared HTTP/normalize core: ``transcribe_file`` reads a path and
+    delegates here, so the multipart POST + error mapping + normalization live
+    exactly once. ``filename`` is used only to (a) guess the multipart MIME via
+    its extension and (b) name the upload part; the bytes are the payload.
 
     multipart ``file`` part + the documented form fields (word-granularity
     timestamps always requested so diarization grouping has per-word spans).
@@ -176,14 +184,13 @@ def transcribe_file(
     if language:
         data["language_code"] = language
 
-    with open(path, "rb") as fh:
-        resp = requests.post(
-            client.BASE_URL + "/v1/speech-to-text",
-            headers=client.auth_headers(),
-            files={"file": (os.path.basename(path), fh, _guess_mime(path))},
-            data=data,
-            timeout=120,
-        )
+    resp = requests.post(
+        client.BASE_URL + "/v1/speech-to-text",
+        headers=client.auth_headers(),
+        files={"file": (os.path.basename(filename), audio_bytes, _guess_mime(filename))},
+        data=data,
+        timeout=120,
+    )
 
     if not (200 <= resp.status_code < 300):
         body = None
@@ -194,3 +201,30 @@ def transcribe_file(
         raise RuntimeError(client.map_error(resp.status_code, body))
 
     return normalize_transcript(resp.json())
+
+
+def transcribe_file(
+    path: str,
+    *,
+    diarize: bool = True,
+    language: str | None = None,
+    tag_audio_events: bool = True,
+    model_id: str | None = None,
+) -> dict:
+    """POST a local audio file to ``/v1/speech-to-text`` and return the
+    normalized transcript.
+
+    Reads the file bytes and delegates to ``transcribe_bytes`` (the shared core),
+    using the basename so the multipart MIME is still guessed from the path's
+    extension exactly as before.
+    """
+    with open(path, "rb") as fh:
+        audio_bytes = fh.read()
+    return transcribe_bytes(
+        audio_bytes,
+        os.path.basename(path),
+        diarize=diarize,
+        language=language,
+        tag_audio_events=tag_audio_events,
+        model_id=model_id,
+    )

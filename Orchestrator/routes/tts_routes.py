@@ -306,17 +306,49 @@ async def tts_stitch(chunks: List[UploadFile] = File(...)):
 
 
 @app.post("/stt")
-async def stt(file: UploadFile = File(...)):
+async def stt(
+    file: UploadFile = File(...),
+    provider: str = Form(None),
+    diarize: bool = Form(False),
+):
     from Orchestrator.stt.file_transcribe import transcribe_bytes
+    from Orchestrator.stt.resolve import resolve_stt_provider
     try:
         audio_bytes = await file.read()
     except Exception as e:
         raise HTTPException(400, f"Failed to read upload: {e}")
+
+    filename = file.filename or "audio.webm"
+    content_type = file.content_type or "audio/webm"
+
+    # Diarized rich payload only when ElevenLabs is the resolved provider AND the
+    # caller explicitly asked for diarization. Back-compat: flat `text` stays at
+    # the top level so existing single-field consumers keep working unchanged.
+    resolved = (provider or "").strip().lower() or resolve_stt_provider()
+    if resolved == "elevenlabs" and diarize:
+        from Orchestrator.elevenlabs import stt as el_stt
+        try:
+            rich = el_stt.transcribe_bytes(audio_bytes, filename, diarize=True)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"STT upstream error: {e}")
+        return {
+            "text": rich["text"],                # BACK-COMPAT: flat text top-level
+            "provider": "elevenlabs",
+            "segments": rich["segments"],
+            "speakers": rich["speakers"],
+            "diarized_text": el_stt.format_diarized(rich),
+            "events": rich["events"],
+            "language": rich["language"],
+        }
+
     try:
         text = transcribe_bytes(
             audio_bytes,
-            file.content_type or "audio/webm",
-            filename=file.filename or "audio.webm",
+            content_type,
+            provider=provider,
+            filename=filename,
         )
     except RuntimeError as e:
         raise HTTPException(400, str(e))
@@ -366,9 +398,13 @@ async def stt_json(body: dict = Body(...)):
     except Exception as e:
         raise HTTPException(400, f"Failed to decode/convert audio: {e}")
 
-    # Transcribe via resolved provider (OpenAI or Google)
+    # Transcribe via resolved provider (OpenAI, Google, or ElevenLabs). Flat text
+    # only — this path serves Gemini Live quick transcription; diarization (YAGNI
+    # here) lives on /stt. An explicit provider in the body is honored.
     try:
-        text = transcribe_bytes(wav_bytes, "audio/wav", filename="audio.wav")
+        text = transcribe_bytes(
+            wav_bytes, "audio/wav", provider=body.get("provider"), filename="audio.wav"
+        )
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
