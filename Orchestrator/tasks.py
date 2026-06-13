@@ -124,7 +124,7 @@ def get_recent_media_artifacts(operator: str, limit: int = 10) -> List[Dict]:
     subsequent operations like image-to-video conversion.
     """
     artifacts = []
-    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC}
+    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
 
     # Get all tasks for this operator (or system operator for tool-generated media)
     all_tasks = task_db.get_all_tasks(operator=operator)
@@ -176,7 +176,7 @@ def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str
         List of artifact metadata dicts ready for snapshot index
     """
     artifacts = []
-    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC}
+    media_task_types = {TaskType.IMAGE_GENERATION, TaskType.VIDEO_GENERATION, TaskType.LYRIA_MUSIC, TaskType.ELEVENLABS_MUSIC}
 
     # Get all tasks for this operator
     all_tasks = task_db.get_all_tasks(operator=operator)

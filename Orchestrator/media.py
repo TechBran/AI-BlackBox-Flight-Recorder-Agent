@@ -27,6 +27,7 @@ def get_recent_media_artifacts(operator: str, limit: int = 10) -> List[Dict]:
         TaskType.IMAGE_GENERATION,
         TaskType.VIDEO_GENERATION,
         TaskType.LYRIA_MUSIC,
+        TaskType.ELEVENLABS_MUSIC,
     }
 
     # Get all tasks for this operator (or system operator for tool-generated media)

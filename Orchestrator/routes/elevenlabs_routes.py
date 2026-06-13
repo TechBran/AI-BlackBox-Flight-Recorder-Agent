@@ -31,6 +31,10 @@ async def elevenlabs_status():
         "credits_remaining": user.get("credits_remaining"),
         "credits_limit": user.get("credits_limit"),
         "features": {
+            # These are available on ANY valid key (the API does not gate them by
+            # plan), so they're unconditionally True once configured. Only the two
+            # cloning capabilities are plan-gated, so those read the explicit
+            # provider booleans from /v1/user (provider-API-as-SoT, not tier inference).
             "tts": True, "stt": True, "music": True, "sound_effects": True,
             "voice_changer": True, "voice_isolator": True, "voice_design": True,
             "instant_voice_cloning": bool(user.get("can_use_instant_voice_cloning")),
