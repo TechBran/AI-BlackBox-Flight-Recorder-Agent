@@ -141,7 +141,7 @@ class LocalModelManagerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `verify returns true on matching sha256`() {
+    fun `verify returns true on matching sha256`() = runTest {
         val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
         val bytes = ByteArray(1024) { (it % 251).toByte() }
         val f = File(modelsDir, "match.bin").apply { writeBytes(bytes) }
@@ -149,14 +149,14 @@ class LocalModelManagerTest {
     }
 
     @Test
-    fun `verify returns false on mismatched sha256`() {
+    fun `verify returns false on mismatched sha256`() = runTest {
         val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
         val f = File(modelsDir, "mismatch.bin").apply { writeBytes(ByteArray(512) { 1 }) }
         assertFalse(mgr.verify(f, "deadbeef"))
     }
 
     @Test
-    fun `verify is a no-op (true) when expected sha is null or blank`() {
+    fun `verify is a no-op (true) when expected sha is null or blank`() = runTest {
         val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
         val f = File(modelsDir, "unknown.bin").apply { writeBytes(ByteArray(256) { 2 }) }
         assertTrue("null sha → can't verify → accept", mgr.verify(f, null))
@@ -278,5 +278,21 @@ class LocalModelManagerTest {
 
         // Deleting again removes nothing.
         assertFalse("second delete removes nothing", mgr.delete("gemma-4-e2b"))
+    }
+
+    @Test
+    fun `installedModels skips corrupt sidecar`() = runTest {
+        val content = ByteArray(1024) { 5 }
+        val bundle = e2b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 4.0)
+
+        // One valid install...
+        mgr.install(bundle, operator = "Brandon", delegate = "cpu") { _, _ -> }
+        // ...plus a garbage .json sidecar that must be skipped, not throw.
+        modelsDir.resolve("garbage.json").writeText("{not valid")
+
+        val listed = mgr.installedModels()
+        assertEquals("only the valid entry is returned", 1, listed.size)
+        assertEquals("gemma-4-e2b", listed.first().slug)
     }
 }

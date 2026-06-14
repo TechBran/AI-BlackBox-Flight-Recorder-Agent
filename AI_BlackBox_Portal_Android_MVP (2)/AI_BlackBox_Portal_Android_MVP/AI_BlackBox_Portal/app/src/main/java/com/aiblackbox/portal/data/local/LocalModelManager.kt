@@ -3,6 +3,8 @@ package com.aiblackbox.portal.data.local
 import com.aiblackbox.portal.data.api.LocalModelDownloader
 import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.model.LocalBundle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -60,13 +62,19 @@ class LocalModelManager(
      * Only sidecars whose recorded bundle file actually exists are returned
      * (a deleted/partial file is treated as not installed). Size is taken from
      * the real file length, not the recorded value, so it's always accurate.
+     *
+     * **Sidecar invariant:** bundle filenames must NOT end in [SIDECAR_SUFFIX]
+     * (`.json`) — sidecar detection is suffix-based, so a `.json` bundle would be
+     * mistaken for a sidecar. Today's `.litertlm` filenames are safe.
+     *
+     * Disk I/O runs on [Dispatchers.IO] so callers on the main thread can't ANR.
      */
-    fun installedModels(): List<InstalledModel> {
+    suspend fun installedModels(): List<InstalledModel> = withContext(Dispatchers.IO) {
         val dir = modelsDir
-        if (!dir.isDirectory) return emptyList()
+        if (!dir.isDirectory) return@withContext emptyList()
         val sidecars = dir.listFiles { f -> f.isFile && f.name.endsWith(SIDECAR_SUFFIX) }
-            ?: return emptyList()
-        return sidecars.mapNotNull { sidecar ->
+            ?: return@withContext emptyList()
+        sidecars.mapNotNull { sidecar ->
             val record = runCatching {
                 json.decodeFromString(SidecarRecord.serializer(), sidecar.readText())
             }.getOrNull() ?: return@mapNotNull null
@@ -86,7 +94,7 @@ class LocalModelManager(
     suspend fun recommendForDevice(bundles: List<LocalBundle>): LocalBundle {
         require(bundles.isNotEmpty()) { "recommendForDevice requires a non-empty bundle list" }
         val ram = totalRamBytes()
-        val fitting = bundles.filter { (it.minRamGb * BYTES_PER_GB).toLong() <= ram }
+        val fitting = bundles.filter { (it.minRamGb * BYTES_PER_GIB).toLong() <= ram }
         return if (fitting.isNotEmpty()) {
             fitting.maxByOrNull { it.minRamGb }!!
         } else {
@@ -101,10 +109,13 @@ class LocalModelManager(
      * `true` — the backend catalog's sha is null until the real Hugging Face
      * fetch fills it in, so there is nothing to verify against yet. This mirrors
      * the server's "skip verification when the digest is unknown" stance.
+     *
+     * The multi-GB streamed hash runs on [Dispatchers.IO] so callers on the main
+     * thread can't ANR.
      */
-    fun verify(file: File, expectedSha256: String?): Boolean {
-        if (expectedSha256.isNullOrBlank()) return true
-        if (!file.isFile) return false
+    suspend fun verify(file: File, expectedSha256: String?): Boolean = withContext(Dispatchers.IO) {
+        if (expectedSha256.isNullOrBlank()) return@withContext true
+        if (!file.isFile) return@withContext false
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(64 * 1024)
@@ -115,7 +126,7 @@ class LocalModelManager(
             }
         }
         val actual = digest.digest().joinToString("") { "%02x".format(it) }
-        return actual.equals(expectedSha256.trim(), ignoreCase = true)
+        actual.equals(expectedSha256.trim(), ignoreCase = true)
     }
 
     /**
@@ -137,19 +148,23 @@ class LocalModelManager(
      * @param version attest version string. Uses [bundle.slug]'s implicit "1.0"
      *   bundle version — there is no per-bundle version field in the catalog yet,
      *   so a stable default is used and documented.
+     *
+     * **Concurrency precondition:** callers MUST NOT invoke [install] for the same
+     * [bundle.slug] concurrently — it shares the `.part`/dest/sidecar paths.
+     * Serialising same-slug installs is the caller's (ViewModel's) responsibility.
      */
     suspend fun install(
         bundle: LocalBundle,
         operator: String,
         delegate: String,
         onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
-    ): Result<InstalledModel> {
+    ): Result<InstalledModel> = withContext(Dispatchers.IO) {
         modelsDir.mkdirs()
         val destFile = File(modelsDir, bundle.filename)
 
         val downloaded = api.download(bundle.slug, destFile, onProgress)
         if (downloaded.isFailure) {
-            return Result.failure(
+            return@withContext Result.failure(
                 downloaded.exceptionOrNull()
                     ?: IOException("download failed for ${bundle.slug}")
             )
@@ -159,7 +174,7 @@ class LocalModelManager(
         if (!verify(file, bundle.sha256)) {
             file.delete()
             sidecarFor(bundle.slug).delete()
-            return Result.failure(
+            return@withContext Result.failure(
                 IOException("checksum mismatch for ${bundle.slug} (expected ${bundle.sha256})")
             )
         }
@@ -170,30 +185,39 @@ class LocalModelManager(
 
         val installed = InstalledModel(slug = bundle.slug, file = file, sizeBytes = file.length())
 
-        val attested = api.attest(
-            AttestRequest(
-                operator = operator,
-                deviceId = deviceId,
-                modelSlug = bundle.slug,
-                version = BUNDLE_VERSION,
-                sha256 = bundle.sha256 ?: "",
-                delegate = delegate,
-                // autonomyMode left at its "permission" default.
+        // Attest-throw safety: the sidecar is already written, so ANY attest
+        // outcome other than success — `false` OR a thrown exception — must
+        // become Result.failure with the verified file + sidecar KEPT (the
+        // documented re-attest retry policy), never an uncaught throw.
+        val attested = try {
+            api.attest(
+                AttestRequest(
+                    operator = operator,
+                    deviceId = deviceId,
+                    modelSlug = bundle.slug,
+                    version = BUNDLE_VERSION,
+                    sha256 = bundle.sha256 ?: "",
+                    delegate = delegate,
+                    // autonomyMode left at its "permission" default.
+                )
             )
-        )
+        } catch (e: Exception) {
+            // Keep the verified file + sidecar for a re-attest retry.
+            return@withContext Result.failure(e)
+        }
         if (!attested) {
             // Keep the verified file + sidecar for a re-attest retry.
-            return Result.failure(IOException("attestation rejected for ${bundle.slug}"))
+            return@withContext Result.failure(IOException("attestation rejected for ${bundle.slug}"))
         }
 
-        return Result.success(installed)
+        Result.success(installed)
     }
 
     /**
      * Remove the model file for [slug] (and its sidecar). Returns whether
-     * anything was actually deleted.
+     * anything was actually deleted. Disk I/O runs on [Dispatchers.IO].
      */
-    fun delete(slug: String): Boolean {
+    suspend fun delete(slug: String): Boolean = withContext(Dispatchers.IO) {
         val sidecar = sidecarFor(slug)
         // Resolve the bundle file from the sidecar if present; otherwise nothing
         // to do (we only know filenames via sidecars).
@@ -208,7 +232,7 @@ class LocalModelManager(
             if (file.exists() && file.delete()) removed = true
         }
         if (sidecar.exists() && sidecar.delete()) removed = true
-        return removed
+        removed
     }
 
     private fun sidecarFor(slug: String) = File(modelsDir, slug + SIDECAR_SUFFIX)
@@ -232,7 +256,7 @@ class LocalModelManager(
 
     companion object {
         /** 1 GiB, matching ActivityManager.MemoryInfo.totalMem's byte units. */
-        const val BYTES_PER_GB: Long = 1_073_741_824L
+        const val BYTES_PER_GIB: Long = 1_073_741_824L
 
         /** Suffix for the per-model install record written next to each bundle. */
         const val SIDECAR_SUFFIX = ".json"
