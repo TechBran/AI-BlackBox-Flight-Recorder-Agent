@@ -97,6 +97,12 @@ fun Composer(
     autoTtsEnabled: Boolean = false,
     onAutoTtsToggle: () -> Unit = {},
     providerLabel: String = "",
+    // Task 1.6: gate the on-device LOCAL provider — only offer it when the
+    // operator has a disk-present, sha-verified model installed.
+    localAvailable: Boolean = false,
+    // Fired when the provider dropdown opens — host re-checks local availability
+    // (and fires a best-effort re-attest) so a just-installed model shows up.
+    onProviderMenuOpen: () -> Unit = {},
     liveModels: List<Pair<String, String>> = emptyList(),
     attachments: List<AttachmentItem> = emptyList(),
     onRemoveAttachment: (Int) -> Unit = {},
@@ -288,7 +294,7 @@ fun Composer(
                     Text(
                         text = ChatProvider.fromId(provider).displayName,
                         modifier = Modifier
-                            .clickable { showProviderMenu = true }
+                            .clickable { onProviderMenuOpen(); showProviderMenu = true }
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontWeight = FontWeight.Medium,
@@ -300,7 +306,10 @@ fun Composer(
                         expanded = showProviderMenu,
                         onDismissRequest = { showProviderMenu = false }
                     ) {
-                        ChatProvider.entries.forEach { p ->
+                        // Task 1.6: hide LOCAL unless a verified on-device model is installed.
+                        ChatProvider.entries
+                            .filter { !it.isLocal || localAvailable }
+                            .forEach { p ->
                             DropdownMenuItem(
                                 text = {
                                     Text(

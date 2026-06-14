@@ -31,6 +31,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _operators = MutableStateFlow(listOf("Brandon"))
     val operators: StateFlow<List<String>> = _operators.asStateFlow()
 
+    // ── On-device (local) provider gating (Task 1.6) ──
+    // True when the current operator has a disk-present, sha-verified on-device
+    // model → the Provider dropdown offers the LOCAL provider. Default false
+    // until loaded so we never flash LOCAL before we know it's installed.
+    private val _localAvailable = MutableStateFlow(false)
+    val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
+    private var providerPicker: com.aiblackbox.portal.ui.chat.ProviderPickerViewModel? = null
+    private var currentOperator: String = "Brandon"
+
+    init {
+        viewModelScope.launch { store.operator.collect { currentOperator = it } }
+    }
+
     private val _apps = MutableStateFlow<List<RegisteredApp>>(emptyList())
     val apps: StateFlow<List<RegisteredApp>> = _apps.asStateFlow()
 
@@ -114,6 +127,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         api = BlackBoxApi(origin)
         loadOperators()
         loadApps()
+
+        // On-device (LOCAL) provider gating (Task 1.6): disk reads off-main.
+        val picker = com.aiblackbox.portal.ui.chat.ProviderPickerViewModel.fromContext(
+            context = getApplication(),
+            api = api!!,
+            operatorProvider = { currentOperator },
+            ioDispatcher = kotlinx.coroutines.Dispatchers.IO,
+        )
+        providerPicker = picker
+        viewModelScope.launch { picker.localAvailable.collect { _localAvailable.value = it } }
+        refreshLocalAvailability()
+    }
+
+    /**
+     * Recompute on-device (LOCAL) availability + fire the best-effort re-attest.
+     * Call when the Provider dropdown opens so a just-installed/just-deleted
+     * model is reflected and the BlackBox's binding record stays current.
+     */
+    fun refreshLocalAvailability() {
+        providerPicker?.refresh()
     }
 
     fun setProvider(provider: String) {

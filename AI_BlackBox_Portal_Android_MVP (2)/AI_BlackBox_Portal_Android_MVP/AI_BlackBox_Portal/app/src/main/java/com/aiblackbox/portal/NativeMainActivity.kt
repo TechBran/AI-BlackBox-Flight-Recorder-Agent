@@ -800,6 +800,11 @@ class NativeMainActivity : ComponentActivity() {
                             autoTtsEnabled = autoTtsEnabled,
                             onAutoTtsToggle = { scope.launch { store.setAutoTtsEnabled(!autoTtsEnabled) } },
                             providerLabel = chatViewModel.getProviderLabel(),
+                            // Task 1.6: offer the on-device LOCAL provider only when a
+                            // verified model is installed; re-check (+ best-effort
+                            // re-attest) each time the picker opens.
+                            localAvailable = chatViewModel.localAvailable.collectAsState().value,
+                            onProviderMenuOpen = { chatViewModel.refreshLocalAvailability() },
                             liveModels = chatViewModel.liveModels.collectAsState().value,
                             attachments = attachments,
                             onRemoveAttachment = { index ->

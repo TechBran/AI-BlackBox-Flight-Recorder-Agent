@@ -19,6 +19,7 @@ import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,6 +57,20 @@ private const val TAG = "ChatVM"
 
 enum class ChatState { IDLE, STREAMING, THINKING, ERROR }
 
+/**
+ * Which delivery path [ChatViewModel.sendMessage] routes a turn to, selected by
+ * [ChatViewModel.routeFor] from the provider's traits. Extracted so the routing
+ * decision is unit-testable without instantiating the AndroidViewModel.
+ *
+ * - [AGENT]: forward to the agent screen (Claude Code / Gemini CLI WebSocket).
+ * - [VOICE]: handled by the Voice screen, not chat.
+ * - [ER_INJECT]: inject into a running robotics ER mission.
+ * - [LOCAL_PLACEHOLDER]: on-device (Gemma) — safe placeholder until the Phase 2
+ *   on-device engine lands; deliberately NOT the SSE path.
+ * - [SSE]: cloud streaming via /chat SSE (the default).
+ */
+enum class ChatRoute { AGENT, VOICE, ER_INJECT, LOCAL_PLACEHOLDER, SSE }
+
 private const val MAX_CHAT_MESSAGES = 100
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -68,6 +83,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
     private var historyLoaded = false
+
+    // ── On-device (local) provider gating (Task 1.6) ──
+    // Built once the api is ready (initialize); gates LOCAL in the picker on a
+    // disk-present, sha-verified model and fires a best-effort re-attest on open.
+    private var providerPicker: ProviderPickerViewModel? = null
 
     // ── UI State ──
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
@@ -116,6 +136,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ── Dynamic model list (fetched from /models/{provider}) ──
     private val _liveModels = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val liveModels: StateFlow<List<Pair<String, String>>> = _liveModels.asStateFlow()
+
+    // ── On-device (local) provider availability (Task 1.6) ──
+    // True when the current operator has a disk-present, sha-verified on-device
+    // model → the picker offers the LOCAL provider. Default false until loaded.
+    private val _localAvailable = MutableStateFlow(false)
+    val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
 
     // ── CU model backends (id → "anthropic" | "google" | "openai") ──
     // Populated only when fetching /models/computer-use (CU production pass
@@ -331,7 +357,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Initialized for $origin")
             startHealthLoop()
             startTaskDiscoveryLoop()
+
+            // Build the on-device provider gating (Task 1.6) now the api is ready.
+            // Disk reads run off the main thread (Dispatchers.IO).
+            val picker = ProviderPickerViewModel.fromContext(
+                context = appContext,
+                api = api!!,
+                operatorProvider = { currentOperator },
+                ioDispatcher = Dispatchers.IO,
+            )
+            providerPicker = picker
+            viewModelScope.launch {
+                picker.localAvailable.collect { _localAvailable.value = it }
+            }
+            refreshLocalAvailability()
         }
+    }
+
+    /**
+     * Recompute on-device (LOCAL) provider availability and fire the best-effort
+     * re-attest. Call when the picker opens so the gate reflects a just-installed
+     * (or just-deleted) model and the BlackBox's binding record stays current.
+     * Safe to call before [initialize] (no-op until the picker exists).
+     */
+    fun refreshLocalAvailability() {
+        providerPicker?.refresh()
     }
 
     private fun startHealthLoop() {
@@ -419,31 +469,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val provider = ChatProvider.fromId(currentProvider)
 
-        // Route by provider type (matches Portal sendChatMessage branching)
-        when {
-            provider.isAgent -> {
+        // Route by provider type (matches Portal sendChatMessage branching).
+        // The branch SELECTION is factored into routeFor() so it unit-tests
+        // without instantiating this AndroidViewModel.
+        when (routeFor(provider, _erMissionActive.value)) {
+            ChatRoute.AGENT -> {
                 // Forward to AgentChatScreen via shared event
                 _agentPromptEvent.tryEmit(text)
                 _inputText.value = TextFieldValue()
-                return
             }
-            provider.isVoice -> {
+            ChatRoute.VOICE -> {
                 // Voice providers handled by VoiceScreen, not chat
                 Log.w(TAG, "Voice provider $currentProvider — use Voice screen")
-                return
             }
-            // Robotics: if mission is running, inject prompt instead of starting new stream
+            // Robotics: mission running → inject prompt instead of new stream
             // Matches Portal chat-send.js window.__erMissionActive check
-            provider.isRobotics && _erMissionActive.value -> {
-                injectErPrompt(text)
-                return
-            }
-            else -> {
+            ChatRoute.ER_INJECT -> injectErPrompt(text)
+            // On-device (Gemma): safe placeholder until the Phase 2 engine lands.
+            // Must NOT fall through to SSE (which would POST provider=local to the
+            // cloud and error). No network call.
+            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalPlaceholder(text)
+            ChatRoute.SSE -> {
                 // Block duplicate sends for non-robotics streaming (robotics handled above)
                 if (_chatState.value == ChatState.STREAMING) return
                 sendViaSSE(text, imageUrls, repo)
             }
         }
+    }
+
+    /**
+     * SAFE placeholder for the on-device `local` provider. Appends the user's
+     * message plus a friendly assistant note and returns WITHOUT any network
+     * call — selecting LOCAL must never reach the cloud SSE path.
+     *
+     * TODO(Phase 2): replace with sendViaLocalEngine(...) — the real
+     * LiteRT-LM / function-calling loop that runs the turn on-device.
+     */
+    private fun sendViaLocalPlaceholder(text: String) {
+        val userMsg = UiMessage(
+            role = "user",
+            content = text,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        val placeholder = buildLocalPlaceholder(currentProvider, currentModel)
+        _messages.value = (_messages.value + userMsg + placeholder).takeLast(MAX_CHAT_MESSAGES)
+        _inputText.value = TextFieldValue()
+        persistHistory()
     }
 
     /**
@@ -1402,6 +1474,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        /**
+         * The on-device placeholder copy shown until the Phase 2 engine lands.
+         * Centralised so the UI test can assert it.
+         */
+        const val LOCAL_PLACEHOLDER_TEXT =
+            "On-device model selected — the on-device engine wiring lands in the next update."
+
+        /**
+         * Select the delivery path for [provider]. Pure (no ViewModel state) so
+         * the routing decision is unit-testable. Mirrors the original when-block:
+         *   agent → AGENT, voice → VOICE, robotics+mission → ER_INJECT,
+         *   local → LOCAL_PLACEHOLDER, everything else → SSE.
+         *
+         * Order matters: LOCAL is checked before the SSE default precisely
+         * because LOCAL is NOT a streaming provider — the SSE fall-through would
+         * otherwise POST provider=local to the cloud and error.
+         */
+        fun routeFor(provider: ChatProvider, erMissionActive: Boolean): ChatRoute = when {
+            provider.isAgent -> ChatRoute.AGENT
+            provider.isVoice -> ChatRoute.VOICE
+            provider.isRobotics && erMissionActive -> ChatRoute.ER_INJECT
+            provider.isLocal -> ChatRoute.LOCAL_PLACEHOLDER
+            else -> ChatRoute.SSE
+        }
+
+        /** The non-streaming assistant placeholder message for the LOCAL branch. */
+        fun buildLocalPlaceholder(provider: String, model: String): UiMessage = UiMessage(
+            role = "assistant",
+            content = LOCAL_PLACEHOLDER_TEXT,
+            isStreaming = false,
+            provider = provider,
+            model = model,
+        )
+
         private val provJson = Json { ignoreUnknownKeys = true; isLenient = true }
         fun parseProvenance(raw: String): Provenance? = try {
             provJson.decodeFromString(Provenance.serializer(), raw.trim())

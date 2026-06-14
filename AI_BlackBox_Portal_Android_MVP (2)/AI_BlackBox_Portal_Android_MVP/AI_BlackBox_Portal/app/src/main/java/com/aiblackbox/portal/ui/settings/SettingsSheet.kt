@@ -515,14 +515,23 @@ fun SettingsSheet(
 
             var showProviderMenu by remember { mutableStateOf(false) }
             val providerDisplay = ChatProvider.fromId(provider).displayName
+            // Task 1.6: gate the on-device LOCAL provider on a verified install.
+            val localAvailable by viewModel.localAvailable.collectAsState()
 
             SettingsDropdown(
                 label = "Provider",
                 value = providerDisplay,
                 expanded = showProviderMenu,
-                onExpandedChange = { showProviderMenu = it }
+                onExpandedChange = { expanded ->
+                    // Re-check availability (+ best-effort re-attest) when opening.
+                    if (expanded) viewModel.refreshLocalAvailability()
+                    showProviderMenu = expanded
+                }
             ) {
-                ChatProvider.entries.forEach { p ->
+                // Hide LOCAL unless a verified on-device model is installed.
+                ChatProvider.entries
+                    .filter { !it.isLocal || localAvailable }
+                    .forEach { p ->
                     DropdownMenuItem(
                         text = {
                             Text(
