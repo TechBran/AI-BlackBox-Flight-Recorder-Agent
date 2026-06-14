@@ -25,10 +25,8 @@ class LocalProviderRegistry:
     """Operator-bound registry of attested on-device models."""
 
     def __init__(self):
-        # Reference the module-level STORE_FILE at call time so tests that
-        # monkeypatch the attribute take effect for fresh instances.
-        import Orchestrator.local_provider.registry as _self_module
-        self._file: Path = _self_module.STORE_FILE
+        # Reads the module global at instantiation so tests can monkeypatch it.
+        self._file: Path = STORE_FILE
         # operator -> {device_id -> record}
         self._store: Dict[str, Dict[str, dict]] = {}
         self._load_from_file()
