@@ -72,6 +72,10 @@ def build_local_models_response(operator: Optional[str]) -> dict:
     nobody is a legitimately-empty result, not a malformed request — so unlike
     the device-status endpoint we do NOT 400 here; the picker just renders the
     empty/disabled state).
+
+    NOTE: the response envelope deliberately diverges from the generic
+    ``_wrap()`` contract (no ``source``/``default_id``/``fetched_iso``) because
+    local has no upstream fetch/cache/server-default and is availability-gated.
     """
     if not isinstance(operator, str) or not operator.strip():
         return {"provider": "local", "models": [], "available": False,
@@ -82,7 +86,8 @@ def build_local_models_response(operator: Optional[str]) -> dict:
         return {"provider": "local", "models": [], "available": False,
                 "reason": _LOCAL_UNAVAILABLE_REASON}
 
-    # Return copies so callers can't mutate the module-level catalog.
+    # shallow-copy each entry (entries are flat) so callers can't mutate the
+    # module-level catalog list/entries.
     return {"provider": "local", "models": [dict(m) for m in LOCAL_MODELS],
             "available": True}
 

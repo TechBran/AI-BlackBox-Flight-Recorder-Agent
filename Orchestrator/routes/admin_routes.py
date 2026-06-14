@@ -816,8 +816,9 @@ def get_available_models(provider: str, operator: Optional[str] = None):
     # FastAPI matches routes in registration order, and this generic handler is
     # registered before local_routes, so a dedicated /models/local handler there
     # would be SHADOWED and never reached. We therefore dispatch `local` here to
-    # the local-provider builder (lazy import — local_routes is imported after
-    # admin_routes in app.py; a top-level import would risk a cycle).
+    # the local-provider builder. Lazy import: avoids eagerly pulling
+    # local_routes' dependency tree into admin_routes during app bootstrap (both
+    # register on the shared `app`); there is no demonstrable import cycle today.
     if provider == "local":
         from Orchestrator.routes.local_routes import build_local_models_response
         return build_local_models_response(operator)

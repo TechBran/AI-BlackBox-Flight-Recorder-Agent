@@ -375,7 +375,13 @@ def test_autonomy_rejects_invalid_mode(client):
 # ---------------------------------------------------------------------------
 
 def test_system_prompt_returns_prompt_and_version(client):
-    """GET /local/system-prompt → 200 with a non-empty prompt + version."""
+    """GET /local/system-prompt → 200 with a non-empty prompt + version.
+
+    The version must be DERIVED from the prompt (12-char sha256 hex), not a
+    hardcoded constant — proving a prompt edit changes the version.
+    """
+    import hashlib
+
     resp = client.get("/local/system-prompt", params={"operator": "Brandon"})
     assert resp.status_code == 200
     body = resp.json()
@@ -383,6 +389,7 @@ def test_system_prompt_returns_prompt_and_version(client):
     assert body["prompt"].strip()
     assert isinstance(body["version"], str)
     assert body["version"]
+    assert body["version"] == hashlib.sha256(body["prompt"].encode("utf-8")).hexdigest()[:12]
 
 
 def test_system_prompt_version_is_stable(client):

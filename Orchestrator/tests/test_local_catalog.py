@@ -107,6 +107,41 @@ def test_local_models_missing_operator(client):
     assert body["reason"] == "no verified on-device model"
 
 
+def test_local_models_response_is_isolated_from_catalog(client):
+    """Mutating a model dict from the /models/local response must NOT corrupt the
+    module-level LOCAL_MODELS catalog — a second call returns the original ids.
+
+    Proves the builder's per-entry copy actually isolates callers (the entries
+    are flat, so a shallow dict() copy is sufficient today)."""
+    # Attest a device so models are returned (gated on a verified binding).
+    attest = client.post(
+        "/local/device/attest",
+        json={
+            "operator": "Brandon",
+            "device_id": "pixel-9",
+            "model_slug": "gemma-4-e4b",
+            "version": "1.0",
+            "sha256": "abc123",
+            "delegate": "gpu",
+        },
+    )
+    assert attest.status_code == 200
+
+    first = client.get("/models/local", params={"operator": "Brandon"})
+    assert first.status_code == 200
+    models = first.json()["models"]
+    assert models[0]["id"] == "gemma-4-e2b"
+    # Tamper with the returned dict.
+    models[0]["id"] = "tampered"
+
+    # A fresh call must still report the original id — the catalog was untouched.
+    second = client.get("/models/local", params={"operator": "Brandon"})
+    assert second.status_code == 200
+    assert second.json()["models"][0]["id"] == "gemma-4-e2b"
+    # And the module-level catalog itself is uncorrupted.
+    assert {m["id"] for m in local_routes.LOCAL_MODELS} == {"gemma-4-e2b", "gemma-4-e4b"}
+
+
 def test_local_catalog_entry_shape():
     """The shared catalog structure carries exactly the two on-device gemma
     models, each flagged on_device True with id/name/provider and NO
