@@ -11,10 +11,10 @@ import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -28,18 +28,19 @@ import kotlin.coroutines.resumeWithException
  *   - POST /local/device/attest             → [attest]
  *   - GET  /local/device/status?operator=   → [status]
  *
- * Reuses [BlackBoxApi]'s OkHttpClient (`getClient()`), base URL (`getBaseUrl()`)
- * and lenient kotlinx.serialization `json` so the orchestrator host is never
- * hardcoded — it always tracks whatever host BlackBoxApi was configured with.
+ * Reuses [BlackBoxApi]'s base URL (`getBaseUrl()`) and lenient
+ * kotlinx.serialization `json` so the orchestrator host is never hardcoded — it
+ * always tracks whatever host BlackBoxApi was configured with.
  *
  * The non-download calls delegate to BlackBoxApi's get/post helpers. download()
  * needs streaming (multi-GB bundles must never load into RAM) plus a Range
- * header for resume, so it drives the shared OkHttpClient directly.
+ * header for resume, so it drives an OkHttpClient directly — specifically the
+ * shared no-read-timeout [BlackBoxApi.streamClient], so a slow link can't trip
+ * the standard 120s read timeout mid-download.
  */
 class LocalModelApi(private val api: BlackBoxApi) {
 
     private val json get() = api.json
-    private val client: OkHttpClient get() = api.getClient()
 
     /** GET /local/models/catalog → the list of downloadable bundles. */
     suspend fun catalog(): List<LocalBundle> {
@@ -60,6 +61,9 @@ class LocalModelApi(private val api: BlackBoxApi) {
      * full bundle size derived from Content-Range (resume) or Content-Length +
      * the existing prefix (fresh). totalBytes is `-1` only if the server sends
      * neither header.
+     *
+     * [onProgress] is invoked on a background (IO) thread — callers must marshal
+     * to the main thread before touching any UI / Compose state from it.
      *
      * Returns [Result.success] of [destFile], or [Result.failure] on any IO /
      * HTTP error (the `.part` is left in place so a later call can resume).
@@ -83,7 +87,11 @@ class LocalModelApi(private val api: BlackBoxApi) {
         }
 
         try {
-            client.newCall(requestBuilder.build()).await().use { response ->
+            // Use the no-read-timeout client: a multi-GB bundle streamed over
+            // Tailscale/cellular can legitimately stall >120s between reads, and
+            // the shared client's 120s readTimeout would abort it. connect/write
+            // timeouts still apply.
+            api.streamClient.newCall(requestBuilder.build()).await().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
                         IOException("HTTP ${response.code}: ${response.message}")
@@ -111,7 +119,7 @@ class LocalModelApi(private val api: BlackBoxApi) {
 
                 var written = startedFrom
                 responseBody.byteStream().use { input ->
-                    java.io.FileOutputStream(partFile, /* append = */ resuming).use { output ->
+                    FileOutputStream(partFile, /* append = */ resuming).use { output ->
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
                             val n = input.read(buffer)
