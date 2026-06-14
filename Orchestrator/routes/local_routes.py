@@ -50,6 +50,9 @@ async def local_tools_search(request: Request):
     if not isinstance(k, int) or k < 1:
         k = 5
 
+    # NOTE: body may carry "operator" for symmetry with /local/tools/execute, but
+    # tool discovery is global/un-scoped — every operator searches the same vault.
+
     try:
         search = meta_tool.execute("search", query=query)
         matches = (search.data or {}).get("matches", []) if search.success else []
@@ -62,15 +65,21 @@ async def local_tools_search(request: Request):
             # The search result only carries {name, score}; pull the full schema
             # (and description) per hit via the meta-tool's read action.
             spec = meta_tool.execute("read", tool_name=name)
+            # Fault isolation: a stale/renamed tool (read failure) is skipped, not
+            # 500'd for the whole batch nor appended as an empty-schema garbage entry.
+            if not spec.success:
+                continue
             data = spec.data or {}
             tools.append({
                 "name": name,
                 "description": data.get("description", ""),
+                # meta_tool calls it "schema"; expose as "parameters" for tool-def consumers
                 "parameters": data.get("schema", {}),
             })
 
         return {"success": True, "tools": tools}
     except Exception as e:
+        print(f"[LOCAL PROVIDER] search failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
@@ -106,4 +115,5 @@ async def local_tools_execute(request: Request):
         result = await execute_tool(tool, params, operator)
         return {"success": bool(result.success), "result": result.result}
     except Exception as e:
+        print(f"[LOCAL PROVIDER] execute failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)

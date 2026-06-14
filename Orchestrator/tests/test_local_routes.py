@@ -121,6 +121,97 @@ def test_tools_search_returns_schemas(client, monkeypatch):
         assert "description" in t
 
 
+def test_tools_search_description_from_real_read_shape(client, monkeypatch):
+    """Regression: with `read` returning the REAL post-fix _action_read data
+    shape (name/schema/groups/tier/description), the bridge surfaces the real
+    description + schema. Would have caught the missing-`description` bug."""
+
+    class _FakeMetaResult:
+        def __init__(self, success, result, data=None):
+            self.success = success
+            self.result = result
+            self.data = data
+
+    def fake_execute(action, **params):
+        if action == "search":
+            return _FakeMetaResult(
+                True,
+                "found",
+                data={"matches": [{"name": "roll_dice", "score": 0.9}]},
+            )
+        if action == "read":
+            return _FakeMetaResult(
+                True,
+                "=== Tool: roll_dice ===",
+                data={
+                    "name": "roll_dice",
+                    "schema": {"type": "object", "properties": {}},
+                    "groups": [],
+                    "tier": 1,
+                    "description": "Roll dice",
+                },
+            )
+        return _FakeMetaResult(False, "unknown action")
+
+    monkeypatch.setattr(local_routes.meta_tool, "execute", fake_execute)
+
+    resp = client.post("/local/tools/search", json={"query": "roll a die", "k": 1})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert len(body["tools"]) == 1
+    tool = body["tools"][0]
+    assert tool["description"] == "Roll dice"
+    assert tool["parameters"] == {"type": "object", "properties": {}}
+
+
+def test_tools_search_skips_failed_read(client, monkeypatch):
+    """A hit whose `read` fails (stale/renamed tool) is skipped, not 500'd and
+    not appended as a garbage empty-schema entry."""
+
+    class _FakeMetaResult:
+        def __init__(self, success, result, data=None):
+            self.success = success
+            self.result = result
+            self.data = data
+
+    def fake_execute(action, **params):
+        if action == "search":
+            return _FakeMetaResult(
+                True,
+                "found",
+                data={"matches": [
+                    {"name": "good_tool", "score": 0.9},
+                    {"name": "stale_tool", "score": 0.8},
+                ]},
+            )
+        if action == "read":
+            name = params.get("tool_name")
+            if name == "good_tool":
+                return _FakeMetaResult(
+                    True,
+                    "=== Tool: good_tool ===",
+                    data={
+                        "name": "good_tool",
+                        "schema": {"type": "object", "properties": {}},
+                        "groups": [],
+                        "tier": 2,
+                        "description": "A working tool",
+                    },
+                )
+            return _FakeMetaResult(False, "not found", data=None)
+        return _FakeMetaResult(False, "unknown action")
+
+    monkeypatch.setattr(local_routes.meta_tool, "execute", fake_execute)
+
+    resp = client.post("/local/tools/search", json={"query": "do something", "k": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert len(body["tools"]) == 1
+    assert body["tools"][0]["name"] == "good_tool"
+
+
 def test_tools_search_requires_query(client):
     """Empty query → 400 with success False."""
     resp = client.post("/local/tools/search", json={"query": "  "})
