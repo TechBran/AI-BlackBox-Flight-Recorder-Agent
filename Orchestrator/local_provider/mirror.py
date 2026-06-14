@@ -147,6 +147,12 @@ def ensure_present(slug: str) -> Path:
     ``_download_bundle`` into ``MIRROR_DIR`` (created lazily here) and the path
     returned.
 
+    Atomic: the fetch writes to a ``<filename>.part`` temp path and is only
+    promoted to the final target via ``os.replace`` (atomic rename) on success,
+    so a mid-download failure can never cache a truncated bundle. On ANY failure
+    the ``.part`` is removed and the error re-raised; the final target is never
+    left in a half-written state.
+
     Raises ``KeyError`` for an unknown slug.
     """
     bundle = get_bundle(slug)
@@ -158,7 +164,31 @@ def ensure_present(slug: str) -> Path:
         return target
 
     MIRROR_DIR.mkdir(parents=True, exist_ok=True)
-    _download_bundle(bundle, target)
+
+    # Download into a temp path, then atomically rename — a failed/partial fetch
+    # can never poison the cache (covers BOTH the hf_hub and requests branches of
+    # _download_bundle since atomicity lives out here, not inside the fetch).
+    tmp = target.with_suffix(target.suffix + ".part")
+    try:
+        _download_bundle(bundle, tmp)
+        os.replace(tmp, target)  # atomic promotion
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    # Optional integrity check: only when the catalog carries a sha256 (None
+    # today). Once catalog hashes are populated this verifies the served bundle.
+    # TODO: presence == size>0 until catalog hashes are populated; once set, this
+    # verifies integrity.
+    expected_sha = bundle.get("sha256")
+    if expected_sha:
+        actual_sha = bundle_sha256(target)
+        if actual_sha != expected_sha:
+            target.unlink(missing_ok=True)
+            raise ValueError(
+                f"sha256 mismatch for {slug}: expected {expected_sha}, got {actual_sha}"
+            )
+
     return target
 
 

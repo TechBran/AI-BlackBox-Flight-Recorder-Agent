@@ -197,6 +197,36 @@ def test_download_unknown_slug_404(client, fake_mirror):
     assert "nope" in body["error"]
 
 
+def test_download_malformed_range_400(client, fake_mirror):
+    """GET with a malformed Range (``bytes=abc``) → 400.
+
+    FileResponse delegates Range parsing to Starlette, which rejects a
+    syntactically-invalid range with 400 Bad Request (verified empirically
+    against Starlette 0.48.0). Pinned to that actual behaviour.
+    """
+    resp = client.get(
+        "/local/models/download/gemma-4-e2b",
+        headers={"Range": "bytes=abc"},
+    )
+    assert resp.status_code == 400
+
+
+def test_download_unsatisfiable_range_416(client, fake_mirror):
+    """GET with a Range past EOF (fixture is 29 bytes; ``bytes=1000-2000``) → 416.
+
+    Starlette returns 416 Range Not Satisfiable with ``Content-Range: */<size>``
+    for a syntactically-valid but out-of-bounds range (verified empirically
+    against Starlette 0.48.0).
+    """
+    resp = client.get(
+        "/local/models/download/gemma-4-e2b",
+        headers={"Range": "bytes=1000-2000"},
+    )
+    assert resp.status_code == 416
+    # RFC 7233: an unsatisfiable response carries Content-Range: */<total>.
+    assert resp.headers.get("content-range") == f"*/{len(FIXTURE_BYTES)}"
+
+
 # --- mirror.ensure_present -------------------------------------------------
 
 def test_ensure_present_fetches_once(monkeypatch, tmp_path):
@@ -228,6 +258,70 @@ def test_ensure_present_unknown_slug_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
     with pytest.raises((KeyError, ValueError)):
         mirror.ensure_present("does-not-exist")
+
+
+def test_ensure_present_cleans_up_partial_on_failure(monkeypatch, tmp_path):
+    """A mid-download failure must NOT cache a truncated bundle: the final
+    target must not exist and no ``.part`` temp file may be left behind. A
+    subsequent successful fetch then works (a failed attempt didn't poison the
+    cache)."""
+    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
+
+    bundle = mirror.get_bundle("gemma-4-e2b")
+    target = tmp_path / bundle["filename"]
+
+    def _partial_then_fail(bundle, dest_path):
+        # Write partial bytes to the temp dest, then blow up mid-stream.
+        dest_path.write_bytes(b"PARTIAL")
+        raise RuntimeError("simulated network failure")
+
+    monkeypatch.setattr(mirror, "_download_bundle", _partial_then_fail)
+
+    with pytest.raises(RuntimeError):
+        mirror.ensure_present("gemma-4-e2b")
+
+    # No truncated bundle cached, and no leftover .part temp file.
+    assert not target.exists()
+    assert list(tmp_path.glob("*.part")) == []
+
+    # A clean retry succeeds — the earlier failure did not poison the cache.
+    def _working_download(bundle, dest_path):
+        dest_path.write_bytes(FIXTURE_BYTES)
+
+    monkeypatch.setattr(mirror, "_download_bundle", _working_download)
+    path = mirror.ensure_present("gemma-4-e2b")
+    assert path.exists()
+    assert path.read_bytes() == FIXTURE_BYTES
+    assert list(tmp_path.glob("*.part")) == []
+
+
+def test_ensure_present_verifies_sha256_when_set(monkeypatch, tmp_path):
+    """When the bundle carries a sha256, ensure_present verifies the downloaded
+    bytes against it: a mismatch raises ValueError and leaves NO cached target.
+    A correct sha256 succeeds."""
+    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
+
+    bundle = mirror.get_bundle("gemma-4-e2b")
+    target = tmp_path / bundle["filename"]
+
+    def _working_download(bundle, dest_path):
+        dest_path.write_bytes(FIXTURE_BYTES)
+
+    monkeypatch.setattr(mirror, "_download_bundle", _working_download)
+
+    # --- wrong hash → ValueError + nothing cached ---
+    monkeypatch.setitem(mirror.BUNDLES["gemma-4-e2b"], "sha256", "deadbeef" * 8)
+    with pytest.raises(ValueError):
+        mirror.ensure_present("gemma-4-e2b")
+    assert not target.exists()
+    assert list(tmp_path.glob("*.part")) == []
+
+    # --- correct hash → success ---
+    correct = hashlib.sha256(FIXTURE_BYTES).hexdigest()
+    monkeypatch.setitem(mirror.BUNDLES["gemma-4-e2b"], "sha256", correct)
+    path = mirror.ensure_present("gemma-4-e2b")
+    assert path.exists()
+    assert path.read_bytes() == FIXTURE_BYTES
 
 
 # --- mirror.bundle_sha256 --------------------------------------------------
