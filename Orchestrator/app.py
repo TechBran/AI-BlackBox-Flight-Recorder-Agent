@@ -92,6 +92,7 @@ from Orchestrator.routes.cron_routes import *
 from Orchestrator.routes.browser_routes import *
 from Orchestrator.routes.internet_routes import *
 from Orchestrator.routes.gmail_routes import *
+from Orchestrator.routes.local_routes import *
 from Orchestrator.routes.toolvault_routes import *
 from Orchestrator.routes.elevenlabs_routes import *
 
