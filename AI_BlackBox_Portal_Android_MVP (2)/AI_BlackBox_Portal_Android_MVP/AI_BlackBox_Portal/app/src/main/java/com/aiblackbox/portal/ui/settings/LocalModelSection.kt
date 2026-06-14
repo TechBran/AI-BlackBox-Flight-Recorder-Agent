@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.ui.theme.BbxAccent
-import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
 import com.aiblackbox.portal.ui.theme.Neutral200

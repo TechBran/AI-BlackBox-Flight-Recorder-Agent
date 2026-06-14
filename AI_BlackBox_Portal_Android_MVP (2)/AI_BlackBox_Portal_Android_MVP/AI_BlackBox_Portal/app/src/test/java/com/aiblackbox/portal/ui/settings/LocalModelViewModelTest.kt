@@ -42,6 +42,21 @@ import java.io.IOException
  *     emit a state update per callback (bounded count) while still landing on
  *     ≈ 1f.
  *   - switchModel records the selected slug.
+ *
+ * NOTE (stale-progress race): the terminal-wins guard in [download] (a late
+ * progress launch must not re-insert a slug already removed by the terminal
+ * success/failure update) is a multi-threaded-dispatcher hazard. The test
+ * dispatcher here serializes coroutines FIFO, so the true race is NOT
+ * reproducible; the guard is verified structurally (busySlug is the
+ * authoritative in-flight signal, cleared at both terminal paths) and the
+ * terminal-wins contract is locked by
+ * [download leaves no stale progress entry once complete].
+ *
+ * NOTE (Composable render coverage): [LocalModelSection]'s render branches
+ * (downloading spinner vs %, installed Switch/Delete vs Download, recommended
+ * badge, autonomy toggle) are exercised by on-device/instrumented testing, not
+ * this unit gate — adding a Compose render test would require a new Gradle test
+ * dependency (Robolectric / createComposeRule) the offline unit gate does not have.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LocalModelViewModelTest {
@@ -220,6 +235,33 @@ class LocalModelViewModelTest {
         if (finalProgress != null) {
             assertEquals(1f, finalProgress, 0.001f)
         }
+    }
+
+    // ── terminal-wins contract (stale-progress race guard) ──────────────────
+
+    @Test
+    fun `download leaves no stale progress entry once complete`() = runTest(dispatcher) {
+        // Locks the terminal-wins contract that the guard protects: once the
+        // download's terminal success update has run, the slug must be GONE from
+        // downloadProgress and busySlug must be null. (The true late-tick race is
+        // dispatcher-dependent and not reproducible on the FIFO test dispatcher —
+        // see the class kdoc; this asserts the invariant the guard preserves.)
+        val installer = FakeInstaller(recommended = e4b, progressTicks = 50)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(installer, catalog)
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertNull("busySlug cleared once download completes", s.busySlug)
+        assertFalse(
+            "no stale progress entry for an installed model",
+            s.downloadProgress.containsKey("gemma-4-e4b"),
+        )
+        assertTrue("model is installed", s.installed.any { it.slug == "gemma-4-e4b" })
     }
 
     // ── download failure is retryable ───────────────────────────────────────

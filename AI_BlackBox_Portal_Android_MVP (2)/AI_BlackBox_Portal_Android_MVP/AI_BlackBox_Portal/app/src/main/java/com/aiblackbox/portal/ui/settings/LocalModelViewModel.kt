@@ -168,7 +168,16 @@ class LocalModelViewModel(
                     // callback on an IO thread, so never touch state inline.
                     scope.launch {
                         _state.update { s ->
-                            s.copy(downloadProgress = s.downloadProgress + (bundle.slug to fraction))
+                            // Terminal-wins guard: on a multi-threaded dispatcher a
+                            // late progress launch can run AFTER the success/failure
+                            // update has removed this slug from downloadProgress and
+                            // cleared busySlug. Without this guard it would re-insert
+                            // the slug, leaving the row stuck on a progress bar for an
+                            // already-installed model. busySlug == this slug for the
+                            // whole download and is cleared at both terminal paths, so
+                            // it is the authoritative "still in flight" signal.
+                            if (s.busySlug != bundle.slug) s
+                            else s.copy(downloadProgress = s.downloadProgress + (bundle.slug to fraction))
                         }
                     }
                 }
