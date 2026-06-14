@@ -309,6 +309,26 @@ async def startup_embeddings_watcher():
 
 
 @app.on_event("startup")
+async def startup_live_session_reaper():
+    """Start the live voice-session reaper (memory-leak fix 2026-06-14).
+
+    GEMINI_LIVE_SESSIONS / GROK_LIVE_SESSIONS / REALTIME_SESSIONS were append-only
+    and grew RAM unbounded (dead sessions retained their transcript + base64 audio).
+    The reaper periodically evicts sessions marked status="disconnected" past a short
+    reconnect grace window. A plain asyncio loop on the app event loop; the route
+    disconnect handlers already release the heavy audio buffers immediately.
+
+    NEVER raises — maintenance, not boot criteria.
+    """
+    try:
+        from Orchestrator.live_session_reaper import start_reaper
+        start_reaper()
+        logger.info("[LIVE-REAPER] live voice-session reaper started (sweep 60s)")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[LIVE-REAPER] failed to start reaper (non-fatal): %s", e)
+
+
+@app.on_event("startup")
 def startup_assert_sudoers_current():
     """Auto-update /etc/sudoers.d/blackbox-system if the template in this
     git checkout adds grants that aren't already present. Uses the

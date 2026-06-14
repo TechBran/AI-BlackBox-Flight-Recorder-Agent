@@ -57,6 +57,7 @@ from Orchestrator.config import (
 )
 from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
 from Orchestrator.volume import now_utc_iso, read_text_safe
+from Orchestrator.live_session_reaper import release_payload
 from Orchestrator.fossils import (
     hybrid_retrieve,
     get_recent_fossils_for_operator,
@@ -1554,6 +1555,8 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
 
         session.portal_ws = None
         session.status = "disconnected"
+        session.last_activity = now_utc_iso()  # start reaper grace clock (live_session_reaper)
+        release_payload(session)               # free audio/transcript buffers; conversation already saved
         print(f"[REALTIME] Session {session_id} cleaned up")
 
 # =============================================================================

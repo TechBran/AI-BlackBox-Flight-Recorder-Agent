@@ -571,6 +571,16 @@ class PhoneAIBridge:
         # Save session using existing route's save function
         if self._ai_session:
             await self._save_session()
+            # Evict this call's entry from the live-session registry it was
+            # inserted into (REALTIME/GEMINI_LIVE/GROK_LIVE depending on backend).
+            # These registries had no removal path — this is the phone leg of the
+            # 2026-06-14 live voice-session memory leak. Pop from all three; only
+            # the matching backend's dict holds this session_id.
+            _sid = getattr(self._ai_session, "session_id", None)
+            if _sid:
+                REALTIME_SESSIONS.pop(_sid, None)
+                GEMINI_LIVE_SESSIONS.pop(_sid, None)
+                GROK_LIVE_SESSIONS.pop(_sid, None)
 
         self.phone_session.status = PhoneStatus.COMPLETED
         self.phone_session.call_end = now_utc_iso()
