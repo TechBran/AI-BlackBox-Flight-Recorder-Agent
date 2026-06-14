@@ -84,6 +84,7 @@ class FcLoop(private val llm: LocalLlm) {
      * Internal so [FcLoopTest] can assert the structure directly.
      */
     internal fun buildPrompt(persona: String, history: List<Turn>, userMessage: String): String {
+        // SECURITY (Phase 4): history/user text is interpolated as plain text, so content containing literal "User:"/"Assistant:" lines is not distinguishable from real turn boundaries. Harmless for a single-user, no-tools Phase 2 model, but once Phase 4 actuators + autonomy gate exist, a self-injected "Assistant:" turn could fabricate intent. Mitigation: Task 2.6's concrete engine should re-template into Gemma's real turn tokens (<start_of_turn>...) which structurally separate role from content.
         val sb = StringBuilder()
         sb.append(persona)
         sb.append("\n\n")
