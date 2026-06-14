@@ -36,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -586,6 +587,30 @@ fun SettingsSheet(
                 }
 
                 Spacer(Modifier.height(16.dp))
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // On-Device Model (Gemma) — Model Manager (Task 1.5)
+            // Built lazily once the api + operator are ready; disposed on leave.
+            // onModelSelected records the chosen slug under "model_local" so the
+            // picker (Task 1.6) can read the active on-device model.
+            // ══════════════════════════════════════════════════════════════
+            val localApi = viewModel.api
+            if (localApi != null) {
+                val localModelVm = remember(localApi, operator) {
+                    LocalModelViewModel.fromContext(
+                        context = context,
+                        api = localApi,
+                        operatorProvider = { operator },
+                        onModelSelected = { slug -> viewModel.setModel(slug, "local") },
+                    )
+                }
+                DisposableEffect(localModelVm) {
+                    localModelVm.refresh()
+                    onDispose { localModelVm.dispose() }
+                }
+                LocalModelSection(viewModel = localModelVm)
+                Spacer(Modifier.height(20.dp))
             }
 
             // ══════════════════════════════════════════════════════════════

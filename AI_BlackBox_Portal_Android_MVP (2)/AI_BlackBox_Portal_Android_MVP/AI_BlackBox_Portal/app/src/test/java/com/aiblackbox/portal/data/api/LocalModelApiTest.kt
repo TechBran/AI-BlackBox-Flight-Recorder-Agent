@@ -296,6 +296,33 @@ class LocalModelApiTest {
         assertTrue(status.models.isEmpty())
     }
 
+    // -------------------------------------------------------------------------
+    // 6. setAutonomy() — POST /local/device/autonomy {operator, device_id, mode}
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `setAutonomy posts operator device_id and mode and returns true on success`() = runTest {
+        enqueueJson("""{"success":true}""")
+
+        val ok = api.setAutonomy(operator = "Brandon", deviceId = "pixel-9", mode = "yolo")
+        assertTrue("setAutonomy returns true on {success:true}", ok)
+
+        val recorded = server.takeRequest()
+        assertEquals("/local/device/autonomy", recorded.target)
+        assertEquals("POST", recorded.method)
+        val sentBody = recorded.body!!.utf8()
+        assertTrue("operator in body", sentBody.contains("\"operator\":\"Brandon\""))
+        assertTrue("device_id (snake_case) in body", sentBody.contains("\"device_id\":\"pixel-9\""))
+        assertTrue("mode in body", sentBody.contains("\"mode\":\"yolo\""))
+    }
+
+    @Test
+    fun `setAutonomy returns false when backend rejects`() = runTest {
+        enqueueJson("""{"success":false,"error":"operator required"}""", code = 400)
+        val ok = api.setAutonomy(operator = "x", deviceId = "y", mode = "permission")
+        assertFalse("setAutonomy must be false on a non-success response", ok)
+    }
+
     // assertArrayEquals helper (JUnit's is on org.junit.Assert; import via FQN to
     // keep the byte-array overload explicit).
     private fun assertArrayEquals(expected: ByteArray, actual: ByteArray) =

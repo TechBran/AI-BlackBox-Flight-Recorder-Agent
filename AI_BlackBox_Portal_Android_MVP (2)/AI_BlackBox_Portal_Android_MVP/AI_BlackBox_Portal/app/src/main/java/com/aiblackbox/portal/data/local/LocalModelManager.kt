@@ -55,7 +55,7 @@ class LocalModelManager(
     private val modelsDir: File,
     private val totalRamBytes: () -> Long,
     private val deviceId: String,
-) {
+) : LocalModelInstaller {
 
     /**
      * Scan [modelsDir] for installed bundles via their `<slug>.json` sidecars.
@@ -69,7 +69,7 @@ class LocalModelManager(
      *
      * Disk I/O runs on [Dispatchers.IO] so callers on the main thread can't ANR.
      */
-    suspend fun installedModels(): List<InstalledModel> = withContext(Dispatchers.IO) {
+    override suspend fun installedModels(): List<InstalledModel> = withContext(Dispatchers.IO) {
         val dir = modelsDir
         if (!dir.isDirectory) return@withContext emptyList()
         val sidecars = dir.listFiles { f -> f.isFile && f.name.endsWith(SIDECAR_SUFFIX) }
@@ -91,7 +91,7 @@ class LocalModelManager(
      *
      * @throws IllegalArgumentException if [bundles] is empty.
      */
-    suspend fun recommendForDevice(bundles: List<LocalBundle>): LocalBundle {
+    override suspend fun recommendForDevice(bundles: List<LocalBundle>): LocalBundle {
         require(bundles.isNotEmpty()) { "recommendForDevice requires a non-empty bundle list" }
         val ram = totalRamBytes()
         val fitting = bundles.filter { (it.minRamGb * BYTES_PER_GIB).toLong() <= ram }
@@ -153,7 +153,7 @@ class LocalModelManager(
      * [bundle.slug] concurrently — it shares the `.part`/dest/sidecar paths.
      * Serialising same-slug installs is the caller's (ViewModel's) responsibility.
      */
-    suspend fun install(
+    override suspend fun install(
         bundle: LocalBundle,
         operator: String,
         delegate: String,
@@ -217,7 +217,7 @@ class LocalModelManager(
      * Remove the model file for [slug] (and its sidecar). Returns whether
      * anything was actually deleted. Disk I/O runs on [Dispatchers.IO].
      */
-    suspend fun delete(slug: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun delete(slug: String): Boolean = withContext(Dispatchers.IO) {
         val sidecar = sidecarFor(slug)
         // Resolve the bundle file from the sidecar if present; otherwise nothing
         // to do (we only know filenames via sidecars).

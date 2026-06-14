@@ -2,6 +2,8 @@ package com.aiblackbox.portal.data.api
 
 import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.model.AttestResponse
+import com.aiblackbox.portal.data.model.AutonomyRequest
+import com.aiblackbox.portal.data.model.AutonomyResponse
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.model.LocalCatalogResponse
 import com.aiblackbox.portal.data.model.LocalStatus
@@ -38,12 +40,12 @@ import kotlin.coroutines.resumeWithException
  * shared no-read-timeout [BlackBoxApi.streamClient], so a slow link can't trip
  * the standard 120s read timeout mid-download.
  */
-class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader {
+class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader, LocalModelCatalogClient {
 
     private val json get() = api.json
 
     /** GET /local/models/catalog → the list of downloadable bundles. */
-    suspend fun catalog(): List<LocalBundle> {
+    override suspend fun catalog(): List<LocalBundle> {
         val body = api.get("/local/models/catalog")
         return json.decodeFromString(LocalCatalogResponse.serializer(), body).bundles
     }
@@ -160,8 +162,28 @@ class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader {
         }
     }
 
+    /**
+     * POST /local/device/autonomy → set a device's autonomy posture.
+     *
+     * Body `{operator, device_id, mode}` where mode is "yolo" (full autonomy)
+     * or "permission" (asks before high-consequence phone actions). Mirrors
+     * [attest]'s style: encode the request, POST, parse `{success}`; a 4xx/5xx
+     * out of [BlackBoxApi.post] surfaces as an IOException → returns false
+     * (a rejected change, not a crash).
+     */
+    override suspend fun setAutonomy(operator: String, deviceId: String, mode: String): Boolean {
+        return try {
+            val req = AutonomyRequest(operator = operator, deviceId = deviceId, mode = mode)
+            val body = json.encodeToString(AutonomyRequest.serializer(), req)
+            val responseText = api.post("/local/device/autonomy", body)
+            json.decodeFromString(AutonomyResponse.serializer(), responseText).success
+        } catch (e: IOException) {
+            false
+        }
+    }
+
     /** GET /local/device/status?operator=… → availability + attested models. */
-    suspend fun status(operator: String): LocalStatus {
+    override suspend fun status(operator: String): LocalStatus {
         val url = "${api.getBaseUrl()}/local/device/status".toHttpUrl().newBuilder()
             .addQueryParameter("operator", operator)
             .build()

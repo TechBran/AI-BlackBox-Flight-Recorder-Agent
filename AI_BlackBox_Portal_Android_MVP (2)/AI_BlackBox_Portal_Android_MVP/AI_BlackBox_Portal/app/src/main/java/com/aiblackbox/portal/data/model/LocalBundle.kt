@@ -85,3 +85,22 @@ data class AttestResponse(
     val success: Boolean = false,
     val device: LocalDeviceRecord? = null,
 )
+
+/**
+ * Body for POST /local/device/autonomy — flips a device's autonomy posture
+ * between "permission" (asks before high-consequence phone actions) and "yolo"
+ * (full autonomy). `operator` + `deviceId` are required by the backend; `mode`
+ * is one of those two literals.
+ */
+@Serializable
+data class AutonomyRequest(
+    val operator: String,
+    @SerialName("device_id") val deviceId: String,
+    val mode: String,
+)
+
+/** POST /local/device/autonomy → {"success": bool, ...}. */
+@Serializable
+data class AutonomyResponse(
+    val success: Boolean = false,
+)
