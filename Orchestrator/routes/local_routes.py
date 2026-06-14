@@ -20,7 +20,7 @@ import hashlib
 from typing import Optional
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
@@ -113,6 +113,119 @@ async def local_models_catalog():
         return {"bundles": mirror.list_bundles()}
     except Exception as e:
         print(f"[LOCAL PROVIDER] catalog failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# GET /local/models/download/{slug} — fetch-once + ranged/resumable download
+#
+# The hub fetches the .litertlm bytes from Hugging Face exactly ONCE
+# (mirror.ensure_present), then phones stream them from here over Tailscale.
+# Bundles are multi-GB, so HTTP Range/resume is supported: a Range header gets a
+# 206 Partial Content with the requested byte slice + Content-Range; no Range
+# header gets a 200 + the whole file. Accept-Ranges: bytes is always advertised.
+# ---------------------------------------------------------------------------
+def _parse_range(range_header: str, total: int) -> Optional[tuple[int, int]]:
+    """Parse a single ``bytes=start-end`` Range header against ``total``.
+
+    Returns an inclusive ``(start, end)`` byte range, or ``None`` if the header
+    is malformed/unsupported (caller then serves the whole file). Supports the
+    forms ``bytes=start-end``, ``bytes=start-`` (to EOF), and ``bytes=-suffix``
+    (last N bytes). Returns a sentinel-clamped range for satisfiable requests; an
+    un-satisfiable start (start >= total) returns ``None`` so the caller can 416.
+    """
+    if not range_header or not range_header.strip().lower().startswith("bytes="):
+        return None
+    spec = range_header.split("=", 1)[1].strip()
+    if "," in spec:  # multi-range not supported (YAGNI) — serve whole file
+        return None
+    if "-" not in spec:
+        return None
+    start_s, end_s = spec.split("-", 1)
+    start_s, end_s = start_s.strip(), end_s.strip()
+    try:
+        if start_s == "":  # suffix range: bytes=-N → last N bytes
+            if end_s == "":
+                return None
+            suffix = int(end_s)
+            if suffix <= 0:
+                return None
+            start = max(0, total - suffix)
+            end = total - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s != "" else total - 1
+    except ValueError:
+        return None
+    if start < 0 or end < start:
+        return None
+    if start >= total:  # un-satisfiable
+        return None
+    end = min(end, total - 1)  # clamp to EOF
+    return start, end
+
+
+@app.get("/local/models/download/{slug}")
+async def local_models_download(slug: str, request: Request):
+    """Stream a mirrored on-device model bundle, with HTTP Range/resume support.
+
+    Unknown slug → 404. Otherwise fetch-once via ``mirror.ensure_present`` and
+    serve the file: a ``Range: bytes=start-end`` request gets 206 + that slice +
+    ``Content-Range``; no Range gets 200 + the whole file. ``Accept-Ranges:
+    bytes`` is always set. An un-satisfiable range gets 416.
+    """
+    if mirror.get_bundle(slug) is None:
+        return JSONResponse(
+            {"success": False, "error": f"unknown bundle: {slug}"}, status_code=404
+        )
+
+    try:
+        path = mirror.ensure_present(slug)
+        total = path.stat().st_size
+
+        range_header = request.headers.get("range")
+        media_type = "application/octet-stream"
+
+        if range_header:
+            parsed = _parse_range(range_header, total)
+            if parsed is None:
+                # Malformed or un-satisfiable range → 416 with the valid extent.
+                return Response(
+                    status_code=416,
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes */{total}",
+                    },
+                )
+            start, end = parsed
+            with open(path, "rb") as f:
+                f.seek(start)
+                chunk = f.read(end - start + 1)
+            return Response(
+                content=chunk,
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{end}/{total}",
+                    "Content-Length": str(len(chunk)),
+                },
+            )
+
+        # No Range header → whole file.
+        with open(path, "rb") as f:
+            data = f.read()
+        return Response(
+            content=data,
+            status_code=200,
+            media_type=media_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(total),
+            },
+        )
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] download failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 

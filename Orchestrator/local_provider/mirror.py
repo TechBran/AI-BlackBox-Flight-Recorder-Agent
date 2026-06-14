@@ -20,7 +20,21 @@ the app can render it before any download has happened.
 ids that we will pin to the real upstream repo/file when Task 1.2 lands.
 """
 
+import hashlib
+import os
+import shutil
+from pathlib import Path
 from typing import Optional
+
+# ---------------------------------------------------------------------------
+# On-disk mirror cache dir. MODULE attribute (not created at import) so tests
+# can monkeypatch it (same pattern as the registry's STORE_FILE). The dir is
+# created lazily by ensure_present on the first real download.
+# ---------------------------------------------------------------------------
+MIRROR_DIR: Path = Path(__file__).parent / "mirror_store"
+
+# Streamed read chunk size for hashing (1 MiB).
+_HASH_CHUNK = 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Bundle metadata — keyed by slug (identical to LOCAL_MODELS ids in
@@ -79,3 +93,83 @@ def get_bundle(slug: str) -> Optional[dict]:
     """
     bundle = BUNDLES.get(slug)
     return dict(bundle) if bundle is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Task 1.2 — fetch-once + ranged download support
+# ---------------------------------------------------------------------------
+
+def _download_bundle(bundle: dict, dest_path: Path) -> None:
+    """Fetch ONE bundle's bytes from Hugging Face into ``dest_path``.
+
+    This is the ONLY function in this module that touches the network — it is a
+    separate module-level function precisely so tests monkeypatch IT and stay
+    hermetic (no real HF request ever runs under pytest).
+
+    Prefers ``huggingface_hub.hf_hub_download`` if the package is importable
+    (then copies the cached file to ``dest_path``); otherwise falls back to a
+    streamed ``requests`` GET against the HF resolve URL. Either way the token
+    comes from ``$HF_TOKEN`` (optional — public repos need none).
+    """
+    repo = bundle["hf_repo"]
+    filename = bundle["filename"]
+    token = os.environ.get("HF_TOKEN")
+
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+    except Exception:
+        hf_hub_download = None
+
+    if hf_hub_download is not None:
+        cached = hf_hub_download(repo_id=repo, filename=filename, token=token)
+        # Copy out of the HF cache so our MIRROR_DIR owns a stable, standalone file.
+        shutil.copyfile(cached, dest_path)
+        return
+
+    # Fallback: streamed requests GET against the resolve URL.
+    import requests
+
+    url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with requests.get(url, headers=headers, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=_HASH_CHUNK):
+                if chunk:
+                    f.write(chunk)
+
+
+def ensure_present(slug: str) -> Path:
+    """Return the local path to a bundle's bytes, fetching them ONCE if needed.
+
+    Fetch-once semantics: if the target file already exists (and is non-empty)
+    it is returned as-is with NO re-download; otherwise it is downloaded via
+    ``_download_bundle`` into ``MIRROR_DIR`` (created lazily here) and the path
+    returned.
+
+    Raises ``KeyError`` for an unknown slug.
+    """
+    bundle = get_bundle(slug)
+    if bundle is None:
+        raise KeyError(f"unknown bundle: {slug}")
+
+    target = MIRROR_DIR / bundle["filename"]
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    MIRROR_DIR.mkdir(parents=True, exist_ok=True)
+    _download_bundle(bundle, target)
+    return target
+
+
+def bundle_sha256(path: Path) -> str:
+    """Return the streamed SHA-256 hex digest of the file at ``path``.
+
+    Streams the file in chunks so hashing a multi-GB bundle does not load it all
+    into memory. Used so a served bundle's integrity can be reported.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_HASH_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()

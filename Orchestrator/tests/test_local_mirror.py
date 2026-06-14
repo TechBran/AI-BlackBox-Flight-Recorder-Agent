@@ -17,6 +17,8 @@ endpoint just serializes it. The startup embedding-sync hook is mocked (it
 spawns a daemon thread calling sync_embeddings, which would hit the network).
 """
 
+import hashlib
+
 from unittest.mock import patch
 
 import pytest
@@ -124,3 +126,128 @@ def test_get_bundle_is_isolated():
     second = mirror.get_bundle("gemma-4-e2b")
     assert second["filename"] == original_filename
     assert mirror.BUNDLES["gemma-4-e2b"]["filename"] == original_filename
+
+
+# ---------------------------------------------------------------------------
+# Task 1.2 — fetch-once + ranged download
+#
+# Hermetic: every download test monkeypatches mirror.MIRROR_DIR to a tmp dir
+# AND monkeypatches mirror._download_bundle with a fake that writes a small
+# known fixture to the dest, so NO real Hugging Face request is ever made.
+# ---------------------------------------------------------------------------
+
+# Known fixture bytes the fake _download_bundle writes (29 bytes).
+FIXTURE_BYTES = b"GEMMA-BUNDLE-BYTES-0123456789"
+
+
+@pytest.fixture
+def fake_mirror(monkeypatch, tmp_path):
+    """Point mirror.MIRROR_DIR at a tmp dir and replace the network fetch with a
+    fake that writes FIXTURE_BYTES to the destination. Returns the tmp dir."""
+    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
+
+    def _fake_download(bundle, dest_path):
+        dest_path.write_bytes(FIXTURE_BYTES)
+
+    monkeypatch.setattr(mirror, "_download_bundle", _fake_download)
+    return tmp_path
+
+
+# --- GET /local/models/download/{slug} -------------------------------------
+
+def test_download_full_returns_200_and_bytes(client, fake_mirror):
+    """GET with no Range header → 200, whole file, Accept-Ranges advertised."""
+    resp = client.get("/local/models/download/gemma-4-e2b")
+    assert resp.status_code == 200
+    assert resp.content == FIXTURE_BYTES
+    assert resp.headers.get("accept-ranges") == "bytes"
+
+
+def test_download_range_returns_206_partial(client, fake_mirror):
+    """GET with Range: bytes=0-9 → 206, first 10 bytes, correct Content-Range."""
+    resp = client.get(
+        "/local/models/download/gemma-4-e2b",
+        headers={"Range": "bytes=0-9"},
+    )
+    assert resp.status_code == 206
+    assert resp.content == FIXTURE_BYTES[0:10]
+    total = len(FIXTURE_BYTES)
+    assert resp.headers.get("content-range") == f"bytes 0-9/{total}"
+    assert resp.headers.get("accept-ranges") == "bytes"
+
+
+def test_download_range_mid_slice(client, fake_mirror):
+    """GET with Range: bytes=5-9 → 206, bytes[5:10]."""
+    resp = client.get(
+        "/local/models/download/gemma-4-e2b",
+        headers={"Range": "bytes=5-9"},
+    )
+    assert resp.status_code == 206
+    assert resp.content == FIXTURE_BYTES[5:10]
+    total = len(FIXTURE_BYTES)
+    assert resp.headers.get("content-range") == f"bytes 5-9/{total}"
+
+
+def test_download_unknown_slug_404(client, fake_mirror):
+    """GET an unknown slug → 404 with a clear error (no fetch attempted)."""
+    resp = client.get("/local/models/download/nope")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["success"] is False
+    assert "nope" in body["error"]
+
+
+# --- mirror.ensure_present -------------------------------------------------
+
+def test_ensure_present_fetches_once(monkeypatch, tmp_path):
+    """ensure_present downloads on the first call and is a pure cache hit on the
+    second — the network fetch runs exactly ONCE."""
+    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
+
+    calls = {"n": 0}
+
+    def _counting_download(bundle, dest_path):
+        calls["n"] += 1
+        dest_path.write_bytes(FIXTURE_BYTES)
+
+    monkeypatch.setattr(mirror, "_download_bundle", _counting_download)
+
+    path1 = mirror.ensure_present("gemma-4-e2b")
+    assert path1.exists()
+    assert path1.read_bytes() == FIXTURE_BYTES
+    assert calls["n"] == 1
+
+    path2 = mirror.ensure_present("gemma-4-e2b")
+    assert path2 == path1
+    assert path2.read_bytes() == FIXTURE_BYTES
+    assert calls["n"] == 1  # second call is a cache hit — no re-download
+
+
+def test_ensure_present_unknown_slug_raises(monkeypatch, tmp_path):
+    """ensure_present on an unknown slug raises (no silent download)."""
+    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
+    with pytest.raises((KeyError, ValueError)):
+        mirror.ensure_present("does-not-exist")
+
+
+# --- mirror.bundle_sha256 --------------------------------------------------
+
+def test_bundle_sha256(tmp_path):
+    """bundle_sha256 streams the file and matches hashlib's digest."""
+    p = tmp_path / "blob.bin"
+    p.write_bytes(FIXTURE_BYTES)
+    expected = hashlib.sha256(FIXTURE_BYTES).hexdigest()
+    assert mirror.bundle_sha256(p) == expected
+
+
+# --- slug parity (deferred from Task 1.1 review) ---------------------------
+
+def test_slug_parity():
+    """The mirror catalog (BUNDLES) and the picker catalog (LOCAL_MODELS) MUST
+    carry identical slug sets — the download path makes this coupling
+    load-bearing (a downloaded bundle must map to a picker entry)."""
+    from Orchestrator.routes.local_routes import LOCAL_MODELS
+
+    bundle_slugs = set(mirror.BUNDLES.keys())
+    picker_ids = {m["id"] for m in LOCAL_MODELS}
+    assert bundle_slugs == picker_ids
