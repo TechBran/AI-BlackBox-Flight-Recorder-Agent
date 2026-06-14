@@ -88,3 +88,39 @@ def test_list_bundles_is_isolated():
     # And the module-level source dict itself is uncorrupted.
     assert set(mirror.BUNDLES.keys()) == {"gemma-4-e2b", "gemma-4-e4b"}
     assert all(b["min_ram_gb"] > 0 for b in mirror.BUNDLES.values())
+
+
+# ---------------------------------------------------------------------------
+# mirror.get_bundle(slug)
+# ---------------------------------------------------------------------------
+
+def test_get_bundle_returns_known():
+    """``mirror.get_bundle()`` for a known slug → a dict carrying that slug and
+    the full download/metadata field set."""
+    bundle = mirror.get_bundle("gemma-4-e2b")
+    assert isinstance(bundle, dict)
+    assert bundle["slug"] == "gemma-4-e2b"
+    required = {
+        "slug", "display_name", "hf_repo", "filename",
+        "size_bytes", "sha256", "min_ram_gb", "recommended_for",
+    }
+    assert required.issubset(bundle.keys()), f"missing fields: {required - bundle.keys()}"
+
+
+def test_get_bundle_unknown_returns_none():
+    """``mirror.get_bundle()`` for an unknown slug → None (no KeyError)."""
+    assert mirror.get_bundle("does-not-exist") is None
+
+
+def test_get_bundle_is_isolated():
+    """``mirror.get_bundle()`` returns a copy — mutating it must NOT corrupt the
+    module-level ``BUNDLES``; a second call for the same slug is unaffected."""
+    original_filename = mirror.BUNDLES["gemma-4-e2b"]["filename"]
+
+    first = mirror.get_bundle("gemma-4-e2b")
+    # Tamper with the returned dict.
+    first["filename"] = "tampered"
+
+    second = mirror.get_bundle("gemma-4-e2b")
+    assert second["filename"] == original_filename
+    assert mirror.BUNDLES["gemma-4-e2b"]["filename"] == original_filename
