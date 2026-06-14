@@ -323,6 +323,34 @@ class LocalModelApiTest {
         assertFalse("setAutonomy must be false on a non-success response", ok)
     }
 
+    // -------------------------------------------------------------------------
+    // 7. systemPrompt() — GET /local/system-prompt?operator=… → {prompt, version}
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `systemPrompt GETs operator query and parses prompt and version`() = runTest {
+        enqueueJson(
+            """{"prompt":"You are BlackBox. Be direct, no sycophancy.","version":"a1b2c3d"}"""
+        )
+
+        // An operator with a space + ampersand exercises URL-encoding.
+        val persona = api.systemPrompt("Brandon DEV & Co")
+
+        assertEquals("You are BlackBox. Be direct, no sycophancy.", persona.prompt)
+        assertEquals("a1b2c3d", persona.version)
+
+        val recorded = server.takeRequest()
+        assertTrue(
+            "must hit /local/system-prompt; got '${recorded.target}'",
+            recorded.target.startsWith("/local/system-prompt"),
+        )
+        // operator passed + URL-encoded (space → %20, & → %26).
+        assertTrue(
+            "operator must be URL-encoded in the query; got '${recorded.target}'",
+            recorded.target.contains("operator=Brandon%20DEV%20%26%20Co"),
+        )
+    }
+
     // assertArrayEquals helper (JUnit's is on org.junit.Assert; import via FQN to
     // keep the byte-array overload explicit).
     private fun assertArrayEquals(expected: ByteArray, actual: ByteArray) =

@@ -104,3 +104,18 @@ data class AutonomyRequest(
 data class AutonomyResponse(
     val success: Boolean = false,
 )
+
+/**
+ * GET /local/system-prompt?operator=… → {"prompt": str, "version": str}.
+ *
+ * The persona / tone / anti-sycophancy system prompt the cloud chat path uses,
+ * built server-side from `behavioral_core` so the on-device (`local`) provider
+ * reasons with the SAME persona. `version` is a short content hash the app
+ * caches alongside the prompt so a later online fetch can detect a changed
+ * prompt and refresh the cache (see PersonaCache).
+ */
+@Serializable
+data class PersonaResponse(
+    val prompt: String = "",
+    val version: String = "",
+)

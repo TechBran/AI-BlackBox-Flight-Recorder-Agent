@@ -7,6 +7,7 @@ import com.aiblackbox.portal.data.model.AutonomyResponse
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.model.LocalCatalogResponse
 import com.aiblackbox.portal.data.model.LocalStatus
+import com.aiblackbox.portal.data.model.PersonaResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -40,7 +41,8 @@ import kotlin.coroutines.resumeWithException
  * shared no-read-timeout [BlackBoxApi.streamClient], so a slow link can't trip
  * the standard 120s read timeout mid-download.
  */
-class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader, LocalModelCatalogClient {
+class LocalModelApi(private val api: BlackBoxApi) :
+    LocalModelDownloader, LocalModelCatalogClient, PersonaSource {
 
     private val json get() = api.json
 
@@ -192,6 +194,25 @@ class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader, LocalM
         val path = url.encodedPath + "?" + (url.encodedQuery ?: "")
         val body = api.get(path)
         return json.decodeFromString(LocalStatus.serializer(), body)
+    }
+
+    /**
+     * GET /local/system-prompt?operator=… → the on-device persona / system
+     * prompt ({prompt, version}), built server-side from `behavioral_core` so the
+     * `local` provider reasons with the SAME persona the cloud chat path uses.
+     *
+     * `operator` is URL-encoded via the HttpUrl builder (same pattern as
+     * [status]). Propagates an [IOException] on any network / non-2xx error out
+     * of [BlackBoxApi.get] — the caller (PersonaCache) catches it to fall back to
+     * a cached prompt when offline.
+     */
+    override suspend fun systemPrompt(operator: String): PersonaResponse {
+        val url = "${api.getBaseUrl()}/local/system-prompt".toHttpUrl().newBuilder()
+            .addQueryParameter("operator", operator)
+            .build()
+        val path = url.encodedPath + "?" + (url.encodedQuery ?: "")
+        val body = api.get(path)
+        return json.decodeFromString(PersonaResponse.serializer(), body)
     }
 
     /**
