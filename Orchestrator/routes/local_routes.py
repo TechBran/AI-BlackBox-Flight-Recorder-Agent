@@ -16,6 +16,8 @@ NOTE: ``execute_tool`` and ``meta_tool`` are imported at MODULE TOP (not inside
 the handlers) so tests can monkeypatch them on this module.
 """
 
+from typing import Optional
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -172,7 +174,7 @@ async def local_device_attest(request: Request):
 # GET /local/device/status — availability + attested models for an operator
 # ---------------------------------------------------------------------------
 @app.get("/local/device/status")
-async def local_device_status(operator: str = None):
+async def local_device_status(operator: Optional[str] = None):
     """Report whether the local provider is available for an operator.
 
     Query: ?operator=<str>

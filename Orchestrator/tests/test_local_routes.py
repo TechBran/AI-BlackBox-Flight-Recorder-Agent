@@ -298,6 +298,25 @@ def test_attest_requires_operator_and_device(client):
     assert "error" in body
 
 
+def test_attest_requires_operator(client):
+    """device_id present but operator missing/blank → 400 with success False."""
+    resp = client.post(
+        "/local/device/attest",
+        json={
+            "operator": "  ",
+            "device_id": "pixel-9",
+            "model_slug": "gemma-4-e4b",
+            "version": "1.0",
+            "sha256": "abc123",
+            "delegate": "gpu",
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
 def test_autonomy_flips_mode(client):
     """Attest (default permission), then flip to yolo; status reflects yolo."""
     client.post(
