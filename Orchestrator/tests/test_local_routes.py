@@ -366,3 +366,41 @@ def test_autonomy_rejects_invalid_mode(client):
     body = resp.json()
     assert body["success"] is False
     assert "error" in body
+
+
+# ---------------------------------------------------------------------------
+# GET /local/system-prompt — persona (behavioral core) for on-device parity
+# (Task 0.4 — exposes the SAME behavioral_core text the cloud /chat path
+# prepends, so the on-device Gemma agent loop shares persona/anti-sycophancy.)
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_returns_prompt_and_version(client):
+    """GET /local/system-prompt → 200 with a non-empty prompt + version."""
+    resp = client.get("/local/system-prompt", params={"operator": "Brandon"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["prompt"], str)
+    assert body["prompt"].strip()
+    assert isinstance(body["version"], str)
+    assert body["version"]
+
+
+def test_system_prompt_version_is_stable(client):
+    """Two GETs with the same operator return the SAME prompt + version
+    (the version is a deterministic hash of the prompt text)."""
+    r1 = client.get("/local/system-prompt", params={"operator": "Brandon"})
+    r2 = client.get("/local/system-prompt", params={"operator": "Brandon"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["prompt"] == r2.json()["prompt"]
+    assert r1.json()["version"] == r2.json()["version"]
+
+
+def test_system_prompt_is_behavioral_core_chat(client):
+    """Parity guard: the returned prompt is EXACTLY the chat behavioral core
+    (the same text the cloud /chat path prepends). If someone hand-rolls a
+    divergent persona string, this fails."""
+    from Orchestrator.behavioral_core import get_behavioral_core
+
+    resp = client.get("/local/system-prompt")
+    assert resp.status_code == 200
+    assert resp.json()["prompt"] == get_behavioral_core("chat")

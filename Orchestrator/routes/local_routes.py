@@ -16,11 +16,13 @@ NOTE: ``execute_tool`` and ``meta_tool`` are imported at MODULE TOP (not inside
 the handlers) so tests can monkeypatch them on this module.
 """
 
+import hashlib
 from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
 from Orchestrator.local_provider import get_local_registry
 from Orchestrator.tools.blackbox_tools import execute_tool
@@ -231,4 +233,35 @@ async def local_device_autonomy(request: Request):
         return {"success": True, "device": device}
     except Exception as e:
         print(f"[LOCAL PROVIDER] autonomy failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# GET /local/system-prompt — persona (behavioral core) for on-device parity
+# ---------------------------------------------------------------------------
+@app.get("/local/system-prompt")
+async def local_system_prompt(operator: Optional[str] = None):
+    """Return the BlackBox persona/tone/anti-sycophancy text for the on-device model.
+
+    The on-device Gemma agent loop runs ON the phone and never hits the cloud
+    /chat path that prepends the behavioral core, so it fetches that SAME text
+    here once and caches it (works offline after first fetch).
+
+    Sourced from ``behavioral_core.get_behavioral_core("chat")`` — the exact
+    constant (``BEHAVIORAL_CORE_CHAT``) the chat path prepends — so persona is
+    identical across providers; this endpoint does NOT re-author it.
+
+    The persona is operator-independent (operator-specific context like memory
+    and snapshots is functional content, not persona), so ``operator`` is
+    accepted for symmetry but does not change the output.
+
+    Query: ?operator=<str> (optional, ignored)
+    Returns: {"prompt": <str>, "version": <stable 12-char sha256 hex of prompt>}.
+    """
+    try:
+        prompt = get_behavioral_core("chat")
+        version = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+        return {"prompt": prompt, "version": version}
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] system-prompt failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
