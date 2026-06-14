@@ -59,6 +59,27 @@ def toolvault_hook(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def health_refresh(monkeypatch):
+    """Stub the post-cutover watcher health refresh with an async recorder.
+
+    The real run_health_check probes provider + vendor catalogs (network) and
+    rewrites health.json — migration unit tests must never touch it. Recorded
+    calls double as the fired-at-cutover assertion. migrate imports watcher
+    lazily (watcher.py imports migrate at load), so patch the module attribute
+    the lazy import resolves to.
+    """
+    from Orchestrator.embeddings import watcher
+    calls = []
+
+    async def _recorder():
+        calls.append(True)
+        return {"state": "ok"}
+
+    monkeypatch.setattr(watcher, "run_health_check", _recorder)
+    return calls
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Isolated index + stores + volume; migrate/search singletons reset."""
@@ -211,6 +232,20 @@ async def test_toolvault_hook_fires_at_cutover_with_target(env, fake_provider, t
 
     assert result["state"] == "done"
     assert toolvault_hook == [TARGET]
+
+
+@pytest.mark.asyncio
+async def test_health_refresh_fires_at_cutover(env, fake_provider, health_refresh):
+    """A successful cutover recomputes health for the NEW active model, so the
+    superseded banner clears immediately instead of pointing at the model the
+    operator just switched TO (until the next daily watcher run / a restart)."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=2)
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    assert health_refresh == [True]  # run_health_check awaited once at cutover
 
 
 @pytest.mark.asyncio

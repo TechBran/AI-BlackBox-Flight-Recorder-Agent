@@ -88,6 +88,9 @@ def test_status_shape(env, client):
 
     resp = client.get("/embeddings/status")
     assert resp.status_code == 200
+    # no-store so a heuristically-caching WebView can't keep drawing a stale
+    # "upgrade available" banner after a migration/registration flips the state
+    assert resp.headers.get("cache-control") == "no-store"
     body = resp.json()
 
     assert set(body.keys()) == STATUS_KEYS

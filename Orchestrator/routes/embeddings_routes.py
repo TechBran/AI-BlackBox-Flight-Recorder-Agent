@@ -26,7 +26,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from Orchestrator import config
@@ -150,7 +150,12 @@ def _model_preflight(entry: dict, ollama: dict) -> tuple[bool, list[str]]:
 
 
 @router.get("/status")
-def embeddings_status():
+def embeddings_status(response: Response):
+    # no-store: health/successor state flips on migrate + model registration, and
+    # a WebView heuristically caching this response keeps drawing a stale
+    # "upgrade available" banner after the upgrade already completed. The dict
+    # return is unaffected — FastAPI merges this injected Response's headers.
+    response.headers["Cache-Control"] = "no-store"
     # Plain def: nothing here awaits, and FastAPI runs sync routes in the
     # threadpool, so the cold-start index parse never stalls the event loop.
     from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle

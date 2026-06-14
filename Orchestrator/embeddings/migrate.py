@@ -379,6 +379,18 @@ async def _run_engine(target_slug: str) -> dict:
             _toolvault_cutover_hook(target_slug)
         except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
             print(f"[MIGRATE] toolvault cutover hook raised (non-fatal): {e}")
+        # Recompute health for the NEW active model BEFORE marking the job done,
+        # so a status poll that sees state=done also reads fresh health. Without
+        # this, the watcher's cached "superseded -> <target>" verdict (computed
+        # while the OLD model was active) persists until the next daily run or a
+        # restart — leaving the banner telling the operator to upgrade to the
+        # model they just switched TO. watcher imported lazily: watcher.py
+        # imports migrate at module load, so a top-level import here would cycle.
+        try:
+            from Orchestrator.embeddings import watcher  # lazy: avoid import cycle
+            await watcher.run_health_check()
+        except Exception as e:  # noqa: BLE001 — cutover must not fail on health refresh
+            print(f"[MIGRATE] post-cutover health refresh failed (non-fatal): {e}")
         _finish_job("done", raced=raced)
         print(f"[MIGRATE] cutover complete: active model is now {target_slug}")
         return get_job_status()

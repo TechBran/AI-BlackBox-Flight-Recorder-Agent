@@ -318,7 +318,7 @@ async function _refreshEmbeddingsCard() {
     const container = document.getElementById("embeddingsCard");
     if (!container) return;  // panel not in DOM (menu modal not built yet)
     try {
-        const r = await fetch("/embeddings/status");
+        const r = await fetch("/embeddings/status", { cache: "no-store" });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const status = await r.json();
         _renderEmbeddingsCard(container, status);
