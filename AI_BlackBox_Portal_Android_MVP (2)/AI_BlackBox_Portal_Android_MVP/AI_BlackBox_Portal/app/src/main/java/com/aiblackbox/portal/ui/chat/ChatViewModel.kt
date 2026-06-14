@@ -384,6 +384,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         providerPicker?.refresh()
     }
 
+    override fun onCleared() {
+        // Cancel the picker's own CoroutineScope (separate from viewModelScope,
+        // which the framework cancels automatically) so it doesn't leak.
+        providerPicker?.dispose()
+        super.onCleared()
+    }
+
     private fun startHealthLoop() {
         viewModelScope.launch {
             while (true) {

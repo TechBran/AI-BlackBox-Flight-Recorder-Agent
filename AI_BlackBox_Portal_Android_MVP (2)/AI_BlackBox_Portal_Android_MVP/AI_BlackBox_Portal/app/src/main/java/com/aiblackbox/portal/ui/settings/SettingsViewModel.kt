@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.ui.chat.ProviderPickerViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,7 +39,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // until loaded so we never flash LOCAL before we know it's installed.
     private val _localAvailable = MutableStateFlow(false)
     val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
-    private var providerPicker: com.aiblackbox.portal.ui.chat.ProviderPickerViewModel? = null
+    private var providerPicker: ProviderPickerViewModel? = null
     private var currentOperator: String = "Brandon"
 
     init {
@@ -118,6 +120,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        // Cancel the picker's own CoroutineScope (separate from viewModelScope)
+        // so it doesn't leak.
+        providerPicker?.dispose()
         previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
         previewPlayer = null
     }
@@ -129,11 +134,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         loadApps()
 
         // On-device (LOCAL) provider gating (Task 1.6): disk reads off-main.
-        val picker = com.aiblackbox.portal.ui.chat.ProviderPickerViewModel.fromContext(
+        val picker = ProviderPickerViewModel.fromContext(
             context = getApplication(),
             api = api!!,
             operatorProvider = { currentOperator },
-            ioDispatcher = kotlinx.coroutines.Dispatchers.IO,
+            ioDispatcher = Dispatchers.IO,
         )
         providerPicker = picker
         viewModelScope.launch { picker.localAvailable.collect { _localAvailable.value = it } }

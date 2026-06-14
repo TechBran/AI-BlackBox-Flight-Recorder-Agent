@@ -31,11 +31,16 @@ import kotlinx.coroutines.launch
  *
  * ## Gating decision: disk-presence, NOT server availability
  *
- * The picker offers LOCAL iff the current operator has a **usable on-device
+ * The picker offers LOCAL iff **this device** has a **usable on-device
  * model** — i.e. [LocalModelInstaller.installedModels] is non-empty. Those are
  * the disk-present, sha-verified bundles (`LocalModelManager.install` DELETES a
  * file that fails verification, so anything `installedModels()` returns is
  * usable).
+ *
+ * Gating is DEVICE-scoped, not per-operator: [LocalModelInstaller.installedModels]
+ * scans one device-global directory and sidecars don't record an operator, so a
+ * model installed under any operator gates LOCAL for all. Per-operator isolation
+ * is deferred to Task 5.4 (multi-tenant).
  *
  * This is deliberately **disk-presence gating, not a hard requirement on
  * `/local/device/status.available`**. The whole point of the on-device model is
@@ -99,6 +104,7 @@ class ProviderPickerViewModel(
                                     deviceId = deviceId,
                                     modelSlug = model.slug,
                                     version = LocalModelManager.BUNDLE_VERSION,
+                                    // TODO(catalog-sha): re-attest sends sha256="" — once mirror catalog shas are populated (Task 1.2 real HF fetch), persist the verified sha in the sidecar/InstalledModel and forward it here, or the upsert will clobber the server's good checksum.
                                     sha256 = "",
                                     delegate = delegate,
                                     // autonomyMode left at its "permission" default.
