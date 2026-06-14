@@ -785,7 +785,7 @@ def _wrap(provider: str, models: list, source: str) -> dict:
 
 
 @app.get("/models/{provider}")
-def get_available_models(provider: str):
+def get_available_models(provider: str, operator: Optional[str] = None):
     """Return the list of chat-capable models for the given provider.
 
     Tries the live upstream API first (cached 10 minutes on success).
@@ -809,6 +809,19 @@ def get_available_models(provider: str):
     inserted server-side.
     """
     provider = provider.lower()
+
+    # `local` (on-device Gemma) is special: its two models run ON the phone with
+    # NO server-side inference, and are surfaced ONLY to an operator with a
+    # verified device binding (per-operator, not a static catalog + not cached).
+    # FastAPI matches routes in registration order, and this generic handler is
+    # registered before local_routes, so a dedicated /models/local handler there
+    # would be SHADOWED and never reached. We therefore dispatch `local` here to
+    # the local-provider builder (lazy import — local_routes is imported after
+    # admin_routes in app.py; a top-level import would risk a cycle).
+    if provider == "local":
+        from Orchestrator.routes.local_routes import build_local_models_response
+        return build_local_models_response(operator)
+
     if provider not in _FALLBACK_MODELS:
         raise HTTPException(404, f"Unknown provider: {provider}")
 

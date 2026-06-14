@@ -32,6 +32,60 @@ from Orchestrator.toolvault import meta_tool
 # permission = ask before each actuator call).
 _AUTONOMY_MODES = ("yolo", "permission")
 
+# ---------------------------------------------------------------------------
+# `local` model catalog — descriptive entries ONLY.
+#
+# These two Gemma models run ON the phone; the Orchestrator has NO server-side
+# inference path for them. This catalog exists solely so the Android picker can
+# render them (uniformly with the cloud providers served by /models/{provider}).
+# They are surfaced ONLY for an operator with a verified on-device attestation
+# (see the Task 0.1 registry); for everyone else /models/local returns an empty
+# list + a reason, so the picker hides/disables the provider.
+#
+# Shape mirrors the cloud catalog entries (id/name + provider) plus an
+# `on_device: true` marker. There is deliberately NO server-inference flag —
+# any consumer keying on one will (correctly) find none.
+# ---------------------------------------------------------------------------
+LOCAL_MODELS = [
+    {"id": "gemma-4-e2b", "name": "Gemma 4 E2B (on-device)", "provider": "local", "on_device": True},
+    {"id": "gemma-4-e4b", "name": "Gemma 4 E4B (on-device)", "provider": "local", "on_device": True},
+]
+
+# Reason string returned when the provider is not available for the operator —
+# the picker shows this when there is no verified device binding.
+_LOCAL_UNAVAILABLE_REASON = "no verified on-device model"
+
+
+def build_local_models_response(operator: Optional[str]) -> dict:
+    """Build the /models/local payload, conditional on a verified device.
+
+    Returns the two descriptive Gemma entries ONLY when the operator has a
+    verified on-device attestation (``get_local_registry().status(op)["available"]``).
+    Otherwise returns an empty list plus an availability signal so the picker
+    can hide/disable the provider.
+
+    Available:    {"provider": "local", "models": [..2..], "available": True}
+    Unavailable:  {"provider": "local", "models": [], "available": False,
+                   "reason": "no verified on-device model"}
+
+    A missing/blank operator is treated as unavailable (a catalog read for
+    nobody is a legitimately-empty result, not a malformed request — so unlike
+    the device-status endpoint we do NOT 400 here; the picker just renders the
+    empty/disabled state).
+    """
+    if not isinstance(operator, str) or not operator.strip():
+        return {"provider": "local", "models": [], "available": False,
+                "reason": _LOCAL_UNAVAILABLE_REASON}
+
+    available = bool(get_local_registry().status(operator).get("available"))
+    if not available:
+        return {"provider": "local", "models": [], "available": False,
+                "reason": _LOCAL_UNAVAILABLE_REASON}
+
+    # Return copies so callers can't mutate the module-level catalog.
+    return {"provider": "local", "models": [dict(m) for m in LOCAL_MODELS],
+            "available": True}
+
 
 # ---------------------------------------------------------------------------
 # POST /local/tools/search — semantic tool discovery
