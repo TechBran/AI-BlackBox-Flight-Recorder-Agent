@@ -20,8 +20,13 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from Orchestrator.checkpoint import app
+from Orchestrator.local_provider import get_local_registry
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
+
+# Valid autonomy modes for the on-device agent loop (YOLO = act without asking,
+# permission = ask before each actuator call).
+_AUTONOMY_MODES = ("yolo", "permission")
 
 
 # ---------------------------------------------------------------------------
@@ -116,4 +121,112 @@ async def local_tools_execute(request: Request):
         return {"success": bool(result.success), "result": result.result}
     except Exception as e:
         print(f"[LOCAL PROVIDER] execute failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# POST /local/device/attest — register an operator's verified on-device model
+# ---------------------------------------------------------------------------
+@app.post("/local/device/attest")
+async def local_device_attest(request: Request):
+    """Record (upsert) which Gemma model an operator's device has verified.
+
+    Body: {"operator": str, "device_id": str, "model_slug"?: str, "version"?: str,
+           "sha256"?: str, "delegate"?: str, "autonomy_mode"? = "permission"}
+    Returns: {"success": True, "device": <record>}. Missing operator/device_id → 400.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
+
+    operator = body.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id.strip():
+        return JSONResponse({"success": False, "error": "device_id required"}, status_code=400)
+
+    autonomy_mode = body.get("autonomy_mode") or "permission"
+
+    try:
+        device = get_local_registry().attest(
+            operator=operator,
+            device_id=device_id,
+            model_slug=body.get("model_slug"),
+            version=body.get("version"),
+            sha256=body.get("sha256"),
+            delegate=body.get("delegate"),
+            autonomy_mode=autonomy_mode,
+        )
+        return {"success": True, "device": device}
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] attest failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# GET /local/device/status — availability + attested models for an operator
+# ---------------------------------------------------------------------------
+@app.get("/local/device/status")
+async def local_device_status(operator: str = None):
+    """Report whether the local provider is available for an operator.
+
+    Query: ?operator=<str>
+    Returns: {"available": bool, "models": [...]}. Missing operator → 400.
+    """
+    if not isinstance(operator, str) or not operator.strip():
+        return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+
+    try:
+        return get_local_registry().status(operator)
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] status failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# POST /local/device/autonomy — flip an attested device's autonomy mode
+# ---------------------------------------------------------------------------
+@app.post("/local/device/autonomy")
+async def local_device_autonomy(request: Request):
+    """Switch an attested device between YOLO and Permission autonomy modes.
+
+    Body: {"operator": str, "device_id": str, "mode": "yolo"|"permission"}
+    Returns: {"success": True, "device": <record>} on success;
+             {"success": False, "error": "device not found"} (404) if unknown.
+    Invalid mode → 400.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
+
+    operator = body.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id.strip():
+        return JSONResponse({"success": False, "error": "device_id required"}, status_code=400)
+
+    mode = body.get("mode")
+    if mode not in _AUTONOMY_MODES:
+        return JSONResponse(
+            {"success": False, "error": f"mode must be one of {list(_AUTONOMY_MODES)}"},
+            status_code=400,
+        )
+
+    try:
+        device = get_local_registry().set_autonomy(operator, device_id, mode)
+        if device is None:
+            return JSONResponse({"success": False, "error": "device not found"}, status_code=404)
+        return {"success": True, "device": device}
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] autonomy failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)

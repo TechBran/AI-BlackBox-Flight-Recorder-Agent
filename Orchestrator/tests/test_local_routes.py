@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from Orchestrator.routes import local_routes
+from Orchestrator.local_provider import registry as registry_module
 
 
 @pytest.fixture
@@ -26,6 +27,21 @@ def client():
         from Orchestrator.app import app
         with TestClient(app) as c:
             yield c
+
+
+@pytest.fixture(autouse=True)
+def isolate_local_registry(monkeypatch, tmp_path):
+    """Point the local-provider registry at a per-test tmp store AND reset the
+    cached module-level singleton.
+
+    HAZARD: ``get_local_registry()`` caches a singleton on first call, and that
+    instance captures ``STORE_FILE`` at construction. Patching ``STORE_FILE``
+    without also nulling ``_registry`` would leave a stale singleton bound to the
+    REAL ``Orchestrator/local_provider/local_devices.json`` — polluting the repo.
+    Resetting ``_registry`` forces a fresh instance reading the patched path.
+    """
+    monkeypatch.setattr(registry_module, "STORE_FILE", tmp_path / "local_devices.json")
+    monkeypatch.setattr(registry_module, "_registry", None)
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +235,115 @@ def test_tools_search_requires_query(client):
     body = resp.json()
     assert body["success"] is False
     assert body["error"] == "query required"
+
+
+# ---------------------------------------------------------------------------
+# /local/device/attest + /local/device/status + /local/device/autonomy
+# (Task 0.3 — backed by the real registry against an isolated tmp store via the
+# autouse ``isolate_local_registry`` fixture above.)
+# ---------------------------------------------------------------------------
+
+def test_attest_then_status(client):
+    """Attesting a device makes the local provider available for that operator;
+    status reflects the attested model and the defaulted autonomy_mode."""
+    resp = client.post(
+        "/local/device/attest",
+        json={
+            "operator": "Brandon",
+            "device_id": "pixel-9",
+            "model_slug": "gemma-4-e4b",
+            "version": "1.0",
+            "sha256": "abc123",
+            "delegate": "gpu",
+            # autonomy_mode omitted → should default to "permission"
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["device"]["model_slug"] == "gemma-4-e4b"
+
+    resp = client.get("/local/device/status", params={"operator": "Brandon"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["models"][0]["model_slug"] == "gemma-4-e4b"
+    assert body["models"][0]["autonomy_mode"] == "permission"
+
+
+def test_status_unknown_operator(client):
+    """An operator with no attestation → available False, empty models list."""
+    resp = client.get("/local/device/status", params={"operator": "Nobody"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert body["models"] == []
+
+
+def test_attest_requires_operator_and_device(client):
+    """Missing device_id → 400."""
+    resp = client.post(
+        "/local/device/attest",
+        json={
+            "operator": "Brandon",
+            "model_slug": "gemma-4-e4b",
+            "version": "1.0",
+            "sha256": "abc123",
+            "delegate": "gpu",
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
+
+
+def test_autonomy_flips_mode(client):
+    """Attest (default permission), then flip to yolo; status reflects yolo."""
+    client.post(
+        "/local/device/attest",
+        json={
+            "operator": "Brandon",
+            "device_id": "pixel-9",
+            "model_slug": "gemma-4-e4b",
+            "version": "1.0",
+            "sha256": "abc123",
+            "delegate": "gpu",
+        },
+    )
+
+    resp = client.post(
+        "/local/device/autonomy",
+        json={"operator": "Brandon", "device_id": "pixel-9", "mode": "yolo"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["device"]["autonomy_mode"] == "yolo"
+
+    resp = client.get("/local/device/status", params={"operator": "Brandon"})
+    assert resp.json()["models"][0]["autonomy_mode"] == "yolo"
+
+
+def test_autonomy_unknown_device_404(client):
+    """Flipping autonomy on a never-attested device → 404, success False."""
+    resp = client.post(
+        "/local/device/autonomy",
+        json={"operator": "Ghost", "device_id": "nonexistent", "mode": "yolo"},
+    )
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["success"] is False
+    assert body["error"] == "device not found"
+
+
+def test_autonomy_rejects_invalid_mode(client):
+    """An autonomy mode outside {yolo, permission} → 400."""
+    resp = client.post(
+        "/local/device/autonomy",
+        json={"operator": "Brandon", "device_id": "pixel-9", "mode": "banana"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["success"] is False
+    assert "error" in body
