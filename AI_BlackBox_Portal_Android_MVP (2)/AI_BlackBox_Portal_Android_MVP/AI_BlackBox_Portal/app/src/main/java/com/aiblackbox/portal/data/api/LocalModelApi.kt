@@ -38,7 +38,7 @@ import kotlin.coroutines.resumeWithException
  * shared no-read-timeout [BlackBoxApi.streamClient], so a slow link can't trip
  * the standard 120s read timeout mid-download.
  */
-class LocalModelApi(private val api: BlackBoxApi) {
+class LocalModelApi(private val api: BlackBoxApi) : LocalModelDownloader {
 
     private val json get() = api.json
 
@@ -68,7 +68,7 @@ class LocalModelApi(private val api: BlackBoxApi) {
      * Returns [Result.success] of [destFile], or [Result.failure] on any IO /
      * HTTP error (the `.part` is left in place so a later call can resume).
      */
-    suspend fun download(
+    override suspend fun download(
         slug: String,
         destFile: File,
         onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
@@ -147,7 +147,7 @@ class LocalModelApi(private val api: BlackBoxApi) {
     }
 
     /** POST /local/device/attest → record a verified on-device model. */
-    suspend fun attest(req: AttestRequest): Boolean {
+    override suspend fun attest(req: AttestRequest): Boolean {
         return try {
             val body = json.encodeToString(AttestRequest.serializer(), req)
             val responseText = api.post("/local/device/attest", body)
