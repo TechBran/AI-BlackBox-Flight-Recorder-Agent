@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
 from Orchestrator.local_provider import get_local_registry
+from Orchestrator.local_provider import mirror
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
 
@@ -90,6 +91,29 @@ def build_local_models_response(operator: Optional[str]) -> dict:
     # module-level catalog list/entries.
     return {"provider": "local", "models": [dict(m) for m in LOCAL_MODELS],
             "available": True}
+
+
+# ---------------------------------------------------------------------------
+# GET /local/models/catalog — server-side model MIRROR catalog (download metadata)
+#
+# The hub mirrors the Gemma LiteRT `.litertlm` bundles so phones download them
+# from the hub over Tailscale. This endpoint lists WHAT is downloadable + its
+# metadata (hf_repo/filename/size/sha/min_ram/guidance). This is DISTINCT from
+# /models/local (the picker descriptors): same slugs, different fields. The
+# actual ranged download is Task 1.2 — this is catalog only, no fetch here.
+# ---------------------------------------------------------------------------
+@app.get("/local/models/catalog")
+async def local_models_catalog():
+    """List the downloadable on-device model bundles (mirror metadata).
+
+    Returns: {"bundles": [{slug, display_name, hf_repo, filename, size_bytes,
+              sha256, min_ram_gb, recommended_for}, ...]}.
+    """
+    try:
+        return {"bundles": mirror.list_bundles()}
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] catalog failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------
