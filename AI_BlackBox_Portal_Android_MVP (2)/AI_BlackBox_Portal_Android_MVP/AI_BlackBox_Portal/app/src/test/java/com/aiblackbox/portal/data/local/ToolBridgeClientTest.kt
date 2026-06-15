@@ -2,6 +2,7 @@ package com.aiblackbox.portal.data.local
 
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -12,6 +13,7 @@ import mockwebserver3.MockWebServer
 import okhttp3.Headers.Companion.headersOf
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -35,6 +37,9 @@ import org.junit.Test
  *   3. searchTools()  — returns empty list when {"success":false} (or tools absent).
  *   4. execute()  — posts {tool, params, operator} and parses {success, result}.
  *   5. execute()  — tolerates a STRING result and a null result (JsonElement? modeling).
+ *   6. execute()  — a tool-ran-but-failed {"success":false, result} flows through
+ *      intact (distinct from a transport IOException); array result parses; the
+ *      default k=5 is emitted on the wire.
  */
 class ToolBridgeClientTest {
 
@@ -181,5 +186,54 @@ class ToolBridgeClientTest {
         val result = client.execute(tool = "noop", operator = "system")
         assertTrue(result.success)
         assertNull("null result must stay null", result.result)
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. execute() — tool-ran-but-failed (success=false WITH a payload) is a
+    //    distinct surface from a transport error (IOException). The on-device
+    //    loop (Task 3.2) must be able to feed this failure back to the model, so
+    //    the client must pass {success:false, result} through untouched, NOT map
+    //    it to a thrown exception or an empty result.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `execute surfaces a tool failure (success false) with its payload intact`() = runTest {
+        enqueueJson("""{"success":false,"result":"tool error: bad args"}""")
+        val result = client.execute(tool = "search_snapshots", operator = "Brandon")
+        assertFalse("tool failure must report success=false", result.success)
+        assertEquals(
+            "the failure payload must survive for the model to verbalize",
+            "tool error: bad args",
+            result.result?.jsonPrimitive?.content,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // 6b. execute() — an ARRAY result parses (the KDoc promises list results, and
+    //     Task 3.2 feeds `result` back to the on-device FC SDK verbatim).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `execute parses an array result`() = runTest {
+        enqueueJson("""{"success":true,"result":[1,2,3]}""")
+        val result = client.execute(tool = "list_recent_snapshots", operator = "system")
+        assertTrue(result.success)
+        val arr = result.result as? JsonArray
+        assertEquals("array result must parse as JsonArray of 3", 3, arr?.size)
+        assertEquals("1", arr?.get(0)?.jsonPrimitive?.content)
+    }
+
+    // -------------------------------------------------------------------------
+    // 6c. searchTools() — the default k=5 is emitted on the wire (encodeDefaults
+    //     is on). Guards the contract against a future encodeDefaults flip or a
+    //     @SerialName slip on the request DTO.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `searchTools emits the default k when none is given`() = runTest {
+        enqueueJson("""{"success":true,"tools":[]}""")
+        client.searchTools("anything")  // k defaults to 5
+        val sentBody = server.takeRequest().body!!.utf8()
+        assertTrue("default k=5 must be on the wire", sentBody.contains("\"k\":5"))
     }
 }
