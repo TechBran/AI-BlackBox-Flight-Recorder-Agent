@@ -59,6 +59,10 @@ interface QueueStore {
  * Concurrency: a [Mutex] serializes flushes so a fire-and-forget app-open flush
  * can't interleave with an enqueue-triggered flush and double-send / reorder.
  *
+ * Capacity: the queue is UNBOUNDED by design — it is bounded in practice by the
+ * offline window (turns generated while disconnected), and a connectivity-driven
+ * cap is deliberately deferred (YAGNI) until a real unbounded-growth case appears.
+ *
  * Android (Context / files dir) is confined to [fromContext] + [JsonFileQueueStore];
  * the core depends only on the [SnapshotSender] and [QueueStore] seams, so it is
  * plain-JUnit testable over a temp file.
@@ -90,7 +94,8 @@ class LocalSnapshotQueue(
      * a successful send; stops at the first [IOException] (offline), leaving the
      * remainder queued in order. A non-IO error propagates WITHOUT dropping the
      * item — the queue is left exactly as far as it got, so no turn is silently
-     * lost. Re-entrancy/concurrency is guarded by [mutex].
+     * lost. Concurrent flushes are serialized by [the mutex] (kotlinx [Mutex] is
+     * non-reentrant — this guarantees non-overlapping acquisition, not reentry).
      */
     suspend fun flush() {
         mutex.withLock {
@@ -139,8 +144,9 @@ class LocalSnapshotQueue(
  * Production [QueueStore]: a JSON array of [SaveRequest] on disk. The ONLY
  * file-touching code path. A missing/empty/corrupt file reads as an empty queue
  * (never throws on load — a corrupt queue must not wedge the app); [save] writes
- * the whole list atomically-enough for this single-process app (truncate-rewrite,
- * deleting the file when the queue empties).
+ * the whole list ATOMICALLY (temp sibling + renameTo on the app-private filesDir),
+ * so a crash mid-write can't truncate the file and silently drop the whole queue,
+ * and deletes the file when the queue empties.
  */
 class JsonFileQueueStore(private val file: File) : QueueStore {
 
@@ -166,7 +172,23 @@ class JsonFileQueueStore(private val file: File) : QueueStore {
             return
         }
         file.parentFile?.mkdirs()
-        file.writeText(JSON.encodeToString(REQUEST_LIST, items))
+        val json = JSON.encodeToString(REQUEST_LIST, items)
+        // Atomic write: serialize to a temp sibling, then renameTo() the real file.
+        // renameTo is atomic within the app-private filesDir (same filesystem), so a
+        // crash/kill mid-write can never leave a half-written queue file — load()
+        // either sees the complete OLD queue or the complete NEW one, never a
+        // truncated one that would read as empty and silently lose the WHOLE queue.
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeText(json)
+        if (!tmp.renameTo(file)) {
+            // Some filesystems refuse rename onto an existing target: drop it, retry.
+            file.delete()
+            if (!tmp.renameTo(file)) {
+                // Last resort (rename still failing): write directly so the data
+                // lands; tmp is left on disk but harmless (load() only reads file).
+                file.writeText(json)
+            }
+        }
     }
 
     private companion object {

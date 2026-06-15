@@ -170,4 +170,28 @@ class LocalSnapshotQueueTest {
         assertEquals("restarted queue flushed the survivor", listOf(r), onlineSender.sent)
         assertTrue("queue drained after restart", JsonFileQueueStore(file).load().isEmpty())
     }
+
+    @Test
+    fun `save is atomic round-trip (no tmp sibling left behind)`() = runTest {
+        // An offline enqueue persists through the real atomic save path (temp +
+        // renameTo). We can't deterministically simulate a crash mid-write, so this
+        // asserts the happy path: the queue file holds the items AND the dir is left
+        // clean — no leftover ".tmp" sibling from the atomic write.
+        val sender = FakeSender(failIf = { true }) // stay offline so the item persists
+        val file = File(tmp.root, "local_snapshot_queue.json")
+        val queue = LocalSnapshotQueue(sender, JsonFileQueueStore(file))
+
+        val r1 = req("alpha")
+        val r2 = req("beta")
+        queue.enqueue(r1)
+        queue.enqueue(r2)
+
+        // Correct content via a fresh store over the same file (round-trips disk).
+        assertEquals("queue file holds both items in order", listOf(r1, r2), JsonFileQueueStore(file).load())
+
+        // Clean dir: the queue file exists, and NO ".tmp" sibling remains.
+        val leftovers = tmp.root.listFiles()?.map { it.name }?.toSet() ?: emptySet()
+        assertTrue("queue file present", leftovers.contains(file.name))
+        assertFalse("no leftover .tmp from the atomic write", leftovers.contains(file.name + ".tmp"))
+    }
 }
