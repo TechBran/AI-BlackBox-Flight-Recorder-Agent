@@ -471,6 +471,85 @@ class FcLoopTest {
     }
 
     @Test
+    fun `runAgent surfaces an empty (offline) search as an explicit failure outcome and continues`() = runTest {
+        // Task 3.4: ToolBridgeClient.searchTools returns emptyList() on a transport
+        // failure (an offline mesh). FcLoop must surface that empty result as an
+        // EXPLICIT graceful-failure outcome (success=false) — not a confusing
+        // success=true outcome with an empty name list — and the turn must CONTINUE
+        // to the model's final text rather than faulting/aborting.
+        val searchArgs = buildJsonObject { put("query", JsonPrimitive("x")) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
+                listOf(text("I couldn't reach my tools")),
+            ),
+        )
+        // searchMap has no entry for "x" → FakeToolBridge.searchTools returns emptyList()
+        // (exactly what ToolBridgeClient now returns offline).
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge)
+
+        val events = runCatching {
+            loop.runAgent("persona", emptyList(), "go").toList()
+        }
+        assertTrue("the turn must NOT throw on an empty/offline search", events.isSuccess)
+
+        val emitted = events.getOrThrow()
+        val outcome = emitted.filterIsInstance<LlmEvent.ToolOutcome>()
+            .firstOrNull { it.name == ResidentTools.SEARCH_TOOLS }
+        assertTrue("a search_tools ToolOutcome was emitted", outcome != null)
+        assertEquals(
+            "an empty/offline search yields an explicit failure outcome",
+            false,
+            outcome!!.result.success,
+        )
+        assertTrue(
+            "the loop continued past the empty search to the final text",
+            emitted.contains(LlmEvent.TextDelta("I couldn't reach my tools")),
+        )
+    }
+
+    @Test
+    fun `runAgent carries an offline execute failure message back and proceeds to final text`() = runTest {
+        // Task 3.4: ToolBridgeClient.execute now returns success=false with a
+        // structured "couldn't reach BlackBox" message on a transport failure
+        // (instead of throwing). The loop must emit that ToolOutcome (message
+        // intact) and proceed to the model's final reply — the turn does not fault.
+        val searchArgs = buildJsonObject { put("query", JsonPrimitive("do a thing")) }
+        val doArgs = buildJsonObject { put("x", JsonPrimitive(1)) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
+                listOf(toolCall("do_thing", doArgs)),
+                listOf(text("recovered")),
+            ),
+        )
+        val offlineMsg = "do_thing is unavailable right now — couldn't reach BlackBox (offline)"
+        val offlineFailure = ToolResult(success = false, result = JsonPrimitive(offlineMsg))
+        val bridge = FakeToolBridge(
+            searchMap = mapOf("do a thing" to listOf(schema("do_thing"))),
+            executeFn = { _, _ -> offlineFailure },
+        )
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge)
+
+        val events = loop.runAgent("persona", emptyList(), "do a thing").toList()
+
+        val outcome = events.filterIsInstance<LlmEvent.ToolOutcome>()
+            .firstOrNull { it.name == "do_thing" }
+        assertTrue("a do_thing ToolOutcome was emitted", outcome != null)
+        assertEquals("the offline failure is carried, not swallowed", false, outcome!!.result.success)
+        assertEquals(
+            "the offline message string is carried back for the model to verbalize",
+            offlineMsg,
+            outcome.result.result?.let { (it as JsonPrimitive).content },
+        )
+        assertTrue(
+            "the loop reached the final TextDelta after the offline failure",
+            events.contains(LlmEvent.TextDelta("recovered")),
+        )
+    }
+
+    @Test
     fun `buildAgentPrompt renders a TOOL turn with the Tool marker`() {
         val loop = FcLoop(FakeLocalLlm())
 

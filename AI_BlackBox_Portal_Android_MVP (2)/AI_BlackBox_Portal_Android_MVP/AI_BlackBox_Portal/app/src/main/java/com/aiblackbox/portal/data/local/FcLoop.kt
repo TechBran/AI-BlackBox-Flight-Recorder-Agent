@@ -146,9 +146,18 @@ class FcLoop(
      * If [maxIterations] is exhausted, the flow completes gracefully (no hang, no
      * throw); the events already emitted are the output.
      *
-     * **Errors are NOT swallowed.** Exceptions from [toolLlm] or [bridge]
-     * propagate to the collector (graceful offline handling is a SEPARATE later
-     * task; not built here).
+     * **Graceful offline (Task 3.4).** The [bridge] is now graceful at the SOURCE:
+     * a tool call that can't reach the mesh does NOT throw — [ToolBridge.execute]
+     * returns a `success=false` "needs connection" [ToolResult] and
+     * [ToolBridge.searchTools] returns an empty list. So this loop does not wrap
+     * the bridge calls in try/catch; an empty search is surfaced as an explicit
+     * failure outcome (see the search_tools branch) and a failed execute flows
+     * through the normal ToolOutcome + TOOL-turn path, and the turn continues.
+     *
+     * **Real faults still propagate.** Exceptions from [toolLlm], and any
+     * non-IOException from the bridge (e.g. a `SerializationException` from a
+     * malformed body — an actual bug, not "offline"), are NOT swallowed; they
+     * propagate to the collector.
      */
     fun runAgent(persona: String, history: List<Turn>, userMessage: String): Flow<LlmEvent> = flow {
         val tools = requireNotNull(toolLlm) {
@@ -215,6 +224,28 @@ class FcLoop(
                     }
                     // k is tied to the injection cap so the two can't silently drift.
                     val found = toolBridge.searchTools(query, k = ResidentTools.MAX_INJECTED_SCHEMAS)
+                    if (found.isEmpty()) {
+                        // No matches — OR the mesh is unreachable: ToolBridgeClient
+                        // returns emptyList() on a transport failure (Task 3.4). Surface
+                        // it as EXPLICIT graceful feedback (success=false) rather than a
+                        // confusing success=true outcome with an empty name list, and let
+                        // the model react next turn — exactly like the malformed-query and
+                        // execute-failure paths. (Do NOT abort the whole run.)
+                        emit(
+                            LlmEvent.ToolOutcome(
+                                ResidentTools.SEARCH_TOOLS,
+                                ToolResult(
+                                    success = false,
+                                    result = JsonPrimitive("no matching tools available (you may be offline)"),
+                                ),
+                            ),
+                        )
+                        working = working + Turn(
+                            Role.TOOL,
+                            "search_tools found nothing (offline or no match)",
+                        )
+                        continue // skip injecting/emitting success for THIS call; loop proceeds
+                    }
                     // TIERING — never dump the whole result set into the next turn.
                     injected = (injected + found)
                         .distinctBy { it.name }

@@ -236,4 +236,64 @@ class ToolBridgeClientTest {
         val sentBody = server.takeRequest().body!!.utf8()
         assertTrue("default k=5 must be on the wire", sentBody.contains("\"k\":5"))
     }
+
+    // -------------------------------------------------------------------------
+    // 7. (Task 3.4) Graceful offline: a transport failure (the mesh is
+    //    unreachable) must NOT throw out of either bridge method. The on-device
+    //    Gemma loop runs OFFLINE but its tools live on the BlackBox over the
+    //    network; a single tool call that can't reach the mesh must degrade
+    //    gracefully so the whole turn does not fault.
+    //
+    //    Offline is simulated by closing the MockWebServer BEFORE the call so the
+    //    socket is refused → OkHttp raises an IOException inside BlackBoxApi.post.
+    //    (Most portable across mockwebserver3 versions vs. a SocketPolicy.)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `execute returns a graceful failure ToolResult when the mesh is unreachable`() = runTest {
+        server.close() // socket refused → connection failure → IOException in BlackBoxApi
+
+        val result = client.execute(tool = "search_snapshots", operator = "Brandon")
+
+        assertFalse("an unreachable mesh must yield success=false, not throw", result.success)
+        val msg = result.result?.jsonPrimitive?.content
+        assertTrue("a failure payload must be present for the model to verbalize", msg != null)
+        assertTrue(
+            "the offline message must name the tool that failed (got: $msg)",
+            msg!!.contains("search_snapshots"),
+        )
+        assertTrue(
+            "the offline message must mention not reaching BlackBox (got: $msg)",
+            msg.contains("couldn't reach BlackBox"),
+        )
+    }
+
+    @Test
+    fun `searchTools returns an empty list when the mesh is unreachable`() = runTest {
+        server.close() // socket refused → connection failure → IOException in BlackBoxApi
+
+        // Must NOT throw — an empty list means "no tools available (possibly offline)".
+        val tools = client.searchTools("find past work", k = 3)
+
+        assertTrue("an unreachable mesh must yield emptyList, not throw", tools.isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
+    // 7b. (Task 3.4) A non-2xx (e.g. 500) reaches BlackBoxApi as an IOException
+    //    too, so it now ALSO degrades gracefully for execute() rather than
+    //    throwing — same offline contract as a dead socket.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `execute returns a graceful failure ToolResult on a non-2xx response`() = runTest {
+        enqueueJson("""{"detail":"boom"}""", code = 500)
+
+        val result = client.execute(tool = "do_thing", operator = "system")
+
+        assertFalse("a non-2xx must yield success=false, not throw (3.4 behavior)", result.success)
+        assertTrue(
+            "the failure payload must name the tool",
+            result.result?.jsonPrimitive?.content?.contains("do_thing") == true,
+        )
+    }
 }
