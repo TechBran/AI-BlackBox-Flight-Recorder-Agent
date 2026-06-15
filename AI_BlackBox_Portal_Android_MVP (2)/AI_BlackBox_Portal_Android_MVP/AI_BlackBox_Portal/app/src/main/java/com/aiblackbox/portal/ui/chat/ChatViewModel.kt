@@ -1971,11 +1971,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    `saveSink(SaveRequest, provider="local")`; returns `true`.
          *  - A TOOL-LEVEL failure (a [ToolResult] with `success=false`) is NOT a
          *    stream fault: it renders "failed" and the turn still completes + saves.
-         *  - A mid-stream THROW (e.g. a bridge IOException propagating out of
-         *    runAgent) is caught via `.catch`, appends [LOCAL_ENGINE_ERROR_TEXT],
-         *    `sink(partial+error, false)`, DOES NOT save, returns `false`. (Graceful
-         *    offline tool handling is Task 3.4; here a propagating bridge fault
-         *    correctly surfaces as the local-engine error.)
+         *  - A mid-stream THROW propagating out of runAgent is caught via `.catch`,
+         *    appends [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES
+         *    NOT save, returns `false`. Note (Task 3.4 landed): an OFFLINE tool
+         *    failure no longer reaches here — the bridge degrades to a
+         *    `success=false` [ToolResult] (rendered "failed") so the turn continues;
+         *    only a genuine non-IO fault (e.g. a SerializationException, or an
+         *    engine fault) still surfaces as the local-engine error.
          *
          * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
          * agent loop onto IO; `.collect` / [sink] stay on the caller's dispatcher.

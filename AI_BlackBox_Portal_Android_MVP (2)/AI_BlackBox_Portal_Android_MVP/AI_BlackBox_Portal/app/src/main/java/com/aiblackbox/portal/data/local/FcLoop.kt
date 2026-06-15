@@ -235,8 +235,12 @@ class FcLoop(
                             LlmEvent.ToolOutcome(
                                 ResidentTools.SEARCH_TOOLS,
                                 ToolResult(
+                                    // Empty covers both "no semantic match" and "mesh
+                                    // unreachable" (searchTools can't distinguish via a List).
+                                    // Phrase it about the catalog, not the user, so the model
+                                    // doesn't falsely tell an online user they're offline.
                                     success = false,
-                                    result = JsonPrimitive("no matching tools available (you may be offline)"),
+                                    result = JsonPrimitive("no matching tools available (the tool catalog may be unreachable)"),
                                 ),
                             ),
                         )

@@ -16,16 +16,30 @@ import kotlinx.serialization.json.JsonObject
  * ([ToolSchema], [ToolResult]); this interface lives in `data/local` — different
  * package, no type clash.
  *
- * Offline / graceful-degradation handling is a SEPARATE later task: a non-2xx
- * from either endpoint surfaces as the [java.io.IOException] thrown by the
- * underlying client and is allowed to propagate through the loop.
+ * Offline / graceful-degradation contract (Task 3.4): implementations DEGRADE
+ * gracefully when the mesh is unreachable so a single failed tool call never
+ * faults the whole agent turn — [execute] returns a `success = false`
+ * [ToolResult] (the model verbalizes it) and [searchTools] returns an empty
+ * list (the loop surfaces an empty result as graceful "no tools" feedback). The
+ * transport failure / non-2xx is caught at the [java.io.IOException] boundary;
+ * only genuine faults (e.g. a malformed-body
+ * [kotlinx.serialization.SerializationException], which is NOT an IOException)
+ * propagate through the loop.
  */
 interface ToolBridge {
 
-    /** Discover up to [k] tool schemas matching [query] (operator-agnostic). */
+    /**
+     * Discover up to [k] tool schemas matching [query] (operator-agnostic).
+     * Returns an empty list on no match OR when the mesh is unreachable — the
+     * caller treats an empty result as graceful "no tools available" feedback.
+     */
     suspend fun searchTools(query: String, k: Int = 5): List<ToolSchema>
 
-    /** Run [tool] with [params] for [operator], returning its raw [ToolResult]. */
+    /**
+     * Run [tool] with [params] for [operator], returning its raw [ToolResult].
+     * On an unreachable mesh, returns a `success = false` [ToolResult] describing
+     * the failure rather than throwing.
+     */
     suspend fun execute(
         tool: String,
         params: JsonObject = JsonObject(emptyMap()),

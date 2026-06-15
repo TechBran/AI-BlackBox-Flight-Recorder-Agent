@@ -63,7 +63,7 @@ class ToolBridgeClient(private val api: BlackBoxApi) : ToolBridge {
             val responseText = api.post("/local/tools/search", body)
             val parsed = json.decodeFromString(ToolSearchResponse.serializer(), responseText)
             if (!parsed.success) emptyList() else parsed.tools
-        } catch (e: IOException) {
+        } catch (_: IOException) {
             // Transport failure / non-2xx → the mesh is unreachable. Degrade to an
             // empty result instead of faulting the turn.
             emptyList()
