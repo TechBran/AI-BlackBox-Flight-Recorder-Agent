@@ -11,6 +11,7 @@ import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.local.FcLoop
 import com.aiblackbox.portal.data.local.LocalLlm
+import com.aiblackbox.portal.data.local.LocalSnapshotQueue
 import com.aiblackbox.portal.data.local.PersonaCache
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
@@ -108,6 +109,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Built lazily off the application context the first time a local turn runs
     // (needs the api, which is set in initialize()); cached thereafter.
     private var personaCache: PersonaCache? = null
+
+    // The offline-resilient memory write-back queue (Task 2.5). persistLocalSave
+    // routes completed on-device turns through this instead of a bare
+    // saveConversation, so a turn finished without the mesh is queued on disk and
+    // flushed (in FIFO order) when connectivity returns. Built lazily off the
+    // application context + repository (both ready after initialize()); cached.
+    private var snapshotQueue: LocalSnapshotQueue? = null
 
     // ── UI State ──
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
@@ -391,6 +399,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 picker.localAvailable.collect { _localAvailable.value = it }
             }
             refreshLocalAvailability()
+
+            // App-open flush (Task 2.5): drain any on-device turns queued offline
+            // in a prior session now that the hub origin is set. Best-effort,
+            // fire-and-forget; a still-offline flush leaves the items for later.
+            snapshotQueueOrBuild()?.let { queue ->
+                viewModelScope.launch {
+                    try {
+                        queue.flush()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "local snapshot app-open flush failed (non-critical): ${e.message}")
+                    }
+                }
+            }
         }
     }
 
@@ -666,21 +687,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Persist a completed on-device turn via the existing save path. Direct save
-     * for now (Task 2.5 replaces this body with the offline snapshot queue while
-     * the [streamLocalTurn] save sink stays the same). Tagged provider=local for
-     * traceability in logs; SaveRequest itself carries no provider field, matching
-     * the cloud save shape.
+     * Persist a completed on-device turn through the offline-resilient snapshot
+     * queue (Task 2.5). The on-device engine works OFFLINE, so the turn is queued
+     * to disk first (survives process death) and flushed in FIFO order when
+     * connectivity returns — the memory ledger never drops or reorders a turn.
+     * Tagged provider=local for traceability (same as Task 2.4's save sink);
+     * SaveRequest itself carries no provider field, matching the cloud save shape.
+     *
+     * Best-effort + non-blocking: enqueue persists-then-flushes on viewModelScope;
+     * a failed flush leaves the item queued for the next attempt (app-open flush
+     * in [initialize], or the next turn's enqueue). Non-IO errors propagate inside
+     * the queue without dropping the item.
      */
     private fun persistLocalSave(request: SaveRequest) {
-        val repo = repository ?: return
+        val queue = snapshotQueueOrBuild() ?: return
         viewModelScope.launch {
             try {
-                repo.saveConversation(request)
+                queue.enqueue(request)
             } catch (e: Exception) {
-                Log.w(TAG, "local saveConversation failed (non-critical): ${e.message}")
+                // enqueue persists the item before flushing, so a throw here (a
+                // non-IO flush error) still leaves the turn queued for next time.
+                Log.w(TAG, "local snapshot enqueue/flush failed (non-critical): ${e.message}")
             }
         }
+    }
+
+    /**
+     * Build (once) or return the offline snapshot queue wired to this VM's
+     * repository + context. Returns null when the repository is not yet ready
+     * (repository ?: return convention, matching [persistLocalSave]'s prior shape).
+     */
+    private fun snapshotQueueOrBuild(): LocalSnapshotQueue? {
+        snapshotQueue?.let { return it }
+        val repo = repository ?: return null
+        val built = LocalSnapshotQueue.fromContext(appContext, repo)
+        snapshotQueue = built
+        return built
     }
 
     /**
