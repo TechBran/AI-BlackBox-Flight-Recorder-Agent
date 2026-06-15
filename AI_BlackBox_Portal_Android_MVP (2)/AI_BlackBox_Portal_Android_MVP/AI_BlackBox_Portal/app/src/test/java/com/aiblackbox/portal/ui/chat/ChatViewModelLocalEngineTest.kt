@@ -30,6 +30,12 @@ import org.junit.Test
  *  3. persona from the cache is included in the prompt handed to the engine.
  *  4. mid-stream throw → partial text + friendly error surfaced, no crash, no SSE.
  *  5. the turn is persisted on completion (save sink invoked, tagged provider=local).
+ *
+ * Review follow-ups (Task 2.4):
+ *  6. streamLocalTurn returns true on success / false on fault (M1/M2 signal).
+ *  7. stateAfterLocalTurn maps that outcome to IDLE vs ERROR (M1/M2 parity with SSE).
+ *  8. shouldBlockSend ignores a second send while STREAMING (I2 hoisted guard) —
+ *     the SAME predicate sendMessage applies to BOTH the engine and placeholder arms.
  */
 class ChatViewModelLocalEngineTest {
 
@@ -64,7 +70,7 @@ class ChatViewModelLocalEngineTest {
         val llm = FakeLocalLlm(responseChunks = listOf("Hel", "lo, ", "world"))
         val h = Harness()
 
-        ChatViewModel.streamLocalTurn(
+        val ok = ChatViewModel.streamLocalTurn(
             fcLoop = FcLoop(llm),
             persona = "PERSONA",
             history = emptyList(),
@@ -75,6 +81,7 @@ class ChatViewModelLocalEngineTest {
             saveSink = h.saveSink,
         )
 
+        assertTrue("success returns true (M1/M2 outcome signal)", ok)
         assertEquals("Hello, world", h.assistant.content)
         assertFalse("streaming flag cleared on completion", h.assistant.isStreaming)
         assertNotNull("save invoked on completion", h.saved)
@@ -137,7 +144,7 @@ class ChatViewModelLocalEngineTest {
         }
         val h = Harness()
 
-        ChatViewModel.streamLocalTurn(
+        val ok = ChatViewModel.streamLocalTurn(
             fcLoop = FcLoop(throwing),
             persona = "P",
             history = emptyList(),
@@ -148,6 +155,7 @@ class ChatViewModelLocalEngineTest {
             saveSink = h.saveSink,
         )
 
+        assertFalse("fault returns false (M1/M2 outcome signal)", ok)
         assertTrue("partial text preserved", h.assistant.content.contains("partial"))
         assertTrue(
             "a friendly on-device error is shown",
@@ -157,6 +165,45 @@ class ChatViewModelLocalEngineTest {
         assertFalse("streaming flag cleared after error", h.assistant.isStreaming)
         // No save on a faulted turn (mirrors the SSE error path, which does not save).
         assertNull("a faulted turn is not persisted", h.saved)
+    }
+
+    // ── Review follow-ups (Task 2.4) ──────────────────────────────────────────
+
+    @Test
+    fun `fault maps to ChatState ERROR not IDLE (M1 M2 parity with SSE)`() {
+        // streamLocalTurn returned false (faulted): the instance method applies
+        // stateAfterLocalTurn, which must yield ERROR — matching sendViaSSE's catch.
+        assertEquals(
+            ChatState.ERROR,
+            ChatViewModel.stateAfterLocalTurn(faulted = true, current = ChatState.STREAMING),
+        )
+    }
+
+    @Test
+    fun `success maps STREAMING to IDLE and never clobbers a terminal state`() {
+        // Normal completion while still streaming → IDLE.
+        assertEquals(
+            ChatState.IDLE,
+            ChatViewModel.stateAfterLocalTurn(faulted = false, current = ChatState.STREAMING),
+        )
+        // If the stream already moved off STREAMING (e.g. a terminal ERROR the
+        // sink set), success must NOT clobber it back to IDLE.
+        assertEquals(
+            ChatState.ERROR,
+            ChatViewModel.stateAfterLocalTurn(faulted = false, current = ChatState.ERROR),
+        )
+    }
+
+    @Test
+    fun `a second send while STREAMING is ignored — hoisted guard, both arms`() {
+        // sendMessage consults shouldBlockSend BEFORE routing for BOTH the SSE arm
+        // and (review I2) the LOCAL_PLACEHOLDER arm, so the local engine AND the
+        // null-engine placeholder fallback are guarded against double-sends.
+        assertTrue("STREAMING blocks a new send", ChatViewModel.shouldBlockSend(ChatState.STREAMING))
+        // Non-streaming states let a send through.
+        assertFalse("IDLE allows a send", ChatViewModel.shouldBlockSend(ChatState.IDLE))
+        assertFalse("THINKING allows a send", ChatViewModel.shouldBlockSend(ChatState.THINKING))
+        assertFalse("ERROR allows a send", ChatViewModel.shouldBlockSend(ChatState.ERROR))
     }
 
     @Test

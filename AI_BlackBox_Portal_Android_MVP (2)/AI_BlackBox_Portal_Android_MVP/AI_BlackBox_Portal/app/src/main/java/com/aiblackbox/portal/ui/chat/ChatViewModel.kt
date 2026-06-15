@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -516,10 +517,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // cloud and error). With no engine wired yet (production default until
             // Task 2.6), sendViaLocalEngine() falls back to the 1.6 placeholder.
             // No cloud network call on this path either way.
-            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text)
+            ChatRoute.LOCAL_PLACEHOLDER -> {
+                // Block duplicate sends BEFORE routing — guards BOTH the engine
+                // path and the placeholder fallback (mirrors the SSE arm).
+                if (shouldBlockSend(_chatState.value)) return
+                sendViaLocalEngine(text)
+            }
             ChatRoute.SSE -> {
                 // Block duplicate sends for non-robotics streaming (robotics handled above)
-                if (_chatState.value == ChatState.STREAMING) return
+                if (shouldBlockSend(_chatState.value)) return
                 sendViaSSE(text, imageUrls, repo)
             }
         }
@@ -538,13 +544,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      *   2. snapshot the conversation-so-far into [FcLoop.Turn]s, EXCLUDING the
      *      just-appended user turn (it is passed as `text`) and the in-flight
      *      assistant placeholder;
-     *   3. on [viewModelScope] (heavy work off the main thread via Dispatchers.IO)
-     *      fetch the persona from the cache, run [FcLoop.runTurn], and stream its
-     *      deltas into the SAME sink the SSE path uses ([updateLastMessage]);
+     *   3. on [viewModelScope] fetch the persona on [Dispatchers.IO], run
+     *      [FcLoop.runTurn] with its generation moved to IO via `.flowOn`, and
+     *      stream the deltas into the SAME sink the SSE path uses
+     *      ([updateLastMessage]) on the VM (Main) collector — exactly mirroring
+     *      [sendViaSSE], which never mutates UI state from an IO thread;
      *   4. on completion mark streaming done and persist the turn via the existing
-     *      save path ([saveConversation], tagged provider=local). The OFFLINE
-     *      QUEUE is Task 2.5 — a direct save is used now, structured so 2.5 can
-     *      swap the queue in at the [ChatViewModel.streamLocalTurn] save sink.
+     *      save path ([saveConversation], tagged provider=local); on fault set
+     *      [ChatState.ERROR] (parity with the SSE error path). The OFFLINE QUEUE
+     *      is Task 2.5 — a direct save is used now, structured so 2.5 can swap the
+     *      queue in at the [ChatViewModel.streamLocalTurn] save sink.
      *
      * The streaming + error handling lives in the pure [streamLocalTurn] so it is
      * unit-testable without the AndroidViewModel; this method is the wiring shim.
@@ -556,8 +565,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             sendViaLocalPlaceholder(text)
             return
         }
-        // Don't start a second local turn over a running one (mirrors SSE guard).
-        if (_chatState.value == ChatState.STREAMING) return
+        // The double-send guard is hoisted to sendMessage's LOCAL_PLACEHOLDER arm
+        // (mirrors the SSE arm), so both this path and the placeholder fallback
+        // above are already guarded by the time we get here.
 
         // 1. Append the user message + a streaming assistant placeholder, exactly
         //    like sendViaSSE — same UiMessage shape, same _messages flow.
@@ -586,13 +596,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val op = currentOperator
         val model = currentModel.ifBlank { null }
-        val cache = personaCacheOrBuild()
+        // api?:return convention (mirrors persistLocalSave's repository?:return) —
+        // no api!!. personaCacheOrBuild needs the api to wire the LocalModelApi.
+        val cache = personaCacheOrBuild() ?: return
 
         streamJob = viewModelScope.launch {
-            // Heavy work (persona fetch + native generation) off the main thread.
-            withContext(Dispatchers.IO) {
-                val persona = cache.get(op)
-                streamLocalTurn(
+            // Threading (mirrors sendViaSSE): the ONLY IO-dispatched work is the
+            // persona fetch + (inside streamLocalTurn) the generation Flow via
+            // .flowOn(Dispatchers.IO). The collect/sink runs HERE on the VM's
+            // dispatcher (Main.immediate in production) — _messages/_chatState
+            // read-modify-write is NOT touched from an IO thread.
+            //
+            // Defense (M4): PersonaCache.get only catches IOException, so a non-IO
+            // throw (e.g. serialization) could escape before streamLocalTurn's
+            // .catch scope. Wrap persona fetch + collection so ANY throw surfaces
+            // the same friendly local-engine error + ChatState.ERROR (no crash).
+            var faulted: Boolean
+            try {
+                val persona = withContext(Dispatchers.IO) { cache.get(op) }
+                val ok = streamLocalTurn(
                     fcLoop = FcLoop(provider()),
                     persona = persona,
                     history = history,
@@ -600,26 +622,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     operator = op,
                     model = model,
                     // 3. The SAME sink sendViaSSE uses — append each delta to the
-                    //    in-flight assistant message (identical rendering).
+                    //    in-flight assistant message (identical rendering). Runs on
+                    //    the collector's dispatcher (Main), NOT Dispatchers.IO.
                     sink = { content, streaming ->
                         updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
                     },
                     // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
                     saveSink = { req, _ -> persistLocalSave(req) },
                 )
+                faulted = !ok
+            } catch (e: Exception) {
+                // A throw OUTSIDE streamLocalTurn's Flow scope (e.g. persona fetch).
+                Log.e(TAG, "local engine error before stream: ${e.message}", e)
+                val partial = _messages.value.lastOrNull()?.content ?: ""
+                updateLastMessage(
+                    content = partial + LOCAL_ENGINE_ERROR_TEXT,
+                    isStreaming = false,
+                    isThinking = false,
+                )
+                faulted = true
             }
-            // Generation finished (success or handled error) — leave streaming.
-            if (_chatState.value == ChatState.STREAMING) _chatState.value = ChatState.IDLE
+            // Mirror the SSE paths: fault → ERROR, success → IDLE (don't clobber a
+            // terminal state already set by the stream). Mapping is the pure
+            // stateAfterLocalTurn so it is unit-testable.
+            _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
             stopBackgroundService()
             persistHistory()
         }
     }
 
-    /** Build (once) or return the persona cache wired to this VM's api + context. */
-    private fun personaCacheOrBuild(): PersonaCache {
+    /**
+     * Build (once) or return the persona cache wired to this VM's api + context.
+     * Returns null when the api is not yet initialized (api?:return convention,
+     * mirroring persistLocalSave's `repository ?: return`) — no `api!!`.
+     */
+    private fun personaCacheOrBuild(): PersonaCache? {
         personaCache?.let { return it }
+        val client = api ?: return null
         // PersonaSource is the LocalModelApi slice (mirrors ProviderPicker wiring).
-        val built = PersonaCache.fromContext(appContext, LocalModelApi(api!!))
+        val built = PersonaCache.fromContext(appContext, LocalModelApi(client))
         personaCache = built
         return built
     }
@@ -1642,6 +1683,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             else -> ChatRoute.SSE
         }
 
+        /**
+         * The pure double-send predicate both the SSE and LOCAL_PLACEHOLDER arms
+         * of [sendMessage] consult BEFORE routing: a send is dropped while a turn
+         * is already streaming. Extracted so the guard (hoisted in review I2 to
+         * cover the placeholder path too) is unit-testable without the ViewModel.
+         */
+        fun shouldBlockSend(state: ChatState): Boolean = state == ChatState.STREAMING
+
+        /**
+         * The terminal [ChatState] a finished local turn leaves behind, given the
+         * [streamLocalTurn] outcome and the state observed when it returned. Pure
+         * so the M1/M2 "fault → ERROR, success → IDLE" mapping is unit-testable
+         * (the instance method applies it after the collect):
+         *  - faulted → [ChatState.ERROR] (parity with sendViaSSE's catch).
+         *  - ok and still [STREAMING] → [ChatState.IDLE].
+         *  - ok but already moved off STREAMING → keep it (don't clobber a
+         *    terminal state the stream set).
+         */
+        fun stateAfterLocalTurn(faulted: Boolean, current: ChatState): ChatState = when {
+            faulted -> ChatState.ERROR
+            current == ChatState.STREAMING -> ChatState.IDLE
+            else -> current
+        }
+
         /** The non-streaming assistant placeholder message for the LOCAL branch. */
         fun buildLocalPlaceholder(provider: String, model: String): UiMessage = UiMessage(
             role = "assistant",
@@ -1712,12 +1777,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    buffer and calling `sink(runningText, isStreaming=true)` per delta —
          *    EXACTLY the SSE token path.
          *  - On normal completion: `sink(fullText, isStreaming=false)` then
-         *    `saveSink(SaveRequest, provider="local")`.
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
          *  - On a mid-stream throw (runTurn's Flow can fault): caught via `.catch`,
          *    appends [LOCAL_ENGINE_ERROR_TEXT] to whatever streamed so far,
-         *    `sink(partial+error, isStreaming=false)`, and DOES NOT save (mirrors
-         *    the SSE error path). Never rethrows — the turn does not crash.
+         *    `sink(partial+error, isStreaming=false)`, DOES NOT save (mirrors the
+         *    SSE error path), and returns `false`. Never rethrows — the turn does
+         *    not crash; the caller maps the `false` to [ChatState.ERROR].
          *  - Never reaches SSE.
+         *
+         * Threading: `.flowOn(Dispatchers.IO)` moves GENERATION (the upstream
+         * [FcLoop.runTurn] Flow) onto IO, while `.collect` / [sink] run on the
+         * collector's dispatcher (the VM's Main in production) — mirroring
+         * [sendViaSSE], which collects on viewModelScope and never wraps the sink
+         * in withContext(IO). flowOn is a no-op under the serial test dispatcher,
+         * so the unit tests below stay deterministic.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
          */
         suspend fun streamLocalTurn(
             fcLoop: FcLoop,
@@ -1728,10 +1803,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             model: String?,
             sink: (content: String, isStreaming: Boolean) -> Unit,
             saveSink: (request: SaveRequest, provider: String) -> Unit,
-        ) {
+        ): Boolean {
             val acc = StringBuilder()
             var faulted = false
             fcLoop.runTurn(persona, history, text)
+                // Generation runs on IO; the collector/sink stay on the caller's
+                // dispatcher (Main in production) — parity with sendViaSSE.
+                .flowOn(Dispatchers.IO)
                 .catch { e ->
                     faulted = true
                     acc.append(LOCAL_ENGINE_ERROR_TEXT)
@@ -1741,7 +1819,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     acc.append(delta)
                     sink(acc.toString(), true)
                 }
-            if (faulted) return
+            if (faulted) return false
             // Normal completion: finalize the stream + persist the turn.
             val full = acc.toString()
             sink(full, false)
@@ -1755,6 +1833,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 provenance = null,
             )
             saveSink(request, LOCAL_PROVIDER_ID)
+            return true
         }
 
         private val provJson = Json { ignoreUnknownKeys = true; isLenient = true }
