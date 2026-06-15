@@ -1962,6 +1962,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *  - TextDelta → append text; ToolCall → append [renderToolCall];
          *    ToolOutcome → append [renderToolOutcome]; `sink(runningText, true)` per
          *    event.
+         *  - MULTI-CALL ORDERING: on a turn with several tool calls [FcLoop.runAgent]
+         *    emits ALL its [LlmEvent.ToolCall]s first, THEN all [LlmEvent.ToolOutcome]s,
+         *    so the inline lines render as the calls batched, then the outcomes batched
+         *    (not interleaved call→outcome); the `[name]` labels disambiguate which
+         *    outcome belongs to which call.
          *  - On normal completion: `sink(fullText, false)` then
          *    `saveSink(SaveRequest, provider="local")`; returns `true`.
          *  - A TOOL-LEVEL failure (a [ToolResult] with `success=false`) is NOT a
@@ -2021,15 +2026,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         /**
+         * Collapse to a single line and bound length so a large model-supplied arg or
+         * tool result can't flood the chat bubble or the saved snapshot. Strips BOTH
+         * \n and \r (a CR-laden tool result must render on one line) and truncates
+         * with an ellipsis past [max] (default [TOOL_RESULT_SNIPPET_MAX]).
+         */
+        private fun inlineCap(s: String, max: Int = TOOL_RESULT_SNIPPET_MAX): String {
+            val oneLine = s.replace('\n', ' ').replace('\r', ' ')
+            return if (oneLine.length > max) oneLine.take(max) + "…" else oneLine
+        }
+
+        /**
          * Inline-markdown for an on-device TOOL CALL. Parity format with the cloud ER
          * `er_action` path: a backtick-wrapped, name-labeled line on its own row
-         * carrying the raw args. `args.toString()` is compact JSON — fine inline.
-         * Self-contained so it reads correctly even when a turn batches several calls
-         * before their outcomes.
+         * carrying the (capped) args. `args.toString()` is compact JSON; it is routed
+         * through [inlineCap] so a model inlining a large blob (e.g. a base64 image) as
+         * an arg can't flood the bubble or snapshot — the SAME cap a large tool RESULT
+         * gets in [renderToolOutcome]. Self-contained so it reads correctly even when a
+         * turn batches several calls before their outcomes.
          */
         @VisibleForTesting
         internal fun renderToolCall(name: String, args: JsonObject): String =
-            "\n`[$name]` $args"
+            "\n`[$name]` ${inlineCap(args.toString())}"
 
         /**
          * Inline-markdown for an on-device TOOL OUTCOME. Parity format with the cloud
@@ -2043,9 +2061,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (!result.success) return "\n`[$name]` → failed"
             val snippet = (result.result as? JsonPrimitive)?.contentOrNull
                 ?: result.result?.toString()
-            val shown = snippet?.replace('\n', ' ')?.let {
-                if (it.length > TOOL_RESULT_SNIPPET_MAX) it.take(TOOL_RESULT_SNIPPET_MAX) + "…" else it
-            }
+            val shown = snippet?.let { inlineCap(it) }
             return if (shown.isNullOrBlank()) "\n`[$name]` → done" else "\n`[$name]` → done · $shown"
         }
 

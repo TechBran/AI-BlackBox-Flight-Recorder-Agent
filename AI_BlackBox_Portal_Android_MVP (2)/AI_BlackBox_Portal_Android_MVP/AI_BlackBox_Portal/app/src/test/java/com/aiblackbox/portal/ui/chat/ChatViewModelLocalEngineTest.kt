@@ -484,4 +484,40 @@ class ChatViewModelLocalEngineTest {
         )
         assertTrue("failure renders failed", failed.contains("failed"))
     }
+
+    @Test
+    fun `renderToolCall caps oversized args so a blob cannot flood the bubble or snapshot`() {
+        // A model inlining a large blob (e.g. a base64 image) as a tool-call arg
+        // must NOT dump it uncapped — renderToolCall caps it the SAME way an
+        // oversized tool RESULT is capped (TOOL_RESULT_SNIPPET_MAX + the … suffix).
+        val huge = "x".repeat(ChatViewModel.TOOL_RESULT_SNIPPET_MAX * 4)
+        val call = ChatViewModel.renderToolCall(
+            "generate_image",
+            buildJsonObject { put("blob", huge) },
+        )
+        // The serialized args are far longer than the cap; the rendered ARGS portion
+        // must be bounded at cap + the single-char ellipsis.
+        assertTrue("oversized args are truncated with the … suffix", call.endsWith("…"))
+        // Whole line = "\n`[name]` " decoration + capped args. The line length must
+        // be bounded ≈ decoration + cap + 1 (ellipsis), NOT the full blob length.
+        val decoration = "\n`[generate_image]` ".length
+        assertEquals(
+            "rendered line is bounded by decoration + cap + ellipsis",
+            decoration + ChatViewModel.TOOL_RESULT_SNIPPET_MAX + 1,
+            call.length,
+        )
+    }
+
+    @Test
+    fun `tool render strips carriage returns so a CR-laden result stays one line`() {
+        // A tool RESULT carrying \r\n (or bare \r) must render on a SINGLE line —
+        // no raw CR leaking into the chat bubble / saved snapshot.
+        val outcome = ChatViewModel.renderToolOutcome(
+            "run_shell",
+            ToolResult(success = true, result = JsonPrimitive("line1\r\nline2\rline3")),
+        )
+        assertFalse("no raw carriage return in the rendered outcome", outcome.contains('\r'))
+        // The only newline is the leading line-break of the inline line itself.
+        assertEquals("snippet collapsed to one line", 1, outcome.count { it == '\n' })
+    }
 }
