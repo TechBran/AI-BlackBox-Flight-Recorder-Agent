@@ -10,15 +10,20 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.data.local.LlmEvent
 import com.aiblackbox.portal.data.local.LocalLlm
 import com.aiblackbox.portal.data.local.LocalSnapshotQueue
 import com.aiblackbox.portal.data.local.PersonaCache
+import com.aiblackbox.portal.data.local.ToolBridge
+import com.aiblackbox.portal.data.local.ToolBridgeClient
+import com.aiblackbox.portal.data.local.ToolCallingLlm
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.model.TokenCount
+import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskRepository
@@ -38,7 +43,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -109,6 +116,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Built lazily off the application context the first time a local turn runs
     // (needs the api, which is set in initialize()); cached thereafter.
     private var personaCache: PersonaCache? = null
+
+    // The two-hop on-device tool bridge (Task 3.1/3.3) — the dependency
+    // FcLoop.runAgent needs to discover + execute BlackBox tools. Built lazily off
+    // this VM's api (mirroring personaCacheOrBuild); cached. Settable so a test can
+    // wire a fake. NULL until the api is set, in which case the local path stays on
+    // the text-only runTurn (no agent loop without a bridge).
+    @VisibleForTesting
+    var toolBridge: ToolBridge? = null
 
     // The offline-resilient memory write-back queue (Task 2.5). persistLocalSave
     // routes completed on-device turns through this instead of a bare
@@ -635,22 +650,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             var faulted: Boolean
             try {
                 val persona = withContext(Dispatchers.IO) { cache.get(op) }
-                val ok = streamLocalTurn(
-                    fcLoop = FcLoop(provider()),
-                    persona = persona,
-                    history = history,
-                    text = text,
-                    operator = op,
-                    model = model,
-                    // 3. The SAME sink sendViaSSE uses — append each delta to the
-                    //    in-flight assistant message (identical rendering). Runs on
-                    //    the collector's dispatcher (Main), NOT Dispatchers.IO.
-                    sink = { content, streaming ->
-                        updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
-                    },
-                    // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
-                    saveSink = { req, _ -> persistLocalSave(req) },
-                )
+                // 3. The SAME sink sendViaSSE uses — append each delta to the
+                //    in-flight assistant message (identical rendering). Runs on the
+                //    collector's dispatcher (Main), NOT Dispatchers.IO.
+                val sink: (String, Boolean) -> Unit = { content, streaming ->
+                    updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
+                }
+                // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
+                val saveSink: (SaveRequest, String) -> Unit = { req, _ -> persistLocalSave(req) }
+
+                // Capability-detect on the SINGLE provider() instance: the concrete
+                // 2.6 engine implements BOTH LocalLlm and ToolCallingLlm. When it
+                // does AND a bridge is available, run the tool-aware agent loop so
+                // tool calls/results render inline (Task 3.3); otherwise fall back to
+                // the unchanged text path (e.g. a text-only FakeLocalLlm → Task 2.4).
+                val llm = provider()
+                val bridge = toolBridgeOrBuild()
+                val ok = if (llm is ToolCallingLlm && bridge != null) {
+                    streamLocalAgentTurn(
+                        fcLoop = FcLoop(llm, toolLlm = llm, bridge = bridge, operator = op),
+                        persona = persona,
+                        history = history,
+                        text = text,
+                        operator = op,
+                        model = model,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                } else {
+                    streamLocalTurn(
+                        fcLoop = FcLoop(llm),
+                        persona = persona,
+                        history = history,
+                        text = text,
+                        operator = op,
+                        model = model,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                }
                 faulted = !ok
             } catch (e: Exception) {
                 // A throw OUTSIDE streamLocalTurn's Flow scope (e.g. persona fetch).
@@ -683,6 +721,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // PersonaSource is the LocalModelApi slice (mirrors ProviderPicker wiring).
         val built = PersonaCache.fromContext(appContext, LocalModelApi(client))
         personaCache = built
+        return built
+    }
+
+    /**
+     * Build (once) or return the two-hop tool bridge wired to this VM's api.
+     * Returns null when the api is not yet initialized (api?:return convention,
+     * mirroring [personaCacheOrBuild]) — no `api!!`. With no bridge, the local path
+     * stays on the text-only [streamLocalTurn] (you cannot run the agent loop
+     * without a bridge), so this degrades to the Task 2.4 behaviour rather than
+     * crashing.
+     */
+    private fun toolBridgeOrBuild(): ToolBridge? {
+        toolBridge?.let { return it }
+        val client = api ?: return null
+        val built = ToolBridgeClient(client)
+        toolBridge = built
         return built
     }
 
@@ -1770,6 +1824,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "\n\n[on-device error — the local model could not finish this reply]"
 
         /**
+         * Max length of the one-line result snippet shown after a successful tool
+         * outcome ([renderToolOutcome]) — keep tool activity inline-readable; never
+         * dump a large JSON blob into the chat bubble.
+         */
+        const val TOOL_RESULT_SNIPPET_MAX = 80
+
+        /**
          * Map the current UI conversation to [FcLoop.Turn]s for prompt assembly.
          *
          * Excludes anything that is NOT a settled user/assistant turn:
@@ -1876,6 +1937,116 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             saveSink(request, LOCAL_PROVIDER_ID)
             return true
+        }
+
+        /**
+         * PURE core of the TOOL-AWARE on-device turn — the [streamLocalTurn] sibling
+         * for a model that can call BlackBox tools. Collects [FcLoop.runAgent]'s
+         * [LlmEvent] Flow (instead of [FcLoop.runTurn]'s plain text Flow) and renders
+         * each event INLINE into the SAME streaming assistant bubble the text streams
+         * into, then persists via [saveSink]. Extracted (like [streamLocalTurn]) so it
+         * is unit-testable without the AndroidViewModel.
+         *
+         * RENDERING PARITY (deliberate design choice): the Android MVP has NO typed
+         * tool-call/tool-result UI message types — [UiMessage] carries none, and the
+         * ONLY existing tool-rendering convention is the cloud ER `er_action` SSE path
+         * (`content.append("\n`[$tool]` $args → $status ")`). So this turn adopts that
+         * SAME inline-markdown convention via [renderToolCall] / [renderToolOutcome]:
+         * tool name in backticks, the args, an arrow, a status — appended to the
+         * streaming assistant `content`, so tool activity shows in the same bubble.
+         * Each rendered line is SELF-CONTAINED + name-labeled because [FcLoop.runAgent]
+         * emits ALL of a turn's [LlmEvent.ToolCall]s BEFORE any [LlmEvent.ToolOutcome]
+         * (a call is NOT immediately followed by its outcome on a multi-call turn).
+         *
+         * Contract (mirrors [streamLocalTurn] exactly):
+         *  - TextDelta → append text; ToolCall → append [renderToolCall];
+         *    ToolOutcome → append [renderToolOutcome]; `sink(runningText, true)` per
+         *    event.
+         *  - On normal completion: `sink(fullText, false)` then
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
+         *  - A TOOL-LEVEL failure (a [ToolResult] with `success=false`) is NOT a
+         *    stream fault: it renders "failed" and the turn still completes + saves.
+         *  - A mid-stream THROW (e.g. a bridge IOException propagating out of
+         *    runAgent) is caught via `.catch`, appends [LOCAL_ENGINE_ERROR_TEXT],
+         *    `sink(partial+error, false)`, DOES NOT save, returns `false`. (Graceful
+         *    offline tool handling is Task 3.4; here a propagating bridge fault
+         *    correctly surfaces as the local-engine error.)
+         *
+         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
+         * agent loop onto IO; `.collect` / [sink] stay on the caller's dispatcher.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalAgentTurn(
+            fcLoop: FcLoop,
+            persona: String,
+            history: List<FcLoop.Turn>,
+            text: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            val acc = StringBuilder()
+            var faulted = false
+            fcLoop.runAgent(persona, history, text)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { event ->
+                    when (event) {
+                        is LlmEvent.TextDelta -> acc.append(event.text)
+                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
+                    }
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * Inline-markdown for an on-device TOOL CALL. Parity format with the cloud ER
+         * `er_action` path: a backtick-wrapped, name-labeled line on its own row
+         * carrying the raw args. `args.toString()` is compact JSON — fine inline.
+         * Self-contained so it reads correctly even when a turn batches several calls
+         * before their outcomes.
+         */
+        @VisibleForTesting
+        internal fun renderToolCall(name: String, args: JsonObject): String =
+            "\n`[$name]` $args"
+
+        /**
+         * Inline-markdown for an on-device TOOL OUTCOME. Parity format with the cloud
+         * ER `er_action` path: a backtick-wrapped, name-labeled line, an arrow, then a
+         * one-word status (a tool-level failure renders "failed", NOT a stream fault).
+         * On success a SHORT one-line result snippet is appended (prefer the unquoted
+         * string content for the common string case); large JSON is NOT dumped.
+         */
+        @VisibleForTesting
+        internal fun renderToolOutcome(name: String, result: ToolResult): String {
+            if (!result.success) return "\n`[$name]` → failed"
+            val snippet = (result.result as? JsonPrimitive)?.contentOrNull
+                ?: result.result?.toString()
+            val shown = snippet?.replace('\n', ' ')?.let {
+                if (it.length > TOOL_RESULT_SNIPPET_MAX) it.take(TOOL_RESULT_SNIPPET_MAX) + "…" else it
+            }
+            return if (shown.isNullOrBlank()) "\n`[$name]` → done" else "\n`[$name]` → done · $shown"
         }
 
         private val provJson = Json { ignoreUnknownKeys = true; isLenient = true }

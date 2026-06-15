@@ -1,10 +1,20 @@
 package com.aiblackbox.portal.ui.chat
 
 import com.aiblackbox.portal.data.local.FakeLocalLlm
+import com.aiblackbox.portal.data.local.FakeToolBridge
+import com.aiblackbox.portal.data.local.FakeToolCallingLlm
 import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.data.local.LlmEvent
+import com.aiblackbox.portal.data.local.ToolCallingLlm
 import com.aiblackbox.portal.data.model.SaveRequest
+import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -248,5 +258,230 @@ class ChatViewModelLocalEngineTest {
         assertEquals("first q", turns[0].text)
         assertEquals(FcLoop.Role.ASSISTANT, turns[1].role)
         assertEquals("first a", turns[1].text)
+    }
+
+    // ── Task 3.3 — on-device tool-call/result rendering parity ─────────────────
+    //
+    // Wiring the tool-aware [FcLoop.runAgent] into the chat send path so a
+    // tool-capable engine's TOOL CALLS and TOOL RESULTS render INLINE in the same
+    // streaming assistant bubble the text streams into. Exercised through the PURE
+    // [ChatViewModel.streamLocalAgentTurn] (mirror of [ChatViewModel.streamLocalTurn]),
+    // with the 3.2 fakes — [FakeToolCallingLlm] (scripted per-turn LlmEvent lists),
+    // [FakeToolBridge] (scripted search/execute), and [FakeLocalLlm] as the unused
+    // `llm` arg (runAgent only consumes toolLlm + bridge).
+    //
+    // RENDERING PARITY (no typed tool UI events exist): the format mirrors the cloud
+    // ER `er_action` convention (`\n`[tool]` args → status`) — see
+    // [ChatViewModel.renderToolCall] / [ChatViewModel.renderToolOutcome].
+
+    /** A two-fakes-in-one double that implements BOTH seams, like the real 2.6 engine. */
+    private class FakeLocalEngine(
+        private val tool: FakeToolCallingLlm,
+    ) : com.aiblackbox.portal.data.local.LocalLlm, ToolCallingLlm {
+        override var isLoaded: Boolean = true
+        override suspend fun load(modelFile: java.io.File, delegate: String) {}
+        override fun generate(prompt: String) = kotlinx.coroutines.flow.flow<String> { }
+        override fun generateWithTools(prompt: String, tools: List<ToolSchema>) =
+            tool.generateWithTools(prompt, tools)
+        override fun close() {}
+    }
+
+    private fun schema(name: String) = ToolSchema(name = name, description = "$name desc")
+
+    @Test
+    fun `agent turn renders tool calls, outcomes, and final text inline, then saves`() = runTest {
+        // Model: turn 1 searches, turn 2 calls the discovered tool, turn 3 answers.
+        val toolLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(LlmEvent.ToolCall("search_tools", buildJsonObject { put("query", "generate an image") })),
+                listOf(LlmEvent.ToolCall("generate_image", buildJsonObject { put("prompt", "a cat") })),
+                listOf(LlmEvent.TextDelta("Here's "), LlmEvent.TextDelta("your image")),
+            ),
+        )
+        val bridge = FakeToolBridge(
+            searchMap = mapOf("generate an image" to listOf(schema("generate_image"))),
+            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("https://img/cat.png")) },
+        )
+        val h = Harness()
+        // Record EVERY (content, isStreaming) emission to assert the final form.
+        val emissions = mutableListOf<Pair<String, Boolean>>()
+        val recordingSink: (String, Boolean) -> Unit = { c, s ->
+            emissions.add(c to s)
+            h.sink(c, s)
+        }
+
+        val ok = ChatViewModel.streamLocalAgentTurn(
+            fcLoop = FcLoop(FakeLocalLlm(), toolLlm = toolLlm, bridge = bridge, operator = "Brandon"),
+            persona = "P",
+            history = emptyList(),
+            text = "make a cat picture",
+            operator = "Brandon",
+            model = "gemma-4-e2b",
+            sink = recordingSink,
+            saveSink = h.saveSink,
+        )
+
+        assertTrue("agent turn completed", ok)
+        // The FINAL sink call is the sink(full, isStreaming=false).
+        val finalEmission = emissions.last()
+        assertFalse("final emission clears streaming", finalEmission.second)
+        val full = finalEmission.first
+
+        // Tool CALL lines appear, in order, before the final text.
+        val searchCallIdx = full.indexOf("`[search_tools]`")
+        val genCallIdx = full.indexOf("`[generate_image]`")
+        val textIdx = full.indexOf("Here's your image")
+        assertTrue("search_tools call line rendered", searchCallIdx >= 0)
+        assertTrue("generate_image call line rendered", genCallIdx >= 0)
+        assertTrue("final text rendered", textIdx >= 0)
+        assertTrue("search call precedes generate call", searchCallIdx < genCallIdx)
+        assertTrue("generate call precedes final text", genCallIdx < textIdx)
+
+        // Tool OUTCOME lines (→ done) appear for both calls.
+        assertTrue("outcomes use the arrow + done", full.contains("→ done"))
+        assertEquals(
+            "two successful outcomes (search + execute)",
+            2,
+            Regex("→ done").findAll(full).count(),
+        )
+
+        // Saved exactly once, full content, provider=local.
+        val req = h.saved
+        assertNotNull("save invoked once on completion", req)
+        assertEquals("save carries the full accumulated content", full, req!!.assistantResponse)
+        assertEquals("the user message", "make a cat picture", req.userMessage)
+        assertEquals("save tagged provider=local", "local", h.saveProvider)
+    }
+
+    @Test
+    fun `a tool-level failure renders failed but does not fault the turn`() = runTest {
+        val toolLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(LlmEvent.ToolCall("generate_image", buildJsonObject { put("prompt", "x") })),
+                listOf(LlmEvent.TextDelta("done trying")),
+            ),
+        )
+        val bridge = FakeToolBridge(
+            executeFn = { _, _ -> ToolResult(success = false, result = JsonPrimitive("quota exceeded")) },
+        )
+        val h = Harness()
+
+        val ok = ChatViewModel.streamLocalAgentTurn(
+            fcLoop = FcLoop(FakeLocalLlm(), toolLlm = toolLlm, bridge = bridge, operator = "Brandon"),
+            persona = "P",
+            history = emptyList(),
+            text = "hi",
+            operator = "Brandon",
+            model = null,
+            sink = h.sink,
+            saveSink = h.saveSink,
+        )
+
+        assertTrue("a tool-LEVEL failure is NOT a stream fault — turn completes", ok)
+        assertTrue("the outcome renders failed", h.assistant.content.contains("→ failed"))
+        assertNotNull("a completed turn is still saved", h.saved)
+        assertFalse("streaming cleared on completion", h.assistant.isStreaming)
+    }
+
+    @Test
+    fun `a pure-text turn via the agent path renders no tool lines and saves`() = runTest {
+        val toolLlm = FakeToolCallingLlm(
+            script = listOf(listOf(LlmEvent.TextDelta("hello"))),
+        )
+        val bridge = FakeToolBridge()
+        val h = Harness()
+
+        val ok = ChatViewModel.streamLocalAgentTurn(
+            fcLoop = FcLoop(FakeLocalLlm(), toolLlm = toolLlm, bridge = bridge, operator = "Brandon"),
+            persona = "P",
+            history = emptyList(),
+            text = "hi",
+            operator = "Brandon",
+            model = null,
+            sink = h.sink,
+            saveSink = h.saveSink,
+        )
+
+        assertTrue(ok)
+        // A tool-capable engine that emits no tool calls renders IDENTICALLY to text.
+        assertEquals("hello", h.assistant.content)
+        assertFalse("no tool-call markers in a pure-text turn", h.assistant.content.contains("`["))
+        assertNotNull("pure-text agent turn still saves", h.saved)
+        assertEquals("hello", h.saved!!.assistantResponse)
+    }
+
+    @Test
+    fun `a mid-stream fault in the agent path surfaces the friendly error and does not save`() = runTest {
+        // The bridge's search throws (a non-2xx IOException equivalent) — parity with
+        // streamLocalTurn's fault path: caught, error appended, false, no save.
+        val toolLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(LlmEvent.ToolCall("search_tools", buildJsonObject { put("query", "anything") })),
+            ),
+        )
+        val throwingBridge = object : com.aiblackbox.portal.data.local.ToolBridge {
+            override suspend fun searchTools(query: String, k: Int): List<ToolSchema> =
+                throw java.io.IOException("bridge offline")
+            override suspend fun execute(tool: String, params: JsonObject, operator: String): ToolResult =
+                ToolResult(success = true, result = null)
+        }
+        val h = Harness()
+
+        val ok = ChatViewModel.streamLocalAgentTurn(
+            fcLoop = FcLoop(FakeLocalLlm(), toolLlm = toolLlm, bridge = throwingBridge, operator = "Brandon"),
+            persona = "P",
+            history = emptyList(),
+            text = "hi",
+            operator = "Brandon",
+            model = null,
+            sink = h.sink,
+            saveSink = h.saveSink,
+        )
+
+        assertFalse("a propagating bridge fault returns false", ok)
+        assertTrue(
+            "the friendly on-device error is appended",
+            h.assistant.content.contains("on-device", ignoreCase = true) ||
+                h.assistant.content.contains("error", ignoreCase = true),
+        )
+        assertFalse("streaming cleared after fault", h.assistant.isStreaming)
+        assertNull("a faulted turn is not persisted (parity with streamLocalTurn)", h.saved)
+    }
+
+    @Test
+    fun `capability routing predicate — text-only engine is not tool-capable, both-interfaces is`() {
+        // The branch sendViaLocalEngine uses: route to the agent path ONLY when the
+        // provided engine implements ToolCallingLlm. FakeLocalLlm is text-only; the
+        // combined FakeLocalEngine implements both.
+        val textOnly: com.aiblackbox.portal.data.local.LocalLlm = FakeLocalLlm()
+        val both: com.aiblackbox.portal.data.local.LocalLlm =
+            FakeLocalEngine(FakeToolCallingLlm(script = emptyList()))
+
+        assertFalse("text-only engine routes to the TEXT path", textOnly is ToolCallingLlm)
+        assertTrue("both-interfaces engine routes to the AGENT path", both is ToolCallingLlm)
+    }
+
+    @Test
+    fun `renderToolCall and renderToolOutcome are self-contained name-labeled lines`() {
+        // Robust to multi-call turns: each line stands alone and is labeled by name
+        // (runAgent emits ALL ToolCalls of a turn before any ToolOutcome).
+        val call = ChatViewModel.renderToolCall("generate_image", buildJsonObject { put("prompt", "a cat") })
+        assertTrue("call line is backtick-labeled by name", call.contains("`[generate_image]`"))
+        assertTrue("call line is on its own line", call.startsWith("\n"))
+        assertTrue("call line includes the args", call.contains("a cat"))
+
+        val done = ChatViewModel.renderToolOutcome(
+            "generate_image",
+            ToolResult(success = true, result = JsonPrimitive("https://img/cat.png")),
+        )
+        assertTrue("outcome line is backtick-labeled by name", done.contains("`[generate_image]`"))
+        assertTrue("outcome line uses the arrow convention", done.contains("→"))
+        assertTrue("success renders done", done.contains("done"))
+
+        val failed = ChatViewModel.renderToolOutcome(
+            "generate_image",
+            ToolResult(success = false, result = JsonPrimitive("nope")),
+        )
+        assertTrue("failure renders failed", failed.contains("failed"))
     }
 }
