@@ -376,6 +376,101 @@ class FcLoopTest {
     }
 
     @Test
+    fun `runAgent feeds an execute failure back to the model and does NOT abort the loop`() = runTest {
+        // FIX 2: a discovered tool returning success=false is a MODEL-recoverable
+        // failure, not an offline error — the loop must feed the failure outcome
+        // back and keep going so the model can react, NOT short-circuit the flow.
+        val searchArgs = buildJsonObject { put("query", JsonPrimitive("do a thing")) }
+        val doArgs = buildJsonObject { put("x", JsonPrimitive(1)) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
+                listOf(toolCall("do_thing", doArgs)),
+                listOf(text("recovered")),
+            ),
+        )
+        val failure = ToolResult(success = false, result = JsonPrimitive("boom"))
+        val bridge = FakeToolBridge(
+            searchMap = mapOf("do a thing" to listOf(schema("do_thing"))),
+            executeFn = { _, _ -> failure },
+        )
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge)
+
+        val events = loop.runAgent("persona", emptyList(), "do a thing").toList()
+
+        // The failure outcome IS emitted (success=false carried through verbatim)...
+        val failOutcome = events.filterIsInstance<LlmEvent.ToolOutcome>()
+            .firstOrNull { it.name == "do_thing" }
+        assertTrue("a do_thing ToolOutcome was emitted", failOutcome != null)
+        assertEquals("the failure is carried back, not swallowed", false, failOutcome!!.result.success)
+        // ...AND the loop proceeded to the final text (it did NOT abort on failure).
+        assertTrue(
+            "the loop reached the final TextDelta after the tool failure",
+            events.contains(LlmEvent.TextDelta("recovered")),
+        )
+        // The discovered tool was executed exactly once.
+        assertEquals(1, bridge.executeCalls.size)
+        assertEquals("do_thing", bridge.executeCalls[0].first)
+    }
+
+    @Test
+    fun `runAgent does not abort on a missing search_tools query and feeds the failure back`() = runTest {
+        // FIX 1/3: search_tools called with NO query key. A blank query 400s the real
+        // backend; coercing it to "" then calling the bridge would abort the whole run.
+        // Instead the loop must emit a failure outcome, skip the bridge, and continue.
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall(ResidentTools.SEARCH_TOOLS, buildJsonObject { })),
+                listOf(text("ok")),
+            ),
+        )
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge)
+
+        val events = loop.runAgent("persona", emptyList(), "go").toList()
+
+        // The bridge was NEVER called with a blank/missing query.
+        assertTrue("bridge.searchTools must not be called for a missing query", bridge.searchCalls.isEmpty())
+        // A failure outcome for search_tools was emitted.
+        val outcome = events.filterIsInstance<LlmEvent.ToolOutcome>()
+            .firstOrNull { it.name == ResidentTools.SEARCH_TOOLS }
+        assertTrue("a search_tools ToolOutcome was emitted", outcome != null)
+        assertEquals("the malformed search call yields a failure outcome", false, outcome!!.result.success)
+        // The loop proceeded to the final text.
+        assertTrue("the loop reached the final TextDelta", events.contains(LlmEvent.TextDelta("ok")))
+    }
+
+    @Test
+    fun `runAgent treats a non-primitive search_tools query as a malformed-arg failure without throwing`() = runTest {
+        // FIX 1/3 (object-query variant): the model sent `query` as a JSON OBJECT.
+        // The old `.jsonPrimitive` access would THROW IllegalArgumentException and
+        // abort the run; the `as? JsonPrimitive` guard must treat it as a failure.
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(
+                    toolCall(
+                        ResidentTools.SEARCH_TOOLS,
+                        buildJsonObject { put("query", buildJsonObject { put("x", JsonPrimitive(1)) }) },
+                    ),
+                ),
+                listOf(text("ok")),
+            ),
+        )
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge)
+
+        // Must NOT throw on a JSON-object query.
+        val events = loop.runAgent("persona", emptyList(), "go").toList()
+
+        assertTrue("bridge.searchTools must not be called for an object query", bridge.searchCalls.isEmpty())
+        val outcome = events.filterIsInstance<LlmEvent.ToolOutcome>()
+            .firstOrNull { it.name == ResidentTools.SEARCH_TOOLS }
+        assertTrue("a search_tools ToolOutcome was emitted", outcome != null)
+        assertEquals("an object query is treated as the same failure", false, outcome!!.result.success)
+        assertTrue("the loop reached the final TextDelta", events.contains(LlmEvent.TextDelta("ok")))
+    }
+
+    @Test
     fun `buildAgentPrompt renders a TOOL turn with the Tool marker`() {
         val loop = FcLoop(FakeLocalLlm())
 

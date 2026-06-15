@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.fold
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * The on-device agent loop. Given a persona, the prior conversation, and a new
@@ -194,8 +194,27 @@ class FcLoop(
                 working = working + Turn(Role.ASSISTANT, "[called ${call.name}]")
 
                 if (call.name == ResidentTools.SEARCH_TOOLS) {
-                    val query = call.args["query"]?.jsonPrimitive?.content ?: ""
-                    val found = toolBridge.searchTools(query)
+                    // A small on-device model can misfire this arg (omit it, send it
+                    // blank, or send a JSON object/array). That's a MODEL error, not an
+                    // offline error — a blank query 400s the real backend (see
+                    // ToolBridgeClient.searchTools), and `.jsonPrimitive` would THROW on
+                    // a non-primitive. Guard both: emit a failure outcome, feed it back as
+                    // a TOOL turn, and let the model retry next turn — exactly like the
+                    // execute-failure path. (Do NOT abort the whole run.)
+                    val query = (call.args["query"] as? JsonPrimitive)?.contentOrNull
+                        ?.takeIf { it.isNotBlank() }
+                    if (query == null) {
+                        emit(
+                            LlmEvent.ToolOutcome(
+                                ResidentTools.SEARCH_TOOLS,
+                                ToolResult(success = false, result = JsonPrimitive("query required")),
+                            ),
+                        )
+                        working = working + Turn(Role.TOOL, "search_tools error: query required")
+                        continue // skip dispatching THIS call; the loop proceeds
+                    }
+                    // k is tied to the injection cap so the two can't silently drift.
+                    val found = toolBridge.searchTools(query, k = ResidentTools.MAX_INJECTED_SCHEMAS)
                     // TIERING — never dump the whole result set into the next turn.
                     injected = (injected + found)
                         .distinctBy { it.name }
@@ -214,15 +233,19 @@ class FcLoop(
                 } else {
                     val res = toolBridge.execute(call.name, call.args, operator)
                     emit(LlmEvent.ToolOutcome(call.name, res))
-                    working = working + Turn(
-                        Role.TOOL,
-                        "${call.name} → ${res.result?.toString() ?: "ok"}",
-                    )
+                    // Prefer the unquoted string content for the common string case so a
+                    // JsonPrimitive("hello") feeds back as `hello`, not `"hello"`, into the
+                    // prompt. (Emitted events are unchanged — this only affects prompt text.)
+                    val resultText = (res.result as? JsonPrimitive)?.contentOrNull
+                        ?: res.result?.toString() ?: "ok"
+                    working = working + Turn(Role.TOOL, "${call.name} → $resultText")
                 }
             }
             // Loop again: the model sees the appended tool results next turn.
         }
         // maxIterations exhausted — complete gracefully (do not hang, do not throw).
+        // TODO(3.3): the collector gets no terminal signal here; surface a "stopped at
+        // maxIterations" event/marker once tool-call/result rendering lands.
     }
 
     /** Role marker used in the assembled prompt ("User" / "Assistant" / "Tool"). */

@@ -23,6 +23,12 @@ import kotlinx.coroutines.flow.flow
  * (the `prompt` arg of each call, in order) for assertions.
  */
 class FakeToolCallingLlm(
+    /**
+     * WARNING: a FINITE [script] whose LAST entry contains a [LlmEvent.ToolCall] is
+     * REPEATED (not terminated) once the loop runs past it — end scripts with a
+     * pure-text turn to let the loop stop naturally. The maxIterations test relies
+     * on this repeat behavior intentionally.
+     */
     private val script: List<List<LlmEvent>>,
 ) : ToolCallingLlm {
 
