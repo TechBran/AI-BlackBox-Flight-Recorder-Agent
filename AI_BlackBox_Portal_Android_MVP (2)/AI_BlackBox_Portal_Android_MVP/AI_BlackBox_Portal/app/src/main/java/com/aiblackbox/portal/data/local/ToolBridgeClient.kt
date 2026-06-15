@@ -24,7 +24,7 @@ import kotlinx.serialization.json.JsonObject
  * from either endpoint surfaces as the [java.io.IOException] thrown by
  * [BlackBoxApi.post], which is allowed to propagate here.
  */
-class ToolBridgeClient(private val api: BlackBoxApi) {
+class ToolBridgeClient(private val api: BlackBoxApi) : ToolBridge {
 
     private val json get() = api.json
 
@@ -39,7 +39,7 @@ class ToolBridgeClient(private val api: BlackBoxApi) {
      * Do NOT pass a blank [query] — the backend answers 400 (which would
      * propagate as an IOException out of [BlackBoxApi.post]).
      */
-    suspend fun searchTools(query: String, k: Int = 5): List<ToolSchema> {
+    override suspend fun searchTools(query: String, k: Int): List<ToolSchema> {
         val body = json.encodeToString(
             ToolSearchRequest.serializer(),
             ToolSearchRequest(query = query, k = k),
@@ -57,9 +57,9 @@ class ToolBridgeClient(private val api: BlackBoxApi) {
      * nullable JsonElement (string, object, list, number, or null) — the caller
      * inspects/casts it as needed.
      */
-    suspend fun execute(
+    override suspend fun execute(
         tool: String,
-        params: JsonObject = JsonObject(emptyMap()),
+        params: JsonObject,
         operator: String,
     ): ToolResult {
         val body = json.encodeToString(
