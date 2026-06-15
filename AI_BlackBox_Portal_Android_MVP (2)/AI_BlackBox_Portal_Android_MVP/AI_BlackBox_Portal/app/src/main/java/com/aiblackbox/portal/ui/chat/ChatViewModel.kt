@@ -7,7 +7,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
+import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.data.local.LocalLlm
+import com.aiblackbox.portal.data.local.PersonaCache
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
@@ -27,7 +31,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
@@ -88,6 +94,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Built once the api is ready (initialize); gates LOCAL in the picker on a
     // disk-present, sha-verified model and fires a best-effort re-attest on open.
     private var providerPicker: ProviderPickerViewModel? = null
+
+    // ── On-device (local) engine seam (Task 2.4) ──
+    // The on-device generation engine, injected as a lazy provider so tests can
+    // supply a FakeLocalLlm. NULL in production: the concrete LiteRtEngine is
+    // Task 2.6, so until then sendViaLocalEngine() falls back to the 1.6
+    // placeholder. Settable so a host/builder (or a test) can wire an engine.
+    @VisibleForTesting
+    var localLlmProvider: (() -> LocalLlm)? = null
+
+    // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
+    // Built lazily off the application context the first time a local turn runs
+    // (needs the api, which is set in initialize()); cached thereafter.
+    private var personaCache: PersonaCache? = null
 
     // ── UI State ──
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
@@ -492,10 +511,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // Robotics: mission running → inject prompt instead of new stream
             // Matches Portal chat-send.js window.__erMissionActive check
             ChatRoute.ER_INJECT -> injectErPrompt(text)
-            // On-device (Gemma): safe placeholder until the Phase 2 engine lands.
+            // On-device (Gemma): run the turn on-device via the local engine.
             // Must NOT fall through to SSE (which would POST provider=local to the
-            // cloud and error). No network call.
-            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalPlaceholder(text)
+            // cloud and error). With no engine wired yet (production default until
+            // Task 2.6), sendViaLocalEngine() falls back to the 1.6 placeholder.
+            // No cloud network call on this path either way.
+            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text)
             ChatRoute.SSE -> {
                 // Block duplicate sends for non-robotics streaming (robotics handled above)
                 if (_chatState.value == ChatState.STREAMING) return
@@ -505,12 +526,127 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Run a turn on the on-device (`local`) engine — the Phase 2 replacement for
+     * [sendViaLocalPlaceholder]. NEVER touches the cloud SSE path.
+     *
+     * Engine seam: [localLlmProvider] is NULL in production (the concrete
+     * LiteRtEngine is Task 2.6), so with no engine wired we fall straight back to
+     * the unchanged 1.6 [sendViaLocalPlaceholder]. With an engine present we:
+     *   1. append the user message + a STREAMING assistant placeholder (the SAME
+     *      shape the SSE path uses), so the UI shows the identical streaming
+     *      affordance;
+     *   2. snapshot the conversation-so-far into [FcLoop.Turn]s, EXCLUDING the
+     *      just-appended user turn (it is passed as `text`) and the in-flight
+     *      assistant placeholder;
+     *   3. on [viewModelScope] (heavy work off the main thread via Dispatchers.IO)
+     *      fetch the persona from the cache, run [FcLoop.runTurn], and stream its
+     *      deltas into the SAME sink the SSE path uses ([updateLastMessage]);
+     *   4. on completion mark streaming done and persist the turn via the existing
+     *      save path ([saveConversation], tagged provider=local). The OFFLINE
+     *      QUEUE is Task 2.5 — a direct save is used now, structured so 2.5 can
+     *      swap the queue in at the [ChatViewModel.streamLocalTurn] save sink.
+     *
+     * The streaming + error handling lives in the pure [streamLocalTurn] so it is
+     * unit-testable without the AndroidViewModel; this method is the wiring shim.
+     */
+    private fun sendViaLocalEngine(text: String) {
+        val provider = localLlmProvider
+        if (provider == null) {
+            // No on-device engine wired yet (production default until Task 2.6).
+            sendViaLocalPlaceholder(text)
+            return
+        }
+        // Don't start a second local turn over a running one (mirrors SSE guard).
+        if (_chatState.value == ChatState.STREAMING) return
+
+        // 1. Append the user message + a streaming assistant placeholder, exactly
+        //    like sendViaSSE — same UiMessage shape, same _messages flow.
+        val userMsg = UiMessage(
+            role = "user",
+            content = text,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        val assistantMsg = UiMessage(
+            role = "assistant",
+            content = "",
+            isStreaming = true,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
+        _inputText.value = TextFieldValue()
+
+        // 2. History for the prompt = the conversation BEFORE this turn — exclude
+        //    the just-appended user turn AND the in-flight assistant placeholder.
+        val history = toFcHistory(_messages.value)
+
+        _chatState.value = ChatState.STREAMING
+        startBackgroundService("Generating on-device response...")
+
+        val op = currentOperator
+        val model = currentModel.ifBlank { null }
+        val cache = personaCacheOrBuild()
+
+        streamJob = viewModelScope.launch {
+            // Heavy work (persona fetch + native generation) off the main thread.
+            withContext(Dispatchers.IO) {
+                val persona = cache.get(op)
+                streamLocalTurn(
+                    fcLoop = FcLoop(provider()),
+                    persona = persona,
+                    history = history,
+                    text = text,
+                    operator = op,
+                    model = model,
+                    // 3. The SAME sink sendViaSSE uses — append each delta to the
+                    //    in-flight assistant message (identical rendering).
+                    sink = { content, streaming ->
+                        updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
+                    },
+                    // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
+                    saveSink = { req, _ -> persistLocalSave(req) },
+                )
+            }
+            // Generation finished (success or handled error) — leave streaming.
+            if (_chatState.value == ChatState.STREAMING) _chatState.value = ChatState.IDLE
+            stopBackgroundService()
+            persistHistory()
+        }
+    }
+
+    /** Build (once) or return the persona cache wired to this VM's api + context. */
+    private fun personaCacheOrBuild(): PersonaCache {
+        personaCache?.let { return it }
+        // PersonaSource is the LocalModelApi slice (mirrors ProviderPicker wiring).
+        val built = PersonaCache.fromContext(appContext, LocalModelApi(api!!))
+        personaCache = built
+        return built
+    }
+
+    /**
+     * Persist a completed on-device turn via the existing save path. Direct save
+     * for now (Task 2.5 replaces this body with the offline snapshot queue while
+     * the [streamLocalTurn] save sink stays the same). Tagged provider=local for
+     * traceability in logs; SaveRequest itself carries no provider field, matching
+     * the cloud save shape.
+     */
+    private fun persistLocalSave(request: SaveRequest) {
+        val repo = repository ?: return
+        viewModelScope.launch {
+            try {
+                repo.saveConversation(request)
+            } catch (e: Exception) {
+                Log.w(TAG, "local saveConversation failed (non-critical): ${e.message}")
+            }
+        }
+    }
+
+    /**
      * SAFE placeholder for the on-device `local` provider. Appends the user's
      * message plus a friendly assistant note and returns WITHOUT any network
-     * call — selecting LOCAL must never reach the cloud SSE path.
-     *
-     * TODO(Phase 2): replace with sendViaLocalEngine(...) — the real
-     * LiteRT-LM / function-calling loop that runs the turn on-device.
+     * call — selecting LOCAL must never reach the cloud SSE path. Used as the
+     * fallback by [sendViaLocalEngine] until the concrete engine lands (Task 2.6).
      */
     private fun sendViaLocalPlaceholder(text: String) {
         val userMsg = UiMessage(
@@ -1514,6 +1650,112 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             provider = provider,
             model = model,
         )
+
+        /** Provider tag for on-device turns (logging / save traceability). */
+        const val LOCAL_PROVIDER_ID = "local"
+
+        /**
+         * Friendly text appended to the (possibly partial) reply when the on-device
+         * engine faults mid-generation. Mirrors the SSE error path: surface a
+         * non-crashing, human message rather than a stack trace.
+         */
+        const val LOCAL_ENGINE_ERROR_TEXT =
+            "\n\n[on-device error — the local model could not finish this reply]"
+
+        /**
+         * Map the current UI conversation to [FcLoop.Turn]s for prompt assembly.
+         *
+         * Excludes anything that is NOT a settled user/assistant turn:
+         *  - the in-flight streaming assistant placeholder (still being filled);
+         *  - any empty-content turns (e.g. the freshly-appended placeholder).
+         *
+         * The just-appended user message is also dropped here because the caller
+         * passes it separately as the turn's `text`; it is the LAST user message
+         * and is excluded by trimming the final user turn. Roles other than
+         * "user"/"assistant" (system/tool placeholders) are ignored.
+         */
+        fun toFcHistory(messages: List<UiMessage>): List<FcLoop.Turn> {
+            // Drop the in-flight assistant placeholder (last, streaming/empty) and
+            // the just-appended user message (the current turn's text) from the
+            // tail before mapping.
+            var end = messages.size
+            // 1. Trailing in-flight assistant placeholder.
+            if (end > 0) {
+                val last = messages[end - 1]
+                if (last.role == "assistant" && (last.isStreaming || last.content.isEmpty())) {
+                    end--
+                }
+            }
+            // 2. The current turn's user message (now the trailing entry).
+            if (end > 0 && messages[end - 1].role == "user") {
+                end--
+            }
+            return messages.subList(0, end).mapNotNull { m ->
+                when (m.role) {
+                    "user" -> FcLoop.Turn(FcLoop.Role.USER, m.content)
+                    "assistant" -> if (m.content.isEmpty() || m.isStreaming) null
+                        else FcLoop.Turn(FcLoop.Role.ASSISTANT, m.content)
+                    else -> null
+                }
+            }
+        }
+
+        /**
+         * PURE core of [sendViaLocalEngine]: run one on-device turn and stream its
+         * deltas into [sink], then persist via [saveSink]. Extracted (like
+         * [routeFor] / [buildSaveRequest]) so it is unit-testable without the
+         * AndroidViewModel — production wires the real `updateLastMessage` /
+         * `saveConversation` into [sink] / [saveSink].
+         *
+         * Contract:
+         *  - Collects [FcLoop.runTurn]'s delta Flow, accumulating into a running
+         *    buffer and calling `sink(runningText, isStreaming=true)` per delta —
+         *    EXACTLY the SSE token path.
+         *  - On normal completion: `sink(fullText, isStreaming=false)` then
+         *    `saveSink(SaveRequest, provider="local")`.
+         *  - On a mid-stream throw (runTurn's Flow can fault): caught via `.catch`,
+         *    appends [LOCAL_ENGINE_ERROR_TEXT] to whatever streamed so far,
+         *    `sink(partial+error, isStreaming=false)`, and DOES NOT save (mirrors
+         *    the SSE error path). Never rethrows — the turn does not crash.
+         *  - Never reaches SSE.
+         */
+        suspend fun streamLocalTurn(
+            fcLoop: FcLoop,
+            persona: String,
+            history: List<FcLoop.Turn>,
+            text: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ) {
+            val acc = StringBuilder()
+            var faulted = false
+            fcLoop.runTurn(persona, history, text)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { delta ->
+                    acc.append(delta)
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return
+            // Normal completion: finalize the stream + persist the turn.
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+        }
 
         private val provJson = Json { ignoreUnknownKeys = true; isLenient = true }
         fun parseProvenance(raw: String): Provenance? = try {

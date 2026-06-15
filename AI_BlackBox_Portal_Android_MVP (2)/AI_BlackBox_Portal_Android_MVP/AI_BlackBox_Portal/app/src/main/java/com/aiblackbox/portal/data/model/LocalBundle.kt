@@ -110,9 +110,10 @@ data class AutonomyResponse(
  *
  * The persona / tone / anti-sycophancy system prompt the cloud chat path uses,
  * built server-side from `behavioral_core` so the on-device (`local`) provider
- * reasons with the SAME persona. `version` is a short content hash the app
- * caches alongside the prompt so a later online fetch can detect a changed
- * prompt and refresh the cache (see PersonaCache).
+ * reasons with the SAME persona. `version` is a short content hash the app caches
+ * alongside the prompt for staleness display / a possible future conditional
+ * fetch; the current cache does NOT consult it — [PersonaCache] simply overwrites
+ * the stored {prompt, version} on every successful online fetch (see PersonaCache).
  */
 @Serializable
 data class PersonaResponse(

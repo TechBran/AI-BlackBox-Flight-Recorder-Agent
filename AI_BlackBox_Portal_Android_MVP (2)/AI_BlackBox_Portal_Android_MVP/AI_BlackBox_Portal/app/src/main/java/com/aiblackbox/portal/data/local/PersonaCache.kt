@@ -62,13 +62,6 @@ class PersonaCache(
         }
     }
 
-    /**
-     * The cached persona ({prompt, version}) for [operator] without any network
-     * call, or null if none was ever fetched. Lets callers read the cached
-     * `version` (e.g. to show staleness) without forcing a fetch.
-     */
-    fun getCached(operator: String): PersonaResponse? = store.load(operator)
-
     companion object {
         /**
          * The persona used ONLY when the prompt has never been fetched AND the
