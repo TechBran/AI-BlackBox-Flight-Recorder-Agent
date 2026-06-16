@@ -68,6 +68,24 @@ class ResidentToolsTest {
         return req.map { (it as JsonPrimitive).content }.toSet()
     }
 
+    /** The `properties` object of a schema's parameters (empty object if absent). */
+    private fun propertiesOf(name: String): JsonObject {
+        val params: JsonObject = ResidentTools.intentActions().first { it.name == name }.parameters
+        return params["properties"] as? JsonObject ?: JsonObject(emptyMap())
+    }
+
+    /** The declared JSON Schema `type` of a single property, or null if unset. */
+    private fun typeOf(action: String, property: String): String? {
+        val prop = propertiesOf(action)[property] as? JsonObject ?: return null
+        return (prop["type"] as? JsonPrimitive)?.content
+    }
+
+    /** Whether the schema's parameters declare a `required` key at all. */
+    private fun hasRequiredKey(name: String): Boolean {
+        val params: JsonObject = ResidentTools.intentActions().first { it.name == name }.parameters
+        return params["required"] != null
+    }
+
     @Test
     fun `send_email requires to`() {
         assertTrue("send_email lists 'to' as required", "to" in requiredOf("send_email"))
@@ -88,5 +106,69 @@ class ResidentToolsTest {
     @Test
     fun `flashlight_on has no required params`() {
         assertTrue("flashlight_on must have an empty/absent required array", requiredOf("flashlight_on").isEmpty())
+    }
+
+    /**
+     * The EXACT required-param set for every intent action that declares required
+     * params. Closes code-review note M2 (prior tests spot-checked only 4 of 16).
+     */
+    private val expectedRequiredByAction: Map<String, Set<String>> = mapOf(
+        "send_email" to setOf("to"),
+        "show_map" to setOf("query"),
+        "create_calendar_event" to setOf("datetime"),
+        "open_url" to setOf("url"),
+        "dial" to setOf("number"),
+        "send_sms" to setOf("number"),
+        "set_alarm" to setOf("hour", "minutes"),
+        "set_timer" to setOf("seconds"),
+        "share_text" to setOf("text"),
+        "web_search" to setOf("query"),
+    )
+
+    @Test
+    fun `every required-param action declares EXACTLY its expected required set`() {
+        for ((action, expected) in expectedRequiredByAction) {
+            assertEquals("$action required set", expected, requiredOf(action))
+        }
+    }
+
+    /** The intent actions that take no required params (optional-only or none). */
+    private val noRequiredActions = setOf(
+        "flashlight_on", "flashlight_off", "open_wifi_settings",
+        "take_photo", "create_contact", "open_settings_panel",
+    )
+
+    @Test
+    fun `no-required actions have an absent or empty required array`() {
+        for (action in noRequiredActions) {
+            // Absent `required` key OR a present-but-empty array both satisfy.
+            assertTrue(
+                "$action must have no required params (absent key or empty array)",
+                !hasRequiredKey(action) || requiredOf(action).isEmpty(),
+            )
+            assertTrue("$action required set must be empty", requiredOf(action).isEmpty())
+        }
+    }
+
+    @Test
+    fun `set_alarm and set_timer integer params are typed integer`() {
+        assertEquals("set_alarm.hour type", "integer", typeOf("set_alarm", "hour"))
+        assertEquals("set_alarm.minutes type", "integer", typeOf("set_alarm", "minutes"))
+        assertEquals("set_timer.seconds type", "integer", typeOf("set_timer", "seconds"))
+    }
+
+    @Test
+    fun `open_settings_panel which enum is exactly the 12 expected values`() {
+        val whichProp = propertiesOf("open_settings_panel")["which"] as? JsonObject
+        assertTrue("open_settings_panel must declare a 'which' property", whichProp != null)
+        val enumArr = whichProp!!["enum"] as? JsonArray
+        assertTrue("'which' must declare an enum", enumArr != null)
+        val values = enumArr!!.map { (it as JsonPrimitive).content }.toSet()
+        val expected = setOf(
+            "wifi", "bluetooth", "location", "sound", "display", "battery",
+            "nfc", "airplane", "data", "storage", "apps", "settings",
+        )
+        assertEquals("'which' enum has 12 entries", 12, enumArr.size)
+        assertEquals("'which' enum values", expected, values)
     }
 }

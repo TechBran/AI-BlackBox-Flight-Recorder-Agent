@@ -23,6 +23,30 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
     <!-- Overlay permission for floating bubble -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <!-- Alarm clock access for the set_alarm/set_timer on-device intent actions -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+
+    <!-- Package-visibility (Android 11+) for the implicit intents fired by the
+         on-device intent actuator (IntentActuator). Declared at top level so any
+         future resolveActivity()/queryIntentActivities() can see these targets.
+         Settings intents (e.g. ACTION_WIFI_SETTINGS) need no entry — they resolve
+         to the always-visible system settings package. -->
+    <queries>
+        <!-- Implicit intents fired by the on-device intent actuator (IntentActuator) -->
+        <intent><action android:name="android.intent.action.DIAL" /><data android:scheme="tel" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="geo" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="https" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="http" /></intent>
+        <intent><action android:name="android.intent.action.SENDTO" /><data android:scheme="smsto" /></intent>
+        <intent><action android:name="android.intent.action.SENDTO" /><data android:scheme="mailto" /></intent>
+        <intent><action android:name="android.intent.action.SEND" /><data android:mimeType="text/plain" /></intent>
+        <intent><action android:name="android.intent.action.INSERT" /><data android:mimeType="vnd.android.cursor.dir/event" /></intent>
+        <intent><action android:name="android.intent.action.INSERT" /><data android:mimeType="vnd.android.cursor.dir/raw_contact" /></intent>
+        <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+        <intent><action android:name="android.intent.action.WEB_SEARCH" /></intent>
+        <intent><action android:name="android.intent.action.SET_ALARM" /></intent>
+        <intent><action android:name="android.intent.action.SET_TIMER" /></intent>
+    </queries>
 
     <application
         android:allowBackup="true"
