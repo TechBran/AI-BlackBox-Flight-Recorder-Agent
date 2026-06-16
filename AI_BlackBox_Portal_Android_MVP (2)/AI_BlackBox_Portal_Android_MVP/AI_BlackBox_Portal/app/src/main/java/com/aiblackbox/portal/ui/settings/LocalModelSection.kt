@@ -53,9 +53,20 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
  * Stateless w.r.t. construction: the caller hands in a [LocalModelViewModel]
  * (built via [LocalModelViewModel.fromContext]) and this Composable just
  * observes [LocalModelViewModel.state] + dispatches actions.
+ *
+ * The "Enable Accessibility" CTA (Phase 4.1) is wired by the screen: it passes
+ * [accessibilityEnabled] (read from the live
+ * `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` setting → the pure
+ * [com.aiblackbox.portal.overlay.isAccessibilityServiceEnabled] helper) and an
+ * [onEnableAccessibility] lambda that deep-links to system Accessibility
+ * settings. Both default to inert so previews/older callers still compile.
  */
 @Composable
-fun LocalModelSection(viewModel: LocalModelViewModel) {
+fun LocalModelSection(
+    viewModel: LocalModelViewModel,
+    accessibilityEnabled: Boolean = false,
+    onEnableAccessibility: () -> Unit = {},
+) {
     val state by viewModel.state.collectAsState()
 
     Column(Modifier.fillMaxWidth()) {
@@ -134,23 +145,37 @@ fun LocalModelSection(viewModel: LocalModelViewModel) {
 
         Spacer(Modifier.height(12.dp))
 
-        // ── Accessibility CTA (inert — Phase 4 wires it) ─────────────────
+        // ── Accessibility CTA (Phase 4.1: deep-links to system settings) ──
+        // Tapping opens the system Accessibility settings list (Android does not
+        // reliably support deep-linking to a single service's toggle). The label
+        // reflects whether our service is currently enabled.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(RadiusMd))
-                .background(Neutral200.copy(alpha = 0.5f))
-                .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
+                .background(
+                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.12f)
+                    else Neutral200.copy(alpha = 0.5f),
+                )
+                .border(
+                    1.dp,
+                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.5f) else GlassBorder,
+                    RoundedCornerShape(RadiusMd),
+                )
+                .clickable(onClick = onEnableAccessibility)
                 .padding(12.dp),
         ) {
             Column {
                 Text(
-                    "Enable Accessibility",
+                    if (accessibilityEnabled) "Accessibility Enabled" else "Enable Accessibility",
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                    color = Neutral500,
+                    color = if (accessibilityEnabled) SolidGreen else BbxWhite,
                 )
                 Text(
-                    "Required for phone control (coming soon).",
+                    if (accessibilityEnabled)
+                        "Phone control is allowed. Tap to manage in system settings."
+                    else
+                        "Required for phone control. Tap to enable in system settings.",
                     style = MaterialTheme.typography.labelSmall,
                     color = Neutral500,
                 )

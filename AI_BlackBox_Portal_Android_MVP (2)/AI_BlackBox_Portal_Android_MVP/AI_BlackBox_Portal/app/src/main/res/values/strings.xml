@@ -1,1 +1,5 @@
-<resources><string name="app_name">AI BlackBox Portal</string></resources>
+<resources>
+    <string name="app_name">AI BlackBox Portal</string>
+    <string name="a11y_service_label">BlackBox Phone Control</string>
+    <string name="a11y_service_description">Lets the on-device BlackBox agent read the screen and perform taps/typing on your behalf when you ask it to control your phone. You can turn this off anytime.</string>
+</resources>

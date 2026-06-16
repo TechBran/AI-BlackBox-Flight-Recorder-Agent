@@ -53,6 +53,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.view.HapticFeedbackConstants
+import com.aiblackbox.portal.overlay.isAccessibilityServiceEnabled
 import androidx.core.content.edit
 import androidx.core.graphics.set
 import androidx.core.net.toUri
@@ -618,7 +619,27 @@ fun SettingsSheet(
                     localModelVm.refresh()
                     onDispose { localModelVm.dispose() }
                 }
-                LocalModelSection(viewModel = localModelVm)
+                // Accessibility CTA wiring (Phase 4.1): read the live enabled-
+                // services setting and parse it with the pure helper; the CTA
+                // deep-links to the system Accessibility settings list.
+                val a11yEnabled = isAccessibilityServiceEnabled(
+                    android.provider.Settings.Secure.getString(
+                        context.contentResolver,
+                        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    ),
+                    context.packageName,
+                    "com.aiblackbox.portal.overlay.BlackBoxA11yService",
+                )
+                LocalModelSection(
+                    viewModel = localModelVm,
+                    accessibilityEnabled = a11yEnabled,
+                    onEnableAccessibility = {
+                        context.startActivity(
+                            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    },
+                )
                 Spacer(Modifier.height(20.dp))
             }
 

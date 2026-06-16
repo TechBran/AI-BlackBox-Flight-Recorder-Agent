@@ -55,6 +55,24 @@
             android:foregroundServiceType="mediaProjection|microphone"
             android:exported="false" />
 
+        <!-- Consented on-device phone-control AccessibilityService (Phase 4).
+             BIND_ACCESSIBILITY_SERVICE is a system-enforced bind permission —
+             the android:permission attribute IS the declaration (no
+             <uses-permission> needed). User enables it from system Accessibility
+             settings; the in-app CTA deep-links there. -->
+        <service
+            android:name=".overlay.BlackBoxA11yService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:label="@string/a11y_service_label">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <activity
             android:name=".PortalActivity"
             android:exported="false"
