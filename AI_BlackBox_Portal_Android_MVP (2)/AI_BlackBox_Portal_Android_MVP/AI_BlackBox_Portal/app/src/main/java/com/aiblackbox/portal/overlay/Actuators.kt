@@ -104,12 +104,20 @@ class Actuators(
         gate("tap", label, isPasswordTarget)?.let { return it }
 
         return try {
-            if (node.isClickable) {
-                val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            // Device finding (4.8): the model often targets a non-clickable leaf
+            // (e.g. the "☰" TextView) whose CLICK handler lives on a parent
+            // container. A coordinate-gesture at the leaf's center is unreliable
+            // (hits nothing visible). So prefer a SEMANTIC click on the node itself
+            // or its nearest clickable ancestor (ACTION_CLICK is reliable, no
+            // coordinates); only fall back to a gesture when nothing in the
+            // ancestor chain is clickable.
+            val clickTarget = clickableSelfOrAncestor(node)
+            if (clickTarget != null) {
+                val ok = clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 logAction("tap", nodeId, ok)
                 ActuatorResult(ok, if (ok) "tapped node $nodeId" else "click action rejected for node $nodeId")
             } else {
-                // Not clickable: tap the bounds center as a touch gesture.
+                // No clickable self-or-ancestor: last-resort touch gesture at center.
                 val rect = android.graphics.Rect()
                 node.getBoundsInScreen(rect)
                 val cx = rect.centerX()
@@ -123,6 +131,26 @@ class Actuators(
             logActionError("tap", nodeId, e)
             ActuatorResult(false, "tap failed for node $nodeId (${e.javaClass.simpleName})")
         }
+    }
+
+    /**
+     * Return [node] if it is itself clickable, else its nearest clickable ANCESTOR
+     * (walking up `parent`, bounded by [maxDepth] hops so we never climb to the
+     * whole window/root). Returns null if nothing in the chain is clickable.
+     * Lets a tap on a non-clickable leaf (a label/icon) activate the real button.
+     */
+    private fun clickableSelfOrAncestor(
+        node: AccessibilityNodeInfo,
+        maxDepth: Int = 6,
+    ): AccessibilityNodeInfo? {
+        var cur: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (cur != null && depth <= maxDepth) {
+            if (cur.isClickable) return cur
+            cur = cur.parent
+            depth++
+        }
+        return null
     }
 
     /**
