@@ -5,6 +5,7 @@ import com.aiblackbox.portal.data.model.ToolResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -113,9 +114,8 @@ class AndroidPhoneController(
         }
     }
 
-    /** Read `node_id` (accept "node_id" or "nodeId") as an int, or null if absent/non-int. */
-    private fun nodeId(args: JsonObject): Int? =
-        (args["node_id"] ?: args["nodeId"])?.jsonPrimitive?.intOrNull
+    /** Read `node_id` (accept "node_id" or "nodeId") via the tolerant [parseNodeId]. */
+    private fun nodeId(args: JsonObject): Int? = parseNodeId(args)
 
     /** Map an [ActuatorResult] to a [ToolResult], carrying ONLY the actuator's own detail. */
     private fun ActuatorResult.toToolResult(): ToolResult =
@@ -147,4 +147,21 @@ class AndroidPhoneController(
                 Actuators.fromService(mode, confirm, credentialHandoff),
             )
     }
+}
+
+/**
+ * PURE, tolerant parse of the `node_id` arg (accepts "node_id" or "nodeId").
+ *
+ * On-device device verification (4.8) surfaced that Gemma emits JSON numbers with
+ * a decimal point — e.g. `{"node_id": 6.0}` — so a strict `intOrNull` (which does
+ * `"6.0".toIntOrNull()` → null) silently dropped every tap/type. We therefore
+ * accept an int (`6`), a float (`6.0` → 6 via [doubleOrNull]), and a string form
+ * (`"6"`/`"6.0"`). Returns null only when truly absent / non-numeric. Top-level so
+ * it is JVM-unit-testable without the framework actuators.
+ */
+internal fun parseNodeId(args: JsonObject): Int? {
+    val prim = (args["node_id"] ?: args["nodeId"])?.jsonPrimitive ?: return null
+    prim.intOrNull?.let { return it }
+    prim.doubleOrNull?.let { return it.toInt() }
+    return prim.contentOrNull?.toDoubleOrNull()?.toInt()
 }
