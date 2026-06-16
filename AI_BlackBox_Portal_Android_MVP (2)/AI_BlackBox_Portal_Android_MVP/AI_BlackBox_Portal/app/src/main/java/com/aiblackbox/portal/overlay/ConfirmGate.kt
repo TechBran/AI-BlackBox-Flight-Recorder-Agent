@@ -141,3 +141,95 @@ fun describeAction(action: String, targetLabel: String?): String {
         }
     }
 }
+
+// =============================================================================
+// CREDENTIAL HANDOFF (Phase 4, Task 4.7)
+// =============================================================================
+
+/**
+ * What the actuator should do when the model tries to fill a `type` target.
+ *
+ * The whole point of Task 4.7: a password field gets a *graceful handoff* rather
+ * than the bare 4.3 refusal. The model's attempted text is DISCARDED and the USER
+ * is asked to type the secret themselves (or, once wired, the system autofills it
+ * from a saved credential). The password therefore reaches the model in NEITHER
+ * direction — read_screen redacts it (4.2) and the model's attempted text is never
+ * typed here (4.7).
+ */
+enum class CredentialAction {
+    /** Not a password target → the model's text is typed normally (the 4.3 path). */
+    TYPE_NORMAL,
+
+    /**
+     * Password target WITH a saved credential → the system fills it (Credential
+     * Manager / Autofill). DEFERRED for v1 — see [credentialDecision]; the
+     * actuator currently treats this like [USER_HANDOFF] so logins still work.
+     */
+    SYSTEM_AUTOFILL,
+
+    /**
+     * Password target with NO saved credential → hand off to the USER: discard the
+     * model's text, prompt the user to type the secret themselves, then resume.
+     */
+    USER_HANDOFF,
+}
+
+/**
+ * PURE: decide how to fill a `type` target.
+ *
+ * - not a password target → [CredentialAction.TYPE_NORMAL] (unchanged 4.3 path).
+ * - password target + a saved credential → [CredentialAction.SYSTEM_AUTOFILL].
+ * - password target + no saved credential → [CredentialAction.USER_HANDOFF].
+ *
+ * NOTE (v1): the call-site passes `hasSavedCredential = false` always — Credential
+ * Manager autofill is DEFERRED, so every password resolves to [USER_HANDOFF]. The
+ * [SYSTEM_AUTOFILL] branch + the parameter are kept for that follow-up and are
+ * unit-tested so the decision is correct the day autofill lands.
+ *
+ * This function NEVER sees the model's attempted text — it cannot, by signature.
+ */
+fun credentialDecision(isPasswordTarget: Boolean, hasSavedCredential: Boolean): CredentialAction =
+    when {
+        !isPasswordTarget -> CredentialAction.TYPE_NORMAL
+        hasSavedCredential -> CredentialAction.SYSTEM_AUTOFILL
+        else -> CredentialAction.USER_HANDOFF
+    }
+
+/**
+ * The seam through which the actuator hands a password entry back to the USER.
+ *
+ * When the model tries to fill a password field, the actuator DISCARDS the model's
+ * attempted text and calls [requestUserEntry], which shows the user a SYSTEM
+ * overlay ("Please enter your password in the field, then tap Done") and SUSPENDS
+ * until the user finishes (`true`) or cancels (`false`). The user types the secret
+ * directly into the target app's own field — it never passes through the model in
+ * either direction.
+ *
+ * SECURITY — [fieldDescription] MUST be GENERIC ("the password field"): it must
+ * NEVER carry the model's attempted text or any field content. The production
+ * implementation ([OverlayCredentialHandoff]) is a SYSTEM overlay because the user
+ * is in another app when the agent drives; tests substitute a fake. It fails SAFE
+ * (returns `false`) on any error or when un-wired.
+ */
+interface CredentialHandoff {
+    /**
+     * Prompt the user to enter their credential directly into the focused field.
+     * [fieldDescription] is a GENERIC label (e.g. "the password field") — never the
+     * model's text. Suspends until the user taps Done (`true`) or Cancel (`false`).
+     */
+    suspend fun requestUserEntry(fieldDescription: String): Boolean
+}
+
+/**
+ * The default [CredentialHandoff] for un-wired [Actuators] (existing call-sites /
+ * tests): auto-DECLINES. This is the SAFE inert default — an un-wired actuator can
+ * never silently let a password entry proceed; the production wiring (ChatViewModel)
+ * supplies the real [OverlayCredentialHandoff]. It also never receives, and so can
+ * never leak, the model's attempted text (the actuator discards it before calling).
+ */
+internal object AutoDeclineCredentialHandoff : CredentialHandoff {
+    override suspend fun requestUserEntry(fieldDescription: String): Boolean = false
+}
+
+/** A GENERIC, content-free description for the credential-handoff prompt (never the model's text). */
+const val CREDENTIAL_FIELD_DESCRIPTION: String = "the password field"

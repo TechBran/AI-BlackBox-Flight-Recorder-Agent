@@ -33,14 +33,16 @@ import android.view.accessibility.AccessibilityNodeInfo
  * enabled"` and a missing node yields `success=false, detail="node N not found"`.
  *
  * ## Safety floors enforced HERE
- * - [type] REFUSES to type into a password field (see [type]). The proper
- *   credential handoff is Task 4.7; 4.3 must never set text on a secret field.
+ * - [type] never sets text on a password field. Instead of the bare 4.3 refusal,
+ *   it now performs the CREDENTIAL HANDOFF (Task 4.7): the model's attempted text
+ *   is DISCARDED and the USER is asked to type the secret directly into the field
+ *   (see [type] / [credentialHandoff]). The password reaches the model in NEITHER
+ *   direction — read_screen redacts it (4.2) and the model's text is never typed.
  * - The autonomy confirm-gate (Task 4.6) is enforced HERE for high-consequence
  *   `tap`/`type` actions: in [AutonomyMode.PERMISSION] the actuator asks [confirm]
  *   (the user) BEFORE firing a send/pay/delete/post/install tap or a sensitive
  *   type, and aborts with `"user declined"` if denied; in [AutonomyMode.YOLO]
- *   high-consequence actions run immediately. Benign actions never gate. The
- *   credential handoff (4.7) layers on after.
+ *   high-consequence actions run immediately. Benign actions never gate.
  *
  * ## Logging discipline (leak vector)
  * Logs emit ONLY `nodeId` / action name / coarse result detail. They MUST NEVER
@@ -61,11 +63,16 @@ import android.view.accessibility.AccessibilityNodeInfo
  * @param confirm the user-confirmation seam for high-consequence actions in
  *   Permission mode (prod: [OverlayConfirmUi]; default auto-approve no-op so
  *   un-wired call-sites are unaffected).
+ * @param credentialHandoff the seam that asks the USER to type a password directly
+ *   into the field when the model targets a password field (Task 4.7; prod:
+ *   [OverlayCredentialHandoff]). Default [AutoDeclineCredentialHandoff] auto-declines,
+ *   so an un-wired call-site fails SAFE (password entry never silently proceeds).
  */
 class Actuators(
     private val service: () -> BlackBoxA11yService?,
     private val mode: () -> AutonomyMode = { AutonomyMode.YOLO },
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
+    private val credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
 ) {
 
     /**
@@ -121,35 +128,54 @@ class Actuators(
     /**
      * Set [text] on the editable node with the given `node_id`.
      *
-     * **HARD SAFETY FLOOR:** if the resolved node is a password field
-     * ([UiTreeReader.isPasswordField] over `isPassword`+`inputType`), this
-     * REFUSES — it returns `success=false, detail="refused: password field — use
-     * credential handoff"` and does NOT set any text. The proper path for
-     * secrets is the credential handoff (Task 4.7); 4.3 never types into a
-     * password field.
+     * **CREDENTIAL HANDOFF (Task 4.7) — HARD SAFETY FLOOR:** if the resolved node
+     * is a password field ([UiTreeReader.isPasswordField] over
+     * `isPassword`+`inputType`), this NEVER types the model's [text]. Per
+     * [credentialDecision] (with `hasSavedCredential = false` — Credential Manager
+     * autofill is DEFERRED) it takes the USER HANDOFF: the model's attempted [text]
+     * is DISCARDED on the floor and [credentialHandoff] asks the USER to type their
+     * password directly into the field. On success → `success=true, "user entered
+     * their credential"` (the model continues, e.g. taps Sign In next); on
+     * decline/cancel → `success=false, "user declined credential entry"`. The model
+     * learns the password in NEITHER direction.
      *
-     * The [text] argument is NEVER logged (leak vector) — only the nodeId,
-     * action, and result. It is likewise NEVER passed into the autonomy confirm
-     * message (4.6): the gate is fed the FIELD label, never the typed text.
+     * The [text] argument is NEVER logged (leak vector), NEVER passed into the
+     * autonomy confirm message (4.6), and — critically for 4.7 — NEVER passed into
+     * the handoff prompt: the handoff is fed only the GENERIC
+     * [CREDENTIAL_FIELD_DESCRIPTION], and for a password target [text] is discarded
+     * before the handoff is even called.
      *
-     * **Autonomy gate (4.6):** a password type is REFUSED before the gate (the
-     * 4.3 floor below), so it never reaches actuation. A non-password type is
-     * benign and does not gate today; the gate call is present so any FUTURE
-     * sensitive non-password type is covered by the same Permission-mode confirm.
+     * **Autonomy gate (4.6):** a password type never reaches the gate (it diverts to
+     * the handoff above). A non-password type is benign and does not gate today; the
+     * gate call is present so any FUTURE sensitive non-password type is covered by
+     * the same Permission-mode confirm.
      */
     suspend fun type(nodeId: Int, text: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
         val node = UiTreeReader.findActionableNode(svc.rootInActiveWindow, nodeId)
             ?: return nodeNotFound(nodeId)
 
-        return try {
-            // SAFETY FLOOR (4.3): refuse password fields outright, BEFORE the gate.
-            // A secret type never reaches actuation OR a confirm message.
-            val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
-            if (isPasswordTarget) {
-                logAction("type(REFUSED:password)", nodeId, false)
-                return ActuatorResult(false, "refused: password field — use credential handoff")
+        val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
+        when (credentialDecision(isPasswordTarget, hasSavedCredential = false)) {
+            // SAFETY FLOOR (4.7): a password target NEVER types the model's text.
+            // Discard it and hand entry back to the user. SYSTEM_AUTOFILL is
+            // DEFERRED (Credential Manager picker) — for v1 it shares the handoff
+            // path so logins still work, and is unreachable today because the
+            // call-site passes hasSavedCredential = false.
+            CredentialAction.USER_HANDOFF, CredentialAction.SYSTEM_AUTOFILL -> {
+                // `text` is NEVER read, logged, or forwarded — it is discarded here.
+                logAction("type(credential-handoff)", nodeId, true)
+                val entered = credentialHandoff.requestUserEntry(CREDENTIAL_FIELD_DESCRIPTION)
+                return if (entered) {
+                    ActuatorResult(true, "user entered their credential")
+                } else {
+                    ActuatorResult(false, "user declined credential entry")
+                }
             }
+            CredentialAction.TYPE_NORMAL -> { /* fall through to the normal type path */ }
+        }
+
+        return try {
             // Autonomy gate for a non-password type. Label is the field's text
             // (the FIELD name/placeholder), never the value being typed.
             gate("type", node.text?.toString(), isPasswordTarget = false)?.let { return it }
@@ -355,11 +381,15 @@ class Actuators(
          *   the pre-4.6 behavior; the real wiring (ChatViewModel) passes the safe
          *   reader.
          * @param confirm the user-confirmation seam (prod: [OverlayConfirmUi]).
+         * @param credentialHandoff the password-entry handoff seam (Task 4.7; prod:
+         *   [OverlayCredentialHandoff]). Default auto-declines so an un-wired call
+         *   fails SAFE.
          */
         fun fromService(
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
-        ): Actuators = Actuators({ BlackBoxA11yService.instance }, mode, confirm)
+            credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
+        ): Actuators = Actuators({ BlackBoxA11yService.instance }, mode, confirm, credentialHandoff)
     }
 }
 

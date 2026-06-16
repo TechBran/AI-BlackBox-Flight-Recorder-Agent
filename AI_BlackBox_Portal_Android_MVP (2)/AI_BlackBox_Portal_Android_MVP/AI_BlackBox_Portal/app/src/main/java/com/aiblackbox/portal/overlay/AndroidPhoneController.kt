@@ -39,9 +39,16 @@ import kotlinx.serialization.json.jsonPrimitive
  * high-consequence action the user declines comes back as a normal
  * `success=false, "user declined"` [ToolResult] the model can react to.
  *
+ * ## Credential handoff (4.7)
+ * Likewise enforced INSIDE [Actuators.type]: a `type` into a password field never
+ * sets the model's text — the text is discarded and the user is asked to type the
+ * secret directly via [CredentialHandoff]. The model sees only a generic
+ * `"user entered their credential"` / `"user declined credential entry"` result;
+ * the password reaches it in neither direction.
+ *
  * @param reader the redacting UI-tree reader (prod: [UiTreeReader.fromService]).
  * @param actuators the gesture actuators (prod: [Actuators.fromService], wired
- *   with the autonomy mode + overlay confirm).
+ *   with the autonomy mode + overlay confirm + credential handoff).
  */
 class AndroidPhoneController(
     private val reader: UiTreeReader,
@@ -67,9 +74,11 @@ class AndroidPhoneController(
                         ?: return ToolResult(false, JsonPrimitive("node_id required"))
                     val text = args["text"]?.jsonPrimitive?.contentOrNull
                         ?: return ToolResult(false, JsonPrimitive("text required"))
-                    // Actuators.type REFUSES password fields (hard safety floor) and
-                    // never logs/echoes the typed text — we forward it verbatim and
-                    // do NOT put it in the result detail.
+                    // Actuators.type performs the CREDENTIAL HANDOFF (4.7) on a
+                    // password field: it DISCARDS this `text` and asks the user to
+                    // type the secret themselves. For a non-password field it sets
+                    // the text normally. Either way the typed text is never logged or
+                    // echoed into the result detail — we forward it verbatim.
                     actuators.type(nodeId, text).toToolResult()
                 }
 
@@ -124,11 +133,18 @@ class AndroidPhoneController(
          *   ONLY so an un-wired call keeps pre-4.6 behavior; ChatViewModel supplies
          *   the safe reader.
          * @param confirm the user-confirmation seam (prod: [OverlayConfirmUi]).
+         * @param credentialHandoff the password-entry handoff seam (Task 4.7; prod:
+         *   [OverlayCredentialHandoff]). Default auto-declines so an un-wired call
+         *   fails SAFE — a password entry never silently proceeds.
          */
         fun fromService(
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
+            credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
         ): AndroidPhoneController =
-            AndroidPhoneController(UiTreeReader.fromService(), Actuators.fromService(mode, confirm))
+            AndroidPhoneController(
+                UiTreeReader.fromService(),
+                Actuators.fromService(mode, confirm, credentialHandoff),
+            )
     }
 }

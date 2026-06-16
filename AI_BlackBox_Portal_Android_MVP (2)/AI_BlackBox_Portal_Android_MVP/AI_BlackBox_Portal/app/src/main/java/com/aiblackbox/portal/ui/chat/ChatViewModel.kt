@@ -21,6 +21,7 @@ import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
+import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
@@ -750,6 +751,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         // mode a high-consequence tap/type asks the user via the
                         // overlay before firing; in YOLO it runs immediately; benign
                         // actions never gate.
+                        //
+                        // Phase 4.7 (credential handoff): supply the system-overlay
+                        // OverlayCredentialHandoff. When the model targets a password
+                        // field, Actuators.type DISCARDS the model's attempted text and
+                        // this overlay asks the USER to type the password directly into
+                        // the field — the model never sees it in either direction.
                         fcLoop = FcLoop(
                             llm,
                             toolLlm = llm,
@@ -758,6 +765,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             phone = AndroidPhoneController.fromService(
                                 mode = { autonomyStore.load() },
                                 confirm = OverlayConfirmUi(appContext),
+                                credentialHandoff = OverlayCredentialHandoff(appContext),
                             ),
                         ),
                         persona = persona,
