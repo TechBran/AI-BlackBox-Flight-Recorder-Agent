@@ -78,9 +78,10 @@ private val HIGH_CONSEQUENCE_TAP_KEYWORDS: List<String> = listOf(
  *
  * Rules:
  *  - `type` into a password/login target ([isPasswordTarget]) → **true**. (Note:
- *    the actuator REFUSES a password `type` outright in 4.3, so in practice this
- *    branch guards any FUTURE non-password sensitive type; it is included so the
- *    decision is complete and correct on its own.)
+ *    as of 4.7 the actuator diverts a password `type` to the CREDENTIAL HANDOFF
+ *    (the user enters the secret; the model's text is discarded) BEFORE this gate
+ *    is consulted, so in practice this branch guards any FUTURE non-password
+ *    sensitive type; it is included so the decision is complete on its own.)
  *  - `tap` whose [targetLabel] (lowercased) CONTAINS any
  *    [HIGH_CONSEQUENCE_TAP_KEYWORDS] entry → **true**.
  *  - everything else (`read_screen`/`back`/`home`/`swipe`/`scroll`/`open_app`,
