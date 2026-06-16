@@ -65,14 +65,14 @@ class AndroidPhoneController(
                     ToolResult(success = true, result = JsonPrimitive(reader.readScreen()))
 
                 "tap" -> {
-                    val nodeId = nodeId(args)
-                        ?: return ToolResult(false, JsonPrimitive("node_id required"))
-                    actuators.tap(nodeId).toToolResult()
+                    val ref = parseNodeRef(args)
+                        ?: return ToolResult(false, JsonPrimitive("node_id or resource_id required"))
+                    actuators.tap(ref).toToolResult()
                 }
 
                 "type" -> {
-                    val nodeId = nodeId(args)
-                        ?: return ToolResult(false, JsonPrimitive("node_id required"))
+                    val ref = parseNodeRef(args)
+                        ?: return ToolResult(false, JsonPrimitive("node_id or resource_id required"))
                     val text = args["text"]?.jsonPrimitive?.contentOrNull
                         ?: return ToolResult(false, JsonPrimitive("text required"))
                     // Actuators.type performs the CREDENTIAL HANDOFF (4.7) on a
@@ -80,7 +80,7 @@ class AndroidPhoneController(
                     // type the secret themselves. For a non-password field it sets
                     // the text normally. Either way the typed text is never logged or
                     // echoed into the result detail — we forward it verbatim.
-                    actuators.type(nodeId, text).toToolResult()
+                    actuators.type(ref, text).toToolResult()
                 }
 
                 "swipe" -> {
@@ -113,9 +113,6 @@ class AndroidPhoneController(
             ToolResult(false, JsonPrimitive("${name} failed (${e.javaClass.simpleName})"))
         }
     }
-
-    /** Read `node_id` (accept "node_id" or "nodeId") via the tolerant [parseNodeId]. */
-    private fun nodeId(args: JsonObject): Int? = parseNodeId(args)
 
     /** Map an [ActuatorResult] to a [ToolResult], carrying ONLY the actuator's own detail. */
     private fun ActuatorResult.toToolResult(): ToolResult =
@@ -164,4 +161,26 @@ internal fun parseNodeId(args: JsonObject): Int? {
     prim.intOrNull?.let { return it }
     prim.doubleOrNull?.let { return it.toInt() }
     return prim.contentOrNull?.toDoubleOrNull()?.toInt()
+}
+
+/**
+ * PURE selection of HOW a tap/type target was addressed, for a `tap`/`type` call:
+ *
+ *  1. PREFER `resource_id` — the STABLE dev-assigned `viewIdResourceName` handle
+ *     from read_screen (e.g. `com.android.settings:id/title`). Unlike `node_id` (a
+ *     positional DFS index that DRIFTS when the screen changes between read_screen
+ *     and the tap), a resource id doesn't move with insertions, so the tap can't
+ *     miss. If present and non-blank → [NodeRef.ById].
+ *  2. Otherwise fall back to `node_id` via the tolerant [parseNodeId] (int / float
+ *     `6.0` / string forms) → [NodeRef.ByIndex]. This covers nodes with no resource
+ *     id (Compose / custom / WebView).
+ *  3. Neither present → null (caller returns "node_id or resource_id required").
+ *
+ * resource_id WINS when both are supplied. Top-level + pure so the selection logic
+ * is JVM-unit-testable without the framework actuators.
+ */
+internal fun parseNodeRef(args: JsonObject): NodeRef? {
+    val resourceId = args["resource_id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    if (resourceId != null) return NodeRef.ById(resourceId)
+    return parseNodeId(args)?.let { NodeRef.ByIndex(it) }
 }

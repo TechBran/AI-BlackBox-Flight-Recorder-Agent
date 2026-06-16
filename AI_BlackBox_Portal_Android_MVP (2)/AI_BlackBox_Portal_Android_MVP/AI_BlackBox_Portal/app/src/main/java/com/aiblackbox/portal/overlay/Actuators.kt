@@ -76,10 +76,12 @@ class Actuators(
 ) {
 
     /**
-     * Tap the node with the given `node_id`.
+     * Tap the node identified by [ref] — a STABLE [NodeRef.ById] resource id
+     * (preferred; doesn't drift when the screen changes) OR a positional
+     * [NodeRef.ByIndex] `node_id` (fallback, for nodes without a resource id).
      *
-     * Resolves the node positionally via [UiTreeReader.findActionableNode]. If
-     * found and [AccessibilityNodeInfo.isClickable], performs a semantic
+     * Resolves the node via [resolve]. If found and
+     * [AccessibilityNodeInfo.isClickable], performs a semantic
      * [AccessibilityNodeInfo.ACTION_CLICK] (more reliable than a coordinate tap).
      * Otherwise falls back to dispatching a touch gesture at the node's
      * on-screen bounds center. A null node → `success=false, "node N not found"`.
@@ -88,13 +90,14 @@ class Actuators(
      * a high-consequence tap (send/pay/delete/post/install… by the node's label)
      * and, in [AutonomyMode.PERMISSION], asks [confirm] BEFORE acting — returning
      * `success=false, "user declined"` if the user denies. The label fed to the
-     * gate is the node's NON-password text (null for a password node, which a tap
-     * never targets in practice), so no secret can leak into the confirm message.
+     * gate is the RESOLVED node's NON-password text (null for a password node,
+     * which a tap never targets in practice), so no secret can leak into the
+     * confirm message. The gate/redaction operate on the resolved node regardless
+     * of how it was addressed (resource id vs index).
      */
-    suspend fun tap(nodeId: Int): ActuatorResult {
+    suspend fun tap(ref: NodeRef): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val node = UiTreeReader.findActionableNode(svc.rootInActiveWindow, nodeId)
-            ?: return nodeNotFound(nodeId)
+        val node = resolve(svc, ref) ?: return nodeNotFound(ref)
 
         // Autonomy gate: never read a password node's text into the label. Use the
         // same text-or-contentDescription label read_screen uses, so an icon-only
@@ -103,6 +106,7 @@ class Actuators(
         val label = if (isPasswordTarget) null else (node.text ?: node.contentDescription)?.toString()
         gate("tap", label, isPasswordTarget)?.let { return it }
 
+        val target = ref.describe()
         return try {
             // Device finding (4.8): the model often targets a non-clickable leaf
             // (e.g. the "☰" TextView) whose CLICK handler lives on a parent
@@ -114,8 +118,8 @@ class Actuators(
             val clickTarget = clickableSelfOrAncestor(node)
             if (clickTarget != null) {
                 val ok = clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                logAction("tap", nodeId, ok)
-                ActuatorResult(ok, if (ok) "tapped node $nodeId" else "click action rejected for node $nodeId")
+                logAction("tap", target, ok)
+                ActuatorResult(ok, if (ok) "tapped $target" else "click action rejected for $target")
             } else {
                 // No clickable self-or-ancestor: last-resort touch gesture at center.
                 val rect = android.graphics.Rect()
@@ -123,15 +127,22 @@ class Actuators(
                 val cx = rect.centerX()
                 val cy = rect.centerY()
                 val ok = dispatchTap(svc, cx, cy)
-                logAction("tap(gesture)", nodeId, ok)
-                ActuatorResult(ok, if (ok) "tapped node $nodeId at center" else "tap gesture dispatch failed for node $nodeId")
+                logAction("tap(gesture)", target, ok)
+                ActuatorResult(ok, if (ok) "tapped $target at center" else "tap gesture dispatch failed for $target")
             }
         } catch (e: Exception) {
             // Never leak node content in the message — only the action + class.
-            logActionError("tap", nodeId, e)
-            ActuatorResult(false, "tap failed for node $nodeId (${e.javaClass.simpleName})")
+            logActionError("tap", target, e)
+            ActuatorResult(false, "tap failed for $target (${e.javaClass.simpleName})")
         }
     }
+
+    /**
+     * Positional-index convenience overload, kept so existing call-sites / tests
+     * that tap by raw `node_id` are unaffected. Equivalent to
+     * `tap(NodeRef.ByIndex(nodeId))`.
+     */
+    suspend fun tap(nodeId: Int): ActuatorResult = tap(NodeRef.ByIndex(nodeId))
 
     /**
      * Return [node] if it is itself clickable, else its nearest clickable ANCESTOR
@@ -154,7 +165,9 @@ class Actuators(
     }
 
     /**
-     * Set [text] on the editable node with the given `node_id`.
+     * Set [text] on the editable node identified by [ref] — a STABLE
+     * [NodeRef.ById] resource id (preferred) OR a positional [NodeRef.ByIndex]
+     * `node_id` (fallback). Resolved via [resolve].
      *
      * **CREDENTIAL HANDOFF (Task 4.7) — HARD SAFETY FLOOR:** if the resolved node
      * is a password field ([UiTreeReader.isPasswordField] over
@@ -178,10 +191,10 @@ class Actuators(
      * gate call is present so any FUTURE sensitive non-password type is covered by
      * the same Permission-mode confirm.
      */
-    suspend fun type(nodeId: Int, text: String): ActuatorResult {
+    suspend fun type(ref: NodeRef, text: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val node = UiTreeReader.findActionableNode(svc.rootInActiveWindow, nodeId)
-            ?: return nodeNotFound(nodeId)
+        val node = resolve(svc, ref) ?: return nodeNotFound(ref)
+        val target = ref.describe()
 
         val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
         when (credentialDecision(isPasswordTarget, hasSavedCredential = false)) {
@@ -192,7 +205,7 @@ class Actuators(
             // call-site passes hasSavedCredential = false.
             CredentialAction.USER_HANDOFF, CredentialAction.SYSTEM_AUTOFILL -> {
                 // `text` is NEVER read, logged, or forwarded — it is discarded here.
-                logAction("type(credential-handoff)", nodeId, true)
+                logAction("type(credential-handoff)", target, true)
                 val entered = credentialHandoff.requestUserEntry(CREDENTIAL_FIELD_DESCRIPTION)
                 return if (entered) {
                     ActuatorResult(true, "user entered their credential")
@@ -212,12 +225,35 @@ class Actuators(
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
             }
             val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            // NOTE: deliberately NOT logging `text` — only the nodeId + result.
-            logAction("type", nodeId, ok)
-            ActuatorResult(ok, if (ok) "set text on node $nodeId" else "set-text action rejected for node $nodeId")
+            // NOTE: deliberately NOT logging `text` — only the target + result.
+            logAction("type", target, ok)
+            ActuatorResult(ok, if (ok) "set text on $target" else "set-text action rejected for $target")
         } catch (e: Exception) {
-            logActionError("type", nodeId, e)
-            ActuatorResult(false, "type failed for node $nodeId (${e.javaClass.simpleName})")
+            logActionError("type", target, e)
+            ActuatorResult(false, "type failed for $target (${e.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * Positional-index convenience overload, kept so existing call-sites / tests
+     * that type by raw `node_id` are unaffected. Equivalent to
+     * `type(NodeRef.ByIndex(nodeId), text)`.
+     */
+    suspend fun type(nodeId: Int, text: String): ActuatorResult = type(NodeRef.ByIndex(nodeId), text)
+
+    /**
+     * Resolve a [NodeRef] to a live [AccessibilityNodeInfo] on the current tree:
+     *  - [NodeRef.ById]    → [UiTreeReader.findNodeByResourceId] (STABLE — keyed on
+     *    the resource id, doesn't drift when the screen changes).
+     *  - [NodeRef.ByIndex] → [UiTreeReader.findActionableNode] (positional,
+     *    best-effort; the legacy path for nodes with no resource id).
+     * Returns null when nothing matches (caller maps null to "not found").
+     */
+    private fun resolve(svc: BlackBoxA11yService, ref: NodeRef): AccessibilityNodeInfo? {
+        val root = svc.rootInActiveWindow
+        return when (ref) {
+            is NodeRef.ById -> UiTreeReader.findNodeByResourceId(root, ref.resourceId)
+            is NodeRef.ByIndex -> UiTreeReader.findActionableNode(root, ref.index)
         }
     }
 
@@ -370,20 +406,26 @@ class Actuators(
 
     private fun notEnabled() = ActuatorResult(false, "accessibility service not enabled")
 
-    private fun nodeNotFound(nodeId: Int): ActuatorResult {
-        Log.i(TAG, "action target node $nodeId not found")
-        return ActuatorResult(false, "node $nodeId not found")
+    private fun nodeNotFound(ref: NodeRef): ActuatorResult {
+        val target = ref.describe()
+        Log.i(TAG, "action target $target not found")
+        return ActuatorResult(false, "$target not found")
     }
 
-    /** Logs nodeId + action + result ONLY — never the typed text or node content. */
-    private fun logAction(action: String, nodeId: Int, ok: Boolean) {
-        Log.i(TAG, "$action node=$nodeId ok=$ok")
+    /**
+     * Logs the action + a coarse node TARGET (node_id index, or resource id) +
+     * result ONLY — never the typed text or node screen content. A resource id is
+     * the dev-assigned view id, not user data, so it is safe to log; this keeps the
+     * no-screen-text discipline intact.
+     */
+    private fun logAction(action: String, target: String, ok: Boolean) {
+        Log.i(TAG, "$action $target ok=$ok")
     }
 
-    private fun logActionError(action: String, nodeId: Int, e: Exception) {
+    private fun logActionError(action: String, target: String, e: Exception) {
         // Class name only — exception messages can carry node text on some
         // frameworks, so we deliberately omit e.message.
-        Log.w(TAG, "$action node=$nodeId failed (${e.javaClass.simpleName})")
+        Log.w(TAG, "$action $target failed (${e.javaClass.simpleName})")
     }
 
     private fun logGesture(action: String, ok: Boolean) {
@@ -423,6 +465,42 @@ class Actuators(
 
 /** A small outcome the agent loop (4.5) feeds back to the model. */
 data class ActuatorResult(val success: Boolean, val detail: String)
+
+/**
+ * How a tap/type target is ADDRESSED. The model gives us either the stable
+ * resource id (preferred — see [ById]) or the positional `node_id` ([ByIndex]);
+ * [Actuators.resolve] turns either into a live node. Splitting the two as a
+ * sealed type keeps the selection logic pure + unit-testable
+ * ([parseNodeRef][com.aiblackbox.portal.overlay.parseNodeRef]) and the resolution
+ * exhaustive.
+ */
+sealed interface NodeRef {
+    /**
+     * The STABLE handle: a dev-assigned `viewIdResourceName` (e.g.
+     * `com.android.settings:id/title`). Resolved via
+     * [UiTreeReader.findNodeByResourceId] — does NOT drift when the screen changes
+     * between read_screen and the tap. Prefer this whenever the node has one.
+     */
+    data class ById(val resourceId: String) : NodeRef
+
+    /**
+     * The positional fallback: the dense actionable DFS index (`node_id`) from
+     * read_screen. Resolved via [UiTreeReader.findActionableNode]. Used only for
+     * nodes that have no resource id (Compose / custom / WebView). Best-effort —
+     * can drift if the tree changed since the read.
+     */
+    data class ByIndex(val index: Int) : NodeRef
+
+    /**
+     * A coarse, NON-secret label for logs / result messages. A resource id is the
+     * dev-assigned view id (not user data), so it is safe to surface; node screen
+     * text is never used here.
+     */
+    fun describe(): String = when (this) {
+        is ById -> "node[$resourceId]"
+        is ByIndex -> "node $index"
+    }
+}
 
 /**
  * The default [ConfirmUi] for un-wired [Actuators] (existing call-sites / tests):

@@ -92,45 +92,53 @@ object ResidentTools {
      * The on-device phone-actuator schemas (names == [PHONE_ACTUATORS]). [FcLoop]
      * appends these to the per-turn tool list ONLY when a [PhoneController] is
      * wired. Descriptions are deliberately TERSE (small on-device model) and tell
-     * the model the workflow: call `read_screen` FIRST to get node_ids, then
-     * `tap`/`type` by node_id; `type` REFUSES password fields.
+     * the model the workflow: call `read_screen` FIRST, then `tap`/`type` —
+     * PREFERRING each node's stable `resource_id` over the positional `node_id`;
+     * `type` REFUSES password fields.
      */
     fun phoneActuators(): List<ToolSchema> = listOf(
         ToolSchema(
             name = "read_screen",
-            description = "Read the phone's current screen as a JSON list of actionable nodes (each with a node_id). Call this FIRST to learn what's on screen and get node_ids for tap/type.",
+            description = "Read the phone's current screen as a JSON list of actionable nodes (each with a node_id and a resource_id). Call this FIRST to learn what's on screen and get handles for tap/type.",
             parameters = noParams(),
         ),
         ToolSchema(
             name = "tap",
-            description = "Tap the screen element with the given node_id (from read_screen).",
+            description = "Tap a screen element. Prefer resource_id (a stable handle from read_screen) when the node has one; fall back to node_id only if resource_id is empty. read_screen returns both for each node.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
+                    putJsonObject("resource_id") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Stable element resource_id from read_screen (preferred)."))
+                    }
                     putJsonObject("node_id") {
                         put("type", JsonPrimitive("integer"))
-                        put("description", JsonPrimitive("Element node_id from read_screen."))
+                        put("description", JsonPrimitive("Element node_id from read_screen (use only if resource_id is empty)."))
                     }
                 }
-                put("required", buildJsonArray { add(JsonPrimitive("node_id")) })
             },
         ),
         ToolSchema(
             name = "type",
-            description = "Type text into the editable element with the given node_id (from read_screen). REFUSES password fields — do not use for passwords.",
+            description = "Type text into an editable element. Prefer resource_id (a stable handle from read_screen) when the node has one; fall back to node_id only if resource_id is empty. read_screen returns both. REFUSES password fields — do not use for passwords.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
+                    putJsonObject("resource_id") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Stable editable element resource_id from read_screen (preferred)."))
+                    }
                     putJsonObject("node_id") {
                         put("type", JsonPrimitive("integer"))
-                        put("description", JsonPrimitive("Editable element node_id from read_screen."))
+                        put("description", JsonPrimitive("Editable element node_id from read_screen (use only if resource_id is empty)."))
                     }
                     putJsonObject("text") {
                         put("type", JsonPrimitive("string"))
                         put("description", JsonPrimitive("The text to type."))
                     }
                 }
-                put("required", buildJsonArray { add(JsonPrimitive("node_id")); add(JsonPrimitive("text")) })
+                put("required", buildJsonArray { add(JsonPrimitive("text")) })
             },
         ),
         ToolSchema(

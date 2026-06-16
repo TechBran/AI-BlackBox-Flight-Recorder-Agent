@@ -77,6 +77,14 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
                         // REDACTION BOUNDARY: nodeText drops the raw text for a
                         // password node. Prefer text, fall back to contentDescription.
                         text = nodeText(node.text ?: node.contentDescription, pw),
+                        // STABLE HANDLE (4.8 follow-up): the dev-assigned resource id
+                        // (e.g. "com.android.settings:id/title"). Unlike node_id (a
+                        // positional DFS index that DRIFTS when the screen changes),
+                        // this does NOT move with insertions, so a tap/type keyed on
+                        // it can't miss. "" when the view has no id (common for
+                        // Compose / custom / WebView nodes). Not a secret — but kept
+                        // out of the redaction path entirely (it is never node text).
+                        resourceId = node.viewIdResourceName ?: "",
                         bounds = boundsString(rect.left, rect.top, rect.right, rect.bottom),
                         clickable = node.isClickable,
                         editable = node.isEditable,
@@ -146,6 +154,48 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
                 if (denseIndex == targetIndex) {
                     found = node
                     true // short-circuit: stop the walk, keep this node un-recycled
+                } else {
+                    false
+                }
+            }
+            return found
+        }
+
+        /**
+         * Resolve a STABLE [resourceId] (the dev-assigned `viewIdResourceName`,
+         * e.g. `com.android.settings:id/title`) back to a live
+         * [AccessibilityNodeInfo] for the Actuators — the reliable path.
+         *
+         * Unlike [findActionableNode], this does NOT key on position, so it does
+         * not drift when the screen changes between `read_screen` and the tap: a
+         * node keeps its resource id even as siblings are inserted/removed. This is
+         * the fix for the device bug where a positional `node_id` pointed at the
+         * wrong (or no) node by the time the tap fired.
+         *
+         * DFS-walks via the SAME [walkActionable] (same actionable filter +
+         * [MAX_NODES] cap) and returns the FIRST node whose `viewIdResourceName`
+         * equals [resourceId] exactly. Returns null when [root] is null,
+         * [resourceId] is blank, or no actionable node within the cap matches.
+         *
+         * LIMITATION: if several nodes share a resource id (e.g. identical list
+         * rows), the FIRST match in DFS order wins. That is acceptable for v1; a
+         * caller that needs a specific row can still fall back to `node_id`.
+         *
+         * The returned node is the LIVE framework node and is intentionally NOT
+         * recycled here (the caller acts on it); other traversed children ARE
+         * recycled inside [walkActionable], exactly like [findActionableNode].
+         */
+        internal fun findNodeByResourceId(
+            root: AccessibilityNodeInfo?,
+            resourceId: String,
+        ): AccessibilityNodeInfo? {
+            if (root == null || resourceId.isBlank()) return null
+            var found: AccessibilityNodeInfo? = null
+            val counter = intArrayOf(0)
+            walkActionable(root, counter) { node, _ ->
+                if (node.viewIdResourceName == resourceId) {
+                    found = node
+                    true // short-circuit: stop, keep this node un-recycled
                 } else {
                     false
                 }
@@ -227,6 +277,12 @@ data class UiNode(
     @SerialName("node_id") val nodeId: Int,
     val role: String, // short class-name-derived role, e.g. "Button","EditText"
     val text: String, // ALREADY redacted if password (see nodeText)
+    // STABLE handle: the dev-assigned resource id (viewIdResourceName), e.g.
+    // "com.android.settings:id/title". Preferred over node_id for tap/type because
+    // it doesn't drift when the screen changes. "" when the view has no id
+    // (Compose / custom / WebView). Defaults to "" so existing construction sites
+    // (e.g. tests building a node without it) keep compiling.
+    @SerialName("resource_id") val resourceId: String = "",
     val bounds: String, // "l,t,r,b"
     val clickable: Boolean,
     val editable: Boolean,

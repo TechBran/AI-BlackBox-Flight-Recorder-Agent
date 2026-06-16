@@ -184,6 +184,66 @@ class UiTreeReaderTest {
         assertEquals("[]", nodesToJson(emptyList()))
     }
 
+    // ---- resource_id: the stable handle (4.8 follow-up) --------------------
+
+    @Test
+    fun `UiNode serializes with a resource_id under the snake_case name`() {
+        val node = UiNode(
+            nodeId = 0,
+            role = "TextView",
+            text = "Display",
+            resourceId = "com.android.settings:id/title",
+            bounds = "0,0,100,40",
+            clickable = true,
+            editable = false,
+            isPassword = false,
+        )
+        val json = nodesToJson(listOf(node))
+        assertTrue("resource_id field name present", json.contains("resource_id"))
+        assertTrue("resource id value present", json.contains("com.android.settings:id/title"))
+    }
+
+    @Test
+    fun `UiNode resource_id defaults to empty string when omitted`() {
+        // Nodes with no view id (Compose / custom / WebView) still serialize
+        // cleanly with an empty resource_id; the model falls back to node_id.
+        val node = UiNode(
+            nodeId = 0,
+            role = "View",
+            text = "x",
+            bounds = "0,0,1,1",
+            clickable = true,
+            editable = false,
+            isPassword = false,
+        )
+        assertEquals("", node.resourceId)
+        val json = nodesToJson(listOf(node))
+        assertTrue(json.contains("\"resource_id\":\"\""))
+    }
+
+    @Test
+    fun `resource_id does not affect password redaction`() {
+        // resource_id is a dev-assigned view id, not screen text — adding it never
+        // changes the redaction guarantee: a password field's raw text is still
+        // dropped even though it carries a (non-secret) resource_id.
+        val secret = "hunter2"
+        val node = UiNode(
+            nodeId = 0,
+            role = "EditText",
+            text = nodeText(secret, isPassword = true),
+            resourceId = "com.app:id/password",
+            bounds = "0,0,200,60",
+            clickable = true,
+            editable = true,
+            isPassword = true,
+        )
+        val json = nodesToJson(listOf(node))
+        assertFalse("raw password must NEVER reach the JSON even with a resource_id", json.contains(secret))
+        assertTrue(json.contains("·····"))
+        // The (non-secret) resource id is still present.
+        assertTrue(json.contains("com.app:id/password"))
+    }
+
     // ---- SECURITY: end-to-end through the reader's own path ----------------
 
     @Test
