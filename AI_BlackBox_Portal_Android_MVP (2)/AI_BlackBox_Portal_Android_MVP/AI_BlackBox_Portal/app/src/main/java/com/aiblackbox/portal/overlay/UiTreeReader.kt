@@ -1,0 +1,199 @@
+package com.aiblackbox.portal.overlay
+
+import android.graphics.Rect
+import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+/**
+ * The `read_screen` UI-tree reader (Phase 4, Task 4.2).
+ *
+ * Turns the live [AccessibilityNodeInfo] tree (from the consented
+ * [BlackBoxA11yService]) into a compact JSON list of *actionable* nodes for the
+ * on-device Gemma agent to reason over — with **password fields redacted at the
+ * boundary**.
+ *
+ * ## Security guarantee (the whole point of this task)
+ * A password field's raw text MUST NEVER cross the device boundary into the
+ * model / transcript / snapshot. The single gate that enforces this is
+ * [nodeText]: for a password node it returns the fixed placeholder
+ * [PASSWORD_PLACEHOLDER] and the raw [CharSequence] is dropped on the floor —
+ * it is never copied into a [UiNode], a log line, or an exception message.
+ *
+ * ## Design: pure core + thin framework shell
+ * Everything that decides *what text gets emitted* ([nodeText], [roleOf],
+ * [boundsString], [nodesToJson]) is a pure, JVM-unit-testable top-level
+ * function with no framework dependency — that's where the redaction guarantee
+ * lives and is tested hard ([UiTreeReaderTest]). The [UiTreeReader] class is the
+ * thin framework shell that DFS-walks the real tree and is device-verified.
+ *
+ * ## Scope (4.2 ONLY)
+ * This produces the JSON. Wiring `read_screen` into the agent loop as a resident
+ * function is Task 4.5. Gesture actuation is 4.3. Screenshots are 4.4.
+ * Credentials are 4.7. None of those happen here.
+ */
+class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
+
+    /**
+     * Read the current screen as a compact JSON array of actionable [UiNode]s.
+     *
+     * - If the accessibility service isn't connected (root is null) → returns
+     *   `nodesToJson(emptyList())` i.e. `"[]"` (graceful, never throws).
+     * - Otherwise DFS-walks the tree, emitting a [UiNode] only for *actionable*
+     *   nodes (see [isActionable]), capping the result at [MAX_NODES] so a huge
+     *   tree cannot blow up the prompt.
+     *
+     * Redaction happens inline via [nodeText]; the raw password text is never
+     * materialized into the node list. No node text/content is logged — only
+     * counts/roles, which are not a leak vector.
+     */
+    fun readScreen(): String {
+        val root = rootProvider() ?: run {
+            Log.i(TAG, "read_screen: service not connected (null root) -> []")
+            return nodesToJson(emptyList())
+        }
+
+        val nodes = ArrayList<UiNode>(MAX_NODES)
+        val counter = intArrayOf(0) // sequential DFS index → node_id
+        try {
+            walk(root, nodes, counter)
+        } catch (e: Exception) {
+            // Defensive: never let a malformed tree crash the agent. The message
+            // is deliberately generic — node text/content must never appear in
+            // an exception/log line (leak vector).
+            Log.w(TAG, "read_screen: tree walk aborted (${e.javaClass.simpleName}); returning partial")
+        }
+        Log.i(TAG, "read_screen: emitted ${nodes.size} actionable node(s)")
+        return nodesToJson(nodes)
+    }
+
+    /**
+     * Depth-first walk. Appends a [UiNode] for each actionable node, assigning
+     * `node_id` as the sequential DFS visitation index. Stops once [MAX_NODES]
+     * have been collected. Recycles framework nodes per platform norm (a no-op
+     * on modern Android, harmless otherwise) — never crashes on recycle.
+     */
+    private fun walk(node: AccessibilityNodeInfo?, out: MutableList<UiNode>, counter: IntArray) {
+        if (node == null || out.size >= MAX_NODES) return
+
+        if (isActionable(node)) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            out.add(
+                UiNode(
+                    nodeId = counter[0],
+                    role = roleOf(node.className),
+                    // REDACTION BOUNDARY: nodeText drops the raw text for a
+                    // password node. Prefer text, fall back to contentDescription.
+                    text = nodeText(node.text ?: node.contentDescription, node.isPassword),
+                    bounds = boundsString(rect.left, rect.top, rect.right, rect.bottom),
+                    clickable = node.isClickable,
+                    editable = node.isEditable,
+                    isPassword = node.isPassword,
+                ),
+            )
+            counter[0]++
+        }
+
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            if (out.size >= MAX_NODES) break
+            val child = node.getChild(i)
+            if (child != null) {
+                walk(child, out, counter)
+                @Suppress("DEPRECATION")
+                try {
+                    child.recycle()
+                } catch (_: Exception) {
+                    // recycle() is a no-op / may throw IllegalStateException on
+                    // some versions; never let cleanup crash the read.
+                }
+            }
+        }
+    }
+
+    /**
+     * A node is worth emitting if the agent could act on it or read it:
+     * clickable, editable, or it carries visible, non-blank text/description.
+     */
+    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable || node.isEditable) return true
+        val hasText = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+        return hasText && node.isVisibleToUser
+    }
+
+    companion object {
+        private const val TAG = "UiTreeReader"
+
+        /**
+         * Cap on emitted nodes so a pathologically large tree can't blow up the
+         * on-device model's prompt. DFS order means the first (typically more
+         * relevant top-of-tree) nodes win.
+         */
+        const val MAX_NODES = 80
+
+        /**
+         * Production factory: reads the live root from the connected
+         * [BlackBoxA11yService] via the singleton seam. The constructor takes a
+         * lambda seam instead of the singleton directly so the walker doesn't
+         * hard-depend on it (and so the shell stays mockable on-device).
+         */
+        fun fromService(): UiTreeReader =
+            UiTreeReader { BlackBoxA11yService.instance?.rootInActiveWindow }
+    }
+}
+
+/**
+ * One actionable UI node, redacted and ready to serialize for the on-device
+ * model. [text] is ALREADY redacted (see [nodeText]) before construction — a
+ * password node's raw text never reaches this type.
+ */
+@Serializable
+data class UiNode(
+    @SerialName("node_id") val nodeId: Int,
+    val role: String, // short class-name-derived role, e.g. "Button","EditText"
+    val text: String, // ALREADY redacted if password (see nodeText)
+    val bounds: String, // "l,t,r,b"
+    val clickable: Boolean,
+    val editable: Boolean,
+    @SerialName("is_password") val isPassword: Boolean,
+)
+
+/** The fixed placeholder emitted in place of any password field's text. */
+const val PASSWORD_PLACEHOLDER: String = "·····"
+
+private val readScreenJson = Json {
+    encodeDefaults = true
+    // Keep output compact (no pretty-print) — this goes straight into a prompt.
+}
+
+/**
+ * THE REDACTION GATE. For a password node returns the fixed
+ * [PASSWORD_PLACEHOLDER]; the raw text is dropped and never returned. For a
+ * non-password node returns the raw text (or "" if null).
+ *
+ * This is the *only* place screen text becomes node text, so it is the single
+ * choke point the security guarantee depends on.
+ */
+fun nodeText(rawText: CharSequence?, isPassword: Boolean): String =
+    if (isPassword) PASSWORD_PLACEHOLDER else rawText?.toString().orEmpty()
+
+/**
+ * Last `.`-segment of a class name (e.g. `android.widget.Button` → `Button`),
+ * or `"View"` if null/blank.
+ */
+fun roleOf(className: CharSequence?): String {
+    val s = className?.toString()?.trim().orEmpty()
+    if (s.isEmpty()) return "View"
+    return s.substringAfterLast('.')
+}
+
+/** Compact bounds string `"l,t,r,b"` from the four edge coordinates. */
+fun boundsString(left: Int, top: Int, right: Int, bottom: Int): String =
+    "$left,$top,$right,$bottom"
+
+/** Serialize the node list to compact JSON — this is what `read_screen` returns. */
+fun nodesToJson(nodes: List<UiNode>): String = readScreenJson.encodeToString(nodes)
