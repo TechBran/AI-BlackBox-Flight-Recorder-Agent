@@ -374,7 +374,7 @@ data class ActuatorResult(val success: Boolean, val detail: String)
  * Permission-mode gate. The production wiring supplies the real overlay + the safe
  * PERMISSION-default mode.
  */
-object AutoApproveConfirmUi : ConfirmUi {
+internal object AutoApproveConfirmUi : ConfirmUi {
     override suspend fun confirm(description: String): Boolean = true
 }
 

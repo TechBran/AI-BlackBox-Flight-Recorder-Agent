@@ -19,11 +19,13 @@ import kotlinx.serialization.json.JsonObject
  * which reads the live screen ([com.aiblackbox.portal.overlay.UiTreeReader]) and
  * performs gestures ([com.aiblackbox.portal.overlay.Actuators]).
  *
- * ## Where the autonomy gate (Task 4.6) wraps
- * The confirm-gate (YOLO vs Permission, high-consequence actions) will WRAP this
- * seam — a decorating [PhoneController] (or a guard inside [dispatch]) that
- * intercepts the call before it reaches the actuators. It is deliberately NOT
- * implemented in 4.5; the credential handoff (4.7) likewise layers on after.
+ * ## Where the autonomy gate (Task 4.6) lives
+ * The confirm-gate (YOLO vs Permission, high-consequence actions) landed INSIDE
+ * the actuator layer ([com.aiblackbox.portal.overlay.Actuators] tap/type), not as
+ * a decorator on this seam — because the gate needs the RESOLVED node's label +
+ * isPassword, which only the actuator has. So a phone-action call passing through
+ * [dispatch] is already gated downstream. The credential handoff (4.7) layers on
+ * after.
  *
  * ## Contract
  * - [dispatch] NEVER throws — every outcome is returned as a [ToolResult] the
