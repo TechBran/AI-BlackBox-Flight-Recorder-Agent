@@ -549,6 +549,159 @@ class FcLoopTest {
         )
     }
 
+    // ---------------------------------------------------------------------------
+    // Phase 4.5: resident on-device phone actuators routed through PhoneController.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    fun `runAgent dispatches phone actuators to the PhoneController, never the bridge, and streams the final text`() = runTest {
+        // The model: turn 1 opens an app, turn 2 reads the screen, turn 3 answers.
+        val openArgs = buildJsonObject { put("package", JsonPrimitive("com.android.settings")) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall("open_app", openArgs)),
+                listOf(toolCall("read_screen", buildJsonObject { })),
+                listOf(text("Brightness is 50%")),
+            ),
+        )
+        val phone = FakePhoneController { name, _ ->
+            when (name) {
+                "open_app" -> ToolResult(success = true, result = JsonPrimitive("opened"))
+                "read_screen" -> ToolResult(success = true, result = JsonPrimitive("[{\"node_id\":0}]"))
+                else -> ToolResult(success = false, result = JsonPrimitive("?"))
+            }
+        }
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
+
+        val events = loop.runAgent("persona", emptyList(), "is my brightness on?").toList()
+
+        // Both phone-actuator calls were dispatched to the PHONE controller, in order.
+        assertEquals(
+            "both phone actuators dispatched to the controller, in order",
+            listOf("open_app", "read_screen"),
+            phone.dispatched.map { it.first },
+        )
+        assertEquals("open_app dispatched with the model's args", openArgs, phone.dispatched[0].second)
+        // ...and NEVER to the cloud bridge (this is the security-relevant assertion).
+        assertTrue("phone actuators must NOT reach bridge.execute", bridge.executeCalls.isEmpty())
+        assertTrue("phone actuators must NOT reach bridge.searchTools", bridge.searchCalls.isEmpty())
+
+        // ToolOutcomes emitted in order, then the final text streamed.
+        assertEquals(
+            "the ordered phone-actuator event sequence ends with the final text",
+            listOf(
+                LlmEvent.ToolCall("open_app", openArgs),
+                LlmEvent.ToolOutcome("open_app", ToolResult(true, JsonPrimitive("opened"))),
+                LlmEvent.ToolCall("read_screen", buildJsonObject { }),
+                LlmEvent.ToolOutcome("read_screen", ToolResult(true, JsonPrimitive("[{\"node_id\":0}]"))),
+                LlmEvent.TextDelta("Brightness is 50%"),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `runAgent routes phone to PhoneController, search to searchTools, and other tools to bridge execute`() = runTest {
+        // One run that exercises all three routes: a phone actuator (tap), a
+        // search_tools discovery, and the discovered cloud tool (execute).
+        val tapArgs = buildJsonObject { put("node_id", JsonPrimitive(3)) }
+        val searchArgs = buildJsonObject { put("query", JsonPrimitive("send a text")) }
+        val smsArgs = buildJsonObject { put("body", JsonPrimitive("hi")) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall("tap", tapArgs)),
+                listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
+                listOf(toolCall("send_sms", smsArgs)),
+                listOf(text("done")),
+            ),
+        )
+        val phone = FakePhoneController { _, _ -> ToolResult(success = true, result = JsonPrimitive("tapped node 3")) }
+        val bridge = FakeToolBridge(
+            searchMap = mapOf("send a text" to listOf(schema("send_sms"))),
+            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("sent")) },
+        )
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
+
+        loop.runAgent("persona", emptyList(), "tap then text").toList()
+
+        // tap -> phone (only); NOT the bridge.
+        assertEquals(listOf("tap"), phone.dispatched.map { it.first })
+        // search_tools -> bridge.searchTools.
+        assertEquals(listOf("send a text"), bridge.searchCalls)
+        // send_sms (a non-phone discovered tool) -> bridge.execute (only); NOT the phone.
+        assertEquals(1, bridge.executeCalls.size)
+        assertEquals("send_sms", bridge.executeCalls[0].first)
+        assertTrue("send_sms must not be dispatched to the phone", phone.dispatched.none { it.first == "send_sms" })
+    }
+
+    @Test
+    fun `runAgent with no PhoneController does not advertise phone actuators`() = runTest {
+        // phone = null (default): the resident set the model sees must be search-only.
+        val fakeLlm = FakeToolCallingLlm(script = listOf(listOf(text("hi"))))
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge) // phone defaults to null
+
+        loop.runAgent("persona", emptyList(), "hello").toList()
+
+        val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
+        assertEquals("with no phone controller, turn 0 advertises only search_tools",
+            setOf(ResidentTools.SEARCH_TOOLS), turn0Tools)
+        // Explicitly assert the phone actuators are NOT advertised.
+        assertTrue("tap must not be advertised without a phone controller", "tap" !in turn0Tools)
+        assertTrue("read_screen must not be advertised without a phone controller", "read_screen" !in turn0Tools)
+    }
+
+    @Test
+    fun `runAgent with no PhoneController falls a phone-actuator-named call through to bridge execute`() = runTest {
+        // DOCUMENTED behavior: with phone=null the loop has no phone branch, so if the
+        // model somehow emits a phone-actuator name it is treated like any other tool
+        // and routed to bridge.execute (the loop does not special-case it).
+        val tapArgs = buildJsonObject { put("node_id", JsonPrimitive(1)) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall("tap", tapArgs)),
+                listOf(text("ok")),
+            ),
+        )
+        val bridge = FakeToolBridge(executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("x")) })
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge) // phone = null
+
+        loop.runAgent("persona", emptyList(), "go").toList()
+
+        assertEquals("with no phone controller, a phone-named call goes to bridge.execute", 1, bridge.executeCalls.size)
+        assertEquals("tap", bridge.executeCalls[0].first)
+    }
+
+    @Test
+    fun `runAgent with a PhoneController advertises the phone actuators alongside search_tools`() = runTest {
+        val fakeLlm = FakeToolCallingLlm(script = listOf(listOf(text("hi"))))
+        val bridge = FakeToolBridge()
+        val phone = FakePhoneController()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
+
+        loop.runAgent("persona", emptyList(), "hello").toList()
+
+        val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
+        assertEquals(
+            "turn 0 advertises search_tools + every phone actuator",
+            ResidentTools.PHONE_ACTUATORS + ResidentTools.SEARCH_TOOLS,
+            turn0Tools,
+        )
+    }
+
+    @Test
+    fun `phoneActuators returns schemas whose names equal PHONE_ACTUATORS and resident stays search-only`() {
+        val names = ResidentTools.phoneActuators().map { it.name }.toSet()
+        assertEquals("phoneActuators names == PHONE_ACTUATORS", ResidentTools.PHONE_ACTUATORS, names)
+        // resident() is still ONLY search_tools (phone actuators are appended by FcLoop, not resident).
+        assertEquals(
+            "resident() is still search-only",
+            listOf(ResidentTools.SEARCH_TOOLS),
+            ResidentTools.resident().map { it.name },
+        )
+    }
+
     @Test
     fun `buildAgentPrompt renders a TOOL turn with the Tool marker`() {
         val loop = FcLoop(FakeLocalLlm())

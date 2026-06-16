@@ -19,6 +19,7 @@ import com.aiblackbox.portal.data.local.PersonaCache
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
@@ -725,7 +726,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val bridge = toolBridgeOrBuild()
                 val ok = if (llm is ToolCallingLlm && bridge != null) {
                     streamLocalAgentTurn(
-                        fcLoop = FcLoop(llm, toolLlm = llm, bridge = bridge, operator = op),
+                        // Phase 4.5: always wire the on-device phone controller. It
+                        // reads the LIVE accessibility service via the singleton seam;
+                        // if the service isn't enabled the actuators degrade
+                        // gracefully ("not enabled") and read_screen returns "[]", so
+                        // it is safe to always pass. When wired, FcLoop advertises the
+                        // resident phone actuators and routes those calls locally —
+                        // never to the cloud bridge. (Autonomy gate = Task 4.6.)
+                        fcLoop = FcLoop(
+                            llm,
+                            toolLlm = llm,
+                            bridge = bridge,
+                            operator = op,
+                            phone = AndroidPhoneController.fromService(),
+                        ),
                         persona = persona,
                         history = history,
                         text = text,

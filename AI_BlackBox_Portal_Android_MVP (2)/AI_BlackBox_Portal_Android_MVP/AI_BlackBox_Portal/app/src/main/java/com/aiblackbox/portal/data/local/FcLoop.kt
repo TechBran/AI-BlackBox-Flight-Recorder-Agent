@@ -36,6 +36,14 @@ class FcLoop(
     private val operator: String = "system",
     private val resident: List<ToolSchema> = ResidentTools.resident(),
     private val maxIterations: Int = 8,
+    // Phase 4.5: the on-device phone-control seam. When non-null, the resident
+    // phone actuators ([ResidentTools.phoneActuators]) are ADVERTISED to the model
+    // each turn and a phone-actuator [LlmEvent.ToolCall] is dispatched LOCALLY
+    // through this controller — NOT the cloud [bridge]. When null (no
+    // accessibility service / no controller wired) the loop never advertises phone
+    // actions and behaves exactly as before. The autonomy gate (Task 4.6) will
+    // wrap this controller; the credential handoff (4.7) layers on after.
+    private val phone: PhoneController? = null,
 ) {
 
     /** Who authored a conversation turn. TOOL carries a tool result fed back to the model. */
@@ -138,10 +146,13 @@ class FcLoop(
      *     [LlmEvent.ToolCall] events (a defensively-emitted ToolOutcome from the
      *     seam is ignored — the seam shouldn't produce one).
      *  3. No tool calls → the model gave its final answer; record it and complete.
-     *  4. Otherwise dispatch each call in order: [ResidentTools.SEARCH_TOOLS]
-     *     discovers + injects (capped) schemas for the NEXT turn; any other call
-     *     executes via the [bridge]. Each dispatch emits a [LlmEvent.ToolOutcome]
-     *     and appends a [Role.TOOL] turn so the model sees the result next turn.
+     *  4. Otherwise dispatch each call in order, routing on the name:
+     *     a resident phone actuator ([ResidentTools.PHONE_ACTUATORS], only when a
+     *     [phone] controller is wired) is dispatched LOCALLY through [phone] and
+     *     NEVER touches the [bridge]; [ResidentTools.SEARCH_TOOLS] discovers +
+     *     injects (capped) schemas for the NEXT turn; any other call executes via
+     *     the [bridge]. Each dispatch emits a [LlmEvent.ToolOutcome] and appends a
+     *     [Role.TOOL] turn so the model sees the result next turn.
      *
      * If [maxIterations] is exhausted, the flow completes gracefully (no hang, no
      * throw); the events already emitted are the output.
@@ -170,9 +181,15 @@ class FcLoop(
         var working = history + Turn(Role.USER, userMessage)
         var injected = emptyList<ToolSchema>()
 
+        // Phase 4.5: advertise the resident phone actuators ONLY when a
+        // PhoneController is wired (a device with the accessibility service off /
+        // no controller never sees phone actions). Constant for the whole run.
+        val phoneTools = if (phone != null) ResidentTools.phoneActuators() else emptyList()
+
         repeat(maxIterations) {
             val prompt = buildAgentPrompt(persona, working)
-            val available = (resident + injected).distinctBy { it.name } // bounded: injected already <= MAX
+            // bounded: resident + phone actuators (fixed small set) + injected (already <= MAX).
+            val available = (resident + phoneTools + injected).distinctBy { it.name }
 
             val assistantText = StringBuilder()
             val pendingCalls = mutableListOf<LlmEvent.ToolCall>()
@@ -201,6 +218,22 @@ class FcLoop(
             for (call in pendingCalls) {
                 // Keep the textual prompt coherent: note that this call happened.
                 working = working + Turn(Role.ASSISTANT, "[called ${call.name}]")
+
+                if (phone != null && call.name in ResidentTools.PHONE_ACTUATORS) {
+                    // Phase 4.5: a resident phone actuator is dispatched LOCALLY
+                    // through the PhoneController (the accessibility service) — it
+                    // must NEVER reach the cloud bridge. The `continue` guarantees
+                    // it skips the search/execute branches below. The autonomy gate
+                    // (4.6) wraps phone.dispatch; the controller never throws.
+                    val res = phone.dispatch(call.name, call.args)
+                    emit(LlmEvent.ToolOutcome(call.name, res))
+                    // Same de-quoting as the execute branch so a JsonPrimitive("ok")
+                    // feeds back as `ok`, not `"ok"`, into the prompt text.
+                    val resultText = (res.result as? JsonPrimitive)?.contentOrNull
+                        ?: res.result?.toString() ?: "ok"
+                    working = working + Turn(Role.TOOL, "${call.name} → $resultText")
+                    continue
+                }
 
                 if (call.name == ResidentTools.SEARCH_TOOLS) {
                     // A small on-device model can misfire this arg (omit it, send it
