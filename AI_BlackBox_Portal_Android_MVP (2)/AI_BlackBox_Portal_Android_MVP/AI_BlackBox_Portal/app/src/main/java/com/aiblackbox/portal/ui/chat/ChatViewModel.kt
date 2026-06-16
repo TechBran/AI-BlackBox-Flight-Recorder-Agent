@@ -10,8 +10,10 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LlmEvent
 import com.aiblackbox.portal.data.local.LocalLlm
+import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.LocalSnapshotQueue
 import com.aiblackbox.portal.data.local.PersonaCache
 import com.aiblackbox.portal.data.local.ToolBridge
@@ -106,11 +108,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── On-device (local) engine seam (Task 2.4) ──
     // The on-device generation engine, injected as a lazy provider so tests can
-    // supply a FakeLocalLlm. NULL in production: the concrete LiteRtEngine is
-    // Task 2.6, so until then sendViaLocalEngine() falls back to the 1.6
-    // placeholder. Settable so a host/builder (or a test) can wire an engine.
+    // supply a FakeLocalLlm. NULL until an installed on-device model is found —
+    // then it is lazily wired (Task 2.6a) to the SINGLETON [localEngine]
+    // (initialize() is ~10s, so the engine is built once and reused across turns).
+    // With no model installed it stays null and sendViaLocalEngine() falls back to
+    // the 1.6 placeholder. Settable so a host/builder (or a test) can wire a fake.
     @VisibleForTesting
     var localLlmProvider: (() -> LocalLlm)? = null
+
+    // The concrete on-device engine singleton (Task 2.6a). Built once the first
+    // time a local turn runs with an installed model present (see
+    // [localProviderOrWire]); reused across turns (its load() is idempotent — the
+    // ~10s initialize() happens once). Closed in [onCleared]. Held here (not just
+    // captured by the provider lambda) so onCleared can release the native engine.
+    private var localEngine: LiteRtEngine? = null
+
+    // The installed bundle file the [localEngine] runs, and its delegate. Resolved
+    // from [LocalModelManager.installedModels] when the engine is wired.
+    private var localEngineModelFile: java.io.File? = null
+    private var localEngineDelegate: String = "cpu"
 
     // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
     // Built lazily off the application context the first time a local turn runs
@@ -444,6 +460,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Cancel the picker's own CoroutineScope (separate from viewModelScope,
         // which the framework cancels automatically) so it doesn't leak.
         providerPicker?.dispose()
+        // Release the on-device engine's native runtime (Task 2.6a). Safe even if
+        // never loaded; close() is idempotent. Guarded so a native-layer throw on
+        // teardown can't crash the VM disposal.
+        runCatching { localEngine?.close() }
+        localEngine = null
         super.onCleared()
     }
 
@@ -595,15 +616,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * unit-testable without the AndroidViewModel; this method is the wiring shim.
      */
     private fun sendViaLocalEngine(text: String) {
-        val provider = localLlmProvider
-        if (provider == null) {
-            // No on-device engine wired yet (production default until Task 2.6).
-            sendViaLocalPlaceholder(text)
-            return
+        // SINGLE job per send: cancel any prior in-flight turn, then run resolution
+        // + (placeholder | engine turn) inside ONE viewModelScope.launch so
+        // streamJob always points at the actual running turn (cancelStream/clear can
+        // reliably cancel it) and two sends can't run concurrent generations racing
+        // on _messages. (The LOCAL_PLACEHOLDER double-send guard in sendMessage
+        // blocks the common case; this cancel covers the non-STREAMING windows.)
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch {
+            // Resolve the provider: an already-wired one (test fake or a
+            // previously-wired production engine) is returned as-is; otherwise wire
+            // the production LiteRtEngine from an INSTALLED model (suspend disk read).
+            val provider = localProviderOrWire()
+            if (provider == null) {
+                // No installed model (or api not ready) → 1.6 placeholder, unchanged.
+                sendViaLocalPlaceholder(text)
+                return@launch
+            }
+            runLocalEngineTurn(text, provider)
         }
+    }
+
+    /**
+     * Run one on-device turn through an already-resolved [provider]. A SUSPEND
+     * function (NOT a launcher): it runs INSIDE the single [streamJob] coroutine
+     * owned by [sendViaLocalEngine], so there is exactly one job per send (no nested
+     * sibling launch, no orphaned/uncancellable job). For the production
+     * [LiteRtEngine] this also LOADS the engine (idempotent ~10s on the first turn,
+     * instant after) on [Dispatchers.IO] before streaming.
+     */
+    private suspend fun runLocalEngineTurn(text: String, provider: () -> LocalLlm) {
         // The double-send guard is hoisted to sendMessage's LOCAL_PLACEHOLDER arm
-        // (mirrors the SSE arm), so both this path and the placeholder fallback
-        // above are already guarded by the time we get here.
+        // (mirrors the SSE arm), so this path is already guarded by the time we get here.
 
         // 1. Append the user message + a streaming assistant placeholder, exactly
         //    like sendViaSSE — same UiMessage shape, same _messages flow.
@@ -636,7 +680,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // no api!!. personaCacheOrBuild needs the api to wire the LocalModelApi.
         val cache = personaCacheOrBuild() ?: return
 
-        streamJob = viewModelScope.launch {
+        run {
             // Threading (mirrors sendViaSSE): the ONLY IO-dispatched work is the
             // persona fetch + (inside streamLocalTurn) the generation Flow via
             // .flowOn(Dispatchers.IO). The collect/sink runs HERE on the VM's
@@ -649,6 +693,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // the same friendly local-engine error + ChatState.ERROR (no crash).
             var faulted: Boolean
             try {
+                // Ensure the on-device engine is loaded BEFORE streaming. load() is
+                // idempotent (~10s the first turn, instant after) and runs on IO so
+                // it never blocks the main thread; the assistant bubble already shows
+                // the streaming affordance during the gap. The persona fetch is on IO
+                // too — load first (sequentially) so a load fault surfaces the same
+                // friendly error. A FakeLocalLlm (tests) has no model file → skip load.
+                val engineToLoad = localEngine
+                val modelFile = localEngineModelFile
+                if (engineToLoad != null && modelFile != null) {
+                    withContext(Dispatchers.IO) {
+                        engineToLoad.load(modelFile, localEngineDelegate)
+                    }
+                }
                 val persona = withContext(Dispatchers.IO) { cache.get(op) }
                 // 3. The SAME sink sendViaSSE uses — append each delta to the
                 //    in-flight assistant message (identical rendering). Runs on the
@@ -738,6 +795,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val built = ToolBridgeClient(client)
         toolBridge = built
         return built
+    }
+
+    /**
+     * Resolve the on-device [localLlmProvider] (Task 2.6a), lazily wiring the
+     * SINGLETON production [LiteRtEngine] the first time an INSTALLED model is
+     * present.
+     *
+     *  - If [localLlmProvider] is already set (a test fake, or a previously-wired
+     *    engine) it is returned unchanged — the test seam is never disturbed.
+     *  - Otherwise this reads the installed bundles via [LocalModelManager]
+     *    ([installedModels] is device-scoped + runs on IO), picks the first
+     *    attested/installed bundle, builds the engine singleton ([LiteRtEngine.fromInstalled],
+     *    delegate "cpu"), records its model file + delegate for [load], sets
+     *    [localLlmProvider] to return that singleton, and returns it.
+     *  - If NO model is installed (or the api is not ready) it returns null and
+     *    [localLlmProvider] stays null — the caller falls back to the placeholder.
+     *
+     * The engine is built ONCE (its ~10s initialize() happens in [load], also
+     * once) and reused across turns. Suspends only for the disk read.
+     */
+    private suspend fun localProviderOrWire(): (() -> LocalLlm)? {
+        localLlmProvider?.let { return it }
+        val client = api ?: return null
+
+        // Device-scoped model discovery (deviceId is irrelevant to installedModels()
+        // — it only matters for attest/setAutonomy — so a stable constant is fine
+        // here; the picker/Model-Manager own the real attest flow).
+        val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
+        val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
+        val bundle = installed.firstOrNull() ?: return null // no model → placeholder path
+
+        // Build the singleton engine for the installed bundle (default CPU delegate).
+        val engine = LiteRtEngine.fromInstalled(appContext, bundle.file, delegate = "cpu")
+        localEngine = engine
+        localEngineModelFile = bundle.file
+        localEngineDelegate = "cpu"
+        val provider: () -> LocalLlm = { engine }
+        localLlmProvider = provider
+        return provider
     }
 
     /**

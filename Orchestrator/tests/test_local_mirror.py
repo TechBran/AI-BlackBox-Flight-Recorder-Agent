@@ -74,6 +74,27 @@ def test_catalog_ram_ordering(client):
     assert by_slug["gemma-4-e2b"]["min_ram_gb"] < by_slug["gemma-4-e4b"]["min_ram_gb"]
 
 
+def test_bundles_pinned_to_real_litert_community_repos():
+    """The bundles are PINNED to the real ungated litert-community repos/files
+    (Task 2.6a): uppercase E2B/E4B casing, the portable ``.litertlm`` CPU/GPU
+    build, a populated size_bytes, and sha256 still None (verify skipped until
+    the real digest is pinned in 2.6b)."""
+    e2b = mirror.BUNDLES["gemma-4-e2b"]
+    assert e2b["hf_repo"] == "litert-community/gemma-4-E2B-it-litert-lm"
+    assert e2b["filename"] == "gemma-4-E2B-it.litertlm"
+    assert isinstance(e2b["size_bytes"], int) and e2b["size_bytes"] > 0
+    assert e2b["sha256"] is None  # TODO(2.6b): pinned to the real digest
+
+    e4b = mirror.BUNDLES["gemma-4-e4b"]
+    assert e4b["hf_repo"] == "litert-community/gemma-4-E4B-it-litert-lm"
+    assert e4b["filename"] == "gemma-4-E4B-it.litertlm"
+    assert isinstance(e4b["size_bytes"], int) and e4b["size_bytes"] > 0
+    assert e4b["sha256"] is None  # TODO(2.6b): pinned to the real digest
+
+    # The heavier E4B bundle is larger than the lighter E2B bundle.
+    assert e4b["size_bytes"] > e2b["size_bytes"]
+
+
 def test_list_bundles_is_isolated():
     """``mirror.list_bundles()`` returns copies — mutating a returned dict must
     NOT corrupt the module-level ``BUNDLES``; a second call is unaffected."""

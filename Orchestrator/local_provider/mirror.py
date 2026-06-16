@@ -12,12 +12,12 @@ This catalog is DISTINCT from the picker catalog (``LOCAL_MODELS`` in
 model selector; the entries here carry DOWNLOAD/METADATA fields. The slugs are
 kept IDENTICAL across both so a downloaded bundle maps cleanly to a picker entry.
 
-``size_bytes`` and ``sha256`` are ``None`` for now — they get populated by the
-real fetch in Task 1.2. The catalog still lists the bundle (with None there) so
-the app can render it before any download has happened.
-
-``hf_repo`` / ``filename`` are PLACEHOLDER config: plausible LiteRT-community
-ids that we will pin to the real upstream repo/file when Task 1.2 lands.
+``hf_repo`` / ``filename`` are now PINNED to the REAL upstream litert-community
+repos (Task 2.6a): the ungated, Apache-2.0 ``litert-community/gemma-4-E*B-it-litert-lm``
+bundles (no HF token needed). ``size_bytes`` is the approximate bundle size;
+``sha256`` is still ``None`` (verification is skipped when the digest is unknown —
+acceptable for v1) and will be pinned to the real content hash in Task 2.6b once
+verified on-device.
 """
 
 import hashlib
@@ -44,10 +44,10 @@ _HASH_CHUNK = 1024 * 1024
 #   slug            stable id, matches the picker catalog entry
 #   display_name    human label
 #   hf_repo         Hugging Face repo id the bundle is mirrored from
-#                   (PLACEHOLDER — pinned to the real repo in Task 1.2)
+#                   (PINNED to the real litert-community repo — Task 2.6a)
 #   filename        the .litertlm file name within that repo
-#   size_bytes      byte size of the bundle (None until the real fetch fills it)
-#   sha256          content hash for verify (None until the real fetch fills it)
+#   size_bytes      approximate byte size of the bundle
+#   sha256          content hash for verify (None — skip verify until pinned in 2.6b)
 #   min_ram_gb      realistic minimum device RAM to run the model
 #   recommended_for short human guidance on when to pick this one
 # ---------------------------------------------------------------------------
@@ -55,20 +55,20 @@ BUNDLES: dict[str, dict] = {
     "gemma-4-e2b": {
         "slug": "gemma-4-e2b",
         "display_name": "Gemma 4 E2B (on-device)",
-        "hf_repo": "litert-community/gemma-4-e2b-it-litert-lm",
-        "filename": "gemma-4-e2b-it.litertlm",
-        "size_bytes": None,  # populated by the real fetch in Task 1.2
-        "sha256": None,      # populated by the real fetch in Task 1.2
+        "hf_repo": "litert-community/gemma-4-E2B-it-litert-lm",
+        "filename": "gemma-4-E2B-it.litertlm",
+        "size_bytes": 2590000000,  # ~2.59 GB (approx)
+        "sha256": None,  # TODO(2.6b): pin real sha256 (verify skipped while None)
         "min_ram_gb": 3.0,
         "recommended_for": "Lighter, faster on-device model for phones with less RAM.",
     },
     "gemma-4-e4b": {
         "slug": "gemma-4-e4b",
         "display_name": "Gemma 4 E4B (on-device)",
-        "hf_repo": "litert-community/gemma-4-e4b-it-litert-lm",
-        "filename": "gemma-4-e4b-it.litertlm",
-        "size_bytes": None,  # populated by the real fetch in Task 1.2
-        "sha256": None,      # populated by the real fetch in Task 1.2
+        "hf_repo": "litert-community/gemma-4-E4B-it-litert-lm",
+        "filename": "gemma-4-E4B-it.litertlm",
+        "size_bytes": 3660000000,  # ~3.66 GB (approx)
+        "sha256": None,  # TODO(2.6b): pin real sha256 (verify skipped while None)
         "min_ram_gb": 4.5,
         "recommended_for": "Heavier, higher-quality on-device model for high-RAM phones.",
     },

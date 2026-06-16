@@ -34,6 +34,12 @@
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config">
 
+        <!-- LiteRT-LM GPU backend (Task 2.6a): optional native libs the on-device
+             Gemma engine uses for GPU delegation. required=false so phones without
+             these libraries still install (CPU backend is the safe default). -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false"/>
+        <uses-native-library android:name="libvndksupport.so" android:required="false"/>
+
         <service
             android:name=".KeepAliveService"
             android:foregroundServiceType="dataSync"
