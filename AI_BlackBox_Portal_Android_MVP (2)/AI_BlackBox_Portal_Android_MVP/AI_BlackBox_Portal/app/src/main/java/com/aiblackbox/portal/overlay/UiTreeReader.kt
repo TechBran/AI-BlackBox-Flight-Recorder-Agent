@@ -59,7 +59,32 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
         val nodes = ArrayList<UiNode>(MAX_NODES)
         val counter = intArrayOf(0) // sequential DFS index → node_id
         try {
-            walk(root, nodes, counter)
+            // Shared walk: emit a UiNode for every actionable node, in the SAME
+            // pre-order DFS + same filter + same MAX_NODES cap that
+            // findActionableNode (the actuator resolver) replays. This is what
+            // keeps node_ids stable between read_screen and the actuators (4.3).
+            walkActionable(root, counter) { node, denseIndex ->
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                // Treat as password if EITHER the node flag OR the inputType says
+                // so (a native field can set one without the other) — computed
+                // once and used for BOTH the redaction gate and the emitted flag.
+                val pw = isPasswordField(node.isPassword, node.inputType)
+                nodes.add(
+                    UiNode(
+                        nodeId = denseIndex,
+                        role = roleOf(node.className),
+                        // REDACTION BOUNDARY: nodeText drops the raw text for a
+                        // password node. Prefer text, fall back to contentDescription.
+                        text = nodeText(node.text ?: node.contentDescription, pw),
+                        bounds = boundsString(rect.left, rect.top, rect.right, rect.bottom),
+                        clickable = node.isClickable,
+                        editable = node.isEditable,
+                        isPassword = pw,
+                    ),
+                )
+                false // never short-circuit: collect every actionable node up to the cap
+            }
         } catch (e: Exception) {
             // Defensive: never let a malformed tree crash the agent. The message
             // is deliberately generic — node text/content must never appear in
@@ -68,65 +93,6 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
         }
         Log.i(TAG, "read_screen: emitted ${nodes.size} actionable node(s)")
         return nodesToJson(nodes)
-    }
-
-    /**
-     * Depth-first walk. Appends a [UiNode] for each actionable node, assigning
-     * `node_id` as the sequential DFS visitation index. Stops once [MAX_NODES]
-     * have been collected. Recycles framework nodes per platform norm (a no-op
-     * on modern Android, harmless otherwise) — never crashes on recycle.
-     */
-    private fun walk(node: AccessibilityNodeInfo?, out: MutableList<UiNode>, counter: IntArray) {
-        if (node == null || out.size >= MAX_NODES) return
-
-        if (isActionable(node)) {
-            val rect = Rect()
-            node.getBoundsInScreen(rect)
-            // Treat as password if EITHER the node flag OR the inputType says so
-            // (a native field can set one without the other) — computed once and
-            // used for BOTH the redaction gate and the emitted is_password flag.
-            val pw = isPasswordField(node.isPassword, node.inputType)
-            out.add(
-                UiNode(
-                    nodeId = counter[0],
-                    role = roleOf(node.className),
-                    // REDACTION BOUNDARY: nodeText drops the raw text for a
-                    // password node. Prefer text, fall back to contentDescription.
-                    text = nodeText(node.text ?: node.contentDescription, pw),
-                    bounds = boundsString(rect.left, rect.top, rect.right, rect.bottom),
-                    clickable = node.isClickable,
-                    editable = node.isEditable,
-                    isPassword = pw,
-                ),
-            )
-            counter[0]++
-        }
-
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            if (out.size >= MAX_NODES) break
-            val child = node.getChild(i)
-            if (child != null) {
-                walk(child, out, counter)
-                @Suppress("DEPRECATION")
-                try {
-                    child.recycle()
-                } catch (_: Exception) {
-                    // recycle() is a no-op / may throw IllegalStateException on
-                    // some versions; never let cleanup crash the read.
-                }
-            }
-        }
-    }
-
-    /**
-     * A node is worth emitting if the agent could act on it or read it:
-     * clickable, editable, or it carries visible, non-blank text/description.
-     */
-    private fun isActionable(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable || node.isEditable) return true
-        val hasText = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
-        return hasText && node.isVisibleToUser
     }
 
     companion object {
@@ -147,6 +113,107 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
          */
         fun fromService(): UiTreeReader =
             UiTreeReader { BlackBoxA11yService.instance?.rootInActiveWindow }
+
+        /**
+         * Resolve a `node_id` (the dense actionable index from `read_screen`)
+         * back to a live [AccessibilityNodeInfo] for the Actuators (Task 4.3).
+         *
+         * A `node_id` is NOT a durable handle — it is purely the position of a
+         * node in the dense actionable sequence produced by [readScreen]. To act
+         * on one, the actuator must RE-WALK the current tree with the IDENTICAL
+         * filter ([isActionable]) and the IDENTICAL pre-order DFS + [MAX_NODES]
+         * cap that the reader used, then take the node at that index. Both paths
+         * go through [walkActionable], so the ordering can never drift between
+         * read and act.
+         *
+         * The tree may have changed slightly since the read; that's acceptable —
+         * this is a best-effort positional match. Returns null if [targetIndex]
+         * is out of range / the tree shrank / [root] is null (caller treats null
+         * as "node not found", never an NPE).
+         *
+         * The returned node is the LIVE framework node and is intentionally NOT
+         * recycled here — the caller performs an action on it. (Sibling/child
+         * nodes traversed on the way are recycled inside [walkActionable].)
+         */
+        internal fun findActionableNode(
+            root: AccessibilityNodeInfo?,
+            targetIndex: Int,
+        ): AccessibilityNodeInfo? {
+            if (root == null || targetIndex < 0) return null
+            var found: AccessibilityNodeInfo? = null
+            val counter = intArrayOf(0)
+            walkActionable(root, counter) { node, denseIndex ->
+                if (denseIndex == targetIndex) {
+                    found = node
+                    true // short-circuit: stop the walk, keep this node un-recycled
+                } else {
+                    false
+                }
+            }
+            return found
+        }
+
+        /**
+         * THE one shared pre-order DFS over *actionable* nodes. Both
+         * [readScreen] (collects every node) and [findActionableNode] (stops at
+         * one) drive their behavior through this so the dense actionable index
+         * (`node_id`) is computed identically on both paths.
+         *
+         * For each actionable node (see [isActionable]) it invokes [visit] with
+         * the live node and its dense index, then increments the index. If
+         * [visit] returns `true` the walk stops immediately AND the node passed
+         * to that final [visit] is NOT recycled (the resolver wants to keep it);
+         * every other traversed child IS recycled. Honors [MAX_NODES] so a
+         * pathological tree can't run away.
+         *
+         * @return true if the walk was short-circuited by [visit].
+         */
+        private fun walkActionable(
+            node: AccessibilityNodeInfo?,
+            counter: IntArray,
+            visit: (AccessibilityNodeInfo, Int) -> Boolean,
+        ): Boolean {
+            if (node == null || counter[0] >= MAX_NODES) return false
+
+            if (isActionable(node)) {
+                val stop = visit(node, counter[0])
+                counter[0]++
+                if (stop) return true
+            }
+
+            val childCount = node.childCount
+            for (i in 0 until childCount) {
+                if (counter[0] >= MAX_NODES) break
+                val child = node.getChild(i) ?: continue
+                val stopped = walkActionable(child, counter, visit)
+                if (stopped) {
+                    // Do NOT recycle: the short-circuited node may be `child`
+                    // itself or live in its subtree (findActionableNode returns
+                    // it to the caller to act on). Recycling would invalidate it.
+                    return true
+                }
+                @Suppress("DEPRECATION")
+                try {
+                    child.recycle()
+                } catch (_: Exception) {
+                    // recycle() is a no-op / may throw IllegalStateException on
+                    // some versions; never let cleanup crash the walk.
+                }
+            }
+            return false
+        }
+
+        /**
+         * A node is worth emitting/acting on if the agent could act on it or
+         * read it: clickable, editable, or it carries visible, non-blank
+         * text/description. This is THE filter both the reader and the actuator
+         * resolver use — keep it the single definition so node_ids line up.
+         */
+        private fun isActionable(node: AccessibilityNodeInfo): Boolean {
+            if (node.isClickable || node.isEditable) return true
+            val hasText = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+            return hasText && node.isVisibleToUser
+        }
     }
 }
 
