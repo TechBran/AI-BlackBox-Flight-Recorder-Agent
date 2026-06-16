@@ -82,17 +82,21 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
         if (isActionable(node)) {
             val rect = Rect()
             node.getBoundsInScreen(rect)
+            // Treat as password if EITHER the node flag OR the inputType says so
+            // (a native field can set one without the other) — computed once and
+            // used for BOTH the redaction gate and the emitted is_password flag.
+            val pw = isPasswordField(node.isPassword, node.inputType)
             out.add(
                 UiNode(
                     nodeId = counter[0],
                     role = roleOf(node.className),
                     // REDACTION BOUNDARY: nodeText drops the raw text for a
                     // password node. Prefer text, fall back to contentDescription.
-                    text = nodeText(node.text ?: node.contentDescription, node.isPassword),
+                    text = nodeText(node.text ?: node.contentDescription, pw),
                     bounds = boundsString(rect.left, rect.top, rect.right, rect.bottom),
                     clickable = node.isClickable,
                     editable = node.isEditable,
-                    isPassword = node.isPassword,
+                    isPassword = pw,
                 ),
             )
             counter[0]++
@@ -180,6 +184,34 @@ private val readScreenJson = Json {
  */
 fun nodeText(rawText: CharSequence?, isPassword: Boolean): String =
     if (isPassword) PASSWORD_PLACEHOLDER else rawText?.toString().orEmpty()
+
+/**
+ * Whether a node must be treated as a password field for redaction. Gates on the
+ * node's own [isPassword] flag AND the [inputType] password variations: a native
+ * EditText can carry a password [inputType] while reporting `isPassword == false`
+ * (the framework doesn't always set both), and its cleartext would otherwise flow
+ * through the gate ungated. Checking both is defense-in-depth for the
+ * native-input case.
+ *
+ * LIMITATION (tracked for the 4.8 security review): this CANNOT catch WebView
+ * `<input type="password">` or Compose `VisualTransformation` fields, which
+ * expose neither `isPassword` nor a password `inputType` — their masking is
+ * purely visual. Those remain a known false-negative surface at this layer.
+ */
+fun isPasswordField(isPassword: Boolean, inputType: Int): Boolean {
+    if (isPassword) return true
+    val variation = inputType and android.text.InputType.TYPE_MASK_VARIATION
+    val cls = inputType and android.text.InputType.TYPE_MASK_CLASS
+    if (cls == android.text.InputType.TYPE_CLASS_TEXT) {
+        return variation == android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+    }
+    if (cls == android.text.InputType.TYPE_CLASS_NUMBER) {
+        return variation == android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+    }
+    return false
+}
 
 /**
  * Last `.`-segment of a class name (e.g. `android.widget.Button` → `Button`),

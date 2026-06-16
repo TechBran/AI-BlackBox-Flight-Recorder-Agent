@@ -22,6 +22,48 @@ import org.junit.Test
  */
 class UiTreeReaderTest {
 
+    // ---- isPasswordField: inputType-aware password gate (4.2 hardening) ----
+
+    private val TEXT = android.text.InputType.TYPE_CLASS_TEXT
+    private val NUMBER = android.text.InputType.TYPE_CLASS_NUMBER
+
+    @Test
+    fun `isPasswordField true when node flag is set regardless of inputType`() {
+        assertTrue(isPasswordField(isPassword = true, inputType = 0))
+        assertTrue(isPasswordField(isPassword = true, inputType = TEXT)) // plain text inputType
+    }
+
+    @Test
+    fun `isPasswordField catches password inputType even when node flag is false`() {
+        // The whole point of the hardening: isPassword=false but inputType says password.
+        assertTrue(isPasswordField(false, TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD))
+        assertTrue(isPasswordField(false, TEXT or android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD))
+        assertTrue(isPasswordField(false, TEXT or android.text.InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD))
+        assertTrue(isPasswordField(false, NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD))
+    }
+
+    @Test
+    fun `isPasswordField false for normal inputs`() {
+        assertFalse(isPasswordField(false, 0))
+        assertFalse(isPasswordField(false, TEXT)) // plain text
+        assertFalse(isPasswordField(false, TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS))
+        assertFalse(isPasswordField(false, NUMBER)) // plain number
+    }
+
+    @Test
+    fun `redaction holds when only inputType marks a password (end-to-end through the gate)`() {
+        val secret = "hunter2"
+        val pw = isPasswordField(false, TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        val node = UiNode(
+            nodeId = 0, role = "EditText", text = nodeText(secret, pw),
+            bounds = "0,0,1,1", clickable = true, editable = true, isPassword = pw,
+        )
+        val json = nodesToJson(listOf(node))
+        assertFalse("inputType-only password must still be redacted", json.contains(secret))
+        assertTrue(json.contains("·····"))
+        assertTrue(json.contains("\"is_password\":true"))
+    }
+
     // ---- nodeText: THE REDACTION GATE -------------------------------------
 
     @Test
