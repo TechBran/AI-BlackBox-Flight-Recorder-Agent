@@ -554,7 +554,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=-/usr/bin/pkill -9 -f audio_subprocess.py
 ExecStart=$BLACKBOX_ROOT/Orchestrator/venv/bin/python -m uvicorn Orchestrator.app:app \\
     --host 0.0.0.0 --port 9091 \\
-    --timeout-keep-alive 120 --limit-max-requests 10000 --loop uvloop
+    --timeout-keep-alive 120 --limit-max-requests 100000 --timeout-graceful-shutdown 30 --loop uvloop
 Restart=always
 RestartSec=10
 
