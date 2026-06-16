@@ -234,3 +234,70 @@ internal object AutoDeclineCredentialHandoff : CredentialHandoff {
 
 /** A GENERIC, content-free description for the credential-handoff prompt (never the model's text). */
 const val CREDENTIAL_FIELD_DESCRIPTION: String = "the password field"
+
+// =============================================================================
+// INTENT GATE (intent-based phone actions — Task IA-1)
+// =============================================================================
+
+/**
+ * The named intent actions that are HIGH-CONSEQUENCE: in [AutonomyMode.PERMISSION]
+ * the actuator must get the user's explicit OK BEFORE firing them.
+ *
+ * Only `send_email` and `send_sms` gate, and the reason is precise: these are the
+ * only intents that FIRE A PREFILLED OUTBOUND MESSAGE to a RECIPIENT. Every other
+ * intent action is either:
+ *  - **benign** (flashlight, open a settings panel, set a timer, show a map, run a
+ *    web search) — nothing leaves the device on the user's behalf; or
+ *  - **finalized by the user inside the launched UI** (`dial` pre-fills the dialer
+ *    but the user still taps Call; `create_calendar_event` opens the editor; an
+ *    `open_url` just opens the browser) — so a separate confirm here would be
+ *    redundant over-gating, which trains the user to rubber-stamp.
+ *
+ * Kept deliberately conservative (only the genuinely "sends on your behalf" pair)
+ * and extensible: any future fire-and-forget outbound intent (e.g. a one-shot
+ * "post" intent) should be added HERE so it inherits the Permission-mode confirm.
+ * Compared case-insensitively against the trimmed intent name.
+ */
+private val HIGH_CONSEQUENCE_INTENTS: Set<String> = setOf("send_email", "send_sms")
+
+/**
+ * PURE: is the intent [name] high-consequence (needs confirmation in Permission
+ * mode)? True only for [HIGH_CONSEQUENCE_INTENTS], matched on the trimmed,
+ * lowercased name.
+ */
+fun isHighConsequenceIntent(name: String): Boolean =
+    name.trim().lowercase() in HIGH_CONSEQUENCE_INTENTS
+
+/**
+ * PURE: should the actuator ask the user before firing intent [name]?
+ *
+ * Only when the device is in [AutonomyMode.PERMISSION] AND the intent is
+ * high-consequence. In [AutonomyMode.YOLO] nothing gates; a benign intent never
+ * gates regardless of mode. Mirrors [shouldConfirm] for the intent surface.
+ */
+fun shouldConfirmIntent(mode: AutonomyMode, name: String): Boolean =
+    mode == AutonomyMode.PERMISSION && isHighConsequenceIntent(name)
+
+/**
+ * PURE: the human-readable confirm message for an intent action.
+ *
+ * - `send_email` → [primaryArg] is the RECIPIENT address:
+ *   `Send an email to "<to>"`, or `Send an email` if [primaryArg] is null/blank.
+ * - `send_sms` → [primaryArg] is the phone NUMBER:
+ *   `Send a text to "<number>"`, or `Send a text message` if null/blank.
+ * - any other [name] → a generic `Run <name>`.
+ *
+ * SECURITY: [primaryArg] is ONLY ever the recipient / number — never the message
+ * BODY. The body is supplied separately to the actuator (IA-2) and never reaches
+ * this function, so it can never appear in a confirm prompt. The entire output is
+ * a fixed function of (`name`, `primaryArg`); there is no path for any other text
+ * to leak in.
+ */
+fun describeIntent(name: String, primaryArg: String?): String {
+    val arg = primaryArg?.trim()?.takeIf { it.isNotBlank() }
+    return when (name.trim().lowercase()) {
+        "send_email" -> if (arg != null) "Send an email to \"$arg\"" else "Send an email"
+        "send_sms" -> if (arg != null) "Send a text to \"$arg\"" else "Send a text message"
+        else -> "Run $name"
+    }
+}
