@@ -189,6 +189,9 @@ class FcLoop(
         repeat(maxIterations) {
             val prompt = buildAgentPrompt(persona, working)
             // bounded: resident + phone actuators (fixed small set) + injected (already <= MAX).
+            // ORDER IS LOAD-BEARING: phoneTools MUST precede injected so distinctBy
+            // keeps the PHONE schema for any name in both sets — matching the dispatch
+            // precedence (the phone branch is checked first). Don't reorder.
             val available = (resident + phoneTools + injected).distinctBy { it.name }
 
             val assistantText = StringBuilder()
