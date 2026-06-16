@@ -118,7 +118,12 @@ class LiteRtEngine(
 
     /** True once a model is loaded and the native engine is initialized. */
     override val isLoaded: Boolean
-        get() = engine?.isInitialized() == true
+        // M4 (review): capture the @Volatile engine into a local so close() can't
+        // null it between the null-check and the native isInitialized() call.
+        get() {
+            val e = engine
+            return e != null && e.isInitialized()
+        }
 
     /** Release the native engine. After [close], a fresh [load] is required. */
     override fun close() {
@@ -145,8 +150,15 @@ class LiteRtEngine(
                 val text = msg.plainText()
                 if (text.isNotEmpty()) emit(text)
             }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // I2 (review): on cancellation (user stop / new send), abort the
+            // in-flight native generation, not just close the conversation.
+            // TODO(2.6b): confirm whether close() alone aborts the native compute;
+            // cancelProcess() is added defensively and is a no-op if already done.
+            runCatching { conversation.cancelProcess() }
+            throw c
         } finally {
-            conversation.close()
+            runCatching { conversation.close() }
         }
     }
 
@@ -177,8 +189,13 @@ class LiteRtEngine(
                     emit(LlmEvent.ToolCall(tc.name, argsToJsonObject(tc.arguments)))
                 }
             }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            // I2 (review): abort the in-flight native generation on cancellation.
+            // TODO(2.6b): confirm close() alone aborts; cancelProcess() defensive.
+            runCatching { conversation.cancelProcess() }
+            throw c
         } finally {
-            conversation.close()
+            runCatching { conversation.close() }
         }
     }
 

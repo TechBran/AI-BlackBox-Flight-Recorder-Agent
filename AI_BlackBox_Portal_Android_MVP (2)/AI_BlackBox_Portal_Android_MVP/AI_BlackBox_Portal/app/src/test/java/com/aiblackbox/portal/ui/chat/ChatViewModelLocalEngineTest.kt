@@ -10,6 +10,13 @@ import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
+import java.io.File
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -175,6 +182,65 @@ class ChatViewModelLocalEngineTest {
         assertFalse("streaming flag cleared after error", h.assistant.isStreaming)
         // No save on a faulted turn (mirrors the SSE error path, which does not save).
         assertNull("a faulted turn is not persisted", h.saved)
+    }
+
+    /**
+     * FIX I1 (Task 2.6a review) — a REAL job cancellation (stop / new send both call
+     * `streamJob?.cancel()`) must NOT be rendered as an on-device fault.
+     *
+     * This guards the STREAMING CORE: `streamLocalTurn`'s `.catch` is transparent to
+     * a genuine cooperative cancellation (unlike a manually-thrown
+     * CancellationException, which `.catch` WOULD swallow — so this test drives a
+     * real `cancelAndJoin`, not a thrown exception). On cancellation the core must
+     * propagate (not append [ChatViewModel.LOCAL_ENGINE_ERROR_TEXT], not save).
+     *
+     * The instance-level fix (the new `catch (CancellationException) { throw e }`
+     * BEFORE the generic catch in `runLocalEngineTurn`, which stops the cancelled
+     * turn from flipping state to ERROR / stopping the new turn's service) needs an
+     * Application/Robolectric the JVM harness lacks — it is verified by
+     * `compileDebugKotlin` + the on-device cancel-mid-load smoke in Task 2.6b.
+     */
+    @Test
+    fun `a real job cancellation propagates through the core, not mapped to error or save`() = runTest {
+        val started = CompletableDeferred<Unit>()
+        // generate emits one delta, signals it has started, then suspends until the
+        // collecting job is cancelled — the faithful real-cancellation scenario.
+        val cancellable = object : com.aiblackbox.portal.data.local.LocalLlm {
+            override var isLoaded: Boolean = true
+            override suspend fun load(modelFile: File, delegate: String) {}
+            override fun generate(prompt: String) = flow {
+                emit("partial ")
+                started.complete(Unit)
+                awaitCancellation()
+            }
+            override fun close() {}
+        }
+        val h = Harness()
+
+        // UnconfinedTestDispatcher runs the launch eagerly; the `started` deferred
+        // synchronizes across streamLocalTurn's internal flowOn(Dispatchers.IO).
+        val job = launch(UnconfinedTestDispatcher(testScheduler)) {
+            ChatViewModel.streamLocalTurn(
+                fcLoop = FcLoop(cancellable),
+                persona = "P",
+                history = emptyList(),
+                text = "hi",
+                operator = "Brandon",
+                model = null,
+                sink = h.sink,
+                saveSink = h.saveSink,
+            )
+        }
+        started.await()
+        job.cancelAndJoin()
+
+        assertTrue("the turn was actually cancelled", job.isCancelled)
+        assertFalse(
+            "cancellation must NOT append the on-device error text",
+            h.assistant.content.contains("error", ignoreCase = true) ||
+                h.assistant.content.contains("on-device", ignoreCase = true),
+        )
+        assertNull("a cancelled turn is not persisted", h.saved)
     }
 
     // ── Review follow-ups (Task 2.4) ──────────────────────────────────────────

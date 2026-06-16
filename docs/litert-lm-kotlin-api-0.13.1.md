@@ -32,7 +32,7 @@ class Backend.GPU(...)                       // Backend.GPU()
 class Backend.NPU(...)                       // Backend.NPU(nativeLibraryDir = context.applicationInfo.nativeLibraryDir)
 
 class Engine(config: EngineConfig) : AutoCloseable {
-    val isInitialized: Boolean
+    fun isInitialized(): Boolean             // NOTE: a method, not a `val` property
     fun initialize()                         // ~10s; call off main thread
     fun close()
     fun createConversation(config: ConversationConfig = default): Conversation

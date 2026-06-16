@@ -747,6 +747,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 faulted = !ok
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // I1 (review): cancellation is NOT a fault. Stopping the turn or
+                // starting a new one calls streamJob?.cancel(), which throws
+                // CancellationException here — it IS an Exception, so the generic
+                // catch below would paint a spurious "[on-device error]", flip state
+                // to ERROR, and stopBackgroundService() (killing the NEW turn's
+                // service). Rethrow so the launch ends cancelled and the trailing
+                // state/service/persist cleanup is SKIPPED; the canceller
+                // (cancelStream/clearHistory) owns its own cleanup.
+                throw e
             } catch (e: Exception) {
                 // A throw OUTSIDE streamLocalTurn's Flow scope (e.g. persona fetch).
                 Log.e(TAG, "local engine error before stream: ${e.message}", e)
@@ -824,6 +834,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // here; the picker/Model-Manager own the real attest flow).
         val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
         val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
+        // M1 (review): firstOrNull → installedModels() is sorted, so this picks the
+        // alphabetically-first slug (gemma-4-e2b, the LIGHTER model) — a safe RAM
+        // default. Only one model is installed at a time today; TODO if multiple can
+        // coexist, prefer LocalModelManager.recommendForDevice() among the installed.
         val bundle = installed.firstOrNull() ?: return null // no model → placeholder path
 
         // Build the singleton engine for the installed bundle (default CPU delegate).
