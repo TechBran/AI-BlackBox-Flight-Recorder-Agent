@@ -93,6 +93,23 @@ enum class ChatRoute { AGENT, VOICE, ER_INJECT, LOCAL_PLACEHOLDER, SSE }
 
 private const val MAX_CHAT_MESSAGES = 100
 
+/**
+ * How many prior conversation turns to feed into the ON-DEVICE model's prompt.
+ *
+ * BlackBox architecture: the immutable snapshot ledger is the memory — NOT a
+ * growing in-prompt transcript. Inter-turn recall will come from snapshot
+ * semantic-search (the next stage); the on-device model only needs INTRA-turn
+ * context, so each turn starts FRESH. `0` = no carried history.
+ *
+ * This keeps every on-device prompt bounded regardless of session length, and was
+ * the fix for the 4096-token overrun caused by accumulating the whole transcript
+ * each turn (device-confirmed: `Input token ids are too long: 4292 >= 4096`). A
+ * small sliding window can be re-enabled here later (e.g. for immediate "it"
+ * follow-ups) without touching [FcLoop]. Only the on-device path uses this; the
+ * cloud SSE path is unaffected (the server owns its own context budget).
+ */
+private const val LOCAL_HISTORY_WINDOW_TURNS = 0
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
@@ -678,9 +695,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
         _inputText.value = TextFieldValue()
 
-        // 2. History for the prompt = the conversation BEFORE this turn — exclude
-        //    the just-appended user turn AND the in-flight assistant placeholder.
-        val history = toFcHistory(_messages.value)
+        // 2. History for the prompt. BlackBox architecture: the ledger is the
+        //    memory, so we DON'T carry the inter-turn transcript into the on-device
+        //    prompt — we window it to the last [LOCAL_HISTORY_WINDOW_TURNS] turns
+        //    (0 = fresh each turn). This keeps the per-turn prompt bounded (the
+        //    accumulated transcript previously overran the engine's token window).
+        //    The full visible conversation still lives in _messages (UI) and is
+        //    minted to the ledger; recall will come from snapshot search later.
+        val history = toFcHistory(_messages.value).takeLast(LOCAL_HISTORY_WINDOW_TURNS)
 
         _chatState.value = ChatState.STREAMING
         startBackgroundService("Generating on-device response...")

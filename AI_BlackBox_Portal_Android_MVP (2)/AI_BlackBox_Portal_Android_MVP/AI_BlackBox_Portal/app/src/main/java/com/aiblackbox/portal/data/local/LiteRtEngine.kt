@@ -58,12 +58,17 @@ import java.io.File
  * @param nativeLibraryDir required for the NPU backend
  *   (`context.applicationInfo.nativeLibraryDir`); ignored otherwise. When `"npu"`
  *   is requested without it, [backendFor] falls back to CPU.
+ * @param maxTokens the context window (input+output tokens) to configure on the
+ *   engine via [EngineConfig.maxNumTokens]. Defaults to [DEFAULT_MAX_TOKENS] —
+ *   set explicitly because the litertlm default (null) is only 4096, far below
+ *   what the on-device agent's per-turn prompt needs (see the constant's KDoc).
  */
 class LiteRtEngine(
     private val modelFile: File,
     private val delegate: String = "cpu",
     private val cacheDir: String? = null,
     private val nativeLibraryDir: String? = null,
+    private val maxTokens: Int = DEFAULT_MAX_TOKENS,
 ) : LocalLlm, ToolCallingLlm {
 
     @Volatile
@@ -108,6 +113,10 @@ class LiteRtEngine(
                 modelPath = targetPath,
                 backend = backendFor(delegate),
                 cacheDir = cacheDir,
+                // Explicit context window — the litertlm default (null) is only
+                // 4096 tokens (device-confirmed: "Input token ids are too long:
+                // 4292 >= 4096"), too small for the agent's per-turn prompt.
+                maxNumTokens = maxTokens,
             )
             val built = Engine(config)
             built.initialize() // ~10s; we're on Dispatchers.IO.
@@ -217,6 +226,25 @@ class LiteRtEngine(
     }
 
     companion object {
+        /**
+         * Context window (input+output tokens) the engine is configured for.
+         *
+         * When [EngineConfig.maxNumTokens] is left null the litertlm default is
+         * only **4096** tokens — far below Gemma-4 E2B/E4B's native capacity, and
+         * too small for the on-device agent's per-turn prompt (persona + the ~24
+         * resident phone/intent tool schemas + a `read_screen` dump + tool
+         * results). Device testing overran it: `Input token ids are too long.
+         * Exceeding the maximum number of tokens allowed: 4292 >= 4096`. We set it
+         * explicitly for INTRA-turn headroom.
+         *
+         * The KV cache grows with this value, so it is bounded for on-device RAM;
+         * 16384 is comfortable on an 8GB+ device (the target hardware). Note this
+         * is the SINGLE-TURN budget: the BlackBox ledger — not a growing in-prompt
+         * transcript — is the memory, so inter-turn history is NOT accumulated
+         * (see ChatViewModel's `LOCAL_HISTORY_WINDOW_TURNS`).
+         */
+        const val DEFAULT_MAX_TOKENS: Int = 16384
+
         /**
          * Convenience factory: build an engine for an installed [modelFile] using
          * the app's native-library dir (so the NPU backend can find vendor
