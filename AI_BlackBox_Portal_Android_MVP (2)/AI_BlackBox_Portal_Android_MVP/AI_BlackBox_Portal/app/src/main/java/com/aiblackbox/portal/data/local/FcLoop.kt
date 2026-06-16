@@ -184,7 +184,9 @@ class FcLoop(
         // Phase 4.5: advertise the resident phone actuators ONLY when a
         // PhoneController is wired (a device with the accessibility service off /
         // no controller never sees phone actions). Constant for the whole run.
-        val phoneTools = if (phone != null) ResidentTools.phoneActuators() else emptyList()
+        val phoneTools =
+            if (phone != null) ResidentTools.phoneActuators() + ResidentTools.intentActions()
+            else emptyList()
 
         repeat(maxIterations) {
             val prompt = buildAgentPrompt(persona, working)
@@ -222,10 +224,10 @@ class FcLoop(
                 // Keep the textual prompt coherent: note that this call happened.
                 working = working + Turn(Role.ASSISTANT, "[called ${call.name}]")
 
-                if (phone != null && call.name in ResidentTools.PHONE_ACTUATORS) {
-                    // Phase 4.5: a resident phone actuator is dispatched LOCALLY
-                    // through the PhoneController (the accessibility service) — it
-                    // must NEVER reach the cloud bridge. The `continue` guarantees
+                if (phone != null && call.name in ResidentTools.LOCAL_PHONE_TOOLS) {
+                    // Phase 4.5 / IA-3: a resident phone actuator OR intent action is
+                    // dispatched LOCALLY through the PhoneController (the accessibility
+                    // service) — it must NEVER reach the cloud bridge. The `continue` guarantees
                     // it skips the search/execute branches below. The autonomy gate
                     // (4.6) wraps phone.dispatch; the controller never throws.
                     val res = phone.dispatch(call.name, call.args)

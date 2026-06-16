@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.overlay
 
 import com.aiblackbox.portal.data.local.PhoneController
+import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.model.ToolResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -50,10 +51,14 @@ import kotlinx.serialization.json.jsonPrimitive
  * @param reader the redacting UI-tree reader (prod: [UiTreeReader.fromService]).
  * @param actuators the gesture actuators (prod: [Actuators.fromService], wired
  *   with the autonomy mode + overlay confirm + credential handoff).
+ * @param intentActuator the intent-action actuator (Task IA-3; prod:
+ *   [IntentActuator.fromService], wired with the same autonomy mode + confirm).
+ *   A call whose name is in [ResidentTools.INTENT_ACTIONS] is forwarded here.
  */
 class AndroidPhoneController(
     private val reader: UiTreeReader,
     private val actuators: Actuators,
+    private val intentActuator: IntentActuator,
 ) : PhoneController {
 
     override suspend fun dispatch(name: String, args: JsonObject): ToolResult {
@@ -105,7 +110,15 @@ class AndroidPhoneController(
                 "back" -> actuators.back().toToolResult()
                 "home" -> actuators.home().toToolResult()
 
-                else -> ToolResult(false, JsonPrimitive("unknown phone action: $name"))
+                // Task IA-3: an intent action (e.g. show_map, dial, set_alarm) is a
+                // deterministic single-shot OS intent — forward it to the
+                // IntentActuator, which builds + fires the stock Android intent and
+                // applies the send_* autonomy gate internally. Anything else is unknown.
+                else -> if (name in ResidentTools.INTENT_ACTIONS) {
+                    intentActuator.perform(name, args).toToolResult()
+                } else {
+                    ToolResult(false, JsonPrimitive("unknown phone action: $name"))
+                }
             }
         } catch (e: Exception) {
             // NEVER throw, NEVER leak content: class name only (matches the
@@ -142,6 +155,9 @@ class AndroidPhoneController(
             AndroidPhoneController(
                 UiTreeReader.fromService(),
                 Actuators.fromService(mode, confirm, credentialHandoff),
+                // Task IA-3: the intent actions share the SAME autonomy posture +
+                // confirm seam as the gestures (its internal gate covers send_*).
+                IntentActuator.fromService(mode, confirm),
             )
     }
 }

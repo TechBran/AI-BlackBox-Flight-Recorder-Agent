@@ -66,6 +66,29 @@ object ResidentTools {
         "read_screen", "tap", "type", "swipe", "scroll", "open_app", "back", "home",
     )
 
+    /**
+     * The names of the on-device INTENT ACTIONS (Task IA-3). A tool call whose name
+     * is in this set is dispatched LOCALLY through the [PhoneController] to the
+     * [com.aiblackbox.portal.overlay.IntentActuator] — NEVER through the cloud
+     * [ToolBridge]. Unlike the gesture [PHONE_ACTUATORS] (which need a read_screen →
+     * tap/type loop), each of these is a DETERMINISTIC, SINGLE-SHOT stock-Android OS
+     * intent (show a map, dial, draft an SMS/email, set an alarm/timer, etc.) that
+     * fully satisfies the request in one call.
+     */
+    val INTENT_ACTIONS: Set<String> = setOf(
+        "flashlight_on", "flashlight_off", "create_contact", "send_email", "show_map",
+        "open_wifi_settings", "create_calendar_event", "open_url", "dial", "send_sms",
+        "set_alarm", "set_timer", "share_text", "open_settings_panel", "take_photo",
+        "web_search",
+    )
+
+    /**
+     * The FULL set of tool names [FcLoop] routes LOCALLY through the
+     * [PhoneController] (never the cloud [ToolBridge]): the gesture
+     * [PHONE_ACTUATORS] plus the [INTENT_ACTIONS]. [FcLoop] routes on this set.
+     */
+    val LOCAL_PHONE_TOOLS: Set<String> = PHONE_ACTUATORS + INTENT_ACTIONS
+
     /** A `{"type":"object"}` schema with no properties (read_screen/back/home). */
     private fun noParams(): JsonObject = buildJsonObject {
         put("type", JsonPrimitive("object"))
@@ -174,6 +197,256 @@ object ResidentTools {
             name = "home",
             description = "Go to the system Home screen.",
             parameters = noParams(),
+        ),
+    )
+
+    // ---- Task IA-3: on-device intent actions --------------------------------
+
+    /**
+     * The on-device INTENT-ACTION schemas (names == [INTENT_ACTIONS]). [FcLoop]
+     * appends these to the per-turn tool list ONLY when a [PhoneController] is
+     * wired, and routes any matching call LOCALLY through the controller to the
+     * [com.aiblackbox.portal.overlay.IntentActuator].
+     *
+     * Descriptions are deliberately TERSE (small on-device model) and
+     * RELIABILITY-STEERING: each tells the model this is a ONE-SHOT direct action —
+     * NO `read_screen`/`tap` loop is needed — so the small model doesn't fall back
+     * to the slower, error-prone gesture path for something a single intent does.
+     */
+    fun intentActions(): List<ToolSchema> = listOf(
+        ToolSchema(
+            name = "flashlight_on",
+            description = "Turn the flashlight on. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "flashlight_off",
+            description = "Turn the flashlight off. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "create_contact",
+            description = "Open a new-contact editor prefilled with these fields. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("first_name") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Contact's first name."))
+                    }
+                    putJsonObject("last_name") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Contact's last name."))
+                    }
+                    putJsonObject("phone_number") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Contact's phone number."))
+                    }
+                    putJsonObject("email") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Contact's email address."))
+                    }
+                }
+            },
+        ),
+        ToolSchema(
+            name = "send_email",
+            description = "Open the email composer prefilled. to=recipient. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("to") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Recipient email address."))
+                    }
+                    putJsonObject("subject") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Email subject."))
+                    }
+                    putJsonObject("body") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Email body."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("to")) })
+            },
+        ),
+        ToolSchema(
+            name = "show_map",
+            description = "Show a place/address in Maps. query=what to find. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("query") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Place or address to show."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("query")) })
+            },
+        ),
+        ToolSchema(
+            name = "open_wifi_settings",
+            description = "Open the Wi-Fi settings screen. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "create_calendar_event",
+            description = "Open a new calendar event prefilled. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("datetime") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Start time, format YYYY-MM-DDTHH:MM:SS."))
+                    }
+                    putJsonObject("title") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Event title."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("datetime")) })
+            },
+        ),
+        ToolSchema(
+            name = "open_url",
+            description = "Open a web URL (http/https). Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("url") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("The http/https URL to open."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("url")) })
+            },
+        ),
+        ToolSchema(
+            name = "dial",
+            description = "Open the dialer prefilled with a number (does not call). Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("number") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Phone number to place in the dialer."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("number")) })
+            },
+        ),
+        ToolSchema(
+            name = "send_sms",
+            description = "Open the messaging app prefilled. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("number") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Recipient phone number."))
+                    }
+                    putJsonObject("body") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Message body."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("number")) })
+            },
+        ),
+        ToolSchema(
+            name = "set_alarm",
+            description = "Set an alarm. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("hour") {
+                        put("type", JsonPrimitive("integer"))
+                        put("description", JsonPrimitive("Hour, 0-23."))
+                    }
+                    putJsonObject("minutes") {
+                        put("type", JsonPrimitive("integer"))
+                        put("description", JsonPrimitive("Minutes, 0-59."))
+                    }
+                    putJsonObject("label") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Alarm label."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("hour")); add(JsonPrimitive("minutes")) })
+            },
+        ),
+        ToolSchema(
+            name = "set_timer",
+            description = "Start a countdown timer. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("seconds") {
+                        put("type", JsonPrimitive("integer"))
+                        put("description", JsonPrimitive("Countdown length in seconds."))
+                    }
+                    putJsonObject("label") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Timer label."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("seconds")) })
+            },
+        ),
+        ToolSchema(
+            name = "share_text",
+            description = "Open the share sheet with this text. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("text") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("The text to share."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("text")) })
+            },
+        ),
+        ToolSchema(
+            name = "open_settings_panel",
+            description = "Open a settings screen. which=which one. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("which") {
+                        put("type", JsonPrimitive("string"))
+                        put("enum", buildJsonArray {
+                            add(JsonPrimitive("wifi")); add(JsonPrimitive("bluetooth"))
+                            add(JsonPrimitive("location")); add(JsonPrimitive("sound"))
+                            add(JsonPrimitive("display")); add(JsonPrimitive("battery"))
+                            add(JsonPrimitive("nfc")); add(JsonPrimitive("airplane"))
+                            add(JsonPrimitive("data")); add(JsonPrimitive("storage"))
+                            add(JsonPrimitive("apps")); add(JsonPrimitive("settings"))
+                        })
+                        put("description", JsonPrimitive("Which settings screen to open."))
+                    }
+                }
+            },
+        ),
+        ToolSchema(
+            name = "take_photo",
+            description = "Open the camera. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "web_search",
+            description = "Run a web search. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("query") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Search query."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("query")) })
+            },
         ),
     )
 }

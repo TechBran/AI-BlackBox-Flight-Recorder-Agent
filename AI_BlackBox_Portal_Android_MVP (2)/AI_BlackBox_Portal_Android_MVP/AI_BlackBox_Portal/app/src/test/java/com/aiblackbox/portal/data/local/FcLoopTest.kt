@@ -604,35 +604,37 @@ class FcLoopTest {
     @Test
     fun `runAgent routes phone to PhoneController, search to searchTools, and other tools to bridge execute`() = runTest {
         // One run that exercises all three routes: a phone actuator (tap), a
-        // search_tools discovery, and the discovered cloud tool (execute).
+        // search_tools discovery, and a discovered CLOUD tool (execute). The cloud
+        // tool must be a name NOT in LOCAL_PHONE_TOOLS (IA-3 made send_sms a LOCAL
+        // intent action, so generate_image is used here as the genuine cloud tool).
         val tapArgs = buildJsonObject { put("node_id", JsonPrimitive(3)) }
-        val searchArgs = buildJsonObject { put("query", JsonPrimitive("send a text")) }
-        val smsArgs = buildJsonObject { put("body", JsonPrimitive("hi")) }
+        val searchArgs = buildJsonObject { put("query", JsonPrimitive("make a picture")) }
+        val genArgs = buildJsonObject { put("prompt", JsonPrimitive("a cat")) }
         val fakeLlm = FakeToolCallingLlm(
             script = listOf(
                 listOf(toolCall("tap", tapArgs)),
                 listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
-                listOf(toolCall("send_sms", smsArgs)),
+                listOf(toolCall("generate_image", genArgs)),
                 listOf(text("done")),
             ),
         )
         val phone = FakePhoneController { _, _ -> ToolResult(success = true, result = JsonPrimitive("tapped node 3")) }
         val bridge = FakeToolBridge(
-            searchMap = mapOf("send a text" to listOf(schema("send_sms"))),
-            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("sent")) },
+            searchMap = mapOf("make a picture" to listOf(schema("generate_image"))),
+            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("http://img/cat.png")) },
         )
         val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
 
-        loop.runAgent("persona", emptyList(), "tap then text").toList()
+        loop.runAgent("persona", emptyList(), "tap then draw").toList()
 
         // tap -> phone (only); NOT the bridge.
         assertEquals(listOf("tap"), phone.dispatched.map { it.first })
         // search_tools -> bridge.searchTools.
-        assertEquals(listOf("send a text"), bridge.searchCalls)
-        // send_sms (a non-phone discovered tool) -> bridge.execute (only); NOT the phone.
+        assertEquals(listOf("make a picture"), bridge.searchCalls)
+        // generate_image (a non-local discovered tool) -> bridge.execute (only); NOT the phone.
         assertEquals(1, bridge.executeCalls.size)
-        assertEquals("send_sms", bridge.executeCalls[0].first)
-        assertTrue("send_sms must not be dispatched to the phone", phone.dispatched.none { it.first == "send_sms" })
+        assertEquals("generate_image", bridge.executeCalls[0].first)
+        assertTrue("generate_image must not be dispatched to the phone", phone.dispatched.none { it.first == "generate_image" })
     }
 
     @Test
@@ -684,9 +686,71 @@ class FcLoopTest {
 
         val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
         assertEquals(
-            "turn 0 advertises search_tools + every phone actuator",
-            ResidentTools.PHONE_ACTUATORS + ResidentTools.SEARCH_TOOLS,
+            "turn 0 advertises search_tools + every phone actuator + every intent action",
+            ResidentTools.PHONE_ACTUATORS + ResidentTools.INTENT_ACTIONS + ResidentTools.SEARCH_TOOLS,
             turn0Tools,
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task IA-3: intent actions route LOCALLY through the PhoneController too.
+    // ---------------------------------------------------------------------------
+
+    @Test
+    fun `runAgent dispatches an intent action to the PhoneController, never the bridge`() = runTest {
+        // The model emits a single intent call (show_map) then its final answer.
+        val mapArgs = buildJsonObject { put("query", JsonPrimitive("coffee near me")) }
+        val fakeLlm = FakeToolCallingLlm(
+            script = listOf(
+                listOf(toolCall("show_map", mapArgs)),
+                listOf(text("Opened the map")),
+            ),
+        )
+        val phone = FakePhoneController { name, _ ->
+            when (name) {
+                "show_map" -> ToolResult(success = true, result = JsonPrimitive("opened maps"))
+                else -> ToolResult(success = false, result = JsonPrimitive("?"))
+            }
+        }
+        val bridge = FakeToolBridge()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
+
+        val events = loop.runAgent("persona", emptyList(), "where's coffee?").toList()
+
+        // The intent call was dispatched to the PHONE controller, with the model's args.
+        assertEquals(
+            "the intent action was dispatched to the controller",
+            listOf("show_map"),
+            phone.dispatched.map { it.first },
+        )
+        assertEquals("show_map dispatched with the model's args", mapArgs, phone.dispatched[0].second)
+        // ...and NEVER to the cloud bridge (the security-relevant assertion).
+        assertTrue("intent actions must NOT reach bridge.execute", bridge.executeCalls.isEmpty())
+        assertTrue("intent actions must NOT reach bridge.searchTools", bridge.searchCalls.isEmpty())
+        // The outcome was emitted and the loop reached the final text.
+        assertTrue(
+            "a show_map ToolOutcome was emitted",
+            events.filterIsInstance<LlmEvent.ToolOutcome>().any { it.name == "show_map" },
+        )
+        assertTrue(
+            "the loop reached the final TextDelta after the intent action",
+            events.contains(LlmEvent.TextDelta("Opened the map")),
+        )
+    }
+
+    @Test
+    fun `runAgent with a PhoneController advertises the intent actions`() = runTest {
+        val fakeLlm = FakeToolCallingLlm(script = listOf(listOf(text("hi"))))
+        val bridge = FakeToolBridge()
+        val phone = FakePhoneController()
+        val loop = FcLoop(FakeLocalLlm(), toolLlm = fakeLlm, bridge = bridge, phone = phone)
+
+        loop.runAgent("persona", emptyList(), "hello").toList()
+
+        val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
+        assertTrue(
+            "every intent action is advertised when a phone controller is wired",
+            ResidentTools.INTENT_ACTIONS.all { it in turn0Tools },
         )
     }
 
