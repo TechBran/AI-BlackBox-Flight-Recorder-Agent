@@ -31,13 +31,17 @@ import kotlinx.serialization.json.jsonPrimitive
  *   text or node content; this adapter adds nothing). `read_screen`'s JSON is
  *   already redacted at the boundary (password fields → placeholder).
  *
- * ## Where the autonomy gate (4.6) wraps
- * 4.6 will wrap [PhoneController.dispatch] (a decorating controller or an in-loop
- * guard) to confirm high-consequence actions before they reach these actuators.
- * Not implemented here.
+ * ## Autonomy gate (4.6)
+ * The YOLO-vs-Permission confirm-gate is enforced INSIDE [Actuators] (it needs the
+ * resolved node's label + isPassword, which only the actuator has), so this
+ * adapter just forwards — the [Actuators] handed in via [fromService] already
+ * carry the autonomy [mode][AutonomyMode] reader + the [ConfirmUi]. A
+ * high-consequence action the user declines comes back as a normal
+ * `success=false, "user declined"` [ToolResult] the model can react to.
  *
  * @param reader the redacting UI-tree reader (prod: [UiTreeReader.fromService]).
- * @param actuators the gesture actuators (prod: [Actuators.fromService]).
+ * @param actuators the gesture actuators (prod: [Actuators.fromService], wired
+ *   with the autonomy mode + overlay confirm).
  */
 class AndroidPhoneController(
     private val reader: UiTreeReader,
@@ -113,8 +117,18 @@ class AndroidPhoneController(
          * Production factory: reads + actuates through the live connected
          * [BlackBoxA11yService] via the singleton seams. Safe to call even when the
          * service is disabled — the underlying reader/actuators degrade gracefully.
+         *
+         * @param mode reads the device autonomy posture for the actuator's gate
+         *   (prod wiring passes a SharedPref-backed read defaulting to
+         *   [AutonomyMode.PERMISSION] — the SAFE default). Defaults to YOLO here
+         *   ONLY so an un-wired call keeps pre-4.6 behavior; ChatViewModel supplies
+         *   the safe reader.
+         * @param confirm the user-confirmation seam (prod: [OverlayConfirmUi]).
          */
-        fun fromService(): AndroidPhoneController =
-            AndroidPhoneController(UiTreeReader.fromService(), Actuators.fromService())
+        fun fromService(
+            mode: () -> AutonomyMode = { AutonomyMode.YOLO },
+            confirm: ConfirmUi = AutoApproveConfirmUi,
+        ): AndroidPhoneController =
+            AndroidPhoneController(UiTreeReader.fromService(), Actuators.fromService(mode, confirm))
     }
 }

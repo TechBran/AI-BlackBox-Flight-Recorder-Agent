@@ -85,6 +85,14 @@ class LocalModelViewModel(
     private val onModelSelected: (String) -> Unit,
     ioDispatcher: CoroutineDispatcher = Dispatchers.Main,
     private val delegate: String = "cpu",
+    /**
+     * Mirror a successfully-changed autonomy mode into LOCAL persistence
+     * (Task 4.6) so the on-device phone-control agent can read it WITHOUT a
+     * network round-trip and fail SAFE. Receives the wire string ("yolo"/
+     * "permission"). Default no-op keeps the core framework-free + testable; the
+     * production [fromContext] wires it to [com.aiblackbox.portal.data.local.AutonomyStore].
+     */
+    private val onAutonomyPersisted: (String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
@@ -106,10 +114,17 @@ class LocalModelViewModel(
                 val recommended = if (bundles.isNotEmpty())
                     runCatching { installer.recommendForDevice(bundles).slug }.getOrNull()
                 else null
-                val mode = runCatching {
+                // Read the hub's posture. On a SUCCESSFUL read, mirror it into LOCAL
+                // persistence so the on-device phone-control gate (4.6) has a current
+                // value without a network hop. On a FAILED read fall back to
+                // PERMISSION for display but do NOT persist it — a transient network
+                // blip must not silently clobber a deliberately-stored YOLO.
+                val fetchedMode = runCatching {
                     val status = catalog.status(operator)
                     status.models.firstOrNull()?.autonomyMode ?: AUTONOMY_PERMISSION
-                }.getOrDefault(AUTONOMY_PERMISSION)
+                }.getOrNull()
+                fetchedMode?.let { onAutonomyPersisted(it) }
+                val mode = fetchedMode ?: AUTONOMY_PERMISSION
 
                 _state.update {
                     it.copy(
@@ -240,6 +255,9 @@ class LocalModelViewModel(
             try {
                 val ok = catalog.setAutonomy(operatorProvider(), deviceId, mode)
                 if (ok) {
+                    // Mirror the new posture into LOCAL persistence so the on-device
+                    // phone-control gate (4.6) sees it immediately, no network hop.
+                    onAutonomyPersisted(mode)
                     _state.update { it.copy(autonomyMode = mode, error = null) }
                 } else {
                     _state.update { it.copy(error = "Couldn't change autonomy mode.") }
@@ -294,6 +312,10 @@ class LocalModelViewModel(
             val deviceId = stableDeviceId(context)
             val localApi = LocalModelApi(api)
             val manager = LocalModelManager.fromContext(context, localApi, deviceId)
+            // Local mirror of the autonomy posture for the on-device phone-control
+            // gate (Task 4.6): the toggle writes here so the agent reads it with no
+            // network hop and fails SAFE (PERMISSION) when unset.
+            val autonomyStore = com.aiblackbox.portal.data.local.AutonomyStore.fromContext(context)
             return LocalModelViewModel(
                 installer = manager,
                 catalog = localApi,
@@ -301,6 +323,9 @@ class LocalModelViewModel(
                 deviceId = deviceId,
                 onModelSelected = onModelSelected,
                 ioDispatcher = ioDispatcher,
+                onAutonomyPersisted = { wire ->
+                    autonomyStore.save(com.aiblackbox.portal.data.local.AutonomyStore.parse(wire))
+                },
             )
         }
 

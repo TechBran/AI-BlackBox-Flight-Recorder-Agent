@@ -20,6 +20,7 @@ import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
 import com.aiblackbox.portal.overlay.AndroidPhoneController
+import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
@@ -96,6 +97,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
     private val store = BlackBoxStore(application)
     private val historyStore = ChatHistoryStore(application)
+
+    // Locally-persisted device autonomy posture (Task 4.6). The Task 1.5 toggle
+    // writes it; the on-device phone-control gate reads it here. load() returns
+    // PERMISSION (the SAFE, gating default) when unset/unreadable, so the agent
+    // never silently runs in YOLO.
+    private val autonomyStore by lazy {
+        com.aiblackbox.portal.data.local.AutonomyStore.fromContext(appContext)
+    }
 
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
@@ -732,13 +741,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         // gracefully ("not enabled") and read_screen returns "[]", so
                         // it is safe to always pass. When wired, FcLoop advertises the
                         // resident phone actuators and routes those calls locally —
-                        // never to the cloud bridge. (Autonomy gate = Task 4.6.)
+                        // never to the cloud bridge.
+                        //
+                        // Phase 4.6 (autonomy gate): supply the REAL autonomy posture
+                        // (read from the locally-persisted AutonomyStore, defaulting
+                        // to PERMISSION — the SAFE, gating default — when never set or
+                        // unreadable) and the system-overlay confirm UI. In Permission
+                        // mode a high-consequence tap/type asks the user via the
+                        // overlay before firing; in YOLO it runs immediately; benign
+                        // actions never gate.
                         fcLoop = FcLoop(
                             llm,
                             toolLlm = llm,
                             bridge = bridge,
                             operator = op,
-                            phone = AndroidPhoneController.fromService(),
+                            phone = AndroidPhoneController.fromService(
+                                mode = { autonomyStore.load() },
+                                confirm = OverlayConfirmUi(appContext),
+                            ),
                         ),
                         persona = persona,
                         history = history,

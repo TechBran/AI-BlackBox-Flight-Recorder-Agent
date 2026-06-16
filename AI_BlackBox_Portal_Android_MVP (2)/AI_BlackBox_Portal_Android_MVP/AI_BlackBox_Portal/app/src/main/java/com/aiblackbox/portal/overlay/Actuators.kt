@@ -32,24 +32,41 @@ import android.view.accessibility.AccessibilityNodeInfo
  * (`service() == null`) yields `success=false, detail="accessibility service not
  * enabled"` and a missing node yields `success=false, detail="node N not found"`.
  *
- * ## Safety floors enforced HERE (the rest is wrapped later)
+ * ## Safety floors enforced HERE
  * - [type] REFUSES to type into a password field (see [type]). The proper
  *   credential handoff is Task 4.7; 4.3 must never set text on a secret field.
- * - The autonomy confirm-gate (4.6) and credential handoff (4.7) wrap these
- *   later for the high-consequence cases — they are NOT implemented here.
+ * - The autonomy confirm-gate (Task 4.6) is enforced HERE for high-consequence
+ *   `tap`/`type` actions: in [AutonomyMode.PERMISSION] the actuator asks [confirm]
+ *   (the user) BEFORE firing a send/pay/delete/post/install tap or a sensitive
+ *   type, and aborts with `"user declined"` if denied; in [AutonomyMode.YOLO]
+ *   high-consequence actions run immediately. Benign actions never gate. The
+ *   credential handoff (4.7) layers on after.
  *
  * ## Logging discipline (leak vector)
  * Logs emit ONLY `nodeId` / action name / coarse result detail. They MUST NEVER
- * emit the [type] `text` argument or any node's screen text/content.
+ * emit the [type] `text` argument or any node's screen text/content. The gate
+ * likewise NEVER passes a password node's text into the confirm message (the
+ * label is null for a password target — see [tap]/[type]).
  *
- * ## Scope (4.3 ONLY)
- * Builds the gestures/intents and performs the actions. Does NOT register these
- * as resident on-device functions (4.5), implement the autonomy gate (4.6),
- * handle credentials (4.7), or capture screenshots (4.4).
+ * ## Scope
+ * Builds the gestures/intents and performs the actions, and enforces the autonomy
+ * gate around the high-consequence ones. Does NOT capture screenshots (4.4) or
+ * handle credential autofill (4.7).
  *
  * @param service seam to the connected service (prod: `{ BlackBoxA11yService.instance }`).
+ * @param mode reads the current device autonomy posture each time it's needed
+ *   (prod: a SharedPref-backed read; default `{ AutonomyMode.YOLO }` so existing
+ *   call-sites/tests that don't wire a gate behave exactly as before — the SAFE
+ *   PERMISSION default is supplied by the production wiring, not this constructor).
+ * @param confirm the user-confirmation seam for high-consequence actions in
+ *   Permission mode (prod: [OverlayConfirmUi]; default auto-approve no-op so
+ *   un-wired call-sites are unaffected).
  */
-class Actuators(private val service: () -> BlackBoxA11yService?) {
+class Actuators(
+    private val service: () -> BlackBoxA11yService?,
+    private val mode: () -> AutonomyMode = { AutonomyMode.YOLO },
+    private val confirm: ConfirmUi = AutoApproveConfirmUi,
+) {
 
     /**
      * Tap the node with the given `node_id`.
@@ -59,11 +76,25 @@ class Actuators(private val service: () -> BlackBoxA11yService?) {
      * [AccessibilityNodeInfo.ACTION_CLICK] (more reliable than a coordinate tap).
      * Otherwise falls back to dispatching a touch gesture at the node's
      * on-screen bounds center. A null node → `success=false, "node N not found"`.
+     *
+     * **Autonomy gate (4.6):** once the node is resolved, computes whether this is
+     * a high-consequence tap (send/pay/delete/post/install… by the node's label)
+     * and, in [AutonomyMode.PERMISSION], asks [confirm] BEFORE acting — returning
+     * `success=false, "user declined"` if the user denies. The label fed to the
+     * gate is the node's NON-password text (null for a password node, which a tap
+     * never targets in practice), so no secret can leak into the confirm message.
      */
-    fun tap(nodeId: Int): ActuatorResult {
+    suspend fun tap(nodeId: Int): ActuatorResult {
         val svc = service() ?: return notEnabled()
         val node = UiTreeReader.findActionableNode(svc.rootInActiveWindow, nodeId)
             ?: return nodeNotFound(nodeId)
+
+        // Autonomy gate: never read a password node's text into the label. Use the
+        // same text-or-contentDescription label read_screen uses, so an icon-only
+        // high-consequence button (label lives in contentDescription) still gates.
+        val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
+        val label = if (isPasswordTarget) null else (node.text ?: node.contentDescription)?.toString()
+        gate("tap", label, isPasswordTarget)?.let { return it }
 
         return try {
             if (node.isClickable) {
@@ -98,19 +129,31 @@ class Actuators(private val service: () -> BlackBoxA11yService?) {
      * password field.
      *
      * The [text] argument is NEVER logged (leak vector) — only the nodeId,
-     * action, and result.
+     * action, and result. It is likewise NEVER passed into the autonomy confirm
+     * message (4.6): the gate is fed the FIELD label, never the typed text.
+     *
+     * **Autonomy gate (4.6):** a password type is REFUSED before the gate (the
+     * 4.3 floor below), so it never reaches actuation. A non-password type is
+     * benign and does not gate today; the gate call is present so any FUTURE
+     * sensitive non-password type is covered by the same Permission-mode confirm.
      */
-    fun type(nodeId: Int, text: String): ActuatorResult {
+    suspend fun type(nodeId: Int, text: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
         val node = UiTreeReader.findActionableNode(svc.rootInActiveWindow, nodeId)
             ?: return nodeNotFound(nodeId)
 
         return try {
-            // SAFETY: refuse password fields outright. Same gate the reader uses.
-            if (isPasswordField(node.isPassword, node.inputType)) {
+            // SAFETY FLOOR (4.3): refuse password fields outright, BEFORE the gate.
+            // A secret type never reaches actuation OR a confirm message.
+            val isPasswordTarget = isPasswordField(node.isPassword, node.inputType)
+            if (isPasswordTarget) {
                 logAction("type(REFUSED:password)", nodeId, false)
                 return ActuatorResult(false, "refused: password field — use credential handoff")
             }
+            // Autonomy gate for a non-password type. Label is the field's text
+            // (the FIELD name/placeholder), never the value being typed.
+            gate("type", node.text?.toString(), isPasswordTarget = false)?.let { return it }
+
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
             }
@@ -204,6 +247,34 @@ class Actuators(private val service: () -> BlackBoxA11yService?) {
 
     // ---- internals --------------------------------------------------------
 
+    /**
+     * The AUTONOMY GATE (4.6). Given a resolved-node [action] ("tap"/"type"), its
+     * NON-password [label], and whether the target is a password field
+     * ([isPasswordTarget]), decides via the pure [isHighConsequence] +
+     * [shouldConfirm] whether to ask the user.
+     *
+     * Returns:
+     *  - `null` → proceed (benign, or YOLO, or the user allowed it).
+     *  - a non-null [ActuatorResult] (`success=false, "user declined"`) → ABORT;
+     *    the caller must return it without actuating.
+     *
+     * SECURITY: [describeAction] is fed only the action + [label]; for a password
+     * target [label] is null by construction, so the confirm message is the fixed
+     * generic "Type into password field" — the typed text can never reach it.
+     */
+    private suspend fun gate(action: String, label: String?, isPasswordTarget: Boolean): ActuatorResult? {
+        val hc = isHighConsequence(action, label, isPasswordTarget)
+        if (!shouldConfirm(mode(), hc)) return null
+        val allowed = confirm.confirm(describeAction(action, label))
+        if (allowed) {
+            // Log the DECISION only — never the label/text (leak discipline).
+            Log.i(TAG, "autonomy: $action allowed by user")
+            return null
+        }
+        Log.i(TAG, "autonomy: $action declined by user")
+        return ActuatorResult(false, "user declined")
+    }
+
     private fun globalAction(name: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
         val action = globalActionFor(name) ?: return ActuatorResult(false, "unknown global action: $name")
@@ -277,13 +348,35 @@ class Actuators(private val service: () -> BlackBoxA11yService?) {
         /**
          * Production factory: actuates through the live connected
          * [BlackBoxA11yService] via the singleton seam.
+         *
+         * @param mode reads the device autonomy posture (prod wiring supplies a
+         *   SharedPref-backed read defaulting to [AutonomyMode.PERMISSION] — the
+         *   SAFE default). Defaults here to YOLO only so an un-wired call keeps
+         *   the pre-4.6 behavior; the real wiring (ChatViewModel) passes the safe
+         *   reader.
+         * @param confirm the user-confirmation seam (prod: [OverlayConfirmUi]).
          */
-        fun fromService(): Actuators = Actuators { BlackBoxA11yService.instance }
+        fun fromService(
+            mode: () -> AutonomyMode = { AutonomyMode.YOLO },
+            confirm: ConfirmUi = AutoApproveConfirmUi,
+        ): Actuators = Actuators({ BlackBoxA11yService.instance }, mode, confirm)
     }
 }
 
 /** A small outcome the agent loop (4.5) feeds back to the model. */
 data class ActuatorResult(val success: Boolean, val detail: String)
+
+/**
+ * The default [ConfirmUi] for un-wired [Actuators] (existing call-sites / tests):
+ * auto-approves everything. This is ONLY ever reached together with the default
+ * `mode = { YOLO }`, where [shouldConfirm] is already false and [ConfirmUi] is
+ * never consulted — so it is a safe inert default, not a way to silently bypass a
+ * Permission-mode gate. The production wiring supplies the real overlay + the safe
+ * PERMISSION-default mode.
+ */
+object AutoApproveConfirmUi : ConfirmUi {
+    override suspend fun confirm(description: String): Boolean = true
+}
 
 /**
  * PURE: compute `[startX, startY, endX, endY]` for a centered swipe in the given
