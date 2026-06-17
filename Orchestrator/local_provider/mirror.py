@@ -50,6 +50,15 @@ _HASH_CHUNK = 1024 * 1024
 #   sha256          content hash for verify (None — skip verify until pinned in 2.6b)
 #   min_ram_gb      realistic minimum device RAM to run the model
 #   recommended_for short human guidance on when to pick this one
+#
+# Per-model runtime config (Task W6) — snake_case to match the <slug>.json
+# sidecar / API JSON the phone consumes (LocalBundle.toModelConfig):
+#   recommended     this is the recommended default model (E4B; the picker
+#                   surfaces it + its note). E2B is labeled experimental.
+#   context_note    human-readable note shown next to the model in the picker
+#   max_tokens      context window (input+output) for the engine's EngineConfig
+#   support_image   whether the bundle accepts image input (both E2B/E4B are
+#                   multimodal; W4 wires the vision backend, this only CARRIES it)
 # ---------------------------------------------------------------------------
 BUNDLES: dict[str, dict] = {
     "gemma-4-e2b": {
@@ -61,6 +70,13 @@ BUNDLES: dict[str, dict] = {
         "sha256": None,  # TODO(2.6b): pin real sha256 (verify skipped while None)
         "min_ram_gb": 3.0,
         "recommended_for": "Lighter, faster on-device model for phones with less RAM.",
+        # Per-model config (Task W6). E2B is the EXPERIMENTAL fallback: it runs
+        # on lower-RAM phones but is weaker at multi-step agent (tool) loops, so
+        # it is NOT the recommended default — E4B is.
+        "recommended": False,
+        "context_note": "Experimental — weaker at multi-step agent loops",
+        "max_tokens": 16384,
+        "support_image": True,
     },
     "gemma-4-e4b": {
         "slug": "gemma-4-e4b",
@@ -71,6 +87,12 @@ BUNDLES: dict[str, dict] = {
         "sha256": None,  # TODO(2.6b): pin real sha256 (verify skipped while None)
         "min_ram_gb": 4.5,
         "recommended_for": "Heavier, higher-quality on-device model for high-RAM phones.",
+        # Per-model config (Task W6). E4B is the RECOMMENDED default: best
+        # on-device agent (multi-step tool-loop) reliability. Multimodal.
+        "recommended": True,
+        "context_note": "Recommended — best on-device agent reliability",
+        "max_tokens": 16384,
+        "support_image": True,
     },
 }
 

@@ -55,15 +55,56 @@ def test_catalog_lists_both_bundles(client):
 
 
 def test_catalog_entries_have_required_fields(client):
-    """Each bundle carries the full download/metadata field set."""
+    """Each bundle carries the full download/metadata field set, now including
+    the per-model config fields (Task W6) the picker + sidecar consume."""
     resp = client.get("/local/models/catalog")
     assert resp.status_code == 200
     required = {
         "slug", "display_name", "hf_repo", "filename",
         "size_bytes", "sha256", "min_ram_gb", "recommended_for",
+        # Per-model config (Task W6) -- snake_case to match the sidecar/API JSON.
+        "recommended", "context_note", "max_tokens", "support_image",
     }
     for b in resp.json()["bundles"]:
         assert required.issubset(b.keys()), f"missing fields: {required - b.keys()}"
+
+
+def test_catalog_per_model_config_e4b_recommended(client):
+    """Task W6: E4B is the recommended default -- carries recommended True, a
+    "Recommended" context note, a real 16K max_tokens window, and is multimodal
+    (support_image True)."""
+    resp = client.get("/local/models/catalog")
+    assert resp.status_code == 200
+    by_slug = {b["slug"]: b for b in resp.json()["bundles"]}
+    e4b = by_slug["gemma-4-e4b"]
+    assert e4b["recommended"] is True
+    assert "Recommended" in e4b["context_note"]
+    assert e4b["max_tokens"] == 16384
+    assert e4b["support_image"] is True
+
+
+def test_catalog_per_model_config_e2b_experimental(client):
+    """Task W6: E2B is labeled experimental/weaker at multi-step agent loops --
+    recommended False with an "Experimental" context note. Still a real 16K
+    window + multimodal."""
+    resp = client.get("/local/models/catalog")
+    assert resp.status_code == 200
+    by_slug = {b["slug"]: b for b in resp.json()["bundles"]}
+    e2b = by_slug["gemma-4-e2b"]
+    assert e2b["recommended"] is False
+    assert "Experimental" in e2b["context_note"]
+    assert e2b["max_tokens"] == 16384
+    assert e2b["support_image"] is True
+
+
+def test_catalog_exactly_one_recommended(client):
+    """Exactly one bundle is flagged recommended (E4B) -- the picker shows a
+    single default."""
+    resp = client.get("/local/models/catalog")
+    assert resp.status_code == 200
+    recommended = [b for b in resp.json()["bundles"] if b.get("recommended")]
+    assert len(recommended) == 1
+    assert recommended[0]["slug"] == "gemma-4-e4b"
 
 
 def test_catalog_ram_ordering(client):

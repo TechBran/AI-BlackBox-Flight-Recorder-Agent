@@ -128,9 +128,19 @@ class LocalModelManager(
     }
 
     /**
-     * Pick the bundle best matched to this device's RAM: the heaviest bundle
-     * whose `minRamGb` fits in [totalRamBytes] (so a high-RAM phone gets E4B, a
-     * low-RAM phone gets E2B). If none fit, fall back to the lightest bundle.
+     * Pick the bundle best matched to this device's RAM, PREFERRING the catalog's
+     * recommended default (Task W6: E4B — best on-device agent reliability).
+     *
+     * Order, among the bundles whose `minRamGb` fits in [totalRamBytes]:
+     *   1. the catalog-recommended bundle if it fits (E4B on a high-RAM phone);
+     *   2. otherwise the heaviest fitting bundle (a high-RAM proxy for "best");
+     *   3. if NONE fit, the lightest bundle overall (so a very low-RAM phone
+     *      still gets the most-likely-to-run model — E2B, the experimental one).
+     *
+     * Pure + testable: depends only on [totalRamBytes] and the [bundles]' own
+     * `recommended`/`minRamGb` fields. The returned bundle carries its own
+     * [LocalBundle.contextNote] (E4B "Recommended…", E2B "Experimental…"), so the
+     * caller surfaces the right note for whichever model was chosen.
      *
      * @throws IllegalArgumentException if [bundles] is empty.
      */
@@ -138,11 +148,12 @@ class LocalModelManager(
         require(bundles.isNotEmpty()) { "recommendForDevice requires a non-empty bundle list" }
         val ram = totalRamBytes()
         val fitting = bundles.filter { (it.minRamGb * BYTES_PER_GIB).toLong() <= ram }
-        return if (fitting.isNotEmpty()) {
-            fitting.maxByOrNull { it.minRamGb }!!
-        } else {
-            bundles.minByOrNull { it.minRamGb }!!
-        }
+        // 1) the catalog-recommended default (E4B) if it fits, else
+        // 2) the heaviest fitting bundle, else
+        // 3) the lightest bundle overall (nothing fit — most-likely-to-run).
+        return fitting.firstOrNull { it.recommended }
+            ?: fitting.maxByOrNull { it.minRamGb }
+            ?: bundles.minByOrNull { it.minRamGb }!!
     }
 
     /**
@@ -224,9 +235,18 @@ class LocalModelManager(
 
         // Bytes are on disk + verified → record the sidecar so installedModels
         // sees it even if attest later fails (kept-for-retry policy).
-        writeSidecar(bundle, file.length(), bundle.toModelConfig())
+        val config = bundle.toModelConfig()
+        writeSidecar(bundle, file.length(), config)
 
-        val installed = InstalledModel(slug = bundle.slug, file = file, sizeBytes = file.length())
+        // W2 review Minor 1: carry the SAME config we just wrote to the sidecar
+        // onto the returned model, so install()'s result matches what a later
+        // installedModels() scan reports (no silent all-defaults divergence).
+        val installed = InstalledModel(
+            slug = bundle.slug,
+            file = file,
+            sizeBytes = file.length(),
+            config = config,
+        )
 
         // Attest-throw safety: the sidecar is already written, so ANY attest
         // outcome other than success — `false` OR a thrown exception — must
@@ -282,13 +302,21 @@ class LocalModelManager(
 
     /**
      * Derive the per-model [ModelConfig] (Task W2) recorded in the sidecar from a
-     * catalog [LocalBundle]. The catalog (GET /local/models/catalog) does not yet
-     * advertise per-model config fields, so today this yields defaults (a
-     * legacy-equivalent sidecar). When the catalog grows `max_tokens`/sampler/
-     * `support_image`/`recommended`/`context_note` (W6/backend), map them HERE and
-     * the round-trip is already wired through [SidecarRecord] + [installedModels].
+     * catalog [LocalBundle]. The catalog (GET /local/models/catalog) now advertises
+     * the per-model config fields (Task W6), so this maps the REAL values through
+     * to the `<slug>.json` sidecar (it previously yielded all-defaults). A legacy
+     * catalog response without these fields still maps cleanly — they default to
+     * null/false on [LocalBundle], producing a legacy-equivalent [ModelConfig].
      */
-    private fun LocalBundle.toModelConfig(): ModelConfig = ModelConfig()
+    private fun LocalBundle.toModelConfig(): ModelConfig = ModelConfig(
+        maxTokens = maxTokens,
+        supportImage = supportImage,
+        recommended = recommended,
+        contextNote = contextNote,
+        topK = topK,
+        topP = topP,
+        temperature = temperature,
+    )
 
     private fun writeSidecar(bundle: LocalBundle, sizeBytes: Long, config: ModelConfig) {
         val record = SidecarRecord(

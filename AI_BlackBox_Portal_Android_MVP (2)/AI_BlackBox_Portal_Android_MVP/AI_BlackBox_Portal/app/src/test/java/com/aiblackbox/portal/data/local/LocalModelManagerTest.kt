@@ -36,6 +36,8 @@ class LocalModelManagerTest {
 
     private lateinit var modelsDir: File
 
+    // Fixtures carry the Task W6 per-model config the backend catalog advertises:
+    // E4B is the recommended default; E2B is the experimental fallback.
     private val e2b = LocalBundle(
         slug = "gemma-4-e2b",
         displayName = "Gemma 4 E2B (on-device)",
@@ -43,6 +45,10 @@ class LocalModelManagerTest {
         filename = "gemma-4-e2b-it.litertlm",
         minRamGb = 3.0,
         recommendedFor = "Lighter, faster on-device model.",
+        recommended = false,
+        contextNote = "Experimental — weaker at multi-step agent loops",
+        maxTokens = 16384,
+        supportImage = true,
     )
     private val e4b = LocalBundle(
         slug = "gemma-4-e4b",
@@ -51,6 +57,10 @@ class LocalModelManagerTest {
         filename = "gemma-4-e4b-it.litertlm",
         minRamGb = 6.0,
         recommendedFor = "Higher quality for high-RAM phones.",
+        recommended = true,
+        contextNote = "Recommended — best on-device agent reliability",
+        maxTokens = 16384,
+        supportImage = true,
     )
 
     @Before fun setUp() {
@@ -114,10 +124,35 @@ class LocalModelManagerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `recommendForDevice picks heaviest that fits on a high-RAM phone`() = runTest {
+    fun `recommendForDevice prefers the recommended default (E4B) on a high-RAM phone`() = runTest {
         val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
         val pick = mgr.recommendForDevice(listOf(e2b, e4b))
-        assertEquals("8GB phone gets E4B (min 6.0)", "gemma-4-e4b", pick.slug)
+        // W6: E4B is the catalog-recommended default and it fits → it wins, and
+        // it carries the "Recommended…" note.
+        assertEquals("8GB phone gets the recommended E4B", "gemma-4-e4b", pick.slug)
+        assertTrue("E4B is the recommended default", pick.recommended)
+        assertTrue("E4B surfaces the Recommended note", pick.contextNote!!.contains("Recommended"))
+    }
+
+    @Test
+    fun `recommendForDevice prefers E4B even when listed first (flag, not order)`() = runTest {
+        // E2B listed FIRST: the choice is driven by the recommended flag + RAM,
+        // not list order — E4B (recommended, fits at 8GB) must still win.
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        val pick = mgr.recommendForDevice(listOf(e2b, e4b))
+        assertEquals("gemma-4-e4b", pick.slug)
+    }
+
+    @Test
+    fun `recommendForDevice falls back to E2B on low RAM and surfaces its experimental note`() = runTest {
+        // 4GB fits E2B (3.0) but not the recommended E4B (6.0): the only fitting
+        // bundle is E2B, and the caller must surface ITS "Experimental…" note.
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 4.0)
+        val pick = mgr.recommendForDevice(listOf(e2b, e4b))
+        assertEquals("gemma-4-e2b", pick.slug)
+        assertFalse("E2B is not the recommended default", pick.recommended)
+        assertTrue("low-RAM fallback surfaces the Experimental note",
+            pick.contextNote!!.contains("Experimental"))
     }
 
     @Test
@@ -389,22 +424,69 @@ class LocalModelManagerTest {
     @Test
     fun `install writes a sidecar carrying the new config keys (round-trip)`() = runTest {
         val content = ByteArray(1024) { 3 }
+        // E2B fixture now carries the real W6 config (max_tokens 16384, multimodal).
         val bundle = e2b.copy(sha256 = sha256Hex(content))
         val mgr = manager(FakeDownloader(content), ramGb = 4.0)
 
         assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "cpu") { _, _ -> }.isSuccess)
 
-        // The written sidecar must emit the W2 keys (today at their defaults, since
-        // the catalog bundle carries no per-model config yet) so the format is
-        // forward-stable and re-parses to the same ModelConfig.
+        // The written sidecar must emit the W2 keys so the format is forward-stable
+        // and re-parses to the same ModelConfig.
         val sidecarText = modelsDir.resolve("${bundle.slug}.json").readText()
         assertTrue("sidecar emits max_tokens", sidecarText.contains("max_tokens"))
         assertTrue("sidecar emits support_image", sidecarText.contains("support_image"))
         assertTrue("sidecar emits top_k", sidecarText.contains("top_k"))
 
-        // Round-trip: re-reading yields a defaulted ModelConfig (maxTokens null).
+        // Round-trip: re-reading yields the bundle's REAL config (W6), not defaults.
         val cfg = mgr.installedModels().single().config
-        assertNull(cfg.maxTokens)
-        assertFalse(cfg.supportImage)
+        assertEquals(16384, cfg.maxTokens)
+        assertTrue(cfg.supportImage)
+        assertFalse("E2B is not recommended", cfg.recommended)
+        assertTrue("E2B carries the experimental note",
+            cfg.contextNote!!.contains("Experimental"))
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. Per-model catalog config → ModelConfig mapping (Task W6)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `install maps the E4B catalog config into the written sidecar (recommended + note)`() = runTest {
+        val content = ByteArray(2048) { 4 }
+        val bundle = e4b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 8.0)
+
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "gpu") { _, _ -> }.isSuccess)
+
+        // Re-read via installedModels → the sidecar carried E4B's real config.
+        val cfg = mgr.installedModels().single().config
+        assertEquals(16384, cfg.maxTokens)
+        assertTrue("E4B is multimodal", cfg.supportImage)
+        assertTrue("E4B is the recommended default", cfg.recommended)
+        assertTrue("E4B carries the Recommended note",
+            cfg.contextNote!!.contains("Recommended"))
+    }
+
+    @Test
+    fun `install returns an InstalledModel whose config equals the written sidecar (Minor 1)`() = runTest {
+        // W2 review Minor 1: install()'s returned InstalledModel.config must match
+        // the config persisted in the sidecar (no all-defaults divergence).
+        val content = ByteArray(2048) { 5 }
+        val bundle = e4b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 8.0)
+
+        val returned = mgr.install(bundle, operator = "Brandon", delegate = "gpu") { _, _ -> }
+            .getOrThrow()
+        // What install() returned...
+        val returnedCfg = returned.config
+        // ...must equal what a fresh installedModels() scan reads from the sidecar.
+        val sidecarCfg = mgr.installedModels().single().config
+
+        assertEquals("returned config == sidecar config", sidecarCfg, returnedCfg)
+        // And it is the bundle's real (non-default) config, not ModelConfig().
+        assertEquals(16384, returnedCfg.maxTokens)
+        assertTrue(returnedCfg.recommended)
+        assertTrue(returnedCfg.supportImage)
+        assertEquals("Recommended — best on-device agent reliability", returnedCfg.contextNote)
     }
 }

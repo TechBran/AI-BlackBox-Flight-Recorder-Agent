@@ -16,6 +16,12 @@ import kotlinx.serialization.Serializable
  * them in (Task 1.2), so both are nullable here. `min_ram_gb` is a float
  * (e.g. 3.0). The lenient Json config (ignoreUnknownKeys) tolerates any extra
  * fields the backend may add later.
+ *
+ * Per-model runtime config (Task W6): the catalog now advertises
+ * [recommended]/[contextNote]/[maxTokens]/[supportImage] (+ optional sampler)
+ * so [LocalModelManager.LocalBundle.toModelConfig] maps REAL values into the
+ * `<slug>.json` sidecar instead of all-defaults. All are OPTIONAL/defaulted, so
+ * a legacy catalog response (without them) still parses unchanged.
  */
 @Serializable
 data class LocalBundle(
@@ -27,6 +33,15 @@ data class LocalBundle(
     val sha256: String? = null,
     @SerialName("min_ram_gb") val minRamGb: Double = 0.0,
     @SerialName("recommended_for") val recommendedFor: String = "",
+    // Per-model config (Task W6) — snake_case to match the backend catalog +
+    // sidecar JSON. Optional/defaulted for backward-compatibility.
+    val recommended: Boolean = false,
+    @SerialName("context_note") val contextNote: String? = null,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
+    @SerialName("support_image") val supportImage: Boolean = false,
+    @SerialName("top_k") val topK: Int? = null,
+    @SerialName("top_p") val topP: Float? = null,
+    val temperature: Float? = null,
 )
 
 /** Wrapper for GET /local/models/catalog → {"bundles": [...]}. */
