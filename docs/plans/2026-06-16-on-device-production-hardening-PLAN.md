@@ -23,6 +23,26 @@ after). Host-JVM caveat: litertlm classes are Java-21 → pure cores take primit
 
 ---
 
+## W0 — Decouple intent actions from accessibility (Gallery parity; do EARLY)
+**Why:** Edge Gallery's intent actions need ZERO accessibility — `startActivity`/
+`CameraManager` work from any Context. OUR 16 intents currently fire through the
+AccessibilityService Context (`IntentActuator(service: () -> BlackBoxA11yService?)`),
+so they wrongly require a11y on (and return "accessibility service not enabled" when
+off). Brandon: a user shouldn't have to grant accessibility just to turn on the
+flashlight. Accessibility must be needed ONLY for the gesture/vision layer (read_screen
+/tap arbitrary UI).
+- **W0.1** Give `IntentActuator` an Application `Context` seam (app-context holder /
+  inject `appContext`) and fire intents + `CameraManager` through it — NOT the a11y
+  service. Keep `FLAG_ACTIVITY_NEW_TASK` (non-Activity context). The autonomy gate +
+  leak discipline are unchanged.
+- **W0.2** `AndroidPhoneController.fromService` supplies the app context to the
+  IntentActuator (the gesture Actuators still use the a11y service; intents no longer
+  do). Net: the 16 intent actions work with the a11y service OFF; accessibility becomes
+  opt-in for gestures/vision only.
+- **W0.3** Tests: IntentActuator no longer returns "not enabled" when a11y is off
+  (fake app context); device-validate flashlight fires with the a11y service disabled.
+  Update the IntentActuator KDoc (remove the v1 a11y-context forward-note — now done).
+
 ## W2 — Per-model config (foundation; do FIRST)
 Gallery ref: `data/Model.kt` (`llmMaxToken`, `llmSupportImage`, `configs/configValues`,
 `getIntConfigValue`), `ui/llmchat/LlmChatModelHelper.kt` (ConfigKeys), `data/Config.kt`.
