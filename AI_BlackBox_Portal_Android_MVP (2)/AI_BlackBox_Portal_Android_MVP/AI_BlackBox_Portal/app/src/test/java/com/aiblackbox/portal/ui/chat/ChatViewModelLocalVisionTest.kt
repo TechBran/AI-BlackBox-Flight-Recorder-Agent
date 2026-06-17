@@ -209,16 +209,23 @@ class ChatViewModelLocalVisionTest {
     fun `isLookAtScreenRequest matches explicit look-at-screen phrasings`() {
         val positives = listOf(
             "look at my screen",
+            "look at the screen",
+            "look at this screen",
             "Look at my screen and tell me what app this is",
             "what's on my screen?",
+            "what's on the screen",
             "What is on the screen right now",
-            "what do you see",
-            "What do you see here?",
             "read the screen for me",
             "Read my screen please",
+            "read my screen",
             "describe my screen",
+            "describe the screen",
+            "see my screen",
             "can you see my screen?",
+            "check my screen",
             "check the screen",
+            "what do you see on my screen",
+            "what do you see on the screen",
         )
         for (p in positives) {
             assertTrue("should trigger vision: \"$p\"", ChatViewModel.isLookAtScreenRequest(p))
@@ -241,6 +248,30 @@ class ChatViewModelLocalVisionTest {
         )
         for (n in negatives) {
             assertFalse("should NOT trigger vision: \"$n\"", ChatViewModel.isLookAtScreenRequest(n))
+        }
+    }
+
+    /**
+     * Regression for the unbounded-substring over-match (commit 5b50a84): the
+     * classifier used naive `contains` checks that hijacked ordinary chat into an
+     * on-device screen capture. Each of these references a screen *setting/feature*
+     * or "screenshot"/"screen of …", or is a bare "what do you see" with no screen
+     * anchor — none is a request to look at THIS device's live screen. They MUST be
+     * classified FALSE. Kept explicit so the over-match cannot silently return.
+     */
+    @Test
+    fun `isLookAtScreenRequest does not over-match screen-setting feature or bare see phrasings`() {
+        val falsePositives = listOf(
+            "how do I read the screen reader settings",
+            "how do I check the screen time settings",
+            "can you describe the screen reader feature",
+            "I want to view my screen time stats",
+            "look at the screenshot I described earlier",
+            "what's on the screen of the new iphone spec sheet",
+            "what do you see as the biggest risk here",
+        )
+        for (n in falsePositives) {
+            assertFalse("must NOT hijack to vision: \"$n\"", ChatViewModel.isLookAtScreenRequest(n))
         }
     }
 }

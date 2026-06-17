@@ -2317,32 +2317,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         fun isLookAtScreenRequest(text: String): Boolean {
             val t = text.lowercase().trim()
             if (t.isEmpty()) return false
-            // "what do you see" / "what can you see" — a direct ask to look, even
-            // without the word screen (the user is pointing the model at the display).
-            if (t.contains("what do you see") || t.contains("what can you see")) return true
-            // Everything else must reference the screen to qualify.
-            if (!t.contains("screen")) return false
-            // Explicit screen-looking verbs paired with "screen". Kept tight so a
-            // statement like "my screen is cracked" / "share my screen" doesn't fire.
-            val screenLookPhrases = listOf(
-                "look at my screen",
-                "look at the screen",
-                "look at this screen",
-                "see my screen",
-                "see the screen",
-                "what's on my screen",
-                "what is on my screen",
-                "what's on the screen",
-                "what is on the screen",
-                "read my screen",
-                "read the screen",
-                "describe my screen",
-                "describe the screen",
-                "check my screen",
-                "check the screen",
-                "view my screen",
+            // The word "screen" must appear as a WHOLE WORD that refers to THIS
+            // device's live display — not as part of "screenshot"/"screensaver" and
+            // not immediately followed by a settings/feature qualifier ("screen
+            // reader", "screen time", "screen of …", …). Without this anchor the
+            // classifier hijacks ordinary chat ("the screen reader settings",
+            // "the screenshot I described") into an on-device capture.
+            //   \bscreen\b      → "screen" bounded by non-word chars (excludes
+            //                       screenshot/screensaver/touchscreen).
+            //   (?!\s*<qualifier>) → not a screen-setting/feature/"screen of" use.
+            val screenAnchor = Regex(
+                "\\bscreen\\b(?!\\s*(reader|time|saver|saving|brightness|" +
+                    "rotation|resolution|lock|protector|mirroring|cast(?:ing)?|" +
+                    "share|sharing|record(?:ing|er)?|of)\\b)"
             )
-            return screenLookPhrases.any { t.contains(it) }
+            if (!screenAnchor.containsMatchIn(t)) return false
+            // A look/see/read/describe/check/view verb that targets the anchored
+            // screen. Kept tight so a statement like "my screen is cracked" /
+            // "share my screen" doesn't fire. Each phrase re-asserts the anchor so a
+            // qualifier ("screen reader") can't satisfy a bare "screen" inside it.
+            val verbRe = "(look at|see|read|describe|check|view|what'?s? on|what is on)"
+            val targeted = Regex(
+                "$verbRe\\s+(on\\s+)?(my |the |this )?$screenAnchor"
+            )
+            return targeted.containsMatchIn(t)
         }
 
         /**
