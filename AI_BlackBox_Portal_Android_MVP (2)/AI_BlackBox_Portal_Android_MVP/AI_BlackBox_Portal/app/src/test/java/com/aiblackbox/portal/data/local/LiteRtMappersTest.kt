@@ -1,6 +1,8 @@
 package com.aiblackbox.portal.data.local
 
+import com.aiblackbox.portal.data.model.ToolResult
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
@@ -12,6 +14,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -171,5 +174,79 @@ class LiteRtMappersTest {
         assertTrue(!SamplerSettings(topK = 1).isUnset)
         assertTrue(!SamplerSettings(topP = 0.1f).isUnset)
         assertTrue(!SamplerSettings(temperature = 0.1f).isUnset)
+    }
+
+    // -------------------------------------------------------------------------
+    // Native tool-calling path (Task W3) — toResultJsonString / parseResultJsonString
+    // / ToolResult.toResultJsonString, the pure cores the engine-driven loop maps
+    // a dispatched ToolResult through (Edge Gallery's
+    // {"status":"succeeded"|"failed","result"/"error":...} shape).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `toResultJsonString emits the succeeded shape with the result payload`() {
+        val json = Json.parseToJsonElement(
+            toResultJsonString(success = true, result = JsonPrimitive("opened")),
+        ).jsonObject
+        assertEquals("succeeded", json["status"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("opened", json["result"]?.jsonPrimitive?.contentOrNull)
+        // A succeeded result carries no "error" key.
+        assertTrue("succeeded shape has no error key", json["error"] == null)
+    }
+
+    @Test
+    fun `toResultJsonString emits the failed shape with the error payload`() {
+        val json = Json.parseToJsonElement(
+            toResultJsonString(success = false, result = JsonPrimitive("needs connection")),
+        ).jsonObject
+        assertEquals("failed", json["status"]?.jsonPrimitive?.contentOrNull)
+        // The failure detail goes under "error", not "result".
+        assertEquals("needs connection", json["error"]?.jsonPrimitive?.contentOrNull)
+        assertTrue("failed shape has no result key", json["result"] == null)
+    }
+
+    @Test
+    fun `toResultJsonString serializes a null payload as JSON null`() {
+        val json = Json.parseToJsonElement(
+            toResultJsonString(success = true, result = null),
+        ).jsonObject
+        assertEquals("succeeded", json["status"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(JsonNull, json["result"])
+    }
+
+    @Test
+    fun `parseResultJsonString round-trips a succeeded result`() {
+        val (ok, payload) = parseResultJsonString(
+            toResultJsonString(success = true, result = JsonPrimitive("tapped node 3")),
+        )
+        assertTrue("status succeeded -> success=true", ok)
+        assertEquals("tapped node 3", (payload as JsonPrimitive).contentOrNull)
+    }
+
+    @Test
+    fun `parseResultJsonString round-trips a failed result and reads the error payload`() {
+        val (ok, payload) = parseResultJsonString(
+            toResultJsonString(success = false, result = JsonPrimitive("missing arg")),
+        )
+        assertFalse("status failed -> success=false", ok)
+        assertEquals("missing arg", (payload as JsonPrimitive).contentOrNull)
+    }
+
+    @Test
+    fun `parseResultJsonString surfaces malformed non-object input as a failure without throwing`() {
+        // A model/engine that returns a bare string instead of the JSON shape must
+        // NOT crash the native turn — it becomes a failed outcome carrying the text.
+        val (ok, payload) = parseResultJsonString("not json at all")
+        assertFalse("malformed input -> success=false", ok)
+        assertEquals("not json at all", (payload as JsonPrimitive).contentOrNull)
+    }
+
+    @Test
+    fun `ToolResult toResultJsonString adapter matches the pure core`() {
+        val res = ToolResult(success = true, result = JsonPrimitive("done"))
+        assertEquals(
+            toResultJsonString(res.success, res.result),
+            res.toResultJsonString(),
+        )
     }
 }

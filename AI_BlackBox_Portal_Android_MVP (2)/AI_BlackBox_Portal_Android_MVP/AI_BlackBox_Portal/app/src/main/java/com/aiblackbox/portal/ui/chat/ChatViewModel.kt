@@ -15,11 +15,16 @@ import com.aiblackbox.portal.data.local.LlmEvent
 import com.aiblackbox.portal.data.local.LocalLlm
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.LocalSnapshotQueue
+import com.aiblackbox.portal.data.local.NativeTool
+import com.aiblackbox.portal.data.local.NativeToolCallingLlm
 import com.aiblackbox.portal.data.local.PersonaCache
+import com.aiblackbox.portal.data.local.PhoneController
+import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.data.local.toResultJsonString
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
@@ -30,6 +35,7 @@ import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.model.TokenCount
 import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskRepository
@@ -37,6 +43,7 @@ import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -805,47 +812,63 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
                 val saveSink: (SaveRequest, String) -> Unit = { req, _ -> persistLocalSave(req) }
 
-                // Capability-detect on the SINGLE provider() instance: the concrete
-                // 2.6 engine implements BOTH LocalLlm and ToolCallingLlm. When it
-                // does AND a bridge is available, run the tool-aware agent loop so
-                // tool calls/results render inline (Task 3.3); otherwise fall back to
-                // the unchanged text path (e.g. a text-only FakeLocalLlm → Task 2.4).
+                // Capability-detect on the SINGLE provider() instance, picking the
+                // best path the engine supports (W3):
+                //   1. NATIVE (engine-driven) agent loop  - provider is
+                //      NativeToolCallingLlm: the litertlm engine runs the tool loop
+                //      itself (automaticToolCalling = true) and terminates cleanly
+                //      (onDone), fixing the manual-loop repeat with the small E4B
+                //      model. THIS increment offers the resident phone/intent tools
+                //      ONLY; search_tools / cloud stay on the manual path (follow-up).
+                //   2. MANUAL agent loop - provider is ToolCallingLlm + a bridge:
+                //      FcLoop drives the tiered two-hop loop (search + cloud + phone).
+                //      Kept intact + selectable so nothing regresses (the test fakes
+                //      land here).
+                //   3. TEXT only - a plain LocalLlm (e.g. a text-only FakeLocalLlm).
                 val llm = provider()
                 val bridge = toolBridgeOrBuild()
-                val ok = if (llm is ToolCallingLlm && bridge != null) {
+                // The on-device phone controller, wired ONCE and shared by whichever
+                // tool path runs. It reads the LIVE accessibility service via the
+                // singleton seam; if the service isn't enabled the actuators degrade
+                // gracefully ("not enabled") and read_screen returns "[]", so it is
+                // safe to always build. The autonomy gate (Phase 4.6) + credential
+                // handoff (Phase 4.7) live INSIDE the actuator (downstream of
+                // dispatch), so they fire on BOTH the native and the manual path.
+                val phoneController = AndroidPhoneController.fromService(
+                    appContext,
+                    mode = { autonomyStore.load() },
+                    confirm = OverlayConfirmUi(appContext),
+                    credentialHandoff = OverlayCredentialHandoff(appContext),
+                )
+                val ok = if (llm is NativeToolCallingLlm) {
+                    // NATIVE path: engine drives the loop. Offer phone + intent tools
+                    // only (dispatched LOCALLY through the controller, NEVER the cloud
+                    // bridge). Build the same plain-text prompt FcLoop would, via a
+                    // transient text-only FcLoop, so the prompt contract is identical.
+                    val prompt = FcLoop(llm).buildPrompt(persona, history, text)
+                    streamLocalNativeAgentTurn(
+                        engine = llm,
+                        phone = phoneController,
+                        phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
+                        prompt = prompt,
+                        operator = op,
+                        model = model,
+                        text = text,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                } else if (llm is ToolCallingLlm && bridge != null) {
+                    // MANUAL agent loop (fallback / non-native engines + the fakes):
+                    // FcLoop drives the tiered two-hop loop. When the phone controller
+                    // is wired it advertises the resident phone actuators and routes
+                    // those calls locally - never to the cloud bridge.
                     streamLocalAgentTurn(
-                        // Phase 4.5: always wire the on-device phone controller. It
-                        // reads the LIVE accessibility service via the singleton seam;
-                        // if the service isn't enabled the actuators degrade
-                        // gracefully ("not enabled") and read_screen returns "[]", so
-                        // it is safe to always pass. When wired, FcLoop advertises the
-                        // resident phone actuators and routes those calls locally —
-                        // never to the cloud bridge.
-                        //
-                        // Phase 4.6 (autonomy gate): supply the REAL autonomy posture
-                        // (read from the locally-persisted AutonomyStore, defaulting
-                        // to PERMISSION — the SAFE, gating default — when never set or
-                        // unreadable) and the system-overlay confirm UI. In Permission
-                        // mode a high-consequence tap/type asks the user via the
-                        // overlay before firing; in YOLO it runs immediately; benign
-                        // actions never gate.
-                        //
-                        // Phase 4.7 (credential handoff): supply the system-overlay
-                        // OverlayCredentialHandoff. When the model targets a password
-                        // field, Actuators.type DISCARDS the model's attempted text and
-                        // this overlay asks the USER to type the password directly into
-                        // the field — the model never sees it in either direction.
                         fcLoop = FcLoop(
                             llm,
                             toolLlm = llm,
                             bridge = bridge,
                             operator = op,
-                            phone = AndroidPhoneController.fromService(
-                                appContext,
-                                mode = { autonomyStore.load() },
-                                confirm = OverlayConfirmUi(appContext),
-                                credentialHandoff = OverlayCredentialHandoff(appContext),
-                            ),
+                            phone = phoneController,
                         ),
                         persona = persona,
                         history = history,
@@ -2391,6 +2414,107 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             saveSink(request, LOCAL_PROVIDER_ID)
             return true
         }
+
+        /**
+         * PURE core of the NATIVE (engine-driven) on-device tool turn (Task W3) - the
+         * [streamLocalAgentTurn] sibling for the litertlm built-in auto tool loop. Where
+         * [streamLocalAgentTurn] collects [FcLoop.runAgent] (manual loop,
+         * `automaticToolCalling = false`), this collects
+         * [NativeToolCallingLlm.generateWithToolsNative] (engine loop,
+         * `automaticToolCalling = true`) so the ENGINE drives the tool loop and
+         * terminates cleanly (`onDone`) - fixing the manual-path loop-repeat with the
+         * small E4B model. Renders the streamed [LlmEvent]s INLINE via the SAME
+         * [renderToolCall] / [renderToolOutcome] convention and persists via [saveSink],
+         * so it is rendering-identical to the manual agent turn.
+         *
+         * **Scope (W3 increment): phone/intent tools ONLY.** Each [phoneTools] schema
+         * becomes a [NativeTool] whose `execute` dispatches LOCALLY through [phone]
+         * ([PhoneController.dispatch]) - bridging the suspend dispatch into the engine's
+         * SYNCHRONOUS execute with `runBlocking(Dispatchers.IO)` (exactly as Edge
+         * Gallery's `AgentTools.execute` does). The dispatch result is serialized to the
+         * Gallery-shaped JSON string ([toResultJsonString]) the engine feeds back to the
+         * model. Phone/intent calls therefore NEVER touch the cloud [ToolBridge], and the
+         * autonomy gate + credential handoff stay INSIDE the actuator (downstream of
+         * [phone].dispatch), so they still fire. `search_tools` / cloud tools are NOT
+         * offered here - they stay on the manual path (a follow-up unifies them).
+         *
+         * Contract mirrors [streamLocalAgentTurn]: TextDelta -> append text; ToolCall ->
+         * [renderToolCall]; ToolOutcome -> [renderToolOutcome]; `sink(runningText, true)`
+         * per event; normal completion -> `sink(full, false)` + `saveSink`; a mid-stream
+         * THROW (engine `onError`) is caught via `.catch`, appends
+         * [LOCAL_ENGINE_ERROR_TEXT], DOES NOT save, returns `false`.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalNativeAgentTurn(
+            engine: NativeToolCallingLlm,
+            phone: PhoneController,
+            phoneTools: List<ToolSchema>,
+            prompt: String,
+            operator: String,
+            model: String?,
+            text: String,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            // Build the engine-driven NativeTools: each phone/intent schema dispatches
+            // LOCALLY through the controller. runBlocking bridges the suspend dispatch
+            // into the engine's synchronous execute (Gallery pattern); the autonomy gate
+            // lives INSIDE dispatch, so it still fires. NEVER the cloud bridge.
+            val nativeTools = phoneTools.map { schema ->
+                NativeTool(
+                    schema = schema,
+                    execute = { argsJson ->
+                        runBlocking(Dispatchers.IO) {
+                            phone.dispatch(schema.name, parseNativeArgs(argsJson))
+                        }.toResultJsonString()
+                    },
+                )
+            }
+            val acc = StringBuilder()
+            var faulted = false
+            engine.generateWithToolsNative(prompt, nativeTools)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { event ->
+                    when (event) {
+                        is LlmEvent.TextDelta -> acc.append(event.text)
+                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
+                    }
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * Parse the model-supplied tool-call argument JSON (what the litertlm engine
+         * passes to a [NativeTool.execute]) into a [JsonObject] for
+         * [PhoneController.dispatch]. A small model can emit a blank, non-object, or
+         * malformed payload; this NEVER throws - it returns an empty object so dispatch
+         * sees no args (the actuator then reports a normal "missing arg" failure rather
+         * than crashing the native turn). Internal so it is unit-testable.
+         */
+        internal fun parseNativeArgs(argsJson: String): JsonObject =
+            runCatching { Json.parseToJsonElement(argsJson) as? JsonObject }.getOrNull()
+                ?: JsonObject(emptyMap())
 
         /**
          * Collapse to a single line and bound length so a large model-supplied arg or

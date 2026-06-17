@@ -1,17 +1,24 @@
 package com.aiblackbox.portal.data.local
 
+import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -21,6 +28,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -93,7 +101,7 @@ class LiteRtEngine(
     private val nativeLibraryDir: String? = null,
     private val maxTokens: Int = DEFAULT_MAX_TOKENS,
     private val sampler: SamplerSettings = SamplerSettings(),
-) : LocalLlm, ToolCallingLlm {
+) : LocalLlm, ToolCallingLlm, NativeToolCallingLlm {
 
     @Volatile
     private var engine: Engine? = null
@@ -246,6 +254,92 @@ class LiteRtEngine(
             runCatching { conversation.cancelProcess() }
             throw c
         } finally {
+            runCatching { conversation.close() }
+        }
+    }
+
+    /**
+     * Stream ONE engine-driven (NATIVE) tool-aware turn (Task W3) as a COLD [Flow]
+     * of [LlmEvent]. Unlike [generateWithTools] (manual path, `automaticToolCalling
+     * = false`, [FcLoop] drives), this opens a conversation with
+     * `automaticToolCalling = true` so the litertlm ENGINE runs the tool loop: it
+     * calls each [NativeTool.execute] ITSELF, feeds the returned JSON back into the
+     * model, loops until a final answer, then signals `onDone`. That clean
+     * termination is the W3 fix for the manual-path loop-repeat with the small E4B
+     * model.
+     *
+     * **Bridging engine -> Flow.** `execute()` is SYNCHRONOUS and is invoked on the
+     * engine's callback thread, while the Flow is collected on the caller's
+     * coroutine. We use [callbackFlow] backed by a Channel: each tool's `execute`
+     * emits [LlmEvent.ToolCall] (before) and [LlmEvent.ToolOutcome] (after) into the
+     * channel via [trySendBlocking], and the litertlm [MessageCallback] emits
+     * [LlmEvent.TextDelta] on `onMessage`, closes the flow on `onDone`, and closes
+     * it with the throwable on `onError`. [awaitClose] cancels the in-flight native
+     * generation ([Conversation.cancelProcess]) and closes the conversation when the
+     * collector goes away (cancellation / completion).
+     *
+     * **Constrained decoding.** [ExperimentalFlags.enableConversationConstrainedDecoding]
+     * is toggled on around [Engine.createConversation] (and reset after, as Edge
+     * Gallery does) to reduce malformed tool-call tokens from the small model. The
+     * flag is verified present in the litertlm 0.13.1 artifact.
+     *
+     * Requires [isLoaded] (throws [IllegalStateException] otherwise).
+     */
+    @OptIn(ExperimentalApi::class)
+    override fun generateWithToolsNative(prompt: String, tools: List<NativeTool>): Flow<LlmEvent> = callbackFlow {
+        val eng = engine
+        check(eng != null && eng.isInitialized()) {
+            "LiteRtEngine.generateWithToolsNative called before load(); call load(modelFile, delegate) first."
+        }
+        // Per-model sampler (Task W2): pass samplerConfig only when an override is set.
+        val samplerConfig = sampler.toSamplerConfig()
+        // Build engine-driven OpenApiTools: each `execute` runs the NativeTool body
+        // AND bridges ToolCall(before)/ToolOutcome(after) into this flow's channel.
+        val providers = tools.map { tool(nativeOpenApiToolFor(it) { event -> trySendBlocking(event) }) }
+        // Constrained decoding (Gallery pattern): enable around createConversation,
+        // reset after. Reduces malformed tool-call tokens from the small model.
+        val priorConstrained = ExperimentalFlags.enableConversationConstrainedDecoding
+        val conversation = try {
+            ExperimentalFlags.enableConversationConstrainedDecoding = true
+            val config = if (samplerConfig != null) {
+                ConversationConfig(
+                    tools = providers,
+                    samplerConfig = samplerConfig,
+                    automaticToolCalling = true,
+                )
+            } else {
+                ConversationConfig(
+                    tools = providers,
+                    automaticToolCalling = true,
+                )
+            }
+            eng.createConversation(config)
+        } finally {
+            ExperimentalFlags.enableConversationConstrainedDecoding = priorConstrained
+        }
+        // Engine-driven streaming via MessageCallback: text deltas -> TextDelta,
+        // onDone -> complete the flow, onError -> fail the flow. The engine calls
+        // each tool's execute() itself between onMessage events (auto tool loop).
+        conversation.sendMessageAsync(
+            prompt,
+            object : MessageCallback {
+                override fun onMessage(message: Message) {
+                    val text = message.plainText()
+                    if (text.isNotEmpty()) trySendBlocking(LlmEvent.TextDelta(text))
+                }
+                override fun onDone() {
+                    channel.close()
+                }
+                override fun onError(throwable: Throwable) {
+                    channel.close(throwable)
+                }
+            },
+            emptyMap(),
+        )
+        awaitClose {
+            // Collector cancelled or flow completed: abort in-flight native compute
+            // and release the conversation (mirrors generate()/generateWithTools()).
+            runCatching { conversation.cancelProcess() }
             runCatching { conversation.close() }
         }
     }
@@ -433,6 +527,65 @@ fun toolDescriptionJson(name: String, description: String, parameters: JsonObjec
 fun bridgeDispatchedStub(): Nothing =
     throw UnsupportedOperationException("dispatched via BlackBox bridge")
 
+// --- Native tool-calling path (Task W3) --------------------------------------
+//
+// The NATIVE path (`generateWithToolsNative`, `automaticToolCalling = true`) lets
+// the litertlm ENGINE drive the tool loop: it calls each [OpenApiTool.execute]
+// itself, feeds the (String) result back, loops until a final answer, and signals
+// `onDone`. This fixes the manual-path loop-repeat (we fed tool results as plain
+// text + re-advertised tools, so the small model never saw a "done"). The result
+// JSON the engine consumes (and feeds back into the model's context) uses Edge
+// Gallery's shape: `{"status":"succeeded","result":<...>}` on success,
+// `{"status":"failed","error":<...>}` on failure. These pure cores convert a
+// dispatched [ToolResult] to that string and parse it back (for inline rendering),
+// and are JVM-unit-testable under JDK 17 (primitives only; see the Mappers header).
+
+/** The succeeded/failed status literals in the Gallery tool-result JSON shape. */
+const val TOOL_STATUS_SUCCEEDED = "succeeded"
+const val TOOL_STATUS_FAILED = "failed"
+
+/**
+ * Serialize a dispatched tool result to the JSON string the litertlm engine feeds
+ * back to the model (Edge Gallery's shape):
+ *  - [success] true  -> `{"status":"succeeded","result":<result|null>}`
+ *  - [success] false -> `{"status":"failed","error":<result|null>}`
+ *
+ * [result] is the [ToolResult.result] [JsonElement] (carried VERBATIM - a string,
+ * object, list, number, or null). On failure it is the error detail (our bridge /
+ * actuator put the message there, e.g. "needs connection"). PURE (primitives only)
+ * so it is JDK17-unit-testable; the thin adapter is [ToolResult.toResultJsonString].
+ */
+fun toResultJsonString(success: Boolean, result: kotlinx.serialization.json.JsonElement?): String {
+    val obj = buildJsonObject {
+        if (success) {
+            put("status", TOOL_STATUS_SUCCEEDED)
+            put("result", result ?: JsonNull)
+        } else {
+            put("status", TOOL_STATUS_FAILED)
+            put("error", result ?: JsonNull)
+        }
+    }
+    return mapperJson.encodeToString(JsonObject.serializer(), obj)
+}
+
+/**
+ * Parse a Gallery-shaped tool-result JSON string ([toResultJsonString]'s output)
+ * back into the [success] flag and `result`/`error` [JsonElement] payload, so the
+ * native engine path can emit a faithful [LlmEvent.ToolOutcome] for inline
+ * rendering. `success` is `status == "succeeded"`; the payload is `result` on
+ * success or `error` on failure (null when absent). MALFORMED / non-object input
+ * (a model or engine that returns a bare string) does NOT throw - it is surfaced
+ * as `success=false` with the raw text as the payload, so rendering never crashes.
+ * PURE so it is JDK17-unit-testable. Returns `(success, payload)`.
+ */
+fun parseResultJsonString(json: String): Pair<Boolean, kotlinx.serialization.json.JsonElement?> {
+    val obj = runCatching { mapperJson.parseToJsonElement(json) as? JsonObject }.getOrNull()
+        ?: return false to JsonPrimitive(json) // not an object -> treat as a failure detail
+    val success = (obj["status"] as? JsonPrimitive)?.contentOrNull == TOOL_STATUS_SUCCEEDED
+    val payload = if (success) obj["result"] else (obj["error"] ?: obj["result"])
+    return success to payload
+}
+
 // --- Thin litertlm-typed adapters (delegate to the pure cores) ---------------
 
 /**
@@ -465,5 +618,47 @@ fun openApiToolFor(schema: ToolSchema): OpenApiTool {
     return object : OpenApiTool {
         override fun getToolDescriptionJsonString(): String = descriptionString
         override fun execute(paramsJsonString: String): String = bridgeDispatchedStub()
+    }
+}
+
+/**
+ * Build an [OpenApiTool] for a NATIVE (engine-driven) tool (Task W3). Its
+ * description JSON is the SAME [toolDescriptionJson] the model sees on the manual
+ * path, but its [OpenApiTool.execute] is REAL (not the [bridgeDispatchedStub]): the
+ * litertlm engine calls it with the model's argument JSON, and it:
+ *  1. emits [LlmEvent.ToolCall] (the args parsed to a [JsonObject]) via [emit],
+ *  2. runs the [NativeTool.execute] body (which returns the Gallery-shaped result
+ *     JSON string the engine feeds back to the model),
+ *  3. parses that string ([parseResultJsonString]) and emits [LlmEvent.ToolOutcome]
+ *     for inline rendering, then
+ *  4. returns the result string to the engine.
+ *
+ * [emit] is the channel sink supplied by [generateWithToolsNative]'s [callbackFlow]
+ * (the events bridge from the engine's synchronous execute thread to the Flow).
+ * NEVER throws out of `execute`: any failure to PARSE args/result is reported as a
+ * failed ToolOutcome and a failed result string, so the engine's loop continues
+ * rather than crashing the native turn.
+ */
+internal fun nativeOpenApiToolFor(
+    nativeTool: NativeTool,
+    emit: (LlmEvent) -> Unit,
+): OpenApiTool {
+    val schema = nativeTool.schema
+    val descriptionString = toolDescriptionJson(schema.name, schema.description, schema.parameters)
+    return object : OpenApiTool {
+        override fun getToolDescriptionJsonString(): String = descriptionString
+        override fun execute(paramsJsonString: String): String {
+            // 1. ToolCall (best-effort arg parse; malformed args -> empty object).
+            val argsObj = runCatching { mapperJson.parseToJsonElement(paramsJsonString) as? JsonObject }
+                .getOrNull() ?: JsonObject(emptyMap())
+            emit(LlmEvent.ToolCall(schema.name, argsObj))
+            // 2. Run the dispatch body (returns the Gallery-shaped result JSON).
+            val resultJson = nativeTool.execute(paramsJsonString)
+            // 3. ToolOutcome for inline rendering (parsed back from the result JSON).
+            val (ok, payload) = parseResultJsonString(resultJson)
+            emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = ok, result = payload)))
+            // 4. Return the result string to the engine for the auto loop.
+            return resultJson
+        }
     }
 }
