@@ -897,7 +897,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 //      (onDone), fixing the manual-loop repeat with the small E4B
                 //      model. ONE native loop offers BOTH the resident phone/intent
                 //      tools (-> PhoneController) AND the cloud vault via
-                //      search_cloud_tools / call_cloud_tool (-> bridge); W3 follow-up.
+                //      find_blackbox_tool / run_blackbox_tool (-> bridge); W3 follow-up.
                 //   2. MANUAL agent loop - provider is ToolCallingLlm + a bridge:
                 //      FcLoop drives the tiered two-hop loop (search + cloud + phone).
                 //      Kept intact + selectable so nothing regresses (the test fakes
@@ -921,7 +921,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val ok = if (llm is NativeToolCallingLlm) {
                     // NATIVE path: ONE engine-driven loop handles BOTH phone/intent
                     // actions (dispatched LOCALLY through the controller, NEVER the cloud
-                    // bridge) AND cloud capabilities (search_cloud_tools / call_cloud_tool,
+                    // bridge) AND cloud capabilities (find_blackbox_tool / run_blackbox_tool,
                     // dispatched through the bridge ONLY). The two are SEPARATE NativeTool
                     // execute lambdas, so a phone tool structurally cannot reach the bridge
                     // (the W3 separation guarantee). Build the same plain-text prompt FcLoop
@@ -2598,7 +2598,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * one tool at a time; reply briefly when done. Not added to the manual/text
          * paths. The cloud-vault sentence ([NATIVE_CLOUD_CAPABILITY_SENTENCE]) is
          * spliced in by [nativeAddendum] ONLY when a cloud bridge is wired, so an
-         * offline native turn never advertises search_cloud_tools / call_cloud_tool.
+         * offline native turn never advertises find_blackbox_tool / run_blackbox_tool.
          */
         const val NATIVE_PHONE_CONTROL_ADDENDUM =
             "\n\nTo act on the phone, call the matching action directly (e.g. " +
@@ -2609,12 +2609,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * The cloud-vault steering sentence, appended to
          * [NATIVE_PHONE_CONTROL_ADDENDUM] ONLY when the cloud tool bridge is wired
          * (Fix 2, final-pass review). Without a bridge the native turn registers no
-         * search_cloud_tools / call_cloud_tool, so the prompt must not name them.
+         * find_blackbox_tool / run_blackbox_tool, so the prompt must not name them.
          */
         const val NATIVE_CLOUD_CAPABILITY_SENTENCE =
-            " For a BlackBox capability (generate an image, search memory, send a " +
-            "message), call search_cloud_tools first, then call_cloud_tool with the " +
-            "chosen name."
+            " For a BlackBox capability you don't have a direct action for (roll " +
+            "dice, generate an image, search memory, send something), call " +
+            "find_blackbox_tool(query) FIRST, then run_blackbox_tool with the name " +
+            "it returns. Do NOT use web_search to find your tools."
 
         /**
          * PURE: the persona addendum for a NATIVE engine-driven turn. The phone
@@ -2925,7 +2926,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *    These NEVER touch the cloud [bridge]; the autonomy gate + credential handoff
          *    stay INSIDE the actuator (downstream of [phone].dispatch), so they still fire.
          *  - CLOUD: when [bridge] is non-null, [buildCloudNativeTools] adds two NativeTools
-         *    -- search_cloud_tools (-> [ToolBridge.searchTools]) + call_cloud_tool
+         *    -- find_blackbox_tool (-> [ToolBridge.searchTools]) + run_blackbox_tool
          *    (-> [ToolBridge.execute], operator-scoped) -- whose `execute` reaches the
          *    [bridge] ONLY (structurally NEVER the [phone]) and carry only the model's
          *    args + the [operator] (no screen/phone content). Offline / no api -> the
@@ -2974,7 +2975,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // native loop as two tools the engine drives like phone actions. Their
             // execute bodies reach the cloud [bridge] ONLY -- structurally NEVER the
             // PhoneController, and they carry only the model's args + the operator (no
-            // screen/phone content). search_cloud_tools discovers; call_cloud_tool runs
+            // screen/phone content). find_blackbox_tool discovers; run_blackbox_tool runs
             // the chosen tool (operator-scoped, exactly as the manual path always did).
             // Only wired when a [bridge] is present (offline/no-api -> phone-only).
             val cloudNativeTools = if (bridge != null) buildCloudNativeTools(bridge, operator) else emptyList()
@@ -3030,11 +3031,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * separation guarantee) -- and pass only the model's args + the [operator] (no
          * screen/phone content; the bridge is operator-scoped, as the manual path was):
          *
-         *  - search_cloud_tools: runBlocking the suspend [ToolBridge.searchTools]
+         *  - find_blackbox_tool: runBlocking the suspend [ToolBridge.searchTools]
          *    (capped at [ResidentTools.MAX_INJECTED_SCHEMAS]) and return the matches
          *    (name + description) as a Gallery-shaped success string the model reads;
          *    an empty result is a failed "no match (possibly offline)" string.
-         *  - call_cloud_tool: parse name + args, runBlocking [ToolBridge.execute]
+         *  - run_blackbox_tool: parse name + args, runBlocking [ToolBridge.execute]
          *    (operator-scoped), and return its [ToolResult] as the Gallery-shaped JSON.
          *    A missing/blank name is a failed result (the engine loop continues).
          *
@@ -3043,7 +3044,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         internal fun buildCloudNativeTools(bridge: ToolBridge, operator: String): List<NativeTool> =
             ResidentTools.cloudTools().map { schema ->
                 when (schema.name) {
-                    ResidentTools.SEARCH_CLOUD_TOOLS -> NativeTool(
+                    ResidentTools.FIND_BLACKBOX_TOOL -> NativeTool(
                         schema = schema,
                         execute = { argsJson ->
                             val query = (parseNativeArgs(argsJson)["query"] as? JsonPrimitive)
@@ -3070,7 +3071,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         },
                     )
-                    else -> NativeTool( // CALL_CLOUD_TOOL
+                    else -> NativeTool( // RUN_BLACKBOX_TOOL
                         schema = schema,
                         execute = { argsJson ->
                             val args = parseNativeArgs(argsJson)
@@ -3089,7 +3090,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
         /**
-         * Coerce the model-supplied `args` element of a call_cloud_tool call into the
+         * Coerce the model-supplied `args` element of a run_blackbox_tool call into the
          * [JsonObject] passed to [ToolBridge.execute]. The small model may send `args`
          * as a JSON OBJECT (preferred) or as a JSON-encoded STRING; either is accepted,
          * anything else (null/absent/malformed) becomes an empty object. NEVER throws.

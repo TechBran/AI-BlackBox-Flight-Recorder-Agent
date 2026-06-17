@@ -171,4 +171,64 @@ class ResidentToolsTest {
         assertEquals("'which' enum has 12 entries", 12, enumArr.size)
         assertEquals("'which' enum values", expected, values)
     }
+
+    // ---- Task R2-B: cloud meta-tools renamed find/run_blackbox_tool ----------
+
+    /** The `required` array of a cloudTools() schema, or empty if absent. */
+    private fun cloudRequiredOf(name: String): Set<String> {
+        val params: JsonObject = ResidentTools.cloudTools().first { it.name == name }.parameters
+        val req = params["required"] as? JsonArray ?: return emptySet()
+        return req.map { (it as JsonPrimitive).content }.toSet()
+    }
+
+    /** The description of a cloudTools() schema. */
+    private fun cloudDescOf(name: String): String =
+        ResidentTools.cloudTools().first { it.name == name }.description
+
+    @Test
+    fun `CLOUD_TOOLS holds exactly find_blackbox_tool and run_blackbox_tool`() {
+        assertEquals(
+            "CLOUD_TOOLS == {find_blackbox_tool, run_blackbox_tool}",
+            setOf("find_blackbox_tool", "run_blackbox_tool"),
+            ResidentTools.CLOUD_TOOLS,
+        )
+        assertEquals("FIND_BLACKBOX_TOOL constant value", "find_blackbox_tool", ResidentTools.FIND_BLACKBOX_TOOL)
+        assertEquals("RUN_BLACKBOX_TOOL constant value", "run_blackbox_tool", ResidentTools.RUN_BLACKBOX_TOOL)
+    }
+
+    @Test
+    fun `cloudTools schema names equal CLOUD_TOOLS`() {
+        val names = ResidentTools.cloudTools().map { it.name }.toSet()
+        assertEquals("cloudTools() names == CLOUD_TOOLS", ResidentTools.CLOUD_TOOLS, names)
+        assertEquals("cloudTools() returns 2 schemas", 2, ResidentTools.cloudTools().size)
+    }
+
+    @Test
+    fun `find_blackbox_tool requires query and run_blackbox_tool requires name`() {
+        assertEquals("find_blackbox_tool required set", setOf("query"), cloudRequiredOf("find_blackbox_tool"))
+        assertEquals("run_blackbox_tool required set", setOf("name"), cloudRequiredOf("run_blackbox_tool"))
+    }
+
+    @Test
+    fun `find_blackbox_tool description disambiguates from the web and points at run_blackbox_tool`() {
+        val d = cloudDescOf("find_blackbox_tool")
+        assertTrue("find description says NOT the web", d.contains("NOT the web"))
+        assertTrue("find description points at run_blackbox_tool", d.contains("run_blackbox_tool"))
+    }
+
+    @Test
+    fun `run_blackbox_tool description references find_blackbox_tool`() {
+        assertTrue(
+            "run description references find_blackbox_tool",
+            cloudDescOf("run_blackbox_tool").contains("find_blackbox_tool"),
+        )
+    }
+
+    @Test
+    fun `web_search description steers away from finding own tools toward find_blackbox_tool`() {
+        val d = ResidentTools.intentActions().first { it.name == "web_search" }.description
+        assertTrue("web_search says it opens a WEB search", d.contains("WEB search"))
+        assertTrue("web_search forbids using it to find own tools", d.contains("Do NOT use this"))
+        assertTrue("web_search redirects to find_blackbox_tool", d.contains("find_blackbox_tool"))
+    }
 }

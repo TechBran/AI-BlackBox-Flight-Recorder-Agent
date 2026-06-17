@@ -75,11 +75,11 @@ interface NativeToolCallingLlm {
 fun ToolResult.toResultJsonString(): String = toResultJsonString(success, result)
 
 /**
- * Format the [ToolSchema] matches a `search_cloud_tools` call returned into the
+ * Format the [ToolSchema] matches a `find_blackbox_tool` call returned into the
  * compact JSON STRING the native engine feeds back to the model (Task W3
  * follow-up). The string is the SUCCESS payload of a Gallery-shaped result built
  * by the caller; it lists each match's `name` + `description` so the model can pick
- * one and call `call_cloud_tool`. Empty input -> `[]` (the caller surfaces "no
+ * one and call `run_blackbox_tool`. Empty input -> `[]` (the caller surfaces "no
  * match / possibly offline" as a failed result). PURE (no litertlm types) so it is
  * JDK17-unit-testable; the per-tool `parameters` schema is intentionally OMITTED
  * here to keep the discovery payload small (the model only needs the name to call).

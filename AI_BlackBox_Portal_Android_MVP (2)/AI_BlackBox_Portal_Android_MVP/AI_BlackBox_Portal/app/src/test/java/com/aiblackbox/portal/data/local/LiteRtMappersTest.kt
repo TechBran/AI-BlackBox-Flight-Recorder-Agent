@@ -252,7 +252,7 @@ class LiteRtMappersTest {
         )
     }
 
-    // ---- Task W3 follow-up: formatCloudToolMatches (search_cloud_tools payload) ----
+    // ---- Task W3 follow-up: formatCloudToolMatches (find_blackbox_tool payload) ----
 
     @Test
     fun `formatCloudToolMatches emits a name+description JSON array`() {

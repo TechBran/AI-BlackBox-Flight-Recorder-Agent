@@ -35,23 +35,23 @@ object ResidentTools {
     // The NATIVE (engine-driven) path can't use the manual FcLoop's two-turn
     // search->inject->call tiering (the engine owns the loop). Instead the cloud
     // vault is exposed to the native loop as TWO native tools the ENGINE drives the
-    // same way it drives phone actions: [SEARCH_CLOUD_TOOLS] discovers a capability
-    // by description, then [CALL_CLOUD_TOOL] runs the chosen one. Their execute
+    // same way it drives phone actions: [FIND_BLACKBOX_TOOL] discovers a capability
+    // by description, then [RUN_BLACKBOX_TOOL] runs the chosen one. Their execute
     // bodies (built in [ChatViewModel.streamLocalNativeAgentTurn]) call the cloud
     // [ToolBridge] ONLY -- never the [PhoneController] (the W3 separation guarantee).
 
     /** Native discovery tool: find a BlackBox capability by description. */
-    const val SEARCH_CLOUD_TOOLS = "search_cloud_tools"
+    const val FIND_BLACKBOX_TOOL = "find_blackbox_tool"
 
     /** Native invocation tool: run a discovered BlackBox capability by name. */
-    const val CALL_CLOUD_TOOL = "call_cloud_tool"
+    const val RUN_BLACKBOX_TOOL = "run_blackbox_tool"
 
     /**
      * The names of the native cloud-vault tools whose execute bodies route to the
      * cloud [ToolBridge] (NEVER the [PhoneController]). Kept disjoint from
      * [LOCAL_PHONE_TOOLS] by construction.
      */
-    val CLOUD_TOOLS: Set<String> = setOf(SEARCH_CLOUD_TOOLS, CALL_CLOUD_TOOL)
+    val CLOUD_TOOLS: Set<String> = setOf(FIND_BLACKBOX_TOOL, RUN_BLACKBOX_TOOL)
 
     /** The one function resident in every turn. Phase 4 appends the phone actuators. */
     val searchToolsSchema = ToolSchema(
@@ -459,7 +459,7 @@ object ResidentTools {
         ),
         ToolSchema(
             name = "web_search",
-            description = "Run a web search. Direct action — no read_screen/tap.",
+            description = "Open a WEB search in the browser for the user's query. Do NOT use this to find your own tools/capabilities \u2014 use find_blackbox_tool for that.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
@@ -476,8 +476,8 @@ object ResidentTools {
     // ---- Task W3 follow-up: native cloud-vault tool schemas -----------------
 
     /**
-     * The TWO native cloud-vault tool schemas (names == [SEARCH_CLOUD_TOOLS] /
-     * [CALL_CLOUD_TOOL]). [ChatViewModel.streamLocalNativeAgentTurn] turns each into
+     * The TWO native cloud-vault tool schemas (names == [FIND_BLACKBOX_TOOL] /
+     * [RUN_BLACKBOX_TOOL]). [ChatViewModel.streamLocalNativeAgentTurn] turns each into
      * a [NativeTool] whose execute calls the cloud [ToolBridge] (search / execute),
      * and offers them to the native engine loop ALONGSIDE the phone/intent tools.
      *
@@ -486,8 +486,8 @@ object ResidentTools {
      */
     fun cloudTools(): List<ToolSchema> = listOf(
         ToolSchema(
-            name = SEARCH_CLOUD_TOOLS,
-            description = "Find a BlackBox capability by description (e.g. generate an image, search memory, send a message). Returns matching tool names + descriptions. Call this FIRST, then call_cloud_tool with the chosen name.",
+            name = FIND_BLACKBOX_TOOL,
+            description = "Find a BlackBox capability by description (e.g. roll dice, generate an image, search memory). Returns matching tool names to use with run_blackbox_tool. This searches YOUR OWN tools \u2014 NOT the web.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
@@ -500,14 +500,14 @@ object ResidentTools {
             },
         ),
         ToolSchema(
-            name = CALL_CLOUD_TOOL,
-            description = "Run a BlackBox capability found via search_cloud_tools. name=the chosen tool name; args=a JSON object of that tool's arguments.",
+            name = RUN_BLACKBOX_TOOL,
+            description = "Run a BlackBox tool you found with find_blackbox_tool. name = the tool's name; args = its arguments.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
                     putJsonObject("name") {
                         put("type", JsonPrimitive("string"))
-                        put("description", JsonPrimitive("The tool name returned by search_cloud_tools."))
+                        put("description", JsonPrimitive("The tool name returned by find_blackbox_tool."))
                     }
                     putJsonObject("args") {
                         put("type", JsonPrimitive("object"))

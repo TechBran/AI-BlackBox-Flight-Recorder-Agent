@@ -572,7 +572,7 @@ class LiteRtEngine(
          * constant is a SOFT cap layered UNDERNEATH it: if that engine-side bound
          * were ever weakened or absent in a future litertlm release, a misbehaving
          * small model could otherwise loop unbounded executing REAL side-effecting
-         * tools (repeated `call_cloud_tool` / `generate_image` / phone intents).
+         * tools (repeated `run_blackbox_tool` / `generate_image` / phone intents).
          * Past this count, each further [OpenApiTool.execute] returns a terminal
          * failed result ("step limit reached") WITHOUT running the tool body, so the
          * model is pushed to give its final answer rather than loop forever.

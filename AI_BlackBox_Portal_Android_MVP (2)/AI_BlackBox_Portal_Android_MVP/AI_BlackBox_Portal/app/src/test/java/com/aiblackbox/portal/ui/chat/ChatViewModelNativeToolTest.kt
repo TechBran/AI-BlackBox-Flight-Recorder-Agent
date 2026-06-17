@@ -31,7 +31,7 @@ import org.junit.Test
  *  - PHONE/INTENT tools become [NativeTool]s whose `execute` dispatches to the
  *    [com.aiblackbox.portal.data.local.PhoneController] (NEVER the cloud
  *    [com.aiblackbox.portal.data.local.ToolBridge]);
- *  - CLOUD tools (search_cloud_tools / call_cloud_tool, W3 follow-up) become
+ *  - CLOUD tools (find_blackbox_tool / run_blackbox_tool, W3 follow-up) become
  *    [NativeTool]s whose `execute` reaches the [ToolBridge] (NEVER the phone),
  *    operator-scoped, carrying only the model's args;
  *  - the two families coexist in ONE native loop and render + persist exactly like
@@ -152,11 +152,11 @@ class ChatViewModelNativeToolTest {
             offered,
         )
         // The manual-path discovery name (search_tools) is NOT used on the native path;
-        // the native cloud entrypoint is search_cloud_tools instead.
+        // the native cloud entrypoint is find_blackbox_tool instead.
         assertTrue("manual search_tools is NOT offered on the native path",
             ResidentTools.SEARCH_TOOLS !in offered)
-        assertTrue("search_cloud_tools IS offered", ResidentTools.SEARCH_CLOUD_TOOLS in offered)
-        assertTrue("call_cloud_tool IS offered", ResidentTools.CALL_CLOUD_TOOL in offered)
+        assertTrue("find_blackbox_tool IS offered", ResidentTools.FIND_BLACKBOX_TOOL in offered)
+        assertTrue("run_blackbox_tool IS offered", ResidentTools.RUN_BLACKBOX_TOOL in offered)
     }
 
     @Test
@@ -217,13 +217,13 @@ class ChatViewModelNativeToolTest {
     // ---- Task W3 follow-up: cloud-vault NativeTools (engine-driven) -------------
 
     @Test
-    fun `search_cloud_tools execute calls bridge searchTools and returns formatted matches`() = runTest {
+    fun `find_blackbox_tool execute calls bridge searchTools and returns formatted matches`() = runTest {
         val matches = listOf(
             ToolSchema(name = "generate_image", description = "Create an image", parameters = buildJsonObject {}),
         )
         val bridge = FakeToolBridge(searchMap = mapOf("make a picture" to matches))
         val cloudTools = ChatViewModel.buildCloudNativeTools(bridge, operator = "Brandon")
-        val search = cloudTools.first { it.schema.name == ResidentTools.SEARCH_CLOUD_TOOLS }
+        val search = cloudTools.first { it.schema.name == ResidentTools.FIND_BLACKBOX_TOOL }
 
         val resultJson = search.execute("""{"query":"make a picture"}""")
 
@@ -238,22 +238,22 @@ class ChatViewModelNativeToolTest {
     }
 
     @Test
-    fun `search_cloud_tools execute with no match returns a failed result`() = runTest {
+    fun `find_blackbox_tool execute with no match returns a failed result`() = runTest {
         val bridge = FakeToolBridge() // empty search map -> emptyList()
         val search = ChatViewModel.buildCloudNativeTools(bridge, operator = "system")
-            .first { it.schema.name == ResidentTools.SEARCH_CLOUD_TOOLS }
+            .first { it.schema.name == ResidentTools.FIND_BLACKBOX_TOOL }
 
         val (ok, _) = parseResultJsonString(search.execute("""{"query":"nothing here"}"""))
         assertFalse("empty matches -> failed result", ok)
     }
 
     @Test
-    fun `call_cloud_tool execute calls bridge execute with name, parsed args and operator`() = runTest {
+    fun `run_blackbox_tool execute calls bridge execute with name, parsed args and operator`() = runTest {
         val bridge = FakeToolBridge(
             executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("image-url")) },
         )
         val call = ChatViewModel.buildCloudNativeTools(bridge, operator = "Brandon")
-            .first { it.schema.name == ResidentTools.CALL_CLOUD_TOOL }
+            .first { it.schema.name == ResidentTools.RUN_BLACKBOX_TOOL }
 
         val resultJson = call.execute("""{"name":"generate_image","args":{"prompt":"a cat"}}""")
 
@@ -271,10 +271,10 @@ class ChatViewModelNativeToolTest {
     }
 
     @Test
-    fun `call_cloud_tool accepts args supplied as a JSON-encoded string`() = runTest {
+    fun `run_blackbox_tool accepts args supplied as a JSON-encoded string`() = runTest {
         val bridge = FakeToolBridge()
         val call = ChatViewModel.buildCloudNativeTools(bridge, operator = "system")
-            .first { it.schema.name == ResidentTools.CALL_CLOUD_TOOL }
+            .first { it.schema.name == ResidentTools.RUN_BLACKBOX_TOOL }
 
         // Some small models emit args as a STRING rather than a nested object.
         call.execute("""{"name":"search_snapshots","args":"{\"q\":\"hi\"}"}""")
@@ -287,10 +287,10 @@ class ChatViewModelNativeToolTest {
     }
 
     @Test
-    fun `call_cloud_tool with no name is a failed result and never hits the bridge`() = runTest {
+    fun `run_blackbox_tool with no name is a failed result and never hits the bridge`() = runTest {
         val bridge = FakeToolBridge()
         val call = ChatViewModel.buildCloudNativeTools(bridge, operator = "system")
-            .first { it.schema.name == ResidentTools.CALL_CLOUD_TOOL }
+            .first { it.schema.name == ResidentTools.RUN_BLACKBOX_TOOL }
 
         val (ok, _) = parseResultJsonString(call.execute("""{"args":{"x":1}}"""))
         assertFalse("missing name -> failed", ok)
@@ -299,10 +299,10 @@ class ChatViewModelNativeToolTest {
 
     @Test
     fun `routing - in a native turn a cloud call hits the bridge and NOT the phone`() = runTest {
-        // The engine "calls" call_cloud_tool; phone must stay UNTOUCHED, bridge must fire.
+        // The engine "calls" run_blackbox_tool; phone must stay UNTOUCHED, bridge must fire.
         val engine = FakeNativeToolCallingLlm(
             calls = listOf(
-                ResidentTools.CALL_CLOUD_TOOL to """{"name":"generate_image","args":{"prompt":"x"}}""",
+                ResidentTools.RUN_BLACKBOX_TOOL to """{"name":"generate_image","args":{"prompt":"x"}}""",
             ),
             finalText = "image made",
         )
@@ -331,7 +331,7 @@ class ChatViewModelNativeToolTest {
 
     // -- Fix 2 (final-pass review): the native persona addendum must only name the
     //    cloud tools when a cloud bridge is actually wired. With no bridge the
-    //    native turn registers no search_cloud_tools / call_cloud_tool, so the
+    //    native turn registers no find_blackbox_tool / run_blackbox_tool, so the
     //    prompt must not advertise them. nativeAddendum(hasCloud) is the PURE
     //    decision the runLocalEngineTurn call site uses (hasCloud = bridge != null).
 
@@ -342,8 +342,12 @@ class ChatViewModelNativeToolTest {
         assertTrue("phone action example present", s.contains("flashlight_on"))
         assertTrue("closing instruction present", s.contains("Call one tool at a time"))
         // Cloud sentence present iff hasCloud.
-        assertTrue("search_cloud_tools advertised when cloud present", s.contains("search_cloud_tools"))
-        assertTrue("call_cloud_tool advertised when cloud present", s.contains("call_cloud_tool"))
+        assertTrue("find_blackbox_tool advertised when cloud present", s.contains("find_blackbox_tool"))
+        assertTrue("run_blackbox_tool advertised when cloud present", s.contains("run_blackbox_tool"))
+        // R2-B disambiguation: the addendum must steer the model AWAY from web_search
+        // for its own tools (the name-collision bug that sent "roll a dice" to the browser).
+        assertTrue("addendum tells the model NOT to use web_search for tools",
+            s.contains("Do NOT use web_search to find your tools"))
     }
 
     @Test
@@ -353,8 +357,8 @@ class ChatViewModelNativeToolTest {
         assertTrue("phone action example present", s.contains("flashlight_on"))
         assertTrue("closing instruction present", s.contains("Call one tool at a time"))
         // ...but the offline native turn must NOT name tools that aren't registered.
-        assertFalse("search_cloud_tools must NOT be advertised offline", s.contains("search_cloud_tools"))
-        assertFalse("call_cloud_tool must NOT be advertised offline", s.contains("call_cloud_tool"))
+        assertFalse("find_blackbox_tool must NOT be advertised offline", s.contains("find_blackbox_tool"))
+        assertFalse("run_blackbox_tool must NOT be advertised offline", s.contains("run_blackbox_tool"))
         // The no-cloud variant is exactly the base phone addendum.
         assertEquals(ChatViewModel.NATIVE_PHONE_CONTROL_ADDENDUM, s)
     }
@@ -364,7 +368,7 @@ class ChatViewModelNativeToolTest {
         val s = ChatViewModel.nativeAddendum(hasCloud = true)
         assertFalse("no double space introduced by the splice", s.contains("  "))
         // The cloud sentence sits before the closing instruction, exactly once.
-        val cloudIdx = s.indexOf("search_cloud_tools")
+        val cloudIdx = s.indexOf("find_blackbox_tool")
         val closeIdx = s.indexOf("Call one tool at a time")
         assertTrue("cloud sentence precedes the closing instruction", cloudIdx in 0 until closeIdx)
         assertEquals("exactly one closing instruction", closeIdx, s.lastIndexOf("Call one tool at a time"))
