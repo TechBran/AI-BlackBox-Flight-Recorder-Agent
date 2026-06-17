@@ -37,6 +37,12 @@ class LocalModelRowTest {
 
     private fun installed(slug: String) = InstalledModel(slug, File("/tmp/$slug"), 1L)
 
+    private fun installed(
+        slug: String,
+        sizeBytes: Long,
+        config: com.aiblackbox.portal.data.local.ModelConfig = com.aiblackbox.portal.data.local.ModelConfig(),
+    ) = InstalledModel(slug, File("/tmp/$slug.litertlm"), sizeBytes, config)
+
     // -- state precedence ---------------------------------------------------
 
     @Test
@@ -119,6 +125,76 @@ class LocalModelRowTest {
             activeSlug = null,
         )
         assertTrue(rows.single().state is ModelRowState.Installed)
+    }
+
+    // -- R2: installed-but-not-in-catalog (catalog 404 / empty) -------------
+
+    @Test
+    fun `installed model with EMPTY catalog still produces an installed row (R2)`() {
+        // The device-runtime symptom: the catalog 404'd (empty) but a model is on
+        // disk. It must STILL render -- as INSTALLED -- not vanish.
+        val rows = modelRowsFrom(
+            catalog = emptyList(),
+            installed = listOf(installed("gemma-4-e4b", sizeBytes = 4_000_000_000L)),
+            downloading = emptyMap(),
+            failed = emptySet(),
+            activeSlug = "gemma-4-e4b",
+        )
+        assertEquals("the installed model still produces a row", 1, rows.size)
+        val row = rows.single()
+        assertEquals("gemma-4-e4b", row.slug)
+        assertTrue("on-disk bytes -> Installed", row.state is ModelRowState.Installed)
+        assertTrue("marked active", (row.state as ModelRowState.Installed).active)
+        // The synthesized bundle carries the on-disk size so the row is never blank.
+        assertEquals(4_000_000_000L, row.bundle.sizeBytes)
+    }
+
+    @Test
+    fun `installed-only row carries the sidecar recommended flag and context note (R2)`() {
+        val cfg = com.aiblackbox.portal.data.local.ModelConfig(
+            recommended = true,
+            contextNote = "Recommended -- best on-device agent reliability",
+        )
+        val rows = modelRowsFrom(
+            catalog = emptyList(),
+            installed = listOf(installed("gemma-4-e4b", sizeBytes = 1L, config = cfg)),
+            downloading = emptyMap(),
+            failed = emptySet(),
+            activeSlug = null,
+        )
+        val row = rows.single()
+        assertTrue("recommended carried from the sidecar config", row.recommended)
+        assertEquals("Recommended -- best on-device agent reliability", row.contextNote)
+    }
+
+    @Test
+    fun `a catalog entry is NOT duplicated by an installed-only row (R2)`() {
+        // When the SAME slug is both in the catalog AND installed, there must be
+        // exactly ONE row (the catalog row, marked Installed) -- no synthesized
+        // duplicate.
+        val rows = modelRowsFrom(
+            catalog = listOf(e4b),
+            installed = listOf(installed("gemma-4-e4b", sizeBytes = 1L)),
+            downloading = emptyMap(),
+            failed = emptySet(),
+            activeSlug = null,
+        )
+        assertEquals("no duplicate row for a catalog+installed slug", 1, rows.size)
+        assertTrue(rows.single().state is ModelRowState.Installed)
+    }
+
+    @Test
+    fun `installed-only rows append after catalog rows, recommended still leads (R2)`() {
+        // A recommended catalog model + an installed-only (not-in-catalog) model:
+        // the recommended catalog row leads; the installed-only row follows.
+        val rows = modelRowsFrom(
+            catalog = listOf(e4b),                 // recommended
+            installed = listOf(installed("sideloaded-x", sizeBytes = 1L)),
+            downloading = emptyMap(),
+            failed = emptySet(),
+            activeSlug = null,
+        )
+        assertEquals(listOf("gemma-4-e4b", "sideloaded-x"), rows.map { it.slug })
     }
 
     // -- recommended sort + badge -------------------------------------------

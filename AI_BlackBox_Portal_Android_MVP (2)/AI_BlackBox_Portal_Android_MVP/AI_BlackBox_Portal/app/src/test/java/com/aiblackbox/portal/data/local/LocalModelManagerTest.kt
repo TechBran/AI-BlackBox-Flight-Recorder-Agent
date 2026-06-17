@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -35,6 +36,9 @@ import kotlin.io.path.createTempDirectory
 class LocalModelManagerTest {
 
     private lateinit var modelsDir: File
+
+    /** Captures the manager's warn-log lines so tests assert WITHOUT android.util.Log. */
+    private val logLines = mutableListOf<String>()
 
     // Fixtures carry the Task W6 per-model config the backend catalog advertises:
     // E4B is the recommended default; E2B is the experimental fallback.
@@ -84,6 +88,8 @@ class LocalModelManagerTest {
         modelsDir = modelsDir,
         totalRamBytes = { (ramGb * 1_073_741_824L).toLong() },
         deviceId = deviceId,
+        // Capture instead of calling android.util.Log (un-mocked on the JVM gate).
+        logWarn = { _, message -> logLines.add(message) },
     )
 
     /**
@@ -329,6 +335,64 @@ class LocalModelManagerTest {
         val listed = mgr.installedModels()
         assertEquals("only the valid entry is returned", 1, listed.size)
         assertEquals("gemma-4-e2b", listed.first().slug)
+    }
+
+    @Test
+    fun `installedModels returns the good model when ANOTHER sidecar is malformed (R2)`() = runTest {
+        // R2 core fix: the device-runtime "no models available" failure mode was a
+        // single bad sidecar emptying the whole list. A present, parseable model
+        // (bundle on disk) must ALWAYS list even alongside a malformed sidecar.
+        val content = ByteArray(1024) { 6 }
+        val bundle = e4b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 8.0)
+
+        // One GOOD install (sidecar + bundle present)...
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "gpu") { _, _ -> }.isSuccess)
+        // ...plus a MALFORMED sidecar that must NOT abort the scan.
+        modelsDir.resolve("broken.json").writeText("}{ this is not json")
+
+        val listed = mgr.installedModels()
+        assertEquals("the good model must still be listed", 1, listed.size)
+        assertEquals("gemma-4-e4b", listed.single().slug)
+    }
+
+    @Test
+    fun `installedModels logs the skipped sidecar (filename + class, no content) and a summary (R2)`() = runTest {
+        val content = ByteArray(1024) { 7 }
+        val bundle = e2b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 4.0)
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "cpu") { _, _ -> }.isSuccess)
+        modelsDir.resolve("broken.json").writeText("not-json-at-all")
+
+        logLines.clear()
+        val listed = mgr.installedModels()
+        assertEquals(1, listed.size)
+
+        // A per-skip warn naming the FILE (not the content) + a one-line summary.
+        val skipLine = logLines.firstOrNull { it.contains("broken.json") }
+        assertNotNull("a skip line names the bad sidecar file", skipLine)
+        assertFalse("the log must NOT echo sidecar content", logLines.any { it.contains("not-json-at-all") })
+        assertTrue("summary line present", logLines.any { it.contains("found 1") && it.contains("skipped 1") })
+    }
+
+    @Test
+    fun `installedModels parses a legacy-minimal sidecar slug filename size_bytes only (R2 regression)`() = runTest {
+        // Regression: the smallest legacy sidecar shape must still parse + list.
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        writeSidecarJson(
+            slug = "gemma-legacy",
+            json = """
+                {
+                  "slug": "gemma-legacy",
+                  "filename": "gemma-legacy.litertlm",
+                  "size_bytes": 8
+                }
+            """.trimIndent(),
+        )
+        val model = mgr.installedModels().single()
+        assertEquals("gemma-legacy", model.slug)
+        assertEquals(8L, model.sizeBytes)
+        assertNull("legacy sidecar carries no max_tokens", model.config.maxTokens)
     }
 
     // -------------------------------------------------------------------------

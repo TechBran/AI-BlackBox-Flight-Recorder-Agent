@@ -91,6 +91,15 @@ fun fractionToPercent(fraction: Float): Int {
  * `recommended` flag comes from the catalog bundle's own field (Task W6), so it
  * is the badge AND the sort key -- no second source of truth.
  *
+ * **Installed-but-not-in-catalog (R2 catalog-unavailable fix).** An installed
+ * model whose slug is NOT in [catalog] STILL gets a row, synthesized from the
+ * [InstalledModel] itself (slug as the display name, the on-disk size, the
+ * sidecar's recommended/contextNote). This is what makes a present, sideloaded
+ * model -- or ANY installed model when the catalog 404s/returns empty -- render
+ * instead of vanishing. Such rows are always [ModelRowState.Installed] (the
+ * bytes are on disk); they have no Download/Failed affordance since there is no
+ * catalog entry to (re)download from.
+ *
  * @param ramBytes optional device RAM (bytes) used to compute each row's
  *   `fitsRam`. Null (the default) leaves `fitsRam` null on every row -- the merge
  *   itself never depends on RAM (recommendation/min-RAM gating lives in the
@@ -105,7 +114,8 @@ fun modelRowsFrom(
     ramBytes: Long? = null,
 ): List<ModelRow> {
     val installedSlugs = installed.mapTo(HashSet()) { it.slug }
-    val rows = catalog.map { bundle ->
+    val catalogSlugs = catalog.mapTo(HashSet()) { it.slug }
+    val catalogRows = catalog.map { bundle ->
         val slug = bundle.slug
         val state: ModelRowState = when {
             downloading.containsKey(slug) ->
@@ -128,8 +138,33 @@ fun modelRowsFrom(
             fitsRam = fitsRam,
         )
     }
-    // Recommended-first, otherwise stable catalog order. sortedBy is stable.
-    return rows.sortedBy { if (it.recommended) 0 else 1 }
+    // R2: installed models with NO catalog entry still get a row (synthesized
+    // from the InstalledModel), so a present model never vanishes when the
+    // catalog 404s/returns empty. Always INSTALLED (bytes are on disk).
+    val installedOnlyRows = installed
+        .filter { it.slug !in catalogSlugs }
+        .map { model ->
+            val synthBundle = LocalBundle(
+                slug = model.slug,
+                displayName = model.slug,
+                filename = model.file.name,
+                sizeBytes = model.sizeBytes,
+                recommended = model.config.recommended,
+                contextNote = model.config.contextNote,
+            )
+            ModelRow(
+                slug = model.slug,
+                bundle = synthBundle,
+                state = ModelRowState.Installed(active = model.slug == activeSlug),
+                recommended = model.config.recommended,
+                contextNote = model.config.contextNote?.takeIf { it.isNotBlank() },
+                // No catalog min-RAM to test against; the model is already on disk.
+                fitsRam = null,
+            )
+        }
+    // Recommended-first, otherwise stable order (catalog rows, then installed-only).
+    // sortedBy is stable, so catalog order + the installed-only suffix are preserved.
+    return (catalogRows + installedOnlyRows).sortedBy { if (it.recommended) 0 else 1 }
 }
 
 /** 1 GiB, matching ActivityManager.MemoryInfo.totalMem's byte units. */

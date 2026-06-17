@@ -151,6 +151,9 @@ class LocalModelViewModelTest {
         private val available: Boolean = false,
         private val setAutonomyOk: Boolean = true,
         private val attestSucceeds: Boolean = true,
+        // Models GET /local/models/catalog 404ing/unreachable (R2): catalog()
+        // throws, so refresh() must fall through to its installed-only path.
+        private val catalogThrows: Boolean = false,
     ) : LocalModelCatalogClient {
         var lastAutonomyMode: String? = null
         var setAutonomyCalls = 0
@@ -160,7 +163,10 @@ class LocalModelViewModelTest {
         // setAutonomy then succeeds (mirrors the real backend's upsert-then-200).
         private var attested = false
 
-        override suspend fun catalog(): List<LocalBundle> = bundles
+        override suspend fun catalog(): List<LocalBundle> {
+            if (catalogThrows) throw IOException("HTTP 404")
+            return bundles
+        }
 
         override suspend fun status(operator: String): LocalStatus =
             LocalStatus(
@@ -239,6 +245,49 @@ class LocalModelViewModelTest {
         advanceUntilIdle()
 
         assertEquals("permission", vm.state.value.autonomyMode)
+    }
+
+    // ── R2: catalog unavailable (404) must NOT hide installed models ─────────
+
+    @Test
+    fun `refresh keeps installed rows + surfaces an error when the catalog 404s (R2)`() = runTest(dispatcher) {
+        // The device symptom: /local/models/catalog 404s but a model IS on disk.
+        // refresh() must still load the installed model so state.rows is non-empty
+        // (drives the "catalog unavailable — your installed models still work"
+        // note) and an error is surfaced — never an empty picker.
+        val installer = FakeInstaller(
+            installed = mutableListOf(InstalledModel("gemma-4-e4b", File("/tmp/e4b.litertlm"), 4_000_000_000L)),
+            recommended = e4b,
+        )
+        val catalog = FakeCatalog(listOf(e2b, e4b), catalogThrows = true)
+        val vm = vm(installer, catalog)
+
+        vm.refresh()
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertTrue("installed model still loaded despite catalog 404", s.installed.any { it.slug == "gemma-4-e4b" })
+        assertFalse("rows non-empty -> the picker renders the installed model", s.rows.isEmpty())
+        assertTrue("the installed model renders as Installed",
+            s.rows.first { it.slug == "gemma-4-e4b" }.state is ModelRowState.Installed)
+        assertNotNull("an error is surfaced (drives the catalog-unavailable note)", s.error)
+    }
+
+    @Test
+    fun `refresh is genuinely empty when the catalog 404s and NOTHING is installed (R2)`() = runTest(dispatcher) {
+        // The only case that should read "No on-device models available": catalog
+        // 404 AND zero installed.
+        val installer = FakeInstaller(recommended = e4b) // nothing installed
+        val catalog = FakeCatalog(listOf(e2b, e4b), catalogThrows = true)
+        val vm = vm(installer, catalog)
+
+        vm.refresh()
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertTrue("no installed models", s.installed.isEmpty())
+        assertTrue("rows genuinely empty", s.rows.isEmpty())
+        assertNotNull("the raw catalog error is still surfaced", s.error)
     }
 
     // ── download happy path ────────────────────────────────────────────────

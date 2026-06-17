@@ -49,19 +49,23 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
  * Delete / Retry actions, a Recommended badge + the per-model context note (W6;
  * the catalog's `recommended` flag both badges AND sorts the row first), the
  * active on-device model clearly marked, plus a YOLO ⇄ Permission autonomy
- * toggle and the "Enable Accessibility" CTA. Styling matches the rest of
- * [SettingsSheet] — Neutral200 glass rows, RadiusMd corners, the project tokens.
+ * toggle and an OPTIONAL "Advanced screen control" affordance (R2: a11y is NOT
+ * required for the on-device model — only for the gesture read-screen/tap layer).
+ * Styling matches the rest of [SettingsSheet] — Neutral200 glass rows, RadiusMd
+ * corners, the project tokens.
  *
  * Stateless w.r.t. construction: the caller hands in a [LocalModelViewModel]
  * (built via [LocalModelViewModel.fromContext]) and this Composable just
  * observes [LocalModelViewModel.state] + dispatches actions.
  *
- * The "Enable Accessibility" CTA (Phase 4.1) is wired by the screen: it passes
- * [accessibilityEnabled] (read from the live
+ * The OPTIONAL "Advanced screen control" affordance (Phase 4.1, reframed in R2)
+ * is wired by the screen: it passes [accessibilityEnabled] (read from the live
  * `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` setting → the pure
  * [com.aiblackbox.portal.overlay.isAccessibilityServiceEnabled] helper) and an
  * [onEnableAccessibility] lambda that deep-links to system Accessibility
- * settings. Both default to inert so previews/older callers still compile.
+ * settings. Both default to inert so previews/older callers still compile. The
+ * capability is unchanged — a11y still drives the gesture read-screen/tap layer;
+ * only the framing is secondary (intents/chat need NO accessibility).
  */
 @Composable
 fun LocalModelSection(
@@ -84,6 +88,8 @@ fun LocalModelSection(
         // ── Picker rows (Task W5.3: recommended-first, state-driven) ──────
         val rows = state.rows
         if (rows.isEmpty()) {
+            // GENUINELY zero installed (R2): only here do we say "none available".
+            // The raw catalog error (if any) is shown by the error block below.
             Text(
                 "No on-device models available.",
                 style = MaterialTheme.typography.bodySmall,
@@ -91,6 +97,18 @@ fun LocalModelSection(
                 modifier = Modifier.padding(vertical = 8.dp),
             )
         } else {
+            // R2: installed models present. If the catalog is unreachable (refresh
+            // set an error) surface a CLEAR secondary note that the installed
+            // models still work — never the alarming "no models available".
+            if (state.error != null) {
+                Text(
+                    "Model catalog unavailable (server not reachable) — " +
+                        "your installed models still work.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Neutral500,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 rows.forEach { row ->
                     ModelRowCard(
@@ -145,21 +163,26 @@ fun LocalModelSection(
 
         Spacer(Modifier.height(12.dp))
 
-        // ── Accessibility CTA (Phase 4.1: deep-links to system settings) ──
-        // Tapping opens the system Accessibility settings list (Android does not
-        // reliably support deep-linking to a single service's toggle). The label
-        // reflects whether our service is currently enabled.
+        // ── Advanced screen control (OPTIONAL) ───────────────────────────
+        // R2: a11y is NO LONGER required for the on-device model. Intents/chat
+        // (flashlight, maps, calls, dice, …) work WITHOUT accessibility — it is
+        // only needed for the OPTIONAL gesture layer (read the screen / tap UI in
+        // OTHER apps). So this is reframed as a clearly-secondary, optional
+        // affordance, never a prominent "required" CTA. Tapping still deep-links
+        // to the system Accessibility settings list (Android does not reliably
+        // support deep-linking to a single service's toggle); the capability is
+        // unchanged, only the framing.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(RadiusMd))
                 .background(
-                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.12f)
-                    else Neutral200.copy(alpha = 0.5f),
+                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.10f)
+                    else Neutral200.copy(alpha = 0.3f),
                 )
                 .border(
                     1.dp,
-                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.5f) else GlassBorder,
+                    if (accessibilityEnabled) SolidGreen.copy(alpha = 0.4f) else GlassBorder,
                     RoundedCornerShape(RadiusMd),
                 )
                 .clickable(onClick = onEnableAccessibility)
@@ -167,15 +190,22 @@ fun LocalModelSection(
         ) {
             Column {
                 Text(
-                    if (accessibilityEnabled) "Accessibility Enabled" else "Enable Accessibility",
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                    color = if (accessibilityEnabled) SolidGreen else BbxWhite,
+                    if (accessibilityEnabled)
+                        "Advanced screen control: on"
+                    else
+                        "Advanced screen control (optional)",
+                    // Secondary weight + muted color: this is no longer a primary CTA.
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                    color = if (accessibilityEnabled) SolidGreen else Neutral500,
                 )
                 Text(
                     if (accessibilityEnabled)
-                        "Phone control is allowed. Tap to manage in system settings."
+                        "The model can read the screen and tap UI in other apps. " +
+                            "Tap to manage in system settings."
                     else
-                        "Required for phone control. Tap to enable in system settings.",
+                        "Only needed if you want the model to read the screen and tap UI " +
+                            "in other apps. Flashlight, maps, calls and other actions work " +
+                            "without it. Tap to enable in system settings.",
                     style = MaterialTheme.typography.labelSmall,
                     color = Neutral500,
                 )
@@ -183,14 +213,21 @@ fun LocalModelSection(
         }
 
         // ── Error ────────────────────────────────────────────────────────
-        state.error?.let { err ->
-            Spacer(Modifier.height(12.dp))
-            Text(
-                err,
-                style = MaterialTheme.typography.bodySmall,
-                color = BbxAccent,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        // When models ARE listed, the catalog error is already softened into the
+        // "catalog unavailable — your installed models still work" note above, so
+        // we don't ALSO show the raw error here (alarming + redundant). With ZERO
+        // models listed there is no note, so the raw error (e.g. "Couldn't load
+        // model catalog: HTTP 404") still shows here.
+        if (state.rows.isEmpty()) {
+            state.error?.let { err ->
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    err,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BbxAccent,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }

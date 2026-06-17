@@ -93,6 +93,16 @@ class LocalModelManager(
     private val modelsDir: File,
     private val totalRamBytes: () -> Long,
     private val deviceId: String,
+    /**
+     * Warning logger seam (R2 Model-Manager fix). Defaults to
+     * [android.util.Log.w]; tests inject a capturing lambda so the JVM unit
+     * gate never hits the un-mocked `android.util.Log`. ONLY ever receives a tag
+     * + a message we build from the slug/filename + the exception CLASS name -
+     * never sidecar CONTENT (a sidecar could carry a path or other detail).
+     */
+    private val logWarn: (tag: String, message: String) -> Unit = { tag, message ->
+        android.util.Log.w(tag, message)
+    },
 ) : LocalModelInstaller {
 
     /**
@@ -112,19 +122,43 @@ class LocalModelManager(
         if (!dir.isDirectory) return@withContext emptyList()
         val sidecars = dir.listFiles { f -> f.isFile && f.name.endsWith(SIDECAR_SUFFIX) }
             ?: return@withContext emptyList()
-        sidecars.mapNotNull { sidecar ->
-            val record = runCatching {
-                json.decodeFromString(SidecarRecord.serializer(), sidecar.readText())
-            }.getOrNull() ?: return@mapNotNull null
-            val file = File(dir, record.filename)
-            if (!file.isFile) return@mapNotNull null
-            InstalledModel(
-                slug = record.slug,
-                file = file,
-                sizeBytes = file.length(),
-                config = record.toModelConfig(),
-            )
-        }.sortedBy { it.slug }
+        // Parse EACH sidecar in its OWN try/catch so one malformed/unreadable
+        // sidecar (the device-runtime "no models available" failure mode) is
+        // SKIPPED with a log line, never aborting the whole scan - a present,
+        // parseable model must ALWAYS list. We log only the filename + the
+        // exception CLASS name (never the sidecar's content) so a bad sidecar's
+        // cause is visible without leaking path/content detail.
+        var skipped = 0
+        val models = ArrayList<InstalledModel>(sidecars.size)
+        for (sidecar in sidecars) {
+            try {
+                val record = json.decodeFromString(SidecarRecord.serializer(), sidecar.readText())
+                val file = File(dir, record.filename)
+                if (!file.isFile) {
+                    // Bundle bytes gone (deleted/partial) - the model is not
+                    // installed. Not an error; skip quietly without a warn.
+                    skipped++
+                    continue
+                }
+                models.add(
+                    InstalledModel(
+                        slug = record.slug,
+                        file = file,
+                        sizeBytes = file.length(),
+                        config = record.toModelConfig(),
+                    )
+                )
+            } catch (e: Exception) {
+                skipped++
+                logWarn(
+                    TAG,
+                    "installedModels: skipping unreadable sidecar '${sidecar.name}' " +
+                        "(${e.javaClass.simpleName})",
+                )
+            }
+        }
+        logWarn(TAG, "installedModels: found ${models.size}, skipped $skipped")
+        models.sortedBy { it.slug }
     }
 
     /**
@@ -362,6 +396,9 @@ class LocalModelManager(
     }
 
     companion object {
+        /** Logcat tag for the Model Manager (R2 installed-scan logging). */
+        private const val TAG = "LocalModelManager"
+
         /** 1 GiB, matching ActivityManager.MemoryInfo.totalMem's byte units. */
         const val BYTES_PER_GIB: Long = 1_073_741_824L
 
