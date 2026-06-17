@@ -51,8 +51,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * @param reader the redacting UI-tree reader (prod: [UiTreeReader.fromService]).
  * @param actuators the gesture actuators (prod: [Actuators.fromService], wired
  *   with the autonomy mode + overlay confirm + credential handoff).
- * @param intentActuator the intent-action actuator (Task IA-3; prod:
- *   [IntentActuator.fromService], wired with the same autonomy mode + confirm).
+ * @param intentActuator the intent-action actuator (Task IA-3 / W0; prod:
+ *   [IntentActuator.fromAppContext], which fires the OS intents through the
+ *   Application [Context] and so needs NO accessibility — only the gesture
+ *   [Actuators] do (Gallery parity). Wired with the same autonomy mode + confirm.
  *   A call whose name is in [ResidentTools.INTENT_ACTIONS] is forwarded here.
  */
 class AndroidPhoneController(
@@ -133,10 +135,14 @@ class AndroidPhoneController(
 
     companion object {
         /**
-         * Production factory: reads + actuates through the live connected
-         * [BlackBoxA11yService] via the singleton seams. Safe to call even when the
-         * service is disabled — the underlying reader/actuators degrade gracefully.
+         * Production factory: reads + actuates the GESTURE layer through the live
+         * connected [BlackBoxA11yService] via the singleton seams (safe even when
+         * the service is disabled — the reader/actuators degrade gracefully), while
+         * the INTENT layer fires through [appContext]'s Application [Context] and
+         * needs NO accessibility at all (Gallery parity, Task W0).
          *
+         * @param appContext any [Context]; its application context is the long-lived
+         *   launch Context handed to [IntentActuator.fromAppContext].
          * @param mode reads the device autonomy posture for the actuator's gate
          *   (prod wiring passes a SharedPref-backed read defaulting to
          *   [AutonomyMode.PERMISSION] — the SAFE default). Defaults to YOLO here
@@ -148,6 +154,7 @@ class AndroidPhoneController(
          *   fails SAFE — a password entry never silently proceeds.
          */
         fun fromService(
+            appContext: android.content.Context,
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
             credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
@@ -155,9 +162,10 @@ class AndroidPhoneController(
             AndroidPhoneController(
                 UiTreeReader.fromService(),
                 Actuators.fromService(mode, confirm, credentialHandoff),
-                // Task IA-3: the intent actions share the SAME autonomy posture +
-                // confirm seam as the gestures (its internal gate covers send_*).
-                IntentActuator.fromService(mode, confirm),
+                // Task IA-3 / W0: the intent actions share the SAME autonomy posture +
+                // confirm seam as the gestures (its internal gate covers send_*), but
+                // fire through the Application context — NO accessibility required.
+                IntentActuator.fromAppContext(appContext, mode, confirm),
             )
     }
 }

@@ -38,20 +38,19 @@ import kotlinx.serialization.json.jsonPrimitive
  * helpers; THIS class only assembles + launches, so it is framework code,
  * **device-verified (not unit-tested here)** — exactly like [Actuators].
  *
- * ## v1 limitation — the launch Context is the a11y service (FORWARD NOTE)
- * Every intent here is fired through the consented [BlackBoxA11yService] (a
- * [Context]) via [service]. There is no separate app/application Context wired in
- * for v1, so when the accessibility service is OFF, every branch returns the
- * graceful `"accessibility service not enabled"` result rather than launching —
- * even though many of these intents (map, dial, settings) need NO accessibility
- * capability and could fire from a plain app Context. A follow-up should give
- * [IntentActuator] an `applicationContext` fallback so the benign launches work
- * with the a11y service disabled; the [service] seam + [fire] helper are kept
- * small precisely so that swap is a one-line change.
+ * ## Fires via the Application context — needs ZERO accessibility (Gallery parity)
+ * Every intent here is launched through the process-wide **Application** [Context]
+ * (via [context]), NOT the accessibility service. None of these benign hand-offs
+ * (map, dial, settings, timer, …) require any accessibility capability, so this
+ * actuator works with the [BlackBoxA11yService] DISABLED — matching Google's Edge
+ * Gallery, which fires its intents from a plain app Context and uses no
+ * accessibility at all. Accessibility remains required ONLY for the gesture layer
+ * ([UiTreeReader]/[Actuators]: read_screen, tap, type, swipe, …); the intent layer
+ * is fully decoupled from it.
  *
  * ## Result, not exceptions (mirrors [Actuators])
- * Every branch is wrapped so NOTHING throws: a disabled service →
- * `success=false, "accessibility service not enabled"`; a missing app
+ * Every branch is wrapped so NOTHING throws: an unavailable app Context →
+ * `success=false, "app context unavailable"`; a missing app
  * ([ActivityNotFoundException]) or any other failure →
  * `success=false, "<name> failed (<ExceptionClass>)"`; an unknown action name →
  * `success=false, "unknown intent action: <name>"`; a missing required arg →
@@ -75,9 +74,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * surfaces is inside [describeIntent] (the confirm prompt), which is correct and by
  * design — and only fixed tool-registry names ever reach [describeIntent].
  *
- * @param service seam to the connected service (prod: `{ BlackBoxA11yService.instance }`);
- *   a [BlackBoxA11yService] IS a [Context], so it is used for `startActivity` /
- *   `getSystemService`.
+ * @param context seam to the process-wide Application [Context] (prod:
+ *   `{ appContext }`); used for `startActivity` / `getSystemService`. Resolved each
+ *   call and normalized to `applicationContext`, so the launch outlives any
+ *   short-lived caller and needs no accessibility.
  * @param mode reads the current device autonomy posture each time it's needed
  *   (default `{ AutonomyMode.YOLO }` so un-wired call-sites behave as before; the
  *   SAFE PERMISSION default is supplied by the production wiring).
@@ -85,7 +85,7 @@ import kotlinx.serialization.json.jsonPrimitive
  *   Permission mode (prod: [OverlayConfirmUi]; default auto-approve no-op).
  */
 class IntentActuator(
-    private val service: () -> BlackBoxA11yService?,
+    private val context: () -> android.content.Context?,
     private val mode: () -> AutonomyMode = { AutonomyMode.YOLO },
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
 ) {
@@ -93,8 +93,8 @@ class IntentActuator(
     /**
      * Build + fire the intent action [name] with Gemma's JSON [args].
      *
-     * Resolves the live service (a [Context]); on `null` returns
-     * `"accessibility service not enabled"`. Dispatches over the 16 known actions;
+     * Resolves the Application [Context]; on `null` returns
+     * `"app context unavailable"`. Dispatches over the 16 known actions;
      * an unknown [name] → `"unknown intent action: <name>"`. EVERY branch is
      * wrapped so nothing throws — a launch failure ([ActivityNotFoundException] or
      * anything else) becomes `"<name> failed (<ExceptionClass>)"`. The two
@@ -102,12 +102,12 @@ class IntentActuator(
      * firing and abort with `"user declined"` if denied.
      */
     suspend fun perform(name: String, args: JsonObject): ActuatorResult {
-        val svc = service() ?: return ActuatorResult(false, "accessibility service not enabled")
+        val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
         return try {
             when (name) {
                 // 1. flashlight — NOT an intent; drive the camera torch directly.
-                "flashlight_on" -> torch(svc, on = true)
-                "flashlight_off" -> torch(svc, on = false)
+                "flashlight_on" -> torch(ctx, on = true)
+                "flashlight_off" -> torch(ctx, on = false)
 
                 // 2. create_contact — all fields optional (default "").
                 "create_contact" -> {
@@ -129,7 +129,7 @@ class IntentActuator(
                             ContactsContract.CommonDataKinds.Phone.TYPE_WORK,
                         )
                     }
-                    fire(svc, name, intent, "contact editor opened")
+                    fire(ctx, name, intent, "contact editor opened")
                 }
 
                 // 3. send_email — `to` REQUIRED; subject/body optional. [GATE]
@@ -151,7 +151,7 @@ class IntentActuator(
                         putExtra(Intent.EXTRA_SUBJECT, subject ?: "")
                         putExtra(Intent.EXTRA_TEXT, body ?: "")
                     }
-                    fire(svc, name, intent, "opened email composer")
+                    fire(ctx, name, intent, "opened email composer")
                 }
 
                 // 4. show_map — query REQUIRED (geoQueryUri form-encodes it).
@@ -160,12 +160,12 @@ class IntentActuator(
                     val intent = Intent(Intent.ACTION_VIEW).apply {
                         data = Uri.parse(geoQueryUri(query))
                     }
-                    fire(svc, name, intent, "opened maps")
+                    fire(ctx, name, intent, "opened maps")
                 }
 
                 // 5. open_wifi_settings.
                 "open_wifi_settings" ->
-                    fire(svc, name, Intent(Settings.ACTION_WIFI_SETTINGS), "opened wifi settings")
+                    fire(ctx, name, Intent(Settings.ACTION_WIFI_SETTINGS), "opened wifi settings")
 
                 // 6. create_calendar_event — datetime REQUIRED, title optional.
                 "create_calendar_event" -> {
@@ -179,7 +179,7 @@ class IntentActuator(
                         putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, begin)
                         putExtra(CalendarContract.EXTRA_EVENT_END_TIME, calendarEndMillis(begin))
                     }
-                    fire(svc, name, intent, "calendar editor opened")
+                    fire(ctx, name, intent, "calendar editor opened")
                 }
 
                 // 7. open_url — url REQUIRED; REJECT non-web schemes (isWebUrl).
@@ -187,14 +187,14 @@ class IntentActuator(
                     val url = str(args, "url") ?: return ActuatorResult(false, "url required")
                     if (!isWebUrl(url)) return ActuatorResult(false, "invalid url")
                     val intent = Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(url) }
-                    fire(svc, name, intent, "opened link")
+                    fire(ctx, name, intent, "opened link")
                 }
 
                 // 8. dial — number REQUIRED (telUri sanitizes to dialer chars).
                 "dial" -> {
                     val number = str(args, "number") ?: return ActuatorResult(false, "number required")
                     val intent = Intent(Intent.ACTION_DIAL).apply { data = Uri.parse(telUri(number)) }
-                    fire(svc, name, intent, "opened dialer")
+                    fire(ctx, name, intent, "opened dialer")
                 }
 
                 // 9. send_sms — number REQUIRED, body optional. [GATE]
@@ -212,7 +212,7 @@ class IntentActuator(
                         data = Uri.parse(smsToUri(number))
                         putExtra("sms_body", body ?: "")
                     }
-                    fire(svc, name, intent, "opened messaging")
+                    fire(ctx, name, intent, "opened messaging")
                 }
 
                 // 10. set_alarm — hour & minutes REQUIRED ints; label optional.
@@ -227,7 +227,7 @@ class IntentActuator(
                         putExtra(AlarmClock.EXTRA_MESSAGE, label ?: "")
                         putExtra(AlarmClock.EXTRA_SKIP_UI, false)
                     }
-                    fire(svc, name, intent, "alarm set")
+                    fire(ctx, name, intent, "alarm set")
                 }
 
                 // 11. set_timer — seconds REQUIRED int; label optional.
@@ -240,7 +240,7 @@ class IntentActuator(
                         putExtra(AlarmClock.EXTRA_MESSAGE, label ?: "")
                         putExtra(AlarmClock.EXTRA_SKIP_UI, false)
                     }
-                    fire(svc, name, intent, "timer set")
+                    fire(ctx, name, intent, "timer set")
                 }
 
                 // 12. share_text — text REQUIRED; fires via a chooser (needs NEW_TASK).
@@ -251,7 +251,7 @@ class IntentActuator(
                         putExtra(Intent.EXTRA_TEXT, text)
                     }
                     try {
-                        svc.startActivity(
+                        ctx.startActivity(
                             Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                         )
                         logFired(name, true)
@@ -265,12 +265,12 @@ class IntentActuator(
                 // 13. open_settings_panel — which optional; settingsPanelAction never null.
                 "open_settings_panel" -> {
                     val which = str(args, "which")
-                    fire(svc, name, Intent(settingsPanelAction(which)), "opened settings")
+                    fire(ctx, name, Intent(settingsPanelAction(which)), "opened settings")
                 }
 
                 // 14. take_photo.
                 "take_photo" ->
-                    fire(svc, name, Intent(MediaStore.ACTION_IMAGE_CAPTURE), "camera opened")
+                    fire(ctx, name, Intent(MediaStore.ACTION_IMAGE_CAPTURE), "camera opened")
 
                 // 15. web_search — query REQUIRED.
                 "web_search" -> {
@@ -278,7 +278,7 @@ class IntentActuator(
                     val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
                         putExtra(SearchManager.QUERY, query)
                     }
-                    fire(svc, name, intent, "web search opened")
+                    fire(ctx, name, intent, "web search opened")
                 }
 
                 else -> ActuatorResult(false, "unknown intent action: $name")
@@ -299,10 +299,10 @@ class IntentActuator(
      * → `"no flash available"`. Wrapped so a camera-service / torch-mode failure
      * becomes a graceful `success=false` rather than throwing.
      */
-    private fun torch(svc: BlackBoxA11yService, on: Boolean): ActuatorResult {
+    private fun torch(ctx: Context, on: Boolean): ActuatorResult {
         val action = if (on) "flashlight_on" else "flashlight_off"
         return try {
-            val cm = svc.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val id = cm.cameraIdList.firstOrNull {
                 cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
             } ?: return ActuatorResult(false, "no flash available")
@@ -317,18 +317,18 @@ class IntentActuator(
 
     /**
      * Fire a built [intent] via `startActivity` (NEW_TASK, required to launch from a
-     * non-Activity [Context] like the service). Returns `success=true, okDetail` on
+     * non-Activity [Context] like the Application context). Returns `success=true, okDetail` on
      * launch; an [ActivityNotFoundException] / any error →
      * `success=false, "<name> failed (<ExceptionClass>)"`. [okDetail] MUST be a
      * fixed, NON-sensitive phrase — it is never derived from the args.
      */
     private fun fire(
-        svc: BlackBoxA11yService,
+        ctx: Context,
         name: String,
         intent: Intent,
         okDetail: String,
     ): ActuatorResult = try {
-        svc.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         logFired(name, true)
         ActuatorResult(true, okDetail)
     } catch (e: ActivityNotFoundException) {
@@ -371,20 +371,23 @@ class IntentActuator(
         private const val TAG = "IntentActuator"
 
         /**
-         * Production factory: actuates through the live connected
-         * [BlackBoxA11yService] via the singleton seam. Safe to call even when the
-         * service is disabled — [perform] then returns the graceful
-         * `"accessibility service not enabled"` result.
+         * Production factory: actuates through the process-wide Application
+         * [Context] — so the benign OS intents fire even with the accessibility
+         * service DISABLED (Gallery parity). [appContext] is normalized to its
+         * `applicationContext` per call.
          *
+         * @param appContext any [Context]; its [Context.getApplicationContext] is
+         *   used as the long-lived launch Context.
          * @param mode reads the device autonomy posture for the `send_*` gate (prod
          *   wiring supplies a SharedPref-backed read defaulting to
          *   [AutonomyMode.PERMISSION] — the SAFE default). Defaults to YOLO here
          *   ONLY so an un-wired call keeps pre-gate behavior.
          * @param confirm the user-confirmation seam (prod: [OverlayConfirmUi]).
          */
-        fun fromService(
+        fun fromAppContext(
+            appContext: android.content.Context,
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
-        ): IntentActuator = IntentActuator({ BlackBoxA11yService.instance }, mode, confirm)
+        ): IntentActuator = IntentActuator({ appContext.applicationContext }, mode, confirm)
     }
 }

@@ -785,6 +785,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             bridge = bridge,
                             operator = op,
                             phone = AndroidPhoneController.fromService(
+                                appContext,
                                 mode = { autonomyStore.load() },
                                 confirm = OverlayConfirmUi(appContext),
                                 credentialHandoff = OverlayCredentialHandoff(appContext),
