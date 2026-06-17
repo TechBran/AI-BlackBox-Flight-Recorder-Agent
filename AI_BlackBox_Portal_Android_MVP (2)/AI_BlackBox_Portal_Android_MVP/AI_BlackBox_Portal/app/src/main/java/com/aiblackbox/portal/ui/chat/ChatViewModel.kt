@@ -927,7 +927,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // (the W3 separation guarantee). Build the same plain-text prompt FcLoop
                     // would (via a transient text-only FcLoop), then append the native
                     // phone-control + cloud steering addendum to the persona.
-                    val nativePersona = persona + NATIVE_PHONE_CONTROL_ADDENDUM
+                    val nativePersona = persona + nativeAddendum(hasCloud = bridge != null)
                     val prompt = FcLoop(llm).buildPrompt(nativePersona, history, text)
                     streamLocalNativeAgentTurn(
                         engine = llm,
@@ -1257,12 +1257,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * I1 (W5 review): apply a model-selection change that arrived mid-turn. Called
-     * at every local-turn completion point; a no-op unless [pendingLocalReWarm] was
-     * set. Now that no generation is in flight, it is safe to close() the old
-     * engine and re-warm the newly-selected bundle.
+     * at every local-turn settle point -- normal turn completion
+     * ([runLocalEngineTurn]) AND, per the final-pass review, on STOP
+     * ([cancelStream]) and CLEAR ([clearHistory]), since those cancel the stream
+     * and so skip the completion path. A no-op unless [pendingLocalReWarm] was set
+     * (the consume decision is the pure [consumePendingReWarm]). Now that no
+     * generation is in flight, it is safe to close() the old engine and re-warm
+     * the newly-selected bundle.
      */
     private fun processPendingLocalReWarm() {
-        if (!pendingLocalReWarm) return
+        // Consume the pending flag exactly once (pure decision, unit-tested).
+        if (!consumePendingReWarm(pendingLocalReWarm)) return
         pendingLocalReWarm = false
         if (!ChatProvider.fromId(currentProvider).isLocal) return
         invalidateLocalEngine()
@@ -1975,6 +1980,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     fun clearHistory() {
         streamJob?.cancel()
+        // I1 (final-pass review): a model switch DEFERred mid-turn must not be
+        // dropped when the turn is cancelled. The normal turn-completion path
+        // (runLocalEngineTurn) is SKIPPED on cancel, so apply it here. Guarded
+        // no-op when nothing is pending.
+        processPendingLocalReWarm()
         _messages.value = emptyList()
         _chatState.value = ChatState.IDLE
         viewModelScope.launch { historyStore.clear(currentOperator) }
@@ -1982,6 +1992,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelStream() {
         streamJob?.cancel()
+        // I1 (final-pass review): see clearHistory -- a mid-turn model switch
+        // (localReWarmAction -> DEFER) is applied at turn completion, which a
+        // STOP skips; apply the pending re-warm here. Guarded no-op otherwise.
+        processPendingLocalReWarm()
         _chatState.value = ChatState.IDLE
         updateLastMessage(
             content = _messages.value.lastOrNull()?.content ?: "",
@@ -2505,6 +2519,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         /**
+         * PURE: whether [processPendingLocalReWarm] should apply (and thereby
+         * consume) a DEFERred model re-warm. Trivial today (it just IS the pending
+         * flag), but extracting it makes the final-pass fix testable without the
+         * AndroidViewModel: a re-warm DEFERred mid-turn ([localReWarmAction] ->
+         * DEFER, which sets pendingLocalReWarm) must be applied at the next settle
+         * point -- including a STOP ([cancelStream]) or CLEAR ([clearHistory]),
+         * which previously dropped it -- and must be a guarded no-op when nothing
+         * is pending (so calling it on every cancel/clear is safe).
+         */
+        fun consumePendingReWarm(pending: Boolean): Boolean = pending
+
+        /**
          * The on-device engine readiness state machine (Task W1) — pure so the
          * IDLE→WARMING→READY happy path and the →ERROR failure path are unit-tested
          * without the ViewModel. Transitions:
@@ -2565,19 +2591,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "I won't capture the screen while a password field is focused. Close it and ask again."
 
         /**
-         * Concise phone-control + cloud-capability steering appended to the persona
-         * ONLY on the NATIVE engine-driven turn (Task W3 follow-up). Mirrors Edge
-         * Gallery's prescriptive ordered-prompt style, kept short for the small E4B
-         * model: act on the phone via the matching action directly; reach a BlackBox
-         * capability via search_cloud_tools then call_cloud_tool; one tool at a time;
-         * reply briefly when done. Not added to the manual/text paths.
+         * Concise phone-control steering (the BASE, always-present part) appended to
+         * the persona ONLY on the NATIVE engine-driven turn (Task W3 follow-up).
+         * Mirrors Edge Gallery's prescriptive ordered-prompt style, kept short for
+         * the small E4B model: act on the phone via the matching action directly;
+         * one tool at a time; reply briefly when done. Not added to the manual/text
+         * paths. The cloud-vault sentence ([NATIVE_CLOUD_CAPABILITY_SENTENCE]) is
+         * spliced in by [nativeAddendum] ONLY when a cloud bridge is wired, so an
+         * offline native turn never advertises search_cloud_tools / call_cloud_tool.
          */
         const val NATIVE_PHONE_CONTROL_ADDENDUM =
             "\n\nTo act on the phone, call the matching action directly (e.g. " +
-            "flashlight_on, show_map, open_app). For a BlackBox capability (generate " +
-            "an image, search memory, send a message), call search_cloud_tools first, " +
-            "then call_cloud_tool with the chosen name. Call one tool at a time; when " +
-            "the task is done, reply briefly."
+            "flashlight_on, show_map, open_app). " +
+            "Call one tool at a time; when the task is done, reply briefly."
+
+        /**
+         * The cloud-vault steering sentence, appended to
+         * [NATIVE_PHONE_CONTROL_ADDENDUM] ONLY when the cloud tool bridge is wired
+         * (Fix 2, final-pass review). Without a bridge the native turn registers no
+         * search_cloud_tools / call_cloud_tool, so the prompt must not name them.
+         */
+        const val NATIVE_CLOUD_CAPABILITY_SENTENCE =
+            " For a BlackBox capability (generate an image, search memory, send a " +
+            "message), call search_cloud_tools first, then call_cloud_tool with the " +
+            "chosen name."
+
+        /**
+         * PURE: the persona addendum for a NATIVE engine-driven turn. The phone
+         * sentence is always present; the cloud sentence is present IFF [hasCloud]
+         * (the bridge / cloud tools are wired). Inserts the cloud sentence after the
+         * phone sentence and before the "one tool at a time" closing so the
+         * prompt never advertises tools that are not registered.
+         */
+        fun nativeAddendum(hasCloud: Boolean): String =
+            if (!hasCloud) NATIVE_PHONE_CONTROL_ADDENDUM
+            else NATIVE_PHONE_CONTROL_ADDENDUM.replace(
+                " Call one tool at a time;",
+                NATIVE_CLOUD_CAPABILITY_SENTENCE + " Call one tool at a time;",
+            )
 
         /**
          * Max length of the one-line result snippet shown after a successful tool

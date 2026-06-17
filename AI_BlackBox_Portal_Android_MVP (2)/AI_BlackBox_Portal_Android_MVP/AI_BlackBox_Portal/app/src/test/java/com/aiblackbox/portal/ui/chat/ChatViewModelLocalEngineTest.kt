@@ -657,4 +657,39 @@ class ChatViewModelLocalEngineTest {
             ),
         )
     }
+
+    // -- Fix 1 (final-pass review): a re-warm DEFERred mid-turn must still be
+    //    APPLIED when the user STOPs (cancelStream) or CLEARs (clearHistory) the
+    //    turn -- those cancel the stream and so skip the normal completion path
+    //    that runs processPendingLocalReWarm. Both now call processPendingLocalReWarm
+    //    after streamJob?.cancel(). The pure consume decision (consumePendingReWarm)
+    //    is the testable seam: it gates whether the (now-safe) close()+re-warm runs.
+
+    @Test
+    fun `consumePendingReWarm applies a DEFERred re-warm (e_g_ on stop or clear)`() {
+        // A mid-turn model switch DEFERs (proven above), which sets the pending
+        // flag; at the next settle point -- including a STOP/CLEAR -- it must run.
+        val deferred = ChatViewModel.localReWarmAction(
+            previousSlug = "gemma-4-e2b",
+            newSlug = "gemma-4-e4b",
+            isLocalProvider = true,
+            turnInFlight = true,
+        )
+        assertEquals(LocalReWarmAction.DEFER, deferred)
+        val pending = deferred == LocalReWarmAction.DEFER
+        assertTrue(
+            "a DEFERred re-warm must be applied on the next settle point (stop/clear)",
+            ChatViewModel.consumePendingReWarm(pending),
+        )
+    }
+
+    @Test
+    fun `consumePendingReWarm is a guarded no-op when nothing is pending`() {
+        // Safety property: cancelStream/clearHistory call processPendingLocalReWarm
+        // unconditionally, so it MUST do nothing when no switch was deferred.
+        assertFalse(
+            "no pending re-warm -> no close()+re-warm on a normal stop/clear",
+            ChatViewModel.consumePendingReWarm(false),
+        )
+    }
 }

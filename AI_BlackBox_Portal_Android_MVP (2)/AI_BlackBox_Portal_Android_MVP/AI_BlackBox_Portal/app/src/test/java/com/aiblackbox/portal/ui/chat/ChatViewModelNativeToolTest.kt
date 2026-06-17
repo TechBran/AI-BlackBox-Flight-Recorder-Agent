@@ -328,4 +328,45 @@ class ChatViewModelNativeToolTest {
         assertEquals(listOf("generate_image"), bridge.executeCalls.map { it.first })
         assertTrue("a cloud tool must NOT reach the phone controller", phone.dispatched.isEmpty())
     }
+
+    // -- Fix 2 (final-pass review): the native persona addendum must only name the
+    //    cloud tools when a cloud bridge is actually wired. With no bridge the
+    //    native turn registers no search_cloud_tools / call_cloud_tool, so the
+    //    prompt must not advertise them. nativeAddendum(hasCloud) is the PURE
+    //    decision the runLocalEngineTurn call site uses (hasCloud = bridge != null).
+
+    @Test
+    fun `nativeAddendum with cloud names the cloud tools and the phone actions`() {
+        val s = ChatViewModel.nativeAddendum(hasCloud = true)
+        // Phone steering is always present.
+        assertTrue("phone action example present", s.contains("flashlight_on"))
+        assertTrue("closing instruction present", s.contains("Call one tool at a time"))
+        // Cloud sentence present iff hasCloud.
+        assertTrue("search_cloud_tools advertised when cloud present", s.contains("search_cloud_tools"))
+        assertTrue("call_cloud_tool advertised when cloud present", s.contains("call_cloud_tool"))
+    }
+
+    @Test
+    fun `nativeAddendum without cloud omits the cloud tools but keeps phone steering`() {
+        val s = ChatViewModel.nativeAddendum(hasCloud = false)
+        // Phone steering still present...
+        assertTrue("phone action example present", s.contains("flashlight_on"))
+        assertTrue("closing instruction present", s.contains("Call one tool at a time"))
+        // ...but the offline native turn must NOT name tools that aren't registered.
+        assertFalse("search_cloud_tools must NOT be advertised offline", s.contains("search_cloud_tools"))
+        assertFalse("call_cloud_tool must NOT be advertised offline", s.contains("call_cloud_tool"))
+        // The no-cloud variant is exactly the base phone addendum.
+        assertEquals(ChatViewModel.NATIVE_PHONE_CONTROL_ADDENDUM, s)
+    }
+
+    @Test
+    fun `nativeAddendum splices the cloud sentence cleanly (no double spaces, single insertion)`() {
+        val s = ChatViewModel.nativeAddendum(hasCloud = true)
+        assertFalse("no double space introduced by the splice", s.contains("  "))
+        // The cloud sentence sits before the closing instruction, exactly once.
+        val cloudIdx = s.indexOf("search_cloud_tools")
+        val closeIdx = s.indexOf("Call one tool at a time")
+        assertTrue("cloud sentence precedes the closing instruction", cloudIdx in 0 until closeIdx)
+        assertEquals("exactly one closing instruction", closeIdx, s.lastIndexOf("Call one tool at a time"))
+    }
 }

@@ -2237,27 +2237,34 @@ class OverlayService : Service() {
             try {
                 val image = reader.acquireLatestImage()
                 if (image != null) {
-                    val planes = image.planes
-                    val buffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * screenWidth
+                    // Fix 3 (final-pass review): ALWAYS close the acquired Image, even
+                    // if copyPixelsFromBuffer / compress throws after acquire -- an
+                    // unclosed Image leaks an ImageReader buffer slot under repeated
+                    // faults and eventually starves the reader.
+                    val bytes = try {
+                        val planes = image.planes
+                        val buffer = planes[0].buffer
+                        val pixelStride = planes[0].pixelStride
+                        val rowStride = planes[0].rowStride
+                        val rowPadding = rowStride - pixelStride * screenWidth
 
-                    val bitmap = Bitmap.createBitmap(
-                        screenWidth + rowPadding / pixelStride,
-                        screenHeight,
-                        Bitmap.Config.ARGB_8888,
-                    )
-                    bitmap.copyPixelsFromBuffer(buffer)
-                    image.close()
+                        val bitmap = Bitmap.createBitmap(
+                            screenWidth + rowPadding / pixelStride,
+                            screenHeight,
+                            Bitmap.Config.ARGB_8888,
+                        )
+                        bitmap.copyPixelsFromBuffer(buffer)
 
-                    val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
-                    bitmap.recycle()
+                        val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                        bitmap.recycle()
 
-                    val baos = ByteArrayOutputStream()
-                    cropped.compress(Bitmap.CompressFormat.PNG, 100, baos)
-                    cropped.recycle()
-                    val bytes = baos.toByteArray()
+                        val baos = ByteArrayOutputStream()
+                        cropped.compress(Bitmap.CompressFormat.PNG, 100, baos)
+                        cropped.recycle()
+                        baos.toByteArray()
+                    } finally {
+                        image.close()
+                    }
                     Log.d(TAG, "captureFramePngBytes: captured ${bytes.size} PNG bytes")
                     callback(bytes)
                 } else if (attempt < maxAttempts) {
