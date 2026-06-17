@@ -193,6 +193,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var localEngineModelFile: java.io.File? = null
     private var localEngineDelegate: String = "cpu"
 
+    // The slug of the active on-device model the user picked in the Model Manager
+    // (Task W5), persisted under "model_local". [localProviderOrWire] prefers the
+    // INSTALLED bundle whose slug matches this, so picking a different installed
+    // model among several actually changes which one is warmed/used. Null/blank ->
+    // fall back to the alphabetically-first installed bundle (the prior behavior).
+    @Volatile
+    private var currentLocalModelSlug: String = ""
+
     // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
     // Built lazily off the application context the first time a local turn runs
     // (needs the api, which is set in initialize()); cached thereafter.
@@ -382,6 +390,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             launch { store.model.collect { currentModel = it } }
+            // Task W5: track the active on-device model selection. When the user
+            // picks a different installed model via the Model Manager ("Use"), the
+            // chosen slug is persisted under "model_local"; honor it so
+            // [localProviderOrWire] warms/uses THAT model, and re-warm if the
+            // selection changes while the local provider is the active one.
+            launch {
+                store.getString("model_local").collect { slug ->
+                    val previous = currentLocalModelSlug
+                    currentLocalModelSlug = slug
+                    if (slug != previous && ChatProvider.fromId(currentProvider).isLocal) {
+                        // The active local model changed -> drop the cached engine
+                        // wiring so the next warm/turn rebuilds for the new bundle,
+                        // then proactively warm it.
+                        invalidateLocalEngine()
+                        preloadLocalEngine()
+                    }
+                }
+            }
         }
     }
 
@@ -1130,11 +1156,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // here; the picker/Model-Manager own the real attest flow).
         val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
         val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
-        // M1 (review): firstOrNull → installedModels() is sorted, so this picks the
-        // alphabetically-first slug (gemma-4-e2b, the LIGHTER model) — a safe RAM
-        // default. Only one model is installed at a time today; TODO if multiple can
-        // coexist, prefer LocalModelManager.recommendForDevice() among the installed.
-        val bundle = installed.firstOrNull() ?: return null // no model → placeholder path
+        // Task W5: honor the user's ACTIVE on-device model selection (persisted under
+        // "model_local" -> [currentLocalModelSlug]). Pick the installed bundle whose
+        // slug matches it; if unset or no longer installed (e.g. just deleted), fall
+        // back to installedModels()'s alphabetically-first entry (gemma-4-e2b, the
+        // LIGHTER model) -- a safe RAM default and the prior behavior.
+        val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
+            ?: installed.firstOrNull()
+            ?: return null // no model -> placeholder path
 
         // Build the singleton engine for the installed bundle (default CPU delegate),
         // threading the PER-MODEL config (Task W2): maxTokens (fallback to the
@@ -1161,6 +1190,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val provider: () -> LocalLlm = { engine }
         localLlmProvider = provider
         return provider
+    }
+
+    /**
+     * Drop the cached on-device engine wiring (Task W5) so the next
+     * [localProviderOrWire] / [preloadLocalEngine] rebuilds it -- used when the
+     * ACTIVE local model selection changes, so a different installed bundle is
+     * actually loaded instead of the previously-wired one. Closes the old native
+     * engine (idempotent, guarded) and clears the warm marker so a re-warm runs.
+     */
+    private fun invalidateLocalEngine() {
+        runCatching { localEngine?.close() }
+        localEngine = null
+        localEngineModelFile = null
+        localLlmProvider = null
+        warmingModelPath = null
+        _localEngineState.value = LocalEngineState.IDLE
     }
 
     /**

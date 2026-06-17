@@ -34,6 +34,9 @@ import kotlinx.coroutines.launch
  * @param busySlug the slug whose long-running action (install/delete) is in
  *   flight; gates re-taps on that row (but a failed download is retryable once
  *   cleared).
+ * @param failedSlugs slugs whose last download attempt FAILED and which are not
+ *   (yet) on disk. Drives the per-row FAILED state + a Retry affordance (Task
+ *   W5.1); cleared the moment a (re)download starts or succeeds.
  * @param autonomyMode "permission" (asks before high-consequence phone actions)
  *   or "yolo" (full autonomy). Defaults to "permission".
  * @param activeSlug the slug the user has selected as the active local model
@@ -46,12 +49,27 @@ data class LocalModelUiState(
     val recommendedSlug: String? = null,
     val downloadProgress: Map<String, Float> = emptyMap(),
     val busySlug: String? = null,
+    val failedSlugs: Set<String> = emptySet(),
     val autonomyMode: String = AUTONOMY_PERMISSION,
     val activeSlug: String? = null,
     val error: String? = null,
 ) {
     /** True when [slug] already has on-disk bytes. */
     fun isInstalled(slug: String): Boolean = installed.any { it.slug == slug }
+
+    /**
+     * The merged picker rows (Task W5.1) -- the catalog joined with the installed
+     * set, in-flight downloads, the failed set and the active slug, recommended
+     * first. Computed (not stored) so it can never drift from the raw state.
+     */
+    val rows: List<ModelRow>
+        get() = modelRowsFrom(
+            catalog = catalog,
+            installed = installed,
+            downloading = downloadProgress,
+            failed = failedSlugs,
+            activeSlug = activeSlug,
+        )
 }
 
 /** Autonomy posture: asks before high-consequence phone actions. */
@@ -162,6 +180,8 @@ class LocalModelViewModel(
             it.copy(
                 busySlug = bundle.slug,
                 error = null,
+                // A (re)download starts -> drop any stale FAILED flag for this slug.
+                failedSlugs = it.failedSlugs - bundle.slug,
                 downloadProgress = it.downloadProgress + (bundle.slug to 0f),
             )
         }
@@ -212,8 +232,9 @@ class LocalModelViewModel(
                     it.copy(
                         installed = installedList,
                         busySlug = null,
-                        // Clear the progress entry on success.
+                        // Clear the progress entry + any FAILED flag on success.
                         downloadProgress = it.downloadProgress - bundle.slug,
+                        failedSlugs = it.failedSlugs - bundle.slug,
                         error = null,
                     )
                 }
@@ -222,12 +243,24 @@ class LocalModelViewModel(
                     it.copy(
                         busySlug = null,
                         downloadProgress = it.downloadProgress - bundle.slug,
+                        // Mark this slug FAILED so the row shows a Retry affordance
+                        // (Task W5.1). The underlying download is resumable, so a
+                        // retry resumes the partial .part rather than restarting.
+                        failedSlugs = it.failedSlugs + bundle.slug,
                         error = "Download failed: ${result.exceptionOrNull()?.message ?: "unknown error"}",
                     )
                 }
             }
         }
     }
+
+    /**
+     * Retry a previously-FAILED download (Task W5.1). Identical to [download] --
+     * the underlying [LocalModelManager.install] is resumable, so this resumes the
+     * partial `.part` rather than restarting the multi-GB fetch, and [download]
+     * already clears the slug's FAILED flag on (re)start.
+     */
+    fun retry(bundle: LocalBundle) = download(bundle)
 
     /** Delete an installed model, then refresh the installed list. */
     fun delete(slug: String) {
@@ -292,8 +325,6 @@ class LocalModelViewModel(
         /** Minimum fractional advance (1%) before a progress tick updates state. */
         const val PROGRESS_STEP = 0.01f
 
-        /** Sentinel fraction for "total unknown" → render an indeterminate spinner. */
-        const val PROGRESS_INDETERMINATE = -1f
 
         /**
          * Production wiring. Builds the real [LocalModelApi] + [LocalModelManager]

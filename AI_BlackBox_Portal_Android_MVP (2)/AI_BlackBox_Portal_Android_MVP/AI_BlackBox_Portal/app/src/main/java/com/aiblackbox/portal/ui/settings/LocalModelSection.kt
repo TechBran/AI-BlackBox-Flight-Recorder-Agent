@@ -41,14 +41,16 @@ import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.SolidGreen
 
 /**
- * On-Device Model (Gemma) settings section — the Model Manager UI (Task 1.5).
+ * On-Device Model (Gemma) settings section — the Edge-Gallery-style picker /
+ * Model Manager UI (Task 1.5 + W5).
  *
- * Renders the downloadable catalog with per-bundle Download / Installed states,
- * a "Recommended for your phone" badge (driven by
- * [LocalModelViewModel] → [com.aiblackbox.portal.data.local.LocalModelManager.recommendForDevice]),
- * a YOLO ⇄ Permission autonomy toggle, and an inert "Enable Accessibility" CTA
- * (Phase 4 wires it). Styling matches the rest of [SettingsSheet] — Neutral200
- * glass rows, RadiusMd corners, the project theme tokens.
+ * Renders the merged picker rows from [LocalModelUiState.rows] (the pure
+ * [modelRowsFrom] reducer): per-model Download → progress / Use (set active) /
+ * Delete / Retry actions, a Recommended badge + the per-model context note (W6;
+ * the catalog's `recommended` flag both badges AND sorts the row first), the
+ * active on-device model clearly marked, plus a YOLO ⇄ Permission autonomy
+ * toggle and the "Enable Accessibility" CTA. Styling matches the rest of
+ * [SettingsSheet] — Neutral200 glass rows, RadiusMd corners, the project tokens.
  *
  * Stateless w.r.t. construction: the caller hands in a [LocalModelViewModel]
  * (built via [LocalModelViewModel.fromContext]) and this Composable just
@@ -79,8 +81,9 @@ fun LocalModelSection(
             modifier = Modifier.padding(bottom = 12.dp),
         )
 
-        // ── Catalog rows ────────────────────────────────────────────────
-        if (state.catalog.isEmpty()) {
+        // ── Picker rows (Task W5.3: recommended-first, state-driven) ──────
+        val rows = state.rows
+        if (rows.isEmpty()) {
             Text(
                 "No on-device models available.",
                 style = MaterialTheme.typography.bodySmall,
@@ -89,17 +92,14 @@ fun LocalModelSection(
             )
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                state.catalog.forEach { bundle ->
-                    BundleRow(
-                        bundle = bundle,
-                        installed = state.isInstalled(bundle.slug),
-                        recommended = bundle.slug == state.recommendedSlug,
-                        active = bundle.slug == state.activeSlug,
-                        progress = state.downloadProgress[bundle.slug],
-                        busy = state.busySlug == bundle.slug,
-                        onDownload = { viewModel.download(bundle) },
-                        onSwitch = { viewModel.switchModel(bundle.slug) },
-                        onDelete = { viewModel.delete(bundle.slug) },
+                rows.forEach { row ->
+                    ModelRowCard(
+                        row = row,
+                        busy = state.busySlug == row.slug,
+                        onDownload = { viewModel.download(row.bundle) },
+                        onRetry = { viewModel.retry(row.bundle) },
+                        onSwitch = { viewModel.switchModel(row.slug) },
+                        onDelete = { viewModel.delete(row.slug) },
                     )
                 }
             }
@@ -195,19 +195,27 @@ fun LocalModelSection(
     }
 }
 
-/** One catalog bundle row: name + size, recommended badge, primary action. */
+/**
+ * One picker row (Task W5.3): model name + size, a Recommended badge + the
+ * context note, and a state-appropriate action -- Download / Use / Delete /
+ * Retry. The active on-device model is clearly marked (Active pill + green
+ * border). Renders directly off a [ModelRow] from the pure [modelRowsFrom]
+ * reducer, so all state precedence lives in one tested place.
+ */
 @Composable
-private fun BundleRow(
-    bundle: LocalBundle,
-    installed: Boolean,
-    recommended: Boolean,
-    active: Boolean,
-    progress: Float?,
+private fun ModelRowCard(
+    row: ModelRow,
     busy: Boolean,
     onDownload: () -> Unit,
+    onRetry: () -> Unit,
     onSwitch: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val bundle = row.bundle
+    val active = (row.state as? ModelRowState.Installed)?.active == true
+    val failed = row.state is ModelRowState.Failed
+    val downloading = row.state as? ModelRowState.Downloading
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -215,7 +223,11 @@ private fun BundleRow(
             .background(Neutral200)
             .border(
                 1.dp,
-                if (active) SolidGreen else GlassBorder,
+                when {
+                    active -> SolidGreen
+                    failed -> BbxAccent.copy(alpha = 0.5f)
+                    else -> GlassBorder
+                },
                 RoundedCornerShape(RadiusMd),
             )
             .padding(12.dp),
@@ -228,7 +240,7 @@ private fun BundleRow(
                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                         color = BbxWhite,
                     )
-                    if (recommended) {
+                    if (row.recommended) {
                         Spacer(Modifier.width(8.dp))
                         RecommendedBadge()
                     }
@@ -238,15 +250,23 @@ private fun BundleRow(
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                     color = Neutral500,
                 )
+                // Per-model context note (W6): "Recommended -- ..." / "Experimental -- ...".
+                row.contextNote?.let { note ->
+                    Text(
+                        note,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (row.recommended) SolidGreen else Neutral500,
+                    )
+                }
             }
 
             Spacer(Modifier.width(8.dp))
 
-            // Primary action area.
+            // Primary action area -- one branch per row state.
             when {
-                progress != null -> {
-                    // Downloading — indeterminate (-1f) shows a spinner.
-                    if (progress < 0f) {
+                downloading != null -> {
+                    // Indeterminate (-1f) shows a spinner; else the percent.
+                    if (downloading.progress < 0f) {
                         CircularProgressIndicator(
                             color = BbxAccent,
                             strokeWidth = 2.dp,
@@ -254,22 +274,26 @@ private fun BundleRow(
                         )
                     } else {
                         Text(
-                            "${(progress * 100).toInt()}%",
+                            "${fractionToPercent(downloading.progress)}%",
                             style = MaterialTheme.typography.labelMedium,
                             color = BbxAccent,
                         )
                     }
                 }
 
-                installed -> {
+                row.state is ModelRowState.Installed -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (active) {
                             PillLabel("Active", SolidGreen)
                         } else {
-                            ActionPill("Switch", BbxAccent, enabled = !busy, onClick = onSwitch)
+                            ActionPill("Use", BbxAccent, enabled = !busy, onClick = onSwitch)
                         }
                         ActionPill("Delete", Neutral500, enabled = !busy, onClick = onDelete)
                     }
+                }
+
+                failed -> {
+                    ActionPill("Retry", BbxAccent, enabled = !busy, onClick = onRetry)
                 }
 
                 else -> {
@@ -278,11 +302,11 @@ private fun BundleRow(
             }
         }
 
-        // Progress bar row beneath when a determinate download is in flight.
-        if (progress != null && progress >= 0f) {
+        // Progress bar beneath when a determinate download is in flight.
+        if (downloading != null && downloading.progress >= 0f) {
             Spacer(Modifier.height(8.dp))
             LinearProgressIndicator(
-                progress = { progress },
+                progress = { downloading.progress },
                 modifier = Modifier.fillMaxWidth(),
                 color = BbxAccent,
                 trackColor = Neutral300,

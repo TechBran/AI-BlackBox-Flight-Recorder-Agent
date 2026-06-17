@@ -78,6 +78,8 @@ class LocalModelViewModelTest {
         sizeBytes = 4_294_967_296L,
         minRamGb = 6.0,
         recommendedFor = "Higher quality for high-RAM phones.",
+        // E4B is the catalog-recommended default (Task W6) -> rows sort it first.
+        recommended = true,
     )
 
     @Before fun setUp() {
@@ -391,5 +393,107 @@ class LocalModelViewModelTest {
         )
         // And it still completed: installed.
         assertTrue(vm.state.value.installed.any { it.slug == "gemma-4-e4b" })
+    }
+
+    // ── FAILED state + retry (Task W5.1) ─────────────────────────────────────
+
+    @Test
+    fun `download failure marks the slug failed and rows show Failed`() = runTest(dispatcher) {
+        val failing = FakeInstaller(recommended = e4b, installSucceeds = false)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(failing, catalog)
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertTrue("slug recorded as failed", s.failedSlugs.contains("gemma-4-e4b"))
+        val row = s.rows.first { it.slug == "gemma-4-e4b" }
+        assertEquals(ModelRowState.Failed, row.state)
+    }
+
+    @Test
+    fun `retry clears the failed flag and re-invokes install`() = runTest(dispatcher) {
+        // First fail, then succeed on retry: the manager flips behavior per call.
+        val installer = object : LocalModelInstaller {
+            var count = 0
+            val store = mutableListOf<InstalledModel>()
+            override suspend fun installedModels() = store.toList()
+            override suspend fun recommendForDevice(bundles: List<LocalBundle>) = e4b
+            override suspend fun install(
+                bundle: LocalBundle,
+                operator: String,
+                delegate: String,
+                onProgress: (Long, Long) -> Unit,
+            ): Result<InstalledModel> {
+                count++
+                onProgress(bundle.sizeBytes ?: 1L, bundle.sizeBytes ?: 1L)
+                return if (count == 1) {
+                    Result.failure(IOException("boom"))
+                } else {
+                    val m = InstalledModel(bundle.slug, File("/tmp/${bundle.filename}"), 1L)
+                    store.add(m)
+                    Result.success(m)
+                }
+            }
+            override suspend fun delete(slug: String): Boolean = store.removeAll { it.slug == slug }
+        }
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(installer, catalog)
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+        assertTrue("failed after first attempt", vm.state.value.failedSlugs.contains("gemma-4-e4b"))
+
+        vm.retry(e4b)
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertEquals("retry re-invoked install", 2, installer.count)
+        assertFalse("failed flag cleared on success", s.failedSlugs.contains("gemma-4-e4b"))
+        assertTrue("installed after retry", s.installed.any { it.slug == "gemma-4-e4b" })
+        // Row now reflects INSTALLED, not FAILED.
+        assertTrue(s.rows.first { it.slug == "gemma-4-e4b" }.state is ModelRowState.Installed)
+    }
+
+    @Test
+    fun `successful install clears any prior failed flag`() = runTest(dispatcher) {
+        val installer = FakeInstaller(recommended = e4b)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(installer, catalog)
+        vm.refresh()
+        advanceUntilIdle()
+
+        // Seed a stale failed flag (as if a previous attempt failed), then succeed.
+        vm.download(e4b)
+        advanceUntilIdle()
+        assertFalse(vm.state.value.failedSlugs.contains("gemma-4-e4b"))
+        assertTrue(vm.state.value.installed.any { it.slug == "gemma-4-e4b" })
+    }
+
+    @Test
+    fun `rows surface recommended-first with active marking`() = runTest(dispatcher) {
+        val installer = FakeInstaller(
+            installed = mutableListOf(InstalledModel("gemma-4-e4b", File("/tmp/x"), 1L)),
+            recommended = e4b,
+        )
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(installer, catalog)
+        vm.refresh()
+        advanceUntilIdle()
+        vm.switchModel("gemma-4-e4b")
+        advanceUntilIdle()
+
+        val rows = vm.state.value.rows
+        // e4b (recommended) leads.
+        assertEquals("gemma-4-e4b", rows.first().slug)
+        val e4bRow = rows.first { it.slug == "gemma-4-e4b" }
+        assertTrue((e4bRow.state as ModelRowState.Installed).active)
+        // e2b is downloadable.
+        assertEquals(ModelRowState.Downloadable, rows.first { it.slug == "gemma-4-e2b" }.state)
     }
 }
