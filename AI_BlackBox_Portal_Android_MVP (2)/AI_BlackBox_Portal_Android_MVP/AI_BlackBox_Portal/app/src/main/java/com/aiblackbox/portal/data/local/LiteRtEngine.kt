@@ -4,6 +4,7 @@ import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -71,6 +72,12 @@ import java.io.File
  *   engine via [EngineConfig.maxNumTokens]. Defaults to [DEFAULT_MAX_TOKENS] —
  *   set explicitly because the litertlm default (null) is only 4096, far below
  *   what the on-device agent's per-turn prompt needs (see the constant's KDoc).
+ * @param supportImage whether this model bundle accepts IMAGE input (Task W4).
+ *   When true, [load] sets [EngineConfig.visionBackend] (see [visionBackendFor])
+ *   so the engine can run image inference, and [generateWithImage] is usable;
+ *   when false the engine stays text-only and [generateWithImage] gates itself
+ *   off (throws), preserving the working CPU text path. Threaded per-model from
+ *   [ModelConfig.supportImage] (W2) exactly like [maxTokens]/[sampler].
  */
 /**
  * Per-model sampler overrides (Task W2), mirroring Edge Gallery's
@@ -101,7 +108,8 @@ class LiteRtEngine(
     private val nativeLibraryDir: String? = null,
     private val maxTokens: Int = DEFAULT_MAX_TOKENS,
     private val sampler: SamplerSettings = SamplerSettings(),
-) : LocalLlm, ToolCallingLlm, NativeToolCallingLlm {
+    private val supportImage: Boolean = false,
+) : LocalLlm, ToolCallingLlm, NativeToolCallingLlm, VisionLlm {
 
     @Volatile
     private var engine: Engine? = null
@@ -141,15 +149,33 @@ class LiteRtEngine(
             engine = null
             loadedModelPath = null
 
-            val config = EngineConfig(
-                modelPath = targetPath,
-                backend = backendFor(delegate),
-                cacheDir = cacheDir,
-                // Explicit context window — the litertlm default (null) is only
-                // 4096 tokens (device-confirmed: "Input token ids are too long:
-                // 4292 >= 4096"), too small for the agent's per-turn prompt.
-                maxNumTokens = maxTokens,
-            )
+            // Vision backend (Task W4): only set a visionBackend when this model
+            // accepts image input ([supportImage]); otherwise omit it (the engine
+            // default applies) so the working text-only CPU path is untouched. Edge
+            // Gallery forces GPU for vision ("must be GPU for Gemma 3n"); we mirror
+            // that ([visionBackendFor]) — whether E4B does image input on CPU on a
+            // given device is unknown and verified separately on-device. The primary
+            // (text) backend is ALWAYS [backendFor(delegate)] regardless.
+            val visionBackend = visionBackendFor(supportImage)
+            val config = if (visionBackend != null) {
+                EngineConfig(
+                    modelPath = targetPath,
+                    backend = backendFor(delegate),
+                    visionBackend = visionBackend,
+                    cacheDir = cacheDir,
+                    // Explicit context window — the litertlm default (null) is only
+                    // 4096 tokens (device-confirmed: "Input token ids are too long:
+                    // 4292 >= 4096"), too small for the agent's per-turn prompt.
+                    maxNumTokens = maxTokens,
+                )
+            } else {
+                EngineConfig(
+                    modelPath = targetPath,
+                    backend = backendFor(delegate),
+                    cacheDir = cacheDir,
+                    maxNumTokens = maxTokens,
+                )
+            }
             val built = Engine(config)
             built.initialize() // ~10s; we're on Dispatchers.IO.
             engine = built
@@ -203,6 +229,77 @@ class LiteRtEngine(
             // in-flight native generation, not just close the conversation.
             // TODO(2.6b): confirm whether close() alone aborts the native compute;
             // cancelProcess() is added defensively and is a no-op if already done.
+            runCatching { conversation.cancelProcess() }
+            throw c
+        } finally {
+            runCatching { conversation.close() }
+        }
+    }
+
+    /**
+     * Stream the model's reply to [prompt] WITH one or more images as incremental
+     * text deltas — the on-device VISION path (Task W4). A COLD Flow: collection
+     * opens a tool-less conversation, sends a single multimodal message whose
+     * [Contents] hold the [images] FIRST (each as a [Content.ImageBytes]) then the
+     * [Content.Text] prompt (Edge Gallery's `runInference(images)` ordering —
+     * images precede text), streams each chunk's text, and closes the conversation
+     * in a `finally`.
+     *
+     * **Gated on [supportImage].** A text-only bundle ([supportImage] == false)
+     * cannot accept image input, so this throws [IllegalStateException] rather than
+     * silently dropping the image — the caller ([ChatViewModel]'s look-at-screen
+     * path) checks the capability and falls back to a clear message. With an EMPTY
+     * [images] list this also throws (use [generate] for a text-only turn) so a
+     * vision turn never quietly degrades to text.
+     *
+     * **NOT the agentic native loop.** Because [OpenApiTool.execute] returns a
+     * String, an image cannot be returned to the model as a tool RESULT inside
+     * [generateWithToolsNative]; so vision is a DIRECT multimodal turn (this
+     * method), not a `look_at_screen` tool the engine calls mid-loop. An autonomous
+     * "model decides to look at the screen mid-loop" path is a future enhancement
+     * (it needs a tool result that can carry image bytes back into the engine).
+     *
+     * The contents-ORDERING is the pure, testable [orderVisionContents]; this thin
+     * method just maps the [ByteArray]s to litertlm [Content] and streams (the
+     * litertlm-typed glue can't be unit-tested under JDK 17 — see the Mappers
+     * header). Requires [isLoaded] (throws [IllegalStateException] otherwise).
+     *
+     * @param images one or more PNG-encoded frames (e.g. from [ScreenCapture]); the
+     *   bytes are passed VERBATIM to [Content.ImageBytes] and are EPHEMERAL — this
+     *   method never writes them anywhere; the caller must not persist them either.
+     */
+    override fun generateWithImage(prompt: String, images: List<ByteArray>): Flow<String> = flow {
+        val eng = engine
+        check(eng != null && eng.isInitialized()) {
+            "LiteRtEngine.generateWithImage called before load(); call load(modelFile, delegate) first."
+        }
+        check(supportImage) {
+            "LiteRtEngine.generateWithImage requires a vision-capable model (supportImage=true); this bundle is text-only."
+        }
+        check(images.isNotEmpty()) {
+            "LiteRtEngine.generateWithImage requires at least one image; use generate() for a text-only turn."
+        }
+        // Images BEFORE text (Edge Gallery ordering), via the pure orderer.
+        val contents = Contents.of(
+            orderVisionContents<Content>(
+                images = images.map { Content.ImageBytes(it) },
+                textContent = Content.Text(prompt),
+            ),
+        )
+        // Per-model sampler (Task W2): only build a ConversationConfig when an
+        // override is set; otherwise keep the tool-less, default-sampler path.
+        val samplerConfig = sampler.toSamplerConfig()
+        val conversation = if (samplerConfig != null) {
+            eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
+        } else {
+            eng.createConversation()
+        }
+        try {
+            conversation.sendMessageAsync(contents).collect { msg ->
+                val text = msg.plainText()
+                if (text.isNotEmpty()) emit(text)
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
             runCatching { conversation.cancelProcess() }
             throw c
         } finally {
@@ -406,6 +503,7 @@ class LiteRtEngine(
             delegate: String = "cpu",
             maxTokens: Int = DEFAULT_MAX_TOKENS,
             sampler: SamplerSettings = SamplerSettings(),
+            supportImage: Boolean = false,
         ): LiteRtEngine = LiteRtEngine(
             modelFile = modelFile,
             delegate = delegate,
@@ -413,6 +511,7 @@ class LiteRtEngine(
             nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
             maxTokens = maxTokens,
             sampler = sampler,
+            supportImage = supportImage,
         )
     }
 }
@@ -467,6 +566,32 @@ fun resolveSampler(
         (temperature ?: LiteRtEngine.DEFAULT_SAMPLER_TEMPERATURE).toDouble(),
     )
 }
+
+/**
+ * The vision GATING decision (Task W4): does this model accept image input, i.e.
+ * should the engine configure a `visionBackend` and should [LiteRtEngine.generateWithImage]
+ * be allowed to run? Purely [supportImage] today (a one-liner now, but kept as a
+ * named pure function so the gate is one testable place and a future device/
+ * accelerator nuance can land here without touching the engine glue).
+ *
+ * PURE (primitives only) so it is JVM-unit-testable under JDK 17 (constructing a
+ * litertlm `Backend` here would throw UnsupportedClassVersionError on the host test
+ * JVM; see the Mappers header). The thin litertlm-typed adapter is [visionBackendFor].
+ */
+fun visionEnabled(supportImage: Boolean): Boolean = supportImage
+
+/**
+ * Order a multimodal turn's [Content]s with the IMAGES FIRST, then the TEXT —
+ * mirroring Edge Gallery's `runInference(images)` (it `contents.add` every image,
+ * then adds the text AFTER). Returns `images + textContent` in that order.
+ *
+ * Generic over the content type [T] so it is PURE + JVM-unit-testable under JDK 17
+ * with plain Strings (constructing a litertlm `Content` in a test would throw
+ * UnsupportedClassVersionError; see the Mappers header). [LiteRtEngine.generateWithImage]
+ * calls it with `T = Content`. The ORDER is the contract being tested; the litertlm
+ * `Contents.of(...)` wrap around it is covered by compileDebugKotlin + the device smoke.
+ */
+fun <T> orderVisionContents(images: List<T>, textContent: T): List<T> = images + textContent
 
 /**
  * Convert a tool-call `arguments` map (`Map<String, Any?>`, values may be
@@ -612,6 +737,22 @@ fun SamplerSettings.toSamplerConfig(): SamplerConfig? {
     val (k, p, t) = resolveSampler(topK, topP, temperature) ?: return null
     return SamplerConfig(topK = k, topP = p, temperature = t)
 }
+
+/**
+ * The litertlm-typed vision-backend selector (Task W4): the [Backend] to set on
+ * [EngineConfig.visionBackend], or null to OMIT it (text-only — leaves the working
+ * CPU text path untouched). Returns [Backend.GPU] when [visionEnabled] is true,
+ * mirroring Edge Gallery, which forces `EngineConfig(visionBackend = GPU)` ("must
+ * be GPU for Gemma 3n"); whether Gemma-4 E4B can do image input on CPU on a given
+ * device is unknown and is verified on-device separately, so we follow Gallery's
+ * proven GPU choice rather than guessing CPU.
+ *
+ * Thin adapter over the testable [visionEnabled]; covered indirectly by
+ * compileDebugKotlin + the device smoke (the host test JVM can't construct a
+ * litertlm 0.13.1 `Backend` — see the Mappers header).
+ */
+fun visionBackendFor(supportImage: Boolean): Backend? =
+    if (visionEnabled(supportImage)) Backend.GPU() else null
 
 fun openApiToolFor(schema: ToolSchema): OpenApiTool {
     val descriptionString = toolDescriptionJson(schema.name, schema.description, schema.parameters)

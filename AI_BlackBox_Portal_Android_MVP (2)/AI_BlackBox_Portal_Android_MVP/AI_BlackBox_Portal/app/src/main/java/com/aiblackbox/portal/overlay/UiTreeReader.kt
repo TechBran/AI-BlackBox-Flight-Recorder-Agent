@@ -103,6 +103,47 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
         return nodesToJson(nodes)
     }
 
+    /**
+     * Is the currently INPUT-FOCUSED node a password field? (Task W4.2 — the
+     * screenshot redaction gate.) Used to REFUSE a MediaProjection screen capture
+     * whenever the user is on a password entry, so a credential never reaches the
+     * model via an image (the accessibility-text path already redacts password node
+     * TEXT via [nodeText]; a screenshot would bypass that, hence this gate).
+     *
+     * Reads the live tree's input focus ([AccessibilityNodeInfo.findFocus] with
+     * [AccessibilityNodeInfo.FOCUS_INPUT]) and runs the SAME pure
+     * [isPasswordField] gate the reader uses (node flag OR password [inputType]).
+     * Returns false when the service isn't connected (null root) or nothing is
+     * focused — the caller treats "can't tell" as "not a password" (capture
+     * proceeds); the explicit-refusal value is true ONLY when a password field is
+     * confirmed focused. Never throws (a malformed tree degrades to false).
+     *
+     * LIMITATION (shared with [isPasswordField]): a WebView `<input type=password>`
+     * or a Compose `VisualTransformation` field exposes neither `isPassword` nor a
+     * password `inputType`, so this can't detect those — they remain a known
+     * false-negative surface, tracked at the redaction layer.
+     */
+    fun isPasswordFieldFocused(): Boolean {
+        val root = rootProvider() ?: return false
+        return try {
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+            val pw = isPasswordField(focused.isPassword, focused.inputType)
+            @Suppress("DEPRECATION")
+            try {
+                focused.recycle()
+            } catch (_: Exception) {
+                // recycle() may be a no-op / throw on some versions; never crash here.
+            }
+            pw
+        } catch (e: Exception) {
+            // Defensive: a focus query on a malformed tree must not crash the gate.
+            // Fail OPEN (not a password) — the caller's other guards still apply; the
+            // password case is the one we positively detect, never assume.
+            Log.w(TAG, "isPasswordFieldFocused: focus query failed (${e.javaClass.simpleName}) -> false")
+            false
+        }
+    }
+
     companion object {
         private const val TAG = "UiTreeReader"
 

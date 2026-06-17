@@ -104,6 +104,24 @@ class OverlayService : Service() {
         private var instance: OverlayService? = null
 
         fun isRunning(): Boolean = instance != null
+
+        /**
+         * Capture ONE screen frame as PNG bytes via the RUNNING overlay service's
+         * existing MediaProjection (Task W4.2 — on-device vision). Delegates to
+         * [captureFramePngBytes] on the live [instance]; calls [callback] with null
+         * when the overlay service isn't running (no projection available — the
+         * caller falls back with a clear message). The [ScreenCapture] seam
+         * ([OverlayScreenCapture]) wraps this into a suspend API; this static hop
+         * exists because the projection + ImageReader live on the Service, not the VM.
+         */
+        fun captureScreenPng(callback: (ByteArray?) -> Unit) {
+            val svc = instance
+            if (svc == null) {
+                callback(null)
+            } else {
+                svc.captureFramePngBytes(callback)
+            }
+        }
     }
 
     // ---- XR detection ----
@@ -2137,6 +2155,123 @@ class OverlayService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error cleaning up capture resources", e)
         }
+    }
+
+    // ==================== Single-frame PNG capture (Task W4 — on-device vision) ====================
+
+    /**
+     * Capture ONE screen frame as PNG BYTES (in memory, never a file), for the
+     * on-device "look at my screen" vision path (Task W4.2). REUSES the existing
+     * MediaProjection + the persistent ImageReader that already power the
+     * screenshot/screen-share features — no new projection, no new consent flow
+     * (the projection consent is already granted when the overlay is running).
+     *
+     * Unlike [takeScreenshot] this does NOT write a file, add to
+     * [attachedScreenshots], or toast — the bytes are EPHEMERAL (handed to the
+     * model's prompt and dropped). It DOES hide the floating overlay briefly so the
+     * BlackBox bubble isn't in the captured frame, then restores it.
+     *
+     * Calls [callback] on the main thread with the PNG bytes, or null when capture
+     * is unavailable (no/invalid MediaProjection, or no frame after retries). Never
+     * throws.
+     */
+    private fun captureFramePngBytes(callback: (ByteArray?) -> Unit) {
+        if (mediaProjection == null || mediaProjectionInvalidated) {
+            Log.w(TAG, "captureFramePngBytes: no valid MediaProjection -> null")
+            requestMediaProjectionRefresh()
+            callback(null)
+            return
+        }
+
+        val proceed = {
+            // Hide overlay so the bubble/panel isn't in the frame.
+            val wasExpanded = isExpanded
+            overlayView.visibility = View.GONE
+            expandedPanel.visibility = View.GONE
+            handler.postDelayed({
+                attemptFramePngFromPersistent(attempt = 1, maxAttempts = 3) { bytes ->
+                    handler.post {
+                        if (wasExpanded) expandedPanel.visibility = View.VISIBLE
+                        else overlayView.visibility = View.VISIBLE
+                        callback(bytes)
+                    }
+                }
+            }, 200)
+        }
+
+        if (persistentScreenshotDisplay != null && persistentImageReader != null) {
+            mediaProjectionInvalidated = false
+            proceed()
+        } else {
+            setupPersistentScreenshotDisplay { success ->
+                if (success && persistentScreenshotDisplay != null && persistentImageReader != null) {
+                    mediaProjectionInvalidated = false
+                    proceed()
+                } else {
+                    Log.e(TAG, "captureFramePngBytes: persistent display setup failed -> null")
+                    requestMediaProjectionRefresh()
+                    callback(null)
+                }
+            }
+        }
+    }
+
+    /**
+     * Acquire one frame from the persistent ImageReader and compress it to PNG
+     * bytes (mirrors [attemptImageCaptureFromPersistent] but returns bytes, not a
+     * file). Retries with backoff up to [maxAttempts]; calls back null on failure.
+     */
+    private fun attemptFramePngFromPersistent(
+        attempt: Int,
+        maxAttempts: Int,
+        callback: (ByteArray?) -> Unit,
+    ) {
+        val reader = persistentImageReader
+        if (reader == null) {
+            callback(null)
+            return
+        }
+        val delays = listOf(100L, 200L, 400L)
+        val delay = delays.getOrElse(attempt - 1) { 400L }
+        handler.postDelayed({
+            try {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    val planes = image.planes
+                    val buffer = planes[0].buffer
+                    val pixelStride = planes[0].pixelStride
+                    val rowStride = planes[0].rowStride
+                    val rowPadding = rowStride - pixelStride * screenWidth
+
+                    val bitmap = Bitmap.createBitmap(
+                        screenWidth + rowPadding / pixelStride,
+                        screenHeight,
+                        Bitmap.Config.ARGB_8888,
+                    )
+                    bitmap.copyPixelsFromBuffer(buffer)
+                    image.close()
+
+                    val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                    bitmap.recycle()
+
+                    val baos = ByteArrayOutputStream()
+                    cropped.compress(Bitmap.CompressFormat.PNG, 100, baos)
+                    cropped.recycle()
+                    val bytes = baos.toByteArray()
+                    Log.d(TAG, "captureFramePngBytes: captured ${bytes.size} PNG bytes")
+                    callback(bytes)
+                } else if (attempt < maxAttempts) {
+                    attemptFramePngFromPersistent(attempt + 1, maxAttempts, callback)
+                } else {
+                    Log.e(TAG, "captureFramePngBytes: no frame after $maxAttempts attempts")
+                    callback(null)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "captureFramePngBytes: error acquiring frame", e)
+                if (attempt < maxAttempts) attemptFramePngFromPersistent(attempt + 1, maxAttempts, callback)
+                else callback(null)
+            }
+        }, delay)
     }
 
     // ==================== Recording Stop Button ====================

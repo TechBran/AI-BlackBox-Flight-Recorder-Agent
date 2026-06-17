@@ -273,4 +273,39 @@ class LiteRtMappersTest {
     fun `formatCloudToolMatches of an empty list is an empty JSON array`() {
         assertEquals(0, Json.parseToJsonElement(formatCloudToolMatches(emptyList())).jsonArray.size)
     }
+
+    // -------------------------------------------------------------------------
+    // Vision path (Task W4) — visionEnabled (the supportImage gating decision) +
+    // orderVisionContents (images-before-text ordering). PURE cores; the litertlm-
+    // typed glue (visionBackendFor / generateWithImage / Content.ImageBytes) can't
+    // be constructed on the JDK-17 host test JVM (see the Mappers header) and is
+    // covered by compileDebugKotlin + the on-device smoke.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `visionEnabled is true only for an image-capable model`() {
+        assertTrue("supportImage=true -> vision on", visionEnabled(true))
+        assertFalse("supportImage=false -> vision off (text path untouched)", visionEnabled(false))
+    }
+
+    @Test
+    fun `orderVisionContents puts images before the text`() {
+        // Generic over the content type so it tests with plain Strings.
+        val ordered = orderVisionContents(images = listOf("img1", "img2"), textContent = "prompt")
+        assertEquals(listOf("img1", "img2", "prompt"), ordered)
+        // The text is LAST (Edge Gallery's runInference(images) ordering).
+        assertEquals("prompt", ordered.last())
+    }
+
+    @Test
+    fun `orderVisionContents with a single image yields image then text`() {
+        assertEquals(listOf("frame", "describe"), orderVisionContents(listOf("frame"), "describe"))
+    }
+
+    @Test
+    fun `orderVisionContents with no images is just the text`() {
+        // Defensive: the engine guards images.isNotEmpty() before calling, but the
+        // pure orderer is well-defined for the empty case (text only).
+        assertEquals(listOf("only-text"), orderVisionContents(emptyList<String>(), "only-text"))
+    }
 }

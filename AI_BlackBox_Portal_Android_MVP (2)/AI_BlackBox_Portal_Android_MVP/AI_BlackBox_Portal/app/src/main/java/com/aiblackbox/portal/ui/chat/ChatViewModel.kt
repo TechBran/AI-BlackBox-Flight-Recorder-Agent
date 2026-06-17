@@ -24,6 +24,7 @@ import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.data.local.VisionLlm
 import com.aiblackbox.portal.data.local.formatCloudToolMatches
 import com.aiblackbox.portal.data.local.toResultJsonString
 import com.aiblackbox.portal.overlay.AndroidPhoneController
@@ -204,6 +205,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // the text-only runTurn (no agent loop without a bridge).
     @VisibleForTesting
     var toolBridge: ToolBridge? = null
+
+    // ── On-device screen-capture seam (Task W4.2 — vision) ──
+    // The single-frame screen capture used by the direct "look at my screen" path
+    // ([lookAtScreen]). Production reuses the running overlay's MediaProjection +
+    // the live accessibility tree's password gate ([OverlayScreenCapture]); built
+    // lazily on first use. Settable so a test can inject a fake (no Service / no
+    // projection needed). Captured frames are EPHEMERAL — never persisted.
+    @VisibleForTesting
+    var screenCapture: com.aiblackbox.portal.overlay.ScreenCapture? = null
 
     // The offline-resilient memory write-back queue (Task 2.5). persistLocalSave
     // routes completed on-device turns through this instead of a bare
@@ -930,6 +940,131 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * The DIRECT on-device VISION path (Task W4.3): capture ONE screen frame and
+     * ask the on-device model to look at it alongside [userPrompt] — for screens the
+     * accessibility tree can't read (Compose / WebView / games). This is a DIRECT
+     * multimodal turn, deliberately SEPARATE from the agentic native loop
+     * ([runLocalEngineTurn]); see [VisionLlm] for why an image can't be a tool
+     * result inside the litertlm native loop (and the deferred autonomous-vision
+     * enhancement).
+     *
+     * Flow (each step degrades GRACEFULLY with a clear message, never a crash):
+     *  1. Resolve the on-device provider; with none, fall back to the placeholder.
+     *  2. Capture a frame via [screenCapture] (reusing the overlay's MediaProjection
+     *     + the password redaction gate). A REFUSED capture (password focused) shows
+     *     [LOCAL_VISION_PASSWORD_REFUSED_TEXT]; an UNAVAILABLE capture shows its
+     *     customer-facing reason. The bytes are EPHEMERAL.
+     *  3. If the model isn't image-capable (`!is VisionLlm`), show
+     *     [LOCAL_VISION_UNSUPPORTED_TEXT] (the text path still works).
+     *  4. Otherwise load the engine + stream [streamLocalVisionTurn] into the same
+     *     assistant bubble, persisting the TEXT turn (never the screenshot).
+     *
+     * Mirrors [sendViaLocalEngine]'s single-[streamJob] discipline so a prior
+     * in-flight turn is cancelled and clear/stop can cancel this one.
+     */
+    fun lookAtScreen(userPrompt: String) {
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch {
+            val provider = localProviderOrWire()
+            if (provider == null) {
+                // No installed model → reuse the placeholder path with a vision-flavored ask.
+                sendViaLocalPlaceholder(userPrompt)
+                return@launch
+            }
+
+            // Append the user message + a streaming assistant placeholder (parity with
+            // runLocalEngineTurn). The user text is shown verbatim; the screenshot is
+            // never added to the transcript.
+            val userMsg = UiMessage(
+                role = "user",
+                content = userPrompt,
+                provider = currentProvider,
+                model = currentModel,
+            )
+            val assistantMsg = UiMessage(
+                role = "assistant",
+                content = "",
+                isStreaming = true,
+                provider = currentProvider,
+                model = currentModel,
+            )
+            _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
+            _inputText.value = TextFieldValue()
+            _chatState.value = ChatState.STREAMING
+            startBackgroundService("Looking at your screen...")
+
+            val sink: (String, Boolean) -> Unit = { content, streaming ->
+                updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
+            }
+            val op = currentOperator
+            val model = currentModel.ifBlank { null }
+
+            var faulted = false
+            try {
+                // 1. Capture the frame (gate runs inside capture()).
+                val capture = (screenCapture ?: com.aiblackbox.portal.overlay.OverlayScreenCapture())
+                    .also { screenCapture = it }
+                    .capture()
+                when (capture) {
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.RefusedPassword -> {
+                        sink(LOCAL_VISION_PASSWORD_REFUSED_TEXT, false)
+                    }
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.Unavailable -> {
+                        sink(capture.reason, false)
+                    }
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.Success -> {
+                        val llm = provider()
+                        if (llm !is VisionLlm) {
+                            // Model can't see images — text path still works; say so.
+                            sink(LOCAL_VISION_UNSUPPORTED_TEXT, false)
+                        } else {
+                            val cache = personaCacheOrBuild()
+                            // Load engine + fetch persona on IO (load() is idempotent).
+                            val engineToLoad = localEngine
+                            val modelFile = localEngineModelFile
+                            if (engineToLoad != null && modelFile != null) {
+                                withContext(Dispatchers.IO) {
+                                    engineToLoad.load(modelFile, localEngineDelegate)
+                                }
+                            }
+                            val persona = withContext(Dispatchers.IO) { cache?.get(op) ?: "" }
+                            // A vision turn is fresh (no transcript history needed for a
+                            // single screen Q&A); buildPrompt with empty history.
+                            val prompt = FcLoop(llm).buildPrompt(persona, emptyList(), userPrompt)
+                            val saveSink: (SaveRequest, String) -> Unit = { req, _ -> persistLocalSave(req) }
+                            val ok = streamLocalVisionTurn(
+                                engine = llm,
+                                prompt = prompt,
+                                imageBytes = listOf(capture.pngBytes),
+                                userMessage = userPrompt,
+                                operator = op,
+                                model = model,
+                                sink = sink,
+                                saveSink = saveSink,
+                            )
+                            faulted = !ok
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "look-at-screen error: ${e.message}", e)
+                val partial = _messages.value.lastOrNull()?.content ?: ""
+                updateLastMessage(
+                    content = partial + LOCAL_ENGINE_ERROR_TEXT,
+                    isStreaming = false,
+                    isThinking = false,
+                )
+                faulted = true
+            }
+            _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
+            stopBackgroundService()
+            persistHistory()
+        }
+    }
+
+    /**
      * Build (once) or return the persona cache wired to this VM's api + context.
      * Returns null when the api is not yet initialized (api?:return convention,
      * mirroring persistLocalSave's `repository ?: return`) — no `api!!`.
@@ -1006,6 +1141,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 topP = cfg.topP,
                 temperature = cfg.temperature,
             ),
+            // Task W4: thread the per-model vision capability so the engine sets a
+            // visionBackend + allows generateWithImage ONLY for image-capable bundles
+            // (text-only models keep the working CPU text path untouched).
+            supportImage = cfg.supportImage,
         )
         localEngine = engine
         localEngineModelFile = bundle.file
@@ -2220,6 +2359,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "\n\n[on-device error — the local model could not finish this reply]"
 
         /**
+         * Shown (in place of a model reply) when the on-device "look at my screen"
+         * vision path can't run because the active model has no image input
+         * (Task W4). The text path still works — only vision is unavailable.
+         */
+        const val LOCAL_VISION_UNSUPPORTED_TEXT =
+            "This on-device model can't see images. Switch to an image-capable model to have it look at your screen."
+
+        /**
+         * Shown when a screen capture is REFUSED because a password field is focused
+         * (Task W4.2 redaction gate) — the model is never shown a screenshot of a
+         * credential entry. Customer-facing + non-alarming.
+         */
+        const val LOCAL_VISION_PASSWORD_REFUSED_TEXT =
+            "I won't capture the screen while a password field is focused. Close it and ask again."
+
+        /**
          * Concise phone-control + cloud-capability steering appended to the persona
          * ONLY on the NATIVE engine-driven turn (Task W3 follow-up). Mirrors Edge
          * Gallery's prescriptive ordered-prompt style, kept short for the small E4B
@@ -2340,6 +2495,76 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val request = buildSaveRequest(
                 operator = operator,
                 userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * PURE core of the DIRECT VISION turn (Task W4.3) — the [streamLocalTurn]
+         * sibling that hands the model a captured screen frame ALONGSIDE the prompt.
+         * It is a DIRECT multimodal generation, NOT a tool inside the native agent
+         * loop: the litertlm [com.google.ai.edge.litertlm.OpenApiTool.execute] returns
+         * a `String`, so an image can't be fed back as a tool RESULT — see [VisionLlm]
+         * for the full rationale + the deferred autonomous-vision enhancement.
+         *
+         * Collects [VisionLlm.generateWithImage]'s text-delta Flow (same shape as
+         * [streamLocalTurn]'s [FcLoop.runTurn] Flow) into the SAME streaming assistant
+         * bubble, then persists via [saveSink]. The [imageBytes] are EPHEMERAL: they
+         * are passed to the engine ONLY to build the prompt and are NEVER written to
+         * the save request (the persisted transcript carries the user TEXT + the
+         * assistant reply, never the screenshot).
+         *
+         * Contract (mirrors [streamLocalTurn]):
+         *  - Streams `sink(runningText, isStreaming=true)` per delta.
+         *  - Normal completion: `sink(fullText, false)` then
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
+         *  - Mid-stream throw (generateWithImage's Flow can fault — e.g. the engine
+         *    can't run vision on this device): caught via `.catch`, appends
+         *    [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES NOT save,
+         *    returns `false`. Never rethrows.
+         *
+         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
+         * generation onto IO; `.collect`/[sink] stay on the caller's dispatcher.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalVisionTurn(
+            engine: VisionLlm,
+            prompt: String,
+            imageBytes: List<ByteArray>,
+            userMessage: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            val acc = StringBuilder()
+            var faulted = false
+            engine.generateWithImage(prompt, imageBytes)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { delta ->
+                    acc.append(delta)
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            // EPHEMERALITY: the save request carries the user TEXT + the reply only —
+            // never the screenshot bytes (they exist solely to build the prompt above).
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = userMessage,
                 assistantResponse = full,
                 reasoning = "",
                 model = model,
