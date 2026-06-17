@@ -3,6 +3,7 @@ package com.aiblackbox.portal.ui.settings
 import com.aiblackbox.portal.data.api.LocalModelCatalogClient
 import com.aiblackbox.portal.data.local.InstalledModel
 import com.aiblackbox.portal.data.local.LocalModelInstaller
+import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.model.LocalDeviceRecord
 import com.aiblackbox.portal.data.model.LocalStatus
@@ -134,14 +135,30 @@ class LocalModelViewModelTest {
         }
     }
 
-    /** Fake catalog/autonomy client. */
+    /**
+     * Fake catalog/autonomy client.
+     *
+     * @param setAutonomyOk first-attempt POST /local/device/autonomy result. When
+     *   false it models the unattested-device 404 (the W7 root cause): the first
+     *   mirror returns false, triggering the VM's attest-then-retry self-heal.
+     * @param attestSucceeds whether the self-heal attest succeeds; on success a
+     *   subsequent setAutonomy is allowed to succeed (models the hub now knowing
+     *   the device).
+     */
     private class FakeCatalog(
         private val bundles: List<LocalBundle>,
         private var autonomy: String = "permission",
         private val available: Boolean = false,
         private val setAutonomyOk: Boolean = true,
+        private val attestSucceeds: Boolean = true,
     ) : LocalModelCatalogClient {
         var lastAutonomyMode: String? = null
+        var setAutonomyCalls = 0
+        var attestCalls = 0
+        var lastAttest: AttestRequest? = null
+        // True once a successful attest has registered the device; a post-attest
+        // setAutonomy then succeeds (mirrors the real backend's upsert-then-200).
+        private var attested = false
 
         override suspend fun catalog(): List<LocalBundle> = bundles
 
@@ -154,9 +171,20 @@ class LocalModelViewModelTest {
             )
 
         override suspend fun setAutonomy(operator: String, deviceId: String, mode: String): Boolean {
+            setAutonomyCalls++
             lastAutonomyMode = mode
-            if (setAutonomyOk) autonomy = mode
-            return setAutonomyOk
+            // First call honors setAutonomyOk; a retry after a successful attest
+            // succeeds (the device is now known to the hub).
+            val ok = setAutonomyOk || attested
+            if (ok) autonomy = mode
+            return ok
+        }
+
+        override suspend fun attest(req: AttestRequest): Boolean {
+            attestCalls++
+            lastAttest = req
+            if (attestSucceeds) attested = true
+            return attestSucceeds
         }
     }
 
@@ -166,6 +194,7 @@ class LocalModelViewModelTest {
         operator: String = "Brandon",
         deviceId: String = "pixel-9",
         onSwitch: (String) -> Unit = {},
+        onPersist: (String) -> Unit = {},
     ) = LocalModelViewModel(
         installer = installer,
         catalog = catalog,
@@ -173,6 +202,7 @@ class LocalModelViewModelTest {
         deviceId = deviceId,
         onModelSelected = onSwitch,
         ioDispatcher = dispatcher,
+        onAutonomyPersisted = onPersist,
     )
 
     // ── refresh ───────────────────────────────────────────────────────────
@@ -310,21 +340,93 @@ class LocalModelViewModelTest {
         assertEquals("yolo", vm.state.value.autonomyMode)
     }
 
+    // ── setAutonomy is LOCAL-FIRST (Task W7) ────────────────────────────────
+    //
+    // The actuator gate reads the LOCAL AutonomyStore, so the toggle must write
+    // local persistence + the UI IMMEDIATELY and treat the backend as a
+    // best-effort mirror. A backend 404 (unattested device) / offline / any
+    // failure must NOT revert the local value nor surface an error to the user.
+
     @Test
-    fun `setAutonomy leaves mode unchanged when backend rejects`() = runTest(dispatcher) {
+    fun `setAutonomy writes local persistence and UI first (gate value correct)`() = runTest(dispatcher) {
+        val installer = FakeInstaller(recommended = e4b)
+        val catalog = FakeCatalog(listOf(e2b, e4b), autonomy = "permission", available = true)
+        var persisted: String? = null
+        val vm = vm(installer, catalog, onPersist = { persisted = it })
+        vm.refresh()
+        advanceUntilIdle()
+        assertEquals("permission", vm.state.value.autonomyMode)
+
+        vm.setAutonomy("yolo")
+        advanceUntilIdle()
+
+        // LOCAL-FIRST: the gate's source of truth + the UI reflect the new mode.
+        assertEquals("local persistence (gate source of truth) updated", "yolo", persisted)
+        assertEquals("UI reflects the new mode", "yolo", vm.state.value.autonomyMode)
+        assertNull("no error on the happy path", vm.state.value.error)
+        // The backend mirror was still attempted.
+        assertEquals("yolo", catalog.lastAutonomyMode)
+    }
+
+    @Test
+    fun `setAutonomy holds local value and shows no error when backend 404s (unattested)`() = runTest(dispatcher) {
+        // Model the W7 root cause: POST /local/device/autonomy 404s because the
+        // device was never attested in THAT hub (sideloaded model). The self-heal
+        // attest then FAILS too — the harshest case. Local must still hold + NO error.
         val installer = FakeInstaller(recommended = e4b)
         val catalog = FakeCatalog(
-            listOf(e2b, e4b), autonomy = "permission", available = true, setAutonomyOk = false,
+            listOf(e2b, e4b),
+            autonomy = "permission",
+            available = true,
+            setAutonomyOk = false,   // first mirror returns false (the 404)
+            attestSucceeds = false,  // self-heal attest also fails (offline hub)
         )
-        val vm = vm(installer, catalog)
+        var persisted: String? = null
+        val vm = vm(installer, catalog, onPersist = { persisted = it })
         vm.refresh()
         advanceUntilIdle()
 
         vm.setAutonomy("yolo")
         advanceUntilIdle()
 
-        assertEquals("permission", vm.state.value.autonomyMode)
-        assertNotNull("a rejected autonomy change surfaces an error", vm.state.value.error)
+        // The local gate value held; the user saw NO 404 / error.
+        assertEquals("local posture held despite backend 404", "yolo", persisted)
+        assertEquals("UI held the new mode", "yolo", vm.state.value.autonomyMode)
+        assertNull("a backend failure must never surface an error", vm.state.value.error)
+        // Self-heal was attempted (attest fired) but is best-effort.
+        assertEquals("self-heal attest attempted once", 1, catalog.attestCalls)
+    }
+
+    @Test
+    fun `setAutonomy self-heals an unattested device (attest then retry the mirror)`() = runTest(dispatcher) {
+        // First mirror 404s (unattested); the self-heal attest SUCCEEDS, so the
+        // retry mirror then lands — the device is now attested + mirrored YOLO.
+        val installer = FakeInstaller(recommended = e4b)
+        val catalog = FakeCatalog(
+            listOf(e2b, e4b),
+            autonomy = "permission",
+            available = true,
+            setAutonomyOk = false,  // first mirror 404s
+            attestSucceeds = true,  // self-heal attest succeeds -> retry lands
+        )
+        val vm = vm(installer, catalog, operator = "Brandon", deviceId = "pixel-9")
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.setAutonomy("yolo")
+        advanceUntilIdle()
+
+        // Self-heal sequence: setAutonomy (fail) -> attest -> setAutonomy (retry).
+        assertEquals("attest fired exactly once", 1, catalog.attestCalls)
+        assertEquals("setAutonomy tried twice (initial + retry)", 2, catalog.setAutonomyCalls)
+        // The attest carried the operator/device binding + the chosen mode
+        // (ledger-ready per-operator device binding).
+        assertEquals("Brandon", catalog.lastAttest?.operator)
+        assertEquals("pixel-9", catalog.lastAttest?.deviceId)
+        assertEquals("yolo", catalog.lastAttest?.autonomyMode)
+        // And the user-facing state is correct with no error.
+        assertEquals("yolo", vm.state.value.autonomyMode)
+        assertNull(vm.state.value.error)
     }
 
     // ── delete ──────────────────────────────────────────────────────────────

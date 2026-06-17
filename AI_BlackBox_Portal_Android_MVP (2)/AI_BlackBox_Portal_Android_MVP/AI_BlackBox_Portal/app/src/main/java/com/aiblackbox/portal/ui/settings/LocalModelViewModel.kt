@@ -4,6 +4,7 @@ import android.content.Context
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.LocalModelCatalogClient
+import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.local.InstalledModel
 import com.aiblackbox.portal.data.local.LocalModelInstaller
 import com.aiblackbox.portal.data.local.LocalModelManager
@@ -279,24 +280,59 @@ class LocalModelViewModel(
     }
 
     /**
-     * Flip the device autonomy posture (POST /local/device/autonomy). On
-     * success update [LocalModelUiState.autonomyMode]; on rejection leave the
-     * mode and surface an error.
+     * Flip the device autonomy posture — **LOCAL-FIRST** (Task W7).
+     *
+     * The actuator gate ([com.aiblackbox.portal.overlay.Actuators]/[com.aiblackbox.portal.overlay.IntentActuator])
+     * reads the LOCAL [com.aiblackbox.portal.data.local.AutonomyStore], so THAT is
+     * the authoritative source of truth and must work offline / regardless of the
+     * backend. So we:
+     *
+     *  1. Persist the new mode LOCALLY ([onAutonomyPersisted]) + reflect it in the
+     *     UI ([LocalModelUiState.autonomyMode]) **immediately** — the toggle never
+     *     blocks on, nor 404s from, the network. The gate is correct at once.
+     *  2. Fire a BEST-EFFORT backend mirror (`POST /local/device/autonomy`). On any
+     *     failure — offline, 5xx, or a **404 because this device was never attested
+     *     in that hub's registry** (e.g. a SIDELOADED model that skipped the
+     *     install→attest flow) — we do NOT surface an error: the local toggle still
+     *     holds and the gate is already correct.
+     *  3. Self-heal: a failed mirror is treated as "probably unattested", so we
+     *     [attest][LocalModelCatalogClient.attest] this device ONCE (idempotent;
+     *     ledger-ready per-operator binding) carrying the chosen mode, then retry
+     *     the mirror. Both steps are swallowed (logged only) — the local posture is
+     *     authoritative either way.
+     *
+     * Net: pressing the toggle NEVER shows the user a 404; the backend mirrors the
+     * posture whenever it is reachable + the device is attested.
      */
     fun setAutonomy(mode: String) {
+        // LOCAL-FIRST: the gate's source of truth + the UI update happen now,
+        // synchronously w.r.t. this call — independent of the backend.
+        onAutonomyPersisted(mode)
+        _state.update { it.copy(autonomyMode = mode, error = null) }
+
+        // Best-effort backend mirror (never surfaces an error to the user).
         scope.launch {
-            try {
-                val ok = catalog.setAutonomy(operatorProvider(), deviceId, mode)
-                if (ok) {
-                    // Mirror the new posture into LOCAL persistence so the on-device
-                    // phone-control gate (4.6) sees it immediately, no network hop.
-                    onAutonomyPersisted(mode)
-                    _state.update { it.copy(autonomyMode = mode, error = null) }
-                } else {
-                    _state.update { it.copy(error = "Couldn't change autonomy mode.") }
+            runCatching {
+                val operator = operatorProvider()
+                val ok = catalog.setAutonomy(operator, deviceId, mode)
+                if (!ok) {
+                    // A false here is most often a 404 for an unattested device
+                    // (sideloaded model). Self-heal: attest once (idempotent), then
+                    // retry the mirror. Both are best-effort.
+                    val attested = catalog.attest(
+                        AttestRequest(
+                            operator = operator,
+                            deviceId = deviceId,
+                            autonomyMode = mode,
+                        )
+                    )
+                    if (attested) {
+                        catalog.setAutonomy(operator, deviceId, mode)
+                    }
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(error = "Couldn't change autonomy mode: ${e.message}") }
+            }.onFailure {
+                // Swallow: the LOCAL posture (step 1) already holds and the gate is
+                // correct. A backend blip must never block or error the toggle.
             }
         }
     }
