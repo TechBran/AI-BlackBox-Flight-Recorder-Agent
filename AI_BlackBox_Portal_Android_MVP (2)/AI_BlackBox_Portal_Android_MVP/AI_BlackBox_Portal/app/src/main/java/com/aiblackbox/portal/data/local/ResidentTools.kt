@@ -30,6 +30,29 @@ object ResidentTools {
      */
     const val MAX_INJECTED_SCHEMAS = 5
 
+    // ---- Task W3 follow-up: cloud tool vault under the NATIVE loop -----------
+    //
+    // The NATIVE (engine-driven) path can't use the manual FcLoop's two-turn
+    // search->inject->call tiering (the engine owns the loop). Instead the cloud
+    // vault is exposed to the native loop as TWO native tools the ENGINE drives the
+    // same way it drives phone actions: [SEARCH_CLOUD_TOOLS] discovers a capability
+    // by description, then [CALL_CLOUD_TOOL] runs the chosen one. Their execute
+    // bodies (built in [ChatViewModel.streamLocalNativeAgentTurn]) call the cloud
+    // [ToolBridge] ONLY -- never the [PhoneController] (the W3 separation guarantee).
+
+    /** Native discovery tool: find a BlackBox capability by description. */
+    const val SEARCH_CLOUD_TOOLS = "search_cloud_tools"
+
+    /** Native invocation tool: run a discovered BlackBox capability by name. */
+    const val CALL_CLOUD_TOOL = "call_cloud_tool"
+
+    /**
+     * The names of the native cloud-vault tools whose execute bodies route to the
+     * cloud [ToolBridge] (NEVER the [PhoneController]). Kept disjoint from
+     * [LOCAL_PHONE_TOOLS] by construction.
+     */
+    val CLOUD_TOOLS: Set<String> = setOf(SEARCH_CLOUD_TOOLS, CALL_CLOUD_TOOL)
+
     /** The one function resident in every turn. Phase 4 appends the phone actuators. */
     val searchToolsSchema = ToolSchema(
         name = SEARCH_TOOLS,
@@ -446,6 +469,52 @@ object ResidentTools {
                     }
                 }
                 put("required", buildJsonArray { add(JsonPrimitive("query")) })
+            },
+        ),
+    )
+
+    // ---- Task W3 follow-up: native cloud-vault tool schemas -----------------
+
+    /**
+     * The TWO native cloud-vault tool schemas (names == [SEARCH_CLOUD_TOOLS] /
+     * [CALL_CLOUD_TOOL]). [ChatViewModel.streamLocalNativeAgentTurn] turns each into
+     * a [NativeTool] whose execute calls the cloud [ToolBridge] (search / execute),
+     * and offers them to the native engine loop ALONGSIDE the phone/intent tools.
+     *
+     * Descriptions are deliberately TERSE and model-steering (small on-device
+     * model): search FIRST to find a capability, then call it by the chosen name.
+     */
+    fun cloudTools(): List<ToolSchema> = listOf(
+        ToolSchema(
+            name = SEARCH_CLOUD_TOOLS,
+            description = "Find a BlackBox capability by description (e.g. generate an image, search memory, send a message). Returns matching tool names + descriptions. Call this FIRST, then call_cloud_tool with the chosen name.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("query") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("What capability you need, in natural language."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("query")) })
+            },
+        ),
+        ToolSchema(
+            name = CALL_CLOUD_TOOL,
+            description = "Run a BlackBox capability found via search_cloud_tools. name=the chosen tool name; args=a JSON object of that tool's arguments.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("name") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("The tool name returned by search_cloud_tools."))
+                    }
+                    putJsonObject("args") {
+                        put("type", JsonPrimitive("object"))
+                        put("description", JsonPrimitive("The chosen tool's arguments, as a JSON object."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("name")) })
             },
         ),
     )

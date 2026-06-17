@@ -24,6 +24,7 @@ import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.data.local.formatCloudToolMatches
 import com.aiblackbox.portal.data.local.toResultJsonString
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
@@ -818,8 +819,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 //      NativeToolCallingLlm: the litertlm engine runs the tool loop
                 //      itself (automaticToolCalling = true) and terminates cleanly
                 //      (onDone), fixing the manual-loop repeat with the small E4B
-                //      model. THIS increment offers the resident phone/intent tools
-                //      ONLY; search_tools / cloud stay on the manual path (follow-up).
+                //      model. ONE native loop offers BOTH the resident phone/intent
+                //      tools (-> PhoneController) AND the cloud vault via
+                //      search_cloud_tools / call_cloud_tool (-> bridge); W3 follow-up.
                 //   2. MANUAL agent loop - provider is ToolCallingLlm + a bridge:
                 //      FcLoop drives the tiered two-hop loop (search + cloud + phone).
                 //      Kept intact + selectable so nothing regresses (the test fakes
@@ -841,15 +843,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     credentialHandoff = OverlayCredentialHandoff(appContext),
                 )
                 val ok = if (llm is NativeToolCallingLlm) {
-                    // NATIVE path: engine drives the loop. Offer phone + intent tools
-                    // only (dispatched LOCALLY through the controller, NEVER the cloud
-                    // bridge). Build the same plain-text prompt FcLoop would, via a
-                    // transient text-only FcLoop, so the prompt contract is identical.
-                    val prompt = FcLoop(llm).buildPrompt(persona, history, text)
+                    // NATIVE path: ONE engine-driven loop handles BOTH phone/intent
+                    // actions (dispatched LOCALLY through the controller, NEVER the cloud
+                    // bridge) AND cloud capabilities (search_cloud_tools / call_cloud_tool,
+                    // dispatched through the bridge ONLY). The two are SEPARATE NativeTool
+                    // execute lambdas, so a phone tool structurally cannot reach the bridge
+                    // (the W3 separation guarantee). Build the same plain-text prompt FcLoop
+                    // would (via a transient text-only FcLoop), then append the native
+                    // phone-control + cloud steering addendum to the persona.
+                    val nativePersona = persona + NATIVE_PHONE_CONTROL_ADDENDUM
+                    val prompt = FcLoop(llm).buildPrompt(nativePersona, history, text)
                     streamLocalNativeAgentTurn(
                         engine = llm,
                         phone = phoneController,
                         phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
+                        bridge = bridge,
                         prompt = prompt,
                         operator = op,
                         model = model,
@@ -2212,6 +2220,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "\n\n[on-device error — the local model could not finish this reply]"
 
         /**
+         * Concise phone-control + cloud-capability steering appended to the persona
+         * ONLY on the NATIVE engine-driven turn (Task W3 follow-up). Mirrors Edge
+         * Gallery's prescriptive ordered-prompt style, kept short for the small E4B
+         * model: act on the phone via the matching action directly; reach a BlackBox
+         * capability via search_cloud_tools then call_cloud_tool; one tool at a time;
+         * reply briefly when done. Not added to the manual/text paths.
+         */
+        const val NATIVE_PHONE_CONTROL_ADDENDUM =
+            "\n\nTo act on the phone, call the matching action directly (e.g. " +
+            "flashlight_on, show_map, open_app). For a BlackBox capability (generate " +
+            "an image, search memory, send a message), call search_cloud_tools first, " +
+            "then call_cloud_tool with the chosen name. Call one tool at a time; when " +
+            "the task is done, reply briefly."
+
+        /**
          * Max length of the one-line result snippet shown after a successful tool
          * outcome ([renderToolOutcome]) — keep tool activity inline-readable; never
          * dump a large JSON blob into the chat bubble.
@@ -2427,16 +2450,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * [renderToolCall] / [renderToolOutcome] convention and persists via [saveSink],
          * so it is rendering-identical to the manual agent turn.
          *
-         * **Scope (W3 increment): phone/intent tools ONLY.** Each [phoneTools] schema
-         * becomes a [NativeTool] whose `execute` dispatches LOCALLY through [phone]
-         * ([PhoneController.dispatch]) - bridging the suspend dispatch into the engine's
-         * SYNCHRONOUS execute with `runBlocking(Dispatchers.IO)` (exactly as Edge
-         * Gallery's `AgentTools.execute` does). The dispatch result is serialized to the
-         * Gallery-shaped JSON string ([toResultJsonString]) the engine feeds back to the
-         * model. Phone/intent calls therefore NEVER touch the cloud [ToolBridge], and the
-         * autonomy gate + credential handoff stay INSIDE the actuator (downstream of
-         * [phone].dispatch), so they still fire. `search_tools` / cloud tools are NOT
-         * offered here - they stay on the manual path (a follow-up unifies them).
+         * **Unified scope (W3 follow-up): phone/intent + cloud, ONE native loop.** The
+         * engine drives BOTH families with `automaticToolCalling = true`:
+         *  - PHONE/INTENT: each [phoneTools] schema becomes a [NativeTool] whose
+         *    `execute` dispatches LOCALLY through [phone] ([PhoneController.dispatch]) --
+         *    bridging the suspend dispatch into the engine's SYNCHRONOUS execute with
+         *    `runBlocking(Dispatchers.IO)` (Edge Gallery's `AgentTools.execute` pattern).
+         *    These NEVER touch the cloud [bridge]; the autonomy gate + credential handoff
+         *    stay INSIDE the actuator (downstream of [phone].dispatch), so they still fire.
+         *  - CLOUD: when [bridge] is non-null, [buildCloudNativeTools] adds two NativeTools
+         *    -- search_cloud_tools (-> [ToolBridge.searchTools]) + call_cloud_tool
+         *    (-> [ToolBridge.execute], operator-scoped) -- whose `execute` reaches the
+         *    [bridge] ONLY (structurally NEVER the [phone]) and carry only the model's
+         *    args + the [operator] (no screen/phone content). Offline / no api -> the
+         *    cloud tools are omitted and the turn is phone-only.
+         * The phone and cloud execute lambdas are SEPARATE, so a phone tool cannot reach
+         * the bridge and a cloud tool cannot reach the phone (the W3 separation guarantee).
+         * Each dispatch result is serialized to the Gallery-shaped JSON string
+         * ([toResultJsonString]) the engine feeds back to the model.
          *
          * Contract mirrors [streamLocalAgentTurn]: TextDelta -> append text; ToolCall ->
          * [renderToolCall]; ToolOutcome -> [renderToolOutcome]; `sink(runningText, true)`
@@ -2450,6 +2481,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             engine: NativeToolCallingLlm,
             phone: PhoneController,
             phoneTools: List<ToolSchema>,
+            bridge: ToolBridge?,
             prompt: String,
             operator: String,
             model: String?,
@@ -2457,11 +2489,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             sink: (content: String, isStreaming: Boolean) -> Unit,
             saveSink: (request: SaveRequest, provider: String) -> Unit,
         ): Boolean {
-            // Build the engine-driven NativeTools: each phone/intent schema dispatches
-            // LOCALLY through the controller. runBlocking bridges the suspend dispatch
-            // into the engine's synchronous execute (Gallery pattern); the autonomy gate
-            // lives INSIDE dispatch, so it still fires. NEVER the cloud bridge.
-            val nativeTools = phoneTools.map { schema ->
+            // PHONE/INTENT NativeTools: each phone/intent schema dispatches LOCALLY
+            // through the controller. runBlocking bridges the suspend dispatch into the
+            // engine's synchronous execute (Gallery pattern); the autonomy gate lives
+            // INSIDE dispatch, so it still fires. These execute bodies reach the
+            // PhoneController ONLY -- structurally NEVER the cloud bridge (W3 guarantee).
+            val phoneNativeTools = phoneTools.map { schema ->
                 NativeTool(
                     schema = schema,
                     execute = { argsJson ->
@@ -2471,11 +2504,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     },
                 )
             }
+            // CLOUD NativeTools (Task W3 follow-up): expose the cloud vault to the SAME
+            // native loop as two tools the engine drives like phone actions. Their
+            // execute bodies reach the cloud [bridge] ONLY -- structurally NEVER the
+            // PhoneController, and they carry only the model's args + the operator (no
+            // screen/phone content). search_cloud_tools discovers; call_cloud_tool runs
+            // the chosen tool (operator-scoped, exactly as the manual path always did).
+            // Only wired when a [bridge] is present (offline/no-api -> phone-only).
+            val cloudNativeTools = if (bridge != null) buildCloudNativeTools(bridge, operator) else emptyList()
+            val nativeTools = phoneNativeTools + cloudNativeTools
             val acc = StringBuilder()
             var faulted = false
+            // The engine's own recurring-tool-call limit (RECURRING_TOOL_CALL_LIMIT)
+            // bounds this native loop against runaway repeats; there is intentionally NO
+            // app-side iteration cap here (unlike the manual FcLoop's maxIterations) --
+            // the engine owns termination (onDone) on this path by design.
             engine.generateWithToolsNative(prompt, nativeTools)
                 .flowOn(Dispatchers.IO)
                 .catch { e ->
+                    // Telemetry-before-fixes: the engine's onError was previously invisible.
+                    Log.w(TAG, "native turn faulted", e)
                     faulted = true
                     acc.append(LOCAL_ENGINE_ERROR_TEXT)
                     sink(acc.toString(), false)
@@ -2505,12 +2553,96 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         /**
+         * Build the TWO cloud-vault [NativeTool]s (Task W3 follow-up) the native engine
+         * loop drives ALONGSIDE the phone/intent tools. Both execute bodies reach the
+         * cloud [bridge] ONLY -- structurally NEVER the [PhoneController] (the W3
+         * separation guarantee) -- and pass only the model's args + the [operator] (no
+         * screen/phone content; the bridge is operator-scoped, as the manual path was):
+         *
+         *  - search_cloud_tools: runBlocking the suspend [ToolBridge.searchTools]
+         *    (capped at [ResidentTools.MAX_INJECTED_SCHEMAS]) and return the matches
+         *    (name + description) as a Gallery-shaped success string the model reads;
+         *    an empty result is a failed "no match (possibly offline)" string.
+         *  - call_cloud_tool: parse name + args, runBlocking [ToolBridge.execute]
+         *    (operator-scoped), and return its [ToolResult] as the Gallery-shaped JSON.
+         *    A missing/blank name is a failed result (the engine loop continues).
+         *
+         * Internal so it is unit-testable against a fake [ToolBridge].
+         */
+        internal fun buildCloudNativeTools(bridge: ToolBridge, operator: String): List<NativeTool> =
+            ResidentTools.cloudTools().map { schema ->
+                when (schema.name) {
+                    ResidentTools.SEARCH_CLOUD_TOOLS -> NativeTool(
+                        schema = schema,
+                        execute = { argsJson ->
+                            val query = (parseNativeArgs(argsJson)["query"] as? JsonPrimitive)
+                                ?.contentOrNull?.takeIf { it.isNotBlank() }
+                            if (query == null) {
+                                toResultJsonString(false, JsonPrimitive("query required"))
+                            } else {
+                                val found = runBlocking(Dispatchers.IO) {
+                                    bridge.searchTools(query, k = ResidentTools.MAX_INJECTED_SCHEMAS)
+                                }
+                                if (found.isEmpty()) {
+                                    toResultJsonString(
+                                        false,
+                                        JsonPrimitive("no matching tools available (the tool catalog may be unreachable)"),
+                                    )
+                                } else {
+                                    // Format matches as a compact JSON string the model reads,
+                                    // carried VERBATIM as the success payload.
+                                    toResultJsonString(
+                                        true,
+                                        JsonPrimitive(formatCloudToolMatches(found)),
+                                    )
+                                }
+                            }
+                        },
+                    )
+                    else -> NativeTool( // CALL_CLOUD_TOOL
+                        schema = schema,
+                        execute = { argsJson ->
+                            val args = parseNativeArgs(argsJson)
+                            val name = (args["name"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                            if (name == null) {
+                                toResultJsonString(false, JsonPrimitive("tool name required"))
+                            } else {
+                                val callArgs = parseCloudCallArgs(args["args"])
+                                runBlocking(Dispatchers.IO) {
+                                    bridge.execute(name, callArgs, operator)
+                                }.toResultJsonString()
+                            }
+                        },
+                    )
+                }
+            }
+
+        /**
+         * Coerce the model-supplied `args` element of a call_cloud_tool call into the
+         * [JsonObject] passed to [ToolBridge.execute]. The small model may send `args`
+         * as a JSON OBJECT (preferred) or as a JSON-encoded STRING; either is accepted,
+         * anything else (null/absent/malformed) becomes an empty object. NEVER throws.
+         * Internal so it is unit-testable.
+         */
+        internal fun parseCloudCallArgs(element: kotlinx.serialization.json.JsonElement?): JsonObject = when (element) {
+            is JsonObject -> element
+            is JsonPrimitive -> runCatching { Json.parseToJsonElement(element.content) as? JsonObject }
+                .getOrNull() ?: JsonObject(emptyMap())
+            else -> JsonObject(emptyMap())
+        }
+
+        /**
          * Parse the model-supplied tool-call argument JSON (what the litertlm engine
          * passes to a [NativeTool.execute]) into a [JsonObject] for
          * [PhoneController.dispatch]. A small model can emit a blank, non-object, or
          * malformed payload; this NEVER throws - it returns an empty object so dispatch
          * sees no args (the actuator then reports a normal "missing arg" failure rather
          * than crashing the native turn). Internal so it is unit-testable.
+         *
+         * NOTE: the engine seam ([nativeOpenApiToolFor]) also parses the same argsJson
+         * once to emit the [LlmEvent.ToolCall]; this is a SECOND, independent parse in a
+         * different layer (dispatch, not rendering). De-duping would mean threading the
+         * parsed object through [NativeTool.execute]'s signature - not worth the coupling.
          */
         internal fun parseNativeArgs(argsJson: String): JsonObject =
             runCatching { Json.parseToJsonElement(argsJson) as? JsonObject }.getOrNull()

@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.local
 
 import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.data.model.ToolSchema
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -10,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.float
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -248,5 +250,27 @@ class LiteRtMappersTest {
             toResultJsonString(res.success, res.result),
             res.toResultJsonString(),
         )
+    }
+
+    // ---- Task W3 follow-up: formatCloudToolMatches (search_cloud_tools payload) ----
+
+    @Test
+    fun `formatCloudToolMatches emits a name+description JSON array`() {
+        val matches = listOf(
+            ToolSchema(name = "generate_image", description = "Create an image", parameters = buildJsonObject {}),
+            ToolSchema(name = "search_snapshots", description = "Search memory", parameters = buildJsonObject {}),
+        )
+        val arr = Json.parseToJsonElement(formatCloudToolMatches(matches)).jsonArray
+        assertEquals(2, arr.size)
+        assertEquals("generate_image", arr[0].jsonObject["name"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("Create an image", arr[0].jsonObject["description"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("search_snapshots", arr[1].jsonObject["name"]?.jsonPrimitive?.contentOrNull)
+        // The verbose per-tool parameters schema is intentionally omitted from the payload.
+        assertTrue("payload omits the parameters schema", arr[0].jsonObject["parameters"] == null)
+    }
+
+    @Test
+    fun `formatCloudToolMatches of an empty list is an empty JSON array`() {
+        assertEquals(0, Json.parseToJsonElement(formatCloudToolMatches(emptyList())).jsonArray.size)
     }
 }

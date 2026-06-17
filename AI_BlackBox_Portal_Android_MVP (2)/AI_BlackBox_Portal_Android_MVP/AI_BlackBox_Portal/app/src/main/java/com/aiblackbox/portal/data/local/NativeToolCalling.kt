@@ -3,6 +3,12 @@ package com.aiblackbox.portal.data.local
 import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * One tool offered to the litertlm ENGINE-DRIVEN (native) tool loop (Task W3).
@@ -67,3 +73,31 @@ interface NativeToolCallingLlm {
  * [toResultJsonString].
  */
 fun ToolResult.toResultJsonString(): String = toResultJsonString(success, result)
+
+/**
+ * Format the [ToolSchema] matches a `search_cloud_tools` call returned into the
+ * compact JSON STRING the native engine feeds back to the model (Task W3
+ * follow-up). The string is the SUCCESS payload of a Gallery-shaped result built
+ * by the caller; it lists each match's `name` + `description` so the model can pick
+ * one and call `call_cloud_tool`. Empty input -> `[]` (the caller surfaces "no
+ * match / possibly offline" as a failed result). PURE (no litertlm types) so it is
+ * JDK17-unit-testable; the per-tool `parameters` schema is intentionally OMITTED
+ * here to keep the discovery payload small (the model only needs the name to call).
+ */
+fun formatCloudToolMatches(tools: List<ToolSchema>): String {
+    val arr = buildJsonArray {
+        for (t in tools) {
+            add(
+                buildJsonObject {
+                    put("name", t.name)
+                    put("description", t.description)
+                },
+            )
+        }
+    }
+    return cloudMatchesJson.encodeToString(JsonArray.serializer(), arr)
+}
+
+/** Local lenient JSON used by [formatCloudToolMatches] (file-scoped; the
+ *  same-named [mapperJson] in LiteRtEngine.kt is private to that file). */
+private val cloudMatchesJson = Json { ignoreUnknownKeys = true }

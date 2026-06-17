@@ -30,8 +30,15 @@ class FakeToolBridge(
     /** Every (tool, params) passed to [execute], in order. */
     val executeCalls: MutableList<Pair<String, JsonObject>> = mutableListOf()
 
+    /** Every `operator` passed to [execute], in order (parallel to [executeCalls]). */
+    val executeOperators: MutableList<String> = mutableListOf()
+
+    /** Every `k` passed to [searchTools], in order (parallel to [searchCalls]). */
+    val searchKs: MutableList<Int> = mutableListOf()
+
     override suspend fun searchTools(query: String, k: Int): List<ToolSchema> {
         searchCalls.add(query)
+        searchKs.add(k)
         return searchMap[query] ?: emptyList()
     }
 
@@ -41,6 +48,7 @@ class FakeToolBridge(
         operator: String,
     ): ToolResult {
         executeCalls.add(tool to params)
+        executeOperators.add(operator)
         return executeFn(tool, params)
     }
 }
