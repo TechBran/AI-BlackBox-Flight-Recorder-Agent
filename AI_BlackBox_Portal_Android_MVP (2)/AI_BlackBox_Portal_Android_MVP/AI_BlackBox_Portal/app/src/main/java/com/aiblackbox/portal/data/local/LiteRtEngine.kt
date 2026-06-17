@@ -8,6 +8,7 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.OpenApiTool
+import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -63,12 +64,35 @@ import java.io.File
  *   set explicitly because the litertlm default (null) is only 4096, far below
  *   what the on-device agent's per-turn prompt needs (see the constant's KDoc).
  */
+/**
+ * Per-model sampler overrides (Task W2), mirroring Edge Gallery's
+ * topK/topP/temperature config. All fields OPTIONAL: a null field falls back to
+ * [LiteRtEngine.DEFAULT_SAMPLER_TOP_K] / [DEFAULT_SAMPLER_TOP_P] /
+ * [DEFAULT_SAMPLER_TEMPERATURE] when a `SamplerConfig` IS built. When ALL three
+ * are null ([isUnset]) the engine omits `samplerConfig` entirely, preserving the
+ * prior (litertlm-default) behavior.
+ *
+ * litertlm's `SamplerConfig(topK: Int, topP: Double, temperature: Double)` requires
+ * all three together (verified against the 0.13.1 artifact: the synthetic
+ * default-ctor defaults only `seed`, not the trio), so partial overrides are filled
+ * with the constants above rather than passed through individually.
+ */
+data class SamplerSettings(
+    val topK: Int? = null,
+    val topP: Float? = null,
+    val temperature: Float? = null,
+) {
+    /** True when no override is set -> the engine omits `samplerConfig`. */
+    val isUnset: Boolean get() = topK == null && topP == null && temperature == null
+}
+
 class LiteRtEngine(
     private val modelFile: File,
     private val delegate: String = "cpu",
     private val cacheDir: String? = null,
     private val nativeLibraryDir: String? = null,
     private val maxTokens: Int = DEFAULT_MAX_TOKENS,
+    private val sampler: SamplerSettings = SamplerSettings(),
 ) : LocalLlm, ToolCallingLlm {
 
     @Volatile
@@ -153,7 +177,14 @@ class LiteRtEngine(
         check(eng != null && eng.isInitialized()) {
             "LiteRtEngine.generate called before load(); call load(modelFile, delegate) first."
         }
-        val conversation = eng.createConversation() // no tools
+        // Per-model sampler (Task W2): only build a ConversationConfig when an
+        // override is set; otherwise keep the prior tool-less, default-sampler path.
+        val samplerConfig = sampler.toSamplerConfig()
+        val conversation = if (samplerConfig != null) {
+            eng.createConversation(ConversationConfig(samplerConfig = samplerConfig))
+        } else {
+            eng.createConversation() // no tools, engine-default sampler
+        }
         try {
             conversation.sendMessageAsync(prompt).collect { msg ->
                 val text = msg.plainText()
@@ -185,10 +216,21 @@ class LiteRtEngine(
         check(eng != null && eng.isInitialized()) {
             "LiteRtEngine.generateWithTools called before load(); call load(modelFile, delegate) first."
         }
-        val config = ConversationConfig(
-            tools = tools.map { tool(openApiToolFor(it)) },
-            automaticToolCalling = false,
-        )
+        // Per-model sampler (Task W2): pass samplerConfig only when an override is
+        // set; null leaves litertlm's default sampler in place (prior behavior).
+        val samplerConfig = sampler.toSamplerConfig()
+        val config = if (samplerConfig != null) {
+            ConversationConfig(
+                tools = tools.map { tool(openApiToolFor(it)) },
+                samplerConfig = samplerConfig,
+                automaticToolCalling = false,
+            )
+        } else {
+            ConversationConfig(
+                tools = tools.map { tool(openApiToolFor(it)) },
+                automaticToolCalling = false,
+            )
+        }
         val conversation = eng.createConversation(config)
         try {
             conversation.sendMessageAsync(prompt).collect { msg ->
@@ -246,6 +288,18 @@ class LiteRtEngine(
         const val DEFAULT_MAX_TOKENS: Int = 16384
 
         /**
+         * Sampler defaults used to FILL a [SamplerSettings] field left null when a
+         * `SamplerConfig` is built (litertlm requires the full topK/topP/temperature
+         * trio; see [SamplerSettings]). These mirror Edge Gallery's Gemma defaults
+         * (topK 64, topP 0.95, temperature 1.0). They apply ONLY when at least one
+         * override is set; an all-null [SamplerSettings] omits `samplerConfig` and
+         * lets litertlm use its own built-in default.
+         */
+        const val DEFAULT_SAMPLER_TOP_K: Int = 64
+        const val DEFAULT_SAMPLER_TOP_P: Float = 0.95f
+        const val DEFAULT_SAMPLER_TEMPERATURE: Float = 1.0f
+
+        /**
          * Convenience factory: build an engine for an installed [modelFile] using
          * the app's native-library dir (so the NPU backend can find vendor
          * delegates). The engine is NOT loaded — call [load] (off the main thread)
@@ -256,11 +310,15 @@ class LiteRtEngine(
             context: android.content.Context,
             modelFile: File,
             delegate: String = "cpu",
+            maxTokens: Int = DEFAULT_MAX_TOKENS,
+            sampler: SamplerSettings = SamplerSettings(),
         ): LiteRtEngine = LiteRtEngine(
             modelFile = modelFile,
             delegate = delegate,
             cacheDir = context.cacheDir.absolutePath,
             nativeLibraryDir = context.applicationInfo.nativeLibraryDir,
+            maxTokens = maxTokens,
+            sampler = sampler,
         )
     }
 }
@@ -292,6 +350,29 @@ private val mapperJson = Json { ignoreUnknownKeys = true }
  * message's [Content.Text] pieces, non-text content dropped) joined in order.
  */
 fun plainTextOf(texts: List<String>): String = texts.joinToString("")
+
+/**
+ * Resolve a [SamplerSettings] to the EFFECTIVE (topK, topP, temperature) trio that
+ * would be passed to litertlm's `SamplerConfig`, OR null when no override is set.
+ *
+ * PURE (primitives only) so it is JVM-unit-testable under JDK 17 (constructing a
+ * litertlm `SamplerConfig` here would throw UnsupportedClassVersionError on the host
+ * test JVM; see the Mappers header). Any null field is filled with the matching
+ * [LiteRtEngine] default constant; an all-null input returns null (-> the engine
+ * omits `samplerConfig`). Returned topP/temperature are Double (litertlm's type).
+ */
+fun resolveSampler(
+    topK: Int?,
+    topP: Float?,
+    temperature: Float?,
+): Triple<Int, Double, Double>? {
+    if (topK == null && topP == null && temperature == null) return null
+    return Triple(
+        topK ?: LiteRtEngine.DEFAULT_SAMPLER_TOP_K,
+        (topP ?: LiteRtEngine.DEFAULT_SAMPLER_TOP_P).toDouble(),
+        (temperature ?: LiteRtEngine.DEFAULT_SAMPLER_TEMPERATURE).toDouble(),
+    )
+}
 
 /**
  * Convert a tool-call `arguments` map (`Map<String, Any?>`, values may be
@@ -368,6 +449,17 @@ fun Message.plainText(): String =
  * schema and its [OpenApiTool.execute] is the [bridgeDispatchedStub] (never called
  * when `automaticToolCalling = false`).
  */
+/**
+ * Build a litertlm [SamplerConfig] from per-model [SamplerSettings], or null when
+ * no override is set (the engine then omits `samplerConfig`). Thin adapter over the
+ * testable [resolveSampler]; covered indirectly by compileDebugKotlin + the device
+ * smoke (the host test JVM can't construct litertlm 0.13.1 types).
+ */
+fun SamplerSettings.toSamplerConfig(): SamplerConfig? {
+    val (k, p, t) = resolveSampler(topK, topP, temperature) ?: return null
+    return SamplerConfig(topK = k, topP = p, temperature = t)
+}
+
 fun openApiToolFor(schema: ToolSchema): OpenApiTool {
     val descriptionString = toolDescriptionJson(schema.name, schema.description, schema.parameters)
     return object : OpenApiTool {

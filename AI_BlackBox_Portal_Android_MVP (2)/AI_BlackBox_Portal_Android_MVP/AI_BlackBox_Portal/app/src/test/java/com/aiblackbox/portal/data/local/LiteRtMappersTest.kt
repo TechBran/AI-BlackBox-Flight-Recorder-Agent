@@ -127,4 +127,49 @@ class LiteRtMappersTest {
             thrown is UnsupportedOperationException,
         )
     }
+
+    // -------------------------------------------------------------------------
+    // resolveSampler (Task W2) — the PURE core behind SamplerSettings.toSamplerConfig.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `resolveSampler returns null when all overrides are null`() {
+        // All-null SamplerSettings -> engine omits samplerConfig (prior behavior).
+        assertEquals(null, resolveSampler(topK = null, topP = null, temperature = null))
+    }
+
+    @Test
+    fun `resolveSampler passes through a full override trio as Double`() {
+        val trio = resolveSampler(topK = 10, topP = 0.5f, temperature = 0.2f)
+        assertNotNull(trio)
+        assertEquals(10, trio!!.first)
+        assertEquals(0.5, trio.second, 1e-6)
+        assertEquals(0.2, trio.third, 1e-6)
+    }
+
+    @Test
+    fun `resolveSampler fills missing fields with engine defaults when any is set`() {
+        // Only topK set -> topP/temperature fall back to the LiteRtEngine defaults.
+        val trio = resolveSampler(topK = 99, topP = null, temperature = null)
+        assertNotNull(trio)
+        assertEquals(99, trio!!.first)
+        assertEquals(LiteRtEngine.DEFAULT_SAMPLER_TOP_P.toDouble(), trio.second, 1e-6)
+        assertEquals(LiteRtEngine.DEFAULT_SAMPLER_TEMPERATURE.toDouble(), trio.third, 1e-6)
+
+        // Only temperature set -> topK/topP fall back to defaults.
+        val trio2 = resolveSampler(topK = null, topP = null, temperature = 0.9f)
+        assertNotNull(trio2)
+        assertEquals(LiteRtEngine.DEFAULT_SAMPLER_TOP_K, trio2!!.first)
+        assertEquals(LiteRtEngine.DEFAULT_SAMPLER_TOP_P.toDouble(), trio2.second, 1e-6)
+        assertEquals(0.9, trio2.third, 1e-6)
+    }
+
+    @Test
+    fun `SamplerSettings isUnset reflects whether any override is set`() {
+        assertTrue(SamplerSettings().isUnset)
+        assertTrue(SamplerSettings(topK = null, topP = null, temperature = null).isUnset)
+        assertTrue(!SamplerSettings(topK = 1).isUnset)
+        assertTrue(!SamplerSettings(topP = 0.1f).isUnset)
+        assertTrue(!SamplerSettings(temperature = 0.1f).isUnset)
+    }
 }

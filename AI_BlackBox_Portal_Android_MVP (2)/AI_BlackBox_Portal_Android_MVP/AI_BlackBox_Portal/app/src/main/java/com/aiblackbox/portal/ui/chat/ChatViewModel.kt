@@ -16,6 +16,7 @@ import com.aiblackbox.portal.data.local.LocalLlm
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.LocalSnapshotQueue
 import com.aiblackbox.portal.data.local.PersonaCache
+import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
@@ -905,8 +906,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // coexist, prefer LocalModelManager.recommendForDevice() among the installed.
         val bundle = installed.firstOrNull() ?: return null // no model → placeholder path
 
-        // Build the singleton engine for the installed bundle (default CPU delegate).
-        val engine = LiteRtEngine.fromInstalled(appContext, bundle.file, delegate = "cpu")
+        // Build the singleton engine for the installed bundle (default CPU delegate),
+        // threading the PER-MODEL config (Task W2): maxTokens (fallback to the
+        // engine default when the descriptor leaves it null) + the sampler trio.
+        val cfg = bundle.config
+        val engine = LiteRtEngine.fromInstalled(
+            appContext,
+            bundle.file,
+            delegate = "cpu",
+            maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
+            sampler = SamplerSettings(
+                topK = cfg.topK,
+                topP = cfg.topP,
+                temperature = cfg.temperature,
+            ),
+        )
         localEngine = engine
         localEngineModelFile = bundle.file
         localEngineDelegate = "cpu"

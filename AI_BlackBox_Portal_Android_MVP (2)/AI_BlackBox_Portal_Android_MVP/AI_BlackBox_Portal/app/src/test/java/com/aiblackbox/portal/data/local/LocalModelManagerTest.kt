@@ -295,4 +295,116 @@ class LocalModelManagerTest {
         assertEquals("only the valid entry is returned", 1, listed.size)
         assertEquals("gemma-4-e2b", listed.first().slug)
     }
+
+    // -------------------------------------------------------------------------
+    // 7. Per-model config sidecar (Task W2)
+    // -------------------------------------------------------------------------
+
+    /** Write a sidecar file directly (bypasses install) for parse-shape tests. */
+    private fun writeSidecarJson(slug: String, json: String) {
+        modelsDir.mkdirs()
+        modelsDir.resolve("$slug.json").writeText(json)
+        // installedModels() only returns sidecars whose bundle file exists.
+        modelsDir.resolve("$slug.litertlm").writeBytes(ByteArray(8) { 1 })
+    }
+
+    @Test
+    fun `installedModels parses a sidecar WITH the new per-model config fields`() = runTest {
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        writeSidecarJson(
+            slug = "gemma-4-e4b",
+            json = """
+                {
+                  "slug": "gemma-4-e4b",
+                  "filename": "gemma-4-e4b.litertlm",
+                  "size_bytes": 8,
+                  "max_tokens": 8192,
+                  "support_image": true,
+                  "recommended": true,
+                  "context_note": "Higher quality; 8GB+ phones.",
+                  "top_k": 40,
+                  "top_p": 0.9,
+                  "temperature": 0.7
+                }
+            """.trimIndent(),
+        )
+
+        val cfg = mgr.installedModels().single().config
+        assertEquals(8192, cfg.maxTokens)
+        assertTrue("support_image -> supportImage true", cfg.supportImage)
+        assertTrue("recommended true", cfg.recommended)
+        assertEquals("Higher quality; 8GB+ phones.", cfg.contextNote)
+        assertEquals(40, cfg.topK)
+        assertEquals(0.9f, cfg.topP)
+        assertEquals(0.7f, cfg.temperature)
+    }
+
+    @Test
+    fun `installedModels parses a LEGACY sidecar (no config fields) with defaults`() = runTest {
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        // A pre-W2 sidecar: ONLY slug/filename/size_bytes. Must still parse.
+        writeSidecarJson(
+            slug = "gemma-4-e2b",
+            json = """
+                {
+                  "slug": "gemma-4-e2b",
+                  "filename": "gemma-4-e2b.litertlm",
+                  "size_bytes": 8
+                }
+            """.trimIndent(),
+        )
+
+        val model = mgr.installedModels().single()
+        assertEquals("gemma-4-e2b", model.slug)
+        val cfg = model.config
+        // maxTokens null -> caller falls back to the engine default.
+        assertNull("legacy sidecar has no max_tokens", cfg.maxTokens)
+        assertFalse("supportImage defaults false", cfg.supportImage)
+        assertFalse("recommended defaults false", cfg.recommended)
+        assertNull(cfg.contextNote)
+        assertNull(cfg.topK)
+        assertNull(cfg.topP)
+        assertNull(cfg.temperature)
+    }
+
+    @Test
+    fun `installedModels tolerates unknown future sidecar keys`() = runTest {
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        writeSidecarJson(
+            slug = "gemma-4-e2b",
+            json = """
+                {
+                  "slug": "gemma-4-e2b",
+                  "filename": "gemma-4-e2b.litertlm",
+                  "size_bytes": 8,
+                  "max_tokens": 4096,
+                  "some_future_key": "ignored"
+                }
+            """.trimIndent(),
+        )
+        val cfg = mgr.installedModels().single().config
+        assertEquals(4096, cfg.maxTokens)
+    }
+
+    @Test
+    fun `install writes a sidecar carrying the new config keys (round-trip)`() = runTest {
+        val content = ByteArray(1024) { 3 }
+        val bundle = e2b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 4.0)
+
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "cpu") { _, _ -> }.isSuccess)
+
+        // The written sidecar must emit the W2 keys (today at their defaults, since
+        // the catalog bundle carries no per-model config yet) so the format is
+        // forward-stable and re-parses to the same ModelConfig.
+        val sidecarText = modelsDir.resolve("${bundle.slug}.json").readText()
+        assertTrue("sidecar emits max_tokens", sidecarText.contains("max_tokens"))
+        assertTrue("sidecar emits support_image", sidecarText.contains("support_image"))
+        assertTrue("sidecar emits top_k", sidecarText.contains("top_k"))
+
+        // Round-trip: re-reading yields a defaulted ModelConfig (maxTokens null).
+        val cfg = mgr.installedModels().single().config
+        assertNull(cfg.maxTokens)
+        assertFalse(cfg.supportImage)
+    }
 }

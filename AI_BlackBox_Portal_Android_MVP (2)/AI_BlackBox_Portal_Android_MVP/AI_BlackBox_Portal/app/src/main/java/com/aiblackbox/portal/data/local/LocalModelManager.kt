@@ -13,15 +13,53 @@ import java.io.IOException
 import java.security.MessageDigest
 
 /**
+ * Per-model runtime config that travels with an installed bundle (Task W2),
+ * mirroring Edge Gallery's per-`Model` config (`llmMaxToken`, `llmSupportImage`,
+ * `configs` topK/topP/temperature). Recorded in the `<slug>.json` sidecar and
+ * carried onto [InstalledModel] so the engine is configured PER MODEL instead of
+ * from one hardcoded global.
+ *
+ * All fields are OPTIONAL/defaulted so a LEGACY sidecar (only slug/filename/
+ * size_bytes) still parses: [maxTokens] null -> the engine's
+ * [LiteRtEngine.DEFAULT_MAX_TOKENS]; the sampler trio null -> the engine omits
+ * `samplerConfig` (uses litertlm's built-in default); [supportImage]/[recommended]
+ * default false.
+ *
+ * @param maxTokens context window (input+output tokens) for `EngineConfig.maxNumTokens`.
+ *   Null -> engine default.
+ * @param supportImage whether the bundle accepts image input (W4 will wire the
+ *   vision backend; W2 only CARRIES the flag).
+ * @param recommended catalog/UI hint that this is the recommended model (W6 uses it).
+ * @param contextNote human-readable note about the context window / model (UI hint).
+ * @param topK / topP / temperature optional sampler overrides. litertlm's
+ *   `SamplerConfig` requires all three together, so [LiteRtEngine] supplies its own
+ *   defaults for any left null - but only builds a `SamplerConfig` at all when at
+ *   least one is set (otherwise it omits it entirely, preserving prior behavior).
+ */
+data class ModelConfig(
+    val maxTokens: Int? = null,
+    val supportImage: Boolean = false,
+    val recommended: Boolean = false,
+    val contextNote: String? = null,
+    val topK: Int? = null,
+    val topP: Float? = null,
+    val temperature: Float? = null,
+)
+
+/**
  * One on-device Gemma model that is present on disk.
  *
  * Returned by [LocalModelManager.installedModels] and [LocalModelManager.install].
  * `file` is the actual bundle file under the manager's `modelsDir`.
+ *
+ * @param config per-model runtime config (Task W2) parsed from the sidecar; legacy
+ *   sidecars yield an all-default [ModelConfig].
  */
 data class InstalledModel(
     val slug: String,
     val file: File,
     val sizeBytes: Long,
+    val config: ModelConfig = ModelConfig(),
 )
 
 /**
@@ -80,7 +118,12 @@ class LocalModelManager(
             }.getOrNull() ?: return@mapNotNull null
             val file = File(dir, record.filename)
             if (!file.isFile) return@mapNotNull null
-            InstalledModel(slug = record.slug, file = file, sizeBytes = file.length())
+            InstalledModel(
+                slug = record.slug,
+                file = file,
+                sizeBytes = file.length(),
+                config = record.toModelConfig(),
+            )
         }.sortedBy { it.slug }
     }
 
@@ -181,7 +224,7 @@ class LocalModelManager(
 
         // Bytes are on disk + verified → record the sidecar so installedModels
         // sees it even if attest later fails (kept-for-retry policy).
-        writeSidecar(bundle, file.length())
+        writeSidecar(bundle, file.length(), bundle.toModelConfig())
 
         val installed = InstalledModel(slug = bundle.slug, file = file, sizeBytes = file.length())
 
@@ -237,11 +280,28 @@ class LocalModelManager(
 
     private fun sidecarFor(slug: String) = File(modelsDir, slug + SIDECAR_SUFFIX)
 
-    private fun writeSidecar(bundle: LocalBundle, sizeBytes: Long) {
+    /**
+     * Derive the per-model [ModelConfig] (Task W2) recorded in the sidecar from a
+     * catalog [LocalBundle]. The catalog (GET /local/models/catalog) does not yet
+     * advertise per-model config fields, so today this yields defaults (a
+     * legacy-equivalent sidecar). When the catalog grows `max_tokens`/sampler/
+     * `support_image`/`recommended`/`context_note` (W6/backend), map them HERE and
+     * the round-trip is already wired through [SidecarRecord] + [installedModels].
+     */
+    private fun LocalBundle.toModelConfig(): ModelConfig = ModelConfig()
+
+    private fun writeSidecar(bundle: LocalBundle, sizeBytes: Long, config: ModelConfig) {
         val record = SidecarRecord(
             slug = bundle.slug,
             filename = bundle.filename,
             sizeBytes = sizeBytes,
+            maxTokens = config.maxTokens,
+            supportImage = config.supportImage,
+            recommended = config.recommended,
+            contextNote = config.contextNote,
+            topK = config.topK,
+            topP = config.topP,
+            temperature = config.temperature,
         )
         sidecarFor(bundle.slug).writeText(json.encodeToString(SidecarRecord.serializer(), record))
     }
@@ -252,7 +312,26 @@ class LocalModelManager(
         val slug: String,
         val filename: String,
         @SerialName("size_bytes") val sizeBytes: Long,
-    )
+        // Per-model config (Task W2). OPTIONAL + defaulted so LEGACY sidecars
+        // (only slug/filename/size_bytes) still deserialize unchanged.
+        @SerialName("max_tokens") val maxTokens: Int? = null,
+        @SerialName("support_image") val supportImage: Boolean = false,
+        @SerialName("recommended") val recommended: Boolean = false,
+        @SerialName("context_note") val contextNote: String? = null,
+        @SerialName("top_k") val topK: Int? = null,
+        @SerialName("top_p") val topP: Float? = null,
+        @SerialName("temperature") val temperature: Float? = null,
+    ) {
+        fun toModelConfig(): ModelConfig = ModelConfig(
+            maxTokens = maxTokens,
+            supportImage = supportImage,
+            recommended = recommended,
+            contextNote = contextNote,
+            topK = topK,
+            topP = topP,
+            temperature = temperature,
+        )
+    }
 
     companion object {
         /** 1 GiB, matching ActivityManager.MemoryInfo.totalMem's byte units. */
@@ -267,7 +346,14 @@ class LocalModelManager(
          */
         const val BUNDLE_VERSION = "1.0"
 
-        private val json = Json { ignoreUnknownKeys = true }
+        // ignoreUnknownKeys: legacy/future sidecars stay forward-compatible.
+        // encodeDefaults: the WRITER emits the W2 per-model keys even at their
+        // defaults, so a written sidecar is self-documenting + forward-stable
+        // (round-trips through SidecarRecord -> installedModels unchanged).
+        private val json = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
 
         /** Subdir of `context.filesDir` where bundles + sidecars are stored. */
         private const val MODELS_SUBDIR = "local_models"
