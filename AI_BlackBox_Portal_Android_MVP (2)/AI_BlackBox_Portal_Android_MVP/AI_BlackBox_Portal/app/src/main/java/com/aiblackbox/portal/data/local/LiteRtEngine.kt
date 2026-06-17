@@ -34,6 +34,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The concrete on-device LLM engine (Task 2.6a) — wraps LiteRT-LM
@@ -449,9 +450,19 @@ class LiteRtEngine(
         }
         // Per-model sampler (Task W2): pass samplerConfig only when an override is set.
         val samplerConfig = sampler.toSamplerConfig()
+        // App-side defensive step cap (Task W3 hardening): a per-INVOCATION counter
+        // shared by every tool wrapper below, so the total tool executions in THIS
+        // native turn are bounded even if the engine's own recurring-tool-call guard
+        // were ever weakened/absent. Fresh per generateWithToolsNative call (resets
+        // each turn). See [MAX_NATIVE_TOOL_CALLS] / the pure [overCap] decision.
+        val nativeCallCount = AtomicInteger(0)
         // Build engine-driven OpenApiTools: each `execute` runs the NativeTool body
         // AND bridges ToolCall(before)/ToolOutcome(after) into this flow's channel.
-        val providers = tools.map { tool(nativeOpenApiToolFor(it) { event -> trySendBlocking(event) }) }
+        // The shared counter lets each wrapper refuse to run its side-effecting body
+        // once the cap is exceeded (returns a terminal "step limit reached" result).
+        val providers = tools.map {
+            tool(nativeOpenApiToolFor(it, nativeCallCount) { event -> trySendBlocking(event) })
+        }
         // Constrained decoding (Gallery pattern): enable around createConversation,
         // reset after. Reduces malformed tool-call tokens from the small model.
         val priorConstrained = ExperimentalFlags.enableConversationConstrainedDecoding
@@ -553,6 +564,27 @@ class LiteRtEngine(
         const val DEFAULT_SAMPLER_TEMPERATURE: Float = 1.0f
 
         /**
+         * App-side defensive cap on the number of tool executions in a SINGLE
+         * [generateWithToolsNative] turn (Task W3 hardening, defense-in-depth).
+         *
+         * The litertlm engine's OWN internal recurring-tool-call guard is the
+         * PRIMARY bound on the native auto-loop (it terminates via `onDone`). This
+         * constant is a SOFT cap layered UNDERNEATH it: if that engine-side bound
+         * were ever weakened or absent in a future litertlm release, a misbehaving
+         * small model could otherwise loop unbounded executing REAL side-effecting
+         * tools (repeated `call_cloud_tool` / `generate_image` / phone intents).
+         * Past this count, each further [OpenApiTool.execute] returns a terminal
+         * failed result ("step limit reached") WITHOUT running the tool body, so the
+         * model is pushed to give its final answer rather than loop forever.
+         *
+         * Chosen generous-but-safe: large enough for a realistic multi-step
+         * phone+cloud task (e.g. read_screen -> a few intents -> a cloud lookup ->
+         * answer), far below any runaway. It does NOT fight the engine -- on the happy
+         * path the engine's own `onDone` ends the loop long before this is reached.
+         */
+        const val MAX_NATIVE_TOOL_CALLS: Int = 24
+
+        /**
          * Convenience factory: build an engine for an installed [modelFile] using
          * the app's native-library dir (so the NPU backend can find vendor
          * delegates). The engine is NOT loaded — call [load] (off the main thread)
@@ -628,6 +660,23 @@ fun resolveSampler(
         (temperature ?: LiteRtEngine.DEFAULT_SAMPLER_TEMPERATURE).toDouble(),
     )
 }
+
+/**
+ * The app-side native-loop STEP-CAP decision (Task W3 hardening, defense-in-depth):
+ * given how many tool calls a single [LiteRtEngine.generateWithToolsNative] turn has
+ * ALREADY executed ([callCount], 1-based for the call being evaluated) and the cap
+ * [max] ([LiteRtEngine.MAX_NATIVE_TOOL_CALLS]), is this call OVER the cap and thus
+ * to be refused (return a terminal "step limit reached" result WITHOUT running the
+ * tool body)? True when `callCount > max` -- i.e. the first [max] calls run normally
+ * and the (max+1)-th onward are refused, pushing the model to its final answer.
+ *
+ * This is a SOFT cap UNDER the litertlm engine's own recurring-tool-call guard (the
+ * primary bound); it only matters if that engine-side bound were ever weakened or
+ * absent. PURE (primitives only) so the decision is JVM-unit-testable under JDK 17;
+ * the enforcement inside [nativeOpenApiToolFor]'s `execute` is device/compile-verified
+ * (see the Mappers header).
+ */
+fun overCap(callCount: Int, max: Int): Boolean = callCount > max
 
 /**
  * The vision GATING decision (Task W4): does this model accept image input, i.e.
@@ -848,12 +897,22 @@ fun openApiToolFor(schema: ToolSchema): OpenApiTool {
  * description JSON is the SAME [toolDescriptionJson] the model sees on the manual
  * path, but its [OpenApiTool.execute] is REAL (not the [bridgeDispatchedStub]): the
  * litertlm engine calls it with the model's argument JSON, and it:
- *  1. emits [LlmEvent.ToolCall] (the args parsed to a [JsonObject]) via [emit],
- *  2. runs the [NativeTool.execute] body (which returns the Gallery-shaped result
+ *  1. ENFORCES the app-side step cap: it increments the shared per-turn
+ *     [callCount] and, if [overCap] (count > [LiteRtEngine.MAX_NATIVE_TOOL_CALLS]),
+ *     emits a single ToolOutcome marker and returns a terminal failed result
+ *     ("step limit reached") WITHOUT running the side-effecting tool body -- so a
+ *     misbehaving model is pushed to its final answer instead of looping forever.
+ *  2. emits [LlmEvent.ToolCall] (the args parsed to a [JsonObject]) via [emit],
+ *  3. runs the [NativeTool.execute] body (which returns the Gallery-shaped result
  *     JSON string the engine feeds back to the model),
- *  3. parses that string ([parseResultJsonString]) and emits [LlmEvent.ToolOutcome]
+ *  4. parses that string ([parseResultJsonString]) and emits [LlmEvent.ToolOutcome]
  *     for inline rendering, then
- *  4. returns the result string to the engine.
+ *  5. returns the result string to the engine.
+ *
+ * [callCount] is the shared per-INVOCATION counter from [generateWithToolsNative]
+ * (one [AtomicInteger] across all of a turn's tool wrappers; resets each turn). The
+ * cap is a SOFT bound UNDER litertlm's own recurring-tool-call guard (defense-in-
+ * depth): on the happy path the engine's `onDone` ends the loop long before it.
  *
  * [emit] is the channel sink supplied by [generateWithToolsNative]'s [callbackFlow]
  * (the events bridge from the engine's synchronous execute thread to the Flow).
@@ -863,6 +922,7 @@ fun openApiToolFor(schema: ToolSchema): OpenApiTool {
  */
 internal fun nativeOpenApiToolFor(
     nativeTool: NativeTool,
+    callCount: AtomicInteger,
     emit: (LlmEvent) -> Unit,
 ): OpenApiTool {
     val schema = nativeTool.schema
@@ -870,17 +930,35 @@ internal fun nativeOpenApiToolFor(
     return object : OpenApiTool {
         override fun getToolDescriptionJsonString(): String = descriptionString
         override fun execute(paramsJsonString: String): String {
-            // 1. ToolCall (best-effort arg parse; malformed args -> empty object).
+            // 1. App-side step cap (defense-in-depth). Count THIS call (1-based) and,
+            //    if over the cap, refuse to run the side-effecting body: return a
+            //    terminal failed result so the model stops and gives its final answer.
+            //    Layered UNDER the engine's own recurring-tool-call guard (we don't
+            //    fight the engine; we just stop executing tool bodies past the cap).
+            if (overCap(callCount.incrementAndGet(), LiteRtEngine.MAX_NATIVE_TOOL_CALLS)) {
+                emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = false, result = STEP_LIMIT_PAYLOAD)))
+                return STEP_LIMIT_RESULT_JSON
+            }
+            // 2. ToolCall (best-effort arg parse; malformed args -> empty object).
             val argsObj = runCatching { mapperJson.parseToJsonElement(paramsJsonString) as? JsonObject }
                 .getOrNull() ?: JsonObject(emptyMap())
             emit(LlmEvent.ToolCall(schema.name, argsObj))
-            // 2. Run the dispatch body (returns the Gallery-shaped result JSON).
+            // 3. Run the dispatch body (returns the Gallery-shaped result JSON).
             val resultJson = nativeTool.execute(paramsJsonString)
-            // 3. ToolOutcome for inline rendering (parsed back from the result JSON).
+            // 4. ToolOutcome for inline rendering (parsed back from the result JSON).
             val (ok, payload) = parseResultJsonString(resultJson)
             emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = ok, result = payload)))
-            // 4. Return the result string to the engine for the auto loop.
+            // 5. Return the result string to the engine for the auto loop.
             return resultJson
         }
     }
 }
+
+/** The "stop and answer" message returned/emitted when the native step cap is exceeded. */
+private const val STEP_LIMIT_MESSAGE = "step limit reached -- stop and give your final answer"
+
+/** The terminal failed-result JSON the engine receives for any tool call past the cap. */
+private val STEP_LIMIT_RESULT_JSON: String = toResultJsonString(false, JsonPrimitive(STEP_LIMIT_MESSAGE))
+
+/** The ToolOutcome payload emitted (once per over-cap call) for inline visibility of the cap. */
+private val STEP_LIMIT_PAYLOAD = JsonPrimitive(STEP_LIMIT_MESSAGE)

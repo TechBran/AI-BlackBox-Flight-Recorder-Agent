@@ -2930,10 +2930,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val nativeTools = phoneNativeTools + cloudNativeTools
             val acc = StringBuilder()
             var faulted = false
-            // The engine's own recurring-tool-call limit (RECURRING_TOOL_CALL_LIMIT)
-            // bounds this native loop against runaway repeats; there is intentionally NO
-            // app-side iteration cap here (unlike the manual FcLoop's maxIterations) --
-            // the engine owns termination (onDone) on this path by design.
+            // Runaway bounds on this native loop: the litertlm engine's OWN internal
+            // recurring-tool-call guard is the PRIMARY bound (it owns termination via
+            // onDone on this path by design), AND -- defense-in-depth (Task W3 hardening) --
+            // [LiteRtEngine.MAX_NATIVE_TOOL_CALLS] is an app-side SOFT cap underneath it:
+            // past that many tool executions in a single turn, each further tool refuses
+            // to run its side-effecting body and returns a terminal 'step limit reached'
+            // result, so a misbehaving model can't loop unbounded with real side effects
+            // even if the engine-side guard were ever weakened/absent. This differs from
+            // the manual FcLoop's explicit maxIterations only in WHERE the cap lives.
             engine.generateWithToolsNative(prompt, nativeTools)
                 .flowOn(Dispatchers.IO)
                 .catch { e ->

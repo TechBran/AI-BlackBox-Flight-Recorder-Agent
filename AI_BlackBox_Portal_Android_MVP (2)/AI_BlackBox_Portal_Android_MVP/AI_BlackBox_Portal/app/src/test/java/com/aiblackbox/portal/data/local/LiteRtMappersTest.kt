@@ -351,4 +351,41 @@ class LiteRtMappersTest {
             shouldRetryWithoutVision(supportImage = false, visionWasSet = true),
         )
     }
+
+    // -------------------------------------------------------------------------
+    // App-side native-loop step cap (Task W3 hardening) -- overCap is the PURE
+    // decision nativeOpenApiToolFor's execute consults: increment a shared per-turn
+    // counter, and if overCap(count, MAX_NATIVE_TOOL_CALLS) refuse to run the tool
+    // body and return a terminal "step limit reached" result. Defense-in-depth UNDER
+    // the litertlm engine's own recurring-tool-call guard. The enforcement inside
+    // execute is device/compile-verified; here we pin the boundary arithmetic.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `overCap is false below the cap`() {
+        // The first call(s) of a turn (count well under max) run normally.
+        assertFalse("count 1 of 24 -> run", overCap(callCount = 1, max = 24))
+        assertFalse("count 23 of 24 -> run", overCap(callCount = 23, max = 24))
+    }
+
+    @Test
+    fun `overCap is false at the cap boundary (the cap-th call still runs)`() {
+        // count == max is the LAST allowed call (1-based): exactly max executions run.
+        assertFalse("count 24 of 24 -> still runs", overCap(callCount = 24, max = 24))
+    }
+
+    @Test
+    fun `overCap is true above the cap (the next call is refused)`() {
+        // count > max: refuse the body, return the terminal step-limit result.
+        assertTrue("count 25 of 24 -> refuse", overCap(callCount = 25, max = 24))
+        assertTrue("far over the cap -> refuse", overCap(callCount = 100, max = 24))
+    }
+
+    @Test
+    fun `overCap honors the real MAX_NATIVE_TOOL_CALLS constant`() {
+        // Pin the wired-in cap: the constant-th call runs, the next is refused.
+        val max = LiteRtEngine.MAX_NATIVE_TOOL_CALLS
+        assertFalse("at the constant cap -> runs", overCap(callCount = max, max = max))
+        assertTrue("one past the constant cap -> refused", overCap(callCount = max + 1, max = max))
+    }
 }
