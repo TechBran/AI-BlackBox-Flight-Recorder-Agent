@@ -10,8 +10,12 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.LocalModelService
 import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LlmEvent
+import com.aiblackbox.portal.data.local.EngineSource
+import com.aiblackbox.portal.data.local.LocalEngineHolder
+import com.aiblackbox.portal.data.local.engineSourceFor
 import com.aiblackbox.portal.data.local.LocalLlm
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.LocalSnapshotQueue
@@ -202,6 +206,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // from [LocalModelManager.installedModels] when the engine is wired.
     private var localEngineModelFile: java.io.File? = null
     private var localEngineDelegate: String = "cpu"
+
+    // R2-C: true when [localEngine] is the PROCESS-held warm engine borrowed
+    // from [LocalEngineHolder] (owned by [LocalModelService]), false when it is a
+    // VM-built fallback this ViewModel owns. onCleared / invalidateLocalEngine
+    // must close ONLY a VM-built engine -- closing the service-owned warm engine
+    // would break the next turn / the model-as-a-tool path. Defaults false
+    // (the pre-R2-C fallback owns its engine).
+    private var localEngineFromHolder: Boolean = false
 
     // The slug of the active on-device model the user picked in the Model Manager
     // (Task W5), persisted under "model_local". [localProviderOrWire] prefers the
@@ -622,7 +634,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Release the on-device engine's native runtime (Task 2.6a). Safe even if
         // never loaded; close() is idempotent. Guarded so a native-layer throw on
         // teardown can't crash the VM disposal.
-        runCatching { localEngine?.close() }
+        //
+        // R2-C: close ONLY a VM-OWNED engine. When [localEngineFromHolder] the
+        // engine is the PROCESS-held warm engine owned by [LocalModelService];
+        // closing it here would tear down the native runtime the service is
+        // keeping resident (and break the next turn / the model-as-a-tool path).
+        // The service releases it on its own stop/destroy via the holder.
+        if (!localEngineFromHolder) {
+            runCatching { localEngine?.close() }
+        }
         localEngine = null
         super.onCleared()
     }
@@ -1202,14 +1222,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?: installed.firstOrNull()
             ?: return null // no model -> placeholder path
 
-        // Build the singleton engine for the installed bundle (default CPU delegate),
-        // threading the PER-MODEL config (Task W2): maxTokens (fallback to the
-        // engine default when the descriptor leaves it null) + the sampler trio.
+        val delegate = "cpu"
+        val targetPath = bundle.file.absolutePath
+
+        // R2-C: PREFER the warm, PROCESS-resident engine pinned by
+        // [LocalModelService] when it matches the active bundle -- it is already
+        // loaded (no ~10-75s cold load) and survives VM/process recycles. The pure
+        // [engineSourceFor] is the decision: USE_HOLDER iff the holder is non-empty
+        // AND built for THIS bundle path; otherwise BUILD_OWN (the pre-R2-C path,
+        // also taken when the service never started -- the graceful fallback).
+        val held = LocalEngineHolder.getOrNull()
+        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath) == EngineSource.USE_HOLDER) {
+            // Borrow the service-owned warm engine. We do NOT own it, so onCleared /
+            // invalidateLocalEngine must not close() it (localEngineFromHolder = true).
+            val warm = held!!
+            localEngine = warm
+            localEngineModelFile = bundle.file
+            localEngineDelegate = delegate
+            localEngineFromHolder = true
+            val provider: () -> LocalLlm = { warm }
+            localLlmProvider = provider
+            return provider
+        }
+
+        // BUILD_OWN: no warm engine to borrow (service not running / different
+        // model). Build the VM-owned engine for the installed bundle (default CPU
+        // delegate), threading the PER-MODEL config (Task W2): maxTokens (fallback
+        // to the engine default when the descriptor leaves it null) + sampler trio.
+        // This is exactly the pre-R2-C path -- the guaranteed fallback.
         val cfg = bundle.config
         val engine = LiteRtEngine.fromInstalled(
             appContext,
             bundle.file,
-            delegate = "cpu",
+            delegate = delegate,
             maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
             sampler = SamplerSettings(
                 topK = cfg.topK,
@@ -1223,7 +1268,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
         localEngine = engine
         localEngineModelFile = bundle.file
-        localEngineDelegate = "cpu"
+        localEngineDelegate = delegate
+        localEngineFromHolder = false
         val provider: () -> LocalLlm = { engine }
         localLlmProvider = provider
         return provider
@@ -1237,9 +1283,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * engine (idempotent, guarded) and clears the warm marker so a re-warm runs.
      */
     private fun invalidateLocalEngine() {
-        runCatching { localEngine?.close() }
+        // R2-C: close ONLY a VM-OWNED engine; never the service-owned warm engine
+        // borrowed from [LocalEngineHolder] (the service owns its lifecycle). We
+        // just drop our reference + re-wire; if the active model changed, the
+        // service's own re-warm (or the BUILD_OWN fallback) handles the new bundle.
+        if (!localEngineFromHolder) {
+            runCatching { localEngine?.close() }
+        }
         localEngine = null
         localEngineModelFile = null
+        localEngineFromHolder = false
         localLlmProvider = null
         warmingModelPath = null
         _localEngineState.value = LocalEngineState.IDLE
@@ -1304,6 +1357,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun preloadLocalEngine() {
         // Provider gate: only warm for the active local provider (see DESIGN NOTE).
         if (!ChatProvider.fromId(currentProvider).isLocal) return
+        // R2-C: the FOREGROUND SERVICE is now the PRIMARY warmer -- it pins the
+        // engine in the PROCESS-level [LocalEngineHolder] so it loads ONCE and
+        // survives VM/process recycles. Best-effort + idempotent (a second start
+        // while a warm is in flight is ignored; LiteRtEngine.load() is itself
+        // Mutex-idempotent). NEVER throws into us (LocalModelService.start swallows
+        // a platform refusal), so the VM-side warm below stays the graceful
+        // fallback: if the service no-ops, [localProviderOrWire] BUILDs its own
+        // engine and this same coroutine load()s it, exactly as before R2-C.
+        LocalModelService.start(appContext)
         // Cheap pre-launch guard: a warm is already in flight → nothing to do.
         if (!shouldStartWarm(_localEngineState.value)) return
 
