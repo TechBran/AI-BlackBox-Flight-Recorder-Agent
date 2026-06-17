@@ -121,6 +121,35 @@ fun engineSourceFor(
     else -> EngineSource.BUILD_OWN
 }
 
+/**
+ * Whether [LocalModelService] should (re)build + warm-load a fresh engine for the
+ * resolved active bundle (Task R2-C follow-up). PURE (primitives only) so the
+ * idempotency decision is JVM-unit-testable under JDK 17 without a real engine.
+ *
+ * The service's warm path used to ALWAYS build a new engine and [LocalEngineHolder.set]
+ * it. But [LocalModelService.start] fires on every provider toggle / model switch, so a
+ * redundant re-warm for the ALREADY-PINNED model would build a second engine B and
+ * [set] would close the live engine A out from under the consumer that borrowed it
+ * (`localEngineFromHolder=true`), forcing the exact ~10-75s cold reload R2-C exists to
+ * prevent and leaking the superseded engine. This gate makes the warm idempotent:
+ *
+ *  - holder already holds an engine for the SAME [targetModelPath] -> false (already
+ *    pinned + warm; skip build/load/set, just mark the notification ready).
+ *  - holder empty -> true (nothing pinned yet; warm it).
+ *  - holder holds a DIFFERENT model (a real switch) -> true (build + [set] the new one;
+ *    closing the superseded engine there IS correct).
+ *  - a null/blank held path can never equal a concrete target -> true (defensive).
+ *
+ * [LocalModelService] calls this AFTER resolving the active bundle's path and BEFORE
+ * building the engine, passing `LocalEngineHolder.getOrNull() != null` for
+ * [holderHasEngine] and [LocalEngineHolder.modelPath] for [holderModelPath].
+ */
+fun shouldWarm(
+    holderHasEngine: Boolean,
+    holderModelPath: String?,
+    targetModelPath: String,
+): Boolean = !(holderHasEngine && holderModelPath == targetModelPath)
+
 /** The two engine sources for an on-device turn (see [engineSourceFor]). */
 enum class EngineSource {
     /** Reuse the warm process-held engine ([LocalEngineHolder]) -- matches the active model. */

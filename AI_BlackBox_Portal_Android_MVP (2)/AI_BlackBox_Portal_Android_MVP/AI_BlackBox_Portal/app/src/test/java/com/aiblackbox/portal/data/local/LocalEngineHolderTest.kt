@@ -1,7 +1,9 @@
 package com.aiblackbox.portal.data.local
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -115,5 +117,85 @@ class LocalEngineHolderTest {
         assertNull("no engine held after clear", LocalEngineHolder.getOrNull())
         assertNull("no model path after clear", LocalEngineHolder.modelPath)
         assertNull("no delegate after clear", LocalEngineHolder.delegate)
+    }
+
+    // -- 6. shouldWarm — idempotent FG-service warm (R2-C follow-up) --
+    //
+    // The service's warm fires on every provider toggle / model switch. A redundant
+    // re-warm for the ALREADY-PINNED model must NOT build a new engine, because the
+    // subsequent set() would close the live engine the consumer borrowed
+    // (localEngineFromHolder=true) — re-triggering the ~10-75s cold reload R2-C
+    // prevents and leaking the superseded engine. shouldWarm gates that.
+
+    @Test fun `already pinned same model does not warm again`() {
+        // Holder already holds an engine for the active model -> skip build/load/set,
+        // so the borrowed engine is never closed by a redundant re-warm.
+        assertFalse(
+            "same model already pinned + warm -> no rebuild (don't close the borrowed engine)",
+            shouldWarm(
+                holderHasEngine = true,
+                holderModelPath = activePath,
+                targetModelPath = activePath,
+            ),
+        )
+    }
+
+    @Test fun `empty holder warms`() {
+        // Nothing pinned yet (service first start / OS reclaimed the process) -> warm.
+        assertTrue(
+            "nothing pinned -> warm-load the active model",
+            shouldWarm(
+                holderHasEngine = false,
+                holderModelPath = null,
+                targetModelPath = activePath,
+            ),
+        )
+    }
+
+    @Test fun `empty holder warms even if a stale path lingers`() {
+        // Engine-presence is checked first, so a torn-down holder with a lingering path
+        // still warms (never a phantom "already pinned").
+        assertTrue(
+            shouldWarm(
+                holderHasEngine = false,
+                holderModelPath = activePath,
+                targetModelPath = activePath,
+            ),
+        )
+    }
+
+    @Test fun `different model warms (a real model switch rebuilds)`() {
+        // The held engine is the wrong bundle (user switched models) -> build + set the
+        // new one; closing the superseded engine in set() IS correct here.
+        assertTrue(
+            "held engine is the wrong bundle -> rebuild the active one (close superseded)",
+            shouldWarm(
+                holderHasEngine = true,
+                holderModelPath = otherPath,
+                targetModelPath = activePath,
+            ),
+        )
+    }
+
+    @Test fun `held with null path warms`() {
+        // A null held path can never equal a concrete target -> warm (defensive).
+        assertTrue(
+            shouldWarm(
+                holderHasEngine = true,
+                holderModelPath = null,
+                targetModelPath = activePath,
+            ),
+        )
+    }
+
+    @Test fun `held with blank path warms`() {
+        // A blank held path can never equal a concrete target -> warm (defensive).
+        assertTrue(
+            shouldWarm(
+                holderHasEngine = true,
+                holderModelPath = "",
+                targetModelPath = activePath,
+            ),
+        )
     }
 }

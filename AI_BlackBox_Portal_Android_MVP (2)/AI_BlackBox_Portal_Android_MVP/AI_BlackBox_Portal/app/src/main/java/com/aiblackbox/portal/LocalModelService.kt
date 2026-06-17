@@ -18,6 +18,7 @@ import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LocalEngineHolder
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.SamplerSettings
+import com.aiblackbox.portal.data.local.shouldWarm
 import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,24 @@ class LocalModelService : Service() {
                     return@launch
                 }
                 val (engine, modelPath, delegate) = resolved
+                // IDEMPOTENT WARM: start() fires on every provider toggle / model
+                // switch. If the holder ALREADY holds an engine for this exact bundle,
+                // it is pinned + warm — skip build/load/set entirely. Otherwise the
+                // set() below would close the live engine the consumer borrowed
+                // (localEngineFromHolder=true), forcing the ~10-75s cold reload R2-C
+                // prevents and leaking the superseded engine. We only build + set when
+                // the holder is empty OR holds a DIFFERENT model (a real switch, where
+                // closing the superseded engine in set() is correct).
+                if (!shouldWarm(
+                        holderHasEngine = LocalEngineHolder.getOrNull() != null,
+                        holderModelPath = LocalEngineHolder.modelPath,
+                        targetModelPath = modelPath,
+                    )
+                ) {
+                    updateNotification(buildNotification(TEXT_READY))
+                    Log.d(TAG, "on-device model already pinned for this bundle; warm skipped")
+                    return@launch
+                }
                 withContext(Dispatchers.IO) { engine.load(File(modelPath), delegate) }
                 // Hand the WARM engine to the process holder (service owns it now).
                 LocalEngineHolder.set(engine, modelPath, delegate)
