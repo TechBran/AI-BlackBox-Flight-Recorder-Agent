@@ -86,6 +86,20 @@ Gallery ref: `customtasks/agentchat/*` (native tool-calling, structured
 Root cause being fixed: manual FcLoop feeds tool results as PLAIN TEXT + re-advertises
 tools → small model repeats calls / never sees "done".
 
+**Native-API ground truth (verified — our `docs/litert-lm-kotlin-api-0.13.1.md` + Gallery):**
+`OpenApiTool { getToolDescriptionJsonString(): String; execute(paramsJsonString): String }`;
+register via `ConversationConfig(tools = listOf(tool(openApiTool)), automaticToolCalling = true)`.
+With `automaticToolCalling = true` the ENGINE calls `execute()` and loops until the model
+emits a final answer (clean `onDone`). Our current `openApiToolFor()` has a STUB `execute`
+(we run `automaticToolCalling=false`); the hybrid phone path makes `execute()` actually
+call `PhoneController.dispatch`/`IntentActuator` and return a result JSON string. `execute`
+is SYNC → bridge our suspend dispatch with `runBlocking(Dispatchers.IO)` (Gallery's
+`AgentTools.execute` does exactly this). Tool result shape: `{"status":"succeeded"|"failed",
+"result"/"error":…}`. Gallery's agent system prompt is highly prescriptive ("execute steps
+in exact order, silently, no internal thoughts") — adopt that style for the phone-control
+system prompt (W3.3 done-cue/ordering). The autonomy gate stays INSIDE the actuator (so it
+still fires even when the engine drives the loop).
+
 - **W3.0 SPIKE (design + device experiment, timeboxed):** Confirm litertlm
   `automaticToolCalling = true` with `OpenApiTool.execute` callbacks works on-device:
   register 1-2 phone tools (e.g. `flashlight_on`, `show_map`) as native tools whose
