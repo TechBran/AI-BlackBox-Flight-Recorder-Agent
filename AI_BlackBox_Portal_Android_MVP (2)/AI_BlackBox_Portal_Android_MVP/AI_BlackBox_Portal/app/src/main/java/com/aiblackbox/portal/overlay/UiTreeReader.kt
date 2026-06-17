@@ -124,6 +124,10 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
      * false-negative surface, tracked at the redaction layer.
      */
     fun isPasswordFieldFocused(): Boolean {
+        // FAIL-OPEN: "can't tell" (no tree / nothing focused / query throws below)
+        // returns false so the capture PROCEEDS. Safe ONLY because capture is
+        // user-invoked today; a FUTURE autonomous capture path MUST flip this to
+        // fail-CLOSED (treat "can't tell" as password-present → refuse the capture).
         val root = rootProvider() ?: return false
         return try {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false

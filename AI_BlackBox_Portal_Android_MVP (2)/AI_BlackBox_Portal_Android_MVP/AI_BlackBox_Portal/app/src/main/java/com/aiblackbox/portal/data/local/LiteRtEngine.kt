@@ -118,6 +118,17 @@ class LiteRtEngine(
     @Volatile
     private var loadedModelPath: String? = null
 
+    // Graceful GPU-vision degrade (W4 follow-up — the Important fix). When a
+    // [supportImage] bundle's GPU vision backend fails to initialize on a
+    // GPU-less / limited device, [load] retries ONCE building the engine WITHOUT
+    // a visionBackend (text-only) so the engine ALWAYS loads for text/native —
+    // and sets this flag. [generateWithImage] then gates on it (alongside
+    // [supportImage]) to fail GRACEFULLY ("vision unavailable on this device")
+    // instead of crashing the TEXT turns the single shared engine also serves.
+    // Reset on every (re)load so a model switch / a successful vision init clears it.
+    @Volatile
+    private var visionDegraded: Boolean = false
+
     // Serializes load() so two concurrent first-turns can't both pass the
     // idempotency check-then-act and double-initialize (leaking a native engine)
     // or close-while-building. The ~10s initialize() runs holding this lock, so a
@@ -157,30 +168,71 @@ class LiteRtEngine(
             // given device is unknown and verified separately on-device. The primary
             // (text) backend is ALWAYS [backendFor(delegate)] regardless.
             val visionBackend = visionBackendFor(supportImage)
-            val config = if (visionBackend != null) {
-                EngineConfig(
-                    modelPath = targetPath,
-                    backend = backendFor(delegate),
-                    visionBackend = visionBackend,
-                    cacheDir = cacheDir,
-                    // Explicit context window — the litertlm default (null) is only
-                    // 4096 tokens (device-confirmed: "Input token ids are too long:
-                    // 4292 >= 4096"), too small for the agent's per-turn prompt.
-                    maxNumTokens = maxTokens,
+            // Fresh load: clear any prior degrade flag (a different model / a now-
+            // working GPU should start un-degraded).
+            visionDegraded = false
+            // Happy path: build with the configured (vision) backend and initialize.
+            // If GPU vision init THROWS on a GPU-less/limited device AND a
+            // visionBackend WAS set, retry ONCE WITHOUT it (text-only) so the
+            // engine ALWAYS loads for text/native; mark vision degraded so
+            // generateWithImage fails gracefully instead of crashing text turns.
+            val built = try {
+                buildAndInitialize(targetPath, delegate, visionBackend)
+            } catch (e: Throwable) {
+                if (!shouldRetryWithoutVision(supportImage, visionBackend != null)) {
+                    // Text-only path (no visionBackend was set): a genuine init
+                    // failure has nothing to retry — rethrow (caller surfaces it).
+                    throw e
+                }
+                // Log the degrade with the throwable CLASS NAME only (never a
+                // message — it could carry device/path detail); then retry text-only.
+                android.util.Log.w(
+                    TAG,
+                    "GPU vision init failed (${e.javaClass.simpleName}); " +
+                        "degrading to text-only — generateWithImage will report vision unavailable",
                 )
-            } else {
-                EngineConfig(
-                    modelPath = targetPath,
-                    backend = backendFor(delegate),
-                    cacheDir = cacheDir,
-                    maxNumTokens = maxTokens,
-                )
+                visionDegraded = true
+                buildAndInitialize(targetPath, delegate, visionBackend = null)
             }
-            val built = Engine(config)
-            built.initialize() // ~10s; we're on Dispatchers.IO.
             engine = built
             loadedModelPath = targetPath
         }
+    }
+
+    /**
+     * Build an [EngineConfig] for [targetPath] on [delegate] — with [visionBackend]
+     * when non-null (the [supportImage] path) or text-only when null — then
+     * construct + `initialize()` the [Engine] (~10s; called on Dispatchers.IO).
+     * Factored so [load] can call it TWICE: once with the configured vision
+     * backend, and (on a GPU-vision init failure) once more without it.
+     */
+    private fun buildAndInitialize(
+        targetPath: String,
+        delegate: String,
+        visionBackend: Backend?,
+    ): Engine {
+        val config = if (visionBackend != null) {
+            EngineConfig(
+                modelPath = targetPath,
+                backend = backendFor(delegate),
+                visionBackend = visionBackend,
+                cacheDir = cacheDir,
+                // Explicit context window — the litertlm default (null) is only
+                // 4096 tokens (device-confirmed: "Input token ids are too long:
+                // 4292 >= 4096"), too small for the agent's per-turn prompt.
+                maxNumTokens = maxTokens,
+            )
+        } else {
+            EngineConfig(
+                modelPath = targetPath,
+                backend = backendFor(delegate),
+                cacheDir = cacheDir,
+                maxNumTokens = maxTokens,
+            )
+        }
+        val built = Engine(config)
+        built.initialize() // ~10s; we're on Dispatchers.IO.
+        return built
     }
 
     /** True once a model is loaded and the native engine is initialized. */
@@ -275,6 +327,13 @@ class LiteRtEngine(
         }
         check(supportImage) {
             "LiteRtEngine.generateWithImage requires a vision-capable model (supportImage=true); this bundle is text-only."
+        }
+        // Graceful GPU-vision degrade (W4 follow-up): the engine loaded text-only
+        // because GPU vision init failed on this device. Fail with a CLEAR message
+        // rather than attempting a vision turn the engine can't serve (the text
+        // path still works — the caller surfaces this as "vision unavailable").
+        check(!visionDegraded) {
+            "LiteRtEngine.generateWithImage: vision is unavailable on this device (GPU vision init failed; the engine is running text-only)."
         }
         check(images.isNotEmpty()) {
             "LiteRtEngine.generateWithImage requires at least one image; use generate() for a text-only turn."
@@ -459,6 +518,9 @@ class LiteRtEngine(
     }
 
     companion object {
+        /** Log tag (class name only — never logs prompts/results/secrets). */
+        private const val TAG = "LiteRtEngine"
+
         /**
          * Context window (input+output tokens) the engine is configured for.
          *
@@ -579,6 +641,25 @@ fun resolveSampler(
  * JVM; see the Mappers header). The thin litertlm-typed adapter is [visionBackendFor].
  */
 fun visionEnabled(supportImage: Boolean): Boolean = supportImage
+
+/**
+ * The graceful GPU-vision degrade DECISION (W4 follow-up — the Important fix):
+ * after the engine's first [com.google.ai.edge.litertlm.Engine.initialize] THROWS,
+ * should [LiteRtEngine.load] retry ONCE building the engine WITHOUT a
+ * `visionBackend` (text-only)? Yes IFF this is a vision bundle ([supportImage])
+ * AND a `visionBackend` was actually set on the failed config ([visionWasSet]) —
+ * i.e. the failure could plausibly be the GPU vision backend on a GPU-less /
+ * limited device, and there is a text-only fallback to fall back TO. A text-only
+ * bundle (no visionBackend) has nothing to retry, so its init failure is real.
+ *
+ * The result: a vision-capable model on a device whose GPU can't init vision
+ * still loads for TEXT/native (it just can't do image turns) instead of the
+ * whole engine — and thus every text turn — failing. PURE (primitives only) so
+ * the retry decision is JVM-unit-testable under JDK 17 (the initialize/retry
+ * itself is framework/device-verified; see the Mappers header).
+ */
+fun shouldRetryWithoutVision(supportImage: Boolean, visionWasSet: Boolean): Boolean =
+    supportImage && visionWasSet
 
 /**
  * Order a multimodal turn's [Content]s with the IMAGES FIRST, then the TEXT —

@@ -718,6 +718,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * unit-testable without the AndroidViewModel; this method is the wiring shim.
      */
     private fun sendViaLocalEngine(text: String) {
+        // VISION TRIGGER (W4 follow-up, v1): if the user is asking the model to LOOK
+        // AT THE SCREEN, route to the direct multimodal vision path instead of the
+        // normal text/agent turn. Conservative so it never hijacks a normal message
+        // (see [isLookAtScreenRequest]). lookAtScreen owns its own streamJob
+        // cancel + launch, so we return here without touching streamJob ourselves.
+        if (isLookAtScreenRequest(text)) {
+            lookAtScreen(text)
+            return
+        }
         // SINGLE job per send: cancel any prior in-flight turn, then run resolution
         // + (placeholder | engine turn) inside ONE viewModelScope.launch so
         // streamJob always points at the actual running turn (cancelStream/clear can
@@ -2286,6 +2295,55 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * cover the placeholder path too) is unit-testable without the ViewModel.
          */
         fun shouldBlockSend(state: ChatState): Boolean = state == ChatState.STREAMING
+
+        /**
+         * The v1 VISION TRIGGER (W4 follow-up): does this on-device message ask the
+         * model to LOOK AT THE SCREEN? When true, [sendViaLocalEngine] routes the
+         * turn to [lookAtScreen] (capture a frame + multimodal turn) instead of the
+         * normal text/agent turn — making the built-but-unreachable vision path
+         * actually usable on-device. (A dedicated UI affordance and an autonomous
+         * mid-loop "the model decides to look" path are FUTURE enhancements; this
+         * conservative phrase match is the v1 trigger.)
+         *
+         * Deliberately CONSERVATIVE so it never hijacks a normal message: it matches
+         * only explicit screen-looking intents ("look at my screen", "what's on my
+         * screen", "what do you see", "read the screen for me", "describe my
+         * screen", "can you see my screen"…), case-insensitively, and requires the
+         * phrase to actually reference the SCREEN (or a direct "what do you see")
+         * rather than firing on the word "screen" alone (e.g. "my screen is
+         * cracked" must NOT trigger a capture). Pure so it is unit-testable without
+         * the ViewModel.
+         */
+        fun isLookAtScreenRequest(text: String): Boolean {
+            val t = text.lowercase().trim()
+            if (t.isEmpty()) return false
+            // "what do you see" / "what can you see" — a direct ask to look, even
+            // without the word screen (the user is pointing the model at the display).
+            if (t.contains("what do you see") || t.contains("what can you see")) return true
+            // Everything else must reference the screen to qualify.
+            if (!t.contains("screen")) return false
+            // Explicit screen-looking verbs paired with "screen". Kept tight so a
+            // statement like "my screen is cracked" / "share my screen" doesn't fire.
+            val screenLookPhrases = listOf(
+                "look at my screen",
+                "look at the screen",
+                "look at this screen",
+                "see my screen",
+                "see the screen",
+                "what's on my screen",
+                "what is on my screen",
+                "what's on the screen",
+                "what is on the screen",
+                "read my screen",
+                "read the screen",
+                "describe my screen",
+                "describe the screen",
+                "check my screen",
+                "check the screen",
+                "view my screen",
+            )
+            return screenLookPhrases.any { t.contains(it) }
+        }
 
         /**
          * The terminal [ChatState] a finished local turn leaves behind, given the

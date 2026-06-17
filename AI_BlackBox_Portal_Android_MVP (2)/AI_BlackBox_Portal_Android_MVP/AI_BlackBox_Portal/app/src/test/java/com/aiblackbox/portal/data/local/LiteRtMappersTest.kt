@@ -308,4 +308,47 @@ class LiteRtMappersTest {
         // pure orderer is well-defined for the empty case (text only).
         assertEquals(listOf("only-text"), orderVisionContents(emptyList<String>(), "only-text"))
     }
+
+    // -------------------------------------------------------------------------
+    // Graceful GPU-vision degrade (W4 follow-up) — shouldRetryWithoutVision is the
+    // PURE decision LiteRtEngine.load() consults when the engine's first
+    // initialize() throws: retry ONCE text-only IFF this was a vision bundle whose
+    // visionBackend was set (so the GPU vision backend could be the culprit and a
+    // text-only fallback exists). The initialize()/retry itself is device-verified.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `shouldRetryWithoutVision retries only for a vision bundle whose vision backend was set`() {
+        // The ONLY true case: a supportImage bundle that DID set a visionBackend.
+        // GPU vision init could be the failure → retry text-only so text still loads.
+        assertTrue(
+            "vision bundle + visionBackend set -> retry text-only",
+            shouldRetryWithoutVision(supportImage = true, visionWasSet = true),
+        )
+    }
+
+    @Test
+    fun `shouldRetryWithoutVision does not retry a text-only bundle (no vision to drop)`() {
+        // Text-only bundle: no visionBackend was ever set, so an init failure is a
+        // genuine failure with nothing to retry — the caller rethrows.
+        assertFalse(
+            "text-only bundle, no visionBackend -> no retry",
+            shouldRetryWithoutVision(supportImage = false, visionWasSet = false),
+        )
+    }
+
+    @Test
+    fun `shouldRetryWithoutVision does not retry when no vision backend was set even for a vision bundle`() {
+        // Defensive: a vision bundle that somehow did NOT set a visionBackend has
+        // no GPU-vision backend to blame and nothing to fall back FROM → no retry.
+        assertFalse(
+            "supportImage but visionBackend not set -> no retry",
+            shouldRetryWithoutVision(supportImage = true, visionWasSet = false),
+        )
+        // And a non-vision bundle that (impossibly) had a backend set is still no.
+        assertFalse(
+            "not a vision bundle -> no retry regardless",
+            shouldRetryWithoutVision(supportImage = false, visionWasSet = true),
+        )
+    }
 }
