@@ -97,6 +97,16 @@ fun Composer(
     autoTtsEnabled: Boolean = false,
     onAutoTtsToggle: () -> Unit = {},
     providerLabel: String = "",
+    // Task 1.6: gate the on-device LOCAL provider — only offer it when the
+    // operator has a disk-present, sha-verified model installed.
+    localAvailable: Boolean = false,
+    // Task W1: on-device engine readiness — drives the "loading…/ready" suffix on
+    // the provider pill while the model warms (so the cold load is visible, not a
+    // surprise on first send). Only affects the pill when the LOCAL provider is active.
+    localEngineState: LocalEngineState = LocalEngineState.IDLE,
+    // Fired when the provider dropdown opens — host re-checks local availability
+    // (and fires a best-effort re-attest) so a just-installed model shows up.
+    onProviderMenuOpen: () -> Unit = {},
     liveModels: List<Pair<String, String>> = emptyList(),
     attachments: List<AttachmentItem> = emptyList(),
     onRemoveAttachment: (Int) -> Unit = {},
@@ -286,9 +296,11 @@ fun Composer(
                 // Provider dropdown
                 Box {
                     Text(
-                        text = ChatProvider.fromId(provider).displayName,
+                        // Task W1: append a readiness suffix for the on-device pill
+                        // (loading…/ready/⚠) so the model warm is visible.
+                        text = providerPillLabel(provider, localEngineState),
                         modifier = Modifier
-                            .clickable { showProviderMenu = true }
+                            .clickable { onProviderMenuOpen(); showProviderMenu = true }
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontWeight = FontWeight.Medium,
@@ -300,7 +312,10 @@ fun Composer(
                         expanded = showProviderMenu,
                         onDismissRequest = { showProviderMenu = false }
                     ) {
-                        ChatProvider.entries.forEach { p ->
+                        // Task 1.6: hide LOCAL unless a verified on-device model is installed.
+                        ChatProvider.entries
+                            .filter { !it.isLocal || localAvailable }
+                            .forEach { p ->
                             DropdownMenuItem(
                                 text = {
                                     Text(
@@ -397,4 +412,29 @@ fun Composer(
             }
         }
     }
+}
+
+/**
+ * The provider pill's label text (Task W1). For every provider it is the plain
+ * [ChatProvider.displayName]; for the ON-DEVICE (LOCAL) provider it appends a
+ * readiness suffix reflecting [LocalEngineState] so the model warm is visible:
+ *  - [LocalEngineState.WARMING] -> " \u00b7 loading\u2026"
+ *  - [LocalEngineState.READY]   -> " \u00b7 ready"
+ *  - [LocalEngineState.ERROR]   -> " \u00b7 \u26a0" (load failed; the send still
+ *    retries the lazy load, so this is informational)
+ *  - [LocalEngineState.IDLE]    -> no suffix (not warmed / not the active provider)
+ *
+ * Non-local providers ignore the engine state entirely. Pure (no Compose) so the
+ * mapping is unit-testable.
+ */
+internal fun providerPillLabel(providerId: String, localEngineState: LocalEngineState): String {
+    val base = ChatProvider.fromId(providerId).displayName
+    if (!ChatProvider.fromId(providerId).isLocal) return base
+    val suffix = when (localEngineState) {
+        LocalEngineState.WARMING -> " \u00b7 loading\u2026"
+        LocalEngineState.READY -> " \u00b7 ready"
+        LocalEngineState.ERROR -> " \u00b7 \u26a0"
+        LocalEngineState.IDLE -> ""
+    }
+    return base + suffix
 }

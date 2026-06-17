@@ -7,29 +7,64 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.SSEEvent
+import com.aiblackbox.portal.data.local.FcLoop
+import com.aiblackbox.portal.LocalModelService
+import com.aiblackbox.portal.data.local.LiteRtEngine
+import com.aiblackbox.portal.data.local.LlmEvent
+import com.aiblackbox.portal.data.local.EngineSource
+import com.aiblackbox.portal.data.local.LocalEngineHolder
+import com.aiblackbox.portal.data.local.engineSourceFor
+import com.aiblackbox.portal.data.local.LocalLlm
+import com.aiblackbox.portal.data.local.LocalModelManager
+import com.aiblackbox.portal.data.local.LocalSnapshotQueue
+import com.aiblackbox.portal.data.local.NativeTool
+import com.aiblackbox.portal.data.local.NativeToolCallingLlm
+import com.aiblackbox.portal.data.local.PersonaCache
+import com.aiblackbox.portal.data.local.PhoneController
+import com.aiblackbox.portal.data.local.ResidentTools
+import com.aiblackbox.portal.data.local.SamplerSettings
+import com.aiblackbox.portal.data.local.ToolBridge
+import com.aiblackbox.portal.data.local.ToolBridgeClient
+import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.data.local.VisionLlm
+import com.aiblackbox.portal.data.local.formatCloudToolMatches
+import com.aiblackbox.portal.data.local.toResultJsonString
+import com.aiblackbox.portal.overlay.AndroidPhoneController
+import com.aiblackbox.portal.overlay.OverlayConfirmUi
+import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.model.TokenCount
+import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.ChatHistoryStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -56,7 +91,75 @@ private const val TAG = "ChatVM"
 
 enum class ChatState { IDLE, STREAMING, THINKING, ERROR }
 
+/**
+ * Which delivery path [ChatViewModel.sendMessage] routes a turn to, selected by
+ * [ChatViewModel.routeFor] from the provider's traits. Extracted so the routing
+ * decision is unit-testable without instantiating the AndroidViewModel.
+ *
+ * - [AGENT]: forward to the agent screen (Claude Code / Gemini CLI WebSocket).
+ * - [VOICE]: handled by the Voice screen, not chat.
+ * - [ER_INJECT]: inject into a running robotics ER mission.
+ * - [LOCAL_PLACEHOLDER]: on-device (Gemma) — safe placeholder until the Phase 2
+ *   on-device engine lands; deliberately NOT the SSE path.
+ * - [SSE]: cloud streaming via /chat SSE (the default).
+ */
+enum class ChatRoute { AGENT, VOICE, ER_INJECT, LOCAL_PLACEHOLDER, SSE }
+
+/**
+ * Readiness of the on-device (`local`) engine, surfaced to the UI so the provider
+ * pill can show a "loading…/ready" affordance instead of the user discovering the
+ * ~10-75s cold model load only on their first send (Task W1 — warm-while-app-open).
+ *
+ * - [IDLE]: no local engine warm has started (no model installed, or the local
+ *   provider is not the active one — we don't load a multi-GB model for a
+ *   cloud-only session).
+ * - [WARMING]: a preload is in flight ([ChatViewModel.preloadLocalEngine] is
+ *   running `engine.load(...)` off the main thread).
+ * - [READY]: the engine is loaded and the first send will be instant.
+ * - [ERROR]: the warm failed (the lazy fallback in [ChatViewModel.runLocalEngineTurn]
+ *   will retry on the next send — load() is idempotent — so this is informational,
+ *   not terminal).
+ *
+ * The transition logic lives in the pure [ChatViewModel.localEngineStateAfter] /
+ * [ChatViewModel.shouldStartWarm] so it is unit-testable without the ViewModel.
+ */
+enum class LocalEngineState { IDLE, WARMING, READY, ERROR }
+
+/**
+ * The events that drive the [LocalEngineState] machine (see
+ * [ChatViewModel.localEngineStateAfter]). Pure data so the transition table is
+ * exercised in a plain JVM unit test.
+ */
+enum class LocalEngineEvent { WARM_STARTED, WARM_SUCCEEDED, WARM_FAILED }
+
+/**
+ * What to do when the active on-device model SELECTION changes (Task W5):
+ *  - [NONE]   no-op (unchanged, not local, or the first replayed emission).
+ *  - [NOW]    invalidate the cached engine + re-warm the new bundle immediately.
+ *  - [DEFER]  a turn is in flight -> apply at turn completion (I1: never close()
+ *             the native engine mid-generation).
+ * Decided by the pure [ChatViewModel.localReWarmAction].
+ */
+enum class LocalReWarmAction { NONE, NOW, DEFER }
+
 private const val MAX_CHAT_MESSAGES = 100
+
+/**
+ * How many prior conversation turns to feed into the ON-DEVICE model's prompt.
+ *
+ * BlackBox architecture: the immutable snapshot ledger is the memory — NOT a
+ * growing in-prompt transcript. Inter-turn recall will come from snapshot
+ * semantic-search (the next stage); the on-device model only needs INTRA-turn
+ * context, so each turn starts FRESH. `0` = no carried history.
+ *
+ * This keeps every on-device prompt bounded regardless of session length, and was
+ * the fix for the 4096-token overrun caused by accumulating the whole transcript
+ * each turn (device-confirmed: `Input token ids are too long: 4292 >= 4096`). A
+ * small sliding window can be re-enabled here later (e.g. for immediate "it"
+ * follow-ups) without touching [FcLoop]. Only the on-device path uses this; the
+ * cloud SSE path is unaffected (the server owns its own context budget).
+ */
+private const val LOCAL_HISTORY_WINDOW_TURNS = 0
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -64,10 +167,98 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private val historyStore = ChatHistoryStore(application)
 
+    // Locally-persisted device autonomy posture (Task 4.6). The Task 1.5 toggle
+    // writes it; the on-device phone-control gate reads it here. load() returns
+    // PERMISSION (the SAFE, gating default) when unset/unreadable, so the agent
+    // never silently runs in YOLO.
+    private val autonomyStore by lazy {
+        com.aiblackbox.portal.data.local.AutonomyStore.fromContext(appContext)
+    }
+
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
     private var historyLoaded = false
+
+    // ── On-device (local) provider gating (Task 1.6) ──
+    // Built once the api is ready (initialize); gates LOCAL in the picker on a
+    // disk-present, sha-verified model and fires a best-effort re-attest on open.
+    private var providerPicker: ProviderPickerViewModel? = null
+
+    // ── On-device (local) engine seam (Task 2.4) ──
+    // The on-device generation engine, injected as a lazy provider so tests can
+    // supply a FakeLocalLlm. NULL until an installed on-device model is found —
+    // then it is lazily wired (Task 2.6a) to the SINGLETON [localEngine]
+    // (initialize() is ~10s, so the engine is built once and reused across turns).
+    // With no model installed it stays null and sendViaLocalEngine() falls back to
+    // the 1.6 placeholder. Settable so a host/builder (or a test) can wire a fake.
+    @VisibleForTesting
+    var localLlmProvider: (() -> LocalLlm)? = null
+
+    // The concrete on-device engine singleton (Task 2.6a). Built once the first
+    // time a local turn runs with an installed model present (see
+    // [localProviderOrWire]); reused across turns (its load() is idempotent — the
+    // ~10s initialize() happens once). Closed in [onCleared]. Held here (not just
+    // captured by the provider lambda) so onCleared can release the native engine.
+    private var localEngine: LiteRtEngine? = null
+
+    // The installed bundle file the [localEngine] runs, and its delegate. Resolved
+    // from [LocalModelManager.installedModels] when the engine is wired.
+    private var localEngineModelFile: java.io.File? = null
+    private var localEngineDelegate: String = "cpu"
+
+    // R2-C: true when [localEngine] is the PROCESS-held warm engine borrowed
+    // from [LocalEngineHolder] (owned by [LocalModelService]), false when it is a
+    // VM-built fallback this ViewModel owns. onCleared / invalidateLocalEngine
+    // must close ONLY a VM-built engine -- closing the service-owned warm engine
+    // would break the next turn / the model-as-a-tool path. Defaults false
+    // (the pre-R2-C fallback owns its engine).
+    private var localEngineFromHolder: Boolean = false
+
+    // The slug of the active on-device model the user picked in the Model Manager
+    // (Task W5), persisted under "model_local". [localProviderOrWire] prefers the
+    // INSTALLED bundle whose slug matches this, so picking a different installed
+    // model among several actually changes which one is warmed/used. Null/blank ->
+    // fall back to the alphabetically-first installed bundle (the prior behavior).
+    @Volatile
+    private var currentLocalModelSlug: String = ""
+
+    // I1 (W5 review): a model-selection change that arrives WHILE a local turn is
+    // streaming must NOT close the live native engine mid-generation (close() is
+    // not serialized against generate() -> native teardown race). When that
+    // happens we set this flag and defer the invalidate+re-warm until the turn
+    // completes ([processPendingLocalReWarm]).
+    @Volatile
+    private var pendingLocalReWarm: Boolean = false
+
+    // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
+    // Built lazily off the application context the first time a local turn runs
+    // (needs the api, which is set in initialize()); cached thereafter.
+    private var personaCache: PersonaCache? = null
+
+    // The two-hop on-device tool bridge (Task 3.1/3.3) — the dependency
+    // FcLoop.runAgent needs to discover + execute BlackBox tools. Built lazily off
+    // this VM's api (mirroring personaCacheOrBuild); cached. Settable so a test can
+    // wire a fake. NULL until the api is set, in which case the local path stays on
+    // the text-only runTurn (no agent loop without a bridge).
+    @VisibleForTesting
+    var toolBridge: ToolBridge? = null
+
+    // ── On-device screen-capture seam (Task W4.2 — vision) ──
+    // The single-frame screen capture used by the direct "look at my screen" path
+    // ([lookAtScreen]). Production reuses the running overlay's MediaProjection +
+    // the live accessibility tree's password gate ([OverlayScreenCapture]); built
+    // lazily on first use. Settable so a test can inject a fake (no Service / no
+    // projection needed). Captured frames are EPHEMERAL — never persisted.
+    @VisibleForTesting
+    var screenCapture: com.aiblackbox.portal.overlay.ScreenCapture? = null
+
+    // The offline-resilient memory write-back queue (Task 2.5). persistLocalSave
+    // routes completed on-device turns through this instead of a bare
+    // saveConversation, so a turn finished without the mesh is queued on disk and
+    // flushed (in FIFO order) when connectivity returns. Built lazily off the
+    // application context + repository (both ready after initialize()); cached.
+    private var snapshotQueue: LocalSnapshotQueue? = null
 
     // ── UI State ──
     private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
@@ -116,6 +307,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ── Dynamic model list (fetched from /models/{provider}) ──
     private val _liveModels = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val liveModels: StateFlow<List<Pair<String, String>>> = _liveModels.asStateFlow()
+
+    // ── On-device (local) provider availability (Task 1.6) ──
+    // True when the current operator has a disk-present, sha-verified on-device
+    // model → the picker offers the LOCAL provider. Default false until loaded.
+    private val _localAvailable = MutableStateFlow(false)
+    val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
+
+    // ── On-device (local) engine readiness (Task W1) ──
+    // Mirrors the warm-while-app-open preload so the provider pill can show
+    // "loading…/ready". IDLE until a warm starts (we only warm when the local
+    // provider is the active one — see [preloadLocalEngine]); the lazy load in
+    // [runLocalEngineTurn] remains the fallback if the user sends before READY.
+    private val _localEngineState = MutableStateFlow(LocalEngineState.IDLE)
+    val localEngineState: StateFlow<LocalEngineState> = _localEngineState.asStateFlow()
+
+    // True while a [preloadLocalEngine] warm is in flight, so a duplicate trigger
+    // (e.g. re-selecting the local provider) does not launch a second concurrent
+    // warm. Paired with the model path so a DIFFERENT model can still re-warm.
+    @Volatile
+    private var warmingModelPath: String? = null
 
     // ── CU model backends (id → "anthropic" | "google" | "openai") ──
     // Populated only when fetching /models/computer-use (CU production pass
@@ -199,9 +410,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 store.provider.collect {
                     currentProvider = it
                     fetchLiveModels(it)
+                    // Task W1: warm-while-app-open. The moment the local provider
+                    // becomes (or is restored as) the active one, proactively load
+                    // the on-device model so the first send is instant. No-op for
+                    // every other provider, and idempotent if already WARMING/READY
+                    // (see [preloadLocalEngine]). This also covers app open, because
+                    // the persisted provider replays through this collector on init.
+                    preloadLocalEngine()
                 }
             }
             launch { store.model.collect { currentModel = it } }
+            // Task W5: track the active on-device model selection. When the user
+            // picks a different installed model via the Model Manager ("Use"), the
+            // chosen slug is persisted under "model_local"; honor it so
+            // [localProviderOrWire] warms/uses THAT model, and re-warm if the
+            // selection changes while the local provider is the active one.
+            launch {
+                store.getString("model_local").collect { slug ->
+                    val previous = currentLocalModelSlug
+                    currentLocalModelSlug = slug
+                    // Thin shim over the PURE [localReWarmAction] decision (M1
+                    // first-emission no-op + I1 mid-stream defer), so the branching
+                    // is unit-tested without the ViewModel.
+                    when (
+                        localReWarmAction(
+                            previousSlug = previous,
+                            newSlug = slug,
+                            isLocalProvider = ChatProvider.fromId(currentProvider).isLocal,
+                            turnInFlight = isLocalTurnInFlight(),
+                        )
+                    ) {
+                        LocalReWarmAction.NOW -> {
+                            invalidateLocalEngine()
+                            preloadLocalEngine()
+                        }
+                        // I1: tearing down now would close() the native runtime
+                        // mid-generation -> apply at turn completion instead.
+                        LocalReWarmAction.DEFER -> pendingLocalReWarm = true
+                        LocalReWarmAction.NONE -> Unit
+                    }
+                }
+            }
         }
     }
 
@@ -331,7 +580,71 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Initialized for $origin")
             startHealthLoop()
             startTaskDiscoveryLoop()
+
+            // Build the on-device provider gating (Task 1.6) now the api is ready.
+            // Disk reads run off the main thread (Dispatchers.IO).
+            val picker = ProviderPickerViewModel.fromContext(
+                context = appContext,
+                api = api!!,
+                operatorProvider = { currentOperator },
+                ioDispatcher = Dispatchers.IO,
+            )
+            providerPicker = picker
+            viewModelScope.launch {
+                picker.localAvailable.collect { _localAvailable.value = it }
+            }
+            refreshLocalAvailability()
+
+            // App-open flush (Task 2.5): drain any on-device turns queued offline
+            // in a prior session now that the hub origin is set. Best-effort,
+            // fire-and-forget; a still-offline flush leaves the items for later.
+            snapshotQueueOrBuild()?.let { queue ->
+                viewModelScope.launch {
+                    try {
+                        queue.flush()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "local snapshot app-open flush failed (non-critical): ${e.message}")
+                    }
+                }
+            }
+
+            // Task W1: app-open warm. If the persisted/active provider is already
+            // LOCAL, the provider collector may have fired in init BEFORE the api
+            // was ready (so localProviderOrWire() returned null → IDLE). Now the api
+            // is wired, kick the warm again; it no-ops for non-local providers and
+            // is idempotent when already WARMING/READY.
+            preloadLocalEngine()
         }
+    }
+
+    /**
+     * Recompute on-device (LOCAL) provider availability and fire the best-effort
+     * re-attest. Call when the picker opens so the gate reflects a just-installed
+     * (or just-deleted) model and the BlackBox's binding record stays current.
+     * Safe to call before [initialize] (no-op until the picker exists).
+     */
+    fun refreshLocalAvailability() {
+        providerPicker?.refresh()
+    }
+
+    override fun onCleared() {
+        // Cancel the picker's own CoroutineScope (separate from viewModelScope,
+        // which the framework cancels automatically) so it doesn't leak.
+        providerPicker?.dispose()
+        // Release the on-device engine's native runtime (Task 2.6a). Safe even if
+        // never loaded; close() is idempotent. Guarded so a native-layer throw on
+        // teardown can't crash the VM disposal.
+        //
+        // R2-C: close ONLY a VM-OWNED engine. When [localEngineFromHolder] the
+        // engine is the PROCESS-held warm engine owned by [LocalModelService];
+        // closing it here would tear down the native runtime the service is
+        // keeping resident (and break the next turn / the model-as-a-tool path).
+        // The service releases it on its own stop/destroy via the holder.
+        if (!localEngineFromHolder) {
+            runCatching { localEngine?.close() }
+        }
+        localEngine = null
+        super.onCleared()
     }
 
     private fun startHealthLoop() {
@@ -419,31 +732,752 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val provider = ChatProvider.fromId(currentProvider)
 
-        // Route by provider type (matches Portal sendChatMessage branching)
-        when {
-            provider.isAgent -> {
+        // Route by provider type (matches Portal sendChatMessage branching).
+        // The branch SELECTION is factored into routeFor() so it unit-tests
+        // without instantiating this AndroidViewModel.
+        when (routeFor(provider, _erMissionActive.value)) {
+            ChatRoute.AGENT -> {
                 // Forward to AgentChatScreen via shared event
                 _agentPromptEvent.tryEmit(text)
                 _inputText.value = TextFieldValue()
-                return
             }
-            provider.isVoice -> {
+            ChatRoute.VOICE -> {
                 // Voice providers handled by VoiceScreen, not chat
                 Log.w(TAG, "Voice provider $currentProvider — use Voice screen")
-                return
             }
-            // Robotics: if mission is running, inject prompt instead of starting new stream
+            // Robotics: mission running → inject prompt instead of new stream
             // Matches Portal chat-send.js window.__erMissionActive check
-            provider.isRobotics && _erMissionActive.value -> {
-                injectErPrompt(text)
-                return
+            ChatRoute.ER_INJECT -> injectErPrompt(text)
+            // On-device (Gemma): run the turn on-device via the local engine.
+            // Must NOT fall through to SSE (which would POST provider=local to the
+            // cloud and error). With no engine wired yet (production default until
+            // Task 2.6), sendViaLocalEngine() falls back to the 1.6 placeholder.
+            // No cloud network call on this path either way.
+            ChatRoute.LOCAL_PLACEHOLDER -> {
+                // Block duplicate sends BEFORE routing — guards BOTH the engine
+                // path and the placeholder fallback (mirrors the SSE arm).
+                if (shouldBlockSend(_chatState.value)) return
+                sendViaLocalEngine(text)
             }
-            else -> {
+            ChatRoute.SSE -> {
                 // Block duplicate sends for non-robotics streaming (robotics handled above)
-                if (_chatState.value == ChatState.STREAMING) return
+                if (shouldBlockSend(_chatState.value)) return
                 sendViaSSE(text, imageUrls, repo)
             }
         }
+    }
+
+    /**
+     * Run a turn on the on-device (`local`) engine — the Phase 2 replacement for
+     * [sendViaLocalPlaceholder]. NEVER touches the cloud SSE path.
+     *
+     * Engine seam: [localLlmProvider] is NULL in production (the concrete
+     * LiteRtEngine is Task 2.6), so with no engine wired we fall straight back to
+     * the unchanged 1.6 [sendViaLocalPlaceholder]. With an engine present we:
+     *   1. append the user message + a STREAMING assistant placeholder (the SAME
+     *      shape the SSE path uses), so the UI shows the identical streaming
+     *      affordance;
+     *   2. snapshot the conversation-so-far into [FcLoop.Turn]s, EXCLUDING the
+     *      just-appended user turn (it is passed as `text`) and the in-flight
+     *      assistant placeholder;
+     *   3. on [viewModelScope] fetch the persona on [Dispatchers.IO], run
+     *      [FcLoop.runTurn] with its generation moved to IO via `.flowOn`, and
+     *      stream the deltas into the SAME sink the SSE path uses
+     *      ([updateLastMessage]) on the VM (Main) collector — exactly mirroring
+     *      [sendViaSSE], which never mutates UI state from an IO thread;
+     *   4. on completion mark streaming done and persist the turn via the existing
+     *      save path ([saveConversation], tagged provider=local); on fault set
+     *      [ChatState.ERROR] (parity with the SSE error path). The OFFLINE QUEUE
+     *      is Task 2.5 — a direct save is used now, structured so 2.5 can swap the
+     *      queue in at the [ChatViewModel.streamLocalTurn] save sink.
+     *
+     * The streaming + error handling lives in the pure [streamLocalTurn] so it is
+     * unit-testable without the AndroidViewModel; this method is the wiring shim.
+     */
+    private fun sendViaLocalEngine(text: String) {
+        // VISION TRIGGER (W4 follow-up, v1): if the user is asking the model to LOOK
+        // AT THE SCREEN, route to the direct multimodal vision path instead of the
+        // normal text/agent turn. Conservative so it never hijacks a normal message
+        // (see [isLookAtScreenRequest]). lookAtScreen owns its own streamJob
+        // cancel + launch, so we return here without touching streamJob ourselves.
+        if (isLookAtScreenRequest(text)) {
+            lookAtScreen(text)
+            return
+        }
+        // SINGLE job per send: cancel any prior in-flight turn, then run resolution
+        // + (placeholder | engine turn) inside ONE viewModelScope.launch so
+        // streamJob always points at the actual running turn (cancelStream/clear can
+        // reliably cancel it) and two sends can't run concurrent generations racing
+        // on _messages. (The LOCAL_PLACEHOLDER double-send guard in sendMessage
+        // blocks the common case; this cancel covers the non-STREAMING windows.)
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch {
+            // Resolve the provider: an already-wired one (test fake or a
+            // previously-wired production engine) is returned as-is; otherwise wire
+            // the production LiteRtEngine from an INSTALLED model (suspend disk read).
+            val provider = localProviderOrWire()
+            if (provider == null) {
+                // No installed model (or api not ready) → 1.6 placeholder, unchanged.
+                sendViaLocalPlaceholder(text)
+                return@launch
+            }
+            runLocalEngineTurn(text, provider)
+        }
+    }
+
+    /**
+     * Run one on-device turn through an already-resolved [provider]. A SUSPEND
+     * function (NOT a launcher): it runs INSIDE the single [streamJob] coroutine
+     * owned by [sendViaLocalEngine], so there is exactly one job per send (no nested
+     * sibling launch, no orphaned/uncancellable job). For the production
+     * [LiteRtEngine] this also LOADS the engine (idempotent ~10s on the first turn,
+     * instant after) on [Dispatchers.IO] before streaming.
+     */
+    private suspend fun runLocalEngineTurn(text: String, provider: () -> LocalLlm) {
+        // The double-send guard is hoisted to sendMessage's LOCAL_PLACEHOLDER arm
+        // (mirrors the SSE arm), so this path is already guarded by the time we get here.
+
+        // 1. Append the user message + a streaming assistant placeholder, exactly
+        //    like sendViaSSE — same UiMessage shape, same _messages flow.
+        val userMsg = UiMessage(
+            role = "user",
+            content = text,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        val assistantMsg = UiMessage(
+            role = "assistant",
+            content = "",
+            isStreaming = true,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
+        _inputText.value = TextFieldValue()
+
+        // 2. History for the prompt. BlackBox architecture: the ledger is the
+        //    memory, so we DON'T carry the inter-turn transcript into the on-device
+        //    prompt — we window it to the last [LOCAL_HISTORY_WINDOW_TURNS] turns
+        //    (0 = fresh each turn). This keeps the per-turn prompt bounded (the
+        //    accumulated transcript previously overran the engine's token window).
+        //    The full visible conversation still lives in _messages (UI) and is
+        //    minted to the ledger; recall will come from snapshot search later.
+        val history = toFcHistory(_messages.value).takeLast(LOCAL_HISTORY_WINDOW_TURNS)
+
+        _chatState.value = ChatState.STREAMING
+        startBackgroundService("Generating on-device response...")
+
+        val op = currentOperator
+        val model = currentModel.ifBlank { null }
+        // api?:return convention (mirrors persistLocalSave's repository?:return) —
+        // no api!!. personaCacheOrBuild needs the api to wire the LocalModelApi.
+        val cache = personaCacheOrBuild() ?: return
+
+        run {
+            // Threading (mirrors sendViaSSE): the ONLY IO-dispatched work is the
+            // persona fetch + (inside streamLocalTurn) the generation Flow via
+            // .flowOn(Dispatchers.IO). The collect/sink runs HERE on the VM's
+            // dispatcher (Main.immediate in production) — _messages/_chatState
+            // read-modify-write is NOT touched from an IO thread.
+            //
+            // Defense (M4): PersonaCache.get only catches IOException, so a non-IO
+            // throw (e.g. serialization) could escape before streamLocalTurn's
+            // .catch scope. Wrap persona fetch + collection so ANY throw surfaces
+            // the same friendly local-engine error + ChatState.ERROR (no crash).
+            var faulted: Boolean
+            try {
+                // Ensure the on-device engine is loaded BEFORE streaming. load() is
+                // idempotent (~10s the first turn, instant after) and runs on IO so
+                // it never blocks the main thread; the assistant bubble already shows
+                // the streaming affordance during the gap. The persona fetch is on IO
+                // too — load first (sequentially) so a load fault surfaces the same
+                // friendly error. A FakeLocalLlm (tests) has no model file → skip load.
+                val engineToLoad = localEngine
+                val modelFile = localEngineModelFile
+                if (engineToLoad != null && modelFile != null) {
+                    withContext(Dispatchers.IO) {
+                        engineToLoad.load(modelFile, localEngineDelegate)
+                    }
+                }
+                val persona = withContext(Dispatchers.IO) { cache.get(op) }
+                // 3. The SAME sink sendViaSSE uses — append each delta to the
+                //    in-flight assistant message (identical rendering). Runs on the
+                //    collector's dispatcher (Main), NOT Dispatchers.IO.
+                val sink: (String, Boolean) -> Unit = { content, streaming ->
+                    updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
+                }
+                // 4. The SAME save path (direct now; Task 2.5 swaps the queue).
+                val saveSink: (SaveRequest, String) -> Unit = { req, _ -> persistLocalSave(req) }
+
+                // Capability-detect on the SINGLE provider() instance, picking the
+                // best path the engine supports (W3):
+                //   1. NATIVE (engine-driven) agent loop  - provider is
+                //      NativeToolCallingLlm: the litertlm engine runs the tool loop
+                //      itself (automaticToolCalling = true) and terminates cleanly
+                //      (onDone), fixing the manual-loop repeat with the small E4B
+                //      model. ONE native loop offers BOTH the resident phone/intent
+                //      tools (-> PhoneController) AND the cloud vault via
+                //      find_blackbox_tool / run_blackbox_tool (-> bridge); W3 follow-up.
+                //   2. MANUAL agent loop - provider is ToolCallingLlm + a bridge:
+                //      FcLoop drives the tiered two-hop loop (search + cloud + phone).
+                //      Kept intact + selectable so nothing regresses (the test fakes
+                //      land here).
+                //   3. TEXT only - a plain LocalLlm (e.g. a text-only FakeLocalLlm).
+                val llm = provider()
+                val bridge = toolBridgeOrBuild()
+                // The on-device phone controller, wired ONCE and shared by whichever
+                // tool path runs. It reads the LIVE accessibility service via the
+                // singleton seam; if the service isn't enabled the actuators degrade
+                // gracefully ("not enabled") and read_screen returns "[]", so it is
+                // safe to always build. The autonomy gate (Phase 4.6) + credential
+                // handoff (Phase 4.7) live INSIDE the actuator (downstream of
+                // dispatch), so they fire on BOTH the native and the manual path.
+                val phoneController = AndroidPhoneController.fromService(
+                    appContext,
+                    mode = { autonomyStore.load() },
+                    confirm = OverlayConfirmUi(appContext),
+                    credentialHandoff = OverlayCredentialHandoff(appContext),
+                )
+                val ok = if (llm is NativeToolCallingLlm) {
+                    // NATIVE path: ONE engine-driven loop handles BOTH phone/intent
+                    // actions (dispatched LOCALLY through the controller, NEVER the cloud
+                    // bridge) AND cloud capabilities (find_blackbox_tool / run_blackbox_tool,
+                    // dispatched through the bridge ONLY). The two are SEPARATE NativeTool
+                    // execute lambdas, so a phone tool structurally cannot reach the bridge
+                    // (the W3 separation guarantee). Build the same plain-text prompt FcLoop
+                    // would (via a transient text-only FcLoop), then append the native
+                    // phone-control + cloud steering addendum to the persona.
+                    val nativePersona = persona + nativeAddendum(hasCloud = bridge != null)
+                    val prompt = FcLoop(llm).buildPrompt(nativePersona, history, text)
+                    streamLocalNativeAgentTurn(
+                        engine = llm,
+                        phone = phoneController,
+                        phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
+                        bridge = bridge,
+                        prompt = prompt,
+                        operator = op,
+                        model = model,
+                        text = text,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                } else if (llm is ToolCallingLlm && bridge != null) {
+                    // MANUAL agent loop (fallback / non-native engines + the fakes):
+                    // FcLoop drives the tiered two-hop loop. When the phone controller
+                    // is wired it advertises the resident phone actuators and routes
+                    // those calls locally - never to the cloud bridge.
+                    streamLocalAgentTurn(
+                        fcLoop = FcLoop(
+                            llm,
+                            toolLlm = llm,
+                            bridge = bridge,
+                            operator = op,
+                            phone = phoneController,
+                        ),
+                        persona = persona,
+                        history = history,
+                        text = text,
+                        operator = op,
+                        model = model,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                } else {
+                    streamLocalTurn(
+                        fcLoop = FcLoop(llm),
+                        persona = persona,
+                        history = history,
+                        text = text,
+                        operator = op,
+                        model = model,
+                        sink = sink,
+                        saveSink = saveSink,
+                    )
+                }
+                faulted = !ok
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // I1 (review): cancellation is NOT a fault. Stopping the turn or
+                // starting a new one calls streamJob?.cancel(), which throws
+                // CancellationException here — it IS an Exception, so the generic
+                // catch below would paint a spurious "[on-device error]", flip state
+                // to ERROR, and stopBackgroundService() (killing the NEW turn's
+                // service). Rethrow so the launch ends cancelled and the trailing
+                // state/service/persist cleanup is SKIPPED; the canceller
+                // (cancelStream/clearHistory) owns its own cleanup.
+                throw e
+            } catch (e: Exception) {
+                // A throw OUTSIDE streamLocalTurn's Flow scope (e.g. persona fetch).
+                Log.e(TAG, "local engine error before stream: ${e.message}", e)
+                val partial = _messages.value.lastOrNull()?.content ?: ""
+                updateLastMessage(
+                    content = partial + LOCAL_ENGINE_ERROR_TEXT,
+                    isStreaming = false,
+                    isThinking = false,
+                )
+                faulted = true
+            }
+            // Mirror the SSE paths: fault → ERROR, success → IDLE (don't clobber a
+            // terminal state already set by the stream). Mapping is the pure
+            // stateAfterLocalTurn so it is unit-testable.
+            _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
+            stopBackgroundService()
+            persistHistory()
+            // I1 (W5): the turn is done -> apply any model switch that arrived
+            // mid-stream now that no native generation is in flight.
+            processPendingLocalReWarm()
+        }
+    }
+
+    /**
+     * The DIRECT on-device VISION path (Task W4.3): capture ONE screen frame and
+     * ask the on-device model to look at it alongside [userPrompt] — for screens the
+     * accessibility tree can't read (Compose / WebView / games). This is a DIRECT
+     * multimodal turn, deliberately SEPARATE from the agentic native loop
+     * ([runLocalEngineTurn]); see [VisionLlm] for why an image can't be a tool
+     * result inside the litertlm native loop (and the deferred autonomous-vision
+     * enhancement).
+     *
+     * Flow (each step degrades GRACEFULLY with a clear message, never a crash):
+     *  1. Resolve the on-device provider; with none, fall back to the placeholder.
+     *  2. Capture a frame via [screenCapture] (reusing the overlay's MediaProjection
+     *     + the password redaction gate). A REFUSED capture (password focused) shows
+     *     [LOCAL_VISION_PASSWORD_REFUSED_TEXT]; an UNAVAILABLE capture shows its
+     *     customer-facing reason. The bytes are EPHEMERAL.
+     *  3. If the model isn't image-capable (`!is VisionLlm`), show
+     *     [LOCAL_VISION_UNSUPPORTED_TEXT] (the text path still works).
+     *  4. Otherwise load the engine + stream [streamLocalVisionTurn] into the same
+     *     assistant bubble, persisting the TEXT turn (never the screenshot).
+     *
+     * Mirrors [sendViaLocalEngine]'s single-[streamJob] discipline so a prior
+     * in-flight turn is cancelled and clear/stop can cancel this one.
+     */
+    fun lookAtScreen(userPrompt: String) {
+        streamJob?.cancel()
+        streamJob = viewModelScope.launch {
+            val provider = localProviderOrWire()
+            if (provider == null) {
+                // No installed model → reuse the placeholder path with a vision-flavored ask.
+                sendViaLocalPlaceholder(userPrompt)
+                return@launch
+            }
+
+            // Append the user message + a streaming assistant placeholder (parity with
+            // runLocalEngineTurn). The user text is shown verbatim; the screenshot is
+            // never added to the transcript.
+            val userMsg = UiMessage(
+                role = "user",
+                content = userPrompt,
+                provider = currentProvider,
+                model = currentModel,
+            )
+            val assistantMsg = UiMessage(
+                role = "assistant",
+                content = "",
+                isStreaming = true,
+                provider = currentProvider,
+                model = currentModel,
+            )
+            _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
+            _inputText.value = TextFieldValue()
+            _chatState.value = ChatState.STREAMING
+            startBackgroundService("Looking at your screen...")
+
+            val sink: (String, Boolean) -> Unit = { content, streaming ->
+                updateLastMessage(content = content, isStreaming = streaming, isThinking = false)
+            }
+            val op = currentOperator
+            val model = currentModel.ifBlank { null }
+
+            var faulted = false
+            try {
+                // 1. Capture the frame (gate runs inside capture()).
+                val capture = (screenCapture ?: com.aiblackbox.portal.overlay.OverlayScreenCapture())
+                    .also { screenCapture = it }
+                    .capture()
+                when (capture) {
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.RefusedPassword -> {
+                        sink(LOCAL_VISION_PASSWORD_REFUSED_TEXT, false)
+                    }
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.Unavailable -> {
+                        sink(capture.reason, false)
+                    }
+                    is com.aiblackbox.portal.overlay.ScreenCaptureResult.Success -> {
+                        val llm = provider()
+                        if (llm !is VisionLlm) {
+                            // Model can't see images — text path still works; say so.
+                            sink(LOCAL_VISION_UNSUPPORTED_TEXT, false)
+                        } else {
+                            val cache = personaCacheOrBuild()
+                            // Load engine + fetch persona on IO (load() is idempotent).
+                            val engineToLoad = localEngine
+                            val modelFile = localEngineModelFile
+                            if (engineToLoad != null && modelFile != null) {
+                                withContext(Dispatchers.IO) {
+                                    engineToLoad.load(modelFile, localEngineDelegate)
+                                }
+                            }
+                            val persona = withContext(Dispatchers.IO) { cache?.get(op) ?: "" }
+                            // A vision turn is fresh (no transcript history needed for a
+                            // single screen Q&A); buildPrompt with empty history.
+                            val prompt = FcLoop(llm).buildPrompt(persona, emptyList(), userPrompt)
+                            val saveSink: (SaveRequest, String) -> Unit = { req, _ -> persistLocalSave(req) }
+                            val ok = streamLocalVisionTurn(
+                                engine = llm,
+                                prompt = prompt,
+                                imageBytes = listOf(capture.pngBytes),
+                                userMessage = userPrompt,
+                                operator = op,
+                                model = model,
+                                sink = sink,
+                                saveSink = saveSink,
+                            )
+                            faulted = !ok
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "look-at-screen error: ${e.message}", e)
+                val partial = _messages.value.lastOrNull()?.content ?: ""
+                updateLastMessage(
+                    content = partial + LOCAL_ENGINE_ERROR_TEXT,
+                    isStreaming = false,
+                    isThinking = false,
+                )
+                faulted = true
+            }
+            _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
+            stopBackgroundService()
+            persistHistory()
+            // I1 (W5): the turn is done -> apply any model switch that arrived
+            // mid-stream now that no native generation is in flight.
+            processPendingLocalReWarm()
+        }
+    }
+
+    /**
+     * Build (once) or return the persona cache wired to this VM's api + context.
+     * Returns null when the api is not yet initialized (api?:return convention,
+     * mirroring persistLocalSave's `repository ?: return`) — no `api!!`.
+     */
+    private fun personaCacheOrBuild(): PersonaCache? {
+        personaCache?.let { return it }
+        val client = api ?: return null
+        // PersonaSource is the LocalModelApi slice (mirrors ProviderPicker wiring).
+        val built = PersonaCache.fromContext(appContext, LocalModelApi(client))
+        personaCache = built
+        return built
+    }
+
+    /**
+     * Build (once) or return the two-hop tool bridge wired to this VM's api.
+     * Returns null when the api is not yet initialized (api?:return convention,
+     * mirroring [personaCacheOrBuild]) — no `api!!`. With no bridge, the local path
+     * stays on the text-only [streamLocalTurn] (you cannot run the agent loop
+     * without a bridge), so this degrades to the Task 2.4 behaviour rather than
+     * crashing.
+     */
+    private fun toolBridgeOrBuild(): ToolBridge? {
+        toolBridge?.let { return it }
+        val client = api ?: return null
+        val built = ToolBridgeClient(client)
+        toolBridge = built
+        return built
+    }
+
+    /**
+     * Resolve the on-device [localLlmProvider] (Task 2.6a), lazily wiring the
+     * SINGLETON production [LiteRtEngine] the first time an INSTALLED model is
+     * present.
+     *
+     *  - If [localLlmProvider] is already set (a test fake, or a previously-wired
+     *    engine) it is returned unchanged — the test seam is never disturbed.
+     *  - Otherwise this reads the installed bundles via [LocalModelManager]
+     *    ([installedModels] is device-scoped + runs on IO), picks the first
+     *    attested/installed bundle, builds the engine singleton ([LiteRtEngine.fromInstalled],
+     *    delegate "cpu"), records its model file + delegate for [load], sets
+     *    [localLlmProvider] to return that singleton, and returns it.
+     *  - If NO model is installed (or the api is not ready) it returns null and
+     *    [localLlmProvider] stays null — the caller falls back to the placeholder.
+     *
+     * The engine is built ONCE (its ~10s initialize() happens in [load], also
+     * once) and reused across turns. Suspends only for the disk read.
+     */
+    private suspend fun localProviderOrWire(): (() -> LocalLlm)? {
+        localLlmProvider?.let { return it }
+        val client = api ?: return null
+
+        // Device-scoped model discovery (deviceId is irrelevant to installedModels()
+        // — it only matters for attest/setAutonomy — so a stable constant is fine
+        // here; the picker/Model-Manager own the real attest flow).
+        val manager = LocalModelManager.fromContext(appContext, LocalModelApi(client), deviceId = "android-device")
+        val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
+        // Task W5: honor the user's ACTIVE on-device model selection (persisted under
+        // "model_local" -> [currentLocalModelSlug]). Pick the installed bundle whose
+        // slug matches it; if unset or no longer installed (e.g. just deleted), fall
+        // back to installedModels()'s alphabetically-first entry (gemma-4-e2b, the
+        // LIGHTER model) -- a safe RAM default and the prior behavior.
+        val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
+            ?: installed.firstOrNull()
+            ?: return null // no model -> placeholder path
+
+        val delegate = "cpu"
+        val targetPath = bundle.file.absolutePath
+
+        // R2-C: PREFER the warm, PROCESS-resident engine pinned by
+        // [LocalModelService] when it matches the active bundle -- it is already
+        // loaded (no ~10-75s cold load) and survives VM/process recycles. The pure
+        // [engineSourceFor] is the decision: USE_HOLDER iff the holder is non-empty
+        // AND built for THIS bundle path; otherwise BUILD_OWN (the pre-R2-C path,
+        // also taken when the service never started -- the graceful fallback).
+        val held = LocalEngineHolder.getOrNull()
+        if (engineSourceFor(held != null, LocalEngineHolder.modelPath, targetPath) == EngineSource.USE_HOLDER) {
+            // Borrow the service-owned warm engine. We do NOT own it, so onCleared /
+            // invalidateLocalEngine must not close() it (localEngineFromHolder = true).
+            val warm = held!!
+            localEngine = warm
+            localEngineModelFile = bundle.file
+            localEngineDelegate = delegate
+            localEngineFromHolder = true
+            val provider: () -> LocalLlm = { warm }
+            localLlmProvider = provider
+            return provider
+        }
+
+        // BUILD_OWN: no warm engine to borrow (service not running / different
+        // model). Build the VM-owned engine for the installed bundle (default CPU
+        // delegate), threading the PER-MODEL config (Task W2): maxTokens (fallback
+        // to the engine default when the descriptor leaves it null) + sampler trio.
+        // This is exactly the pre-R2-C path -- the guaranteed fallback.
+        val cfg = bundle.config
+        val engine = LiteRtEngine.fromInstalled(
+            appContext,
+            bundle.file,
+            delegate = delegate,
+            maxTokens = cfg.maxTokens ?: LiteRtEngine.DEFAULT_MAX_TOKENS,
+            sampler = SamplerSettings(
+                topK = cfg.topK,
+                topP = cfg.topP,
+                temperature = cfg.temperature,
+            ),
+            // Task W4: thread the per-model vision capability so the engine sets a
+            // visionBackend + allows generateWithImage ONLY for image-capable bundles
+            // (text-only models keep the working CPU text path untouched).
+            supportImage = cfg.supportImage,
+        )
+        localEngine = engine
+        localEngineModelFile = bundle.file
+        localEngineDelegate = delegate
+        localEngineFromHolder = false
+        val provider: () -> LocalLlm = { engine }
+        localLlmProvider = provider
+        return provider
+    }
+
+    /**
+     * Drop the cached on-device engine wiring (Task W5) so the next
+     * [localProviderOrWire] / [preloadLocalEngine] rebuilds it -- used when the
+     * ACTIVE local model selection changes, so a different installed bundle is
+     * actually loaded instead of the previously-wired one. Closes the old native
+     * engine (idempotent, guarded) and clears the warm marker so a re-warm runs.
+     */
+    private fun invalidateLocalEngine() {
+        // R2-C: close ONLY a VM-OWNED engine; never the service-owned warm engine
+        // borrowed from [LocalEngineHolder] (the service owns its lifecycle). We
+        // just drop our reference + re-wire; if the active model changed, the
+        // service's own re-warm (or the BUILD_OWN fallback) handles the new bundle.
+        if (!localEngineFromHolder) {
+            runCatching { localEngine?.close() }
+        }
+        localEngine = null
+        localEngineModelFile = null
+        localEngineFromHolder = false
+        localLlmProvider = null
+        warmingModelPath = null
+        _localEngineState.value = LocalEngineState.IDLE
+    }
+
+    /**
+     * I1 (W5 review): true while an on-device turn is actively running, so a
+     * model-selection change defers its engine teardown until the turn finishes
+     * rather than close()-ing the native runtime mid-generation. STREAMING and
+     * THINKING are the in-flight states for a local turn (see [runLocalEngineTurn]
+     * / the vision turn); IDLE/ERROR are terminal.
+     */
+    private fun isLocalTurnInFlight(): Boolean =
+        _chatState.value == ChatState.STREAMING || _chatState.value == ChatState.THINKING
+
+    /**
+     * I1 (W5 review): apply a model-selection change that arrived mid-turn. Called
+     * at every local-turn settle point -- normal turn completion
+     * ([runLocalEngineTurn]) AND, per the final-pass review, on STOP
+     * ([cancelStream]) and CLEAR ([clearHistory]), since those cancel the stream
+     * and so skip the completion path. A no-op unless [pendingLocalReWarm] was set
+     * (the consume decision is the pure [consumePendingReWarm]). Now that no
+     * generation is in flight, it is safe to close() the old engine and re-warm
+     * the newly-selected bundle.
+     */
+    private fun processPendingLocalReWarm() {
+        // Consume the pending flag exactly once (pure decision, unit-tested).
+        if (!consumePendingReWarm(pendingLocalReWarm)) return
+        pendingLocalReWarm = false
+        if (!ChatProvider.fromId(currentProvider).isLocal) return
+        invalidateLocalEngine()
+        preloadLocalEngine()
+    }
+
+    /**
+     * Task W1 — warm the on-device engine WHILE the app/chat is open, so the first
+     * send is instant instead of paying the ~10-75s cold model load on the first
+     * turn (matching Edge Gallery's "initialize once, keep warm" pattern).
+     *
+     * Gated + idempotent:
+     *  - Only warms when the LOCAL provider is the ACTIVE/selected one — we do NOT
+     *    pull a multi-GB model into RAM for a cloud-only session. DESIGN NOTE: an
+     *    always-warm-on-open variant (for a future "another model calls the local
+     *    engine as a tool" path) is a one-line change — drop the [currentProvider]
+     *    `isLocal` gate below.
+     *  - Resolves the production engine via [localProviderOrWire] (the SAME wiring
+     *    the send path uses) on [Dispatchers.IO]; with no installed model it stays
+     *    [LocalEngineState.IDLE] and does nothing.
+     *  - Guards against duplicate/concurrent warms ([shouldStartWarm] + the
+     *    [warmingModelPath] in-flight marker): a repeat trigger while WARMING, or
+     *    while already READY for the same model, returns WITHOUT launching a second
+     *    `load()` (which would just await the in-flight Mutex anyway) — no redundant
+     *    coroutine, no state churn.
+     *  - NEVER blocks Main and NEVER crashes: a load fault sets
+     *    [LocalEngineState.ERROR] (the lazy fallback in [runLocalEngineTurn] still
+     *    works — `load()` is idempotent — so the user can still send and the next
+     *    trigger re-warms).
+     *
+     * Safe to call before [initialize] (no api → [localProviderOrWire] returns null
+     * → IDLE) and to call repeatedly (the guards make repeats cheap no-ops).
+     */
+    fun preloadLocalEngine() {
+        // Provider gate: only warm for the active local provider (see DESIGN NOTE).
+        if (!ChatProvider.fromId(currentProvider).isLocal) return
+        // R2-C: the FOREGROUND SERVICE is now the PRIMARY warmer -- it pins the
+        // engine in the PROCESS-level [LocalEngineHolder] so it loads ONCE and
+        // survives VM/process recycles. Best-effort + idempotent (a second start
+        // while a warm is in flight is ignored; LiteRtEngine.load() is itself
+        // Mutex-idempotent). NEVER throws into us (LocalModelService.start swallows
+        // a platform refusal), so the VM-side warm below stays the graceful
+        // fallback: if the service no-ops, [localProviderOrWire] BUILDs its own
+        // engine and this same coroutine load()s it, exactly as before R2-C.
+        LocalModelService.start(appContext)
+        // Cheap pre-launch guard: a warm is already in flight → nothing to do.
+        if (!shouldStartWarm(_localEngineState.value)) return
+
+        viewModelScope.launch {
+            // Resolve (and lazily wire) the production engine off the main thread.
+            val provider = withContext(Dispatchers.IO) { localProviderOrWire() }
+            if (provider == null) {
+                // No installed model (or api not ready) → nothing to warm.
+                _localEngineState.value = LocalEngineState.IDLE
+                return@launch
+            }
+            val engine = localEngine
+            val modelFile = localEngineModelFile
+            // A FakeLocalLlm (tests) / fake-wired provider has no model file — there
+            // is nothing to preload; reflect READY iff it reports already loaded.
+            if (engine == null || modelFile == null) {
+                _localEngineState.value =
+                    if (provider().isLoaded) LocalEngineState.READY else LocalEngineState.IDLE
+                return@launch
+            }
+            val targetPath = modelFile.absolutePath
+            // Idempotency (model now known): already READY+loaded for this exact model
+            // → keep the in-flight marker pinned and skip the redundant warm.
+            if (_localEngineState.value == LocalEngineState.READY &&
+                warmingModelPath == targetPath && engine.isLoaded) {
+                return@launch
+            }
+            // Concurrency: another warm for this model is already mid-flight.
+            if (warmingModelPath == targetPath && _localEngineState.value == LocalEngineState.WARMING) {
+                return@launch
+            }
+            warmingModelPath = targetPath
+            _localEngineState.value =
+                localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_STARTED)
+            try {
+                // load() is idempotent + Mutex-serialized (instant if already loaded);
+                // a concurrent first-send simply awaits this same in-flight load.
+                withContext(Dispatchers.IO) { engine.load(modelFile, localEngineDelegate) }
+                _localEngineState.value =
+                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_SUCCEEDED)
+                Log.d(TAG, "on-device engine warmed (READY) for $targetPath")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Cancellation (VM cleared / new warm) is NOT a fault — clear the
+                // in-flight marker so a re-trigger can warm again, then unwind.
+                if (warmingModelPath == targetPath) warmingModelPath = null
+                throw e
+            } catch (e: Exception) {
+                _localEngineState.value =
+                    localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_FAILED)
+                // Clear the in-flight marker so the next trigger retries the warm.
+                if (warmingModelPath == targetPath) warmingModelPath = null
+                Log.w(TAG, "on-device engine warm failed (lazy fallback still works): ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Persist a completed on-device turn through the offline-resilient snapshot
+     * queue (Task 2.5). The on-device engine works OFFLINE, so the turn is queued
+     * to disk first (survives process death) and flushed in FIFO order when
+     * connectivity returns — the memory ledger never drops or reorders a turn.
+     * Tagged provider=local for traceability (same as Task 2.4's save sink);
+     * SaveRequest itself carries no provider field, matching the cloud save shape.
+     *
+     * Best-effort + non-blocking: enqueue persists-then-flushes on viewModelScope;
+     * a failed flush leaves the item queued for the next attempt (app-open flush
+     * in [initialize], or the next turn's enqueue). Non-IO errors propagate inside
+     * the queue without dropping the item.
+     */
+    private fun persistLocalSave(request: SaveRequest) {
+        val queue = snapshotQueueOrBuild() ?: return
+        viewModelScope.launch {
+            try {
+                queue.enqueue(request)
+            } catch (e: Exception) {
+                // enqueue persists the item before flushing, so a throw here (a
+                // non-IO flush error) still leaves the turn queued for next time.
+                Log.w(TAG, "local snapshot enqueue/flush failed (non-critical): ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Build (once) or return the offline snapshot queue wired to this VM's
+     * repository + context. Returns null when the repository is not yet ready
+     * (repository ?: return convention, matching [persistLocalSave]'s prior shape).
+     */
+    private fun snapshotQueueOrBuild(): LocalSnapshotQueue? {
+        snapshotQueue?.let { return it }
+        val repo = repository ?: return null
+        val built = LocalSnapshotQueue.fromContext(appContext, repo)
+        snapshotQueue = built
+        return built
+    }
+
+    /**
+     * SAFE placeholder for the on-device `local` provider. Appends the user's
+     * message plus a friendly assistant note and returns WITHOUT any network
+     * call — selecting LOCAL must never reach the cloud SSE path. Used as the
+     * fallback by [sendViaLocalEngine] until the concrete engine lands (Task 2.6).
+     */
+    private fun sendViaLocalPlaceholder(text: String) {
+        val userMsg = UiMessage(
+            role = "user",
+            content = text,
+            provider = currentProvider,
+            model = currentModel,
+        )
+        val placeholder = buildLocalPlaceholder(currentProvider, currentModel)
+        _messages.value = (_messages.value + userMsg + placeholder).takeLast(MAX_CHAT_MESSAGES)
+        _inputText.value = TextFieldValue()
+        persistHistory()
     }
 
     /**
@@ -1008,6 +2042,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     fun clearHistory() {
         streamJob?.cancel()
+        // I1 (final-pass review): a model switch DEFERred mid-turn must not be
+        // dropped when the turn is cancelled. The normal turn-completion path
+        // (runLocalEngineTurn) is SKIPPED on cancel, so apply it here. Guarded
+        // no-op when nothing is pending.
+        processPendingLocalReWarm()
         _messages.value = emptyList()
         _chatState.value = ChatState.IDLE
         viewModelScope.launch { historyStore.clear(currentOperator) }
@@ -1015,6 +2054,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelStream() {
         streamJob?.cancel()
+        // I1 (final-pass review): see clearHistory -- a mid-turn model switch
+        // (localReWarmAction -> DEFER) is applied at turn completion, which a
+        // STOP skips; apply the pending re-warm here. Guarded no-op otherwise.
+        processPendingLocalReWarm()
         _chatState.value = ChatState.IDLE
         updateLastMessage(
             content = _messages.value.lastOrNull()?.content ?: "",
@@ -1402,6 +2445,783 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        /**
+         * The on-device placeholder copy shown until the Phase 2 engine lands.
+         * Centralised so the UI test can assert it.
+         */
+        const val LOCAL_PLACEHOLDER_TEXT =
+            "On-device model selected — the on-device engine wiring lands in the next update."
+
+        /**
+         * Select the delivery path for [provider]. Pure (no ViewModel state) so
+         * the routing decision is unit-testable. Mirrors the original when-block:
+         *   agent → AGENT, voice → VOICE, robotics+mission → ER_INJECT,
+         *   local → LOCAL_PLACEHOLDER, everything else → SSE.
+         *
+         * Order matters: LOCAL is checked before the SSE default precisely
+         * because LOCAL is NOT a streaming provider — the SSE fall-through would
+         * otherwise POST provider=local to the cloud and error.
+         */
+        fun routeFor(provider: ChatProvider, erMissionActive: Boolean): ChatRoute = when {
+            provider.isAgent -> ChatRoute.AGENT
+            provider.isVoice -> ChatRoute.VOICE
+            provider.isRobotics && erMissionActive -> ChatRoute.ER_INJECT
+            provider.isLocal -> ChatRoute.LOCAL_PLACEHOLDER
+            else -> ChatRoute.SSE
+        }
+
+        /**
+         * The pure double-send predicate both the SSE and LOCAL_PLACEHOLDER arms
+         * of [sendMessage] consult BEFORE routing: a send is dropped while a turn
+         * is already streaming. Extracted so the guard (hoisted in review I2 to
+         * cover the placeholder path too) is unit-testable without the ViewModel.
+         */
+        fun shouldBlockSend(state: ChatState): Boolean = state == ChatState.STREAMING
+
+        /**
+         * The v1 VISION TRIGGER (W4 follow-up): does this on-device message ask the
+         * model to LOOK AT THE SCREEN? When true, [sendViaLocalEngine] routes the
+         * turn to [lookAtScreen] (capture a frame + multimodal turn) instead of the
+         * normal text/agent turn — making the built-but-unreachable vision path
+         * actually usable on-device. (A dedicated UI affordance and an autonomous
+         * mid-loop "the model decides to look" path are FUTURE enhancements; this
+         * conservative phrase match is the v1 trigger.)
+         *
+         * Deliberately CONSERVATIVE so it never hijacks a normal message: it matches
+         * only explicit screen-looking intents ("look at my screen", "what's on my
+         * screen", "what do you see", "read the screen for me", "describe my
+         * screen", "can you see my screen"…), case-insensitively, and requires the
+         * phrase to actually reference the SCREEN (or a direct "what do you see")
+         * rather than firing on the word "screen" alone (e.g. "my screen is
+         * cracked" must NOT trigger a capture). Pure so it is unit-testable without
+         * the ViewModel.
+         */
+        fun isLookAtScreenRequest(text: String): Boolean {
+            val t = text.lowercase().trim()
+            if (t.isEmpty()) return false
+            // The word "screen" must appear as a WHOLE WORD that refers to THIS
+            // device's live display — not as part of "screenshot"/"screensaver" and
+            // not immediately followed by a settings/feature qualifier ("screen
+            // reader", "screen time", "screen of …", …). Without this anchor the
+            // classifier hijacks ordinary chat ("the screen reader settings",
+            // "the screenshot I described") into an on-device capture.
+            //   \bscreen\b      → "screen" bounded by non-word chars (excludes
+            //                       screenshot/screensaver/touchscreen).
+            //   (?!\s*<qualifier>) → not a screen-setting/feature/"screen of" use.
+            val screenAnchor = Regex(
+                "\\bscreen\\b(?!\\s*(reader|time|saver|saving|brightness|" +
+                    "rotation|resolution|lock|protector|mirroring|cast(?:ing)?|" +
+                    "share|sharing|record(?:ing|er)?|of)\\b)"
+            )
+            if (!screenAnchor.containsMatchIn(t)) return false
+            // A look/see/read/describe/check/view verb that targets the anchored
+            // screen. Kept tight so a statement like "my screen is cracked" /
+            // "share my screen" doesn't fire. Each phrase re-asserts the anchor so a
+            // qualifier ("screen reader") can't satisfy a bare "screen" inside it.
+            val verbRe = "(look at|see|read|describe|check|view|what'?s? on|what is on)"
+            val targeted = Regex(
+                "$verbRe\\s+(on\\s+)?(my |the |this )?$screenAnchor"
+            )
+            return targeted.containsMatchIn(t)
+        }
+
+        /**
+         * The terminal [ChatState] a finished local turn leaves behind, given the
+         * [streamLocalTurn] outcome and the state observed when it returned. Pure
+         * so the M1/M2 "fault → ERROR, success → IDLE" mapping is unit-testable
+         * (the instance method applies it after the collect):
+         *  - faulted → [ChatState.ERROR] (parity with sendViaSSE's catch).
+         *  - ok and still [STREAMING] → [ChatState.IDLE].
+         *  - ok but already moved off STREAMING → keep it (don't clobber a
+         *    terminal state the stream set).
+         */
+        fun stateAfterLocalTurn(faulted: Boolean, current: ChatState): ChatState = when {
+            faulted -> ChatState.ERROR
+            current == ChatState.STREAMING -> ChatState.IDLE
+            else -> current
+        }
+
+        /**
+         * Whether a NEW on-device warm should be launched from [current] (Task W1).
+         * Pure so the no-double-warm guard is unit-testable: a warm is launched from
+         * any state EXCEPT [LocalEngineState.WARMING] (a warm is already in flight).
+         * IDLE/READY/ERROR all permit a (re)warm — READY/ERROR re-evaluate against
+         * the concrete model path inside [preloadLocalEngine] and no-op when already
+         * loaded for that exact model.
+         */
+        fun shouldStartWarm(current: LocalEngineState): Boolean =
+            current != LocalEngineState.WARMING
+
+        /**
+         * What to do when the persisted active on-device model slug emits (Task
+         * W5). PURE so the selection->warm branching (incl. the I1 mid-stream
+         * defer + the M1 first-emission no-op) is unit-testable without the
+         * ViewModel:
+         *  - [previousSlug] blank  -> [LocalReWarmAction.NONE] (first replayed
+         *    emission of the persisted value; the provider collector owns the
+         *    initial warm, so don't invalidate + re-warm it).
+         *  - slug unchanged        -> NONE.
+         *  - not the local provider -> NONE (no on-device engine to re-wire).
+         *  - a real change while a turn is in flight -> [LocalReWarmAction.DEFER]
+         *    (close()-ing the native engine mid-generation is unsafe; apply it at
+         *    turn completion).
+         *  - a real change, idle    -> [LocalReWarmAction.NOW] (invalidate + warm).
+         */
+        fun localReWarmAction(
+            previousSlug: String,
+            newSlug: String,
+            isLocalProvider: Boolean,
+            turnInFlight: Boolean,
+        ): LocalReWarmAction = when {
+            previousSlug.isBlank() -> LocalReWarmAction.NONE
+            newSlug == previousSlug -> LocalReWarmAction.NONE
+            !isLocalProvider -> LocalReWarmAction.NONE
+            turnInFlight -> LocalReWarmAction.DEFER
+            else -> LocalReWarmAction.NOW
+        }
+
+        /**
+         * PURE: whether [processPendingLocalReWarm] should apply (and thereby
+         * consume) a DEFERred model re-warm. Trivial today (it just IS the pending
+         * flag), but extracting it makes the final-pass fix testable without the
+         * AndroidViewModel: a re-warm DEFERred mid-turn ([localReWarmAction] ->
+         * DEFER, which sets pendingLocalReWarm) must be applied at the next settle
+         * point -- including a STOP ([cancelStream]) or CLEAR ([clearHistory]),
+         * which previously dropped it -- and must be a guarded no-op when nothing
+         * is pending (so calling it on every cancel/clear is safe).
+         */
+        fun consumePendingReWarm(pending: Boolean): Boolean = pending
+
+        /**
+         * The on-device engine readiness state machine (Task W1) — pure so the
+         * IDLE→WARMING→READY happy path and the →ERROR failure path are unit-tested
+         * without the ViewModel. Transitions:
+         *  - [LocalEngineEvent.WARM_STARTED]   → [LocalEngineState.WARMING]
+         *  - [LocalEngineEvent.WARM_SUCCEEDED] → [LocalEngineState.READY]
+         *  - [LocalEngineEvent.WARM_FAILED]    → [LocalEngineState.ERROR]
+         *
+         * A late SUCCEEDED/FAILED that arrives after the warm was superseded (state
+         * no longer WARMING) is ignored — the in-flight outcome must not clobber a
+         * newer state (e.g. a fresh WARMING the next trigger started). STARTED always
+         * wins (a new warm overrides any prior terminal state).
+         */
+        fun localEngineStateAfter(
+            current: LocalEngineState,
+            event: LocalEngineEvent,
+        ): LocalEngineState = when (event) {
+            LocalEngineEvent.WARM_STARTED -> LocalEngineState.WARMING
+            LocalEngineEvent.WARM_SUCCEEDED ->
+                if (current == LocalEngineState.WARMING) LocalEngineState.READY else current
+            LocalEngineEvent.WARM_FAILED ->
+                if (current == LocalEngineState.WARMING) LocalEngineState.ERROR else current
+        }
+
+        /** The non-streaming assistant placeholder message for the LOCAL branch. */
+        fun buildLocalPlaceholder(provider: String, model: String): UiMessage = UiMessage(
+            role = "assistant",
+            content = LOCAL_PLACEHOLDER_TEXT,
+            isStreaming = false,
+            provider = provider,
+            model = model,
+        )
+
+        /** Provider tag for on-device turns (logging / save traceability). */
+        const val LOCAL_PROVIDER_ID = "local"
+
+        /**
+         * Friendly text appended to the (possibly partial) reply when the on-device
+         * engine faults mid-generation. Mirrors the SSE error path: surface a
+         * non-crashing, human message rather than a stack trace.
+         */
+        const val LOCAL_ENGINE_ERROR_TEXT =
+            "\n\n[on-device error — the local model could not finish this reply]"
+
+        /**
+         * Shown (in place of a model reply) when the on-device "look at my screen"
+         * vision path can't run because the active model has no image input
+         * (Task W4). The text path still works — only vision is unavailable.
+         */
+        const val LOCAL_VISION_UNSUPPORTED_TEXT =
+            "This on-device model can't see images. Switch to an image-capable model to have it look at your screen."
+
+        /**
+         * Shown when a screen capture is REFUSED because a password field is focused
+         * (Task W4.2 redaction gate) — the model is never shown a screenshot of a
+         * credential entry. Customer-facing + non-alarming.
+         */
+        const val LOCAL_VISION_PASSWORD_REFUSED_TEXT =
+            "I won't capture the screen while a password field is focused. Close it and ask again."
+
+        /**
+         * Concise phone-control steering (the BASE, always-present part) appended to
+         * the persona ONLY on the NATIVE engine-driven turn (Task W3 follow-up).
+         * Mirrors Edge Gallery's prescriptive ordered-prompt style, kept short for
+         * the small E4B model: act on the phone via the matching action directly;
+         * one tool at a time; reply briefly when done. Not added to the manual/text
+         * paths. The cloud-vault sentence ([NATIVE_CLOUD_CAPABILITY_SENTENCE]) is
+         * spliced in by [nativeAddendum] ONLY when a cloud bridge is wired, so an
+         * offline native turn never advertises find_blackbox_tool / run_blackbox_tool.
+         */
+        const val NATIVE_PHONE_CONTROL_ADDENDUM =
+            "\n\nTo act on the phone, call the matching action directly (e.g. " +
+            "flashlight_on, show_map, open_app). " +
+            "Call one tool at a time; when the task is done, reply briefly."
+
+        /**
+         * The cloud-vault steering sentence, appended to
+         * [NATIVE_PHONE_CONTROL_ADDENDUM] ONLY when the cloud tool bridge is wired
+         * (Fix 2, final-pass review). Without a bridge the native turn registers no
+         * find_blackbox_tool / run_blackbox_tool, so the prompt must not name them.
+         */
+        const val NATIVE_CLOUD_CAPABILITY_SENTENCE =
+            " For a BlackBox capability you don't have a direct action for (roll " +
+            "dice, generate an image, search memory, send something), call " +
+            "find_blackbox_tool(query) FIRST, then run_blackbox_tool with the name " +
+            "it returns. Do NOT use web_search to find your tools."
+
+        /**
+         * PURE: the persona addendum for a NATIVE engine-driven turn. The phone
+         * sentence is always present; the cloud sentence is present IFF [hasCloud]
+         * (the bridge / cloud tools are wired). Inserts the cloud sentence after the
+         * phone sentence and before the "one tool at a time" closing so the
+         * prompt never advertises tools that are not registered.
+         */
+        fun nativeAddendum(hasCloud: Boolean): String =
+            if (!hasCloud) NATIVE_PHONE_CONTROL_ADDENDUM
+            else NATIVE_PHONE_CONTROL_ADDENDUM.replace(
+                " Call one tool at a time;",
+                NATIVE_CLOUD_CAPABILITY_SENTENCE + " Call one tool at a time;",
+            )
+
+        /**
+         * Max length of the one-line result snippet shown after a successful tool
+         * outcome ([renderToolOutcome]) — keep tool activity inline-readable; never
+         * dump a large JSON blob into the chat bubble.
+         */
+        const val TOOL_RESULT_SNIPPET_MAX = 80
+
+        /**
+         * Map the current UI conversation to [FcLoop.Turn]s for prompt assembly.
+         *
+         * Excludes anything that is NOT a settled user/assistant turn:
+         *  - the in-flight streaming assistant placeholder (still being filled);
+         *  - any empty-content turns (e.g. the freshly-appended placeholder).
+         *
+         * The just-appended user message is also dropped here because the caller
+         * passes it separately as the turn's `text`; it is the LAST user message
+         * and is excluded by trimming the final user turn. Roles other than
+         * "user"/"assistant" (system/tool placeholders) are ignored.
+         */
+        fun toFcHistory(messages: List<UiMessage>): List<FcLoop.Turn> {
+            // Drop the in-flight assistant placeholder (last, streaming/empty) and
+            // the just-appended user message (the current turn's text) from the
+            // tail before mapping.
+            var end = messages.size
+            // 1. Trailing in-flight assistant placeholder.
+            if (end > 0) {
+                val last = messages[end - 1]
+                if (last.role == "assistant" && (last.isStreaming || last.content.isEmpty())) {
+                    end--
+                }
+            }
+            // 2. The current turn's user message (now the trailing entry).
+            if (end > 0 && messages[end - 1].role == "user") {
+                end--
+            }
+            return messages.subList(0, end).mapNotNull { m ->
+                when (m.role) {
+                    "user" -> FcLoop.Turn(FcLoop.Role.USER, m.content)
+                    "assistant" -> if (m.content.isEmpty() || m.isStreaming) null
+                        else FcLoop.Turn(FcLoop.Role.ASSISTANT, m.content)
+                    else -> null
+                }
+            }
+        }
+
+        /**
+         * PURE core of [sendViaLocalEngine]: run one on-device turn and stream its
+         * deltas into [sink], then persist via [saveSink]. Extracted (like
+         * [routeFor] / [buildSaveRequest]) so it is unit-testable without the
+         * AndroidViewModel — production wires the real `updateLastMessage` /
+         * `saveConversation` into [sink] / [saveSink].
+         *
+         * Contract:
+         *  - Collects [FcLoop.runTurn]'s delta Flow, accumulating into a running
+         *    buffer and calling `sink(runningText, isStreaming=true)` per delta —
+         *    EXACTLY the SSE token path.
+         *  - On normal completion: `sink(fullText, isStreaming=false)` then
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
+         *  - On a mid-stream throw (runTurn's Flow can fault): caught via `.catch`,
+         *    appends [LOCAL_ENGINE_ERROR_TEXT] to whatever streamed so far,
+         *    `sink(partial+error, isStreaming=false)`, DOES NOT save (mirrors the
+         *    SSE error path), and returns `false`. Never rethrows — the turn does
+         *    not crash; the caller maps the `false` to [ChatState.ERROR].
+         *  - Never reaches SSE.
+         *
+         * Threading: `.flowOn(Dispatchers.IO)` moves GENERATION (the upstream
+         * [FcLoop.runTurn] Flow) onto IO, while `.collect` / [sink] run on the
+         * collector's dispatcher (the VM's Main in production) — mirroring
+         * [sendViaSSE], which collects on viewModelScope and never wraps the sink
+         * in withContext(IO). flowOn is a no-op under the serial test dispatcher,
+         * so the unit tests below stay deterministic.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalTurn(
+            fcLoop: FcLoop,
+            persona: String,
+            history: List<FcLoop.Turn>,
+            text: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            val acc = StringBuilder()
+            var faulted = false
+            fcLoop.runTurn(persona, history, text)
+                // Generation runs on IO; the collector/sink stay on the caller's
+                // dispatcher (Main in production) — parity with sendViaSSE.
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { delta ->
+                    acc.append(delta)
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            // Normal completion: finalize the stream + persist the turn.
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * PURE core of the DIRECT VISION turn (Task W4.3) — the [streamLocalTurn]
+         * sibling that hands the model a captured screen frame ALONGSIDE the prompt.
+         * It is a DIRECT multimodal generation, NOT a tool inside the native agent
+         * loop: the litertlm [com.google.ai.edge.litertlm.OpenApiTool.execute] returns
+         * a `String`, so an image can't be fed back as a tool RESULT — see [VisionLlm]
+         * for the full rationale + the deferred autonomous-vision enhancement.
+         *
+         * Collects [VisionLlm.generateWithImage]'s text-delta Flow (same shape as
+         * [streamLocalTurn]'s [FcLoop.runTurn] Flow) into the SAME streaming assistant
+         * bubble, then persists via [saveSink]. The [imageBytes] are EPHEMERAL: they
+         * are passed to the engine ONLY to build the prompt and are NEVER written to
+         * the save request (the persisted transcript carries the user TEXT + the
+         * assistant reply, never the screenshot).
+         *
+         * Contract (mirrors [streamLocalTurn]):
+         *  - Streams `sink(runningText, isStreaming=true)` per delta.
+         *  - Normal completion: `sink(fullText, false)` then
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
+         *  - Mid-stream throw (generateWithImage's Flow can fault — e.g. the engine
+         *    can't run vision on this device): caught via `.catch`, appends
+         *    [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES NOT save,
+         *    returns `false`. Never rethrows.
+         *
+         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
+         * generation onto IO; `.collect`/[sink] stay on the caller's dispatcher.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalVisionTurn(
+            engine: VisionLlm,
+            prompt: String,
+            imageBytes: List<ByteArray>,
+            userMessage: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            val acc = StringBuilder()
+            var faulted = false
+            engine.generateWithImage(prompt, imageBytes)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { delta ->
+                    acc.append(delta)
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            // EPHEMERALITY: the save request carries the user TEXT + the reply only —
+            // never the screenshot bytes (they exist solely to build the prompt above).
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = userMessage,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * PURE core of the TOOL-AWARE on-device turn — the [streamLocalTurn] sibling
+         * for a model that can call BlackBox tools. Collects [FcLoop.runAgent]'s
+         * [LlmEvent] Flow (instead of [FcLoop.runTurn]'s plain text Flow) and renders
+         * each event INLINE into the SAME streaming assistant bubble the text streams
+         * into, then persists via [saveSink]. Extracted (like [streamLocalTurn]) so it
+         * is unit-testable without the AndroidViewModel.
+         *
+         * RENDERING PARITY (deliberate design choice): the Android MVP has NO typed
+         * tool-call/tool-result UI message types — [UiMessage] carries none, and the
+         * ONLY existing tool-rendering convention is the cloud ER `er_action` SSE path
+         * (`content.append("\n`[$tool]` $args → $status ")`). So this turn adopts that
+         * SAME inline-markdown convention via [renderToolCall] / [renderToolOutcome]:
+         * tool name in backticks, the args, an arrow, a status — appended to the
+         * streaming assistant `content`, so tool activity shows in the same bubble.
+         * Each rendered line is SELF-CONTAINED + name-labeled because [FcLoop.runAgent]
+         * emits ALL of a turn's [LlmEvent.ToolCall]s BEFORE any [LlmEvent.ToolOutcome]
+         * (a call is NOT immediately followed by its outcome on a multi-call turn).
+         *
+         * Contract (mirrors [streamLocalTurn] exactly):
+         *  - TextDelta → append text; ToolCall → append [renderToolCall];
+         *    ToolOutcome → append [renderToolOutcome]; `sink(runningText, true)` per
+         *    event.
+         *  - MULTI-CALL ORDERING: on a turn with several tool calls [FcLoop.runAgent]
+         *    emits ALL its [LlmEvent.ToolCall]s first, THEN all [LlmEvent.ToolOutcome]s,
+         *    so the inline lines render as the calls batched, then the outcomes batched
+         *    (not interleaved call→outcome); the `[name]` labels disambiguate which
+         *    outcome belongs to which call.
+         *  - On normal completion: `sink(fullText, false)` then
+         *    `saveSink(SaveRequest, provider="local")`; returns `true`.
+         *  - A TOOL-LEVEL failure (a [ToolResult] with `success=false`) is NOT a
+         *    stream fault: it renders "failed" and the turn still completes + saves.
+         *  - A mid-stream THROW propagating out of runAgent is caught via `.catch`,
+         *    appends [LOCAL_ENGINE_ERROR_TEXT], `sink(partial+error, false)`, DOES
+         *    NOT save, returns `false`. Note (Task 3.4 landed): an OFFLINE tool
+         *    failure no longer reaches here — the bridge degrades to a
+         *    `success=false` [ToolResult] (rendered "failed") so the turn continues;
+         *    only a genuine non-IO fault (e.g. a SerializationException, or an
+         *    engine fault) still surfaces as the local-engine error.
+         *
+         * Threading mirrors [streamLocalTurn]: `.flowOn(Dispatchers.IO)` moves the
+         * agent loop onto IO; `.collect` / [sink] stay on the caller's dispatcher.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalAgentTurn(
+            fcLoop: FcLoop,
+            persona: String,
+            history: List<FcLoop.Turn>,
+            text: String,
+            operator: String,
+            model: String?,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            val acc = StringBuilder()
+            var faulted = false
+            fcLoop.runAgent(persona, history, text)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { event ->
+                    when (event) {
+                        is LlmEvent.TextDelta -> acc.append(event.text)
+                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
+                    }
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * PURE core of the NATIVE (engine-driven) on-device tool turn (Task W3) - the
+         * [streamLocalAgentTurn] sibling for the litertlm built-in auto tool loop. Where
+         * [streamLocalAgentTurn] collects [FcLoop.runAgent] (manual loop,
+         * `automaticToolCalling = false`), this collects
+         * [NativeToolCallingLlm.generateWithToolsNative] (engine loop,
+         * `automaticToolCalling = true`) so the ENGINE drives the tool loop and
+         * terminates cleanly (`onDone`) - fixing the manual-path loop-repeat with the
+         * small E4B model. Renders the streamed [LlmEvent]s INLINE via the SAME
+         * [renderToolCall] / [renderToolOutcome] convention and persists via [saveSink],
+         * so it is rendering-identical to the manual agent turn.
+         *
+         * **Unified scope (W3 follow-up): phone/intent + cloud, ONE native loop.** The
+         * engine drives BOTH families with `automaticToolCalling = true`:
+         *  - PHONE/INTENT: each [phoneTools] schema becomes a [NativeTool] whose
+         *    `execute` dispatches LOCALLY through [phone] ([PhoneController.dispatch]) --
+         *    bridging the suspend dispatch into the engine's SYNCHRONOUS execute with
+         *    `runBlocking(Dispatchers.IO)` (Edge Gallery's `AgentTools.execute` pattern).
+         *    These NEVER touch the cloud [bridge]; the autonomy gate + credential handoff
+         *    stay INSIDE the actuator (downstream of [phone].dispatch), so they still fire.
+         *  - CLOUD: when [bridge] is non-null, [buildCloudNativeTools] adds two NativeTools
+         *    -- find_blackbox_tool (-> [ToolBridge.searchTools]) + run_blackbox_tool
+         *    (-> [ToolBridge.execute], operator-scoped) -- whose `execute` reaches the
+         *    [bridge] ONLY (structurally NEVER the [phone]) and carry only the model's
+         *    args + the [operator] (no screen/phone content). Offline / no api -> the
+         *    cloud tools are omitted and the turn is phone-only.
+         * The phone and cloud execute lambdas are SEPARATE, so a phone tool cannot reach
+         * the bridge and a cloud tool cannot reach the phone (the W3 separation guarantee).
+         * Each dispatch result is serialized to the Gallery-shaped JSON string
+         * ([toResultJsonString]) the engine feeds back to the model.
+         *
+         * Contract mirrors [streamLocalAgentTurn]: TextDelta -> append text; ToolCall ->
+         * [renderToolCall]; ToolOutcome -> [renderToolOutcome]; `sink(runningText, true)`
+         * per event; normal completion -> `sink(full, false)` + `saveSink`; a mid-stream
+         * THROW (engine `onError`) is caught via `.catch`, appends
+         * [LOCAL_ENGINE_ERROR_TEXT], DOES NOT save, returns `false`.
+         *
+         * @return `true` if the turn completed and was saved, `false` if it faulted.
+         */
+        suspend fun streamLocalNativeAgentTurn(
+            engine: NativeToolCallingLlm,
+            phone: PhoneController,
+            phoneTools: List<ToolSchema>,
+            bridge: ToolBridge?,
+            prompt: String,
+            operator: String,
+            model: String?,
+            text: String,
+            sink: (content: String, isStreaming: Boolean) -> Unit,
+            saveSink: (request: SaveRequest, provider: String) -> Unit,
+        ): Boolean {
+            // PHONE/INTENT NativeTools: each phone/intent schema dispatches LOCALLY
+            // through the controller. runBlocking bridges the suspend dispatch into the
+            // engine's synchronous execute (Gallery pattern); the autonomy gate lives
+            // INSIDE dispatch, so it still fires. These execute bodies reach the
+            // PhoneController ONLY -- structurally NEVER the cloud bridge (W3 guarantee).
+            val phoneNativeTools = phoneTools.map { schema ->
+                NativeTool(
+                    schema = schema,
+                    execute = { argsJson ->
+                        runBlocking(Dispatchers.IO) {
+                            phone.dispatch(schema.name, parseNativeArgs(argsJson))
+                        }.toResultJsonString()
+                    },
+                )
+            }
+            // CLOUD NativeTools (Task W3 follow-up): expose the cloud vault to the SAME
+            // native loop as two tools the engine drives like phone actions. Their
+            // execute bodies reach the cloud [bridge] ONLY -- structurally NEVER the
+            // PhoneController, and they carry only the model's args + the operator (no
+            // screen/phone content). find_blackbox_tool discovers; run_blackbox_tool runs
+            // the chosen tool (operator-scoped, exactly as the manual path always did).
+            // Only wired when a [bridge] is present (offline/no-api -> phone-only).
+            val cloudNativeTools = if (bridge != null) buildCloudNativeTools(bridge, operator) else emptyList()
+            val nativeTools = phoneNativeTools + cloudNativeTools
+            val acc = StringBuilder()
+            var faulted = false
+            // Runaway bounds on this native loop: the litertlm engine's OWN internal
+            // recurring-tool-call guard is the PRIMARY bound (it owns termination via
+            // onDone on this path by design), AND -- defense-in-depth (Task W3 hardening) --
+            // [LiteRtEngine.MAX_NATIVE_TOOL_CALLS] is an app-side SOFT cap underneath it:
+            // past that many tool executions in a single turn, each further tool refuses
+            // to run its side-effecting body and returns a terminal 'step limit reached'
+            // result, so a misbehaving model can't loop unbounded with real side effects
+            // even if the engine-side guard were ever weakened/absent. This differs from
+            // the manual FcLoop's explicit maxIterations only in WHERE the cap lives.
+            engine.generateWithToolsNative(prompt, nativeTools)
+                .flowOn(Dispatchers.IO)
+                .catch { e ->
+                    // Telemetry-before-fixes: the engine's onError was previously invisible.
+                    Log.w(TAG, "native turn faulted", e)
+                    faulted = true
+                    acc.append(LOCAL_ENGINE_ERROR_TEXT)
+                    sink(acc.toString(), false)
+                }
+                .collect { event ->
+                    when (event) {
+                        is LlmEvent.TextDelta -> acc.append(event.text)
+                        is LlmEvent.ToolCall -> acc.append(renderToolCall(event.name, event.args))
+                        is LlmEvent.ToolOutcome -> acc.append(renderToolOutcome(event.name, event.result))
+                    }
+                    sink(acc.toString(), true)
+                }
+            if (faulted) return false
+            val full = acc.toString()
+            sink(full, false)
+            val request = buildSaveRequest(
+                operator = operator,
+                userMessage = text,
+                assistantResponse = full,
+                reasoning = "",
+                model = model,
+                tokens = null,
+                provenance = null,
+            )
+            saveSink(request, LOCAL_PROVIDER_ID)
+            return true
+        }
+
+        /**
+         * Build the TWO cloud-vault [NativeTool]s (Task W3 follow-up) the native engine
+         * loop drives ALONGSIDE the phone/intent tools. Both execute bodies reach the
+         * cloud [bridge] ONLY -- structurally NEVER the [PhoneController] (the W3
+         * separation guarantee) -- and pass only the model's args + the [operator] (no
+         * screen/phone content; the bridge is operator-scoped, as the manual path was):
+         *
+         *  - find_blackbox_tool: runBlocking the suspend [ToolBridge.searchTools]
+         *    (capped at [ResidentTools.MAX_INJECTED_SCHEMAS]) and return the matches
+         *    (name + description) as a Gallery-shaped success string the model reads;
+         *    an empty result is a failed "no match (possibly offline)" string.
+         *  - run_blackbox_tool: parse name + args, runBlocking [ToolBridge.execute]
+         *    (operator-scoped), and return its [ToolResult] as the Gallery-shaped JSON.
+         *    A missing/blank name is a failed result (the engine loop continues).
+         *
+         * Internal so it is unit-testable against a fake [ToolBridge].
+         */
+        internal fun buildCloudNativeTools(bridge: ToolBridge, operator: String): List<NativeTool> =
+            ResidentTools.cloudTools().map { schema ->
+                when (schema.name) {
+                    ResidentTools.FIND_BLACKBOX_TOOL -> NativeTool(
+                        schema = schema,
+                        execute = { argsJson ->
+                            val query = (parseNativeArgs(argsJson)["query"] as? JsonPrimitive)
+                                ?.contentOrNull?.takeIf { it.isNotBlank() }
+                            if (query == null) {
+                                toResultJsonString(false, JsonPrimitive("query required"))
+                            } else {
+                                val found = runBlocking(Dispatchers.IO) {
+                                    bridge.searchTools(query, k = ResidentTools.MAX_INJECTED_SCHEMAS)
+                                }
+                                if (found.isEmpty()) {
+                                    toResultJsonString(
+                                        false,
+                                        JsonPrimitive("no matching tools available (the tool catalog may be unreachable)"),
+                                    )
+                                } else {
+                                    // Format matches as a compact JSON string the model reads,
+                                    // carried VERBATIM as the success payload.
+                                    toResultJsonString(
+                                        true,
+                                        JsonPrimitive(formatCloudToolMatches(found)),
+                                    )
+                                }
+                            }
+                        },
+                    )
+                    else -> NativeTool( // RUN_BLACKBOX_TOOL
+                        schema = schema,
+                        execute = { argsJson ->
+                            val args = parseNativeArgs(argsJson)
+                            val name = (args["name"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                            if (name == null) {
+                                toResultJsonString(false, JsonPrimitive("tool name required"))
+                            } else {
+                                val callArgs = parseCloudCallArgs(args["args"])
+                                runBlocking(Dispatchers.IO) {
+                                    bridge.execute(name, callArgs, operator)
+                                }.toResultJsonString()
+                            }
+                        },
+                    )
+                }
+            }
+
+        /**
+         * Coerce the model-supplied `args` element of a run_blackbox_tool call into the
+         * [JsonObject] passed to [ToolBridge.execute]. The small model may send `args`
+         * as a JSON OBJECT (preferred) or as a JSON-encoded STRING; either is accepted,
+         * anything else (null/absent/malformed) becomes an empty object. NEVER throws.
+         * Internal so it is unit-testable.
+         */
+        internal fun parseCloudCallArgs(element: kotlinx.serialization.json.JsonElement?): JsonObject = when (element) {
+            is JsonObject -> element
+            is JsonPrimitive -> runCatching { Json.parseToJsonElement(element.content) as? JsonObject }
+                .getOrNull() ?: JsonObject(emptyMap())
+            else -> JsonObject(emptyMap())
+        }
+
+        /**
+         * Parse the model-supplied tool-call argument JSON (what the litertlm engine
+         * passes to a [NativeTool.execute]) into a [JsonObject] for
+         * [PhoneController.dispatch]. A small model can emit a blank, non-object, or
+         * malformed payload; this NEVER throws - it returns an empty object so dispatch
+         * sees no args (the actuator then reports a normal "missing arg" failure rather
+         * than crashing the native turn). Internal so it is unit-testable.
+         *
+         * NOTE: the engine seam ([nativeOpenApiToolFor]) also parses the same argsJson
+         * once to emit the [LlmEvent.ToolCall]; this is a SECOND, independent parse in a
+         * different layer (dispatch, not rendering). De-duping would mean threading the
+         * parsed object through [NativeTool.execute]'s signature - not worth the coupling.
+         */
+        internal fun parseNativeArgs(argsJson: String): JsonObject =
+            runCatching { Json.parseToJsonElement(argsJson) as? JsonObject }.getOrNull()
+                ?: JsonObject(emptyMap())
+
+        /**
+         * Collapse to a single line and bound length so a large model-supplied arg or
+         * tool result can't flood the chat bubble or the saved snapshot. Strips BOTH
+         * \n and \r (a CR-laden tool result must render on one line) and truncates
+         * with an ellipsis past [max] (default [TOOL_RESULT_SNIPPET_MAX]).
+         */
+        private fun inlineCap(s: String, max: Int = TOOL_RESULT_SNIPPET_MAX): String {
+            val oneLine = s.replace('\n', ' ').replace('\r', ' ')
+            return if (oneLine.length > max) oneLine.take(max) + "…" else oneLine
+        }
+
+        /**
+         * Inline-markdown for an on-device TOOL CALL. Parity format with the cloud ER
+         * `er_action` path: a backtick-wrapped, name-labeled line on its own row
+         * carrying the (capped) args. `args.toString()` is compact JSON; it is routed
+         * through [inlineCap] so a model inlining a large blob (e.g. a base64 image) as
+         * an arg can't flood the bubble or snapshot — the SAME cap a large tool RESULT
+         * gets in [renderToolOutcome]. Self-contained so it reads correctly even when a
+         * turn batches several calls before their outcomes.
+         */
+        @VisibleForTesting
+        internal fun renderToolCall(name: String, args: JsonObject): String =
+            "\n`[$name]` ${inlineCap(args.toString())}"
+
+        /**
+         * Inline-markdown for an on-device TOOL OUTCOME. Parity format with the cloud
+         * ER `er_action` path: a backtick-wrapped, name-labeled line, an arrow, then a
+         * one-word status (a tool-level failure renders "failed", NOT a stream fault).
+         * On success a SHORT one-line result snippet is appended (prefer the unquoted
+         * string content for the common string case); large JSON is NOT dumped.
+         */
+        @VisibleForTesting
+        internal fun renderToolOutcome(name: String, result: ToolResult): String {
+            if (!result.success) return "\n`[$name]` → failed"
+            val snippet = (result.result as? JsonPrimitive)?.contentOrNull
+                ?: result.result?.toString()
+            val shown = snippet?.let { inlineCap(it) }
+            return if (shown.isNullOrBlank()) "\n`[$name]` → done" else "\n`[$name]` → done · $shown"
+        }
+
         private val provJson = Json { ignoreUnknownKeys = true; isLenient = true }
         fun parseProvenance(raw: String): Provenance? = try {
             provJson.decodeFromString(Provenance.serializer(), raw.trim())

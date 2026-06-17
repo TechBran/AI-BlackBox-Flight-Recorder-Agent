@@ -36,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -52,6 +53,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.view.HapticFeedbackConstants
+import com.aiblackbox.portal.overlay.isAccessibilityServiceEnabled
 import androidx.core.content.edit
 import androidx.core.graphics.set
 import androidx.core.net.toUri
@@ -514,14 +516,23 @@ fun SettingsSheet(
 
             var showProviderMenu by remember { mutableStateOf(false) }
             val providerDisplay = ChatProvider.fromId(provider).displayName
+            // Task 1.6: gate the on-device LOCAL provider on a verified install.
+            val localAvailable by viewModel.localAvailable.collectAsState()
 
             SettingsDropdown(
                 label = "Provider",
                 value = providerDisplay,
                 expanded = showProviderMenu,
-                onExpandedChange = { showProviderMenu = it }
+                onExpandedChange = { expanded ->
+                    // Re-check availability (+ best-effort re-attest) when opening.
+                    if (expanded) viewModel.refreshLocalAvailability()
+                    showProviderMenu = expanded
+                }
             ) {
-                ChatProvider.entries.forEach { p ->
+                // Hide LOCAL unless a verified on-device model is installed.
+                ChatProvider.entries
+                    .filter { !it.isLocal || localAvailable }
+                    .forEach { p ->
                     DropdownMenuItem(
                         text = {
                             Text(
@@ -586,6 +597,50 @@ fun SettingsSheet(
                 }
 
                 Spacer(Modifier.height(16.dp))
+            }
+
+            // ══════════════════════════════════════════════════════════════
+            // On-Device Model (Gemma) — Model Manager (Task 1.5)
+            // Built lazily once the api + operator are ready; disposed on leave.
+            // onModelSelected records the chosen slug under "model_local" so the
+            // picker (Task 1.6) can read the active on-device model.
+            // ══════════════════════════════════════════════════════════════
+            val localApi = viewModel.api
+            if (localApi != null) {
+                val localModelVm = remember(localApi, operator) {
+                    LocalModelViewModel.fromContext(
+                        context = context,
+                        api = localApi,
+                        operatorProvider = { operator },
+                        onModelSelected = { slug -> viewModel.setModel(slug, "local") },
+                    )
+                }
+                DisposableEffect(localModelVm) {
+                    localModelVm.refresh()
+                    onDispose { localModelVm.dispose() }
+                }
+                // Accessibility CTA wiring (Phase 4.1): read the live enabled-
+                // services setting and parse it with the pure helper; the CTA
+                // deep-links to the system Accessibility settings list.
+                val a11yEnabled = isAccessibilityServiceEnabled(
+                    android.provider.Settings.Secure.getString(
+                        context.contentResolver,
+                        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    ),
+                    context.packageName,
+                    "com.aiblackbox.portal.overlay.BlackBoxA11yService",
+                )
+                LocalModelSection(
+                    viewModel = localModelVm,
+                    accessibilityEnabled = a11yEnabled,
+                    onEnableAccessibility = {
+                        context.startActivity(
+                            Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    },
+                )
+                Spacer(Modifier.height(20.dp))
             }
 
             // ══════════════════════════════════════════════════════════════

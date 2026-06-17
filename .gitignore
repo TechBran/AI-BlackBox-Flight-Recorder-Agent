@@ -240,6 +240,9 @@ Contacts/contacts.json
 # Per-install device registry state (template at devices.json.template) —
 # customer's tailnet devices populate via /devices/sync-tailscale on first use.
 Orchestrator/device_registry/devices.json
+# On-device (local Gemma) provider attestation registry — written at runtime
+# as phones attest; per-install device-trust state, never commit.
+Orchestrator/local_provider/local_devices.json
 
 # Zellij CLI Agent state: (operator, provider, app) -> session_name +
 # token_name mapping. Per-install runtime data; NEVER stores raw token

@@ -11,7 +11,8 @@ enum class ChatProvider(val id: String, val displayName: String) {
     GEMINI_LIVE("gemini-live", "Gemini Live"),
     GROK_LIVE("grok-live", "Grok Live"),
     ROBOTICS("robotics", "Robotics (ER)"),
-    COMPUTER_USE("computer-use", "Computer Use");
+    COMPUTER_USE("computer-use", "Computer Use"),
+    LOCAL("local", "On-Device (Gemma)");
 
     companion object {
         fun fromId(id: String): ChatProvider = entries.find { it.id == id } ?: GEMINI
@@ -20,5 +21,15 @@ enum class ChatProvider(val id: String, val displayName: String) {
     val isAgent get() = this == AGENTS || this == GEMINI_AGENTS
     val isVoice get() = this == REALTIME || this == GEMINI_LIVE || this == GROK_LIVE
     val isRobotics get() = this == ROBOTICS
-    val isStreaming get() = !isAgent && !isVoice
+
+    /** On-device Gemma — its turn runs locally on the phone, not via the mesh. */
+    val isLocal get() = this == LOCAL
+
+    /**
+     * A cloud streaming/SSE provider. LOCAL is deliberately EXCLUDED: it is
+     * neither agent nor voice, but its turn is executed on-device (Phase 2),
+     * NOT over the cloud SSE path — so the SSE/streaming branch must never treat
+     * it as a streaming provider.
+     */
+    val isStreaming get() = !isAgent && !isVoice && !isLocal
 }

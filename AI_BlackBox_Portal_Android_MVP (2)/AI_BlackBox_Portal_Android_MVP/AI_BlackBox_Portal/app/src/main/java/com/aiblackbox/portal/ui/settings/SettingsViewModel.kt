@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.ui.chat.ProviderPickerViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +32,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _operators = MutableStateFlow(listOf("Brandon"))
     val operators: StateFlow<List<String>> = _operators.asStateFlow()
+
+    // ── On-device (local) provider gating (Task 1.6) ──
+    // True when the current operator has a disk-present, sha-verified on-device
+    // model → the Provider dropdown offers the LOCAL provider. Default false
+    // until loaded so we never flash LOCAL before we know it's installed.
+    private val _localAvailable = MutableStateFlow(false)
+    val localAvailable: StateFlow<Boolean> = _localAvailable.asStateFlow()
+    private var providerPicker: ProviderPickerViewModel? = null
+    private var currentOperator: String = "Brandon"
+
+    init {
+        viewModelScope.launch { store.operator.collect { currentOperator = it } }
+    }
 
     private val _apps = MutableStateFlow<List<RegisteredApp>>(emptyList())
     val apps: StateFlow<List<RegisteredApp>> = _apps.asStateFlow()
@@ -105,6 +120,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         super.onCleared()
+        // Cancel the picker's own CoroutineScope (separate from viewModelScope)
+        // so it doesn't leak.
+        providerPicker?.dispose()
         previewPlayer?.apply { setOnCompletionListener(null); setOnErrorListener(null); release() }
         previewPlayer = null
     }
@@ -114,6 +132,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         api = BlackBoxApi(origin)
         loadOperators()
         loadApps()
+
+        // On-device (LOCAL) provider gating (Task 1.6): disk reads off-main.
+        val picker = ProviderPickerViewModel.fromContext(
+            context = getApplication(),
+            api = api!!,
+            operatorProvider = { currentOperator },
+            ioDispatcher = Dispatchers.IO,
+        )
+        providerPicker = picker
+        viewModelScope.launch { picker.localAvailable.collect { _localAvailable.value = it } }
+        refreshLocalAvailability()
+    }
+
+    /**
+     * Recompute on-device (LOCAL) availability + fire the best-effort re-attest.
+     * Call when the Provider dropdown opens so a just-installed/just-deleted
+     * model is reflected and the BlackBox's binding record stays current.
+     */
+    fun refreshLocalAvailability() {
+        providerPicker?.refresh()
     }
 
     fun setProvider(provider: String) {

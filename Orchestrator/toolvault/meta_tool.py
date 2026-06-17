@@ -245,6 +245,7 @@ def _action_read(tool_name: str) -> MetaToolResult:
             "schema": schema,
             "groups": entry.get("groups", []),
             "tier": tier,
+            "description": entry.get("description", ""),
         },
     )
 
