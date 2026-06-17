@@ -128,6 +128,16 @@ enum class LocalEngineState { IDLE, WARMING, READY, ERROR }
  */
 enum class LocalEngineEvent { WARM_STARTED, WARM_SUCCEEDED, WARM_FAILED }
 
+/**
+ * What to do when the active on-device model SELECTION changes (Task W5):
+ *  - [NONE]   no-op (unchanged, not local, or the first replayed emission).
+ *  - [NOW]    invalidate the cached engine + re-warm the new bundle immediately.
+ *  - [DEFER]  a turn is in flight -> apply at turn completion (I1: never close()
+ *             the native engine mid-generation).
+ * Decided by the pure [ChatViewModel.localReWarmAction].
+ */
+enum class LocalReWarmAction { NONE, NOW, DEFER }
+
 private const val MAX_CHAT_MESSAGES = 100
 
 /**
@@ -200,6 +210,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // fall back to the alphabetically-first installed bundle (the prior behavior).
     @Volatile
     private var currentLocalModelSlug: String = ""
+
+    // I1 (W5 review): a model-selection change that arrives WHILE a local turn is
+    // streaming must NOT close the live native engine mid-generation (close() is
+    // not serialized against generate() -> native teardown race). When that
+    // happens we set this flag and defer the invalidate+re-warm until the turn
+    // completes ([processPendingLocalReWarm]).
+    @Volatile
+    private var pendingLocalReWarm: Boolean = false
 
     // The persona / system-prompt cache (Task 2.3) feeding the on-device turn.
     // Built lazily off the application context the first time a local turn runs
@@ -399,12 +417,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 store.getString("model_local").collect { slug ->
                     val previous = currentLocalModelSlug
                     currentLocalModelSlug = slug
-                    if (slug != previous && ChatProvider.fromId(currentProvider).isLocal) {
-                        // The active local model changed -> drop the cached engine
-                        // wiring so the next warm/turn rebuilds for the new bundle,
-                        // then proactively warm it.
-                        invalidateLocalEngine()
-                        preloadLocalEngine()
+                    // Thin shim over the PURE [localReWarmAction] decision (M1
+                    // first-emission no-op + I1 mid-stream defer), so the branching
+                    // is unit-tested without the ViewModel.
+                    when (
+                        localReWarmAction(
+                            previousSlug = previous,
+                            newSlug = slug,
+                            isLocalProvider = ChatProvider.fromId(currentProvider).isLocal,
+                            turnInFlight = isLocalTurnInFlight(),
+                        )
+                    ) {
+                        LocalReWarmAction.NOW -> {
+                            invalidateLocalEngine()
+                            preloadLocalEngine()
+                        }
+                        // I1: tearing down now would close() the native runtime
+                        // mid-generation -> apply at turn completion instead.
+                        LocalReWarmAction.DEFER -> pendingLocalReWarm = true
+                        LocalReWarmAction.NONE -> Unit
                     }
                 }
             }
@@ -971,6 +1002,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
             stopBackgroundService()
             persistHistory()
+            // I1 (W5): the turn is done -> apply any model switch that arrived
+            // mid-stream now that no native generation is in flight.
+            processPendingLocalReWarm()
         }
     }
 
@@ -1096,6 +1130,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
             stopBackgroundService()
             persistHistory()
+            // I1 (W5): the turn is done -> apply any model switch that arrived
+            // mid-stream now that no native generation is in flight.
+            processPendingLocalReWarm()
         }
     }
 
@@ -1206,6 +1243,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         localLlmProvider = null
         warmingModelPath = null
         _localEngineState.value = LocalEngineState.IDLE
+    }
+
+    /**
+     * I1 (W5 review): true while an on-device turn is actively running, so a
+     * model-selection change defers its engine teardown until the turn finishes
+     * rather than close()-ing the native runtime mid-generation. STREAMING and
+     * THINKING are the in-flight states for a local turn (see [runLocalEngineTurn]
+     * / the vision turn); IDLE/ERROR are terminal.
+     */
+    private fun isLocalTurnInFlight(): Boolean =
+        _chatState.value == ChatState.STREAMING || _chatState.value == ChatState.THINKING
+
+    /**
+     * I1 (W5 review): apply a model-selection change that arrived mid-turn. Called
+     * at every local-turn completion point; a no-op unless [pendingLocalReWarm] was
+     * set. Now that no generation is in flight, it is safe to close() the old
+     * engine and re-warm the newly-selected bundle.
+     */
+    private fun processPendingLocalReWarm() {
+        if (!pendingLocalReWarm) return
+        pendingLocalReWarm = false
+        if (!ChatProvider.fromId(currentProvider).isLocal) return
+        invalidateLocalEngine()
+        preloadLocalEngine()
     }
 
     /**
@@ -2414,6 +2475,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          */
         fun shouldStartWarm(current: LocalEngineState): Boolean =
             current != LocalEngineState.WARMING
+
+        /**
+         * What to do when the persisted active on-device model slug emits (Task
+         * W5). PURE so the selection->warm branching (incl. the I1 mid-stream
+         * defer + the M1 first-emission no-op) is unit-testable without the
+         * ViewModel:
+         *  - [previousSlug] blank  -> [LocalReWarmAction.NONE] (first replayed
+         *    emission of the persisted value; the provider collector owns the
+         *    initial warm, so don't invalidate + re-warm it).
+         *  - slug unchanged        -> NONE.
+         *  - not the local provider -> NONE (no on-device engine to re-wire).
+         *  - a real change while a turn is in flight -> [LocalReWarmAction.DEFER]
+         *    (close()-ing the native engine mid-generation is unsafe; apply it at
+         *    turn completion).
+         *  - a real change, idle    -> [LocalReWarmAction.NOW] (invalidate + warm).
+         */
+        fun localReWarmAction(
+            previousSlug: String,
+            newSlug: String,
+            isLocalProvider: Boolean,
+            turnInFlight: Boolean,
+        ): LocalReWarmAction = when {
+            previousSlug.isBlank() -> LocalReWarmAction.NONE
+            newSlug == previousSlug -> LocalReWarmAction.NONE
+            !isLocalProvider -> LocalReWarmAction.NONE
+            turnInFlight -> LocalReWarmAction.DEFER
+            else -> LocalReWarmAction.NOW
+        }
 
         /**
          * The on-device engine readiness state machine (Task W1) — pure so the

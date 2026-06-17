@@ -586,4 +586,75 @@ class ChatViewModelLocalEngineTest {
         // The only newline is the leading line-break of the inline line itself.
         assertEquals("snippet collapsed to one line", 1, outcome.count { it == '\n' })
     }
+
+    // ── W5: active-model selection → re-warm decision (I1 defer + M1 first-emission) ──
+
+    @Test
+    fun `localReWarmAction first emission is a no-op`() {
+        // Blank `previous` = the persisted slug replaying on init; the provider
+        // collector owns the initial warm, so don't invalidate + re-warm it.
+        assertEquals(
+            LocalReWarmAction.NONE,
+            ChatViewModel.localReWarmAction(
+                previousSlug = "",
+                newSlug = "gemma-4-e4b",
+                isLocalProvider = true,
+                turnInFlight = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `localReWarmAction unchanged slug is a no-op`() {
+        assertEquals(
+            LocalReWarmAction.NONE,
+            ChatViewModel.localReWarmAction(
+                previousSlug = "gemma-4-e4b",
+                newSlug = "gemma-4-e4b",
+                isLocalProvider = true,
+                turnInFlight = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `localReWarmAction change while not local provider is a no-op`() {
+        assertEquals(
+            LocalReWarmAction.NONE,
+            ChatViewModel.localReWarmAction(
+                previousSlug = "gemma-4-e2b",
+                newSlug = "gemma-4-e4b",
+                isLocalProvider = false,
+                turnInFlight = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `localReWarmAction real change while idle re-warms now`() {
+        assertEquals(
+            LocalReWarmAction.NOW,
+            ChatViewModel.localReWarmAction(
+                previousSlug = "gemma-4-e2b",
+                newSlug = "gemma-4-e4b",
+                isLocalProvider = true,
+                turnInFlight = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `localReWarmAction real change mid-turn defers (I1 no mid-stream close)`() {
+        // The riskiest case: a different model is selected while a local turn is
+        // streaming. Must DEFER -- closing the native engine now races generate().
+        assertEquals(
+            LocalReWarmAction.DEFER,
+            ChatViewModel.localReWarmAction(
+                previousSlug = "gemma-4-e2b",
+                newSlug = "gemma-4-e4b",
+                isLocalProvider = true,
+                turnInFlight = true,
+            ),
+        )
+    }
 }
