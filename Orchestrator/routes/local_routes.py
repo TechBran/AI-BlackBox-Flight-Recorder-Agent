@@ -26,6 +26,7 @@ from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
 from Orchestrator.local_provider import get_local_registry
 from Orchestrator.local_provider import mirror
+from Orchestrator.local_provider.tool_injection import build_injected_tools
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
 
@@ -184,29 +185,10 @@ async def local_tools_search(request: Request):
     # tool discovery is global/un-scoped — every operator searches the same vault.
 
     try:
-        search = meta_tool.execute("search", query=query)
-        matches = (search.data or {}).get("matches", []) if search.success else []
-
-        tools = []
-        for m in matches[:k]:
-            name = m.get("name")
-            if not name:
-                continue
-            # The search result only carries {name, score}; pull the full schema
-            # (and description) per hit via the meta-tool's read action.
-            spec = meta_tool.execute("read", tool_name=name)
-            # Fault isolation: a stale/renamed tool (read failure) is skipped, not
-            # 500'd for the whole batch nor appended as an empty-schema garbage entry.
-            if not spec.success:
-                continue
-            data = spec.data or {}
-            tools.append({
-                "name": name,
-                "description": data.get("description", ""),
-                # meta_tool calls it "schema"; expose as "parameters" for tool-def consumers
-                "parameters": data.get("schema", {}),
-            })
-
+        # Shared discovery->specs helper (also used by /local/turn/prepare). It
+        # is total (never raises) and applies the same fault isolation: stale/
+        # renamed hits whose `read` fails are skipped, not 500'd for the batch.
+        tools = build_injected_tools(query, k)
         return {"success": True, "tools": tools}
     except Exception as e:
         print(f"[LOCAL PROVIDER] search failed: {e}")
