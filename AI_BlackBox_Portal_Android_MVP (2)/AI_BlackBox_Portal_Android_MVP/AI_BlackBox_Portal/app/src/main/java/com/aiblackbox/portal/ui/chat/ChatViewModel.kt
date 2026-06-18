@@ -980,7 +980,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         // text); a structured tool_transcript is a later enhancement.
                         val completeSink: (SaveRequest, String) -> Unit = { req, _ ->
                             viewModelScope.launch {
-                                onlineClient.complete(
+                                val res = onlineClient.complete(
                                     CompleteRequest(
                                         turnId = prep.turnId,
                                         operator = op,
@@ -989,6 +989,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                         toolTranscript = emptyList(),
                                     ),
                                 )
+                                // Resilience (Task 11): prepare succeeded (online) but complete()
+                                // came back null (mesh dropped mid-turn). Fall back to the durable
+                                // queue so the turn is minted on reconnect -- a completed turn is
+                                // NEVER silently lost.
+                                if (res == null) persistLocalSave(req)
                             }
                         }
                         streamLocalNativeAgentTurn(
