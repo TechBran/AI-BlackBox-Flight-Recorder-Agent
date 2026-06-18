@@ -3152,6 +3152,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
         /**
+         * Turn the top-K tool schemas returned by /local/turn/prepare into DIRECTLY-callable
+         * native tools: the model calls each by its real name (e.g. roll_dice) and the engine
+         * routes the call straight to the cloud [ToolBridge] (NEVER the phone PhoneController) —
+         * no find_blackbox_tool/run_blackbox_tool indirection. find_blackbox_tool remains
+         * (via buildCloudNativeTools) ONLY as the long-tail fallback.
+         */
+        internal fun buildInjectedNativeTools(
+            tools: List<ToolSchema>,
+            bridge: ToolBridge,
+            operator: String,
+        ): List<NativeTool> = tools.map { schema ->
+            NativeTool(
+                schema = schema,
+                execute = { argsJson ->
+                    val callArgs = parseNativeArgs(argsJson) // the tool's args ARE the payload (no nested "args")
+                    runBlocking(Dispatchers.IO) {
+                        bridge.execute(schema.name, callArgs, operator)
+                    }.toResultJsonString()
+                },
+            )
+        }
+
+        /**
          * Coerce the model-supplied `args` element of a run_blackbox_tool call into the
          * [JsonObject] passed to [ToolBridge.execute]. The small model may send `args`
          * as a JSON OBJECT (preferred) or as a JSON-encoded STRING; either is accepted,
