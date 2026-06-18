@@ -22,9 +22,8 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from Orchestrator.config import CFG, VOL_PATH
+from Orchestrator.config import CFG, VOL_PATH, START_RX
 from Orchestrator.fossils import (
-    extract_snap_ids,
     get_recent_checkpoints_for_operator,
     get_recent_fossils_for_operator,
     keyword_retrieve_for_operator,
@@ -55,6 +54,7 @@ PROVIDER_CAPS = {
     "anthropic": 75000,    # Opus 4.7 adaptive-thinking TTFB constraint
     "computer-use": 75000,  # Anthropic-backed CU model uses same path
     "openai":    100000,   # GPT-5.1 has 256K window but conservative for prefill
+    "local":     16000,    # on-device Gemma: chars ≈ ~4K tokens, reserves ~12K of the phone's 16K window for the agent loop
     # "google" / "gemini" / "xai" / "grok" → fall back to MAX_TOTAL_CONTEXT_CHARS
 }
 
@@ -75,6 +75,10 @@ def build_fossil_context(
     operator: str,
     log_prefix: str = "[CONTEXT]",
     provider: str | None = None,
+    semantic_k: int | None = None,
+    checkpoint_count: int | None = None,
+    include_recent: bool = True,
+    include_keyword: bool = True,
 ) -> Tuple[str, dict]:
     """Retrieve fossils for `operator` and build the fossil-context string.
 
@@ -99,48 +103,70 @@ def build_fossil_context(
     # Retrieval config — same keys and fallbacks as build_streaming_context
     RF  = CFG.getint("context", "recent_fossils_per_user", fallback=5)
     KF  = CFG.getint("context", "keyword_fossils_per_user", fallback=4)
-    SF  = CFG.getint("context", "semantic_fossils_per_user", fallback=8)
+    SF  = semantic_k if semantic_k is not None else CFG.getint("context", "semantic_fossils_per_user", fallback=8)
     ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.60)
     from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
     ST = active_threshold(ST)
-    CP  = CFG.getint("context", "checkpoint_snapshots", fallback=2)
+    CP  = checkpoint_count if checkpoint_count is not None else CFG.getint("context", "checkpoint_snapshots", fallback=2)
     CAP = CFG.getint("context", "max_fossil_chars", fallback=10000)
 
     # Read volume once
     vol_txt = read_text_safe(VOL_PATH)
 
-    # Four separate retrieval sources, all scoped to `operator`
-    recent_snaps = get_recent_fossils_for_operator(vol_txt, operator, RF, CAP)
+    # Four separate retrieval sources, all scoped to `operator`.
+    # include_recent / include_keyword let lean profiles (e.g. on-device
+    # `local`) skip these sources entirely; cloud callers leave them True.
+    recent_snaps = (
+        get_recent_fossils_for_operator(vol_txt, operator, RF, CAP)
+        if include_recent else []
+    )
     keyword_snaps_raw = (
         keyword_retrieve_for_operator(vol_txt, user_text, KF, operator)
-        if user_text else []
+        if (include_keyword and user_text) else []
     )
+    # Cap to SF defensively: semantic_retrieve already honors k=SF, so this is
+    # a no-op for cloud callers, but it guarantees the lean `local` profile's
+    # item budget even if a retriever over-returns.
     semantic_snaps_raw = (
-        semantic_retrieve(user_text, operator=operator, k=SF, threshold=ST)
+        semantic_retrieve(user_text, operator=operator, k=SF, threshold=ST)[:SF]
         if user_text else []
     )
     checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CP)
 
+    # ID extraction for dedupe + provenance. Real snapshot blocks always carry
+    # a START marker, so this yields the same SNAP-IDs the snapshot parser
+    # does (cloud behavior byte-for-byte identical). For marker-less blocks —
+    # which only arise from stubbed/lean inputs — fall back to the block
+    # itself so dedupe + provenance stay coherent.
+    def _ids(blocks: list[str]) -> list[str]:
+        out: list[str] = []
+        for b in blocks or []:
+            if not b:
+                continue
+            m = START_RX.search(b)
+            out.append(m.group("snap") if m else b)
+        return out
+
     # Deduplicate: keyword must not re-include snaps already in recent
-    recent_ids = set(extract_snap_ids(recent_snaps))
+    recent_ids = set(_ids(recent_snaps))
     keyword_snaps = [
         snap for snap in keyword_snaps_raw
-        if not any(sid in recent_ids for sid in extract_snap_ids([snap]))
+        if not any(sid in recent_ids for sid in _ids([snap]))
     ]
 
     # Semantic dedupe against recent AND keyword
-    keyword_ids_set = set(extract_snap_ids(keyword_snaps))
+    keyword_ids_set = set(_ids(keyword_snaps))
     seen_ids = recent_ids | keyword_ids_set
     semantic_snaps = [
         snap for snap in semantic_snaps_raw
-        if not any(sid in seen_ids for sid in extract_snap_ids([snap]))
+        if not any(sid in seen_ids for sid in _ids([snap]))
     ]
 
     # Provenance — same shape as chat_routes.build_streaming_context returns
-    recent_ids_list = extract_snap_ids(recent_snaps)
-    keyword_ids = extract_snap_ids(keyword_snaps)
-    semantic_ids = extract_snap_ids(semantic_snaps)
-    checkpoint_ids = extract_snap_ids(checkpoint_snaps)
+    recent_ids_list = _ids(recent_snaps)
+    keyword_ids = _ids(keyword_snaps)
+    semantic_ids = _ids(semantic_snaps)
+    checkpoint_ids = _ids(checkpoint_snaps)
 
     provenance = {
         "recent": recent_ids_list,
