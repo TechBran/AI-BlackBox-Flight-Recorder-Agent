@@ -456,12 +456,19 @@ class LiteRtEngine(
         // were ever weakened/absent. Fresh per generateWithToolsNative call (resets
         // each turn). See [MAX_NATIVE_TOOL_CALLS] / the pure [overCap] decision.
         val nativeCallCount = AtomicInteger(0)
+        // App-side per-turn tool-RESULT budget (snapshot-ledger Task 9): cumulative
+        // chars of the (trimmed) tool results fed back this turn. The window is ~16K
+        // and each result re-enters it, so a turn with several big results can still
+        // overflow even under the step cap. Fresh per generateWithToolsNative call
+        // (resets each turn). See [MAX_TURN_TOOL_RESULT_CHARS] / the pure
+        // [overTurnBudget] decision (an ADDITIONAL soft-stop gate OR'd with overCap).
+        val nativeToolResultChars = AtomicInteger(0)
         // Build engine-driven OpenApiTools: each `execute` runs the NativeTool body
         // AND bridges ToolCall(before)/ToolOutcome(after) into this flow's channel.
         // The shared counter lets each wrapper refuse to run its side-effecting body
         // once the cap is exceeded (returns a terminal "step limit reached" result).
         val providers = tools.map {
-            tool(nativeOpenApiToolFor(it, nativeCallCount) { event -> trySendBlocking(event) })
+            tool(nativeOpenApiToolFor(it, nativeCallCount, nativeToolResultChars) { event -> trySendBlocking(event) })
         }
         // Constrained decoding (Gallery pattern): enable around createConversation,
         // reset after. Reduces malformed tool-call tokens from the small model.
@@ -923,6 +930,7 @@ fun openApiToolFor(schema: ToolSchema): OpenApiTool {
 internal fun nativeOpenApiToolFor(
     nativeTool: NativeTool,
     callCount: AtomicInteger,
+    toolResultChars: AtomicInteger,
     emit: (LlmEvent) -> Unit,
 ): OpenApiTool {
     val schema = nativeTool.schema
@@ -930,12 +938,18 @@ internal fun nativeOpenApiToolFor(
     return object : OpenApiTool {
         override fun getToolDescriptionJsonString(): String = descriptionString
         override fun execute(paramsJsonString: String): String {
-            // 1. App-side step cap (defense-in-depth). Count THIS call (1-based) and,
-            //    if over the cap, refuse to run the side-effecting body: return a
-            //    terminal failed result so the model stops and gives its final answer.
-            //    Layered UNDER the engine's own recurring-tool-call guard (we don't
-            //    fight the engine; we just stop executing tool bodies past the cap).
-            if (overCap(callCount.incrementAndGet(), LiteRtEngine.MAX_NATIVE_TOOL_CALLS)) {
+            // 1. App-side soft gates (defense-in-depth), checked BEFORE running the
+            //    side-effecting body. EITHER triggers the SAME terminal "stop and
+            //    answer" path so the model wraps up with what it has -- never errors:
+            //      a) STEP cap: count THIS call (1-based); over MAX_NATIVE_TOOL_CALLS?
+            //      b) per-turn tool-RESULT budget (snapshot-ledger Task 9): have the
+            //         (trimmed) results fed back this turn exceeded the char budget?
+            //    Both are layered UNDER the engine's own recurring-tool-call guard (we
+            //    don't fight the engine; we just stop executing tool bodies past either
+            //    bound). The result-budget gate reads the shared accumulator updated in
+            //    step 5 below; it gates the NEXT call once the budget is spent.
+            if (overCap(callCount.incrementAndGet(), LiteRtEngine.MAX_NATIVE_TOOL_CALLS) ||
+                overTurnBudget(toolResultChars.get(), MAX_TURN_TOOL_RESULT_CHARS)) {
                 emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = false, result = STEP_LIMIT_PAYLOAD)))
                 return STEP_LIMIT_RESULT_JSON
             }
@@ -944,11 +958,17 @@ internal fun nativeOpenApiToolFor(
                 .getOrNull() ?: JsonObject(emptyMap())
             emit(LlmEvent.ToolCall(schema.name, argsObj))
             // 3. Run the dispatch body (returns the Gallery-shaped result JSON).
-            val resultJson = nativeTool.execute(paramsJsonString)
-            // 4. ToolOutcome for inline rendering (parsed back from the result JSON).
+            val rawResultJson = nativeTool.execute(paramsJsonString)
+            // 4. TRIM (snapshot-ledger Task 9): a single oversized result can't blow
+            //    the ~16K window on its own. Feed the TRIMMED string back to the engine
+            //    (not the raw one) and add its length to the per-turn accumulator that
+            //    the budget gate (step 1b) reads on the NEXT call.
+            val resultJson = trimToolResult(rawResultJson, MAX_TOOL_RESULT_CHARS)
+            toolResultChars.addAndGet(resultJson.length)
+            // 5. ToolOutcome for inline rendering (parsed back from the result JSON).
             val (ok, payload) = parseResultJsonString(resultJson)
             emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = ok, result = payload)))
-            // 5. Return the result string to the engine for the auto loop.
+            // 6. Return the (trimmed) result string to the engine for the auto loop.
             return resultJson
         }
     }
