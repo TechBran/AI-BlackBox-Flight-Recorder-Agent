@@ -3338,6 +3338,103 @@ async def _cu_save_to_blackbox(operator: str, user_text: str, result_text: str, 
         print(f"[CU-SAVE] Error saving: {e}\n{traceback.format_exc()}")
 
 
+async def persist_local_turn_and_mint(
+    operator: str, prompt: str, final_response: str,
+    tool_transcript: list | None = None, provenance: dict | None = None,
+) -> dict:
+    """Persist a completed on-device (local provider) turn and auto-mint it.
+
+    Mirrors _cu_save_to_blackbox / chat_save's persist+mint sequence but composes
+    the snapshot body SERVER-SIDE from the phone-supplied turn (the on-device 4B
+    never authors snapshot content). Reuses perform_mint for the actual mint.
+    Returns {"snap_id": str|None, "minted": bool, "checkpoint_triggered": bool}.
+    """
+    try:
+        # --- Compose the assistant response SERVER-SIDE -------------------
+        # Start with the model's final answer; if the phone reported tool use,
+        # append a compact, bounded provenance block so the snapshot records
+        # what the turn actually touched (the 4B never authors this).
+        assistant_response = final_response
+        if tool_transcript:
+            lines = ["", "[TOOLS USED]"]
+            for call in tool_transcript:
+                if not isinstance(call, dict):
+                    continue
+                name = str(call.get("name", "tool"))
+                args = call.get("args", {})
+                args_str = json.dumps(args, default=str) if isinstance(args, (dict, list)) else str(args)
+                if len(args_str) > 200:
+                    args_str = args_str[:200] + "..."
+                result_str = str(call.get("result", ""))
+                if len(result_str) > 200:
+                    result_str = result_str[:200] + "..."
+                lines.append(f"- {name}({args_str}) -> {result_str}")
+            assistant_response = final_response + "\n" + "\n".join(lines)
+
+        # --- Persist the turn (mirror _cu_save_to_blackbox / chat_save) ---
+        s = get_state(operator)
+        utc_now = now_utc_iso()
+        if prompt:
+            s.add_conversation_turn({"role": "user", "utc": utc_now, "text": prompt})
+        s.add_conversation_turn({
+            "role": "assistant", "utc": utc_now,
+            "text": assistant_response, "snap_text": assistant_response,
+        })
+
+        # Counters (token counts are 0 for an on-device turn).
+        s.conv_turns_since += 1
+        s.total_turns += 1
+
+        # Context metadata - model is the on-device provider.
+        s.last_context_meta["model"] = "local"
+
+        # Provenance - map the same way chat_save does (recent / relevant).
+        if provenance:
+            s.last_context_meta["gm_excerpt"] = True
+            s.last_context_meta["recent_ids"] = provenance.get("recent", [])
+            relevant = (
+                provenance.get("keyword", [])
+                + provenance.get("checkpoint", [])
+                + provenance.get("semantic", [])
+            )
+            s.last_context_meta["relevant_ids"] = relevant
+            print(f"[LOCAL-SAVE] Provenance - Recent: {provenance.get('recent', [])}, Relevant: {relevant}")
+
+        # --- Auto-mint (same gate as chat_save / _cu_save) ---------------
+        minted = False
+        snap_id = None
+        if AUTO_ENABLE:
+            now_ms = int(time.time() * 1000)
+            should_mint, reason = False, None
+            d = drift_state_for(s)
+            if d == "red" and ON_RED == "auto": should_mint, reason = True, "DRIFT_RED"
+            elif d == "yellow" and ON_YELLOW == "auto": should_mint, reason = True, "DRIFT_YELLOW"
+            elif s.conv_tokens_since >= TOKENS_THRESHOLD: should_mint, reason = True, "TOKENS"
+            elif s.conv_turns_since >= TURNS_THRESHOLD: should_mint, reason = True, "TURNS"
+
+            if should_mint and (now_ms - s.last_mint_ms >= DEBOUNCE_MS):
+                result = await run_blocking(perform_mint, operator, reason or "LOCAL_TURN")
+                s.last_mint_ms = int(time.time() * 1000)
+                minted = True
+                snap_id = result.get("snap_id")
+                print(f"[LOCAL-SAVE] Auto-mint triggered for {operator}: {reason} -> {snap_id}")
+
+        # --- Checkpoint cadence (same as chat_save) ----------------------
+        checkpoint_triggered = False
+        if should_create_checkpoint(operator):
+            print(f"[LOCAL-SAVE] Creating checkpoint task for {operator} at turn {s.total_turns}")
+            create_task(TaskType.CHECKPOINT, operator=operator, result_data={"manual": False})
+            checkpoint_triggered = True
+
+        save_operator_state()
+        print(f"[LOCAL-SAVE] Saved on-device turn for {operator} (minted={minted})")
+        return {"snap_id": snap_id, "minted": minted, "checkpoint_triggered": checkpoint_triggered}
+    except Exception as e:
+        import traceback
+        print(f"[LOCAL-SAVE] Error saving: {e}\n{traceback.format_exc()}")
+        return {"snap_id": None, "minted": False, "checkpoint_triggered": False, "error": str(e)}
+
+
 async def stream_computer_use(messages: List[Dict], model: str, operator: str, session_id: str = None, device_id: str = "blackbox"):
     """Launch the CU agent loop as a background asyncio.Task and consume
     events from its queue.  The task keeps running even if the SSE client

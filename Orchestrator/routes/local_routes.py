@@ -310,6 +310,63 @@ async def local_turn_prepare(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# POST /local/turn/complete - server-composed mint of a completed on-device turn
+#
+# The second leg of the server-bracketed on-device turn: after the phone runs
+# the on-device Gemma model locally (on the package from /local/turn/prepare),
+# it POSTs the completed turn here. The BlackBox composes the snapshot body
+# SERVER-SIDE (the 4B never authors snapshot content), persists it, and
+# AUTO-MINTS it (inline embedding) so the turn is instantly recallable - and
+# the existing checkpoint cadence may fire. The persist+mint sequence is reused
+# from chat_routes (lazy-imported below to avoid an import cycle).
+# ---------------------------------------------------------------------------
+@app.post("/local/turn/complete")
+async def local_turn_complete(request: Request):
+    """Persist + auto-mint a completed on-device turn (server-composed body).
+
+    Body: {"turn_id": str, "operator": str, "prompt": str,
+           "final_response": str, "tool_transcript"?: [{name,args,result}],
+           "provenance"?: {}}.
+
+    Blank operator -> 400; missing/blank final_response -> 400.
+    Returns: {"success": True, "snap_id": str|None, "checkpoint_triggered": bool}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
+
+    operator = body.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+
+    final_response = body.get("final_response")
+    if not isinstance(final_response, str) or not final_response.strip():
+        return JSONResponse({"success": False, "error": "final_response required"}, status_code=400)
+
+    prompt = body.get("prompt") or ""
+
+    # Lazy-import to avoid an import cycle: chat_routes pulls in a large pile of
+    # state/mint/task deps; importing it at module top here would create a cycle.
+    from Orchestrator.routes.chat_routes import persist_local_turn_and_mint
+
+    result = await persist_local_turn_and_mint(
+        operator, prompt, final_response,
+        tool_transcript=body.get("tool_transcript"),
+        provenance=body.get("provenance"),
+    )
+    if result.get("error"):
+        return JSONResponse({"success": False, "error": result["error"]}, status_code=500)
+    return {
+        "success": True,
+        "snap_id": result["snap_id"],
+        "checkpoint_triggered": result["checkpoint_triggered"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /local/device/attest — register an operator's verified on-device model
 # ---------------------------------------------------------------------------
 @app.post("/local/device/attest")
