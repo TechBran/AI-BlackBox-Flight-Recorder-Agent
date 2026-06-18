@@ -191,3 +191,10 @@ Checklist on the Fold 6 against the staging origin (`tailscale serve --bg http:/
 - **`system_prompt` source flips online vs offline** (server vs persona cache) — keep the seam explicit so offline never silently sends a stale server prompt.
 - **Budget is empirical** — Task 5 measures real `package_chars`; Task 12 tunes. Don't hardcode until measured.
 - **Decode-safety:** every phone DTO field defaulted (a missing field must not fault a turn).
+
+## Post-review follow-ups (whole-branch review 2026-06-17 — verdict READY, non-blocking)
+These do NOT gate the ship; tracked for a later pass:
+- **(Minor) Online complete() is less crash-durable than the offline queue.** `completeSink` is a bare `viewModelScope.launch { complete(); if null persistLocalSave }`. If the VM is cleared between turn-end and `complete()` resolving, the POST is dropped AND the fallback never runs → that completed turn is never minted. Offline `persistLocalSave` persists-to-disk-before-flush, so it survives cancellation. Fix idea: run complete()/fallback on a scope that outlives the VM, or enqueue-then-complete-then-dedupe, to make online as durable as offline. (Nit fixed in code: the Nit-3 comment.)
+- **(Minor) A server-side 500 in `complete` can duplicate a conv-log entry** (NOT a duplicate snapshot): `persist_local_turn_and_mint` adds the conversation turn before minting; if `perform_mint`/`save_operator_state` throws → 500 → phone treats it as offline → re-enqueues to `/chat/save` → the turn is appended again (folded into the next snapshot's raw log). Rare (needs a mint/persist throw). Fix idea: validate/compose before the first `add_conversation_turn`.
+- **(Nit) Lock the `TurnClient` SerializationException-propagates contract** with a malformed-200 test (behavior is correct by construction today).
+- **(Enhancement) Structured `tool_transcript`**: v1 sends `emptyList()` (provenance is rendered inline in `finalResponse`); the server composer already handles a populated transcript when we wire capture of the loop's ToolCall/ToolOutcome events.

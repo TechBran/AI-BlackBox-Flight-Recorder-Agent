@@ -24,9 +24,12 @@ package com.aiblackbox.portal.data.local
  *  screen read or a multi-snapshot search) can't blow the window on its own. */
 const val MAX_TOOL_RESULT_CHARS: Int = 4000
 
-/** Per-turn cumulative tool-result budget (chars). When exceeded, the loop
- *  soft-stops. ~40K chars ≈ ~10K tokens of tool output, leaving room for the
- *  package + the model's answer in the 16K window. Tunable (Task 12). */
+/** Per-turn budget: the cumulative chars of (trimmed) tool output fed back across
+ *  one turn before the loop is forced to wrap up. This is an upper-bound TRIGGER
+ *  for the soft-stop, not a simultaneous window occupant — the litertlm engine owns
+ *  window management (and has its own recurring-call guard); this is a backstop so
+ *  a tool-call-happy turn can't keep growing context unbounded. ~40K chars ≈ ~10K
+ *  tokens. Tunable (Task 12). */
 const val MAX_TURN_TOOL_RESULT_CHARS: Int = 40000
 
 /** The marker appended to a truncated tool result so the model (and a human
