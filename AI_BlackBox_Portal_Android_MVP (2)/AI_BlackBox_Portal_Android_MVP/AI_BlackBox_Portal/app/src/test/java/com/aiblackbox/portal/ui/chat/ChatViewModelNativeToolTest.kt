@@ -159,6 +159,121 @@ class ChatViewModelNativeToolTest {
         assertTrue("run_blackbox_tool IS offered", ResidentTools.RUN_BLACKBOX_TOOL in offered)
     }
 
+    // ---- Task 10 (snapshot ledger): server-injected DIRECT tools in the native loop ----
+    //
+    // /local/turn/prepare returns the top-K relevant tools; streamLocalNativeAgentTurn
+    // takes them via the new `injectedTools` param and offers them as DIRECTLY-callable
+    // NativeTools (the model calls each by its real name, e.g. roll_dice) ALONGSIDE the
+    // resident phone/intent tools and the find/run cloud fallback. Order: phone, then
+    // injected direct tools, then the find/run fallback.
+
+    @Test
+    fun `injected tools are offered as direct native tools alongside phone + the find-run fallback`() = runTest {
+        val engine = FakeNativeToolCallingLlm(calls = emptyList(), finalText = "hi")
+        val phone = FakePhoneController()
+        val bridge = FakeToolBridge()
+        val injected = listOf(
+            ToolSchema(name = "roll_dice", description = "Roll a die", parameters = buildJsonObject {}),
+            ToolSchema(name = "generate_image", description = "Make an image", parameters = buildJsonObject {}),
+        )
+
+        ChatViewModel.streamLocalNativeAgentTurn(
+            engine = engine,
+            phone = phone,
+            phoneTools = phoneTools,
+            bridge = bridge,
+            prompt = "p",
+            injectedTools = injected,
+            operator = "Brandon",
+            model = null,
+            text = "roll a dice",
+            sink = { _, _ -> },
+            saveSink = { _, _ -> },
+        )
+
+        val offeredNames = engine.seenTools.map { it.schema.name }
+        // The server-injected tools are offered DIRECTLY (by their real names)...
+        assertTrue("injected roll_dice offered directly", "roll_dice" in offeredNames)
+        assertTrue("injected generate_image offered directly", "generate_image" in offeredNames)
+        // ...the resident phone/intent tools are still offered...
+        assertTrue("phone actuators still offered",
+            ResidentTools.PHONE_ACTUATORS.all { it in offeredNames })
+        // ...and the find/run fallback is STILL present (long-tail reachability).
+        assertTrue("find_blackbox_tool fallback retained", ResidentTools.FIND_BLACKBOX_TOOL in offeredNames)
+        assertTrue("run_blackbox_tool fallback retained", ResidentTools.RUN_BLACKBOX_TOOL in offeredNames)
+        // Order contract: phone first, then injected, then the find/run fallback.
+        val rollIdx = offeredNames.indexOf("roll_dice")
+        val findIdx = offeredNames.indexOf(ResidentTools.FIND_BLACKBOX_TOOL)
+        val firstPhoneIdx = offeredNames.indexOf(ResidentTools.PHONE_ACTUATORS.first())
+        assertTrue("phone tools precede injected", firstPhoneIdx in 0 until rollIdx)
+        assertTrue("injected precede the find/run fallback", rollIdx in 0 until findIdx)
+    }
+
+    @Test
+    fun `an injected tool dispatches directly to the bridge with its own name, not via find-run`() = runTest {
+        // The engine "calls" the injected roll_dice by its REAL name (no find_blackbox_tool first).
+        val engine = FakeNativeToolCallingLlm(
+            calls = listOf("roll_dice" to """{"sides":6}"""),
+            finalText = "rolled",
+        )
+        val phone = FakePhoneController() // must stay untouched
+        val bridge = FakeToolBridge(
+            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("rolled-4")) },
+        )
+        val injected = listOf(
+            ToolSchema(name = "roll_dice", description = "Roll a die", parameters = buildJsonObject {}),
+        )
+
+        ChatViewModel.streamLocalNativeAgentTurn(
+            engine = engine,
+            phone = phone,
+            phoneTools = phoneTools,
+            bridge = bridge,
+            prompt = "p",
+            injectedTools = injected,
+            operator = "Brandon",
+            model = null,
+            text = "roll a dice",
+            sink = { _, _ -> },
+            saveSink = { _, _ -> },
+        )
+
+        // Direct: the bridge ran roll_dice by name; no find_blackbox_tool indirection; phone untouched.
+        assertEquals(listOf("roll_dice"), bridge.executeCalls.map { it.first })
+        assertEquals("Brandon", bridge.executeOperators.single())
+        assertTrue("a direct injected call must NOT search the catalog first", bridge.searchCalls.isEmpty())
+        assertTrue("an injected tool must NOT reach the phone controller", phone.dispatched.isEmpty())
+    }
+
+    @Test
+    fun `injectedTools defaults to empty so existing callers are unaffected`() = runTest {
+        // The manual/offline callers omit injectedTools entirely; the offered set is
+        // then exactly the legacy phone + find/run fallback (no extra direct tools).
+        val engine = FakeNativeToolCallingLlm(calls = emptyList(), finalText = "hi")
+        val phone = FakePhoneController()
+        val bridge = FakeToolBridge()
+
+        ChatViewModel.streamLocalNativeAgentTurn(
+            engine = engine,
+            phone = phone,
+            phoneTools = phoneTools,
+            bridge = bridge,
+            prompt = "p",
+            operator = "system",
+            model = null,
+            text = "hello",
+            sink = { _, _ -> },
+            saveSink = { _, _ -> },
+        )
+
+        val offered = engine.seenTools.map { it.schema.name }.toSet()
+        assertEquals(
+            "no injectedTools -> exactly phone actuators + intent actions + cloud find/run",
+            ResidentTools.PHONE_ACTUATORS + ResidentTools.INTENT_ACTIONS + ResidentTools.CLOUD_TOOLS,
+            offered,
+        )
+    }
+
     @Test
     fun `with no bridge the native path is phone-only (cloud tools omitted)`() = runTest {
         val engine = FakeNativeToolCallingLlm(calls = emptyList(), finalText = "hi")

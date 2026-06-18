@@ -28,6 +28,7 @@ import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.ToolBridge
 import com.aiblackbox.portal.data.local.ToolBridgeClient
 import com.aiblackbox.portal.data.local.ToolCallingLlm
+import com.aiblackbox.portal.data.local.TurnClient
 import com.aiblackbox.portal.data.local.VisionLlm
 import com.aiblackbox.portal.data.local.formatCloudToolMatches
 import com.aiblackbox.portal.data.local.toResultJsonString
@@ -36,6 +37,7 @@ import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
+import com.aiblackbox.portal.data.model.CompleteRequest
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.SaveRequest
 import com.aiblackbox.portal.data.model.TaskStatus
@@ -243,6 +245,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // the text-only runTurn (no agent loop without a bridge).
     @VisibleForTesting
     var toolBridge: ToolBridge? = null
+
+    // The server-bracketed on-device turn client (Task 10) — POST /local/turn/prepare
+    // (assemble the per-turn package) + POST /local/turn/complete (mint the finished
+    // turn). Built lazily off this VM's api (mirroring toolBridge/toolBridgeOrBuild);
+    // cached. Settable so a test can wire a fake. NULL until the api is set, in which
+    // case the native path falls back to the local persona-cache turn (offline mode).
+    @VisibleForTesting
+    var turnClient: TurnClient? = null
 
     // ── On-device screen-capture seam (Task W4.2 — vision) ──
     // The single-frame screen capture used by the direct "look at my screen" path
@@ -944,23 +954,75 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // bridge) AND cloud capabilities (find_blackbox_tool / run_blackbox_tool,
                     // dispatched through the bridge ONLY). The two are SEPARATE NativeTool
                     // execute lambdas, so a phone tool structurally cannot reach the bridge
-                    // (the W3 separation guarantee). Build the same plain-text prompt FcLoop
-                    // would (via a transient text-only FcLoop), then append the native
-                    // phone-control + cloud steering addendum to the persona.
-                    val nativePersona = persona + nativeAddendum(hasCloud = bridge != null)
-                    val prompt = FcLoop(llm).buildPrompt(nativePersona, history, text)
-                    streamLocalNativeAgentTurn(
-                        engine = llm,
-                        phone = phoneController,
-                        phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
-                        bridge = bridge,
-                        prompt = prompt,
-                        operator = op,
-                        model = model,
-                        text = text,
-                        sink = sink,
-                        saveSink = saveSink,
-                    )
+                    // (the W3 separation guarantee).
+                    //
+                    // SERVER-BRACKETED turn (Task 10): ask the hub to assemble this turn's
+                    // package (POST /local/turn/prepare). ONLINE -> the model runs on the
+                    // server-assembled system_prompt (fresh per-operator memory) + the
+                    // server's top-K relevant tools as DIRECT native calls, and the turn is
+                    // MINTED back via /local/turn/complete. OFFLINE (prepare == null,
+                    // unreachable) -> the EXISTING local persona-cache turn + persistLocalSave
+                    // queue (Task 11 formalizes degraded mode). The two paths are mutually
+                    // exclusive on the save sink, so a turn is minted EXACTLY ONCE (online via
+                    // complete, offline via persistLocalSave) -- NEVER both.
+                    val tc = turnClientOrBuild()
+                    val prep = if (tc != null) withContext(Dispatchers.IO) { tc.prepare(text, op) } else null
+                    if (prep != null) {
+                        // ONLINE: server system_prompt + injected direct tools; mint via complete.
+                        // tc is non-null here (prep came from tc.prepare); capture it as a
+                        // non-null val so the completeSink closure can call complete without !!.
+                        val onlineClient = tc!!
+                        val nativePrompt = prep.systemPrompt + nativeAddendum(hasCloud = bridge != null)
+                        val onlinePrompt = FcLoop(llm).buildPrompt(nativePrompt, history, text)
+                        // The save sink for the ONLINE path mints through /local/turn/complete
+                        // (NOT persistLocalSave) -- the no-double-mint guarantee. v1 carries the
+                        // provenance INLINE in finalResponse (already rendered into the assistant
+                        // text); a structured tool_transcript is a later enhancement.
+                        val completeSink: (SaveRequest, String) -> Unit = { req, _ ->
+                            viewModelScope.launch {
+                                onlineClient.complete(
+                                    CompleteRequest(
+                                        turnId = prep.turnId,
+                                        operator = op,
+                                        prompt = text,
+                                        finalResponse = req.assistantResponse,
+                                        toolTranscript = emptyList(),
+                                    ),
+                                )
+                            }
+                        }
+                        streamLocalNativeAgentTurn(
+                            engine = llm,
+                            phone = phoneController,
+                            phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
+                            bridge = bridge,
+                            prompt = onlinePrompt,
+                            injectedTools = prep.tools,
+                            operator = op,
+                            model = model,
+                            text = text,
+                            sink = sink,
+                            saveSink = completeSink,
+                        )
+                    } else {
+                        // OFFLINE / degraded (Task 11 formalizes): local persona cache prompt +
+                        // persistLocalSave queue, no fresh memory / injected tools.
+                        val nativePersona = persona + nativeAddendum(hasCloud = bridge != null)
+                        val prompt = FcLoop(llm).buildPrompt(nativePersona, history, text)
+                        streamLocalNativeAgentTurn(
+                            engine = llm,
+                            phone = phoneController,
+                            phoneTools = ResidentTools.phoneActuators() + ResidentTools.intentActions(),
+                            bridge = bridge,
+                            prompt = prompt,
+                            injectedTools = emptyList(),
+                            operator = op,
+                            model = model,
+                            text = text,
+                            sink = sink,
+                            saveSink = saveSink,
+                        )
+                    }
                 } else if (llm is ToolCallingLlm && bridge != null) {
                     // MANUAL agent loop (fallback / non-native engines + the fakes):
                     // FcLoop drives the tiered two-hop loop. When the phone controller
@@ -1183,6 +1245,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val client = api ?: return null
         val built = ToolBridgeClient(client)
         toolBridge = built
+        return built
+    }
+
+    /**
+     * Build (once) or return the server-bracketed turn client wired to this VM's api
+     * (Task 10). Returns null when the api is not yet initialized (api?:return
+     * convention, mirroring [toolBridgeOrBuild]) — no `api!!`. With no client the
+     * native path falls back to the local persona-cache turn (the offline branch).
+     */
+    private fun turnClientOrBuild(): TurnClient? {
+        turnClient?.let { return it }
+        val client = api ?: return null
+        val built = TurnClient(client)
+        turnClient = built
         return built
     }
 
@@ -3017,6 +3093,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             text: String,
             sink: (content: String, isStreaming: Boolean) -> Unit,
             saveSink: (request: SaveRequest, provider: String) -> Unit,
+            injectedTools: List<ToolSchema> = emptyList(),
         ): Boolean {
             // PHONE/INTENT NativeTools: each phone/intent schema dispatches LOCALLY
             // through the controller. runBlocking bridges the suspend dispatch into the
@@ -3040,8 +3117,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // screen/phone content). find_blackbox_tool discovers; run_blackbox_tool runs
             // the chosen tool (operator-scoped, exactly as the manual path always did).
             // Only wired when a [bridge] is present (offline/no-api -> phone-only).
+            // SERVER-INJECTED DIRECT tools (Task 10): the top-K relevant tools that
+            // /local/turn/prepare picked become DIRECTLY-callable NativeTools (the model
+            // calls each by its real name, e.g. roll_dice, routed straight to the cloud
+            // [bridge]); find_blackbox_tool/run_blackbox_tool stay below ONLY as the
+            // long-tail fallback. Only wired with a [bridge] (offline -> none).
+            val injected = if (bridge != null) buildInjectedNativeTools(injectedTools, bridge, operator) else emptyList()
             val cloudNativeTools = if (bridge != null) buildCloudNativeTools(bridge, operator) else emptyList()
-            val nativeTools = phoneNativeTools + cloudNativeTools
+            // Order: phone actuators, then the injected DIRECT tools, then the find/run fallback.
+            val nativeTools = phoneNativeTools + injected + cloudNativeTools
             val acc = StringBuilder()
             var faulted = false
             // Runaway bounds on this native loop: the litertlm engine's OWN internal
