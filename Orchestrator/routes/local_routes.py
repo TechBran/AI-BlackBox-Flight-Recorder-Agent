@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
+from Orchestrator.config import CFG
 from Orchestrator.context_builder import PROVIDER_CAPS, build_fossil_context
 from Orchestrator.local_provider import get_local_registry
 from Orchestrator.local_provider import mirror
@@ -275,17 +276,22 @@ async def local_turn_prepare(request: Request):
     prompt = body.get("prompt") or ""
 
     try:
-        # Lean LOCAL profile: semantic_k=3 + 1 checkpoint, no recent/keyword.
+        # Lean LOCAL profile: a few semantic snapshots (the teleport) + the most
+        # recent checkpoint, NO recent/keyword — kept small so the package leaves
+        # ~12K of the phone's 16K window for the agent loop. Defaults (3/1/5) are
+        # the Task-5-validated budget (persona ~2941 + ~1330/snapshot ≈ 8-10K <
+        # the 16000-char local cap); exposed via [context] config so they can be
+        # tuned on the live box (post-device timing) WITHOUT an APK/backend rebuild.
         fossil, prov = build_fossil_context(
             prompt,
             operator=operator,
             provider="local",
-            semantic_k=3,
-            checkpoint_count=1,
+            semantic_k=CFG.getint("context", "local_semantic_k", fallback=3),
+            checkpoint_count=CFG.getint("context", "local_checkpoint_count", fallback=1),
             include_recent=False,
             include_keyword=False,
         )
-        tools = build_injected_tools(prompt, k=5)
+        tools = build_injected_tools(prompt, k=CFG.getint("context", "local_injected_tools_k", fallback=5))
         persona = get_behavioral_core("chat")
         # Don't leave a trailing blank fossil block when there are no fossils.
         system_prompt = persona + ("\n\n" + fossil if fossil else "")
