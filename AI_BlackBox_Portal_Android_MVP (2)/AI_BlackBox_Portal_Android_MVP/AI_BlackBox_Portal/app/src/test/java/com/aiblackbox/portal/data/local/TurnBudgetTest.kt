@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.data.local
 
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -116,5 +117,45 @@ class TurnBudgetTest {
         }
         val expected = (MAX_TURN_TOOL_RESULT_CHARS / perCall) + 1 // = 11
         assertEquals("budget flips on the first call that pushes used past the cap", expected, flippedAt)
+    }
+
+    // -------------------------------------------------------------------------
+    // trimResultPayload -- trim the INNER result VALUE, keeping the Gallery JSON
+    // wrapper VALID. Regression: the native loop used to trim the whole
+    // toResultJsonString string, which sliced big results mid-JSON → invalid →
+    // parsed as "failed" (search_snapshots' ~23K-char result broke; roll_dice's
+    // ~53 chars slipped under the cap and worked).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `big-result tool stays valid JSON with success preserved (search_snapshots regression)`() {
+        val big = "x".repeat(23786) // ~ a real search_snapshots payload
+        val rawJson = toResultJsonString(true, JsonPrimitive(big))
+
+        // OLD BUG: trimming the WHOLE wrapper cuts it mid-JSON → unparseable → failed.
+        val naive = trimToolResult(rawJson, MAX_TOOL_RESULT_CHARS)
+        val (okBuggy, _) = parseResultJsonString(naive)
+        assertFalse("wrapper-trim yields invalid JSON parsed as failure (the bug)", okBuggy)
+
+        // FIX: parse → trim the inner payload → re-wrap → valid JSON, success kept.
+        val (ok, rawPayload) = parseResultJsonString(rawJson)
+        val payload = trimResultPayload(rawPayload, MAX_TOOL_RESULT_CHARS)
+        val resultJson = toResultJsonString(ok, payload)
+        val (ok2, payload2) = parseResultJsonString(resultJson)
+        assertTrue("re-wrapped result is valid JSON parsed as SUCCESS", ok2)
+        assertTrue("payload is a string", payload2 is JsonPrimitive)
+        assertTrue(
+            "payload bounded to maxChars + marker",
+            (payload2 as JsonPrimitive).content.length <= MAX_TOOL_RESULT_CHARS + 64,
+        )
+    }
+
+    @Test
+    fun `trimResultPayload passes short and non-string payloads through unchanged`() {
+        val short = JsonPrimitive("Rolled 1d6: [4]")
+        assertEquals(short, trimResultPayload(short))
+        val num = JsonPrimitive(42)
+        assertEquals(num, trimResultPayload(num))
+        assertEquals(null, trimResultPayload(null))
     }
 }

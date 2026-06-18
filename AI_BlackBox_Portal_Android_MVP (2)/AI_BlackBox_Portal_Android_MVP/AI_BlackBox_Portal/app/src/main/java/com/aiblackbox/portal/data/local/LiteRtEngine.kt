@@ -959,16 +959,21 @@ internal fun nativeOpenApiToolFor(
             emit(LlmEvent.ToolCall(schema.name, argsObj))
             // 3. Run the dispatch body (returns the Gallery-shaped result JSON).
             val rawResultJson = nativeTool.execute(paramsJsonString)
-            // 4. TRIM (snapshot-ledger Task 9): a single oversized result can't blow
-            //    the ~16K window on its own. Feed the TRIMMED string back to the engine
-            //    (not the raw one) and add its length to the per-turn accumulator that
-            //    the budget gate (step 1b) reads on the NEXT call.
-            val resultJson = trimToolResult(rawResultJson, MAX_TOOL_RESULT_CHARS)
+            // 4. TRIM the INNER result VALUE, not the JSON wrapper (snapshot-ledger
+            //    Task 9 + fix): trimming the whole `{"status":...,"result":"..."}`
+            //    string cuts it mid-JSON → invalid JSON → parseResultJsonString reads
+            //    it as "failed" (this broke every big-result tool, e.g. search_snapshots
+            //    at ~23K chars, while tiny ones like roll_dice slipped under the cap).
+            //    So parse the VALID raw JSON, trim the payload string, re-wrap → the
+            //    engine always receives valid JSON. Accumulate the trimmed length for
+            //    the per-turn budget gate (step 1b) read on the NEXT call.
+            val (ok, rawPayload) = parseResultJsonString(rawResultJson)
+            val payload = trimResultPayload(rawPayload, MAX_TOOL_RESULT_CHARS)
+            val resultJson = toResultJsonString(ok, payload)
             toolResultChars.addAndGet(resultJson.length)
-            // 5. ToolOutcome for inline rendering (parsed back from the result JSON).
-            val (ok, payload) = parseResultJsonString(resultJson)
+            // 5. ToolOutcome for inline rendering (trimmed payload + faithful success).
             emit(LlmEvent.ToolOutcome(schema.name, ToolResult(success = ok, result = payload)))
-            // 6. Return the (trimmed) result string to the engine for the auto loop.
+            // 6. Return the re-wrapped (valid, trimmed) result string to the engine.
             return resultJson
         }
     }

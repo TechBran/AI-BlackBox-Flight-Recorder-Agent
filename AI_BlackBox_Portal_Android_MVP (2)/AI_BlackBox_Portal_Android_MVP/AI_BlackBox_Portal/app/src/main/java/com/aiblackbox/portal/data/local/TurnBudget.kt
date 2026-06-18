@@ -1,5 +1,8 @@
 package com.aiblackbox.portal.data.local
 
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+
 /*
  * Per-turn tool-result context budget (snapshot-ledger Task 9).
  *
@@ -46,3 +49,21 @@ fun trimToolResult(result: String, maxChars: Int = MAX_TOOL_RESULT_CHARS): Strin
  *  usedChars = cumulative chars of (trimmed) tool results fed back this turn. */
 fun overTurnBudget(usedChars: Int, maxChars: Int = MAX_TURN_TOOL_RESULT_CHARS): Boolean =
     usedChars > maxChars
+
+/**
+ * Trim the INNER result PAYLOAD of a Gallery-shaped tool result — NOT the JSON
+ * wrapper. The native loop's tool result is `{"status":...,"result":"<text>"}`;
+ * a naive [trimToolResult] on that whole string cuts it mid-JSON → INVALID JSON
+ * the engine/[parseResultJsonString] can't parse → the tool reads as "failed".
+ * That bit every big-result tool (e.g. search_snapshots returns ~23K chars) while
+ * tiny ones (roll_dice, ~53) slipped under the cap and worked. So trim the string
+ * VALUE here and let the caller re-wrap via toResultJsonString, keeping the JSON
+ * VALID. Only string payloads can be oversized in practice; non-string payloads
+ * (numbers/objects/null — typically small) pass through unchanged. NEVER throws.
+ */
+fun trimResultPayload(payload: JsonElement?, maxChars: Int = MAX_TOOL_RESULT_CHARS): JsonElement? {
+    val prim = payload as? JsonPrimitive ?: return payload
+    if (!prim.isString) return payload
+    val s = prim.content
+    return if (s.length <= maxChars) payload else JsonPrimitive(trimToolResult(s, maxChars))
+}
