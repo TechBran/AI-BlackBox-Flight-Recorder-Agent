@@ -133,6 +133,12 @@ Behavior:
 - `curl` `/local/turn/complete {...}` → expect `snap_id`; then `curl /local/tools/search` and confirm the new snapshot is semantically findable (teleport works).
 - Document the actual `package_chars` for budget tuning (Task 11). Commit a short note in the plan file if numbers differ from assumptions.
 
+**RESULTS (2026-06-17, snapshot-ledger backend on 127.0.0.1:9098, isolated):**
+- ✅ `prepare` live: `success`, `tools=['roll_dice']`, persona injected, `package_chars=2941 / cap 16000`.
+- ✅ `complete` live: minted `SNAP-20260618-001`, `checkpoint_triggered=false`. Embedding generated (proven by the teleport below).
+- ✅ **TELEPORT**: a 2nd `prepare` with a query matching the minted turn returned `provenance.semantic=['SNAP-20260618-001']` and the minted content (`XYLOPHONE-7742`) was present in the assembled `system_prompt`. The mint→recall loop works end-to-end.
+- **Budget measurement (feeds Task 12):** persona baseline **2941** chars; **~1330 chars per semantic snapshot** (2941→4271 with one). A full lean package (1 checkpoint + 3 semantic) ≈ **8–10K chars**, comfortably under the 16000 cap → ample loop headroom. The `local` cap of 16000 (~4K tokens, ~12K left of the 16K window) is validated as reasonable; no change needed pending on-device timing.
+
 ---
 
 ## Phase 2 — PHONE (turn driver, tools, budget, offline)
