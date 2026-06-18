@@ -45,8 +45,13 @@ class LocalProviderRegistry:
 
     def attest(self, operator: str, device_id: str, model_slug: str,
                version: str, sha256: str, delegate: str,
-               autonomy_mode: str) -> dict:
-        """Upsert an attestation record for an operator's device, persist it."""
+               autonomy_mode: str, tailnet_name: Optional[str] = None) -> dict:
+        """Upsert an attestation record for an operator's device, persist it.
+
+        ``tailnet_name`` (optional) is the device's Tailscale node name — the join
+        key used to marry this registry to ``tailscale status`` when reaching the
+        device for remote control. Omitting it is backward-compatible.
+        """
         record = {
             "device_id": device_id,
             "model_slug": model_slug,
@@ -54,6 +59,7 @@ class LocalProviderRegistry:
             "sha256": sha256,
             "delegate": delegate,
             "autonomy_mode": autonomy_mode,
+            "tailnet_name": tailnet_name,
             "verified_at": time.time(),
         }
         self._store.setdefault(operator, {})[device_id] = record

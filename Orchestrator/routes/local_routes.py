@@ -380,7 +380,8 @@ async def local_device_attest(request: Request):
     """Record (upsert) which Gemma model an operator's device has verified.
 
     Body: {"operator": str, "device_id": str, "model_slug"?: str, "version"?: str,
-           "sha256"?: str, "delegate"?: str, "autonomy_mode"? = "permission"}
+           "sha256"?: str, "delegate"?: str, "autonomy_mode"? = "permission",
+           "tailnet_name"?: str}
     Returns: {"success": True, "device": <record>}. Missing operator/device_id → 400.
     """
     try:
@@ -409,6 +410,7 @@ async def local_device_attest(request: Request):
             sha256=body.get("sha256"),
             delegate=body.get("delegate"),
             autonomy_mode=autonomy_mode,
+            tailnet_name=body.get("tailnet_name"),
         )
         return {"success": True, "device": device}
     except Exception as e:

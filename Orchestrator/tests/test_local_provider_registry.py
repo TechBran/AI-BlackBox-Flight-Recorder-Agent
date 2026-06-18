@@ -47,3 +47,25 @@ def test_remove_prunes_empty_operator(tmp_path, monkeypatch):
     assert "Brandon" not in reg._store
     # Idempotent: removing the now-missing record returns False.
     assert reg.remove("Brandon", "pixel-9") is False
+
+def test_attest_records_tailnet_name(tmp_path, monkeypatch):
+    import Orchestrator.local_provider.registry as r
+    monkeypatch.setattr(r, "STORE_FILE", tmp_path / "local_devices.json")
+    reg = r.LocalProviderRegistry()
+    reg.attest(operator="Brandon", device_id="pixel-9", model_slug="gemma-4-e4b",
+               version="1.0", sha256="abc", delegate="gpu", autonomy_mode="permission",
+               tailnet_name="brandon-fold6")
+    rec = reg.status(operator="Brandon")["models"][0]
+    assert rec["tailnet_name"] == "brandon-fold6"
+    # Persists across a fresh instance reading the same patched store.
+    reloaded = r.LocalProviderRegistry()
+    assert reloaded.status(operator="Brandon")["models"][0]["tailnet_name"] == "brandon-fold6"
+
+def test_attest_without_tailnet_name_defaults_none(tmp_path, monkeypatch):
+    import Orchestrator.local_provider.registry as r
+    monkeypatch.setattr(r, "STORE_FILE", tmp_path / "local_devices.json")
+    reg = r.LocalProviderRegistry()
+    reg.attest(operator="Brandon", device_id="pixel-9", model_slug="gemma-4-e4b",
+               version="1.0", sha256="abc", delegate="gpu", autonomy_mode="permission")
+    rec = reg.status(operator="Brandon")["models"][0]
+    assert rec["tailnet_name"] is None
