@@ -707,6 +707,12 @@ STT_GOOGLE_AVAILABLE = bool(GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(GO
 
 # Anchors and ID regex
 SNAP_RE = re.compile(r"SNAP-(\d{8})-(\d+)$")
+# Bare SNAP-ID matcher used by fossils.extract_snap_ids' marker-less fallback.
+# Lives here alongside START_RX/END_RX/SNAP_RE so every snapshot regex shares one
+# home; it was previously defined ONLY in tasks.py, which fossils.py does not
+# import — a latent NameError in the fallback branch (dormant because real
+# snapshot blocks always carry a START marker).
+SNAP_ID_RX = re.compile(r"(SNAP-\d{8}-\d+)")
 END_RX = re.compile(
     r'^\s*===\s*END SNAPSHOT\s*[—-]\s*(?P<snap>SNAP-\d{8}-\d+)\s*[—-]\s*UTC\s*(?P<utc>.+?)\s*===\s*$',
     re.M

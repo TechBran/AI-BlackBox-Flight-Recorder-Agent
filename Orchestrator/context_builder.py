@@ -22,8 +22,9 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from Orchestrator.config import CFG, VOL_PATH, START_RX
+from Orchestrator.config import CFG, VOL_PATH
 from Orchestrator.fossils import (
+    extract_snap_ids,
     get_recent_checkpoints_for_operator,
     get_recent_fossils_for_operator,
     keyword_retrieve_for_operator,
@@ -133,40 +134,26 @@ def build_fossil_context(
     )
     checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CP)
 
-    # ID extraction for dedupe + provenance. Real snapshot blocks always carry
-    # a START marker, so this yields the same SNAP-IDs the snapshot parser
-    # does (cloud behavior byte-for-byte identical). For marker-less blocks —
-    # which only arise from stubbed/lean inputs — fall back to the block
-    # itself so dedupe + provenance stay coherent.
-    def _ids(blocks: list[str]) -> list[str]:
-        out: list[str] = []
-        for b in blocks or []:
-            if not b:
-                continue
-            m = START_RX.search(b)
-            out.append(m.group("snap") if m else b)
-        return out
-
     # Deduplicate: keyword must not re-include snaps already in recent
-    recent_ids = set(_ids(recent_snaps))
+    recent_ids = set(extract_snap_ids(recent_snaps))
     keyword_snaps = [
         snap for snap in keyword_snaps_raw
-        if not any(sid in recent_ids for sid in _ids([snap]))
+        if not any(sid in recent_ids for sid in extract_snap_ids([snap]))
     ]
 
     # Semantic dedupe against recent AND keyword
-    keyword_ids_set = set(_ids(keyword_snaps))
+    keyword_ids_set = set(extract_snap_ids(keyword_snaps))
     seen_ids = recent_ids | keyword_ids_set
     semantic_snaps = [
         snap for snap in semantic_snaps_raw
-        if not any(sid in seen_ids for sid in _ids([snap]))
+        if not any(sid in seen_ids for sid in extract_snap_ids([snap]))
     ]
 
     # Provenance — same shape as chat_routes.build_streaming_context returns
-    recent_ids_list = _ids(recent_snaps)
-    keyword_ids = _ids(keyword_snaps)
-    semantic_ids = _ids(semantic_snaps)
-    checkpoint_ids = _ids(checkpoint_snaps)
+    recent_ids_list = extract_snap_ids(recent_snaps)
+    keyword_ids = extract_snap_ids(keyword_snaps)
+    semantic_ids = extract_snap_ids(semantic_snaps)
+    checkpoint_ids = extract_snap_ids(checkpoint_snaps)
 
     provenance = {
         "recent": recent_ids_list,
