@@ -17,6 +17,7 @@ the handlers) so tests can monkeypatch them on this module.
 """
 
 import hashlib
+import uuid
 from typing import Optional
 
 from fastapi import Request
@@ -24,6 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from Orchestrator.behavioral_core import get_behavioral_core
 from Orchestrator.checkpoint import app
+from Orchestrator.context_builder import PROVIDER_CAPS, build_fossil_context
 from Orchestrator.local_provider import get_local_registry
 from Orchestrator.local_provider import mirror
 from Orchestrator.local_provider.tool_injection import build_injected_tools
@@ -228,6 +230,82 @@ async def local_tools_execute(request: Request):
         return {"success": bool(result.success), "result": result.result}
     except Exception as e:
         print(f"[LOCAL PROVIDER] execute failed: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# POST /local/turn/prepare — per-turn context assembly (server-bracketed turn)
+#
+# The first leg of the server-bracketed on-device turn: the phone POSTs the user
+# prompt + operator; the BlackBox assembles a LEAN per-turn context package
+# (persona + operator-scoped fossils + semantically-injected tools) and returns
+# it; the phone then runs the on-device Gemma model locally on that package.
+#
+# Per-operator scoping is server-authoritative: the operator comes from the
+# request body and is passed straight to build_fossil_context (consistent with
+# the Tailscale-perimeter trust model). The lean LOCAL profile keeps the package
+# inside the phone's small window: semantic_k=3 + checkpoint_count=1, NO recent/
+# keyword blocks (the on-device agent loop needs the ~12K-token remainder).
+# ---------------------------------------------------------------------------
+@app.post("/local/turn/prepare")
+async def local_turn_prepare(request: Request):
+    """Assemble a lean per-turn context package for the on-device model.
+
+    Body: {"prompt": str, "operator": str}. Blank prompt is allowed (assembly
+    still returns checkpoint + persona); blank/missing operator -> 400.
+
+    Returns: {"success": True, "turn_id", "system_prompt", "tools": [...],
+              "provenance": {"semantic": [...], "checkpoint": [...]},
+              "budget": {"package_chars", "cap_chars"}}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"success": False, "error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"success": False, "error": "body must be a JSON object"}, status_code=400)
+
+    operator = body.get("operator")
+    if not isinstance(operator, str) or not operator.strip():
+        return JSONResponse({"success": False, "error": "operator required"}, status_code=400)
+
+    # Blank/missing prompt is allowed — assembly still returns checkpoint +
+    # persona. Pass it through to build_fossil_context as-is (it skips keyword/
+    # semantic retrieval for an empty user_text).
+    prompt = body.get("prompt") or ""
+
+    try:
+        # Lean LOCAL profile: semantic_k=3 + 1 checkpoint, no recent/keyword.
+        fossil, prov = build_fossil_context(
+            prompt,
+            operator=operator,
+            provider="local",
+            semantic_k=3,
+            checkpoint_count=1,
+            include_recent=False,
+            include_keyword=False,
+        )
+        tools = build_injected_tools(prompt, k=5)
+        persona = get_behavioral_core("chat")
+        # Don't leave a trailing blank fossil block when there are no fossils.
+        system_prompt = persona + ("\n\n" + fossil if fossil else "")
+        turn_id = uuid.uuid4().hex
+        return {
+            "success": True,
+            "turn_id": turn_id,
+            "system_prompt": system_prompt,
+            "tools": tools,
+            "provenance": {
+                "semantic": prov.get("semantic", []),
+                "checkpoint": prov.get("checkpoint", []),
+            },
+            "budget": {
+                "package_chars": len(system_prompt),
+                "cap_chars": PROVIDER_CAPS["local"],
+            },
+        }
+    except Exception as e:
+        print(f"[LOCAL PROVIDER] turn/prepare failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
