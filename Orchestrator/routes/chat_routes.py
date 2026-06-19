@@ -2181,6 +2181,18 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = tool_exec_result.result
                                 print(f"[OPENAI-STREAM] {func_name}: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {tool_result[:80]}"}
+                            else:
+                                # Catch-all: route any other tool (dynamically-injected ToolVault
+                                # tools like control_phone) through BlackBoxToolExecutor. Without it
+                                # an unknown func_name left tool_result stale/undefined and we told
+                                # the model "Tool executed successfully" WITHOUT running it (silent
+                                # false success). Mirrors the Anthropic/Gemini catch-all.
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator)
+                                tool_exec_result = await executor.execute(func_name, func_args)
+                                tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
+                                print(f"[OPENAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
+                                yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
 
                             # Add tool result message
                             payload["messages"].append({
@@ -5417,6 +5429,18 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = tool_exec_result.result
                                 print(f"[XAI-STREAM] {func_name}: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {tool_result[:80]}"}
+                            else:
+                                # Catch-all: route any other tool (dynamically-injected ToolVault
+                                # tools like control_phone) through BlackBoxToolExecutor. Without it
+                                # an unknown func_name left tool_result stale/undefined and we told
+                                # the model "Tool executed successfully" WITHOUT running it (silent
+                                # false success). Mirrors the Anthropic/Gemini catch-all.
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator)
+                                tool_exec_result = await executor.execute(func_name, func_args)
+                                tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
+                                print(f"[XAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
+                                yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
 
                             # Add tool result message
                             payload["messages"].append({
