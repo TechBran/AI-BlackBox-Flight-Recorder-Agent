@@ -219,6 +219,14 @@ class LiteRtEngine(
         delegate: String,
         visionBackend: Backend?,
     ): Engine {
+        // HARD CAP the context window: the KV cache is pre-allocated ~proportional to
+        // maxNumTokens, so an oversized per-model config is a memory bomb (16384 thrashed/
+        // OOM'd the device). Clamp to DEFAULT_MAX_TOKENS so NO model config can exceed it.
+        val safeTokens = maxTokens.coerceAtMost(DEFAULT_MAX_TOKENS)
+        if (safeTokens != maxTokens) {
+            android.util.Log.w(TAG, "maxNumTokens clamped $maxTokens -> $safeTokens (KV-cache cap)")
+        }
+        android.util.Log.i(TAG, "engine load: delegate=$delegate maxNumTokens=$safeTokens supportImage=$supportImage")
         val config = if (visionBackend != null) {
             EngineConfig(
                 modelPath = targetPath,
@@ -228,14 +236,14 @@ class LiteRtEngine(
                 // Explicit context window — the litertlm default (null) is only
                 // 4096 tokens (device-confirmed: "Input token ids are too long:
                 // 4292 >= 4096"), too small for the agent's per-turn prompt.
-                maxNumTokens = maxTokens,
+                maxNumTokens = safeTokens,
             )
         } else {
             EngineConfig(
                 modelPath = targetPath,
                 backend = backendFor(delegate),
                 cacheDir = cacheDir,
-                maxNumTokens = maxTokens,
+                maxNumTokens = safeTokens,
             )
         }
         val built = Engine(config)
@@ -570,13 +578,25 @@ class LiteRtEngine(
          * Exceeding the maximum number of tokens allowed: 4292 >= 4096`. We set it
          * explicitly for INTRA-turn headroom.
          *
-         * The KV cache grows with this value, so it is bounded for on-device RAM;
-         * 16384 is comfortable on an 8GB+ device (the target hardware). Note this
-         * is the SINGLE-TURN budget: the BlackBox ledger — not a growing in-prompt
-         * transcript — is the memory, so inter-turn history is NOT accumulated
-         * (see ChatViewModel's `LOCAL_HISTORY_WINDOW_TURNS`).
+         * The KV cache is pre-allocated ~proportional to this value, so it is the
+         * dominant tunable for warm-time RAM. Note this is the SINGLE-TURN budget:
+         * the BlackBox ledger — not a growing in-prompt transcript — is the memory,
+         * so inter-turn history is NOT accumulated (see ChatViewModel's
+         * `LOCAL_HISTORY_WINDOW_TURNS`).
          */
-        const val DEFAULT_MAX_TOKENS: Int = 16384
+        // 6144, walked DOWN from 16384 -> 8192 -> 6144 as the warm-time OOM was chased.
+        // The KV cache is pre-allocated ~proportional to this value (~hundreds of
+        // KB/token for a 4B model): ~6GB at 16384, ~3.2GB at 8192, ~2.4GB at 6144,
+        // all ON TOP of the ~3GB int4 weights. The device lmkd-killed the app during
+        // the GPU cold-load when only ~3.4GB was free, so the KV spike is the bomb,
+        // not the weights. Edge Gallery runs the SAME 4B model smoothly because it
+        // boots at 1024 and warns above ~10K. We can't go that low — the on-device
+        // agent's per-turn prompt overran 4096 ("4292 >= 4096") — so 6144 is the
+        // floor that still fits that prompt (~4.3K) + short tool-call generation
+        // while cutting the KV spike ~25% from 8192. This is the HARD CAP too:
+        // buildAndInitialize coerceAtMost()'s any per-model max_tokens override down
+        // to it, so no model config can re-introduce the bomb (device-tuned 2026-06-19).
+        const val DEFAULT_MAX_TOKENS: Int = 6144
 
         /**
          * Sampler defaults used to FILL a [SamplerSettings] field left null when a
