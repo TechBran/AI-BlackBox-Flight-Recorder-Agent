@@ -21,10 +21,11 @@ import aiohttp
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 from Orchestrator.local_provider import mesh
 
-# Port the phone's RemoteControlServer (Task 5) listens on. Tailscale already
-# encrypts the transport (WireGuard), so plain HTTP over the tailnet is fine.
+# Defaults for reaching the phone's RemoteControlServer (Task 5). Tailscale already
+# encrypts the transport (WireGuard), so plain HTTP over the tailnet is fine. All
+# three are overridable via the [control_phone] section of config.ini; the defaults
+# live here (mirrors the [context] local_* knob pattern).
 REMOTE_CONTROL_PORT = 8765
-# Poll cadence + overall budget. Refined + made config-tunable in Task 4.
 POLL_INTERVAL_SECS = 2.0
 TOTAL_TIMEOUT_SECS = 300.0          # ~5 min: model load (10-75s) + execution
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
@@ -34,10 +35,44 @@ _PHASE_DONE = "done"
 _PHASE_ERROR = "error"
 
 
+def _control_port() -> int:
+    """Phone listener port — [control_phone] port, default REMOTE_CONTROL_PORT."""
+    try:
+        from Orchestrator.config import CFG
+        return CFG.getint("control_phone", "port", fallback=REMOTE_CONTROL_PORT)
+    except Exception:
+        return REMOTE_CONTROL_PORT
+
+
+def _poll_interval_secs() -> float:
+    """Status poll cadence — [control_phone] poll_interval_secs, default 2.0s."""
+    try:
+        from Orchestrator.config import CFG
+        return CFG.getfloat("control_phone", "poll_interval_secs",
+                            fallback=POLL_INTERVAL_SECS)
+    except Exception:
+        return POLL_INTERVAL_SECS
+
+
+def _total_timeout_secs() -> float:
+    """Overall blocking budget — [control_phone] timeout_secs, default 300s."""
+    try:
+        from Orchestrator.config import CFG
+        return CFG.getfloat("control_phone", "timeout_secs", fallback=TOTAL_TIMEOUT_SECS)
+    except Exception:
+        return TOTAL_TIMEOUT_SECS
+
+
 def _phone_base_url(node: mesh.Node) -> str:
     """Build the phone listener's base URL from its tailnet address."""
     host = node.dns_name or node.ip
-    return f"http://{host}:{REMOTE_CONTROL_PORT}"
+    return f"http://{host}:{_control_port()}"
+
+
+def _clip(value, limit: int = 300) -> str:
+    """Clip an error/exception string so a huge __str__ can't flood model context."""
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "…"
 
 
 async def _post_task(base_url: str, payload: dict) -> dict:
@@ -82,7 +117,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     except Exception as e:  # connection refused, DNS failure, timeout, etc.
         return ToolResult(
             False,
-            f"Could not reach the phone ({device}) to start the task: {e}",
+            f"Could not reach the phone ({device}) to start the task: {_clip(e)}",
             data={"error_kind": "wake_failed", "device": device},
         )
 
@@ -95,7 +130,12 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         )
 
     # Block, polling /status until the on-device run reaches a terminal phase.
-    deadline = time.monotonic() + TOTAL_TIMEOUT_SECS
+    # CANCELLATION-SAFE: asyncio.CancelledError is a BaseException (Py3.8+), so the
+    # `except Exception` clauses below do NOT swallow it — a cancelled turn aborts
+    # the poll cleanly instead of being misreported as lost_contact/wake_failed.
+    poll_interval = _poll_interval_secs()
+    total_timeout = _total_timeout_secs()
+    deadline = time.monotonic() + total_timeout
     last_phase = "waking"
     while True:
         try:
@@ -104,7 +144,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             return ToolResult(
                 False,
                 f"Lost contact with the phone ({device}) while it was "
-                f"'{last_phase}': {e}",
+                f"'{last_phase}': {_clip(e)}",
                 data={"error_kind": "lost_contact", "device": device, "phase": last_phase},
             )
 
@@ -126,8 +166,8 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         if time.monotonic() >= deadline:
             return ToolResult(
                 False,
-                f"Timed out after {int(TOTAL_TIMEOUT_SECS)}s while the phone was "
+                f"Timed out after {int(total_timeout)}s while the phone was "
                 f"'{phase}'. The model may still be loading — you can try again.",
                 data={"error_kind": "timeout", "device": device, "phase": phase},
             )
-        await asyncio.sleep(POLL_INTERVAL_SECS)
+        await asyncio.sleep(poll_interval)

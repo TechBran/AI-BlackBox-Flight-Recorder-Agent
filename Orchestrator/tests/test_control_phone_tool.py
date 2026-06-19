@@ -10,6 +10,8 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.local_provider.mesh import Node
 
@@ -50,7 +52,7 @@ def test_no_reachable_device(monkeypatch):
 
 def test_happy_path_waking_working_done(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
-    monkeypatch.setattr(cp, "POLL_INTERVAL_SECS", 0)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
 
     async def fake_post(base_url, payload):
         assert "brandon-fold6" in base_url           # addressed the resolved node
@@ -76,7 +78,7 @@ def test_happy_path_waking_working_done(monkeypatch):
 
 def test_remote_error_surfaces_message(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
-    monkeypatch.setattr(cp, "POLL_INTERVAL_SECS", 0)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
     monkeypatch.setattr(cp, "_get_status",
                         _aret({"phase": "error", "error": "tool refused for remote control"}))
@@ -109,7 +111,7 @@ def test_bad_response_when_no_task_id(monkeypatch):
 
 def test_lost_contact_when_status_raises(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
-    monkeypatch.setattr(cp, "POLL_INTERVAL_SECS", 0)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
 
     async def boom(base_url, task_id):
@@ -125,3 +127,58 @@ def test_phone_base_url_prefers_dns_name():
     assert cp._phone_base_url(NODE) == f"http://{NODE.dns_name}:{cp.REMOTE_CONTROL_PORT}"
     ip_only = Node(hostname="h", dns_name="", ip="100.88.0.7", online=True)
     assert cp._phone_base_url(ip_only) == f"http://100.88.0.7:{cp.REMOTE_CONTROL_PORT}"
+
+
+# ── Task 4: poll/timeout semantics + cancellation-safety ──
+
+def test_timeout_when_phone_stays_waking(monkeypatch):
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
+    monkeypatch.setattr(cp, "_total_timeout_secs", lambda: 0.0)  # deadline == now -> first check trips
+    monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
+    monkeypatch.setattr(cp, "_get_status", _aret({"phase": "waking"}))  # never advances
+    res = _run(cp.execute({"task": "x"}, CTX))
+    assert res.success is False
+    assert res.data["error_kind"] == "timeout"
+    assert res.data["phase"] == "waking"
+
+
+def test_done_within_budget_after_waking(monkeypatch):
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
+    monkeypatch.setattr(cp, "_total_timeout_secs", lambda: 5.0)
+    monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
+    seq = iter([{"phase": "waking"}, {"phase": "waking"},
+                {"phase": "working"}, {"phase": "done", "result": "ok"}])
+
+    async def status(base_url, task_id):
+        return next(seq)
+
+    monkeypatch.setattr(cp, "_get_status", status)
+    res = _run(cp.execute({"task": "x"}, CTX))
+    assert res.success is True
+    assert res.result == "ok"
+
+
+def test_cancellation_propagates_not_swallowed(monkeypatch):
+    # A cancelled turn must abort the poll cleanly, NOT be swallowed by the
+    # broad `except Exception` and misreported as lost_contact.
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
+    monkeypatch.setattr(cp, "_total_timeout_secs", lambda: 60.0)
+    monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
+
+    async def hang(base_url, task_id):
+        await asyncio.sleep(5)  # long status call we cancel mid-flight
+        return {"phase": "working"}
+
+    monkeypatch.setattr(cp, "_get_status", hang)
+
+    async def driver():
+        task = asyncio.create_task(cp.execute({"task": "x"}, CTX))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(driver())
