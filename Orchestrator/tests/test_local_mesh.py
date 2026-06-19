@@ -128,3 +128,29 @@ def test_name_match_accepts_fqdn_attestation(fresh_registry):
     _attest(fresh_registry, tailnet_name="brandon-fold6.tailnet-abc.ts.net")
     node = m.resolve_origin("Brandon", status_json=SAMPLE_STATUS)
     assert node is not None and node.hostname == "brandon-fold6"
+
+
+# ── degradation + _name_matches direct coverage (Task 2 review minors) ──
+
+def test_parse_ipv6_only_node_yields_empty_ip():
+    sample = json.dumps({"Self": {"HostName": "v6", "DNSName": "v6.tailnet-abc.ts.net.",
+        "Online": True, "TailscaleIPs": ["fd7a:115c:a1e0::9"], "OS": "linux"}})
+    assert m.parse_tailscale_status(sample)[0].ip == ""  # no IPv4 -> "", not a crash
+
+
+def test_parse_missing_tailscaleips_yields_empty_ip():
+    sample = json.dumps({"Self": {"HostName": "noip", "DNSName": "noip.tailnet-abc.ts.net.",
+        "Online": True, "OS": "linux"}})  # TailscaleIPs absent entirely
+    assert m.parse_tailscale_status(sample)[0].ip == ""
+
+
+def test_name_matches_short_fqdn_and_rejects():
+    n = m.Node(hostname="brandon-fold6", dns_name="brandon-fold6.tailnet-abc.ts.net",
+               ip="100.88.0.7", online=True, os="android")
+    assert m._name_matches("brandon-fold6", n) is True
+    assert m._name_matches("BRANDON-FOLD6", n) is True                      # case-insensitive
+    assert m._name_matches("brandon-fold6.tailnet-abc.ts.net", n) is True   # full FQDN
+    assert m._name_matches("brandon-fold6.tailnet-abc.ts.net.", n) is True  # trailing dot tolerated
+    assert m._name_matches("someone-else", n) is False
+    assert m._name_matches("", n) is False
+    assert m._name_matches("   ", n) is False

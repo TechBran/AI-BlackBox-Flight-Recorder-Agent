@@ -102,6 +102,9 @@ def _name_matches(tailnet_name: str, node: Node) -> bool:
         dn = node.dns_name.lower()
         candidates.add(dn)
         candidates.add(dn.split(".")[0])
+    # The first-label fallback (t.split(".")[0]) assumes a SINGLE tailnet — two
+    # tailnets sharing a short hostname could collide here. Fine under the design's
+    # single-tailnet assumption; revisit if multi-tailnet targeting ever lands.
     return t in candidates or t.split(".")[0] in candidates
 
 
