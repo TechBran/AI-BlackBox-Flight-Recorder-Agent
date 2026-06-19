@@ -92,6 +92,10 @@ data class AttestRequest(
     val sha256: String? = null,
     val delegate: String? = null,
     @SerialName("autonomy_mode") val autonomyMode: String = "permission",
+    // The device's tailnet IPv4 (100.64/10) — the join key the BlackBox mesh uses to
+    // resolve this device for control_phone. The phone can read its own interface
+    // address but not its tailnet name; the mesh matches this against tailscale status.
+    @SerialName("tailnet_name") val tailnetName: String? = null,
 )
 
 /** POST /local/device/attest → {"success": bool, "device": {...}}. */

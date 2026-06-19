@@ -14,7 +14,7 @@
     },
     "required": ["task"]
   },
-  "returns": "The result text reported by the on-device model, or a structured error (error_kind: no_device / wake_failed / bad_response / lost_contact / remote_error / timeout).",
+  "returns": "The result text reported by the on-device model, or a structured error (error_kind: no_device / wake_failed / refused / bad_response / lost_contact / remote_error / timeout).",
   "example": "control_phone(task=\"open the camera app\")",
   "notes": "Frontier->phone inversion: the BlackBox reaches out to the originating operator's phone (resolved via the tailnet mesh) and drives its on-device Gemma. Blocking with wake-tracking; the phone enforces a remote allowlist. v1 targets the originating operator's device; Phase 2 adds an optional device param. See docs/plans/2026-06-18-frontier-to-phone-control.md."
 }

@@ -124,6 +124,33 @@ def test_lost_contact_when_status_raises(monkeypatch):
     assert res.data["error_kind"] == "lost_contact"
 
 
+def test_http_4xx_from_phone_is_refused(monkeypatch):
+    import aiohttp
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+
+    async def refuse(base_url, payload):
+        raise aiohttp.ClientResponseError(request_info=None, history=(), status=403, message="forbidden")
+
+    monkeypatch.setattr(cp, "_post_task", refuse)
+    res = _run(cp.execute({"task": "x"}, CTX))
+    assert res.success is False
+    assert res.data["error_kind"] == "refused"
+    assert res.data["http_status"] == 403
+
+
+def test_http_5xx_from_phone_is_wake_failed(monkeypatch):
+    import aiohttp
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+
+    async def boom(base_url, payload):
+        raise aiohttp.ClientResponseError(request_info=None, history=(), status=502, message="bad gateway")
+
+    monkeypatch.setattr(cp, "_post_task", boom)
+    res = _run(cp.execute({"task": "x"}, CTX))
+    assert res.success is False
+    assert res.data["error_kind"] == "wake_failed"
+
+
 def test_phone_base_url_prefers_dns_name():
     assert cp._phone_base_url(NODE) == f"http://{NODE.dns_name}:{cp.REMOTE_CONTROL_PORT}"
     ip_only = Node(hostname="h", dns_name="", ip="100.88.0.7", online=True)

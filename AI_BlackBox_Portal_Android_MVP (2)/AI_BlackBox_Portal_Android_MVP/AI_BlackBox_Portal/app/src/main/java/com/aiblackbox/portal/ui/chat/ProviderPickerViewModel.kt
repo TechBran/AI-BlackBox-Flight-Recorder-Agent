@@ -107,6 +107,7 @@ class ProviderPickerViewModel(
                                     // TODO(catalog-sha): re-attest sends sha256="" — once mirror catalog shas are populated (Task 1.2 real HF fetch), persist the verified sha in the sidecar/InstalledModel and forward it here, or the upsert will clobber the server's good checksum.
                                     sha256 = "",
                                     delegate = delegate,
+                                    tailnetName = com.aiblackbox.portal.data.remote.TailnetAddress.localTailnetIpv4(),
                                     // autonomyMode left at its "permission" default.
                                 )
                             )

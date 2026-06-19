@@ -130,6 +130,14 @@ def test_name_match_accepts_fqdn_attestation(fresh_registry):
     assert node is not None and node.hostname == "brandon-fold6"
 
 
+def test_resolve_origin_matches_by_tailnet_ipv4(fresh_registry):
+    # The phone self-reports its tailnet IPv4 as the join key (it can read its own
+    # 100.64/10 interface address but not its tailnet NAME); the mesh matches on it.
+    _attest(fresh_registry, tailnet_name="100.88.0.7")  # brandon-fold6's TailscaleIP
+    node = m.resolve_origin("Brandon", status_json=SAMPLE_STATUS)
+    assert node is not None and node.hostname == "brandon-fold6"
+
+
 # ── degradation + _name_matches direct coverage (Task 2 review minors) ──
 
 def test_parse_ipv6_only_node_yields_empty_ip():

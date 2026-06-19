@@ -109,6 +109,34 @@ def test_no_device_when_unresolved(monkeypatch):
     assert res.data["error_kind"] == "no_device"
 
 
+def test_phone_403_is_refused(monkeypatch):
+    """A real 403 from the phone's auth (operator/source) -> refused, not wake_failed."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            body = b'{"error":"operator not authorized for this device"}'
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        _point_at(monkeypatch, server.server_address[1])
+        res = asyncio.run(cp.execute({"task": "x"}, CTX))
+        assert res.success is False
+        assert res.data["error_kind"] == "refused"
+        assert res.data["http_status"] == 403
+    finally:
+        server.shutdown()
+
+
 def test_tool_is_discoverable_and_executable():
     from Orchestrator.toolvault import registry
     names = {t.get("name") for t in registry.load_canonical()}

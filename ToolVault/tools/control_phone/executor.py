@@ -114,6 +114,22 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     # Wake + start the task on the phone.
     try:
         started = await _post_task(base_url, {"task": task, "operator": ctx.operator})
+    except aiohttp.ClientResponseError as e:
+        # The phone WAS reached but refused/errored. A 4xx (esp. 403 from the phone's
+        # source/operator auth) is a deliberate refusal — distinct from "couldn't reach"
+        # so the frontier model stops instead of pointlessly retrying a wake.
+        if 400 <= e.status < 500:
+            return ToolResult(
+                False,
+                f"The phone refused the task (HTTP {e.status}) — it may not be authorized "
+                f"for this operator, or the listener rejected the caller.",
+                data={"error_kind": "refused", "device": device, "http_status": e.status},
+            )
+        return ToolResult(
+            False,
+            f"The phone errored starting the task (HTTP {e.status}).",
+            data={"error_kind": "wake_failed", "device": device, "http_status": e.status},
+        )
     except Exception as e:  # connection refused, DNS failure, timeout, etc.
         return ToolResult(
             False,

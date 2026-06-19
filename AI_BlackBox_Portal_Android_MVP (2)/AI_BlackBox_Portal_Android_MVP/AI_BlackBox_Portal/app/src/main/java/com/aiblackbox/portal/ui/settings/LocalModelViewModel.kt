@@ -324,6 +324,7 @@ class LocalModelViewModel(
                             operator = operator,
                             deviceId = deviceId,
                             autonomyMode = mode,
+                            tailnetName = com.aiblackbox.portal.data.remote.TailnetAddress.localTailnetIpv4(),
                         )
                     )
                     if (attested) {

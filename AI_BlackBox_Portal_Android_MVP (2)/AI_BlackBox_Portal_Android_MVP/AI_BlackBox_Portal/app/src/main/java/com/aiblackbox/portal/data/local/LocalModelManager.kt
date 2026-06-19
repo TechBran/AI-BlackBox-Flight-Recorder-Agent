@@ -295,6 +295,7 @@ class LocalModelManager(
                     version = BUNDLE_VERSION,
                     sha256 = bundle.sha256 ?: "",
                     delegate = delegate,
+                    tailnetName = com.aiblackbox.portal.data.remote.TailnetAddress.localTailnetIpv4(),
                     // autonomyMode left at its "permission" default.
                 )
             )
