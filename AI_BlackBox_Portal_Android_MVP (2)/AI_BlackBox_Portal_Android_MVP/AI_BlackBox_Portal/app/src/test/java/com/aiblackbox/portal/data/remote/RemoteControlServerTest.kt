@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.remote
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -87,5 +88,46 @@ class RemoteControlServerTest {
 
     @Test fun method_is_case_insensitive() {
         assertEquals(200, routeRequest("get", "/healthz", "", FakeHandler()).status)
+    }
+
+    // ── Task 8: source/scope auth ──
+
+    @Test fun off_tailnet_source_is_rejected() {
+        assertEquals(403, authorize("POST", "/task", "192.168.1.50", "Brandon", "Brandon")?.status)
+    }
+
+    @Test fun tailnet_source_matching_operator_is_allowed() {
+        assertNull(authorize("POST", "/task", "100.88.0.7", "Brandon", "Brandon"))
+    }
+
+    @Test fun tailnet_source_wrong_operator_is_rejected() {
+        assertEquals(403, authorize("POST", "/task", "100.88.0.7", "Mallory", "Brandon")?.status)
+    }
+
+    @Test fun blank_bound_operator_fails_closed_on_task() {
+        assertEquals(403, authorize("POST", "/task", "100.88.0.7", "Brandon", "")?.status)
+    }
+
+    @Test fun healthz_and_status_need_only_tailnet_not_operator() {
+        assertNull(authorize("GET", "/healthz", "100.88.0.7", "", "Brandon"))
+        assertNull(authorize("GET", "/status/abc", "100.88.0.7", "", "Brandon"))
+    }
+
+    @Test fun isTailnetSource_classification() {
+        assertTrue(isTailnetSource("100.64.0.1"))
+        assertTrue(isTailnetSource("100.127.255.255"))
+        assertTrue(isTailnetSource("127.0.0.1"))             // loopback (same-device)
+        assertTrue(isTailnetSource("fd7a:115c:a1e0::1"))     // Tailscale IPv6
+        assertFalse(isTailnetSource("100.63.255.255"))       // just below CGNAT
+        assertFalse(isTailnetSource("100.128.0.1"))          // just above CGNAT
+        assertFalse(isTailnetSource("192.168.1.5"))          // LAN
+        assertFalse(isTailnetSource("8.8.8.8"))              // public
+        assertFalse(isTailnetSource(""))
+    }
+
+    @Test fun extractOperator_is_tolerant() {
+        assertEquals("Brandon", extractOperator("""{"task":"x","operator":"Brandon"}"""))
+        assertEquals("", extractOperator("not json"))
+        assertEquals("", extractOperator("""{"task":"x"}"""))
     }
 }

@@ -113,14 +113,58 @@ fun routeRequest(method: String, path: String, body: String,
 }
 
 /**
- * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces; Tailscale (WireGuard)
- * encrypts the transport, and Task 8 adds the paired-hub + operator auth that is the
- * real blast-radius guard. The socket binding is device/compile-verified; the routing
- * it delegates to is unit-tested via [routeRequest].
+ * Source/scope auth for the inbound listener (Task 8): blast-radius scoping ON TOP of
+ * the Tailscale perimeter. Returns a 403 [RemoteResponse] to REJECT, or null to allow.
+ * PURE → JVM-unit-testable.
+ *  - Every route: the caller's source IP must be on the tailnet (Tailscale CGNAT
+ *    100.64.0.0/10 or the Tailscale IPv6 ULA) or loopback (same-device). A LAN /
+ *    external caller that reached the 0.0.0.0-bound socket is rejected here.
+ *  - POST /task additionally: the request's `operator` must match the device's bound
+ *    operator (a different operator's hub cannot drive this device). Fail-closed: a
+ *    blank bound operator rejects.
+ */
+fun authorize(method: String, path: String, remoteIp: String,
+              requestOperator: String, boundOperator: String): RemoteResponse? {
+    if (!isTailnetSource(remoteIp))
+        return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
+    if (path == "/task" && method.uppercase() == "POST") {
+        if (boundOperator.isBlank() || requestOperator != boundOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
+    return null
+}
+
+/** True iff [ip] is a Tailscale tailnet address (CGNAT 100.64.0.0/10 or the Tailscale
+ *  IPv6 ULA fd7a:115c:a1e0::/48) or loopback (same-device). PURE. */
+fun isTailnetSource(ip: String): Boolean {
+    val a = ip.trim().lowercase()
+    if (a.isEmpty()) return false
+    if (a == "::1" || a.startsWith("127.")) return true        // loopback (same-device)
+    if (a.startsWith("fd7a:115c:a1e0")) return true            // Tailscale IPv6 ULA
+    val octets = a.split(".")                                  // IPv4 CGNAT 100.64.0.0/10
+    if (octets.size == 4) {
+        val o0 = octets[0].toIntOrNull()
+        val o1 = octets[1].toIntOrNull()
+        if (o0 == 100 && o1 != null && o1 in 64..127) return true
+    }
+    return false
+}
+
+/** Tolerant extract of the `operator` field from a JSON body ("" if absent/malformed). */
+internal fun extractOperator(body: String): String =
+    try { JSON.decodeFromString<TaskRequest>(body.ifBlank { "{}" }).operator } catch (e: Exception) { "" }
+
+/**
+ * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [authorize] gates
+ * every request to tailnet-source callers (Tailscale/WireGuard encrypts the
+ * transport) and scopes POST /task to the device's bound operator. The socket binding
+ * is device/compile-verified; the routing + auth it delegates to are unit-tested via
+ * [routeRequest] / [authorize].
  */
 class RemoteControlServer(
     port: Int,
     private val handler: RemoteTaskHandler,
+    private val operatorProvider: () -> String = { "" },
 ) : NanoHTTPD(port) {
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
@@ -128,8 +172,14 @@ class RemoteControlServer(
 
     override fun serve(session: IHTTPSession): Response {
         val method = session.method?.name ?: "GET"
+        val path = session.uri ?: "/"
         val body = if (method.equals("POST", ignoreCase = true)) readBody(session) else ""
-        val routed = routeRequest(method, session.uri ?: "/", body, handler)
+        val remoteIp = session.remoteIpAddress ?: ""
+        val requestOperator = if (path == "/task") extractOperator(body) else ""
+        authorize(method, path, remoteIp, requestOperator, operatorProvider())?.let { denied ->
+            return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
+        }
+        val routed = routeRequest(method, path, body, handler)
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
     }
 

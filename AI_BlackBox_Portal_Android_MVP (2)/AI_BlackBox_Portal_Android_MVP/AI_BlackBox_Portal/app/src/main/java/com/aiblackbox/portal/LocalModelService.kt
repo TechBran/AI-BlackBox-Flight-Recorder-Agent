@@ -31,6 +31,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -223,7 +224,7 @@ class LocalModelService : Service() {
             return
         }
         runCatching {
-            RemoteControlServer(REMOTE_CONTROL_PORT, factory(applicationContext)).also {
+            RemoteControlServer(REMOTE_CONTROL_PORT, factory(applicationContext), operatorProvider = { boundOperator() }).also {
                 it.startServer()
                 remoteServer = it
             }
@@ -239,6 +240,11 @@ class LocalModelService : Service() {
         runCatching { remoteServer?.stopServer() }
         remoteServer = null
     }
+
+    /** The device's bound operator (BlackBoxStore), or "" — the scope POST /task is
+     *  authorized against. Read per request on the listener's worker thread. */
+    private fun boundOperator(): String =
+        runCatching { runBlocking { BlackBoxStore(applicationContext).operator.first() } }.getOrDefault("")
 
     override fun onDestroy() {
         _isRunning = false
