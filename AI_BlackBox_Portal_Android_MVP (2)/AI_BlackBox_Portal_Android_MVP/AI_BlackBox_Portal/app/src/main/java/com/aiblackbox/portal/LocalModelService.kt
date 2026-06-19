@@ -20,6 +20,9 @@ import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.shouldWarm
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.remote.REMOTE_CONTROL_PORT
+import com.aiblackbox.portal.data.remote.RemoteControlServer
+import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -77,6 +80,10 @@ class LocalModelService : Service() {
     @Volatile
     private var warmJob: Job? = null
 
+    // The inbound remote-control listener (control_phone). Started alongside the
+    // foreground service when a task handler is registered; stopped on STOP/destroy.
+    private var remoteServer: RemoteControlServer? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -87,6 +94,7 @@ class LocalModelService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                stopRemoteControlServer()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -96,6 +104,7 @@ class LocalModelService : Service() {
                 startForegroundWith(buildNotification(TEXT_PREPARING))
                 _isRunning = true
                 startWarmIfNeeded()
+                startRemoteControlServerIfPossible()
             }
         }
         // START_STICKY: if the OS kills us under memory pressure, re-deliver a null
@@ -200,8 +209,40 @@ class LocalModelService : Service() {
         stopSelf()
     }
 
+    /**
+     * Best-effort start of the inbound remote-control listener (control_phone). A
+     * no-op (logged) unless a [remoteTaskHandlerFactory] is registered (Task 6) — a
+     * listener with nothing safe to run stays OFF. NEVER throws into the service: a
+     * bind failure leaves remoteServer null and the rest of the service intact.
+     */
+    private fun startRemoteControlServerIfPossible() {
+        if (remoteServer != null) return
+        val factory = remoteTaskHandlerFactory
+        if (factory == null) {
+            Log.d(TAG, "no remote task handler registered; inbound control listener stays off")
+            return
+        }
+        runCatching {
+            RemoteControlServer(REMOTE_CONTROL_PORT, factory(applicationContext)).also {
+                it.startServer()
+                remoteServer = it
+            }
+            Log.d(TAG, "remote control listener started on :$REMOTE_CONTROL_PORT")
+        }.onFailure {
+            Log.w(TAG, "remote control listener start refused (${it.javaClass.simpleName})")
+            remoteServer = null
+        }
+    }
+
+    /** Best-effort stop of the inbound listener. Never throws. */
+    private fun stopRemoteControlServer() {
+        runCatching { remoteServer?.stopServer() }
+        remoteServer = null
+    }
+
     override fun onDestroy() {
         _isRunning = false
+        stopRemoteControlServer()
         // Release the pinned engine — the service owns it, so its lifecycle ends here.
         runCatching { LocalEngineHolder.clearAndClose() }
         scope.cancel()

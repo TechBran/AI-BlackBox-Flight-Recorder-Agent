@@ -52,6 +52,9 @@ dependencies {
     implementation "com.journeyapps:zxing-android-embedded:4.3.0"
     implementation "com.google.zxing:core:3.5.4"
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
+
+    // Embedded HTTP listener for inbound remote control (control_phone, Task 5).
+    implementation "org.nanohttpd:nanohttpd:2.3.1"
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 
