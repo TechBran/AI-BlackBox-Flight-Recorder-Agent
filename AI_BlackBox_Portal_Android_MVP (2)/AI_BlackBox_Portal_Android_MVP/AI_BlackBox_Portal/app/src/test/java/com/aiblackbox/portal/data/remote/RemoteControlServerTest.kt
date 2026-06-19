@@ -69,6 +69,12 @@ class RemoteControlServerTest {
         assertEquals(404, r.status)
     }
 
+    @Test fun get_status_empty_id_defers_to_handler() {
+        // GET /status/ -> handler.taskStatus("") -> null in any real impl -> 404.
+        val r = routeRequest("GET", "/status/", "", FakeHandler(status = null))
+        assertEquals(404, r.status)
+    }
+
     @Test fun wrong_method_on_known_path_is_405() {
         assertEquals(405, routeRequest("GET", "/task", "", FakeHandler()).status)
         assertEquals(405, routeRequest("POST", "/healthz", "", FakeHandler()).status)

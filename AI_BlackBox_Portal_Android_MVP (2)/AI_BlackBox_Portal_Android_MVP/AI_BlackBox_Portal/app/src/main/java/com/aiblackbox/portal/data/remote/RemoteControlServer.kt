@@ -62,7 +62,9 @@ interface RemoteTaskHandler {
  *  the routing logic is unit-testable on the JVM without binding a socket. */
 data class RemoteResponse(val status: Int, val json: String)
 
-private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+// encodeDefaults left at false so null result/error/step are omitted from RemoteStatus
+// on the wire (cleaner; the backend reads phase/result/error tolerantly).
+private val JSON = Json { ignoreUnknownKeys = true }
 
 @Serializable private data class TaskRequest(val task: String = "", val operator: String = "")
 @Serializable private data class TaskAccepted(@SerialName("task_id") val taskId: String)

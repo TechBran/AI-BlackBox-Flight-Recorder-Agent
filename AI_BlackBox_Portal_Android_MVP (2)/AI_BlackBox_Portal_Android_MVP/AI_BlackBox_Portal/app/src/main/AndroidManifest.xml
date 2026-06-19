@@ -49,6 +49,7 @@
     </queries>
 
     <application
+        android:name=".PortalApplication"
         android:allowBackup="true"
         android:largeHeap="true"
         android:label="AI BlackBox Portal"
