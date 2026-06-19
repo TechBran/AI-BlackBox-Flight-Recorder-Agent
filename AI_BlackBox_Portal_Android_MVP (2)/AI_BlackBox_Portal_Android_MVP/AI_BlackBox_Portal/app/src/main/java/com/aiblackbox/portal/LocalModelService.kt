@@ -100,24 +100,32 @@ class LocalModelService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_START_LISTENER -> {
-                // Listener-only: host the inbound control_phone listener so the phone is
-                // a reachable control target regardless of the active chat provider,
-                // WITHOUT eagerly warming the engine (control_phone wakes it on demand).
-                startForegroundWith(buildNotification(TEXT_LISTENER))
-                _isRunning = true
-                startRemoteControlServerIfPossible()
-            }
-            else -> {
-                // Become foreground IMMEDIATELY (startForegroundService contract).
+            ACTION_START -> {
+                // EXPLICIT warm request (the chat path pins the engine while the app is
+                // open). Become foreground IMMEDIATELY (startForegroundService contract),
+                // warm the engine, and host the listener.
                 startForegroundWith(buildNotification(TEXT_PREPARING))
                 _isRunning = true
                 startWarmIfNeeded()
                 startRemoteControlServerIfPossible()
             }
+            else -> {
+                // ACTION_START_LISTENER, OR a NULL-intent START_STICKY REDELIVERY after the
+                // OS killed us. BOTH restart LISTENER-ONLY (no eager warm). This is the fix
+                // for the cold-warm crash-LOOP: previously a null redelivery fell through to
+                // startWarmIfNeeded(), so an OOM-killed warm respawned straight back into
+                // another 3.66GB GPU load that OOM'd again — an unbounded restart/thrash
+                // loop (the "phone goes crazy" symptom). control_phone wakes the engine on
+                // demand and the chat path re-warms via an explicit ACTION_START, so the
+                // safe restart posture is just the lightweight listener.
+                startForegroundWith(buildNotification(TEXT_LISTENER))
+                _isRunning = true
+                startRemoteControlServerIfPossible()
+            }
         }
-        // START_STICKY: if the OS kills us under memory pressure, re-deliver a null
-        // intent so we re-warm (the holder was lost with the process anyway).
+        // START_STICKY: keep the cheap LISTENER alive across OS kills so the phone stays a
+        // reachable control target. A null redelivery lands in the else branch above =
+        // listener-only, NEVER a re-warm (that loop is exactly what we just removed).
         return START_STICKY
     }
 
