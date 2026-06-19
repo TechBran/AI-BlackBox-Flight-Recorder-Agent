@@ -16,7 +16,7 @@ Usage:
 import json
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 STORE_FILE = Path(__file__).parent / "local_devices.json"
 
@@ -90,6 +90,15 @@ class LocalProviderRegistry:
             del self._store[operator]
         self._save_to_file()
         return True
+
+    def all_records(self) -> List[Tuple[str, dict]]:
+        """Return every (operator, record) pair across all operators.
+
+        Read accessor for tailnet mesh joins (control_phone device resolution),
+        so sibling modules need not reach into the private store.
+        """
+        return [(op, rec) for op, devs in self._store.items()
+                for rec in devs.values()]
 
 
 # ── Singleton ──
