@@ -19,11 +19,13 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.util.Collections
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Runs a remote-control task on the on-device Gemma (control_phone). Implements
@@ -57,7 +59,22 @@ class RemoteTaskRunner internal constructor(
         phoneProvider = { AndroidPhoneController.fromService(appContext, mode = { AutonomyMode.YOLO }) },
     )
 
-    private val tasks = ConcurrentHashMap<String, RemoteStatus>()
+    // Bounded LRU (access-order): an actively-polled task stays warm while old
+    // terminal entries are evicted past MAX_TASKS — no unbounded growth on a
+    // long-lived foreground service. Synchronized for the listener's threads.
+    private val tasks: MutableMap<String, RemoteStatus> = Collections.synchronizedMap(
+        object : LinkedHashMap<String, RemoteStatus>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RemoteStatus>?): Boolean =
+                size > MAX_TASKS
+        },
+    )
+
+    // Serialize remote turns so two overlapping remote tasks don't race the one warm
+    // engine. NOTE (v1): the foreground chat uses the SAME engine and does NOT share
+    // this lock, so a remote task concurrent with active on-device chat could still
+    // race native state — unlikely (the owner is remote when delegating) and a
+    // device-validation watch-item; a shared engine lock is the follow-up.
+    private val turnMutex = Mutex()
 
     /** Liveness for the device list: ready only when a warm engine is available. */
     override fun healthz(): Boolean = engineProvider() != null
@@ -89,24 +106,44 @@ class RemoteTaskRunner internal constructor(
             )
             return
         }
-        tasks[id] = RemoteStatus(phase = "working")
         val acc = StringBuilder()
-        try {
+        var step = 0
+        var faulted = false
+        // One remote turn at a time (serialize concurrent remote submissions). While
+        // queued for the lock the task stays `waking`; it flips to `working` once it
+        // actually starts driving the engine. The `.catch` operator (mirroring the chat
+        // loop) handles an engine fault WITHIN the flow — reliable under flowOn, unlike a
+        // try/catch around collect — and preserves cancellation (catch ignores
+        // CancellationException). Only a clean completion reaches `done`.
+        turnMutex.withLock {
+            tasks[id] = RemoteStatus(phase = "working")
             engine.generateWithToolsNative(remotePrompt(task), buildRemoteDeviceTools(phone))
-                .flowOn(ioDispatcher)
-                .catch { e -> throw e }   // surface to the catch below; never swallow
-                .collect { event ->
-                    if (event is LlmEvent.TextDelta) acc.append(event.text)
+                .catch { e ->
+                    faulted = true
+                    Log.w(TAG, "remote task failed (${e.javaClass.simpleName})")
+                    tasks[id] = RemoteStatus(phase = "error", error = "task failed (${e.javaClass.simpleName})")
                 }
+                .flowOn(ioDispatcher)
+                .collect { event ->
+                    when (event) {
+                        is LlmEvent.TextDelta -> acc.append(event.text)
+                        is LlmEvent.ToolCall -> {
+                            step++
+                            tasks[id] = RemoteStatus(phase = "working", step = step)
+                        }
+                        is LlmEvent.ToolOutcome -> { /* fed back to the model by the engine */ }
+                    }
+                }
+        }
+        if (!faulted) {
             tasks[id] = RemoteStatus(phase = "done", result = acc.toString().ifBlank { "Done." })
-        } catch (e: Exception) {
-            Log.w(TAG, "remote task failed (${e.javaClass.simpleName})")
-            tasks[id] = RemoteStatus(phase = "error", error = "task failed (${e.javaClass.simpleName})")
         }
     }
 
     companion object {
         private const val TAG = "RemoteTaskRunner"
+        /** Max retained per-task status entries before LRU eviction (bounded memory). */
+        internal const val MAX_TASKS = 64
         private val ARGS_JSON = Json { ignoreUnknownKeys = true }
 
         private fun remotePrompt(task: String): String =

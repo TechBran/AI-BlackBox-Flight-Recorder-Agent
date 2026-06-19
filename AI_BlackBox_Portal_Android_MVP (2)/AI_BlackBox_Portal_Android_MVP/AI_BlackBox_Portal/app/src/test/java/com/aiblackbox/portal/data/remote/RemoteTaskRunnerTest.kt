@@ -5,10 +5,17 @@ import com.aiblackbox.portal.data.local.NativeTool
 import com.aiblackbox.portal.data.local.NativeToolCallingLlm
 import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.model.ToolResult
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
@@ -84,5 +91,59 @@ class RemoteTaskRunnerTest {
         engineProvider = { engine },
         phoneProvider = { FakePhone() },
         ioDispatcher = Dispatchers.Unconfined,
+    )
+
+    // ── Task 7: status state machine (waking -> working -> done|error) + step + bounding ──
+
+    @Test fun transitions_waking_then_done_with_result() = runTest {
+        val d = StandardTestDispatcher(testScheduler)
+        val r = testRunner(d, FakeEngine(flowOf(LlmEvent.TextDelta("Opened "), LlmEvent.TextDelta("Maps."))))
+        val id = r.submitTask("open maps", "Brandon")
+        assertEquals("waking", r.taskStatus(id)?.phase)   // launched coroutine hasn't run yet
+        advanceUntilIdle()
+        val st = r.taskStatus(id)
+        assertEquals("done", st?.phase)
+        assertEquals("Opened Maps.", st?.result)
+    }
+
+    @Test fun engine_fault_sets_error_status() {
+        // Synchronous (Unconfined) so the throwing engine flow runs inline through the
+        // .catch operator -> error. (Avoids a StandardTestDispatcher/flowOn artifact.)
+        val r = runner(engine = FakeEngine(flow { throw RuntimeException("boom") }))
+        val id = r.submitTask("x", "Brandon")
+        assertEquals("error", r.taskStatus(id)?.phase)
+    }
+
+    @Test fun working_step_increments_on_tool_calls() = runTest {
+        val d = StandardTestDispatcher(testScheduler)
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeEngine(flow {
+            emit(LlmEvent.ToolCall("open_app", JsonObject(emptyMap())))
+            gate.await()                          // pause mid-turn so we can observe `working`
+            emit(LlmEvent.TextDelta("done"))
+        })
+        val r = testRunner(d, engine)
+        val id = r.submitTask("x", "Brandon")
+        advanceUntilIdle()                        // runs up to gate.await()
+        val mid = r.taskStatus(id)
+        assertEquals("working", mid?.phase)
+        assertEquals(1, mid?.step)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("done", r.taskStatus(id)?.phase)
+    }
+
+    @Test fun tasks_map_is_bounded_by_lru_eviction() {
+        val r = runner(engine = null)             // Unconfined -> each submit errors synchronously
+        val ids = (1..RemoteTaskRunner.MAX_TASKS + 10).map { r.submitTask("t$it", "op") }
+        assertNull("earliest task should be evicted", r.taskStatus(ids.first()))
+        assertEquals("error", r.taskStatus(ids.last())?.phase)
+    }
+
+    private fun testRunner(d: CoroutineDispatcher, engine: NativeToolCallingLlm) = RemoteTaskRunner(
+        scope = CoroutineScope(d),
+        engineProvider = { engine },
+        phoneProvider = { FakePhone() },
+        ioDispatcher = d,
     )
 }

@@ -41,6 +41,14 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        // android.util.Log (and other android.jar calls) return defaults instead of
+        // throwing "not mocked" in plain JVM unit tests — lets Log-using classes
+        // (e.g. RemoteTaskRunner's failure telemetry) be unit-tested. Only affects
+        // calls that would otherwise throw, so currently-passing tests are unaffected.
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
