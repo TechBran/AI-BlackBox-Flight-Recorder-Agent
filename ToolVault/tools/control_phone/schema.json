@@ -1,0 +1,20 @@
+{
+  "name": "control_phone",
+  "description": "Delegate a hands-on task to the on-device Gemma model running on the user's OWN phone, over Tailscale. Use this when the user asks you to DO something on their phone (open an app, navigate the UI, read what's on screen, set a timer, run a search, show a map). IMPORTANT: before you call this, tell the user you are waking Gemma on their phone and will report back when it's done — this call BLOCKS while the phone wakes its model (which can take up to a minute) and runs the task. Only SAFE actions run remotely; high-consequence actions (sending messages, placing calls, payments) are refused for remote control and must be done by the user directly on the device. Returns the result the on-device model reports, or a clear error (phone offline / wake failed / timed out / refused) so you can retry or stop.",
+  "category": "computer_control",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "The natural-language task to run on the phone, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'."
+      }
+    },
+    "required": ["task"]
+  },
+  "returns": "The result text reported by the on-device model, or a structured error (error_kind: no_device / wake_failed / bad_response / lost_contact / remote_error / timeout).",
+  "example": "control_phone(task=\"open the camera app\")",
+  "notes": "Frontier->phone inversion: the BlackBox reaches out to the originating operator's phone (resolved via the tailnet mesh) and drives its on-device Gemma. Blocking with wake-tracking; the phone enforces a remote allowlist. v1 targets the originating operator's device; Phase 2 adds an optional device param. See docs/plans/2026-06-18-frontier-to-phone-control.md."
+}
