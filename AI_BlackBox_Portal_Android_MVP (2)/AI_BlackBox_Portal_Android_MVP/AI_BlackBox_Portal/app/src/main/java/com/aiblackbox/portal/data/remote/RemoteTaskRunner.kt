@@ -8,6 +8,7 @@ import com.aiblackbox.portal.data.local.NativeTool
 import com.aiblackbox.portal.data.local.NativeToolCallingLlm
 import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.local.ResidentTools
+import com.aiblackbox.portal.data.local.ensureWarmEngine
 import com.aiblackbox.portal.data.local.toResultJsonString
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.AutonomyMode
@@ -48,15 +49,20 @@ class RemoteTaskRunner internal constructor(
     private val engineProvider: () -> NativeToolCallingLlm?,
     private val phoneProvider: () -> PhoneController,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    // WAKE: load the engine on demand when the holder is cold (the "waking Gemma" work).
+    // Defaults to the sync provider (no load) for tests that don't exercise warming.
+    private val engineWarmer: suspend () -> NativeToolCallingLlm? = { engineProvider() },
 ) : RemoteTaskHandler {
 
-    /** Production wiring: warm engine from the process holder; phone controller in the
-     *  remote posture (YOLO; default confirm = auto-approve, credential handoff =
-     *  auto-decline so passwords never proceed). */
+    /** Production wiring: warm engine from the process holder; WAKE it on demand via
+     *  [ensureWarmEngine] when cold; phone controller in the remote posture (YOLO;
+     *  default confirm = auto-approve, credential handoff = auto-decline so passwords
+     *  never proceed). */
     constructor(appContext: Context) : this(
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
         engineProvider = { LocalEngineHolder.getOrNull() as? NativeToolCallingLlm },
         phoneProvider = { AndroidPhoneController.fromService(appContext, mode = { AutonomyMode.YOLO }) },
+        engineWarmer = { ensureWarmEngine(appContext) },
     )
 
     // Bounded LRU (access-order): an actively-polled task stays warm while old
@@ -89,54 +95,53 @@ class RemoteTaskRunner internal constructor(
     }
 
     private suspend fun runTask(id: String, task: String) {
-        val engine = engineProvider()
-        if (engine == null) {
-            tasks[id] = RemoteStatus(
-                phase = "error",
-                error = "on-device model is not loaded yet; try again shortly",
-            )
-            return
-        }
-        val phone = try {
-            phoneProvider()
-        } catch (e: Exception) {
-            tasks[id] = RemoteStatus(
-                phase = "error",
-                error = "phone control unavailable (${e.javaClass.simpleName})",
-            )
-            return
-        }
         val acc = StringBuilder()
         var step = 0
         var faulted = false
-        // One remote turn at a time (serialize concurrent remote submissions). While
-        // queued for the lock the task stays `waking`; it flips to `working` once it
-        // actually starts driving the engine. The `.catch` operator (mirroring the chat
-        // loop) handles an engine fault WITHIN the flow — reliable under flowOn, unlike a
-        // try/catch around collect — and preserves cancellation (catch ignores
+        var started = false
+        // One remote turn at a time (serialize concurrent remote submissions). The task
+        // stays `waking` while the lock is held AND while the engine cold-loads (the WAKE),
+        // then flips to `working` once it drives the engine. The `.catch` operator (mirroring
+        // the chat loop) handles an engine fault WITHIN the flow — reliable under flowOn,
+        // unlike a try/catch around collect — and preserves cancellation (catch ignores
         // CancellationException). Only a clean completion reaches `done`.
-        turnMutex.withLock {
-            tasks[id] = RemoteStatus(phase = "working")
-            engine.generateWithToolsNative(remotePrompt(task), buildRemoteDeviceTools(phone))
-                .catch { e ->
-                    faulted = true
-                    Log.w(TAG, "remote task failed (${e.javaClass.simpleName})")
-                    tasks[id] = RemoteStatus(phase = "error", error = "task failed (${e.javaClass.simpleName})")
+        try {
+            turnMutex.withLock {
+                val engine = engineWarmer()   // wake Gemma on demand if the holder is cold
+                if (engine == null) {
+                    tasks[id] = RemoteStatus(
+                        phase = "error",
+                        error = "no on-device model is installed, or it failed to load",
+                    )
+                    return@withLock
                 }
-                .flowOn(ioDispatcher)
-                .collect { event ->
-                    when (event) {
-                        is LlmEvent.TextDelta -> acc.append(event.text)
-                        is LlmEvent.ToolCall -> {
-                            step++
-                            tasks[id] = RemoteStatus(phase = "working", step = step)
-                        }
-                        is LlmEvent.ToolOutcome -> { /* fed back to the model by the engine */ }
+                val phone = phoneProvider()
+                started = true
+                tasks[id] = RemoteStatus(phase = "working")
+                engine.generateWithToolsNative(remotePrompt(task), buildRemoteDeviceTools(phone))
+                    .catch { e ->
+                        faulted = true
+                        Log.w(TAG, "remote task failed (${e.javaClass.simpleName})")
+                        tasks[id] = RemoteStatus(phase = "error", error = "task failed (${e.javaClass.simpleName})")
                     }
-                }
-        }
-        if (!faulted) {
-            tasks[id] = RemoteStatus(phase = "done", result = acc.toString().ifBlank { "Done." })
+                    .flowOn(ioDispatcher)
+                    .collect { event ->
+                        when (event) {
+                            is LlmEvent.TextDelta -> acc.append(event.text)
+                            is LlmEvent.ToolCall -> {
+                                step++
+                                tasks[id] = RemoteStatus(phase = "working", step = step)
+                            }
+                            is LlmEvent.ToolOutcome -> { /* fed back to the model by the engine */ }
+                        }
+                    }
+            }
+            if (started && !faulted) {
+                tasks[id] = RemoteStatus(phase = "done", result = acc.toString().ifBlank { "Done." })
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "remote task failed (${e.javaClass.simpleName})")
+            tasks[id] = RemoteStatus(phase = "error", error = "task failed (${e.javaClass.simpleName})")
         }
     }
 

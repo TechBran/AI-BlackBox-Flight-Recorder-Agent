@@ -78,12 +78,30 @@ class RemoteTaskRunnerTest {
         assertNull(runner(engine = null).taskStatus("nope"))
     }
 
-    @Test fun submit_without_engine_sets_error_status() {
-        val r = runner(engine = null)
+    @Test fun submit_with_no_installed_model_sets_error_status() {
+        val r = runner(engine = null)   // warmer defaults to engineProvider -> null
         val id = r.submitTask("open maps", "Brandon")
         val st = r.taskStatus(id)
         assertEquals("error", st?.phase)
-        assertTrue(st?.error.orEmpty().contains("not loaded"))
+        assertTrue(st?.error.orEmpty().contains("installed"))
+    }
+
+    @Test fun cold_holder_is_woken_on_demand() = runTest {
+        // holder is cold (engineProvider -> null) but the warmer loads it on demand.
+        val d = StandardTestDispatcher(testScheduler)
+        val engine = FakeEngine(flowOf(LlmEvent.TextDelta("woke and did it")))
+        val r = RemoteTaskRunner(
+            scope = CoroutineScope(d),
+            engineProvider = { null },
+            phoneProvider = { FakePhone() },
+            ioDispatcher = d,
+            engineWarmer = { engine },
+        )
+        val id = r.submitTask("x", "Brandon")
+        advanceUntilIdle()
+        val st = r.taskStatus(id)
+        assertEquals("done", st?.phase)
+        assertEquals("woke and did it", st?.result)
     }
 
     private fun runner(engine: NativeToolCallingLlm?) = RemoteTaskRunner(
