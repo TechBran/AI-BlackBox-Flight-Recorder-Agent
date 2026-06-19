@@ -4877,6 +4877,28 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     }
                                 })
                                 yield {"type": "tool_result", "data": f"{func_name}: {result_message[:80]}"}
+                            else:
+                                # Catch-all: route ANY other tool through BlackBoxToolExecutor.
+                                # This handles dynamically-injected ToolVault tools (control_phone,
+                                # etc.) that have no explicit elif branch. Without it an unrecognized
+                                # func_name produced NO functionResponse, so Gemini got an empty tool
+                                # result and re-called control_phone in a loop until it gave up
+                                # ("walked away") and the tool never executed. Mirrors the Anthropic
+                                # streaming catch-all (this provider was simply missing it).
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator)
+                                tool_exec_result = await executor.execute(func_name, func_args)
+                                result_message = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
+                                if not result_message:
+                                    result_message = f"Tool '{func_name}' executed successfully (no output)."
+                                print(f"\033[33m[TOOLVAULT-EXEC] {func_name} (gemini catch-all): {result_message[:120]}\033[0m", flush=True)
+                                function_responses.append({
+                                    "functionResponse": {
+                                        "name": func_name,
+                                        "response": {"result": result_message}
+                                    }
+                                })
+                                yield {"type": "tool_result", "data": f"{func_name}: {result_message[:80]}"}
 
                         # Add function responses to conversation
                         payload["contents"].append({
@@ -5919,7 +5941,10 @@ async def chat_save(request: Request):
         reasoning = body.get("reasoning", "")
         provenance = body.get("provenance", {})  # Fossil retrieval provenance
         model = body.get("model", "")
-        tokens = body.get("tokens", {})
+        # `or {}` (not just a default): a tool-call turn can POST "tokens": null
+        # explicitly, and body.get("tokens", {}) returns None for a present-but-null
+        # key -> later tokens.get(...) crashed the save (AttributeError on NoneType).
+        tokens = body.get("tokens") or {}
 
         if not assistant_response:
             return JSONResponse(status_code=400, content={"error": "assistant_response required"})
