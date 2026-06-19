@@ -1,9 +1,10 @@
-"""Hermetic tests for the control_phone ToolVault executor (Task 3).
+"""Hermetic tests for the control_phone ToolVault executor (Tasks 3-4).
 
 The executor module is loaded directly from its file (the same mechanism the
 registry uses). mesh.resolve_origin + the two phone-HTTP seams
 (_post_task / _get_status) are monkeypatched, so no tailscale, no sockets, and no
-real phone are touched. POLL_INTERVAL_SECS is set to 0 so the poll loop spins
+real phone are touched. The poll cadence/timeout come from the _poll_interval_secs
+/ _total_timeout_secs helpers, which the timing tests monkeypatch to spin the loop
 instantly.
 """
 import asyncio

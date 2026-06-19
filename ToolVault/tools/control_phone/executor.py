@@ -70,9 +70,9 @@ def _phone_base_url(node: mesh.Node) -> str:
 
 
 def _clip(value, limit: int = 300) -> str:
-    """Clip an error/exception string so a huge __str__ can't flood model context."""
+    """Clip a string so a huge __str__ can't flood model context (caps at `limit`)."""
     s = str(value)
-    return s if len(s) <= limit else s[:limit] + "…"
+    return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
 async def _post_task(base_url: str, payload: dict) -> dict:
@@ -125,7 +125,7 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     if not task_id:
         return ToolResult(
             False,
-            f"The phone did not return a task id (got: {started}).",
+            f"The phone did not return a task id (got: {_clip(started)}).",
             data={"error_kind": "bad_response", "device": device},
         )
 
