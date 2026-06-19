@@ -122,6 +122,11 @@ class NativeMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // control_phone: bring up the inbound remote-control LISTENER on app launch,
+        // independent of the chat provider, so the phone is a reachable control target.
+        // Listener-only (no engine warm) — control_phone wakes Gemma on demand.
+        LocalModelService.startListener(this)
+
         // Normalize origin for API calls — handles Tailscale .ts.net domains
         // (forces HTTPS, strips port for Tailscale, removes /ui/ suffix)
         val rawOrigin = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)

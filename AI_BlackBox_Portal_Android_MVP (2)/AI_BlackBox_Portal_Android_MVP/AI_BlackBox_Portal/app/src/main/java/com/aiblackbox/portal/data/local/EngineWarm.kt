@@ -46,7 +46,9 @@ suspend fun ensureWarmEngine(appContext: Context): NativeToolCallingLlm? {
                 ?: installed.firstOrNull()
                 ?: return@withContext null
             val cfg = bundle.config
-            val delegate = "cpu"
+            // GPU (Edge Gallery parity, ~10x faster than CPU); LiteRtEngine.load falls
+            // back to CPU if GPU init fails on a limited device.
+            val delegate = "gpu"
             val engine = LiteRtEngine.fromInstalled(
                 appContext,
                 bundle.file,

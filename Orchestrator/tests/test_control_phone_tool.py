@@ -113,6 +113,7 @@ def test_bad_response_when_no_task_id(monkeypatch):
 def test_lost_contact_when_status_raises(monkeypatch):
     monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
     monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
+    monkeypatch.setattr(cp, "LOST_CONTACT_GRACE_SECS", 0.0)  # no grace -> first failure is fatal
     monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
 
     async def boom(base_url, task_id):
@@ -122,6 +123,26 @@ def test_lost_contact_when_status_raises(monkeypatch):
     res = _run(cp.execute({"task": "x"}, CTX))
     assert res.success is False
     assert res.data["error_kind"] == "lost_contact"
+
+
+def test_transient_status_drops_during_wake_are_tolerated(monkeypatch):
+    # The listener can briefly drop /status during a heavy GPU cold-load; the poll
+    # should ride through transient failures (within the grace window) and still finish.
+    monkeypatch.setattr(cp.mesh, "resolve_origin", lambda *a, **k: NODE)
+    monkeypatch.setattr(cp, "_poll_interval_secs", lambda: 0.0)
+    monkeypatch.setattr(cp, "_post_task", _aret({"task_id": "t1"}))
+    calls = {"n": 0}
+
+    async def flaky_status(base_url, task_id):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise ConnectionResetError("dropped during wake")
+        return {"phase": "done", "result": "ok"}
+
+    monkeypatch.setattr(cp, "_get_status", flaky_status)
+    res = _run(cp.execute({"task": "x"}, CTX))
+    assert res.success is True
+    assert res.result == "ok"
 
 
 def test_http_4xx_from_phone_is_refused(monkeypatch):

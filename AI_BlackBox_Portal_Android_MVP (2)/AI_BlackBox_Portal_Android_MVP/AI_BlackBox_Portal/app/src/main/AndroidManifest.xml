@@ -16,6 +16,13 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- control_phone: the on-device-model service hosts a remote-control listener the
+         BlackBox (a connected device) drives over Tailscale. connectedDevice FGS is NOT
+         subject to the dataSync runtime timeout (which crashed the app on Android 14+). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <!-- connectedDevice FGS requires one of a set of companion perms; CHANGE_NETWORK_STATE
+         is a normal (auto-granted) one and fits a network-reached listener. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <!-- Storage permissions for downloading files -->
@@ -81,7 +88,7 @@
              service can't start, the ChatViewModel builds + uses its own engine. -->
         <service
             android:name=".LocalModelService"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="connectedDevice"
             android:exported="false" />
 
         <service

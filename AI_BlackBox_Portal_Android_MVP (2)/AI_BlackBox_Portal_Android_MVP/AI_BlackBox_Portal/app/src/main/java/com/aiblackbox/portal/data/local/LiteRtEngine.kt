@@ -177,23 +177,30 @@ class LiteRtEngine(
             // visionBackend WAS set, retry ONCE WITHOUT it (text-only) so the
             // engine ALWAYS loads for text/native; mark vision degraded so
             // generateWithImage fails gracefully instead of crashing text turns.
+            // Safety cascade so the GPU default (Edge Gallery parity, ~10x faster than
+            // CPU) can't brick the model on a GPU-less/limited device:
+            //   1. (delegate, vision) — happy path.
+            //   2. GPU-vision init failure -> (delegate, text-only) [vision degraded].
+            //   3. delegate init failure outright (no usable GPU) -> (CPU, text-only).
+            //   4. CPU also fails -> rethrow (caller surfaces it).
             val built = try {
                 buildAndInitialize(targetPath, delegate, visionBackend)
             } catch (e: Throwable) {
-                if (!shouldRetryWithoutVision(supportImage, visionBackend != null)) {
-                    // Text-only path (no visionBackend was set): a genuine init
-                    // failure has nothing to retry — rethrow (caller surfaces it).
-                    throw e
+                if (shouldRetryWithoutVision(supportImage, visionBackend != null)) {
+                    // Log CLASS NAME only (never a message — could carry device/path detail).
+                    android.util.Log.w(
+                        TAG,
+                        "vision init failed (${e.javaClass.simpleName}); degrading to text-only",
+                    )
+                    visionDegraded = true
+                    try {
+                        buildAndInitialize(targetPath, delegate, visionBackend = null)
+                    } catch (e2: Throwable) {
+                        buildOnCpuOrThrow(targetPath, delegate, e2)
+                    }
+                } else {
+                    buildOnCpuOrThrow(targetPath, delegate, e)
                 }
-                // Log the degrade with the throwable CLASS NAME only (never a
-                // message — it could carry device/path detail); then retry text-only.
-                android.util.Log.w(
-                    TAG,
-                    "GPU vision init failed (${e.javaClass.simpleName}); " +
-                        "degrading to text-only — generateWithImage will report vision unavailable",
-                )
-                visionDegraded = true
-                buildAndInitialize(targetPath, delegate, visionBackend = null)
             }
             engine = built
             loadedModelPath = targetPath
@@ -234,6 +241,19 @@ class LiteRtEngine(
         val built = Engine(config)
         built.initialize() // ~10s; we're on Dispatchers.IO.
         return built
+    }
+
+    /** Last resort in the load cascade: if a non-CPU [delegate] (e.g. "gpu") failed to
+     *  initialize, retry text-only on CPU so the model still loads; if we were already
+     *  on CPU, rethrow [cause] (nothing left to fall back to). */
+    private fun buildOnCpuOrThrow(targetPath: String, delegate: String, cause: Throwable): Engine {
+        if (delegate.lowercase() == "cpu") throw cause
+        android.util.Log.w(
+            TAG,
+            "$delegate init failed (${cause.javaClass.simpleName}); falling back to CPU",
+        )
+        visionDegraded = true // CPU path is text-only here
+        return buildAndInitialize(targetPath, "cpu", visionBackend = null)
     }
 
     /** True once a model is loaded and the native engine is initialized. */

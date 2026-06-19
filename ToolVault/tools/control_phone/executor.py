@@ -28,6 +28,10 @@ from Orchestrator.local_provider import mesh
 REMOTE_CONTROL_PORT = 8765
 POLL_INTERVAL_SECS = 2.0
 TOTAL_TIMEOUT_SECS = 300.0          # ~5 min: model load (10-75s) + execution
+# Tolerate transient /status drops: the phone's listener can briefly stop responding
+# while it cold-loads the model on the GPU (heavy + memory-pressure). Only declare
+# lost_contact after /status has failed continuously for this long.
+LOST_CONTACT_GRACE_SECS = 60.0
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 # Terminal phases reported by the phone's /status (see RemoteTaskRunner, Task 7).
@@ -153,16 +157,34 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     total_timeout = _total_timeout_secs()
     deadline = time.monotonic() + total_timeout
     last_phase = "waking"
+    first_status_failure_at = None  # start of the current run of consecutive /status failures
     while True:
         try:
             status = await _get_status(base_url, task_id)
+            first_status_failure_at = None  # responded → reset the failure run
         except Exception as e:
-            return ToolResult(
-                False,
-                f"Lost contact with the phone ({device}) while it was "
-                f"'{last_phase}': {_clip(e)}",
-                data={"error_kind": "lost_contact", "device": device, "phase": last_phase},
-            )
+            # Transient drop — the listener can briefly stop responding during a heavy
+            # GPU cold-load. Tolerate it for LOST_CONTACT_GRACE_SECS before giving up;
+            # the overall deadline still caps the total wait.
+            now = time.monotonic()
+            if first_status_failure_at is None:
+                first_status_failure_at = now
+            if now - first_status_failure_at >= LOST_CONTACT_GRACE_SECS:
+                return ToolResult(
+                    False,
+                    f"Lost contact with the phone ({device}) while it was "
+                    f"'{last_phase}': {_clip(e)}",
+                    data={"error_kind": "lost_contact", "device": device, "phase": last_phase},
+                )
+            if now >= deadline:
+                return ToolResult(
+                    False,
+                    f"Timed out after {int(total_timeout)}s while the phone was "
+                    f"'{last_phase}'. The model may still be loading — you can try again.",
+                    data={"error_kind": "timeout", "device": device, "phase": last_phase},
+                )
+            await asyncio.sleep(poll_interval)
+            continue
 
         phase = status.get("phase") or status.get("status") or "working"
         last_phase = phase

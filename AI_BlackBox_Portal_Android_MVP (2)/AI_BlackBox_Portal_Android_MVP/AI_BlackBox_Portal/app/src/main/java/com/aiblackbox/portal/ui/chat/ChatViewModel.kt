@@ -207,7 +207,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // The installed bundle file the [localEngine] runs, and its delegate. Resolved
     // from [LocalModelManager.installedModels] when the engine is wired.
     private var localEngineModelFile: java.io.File? = null
-    private var localEngineDelegate: String = "cpu"
+    private var localEngineDelegate: String = "gpu"
 
     // R2-C: true when [localEngine] is the PROCESS-held warm engine borrowed
     // from [LocalEngineHolder] (owned by [LocalModelService]), false when it is a
@@ -1303,7 +1303,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?: installed.firstOrNull()
             ?: return null // no model -> placeholder path
 
-        val delegate = "cpu"
+        val delegate = "gpu" // Edge Gallery parity: GPU ~10x faster; load() falls back to CPU on GPU-init failure
         val targetPath = bundle.file.absolutePath
 
         // R2-C: PREFER the warm, PROCESS-resident engine pinned by

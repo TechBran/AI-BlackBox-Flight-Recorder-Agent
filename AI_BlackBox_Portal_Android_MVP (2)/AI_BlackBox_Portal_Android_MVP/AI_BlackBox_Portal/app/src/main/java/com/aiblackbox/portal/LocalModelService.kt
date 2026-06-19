@@ -100,6 +100,14 @@ class LocalModelService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+            ACTION_START_LISTENER -> {
+                // Listener-only: host the inbound control_phone listener so the phone is
+                // a reachable control target regardless of the active chat provider,
+                // WITHOUT eagerly warming the engine (control_phone wakes it on demand).
+                startForegroundWith(buildNotification(TEXT_LISTENER))
+                _isRunning = true
+                startRemoteControlServerIfPossible()
+            }
             else -> {
                 // Become foreground IMMEDIATELY (startForegroundService contract).
                 startForegroundWith(buildNotification(TEXT_PREPARING))
@@ -188,7 +196,9 @@ class LocalModelService : Service() {
             ?: installed.firstOrNull()
             ?: return null
         val cfg = bundle.config
-        val delegate = "cpu"
+        // GPU (Edge Gallery parity, ~10x faster than CPU); LiteRtEngine.load falls back
+        // to CPU if GPU init fails on a limited device.
+        val delegate = "gpu"
         val engine = LiteRtEngine.fromInstalled(
             applicationContext,
             bundle.file,
@@ -262,7 +272,7 @@ class LocalModelService : Service() {
                 this,
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -331,6 +341,7 @@ class LocalModelService : Service() {
         const val CHANNEL_ID = "blackbox_local_model"
         const val NOTIFICATION_ID = 9093
         const val ACTION_START = "com.aiblackbox.portal.START_LOCAL_MODEL"
+        const val ACTION_START_LISTENER = "com.aiblackbox.portal.START_LISTENER"
         const val ACTION_STOP = "com.aiblackbox.portal.STOP_LOCAL_MODEL"
 
         // The DataStore key the Model Manager persists the active on-device slug under
@@ -340,6 +351,7 @@ class LocalModelService : Service() {
 
         private const val TEXT_PREPARING = "Loading on-device model…"
         private const val TEXT_READY = "On-device model ready"
+        private const val TEXT_LISTENER = "Remote control ready"
 
         private var _isRunning = false
         fun isRunning() = _isRunning
@@ -363,6 +375,27 @@ class LocalModelService : Service() {
                 }
             } catch (e: Throwable) {
                 Log.w(TAG, "start refused (${e.javaClass.simpleName}); VM fallback still works")
+            }
+        }
+
+        /**
+         * Best-effort start of the inbound control_phone LISTENER ONLY (no engine warm).
+         * Call on app launch so the phone is a reachable remote-control target regardless
+         * of the active chat provider (control_phone wakes the engine on demand). Never throws.
+         */
+        @JvmStatic
+        fun startListener(context: Context) {
+            val intent = Intent(context, LocalModelService::class.java).apply {
+                action = ACTION_START_LISTENER
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "startListener refused (${e.javaClass.simpleName})")
             }
         }
 
