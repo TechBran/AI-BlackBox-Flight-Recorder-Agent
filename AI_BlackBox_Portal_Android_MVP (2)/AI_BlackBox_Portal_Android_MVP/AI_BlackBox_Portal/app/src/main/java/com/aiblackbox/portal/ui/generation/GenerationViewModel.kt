@@ -7,6 +7,8 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.TaskResponse
 import com.aiblackbox.portal.data.model.TaskStatus
 import com.aiblackbox.portal.data.repository.TaskRepository
+import com.aiblackbox.portal.data.repository.ImageCatalogProvider
+import com.aiblackbox.portal.data.repository.ImageCatalogRepository
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonPrimitive
 
 enum class GenType { IMAGE, VIDEO, MUSIC }
 enum class GenState { IDLE, SUBMITTING, POLLING, COMPLETED, FAILED }
@@ -22,6 +25,7 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     private val store = BlackBoxStore(application)
     private var api: BlackBoxApi? = null
     private var taskRepo: TaskRepository? = null
+    private var imageCatalogRepo: ImageCatalogRepository? = null
 
     private val _state = MutableStateFlow(GenState.IDLE)
     val state: StateFlow<GenState> = _state.asStateFlow()
@@ -38,6 +42,17 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    // --- Provider-aware image catalog (mirrors Portal's /image/catalog hydration) ---
+    private val _imageProviders = MutableStateFlow<List<ImageCatalogProvider>>(emptyList())
+    val imageProviders: StateFlow<List<ImageCatalogProvider>> = _imageProviders.asStateFlow()
+
+    private val _selectedImageProvider = MutableStateFlow<String?>(null)
+    val selectedImageProvider: StateFlow<String?> = _selectedImageProvider.asStateFlow()
+
+    /** Current param values keyed by catalog param name (e.g. "aspectRatio" -> "16:9"). */
+    private val _imageParamValues = MutableStateFlow<Map<String, String>>(emptyMap())
+    val imageParamValues: StateFlow<Map<String, String>> = _imageParamValues.asStateFlow()
+
     private var currentOperator = "Brandon"
 
     init {
@@ -48,6 +63,86 @@ class GenerationViewModel(application: Application) : AndroidViewModel(applicati
         if (origin.isBlank() || api != null) return
         api = BlackBoxApi(origin)
         taskRepo = TaskRepository(api!!)
+        imageCatalogRepo = ImageCatalogRepository(api!!)
+        loadImageCatalog()
+    }
+
+    /**
+     * Load the image provider catalog (fail-open). Preselects the default
+     * provider and seeds its param values from each spec's default. Mirrors
+     * Portal setupImageProviderControls().
+     */
+    private fun loadImageCatalog() {
+        val repo = imageCatalogRepo ?: return
+        viewModelScope.launch {
+            val catalog = repo.fetchCatalog()
+            _imageProviders.value = catalog
+            // Preselect default (default:true, else first), keep prior pick if still valid.
+            val current = _selectedImageProvider.value
+            val keep = catalog.any { it.provider == current }
+            val chosen = when {
+                keep -> current
+                else -> (catalog.firstOrNull { it.default } ?: catalog.firstOrNull())?.provider
+            }
+            if (chosen != null) selectImageProvider(chosen)
+        }
+    }
+
+    /**
+     * Select an image provider and reset the param values to that provider's
+     * spec defaults (so the controls SWAP when the dropdown changes).
+     */
+    fun selectImageProvider(provider: String) {
+        _selectedImageProvider.value = provider
+        val entry = _imageProviders.value.firstOrNull { it.provider == provider }
+        _imageParamValues.value = entry?.params?.mapNotNull { spec ->
+            val d = spec.default ?: spec.options.firstOrNull()
+            if (d != null) spec.name to d else null
+        }?.toMap() ?: emptyMap()
+    }
+
+    /** Update a single param value (keyed by catalog param name). */
+    fun setImageParam(name: String, value: String) {
+        _imageParamValues.value = _imageParamValues.value.toMutableMap().apply { put(name, value) }
+    }
+
+    /**
+     * Provider-aware image generation. POSTs /generate/image with {prompt,
+     * operator, provider, ...params}. Param names (aspectRatio/resolution/
+     * numberOfImages/size/quality) come straight from the catalog spec so they
+     * match the backend GenIn model. int-typed params are sent as numbers.
+     */
+    fun generateImageForProvider(
+        prompt: String,
+        provider: String,
+        params: Map<String, String>,
+        intParamNames: Set<String> = emptySet(),
+    ) {
+        val api = api ?: return
+        _state.value = GenState.SUBMITTING
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                val body = buildJsonObject {
+                    put("prompt", prompt)
+                    put("operator", currentOperator)
+                    put("provider", provider)
+                    params.forEach { (name, value) ->
+                        if (name in intParamNames) {
+                            put(name, JsonPrimitive(value.toIntOrNull() ?: 1))
+                        } else {
+                            put(name, value)
+                        }
+                    }
+                }.toString()
+                val response = api.post("/generate/image", body)
+                val taskResponse = api.json.decodeFromString(TaskResponse.serializer(), response)
+                pollTask(taskResponse.taskId)
+            } catch (e: Exception) {
+                _state.value = GenState.FAILED
+                _error.value = e.message
+            }
+        }
     }
 
     fun generateImage(

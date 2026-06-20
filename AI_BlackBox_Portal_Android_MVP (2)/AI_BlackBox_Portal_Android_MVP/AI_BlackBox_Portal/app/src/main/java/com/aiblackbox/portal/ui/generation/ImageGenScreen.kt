@@ -34,12 +34,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,7 +53,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.aiblackbox.portal.data.repository.ImageCatalogProvider
+import com.aiblackbox.portal.data.repository.ImageCatalogRepository
+import com.aiblackbox.portal.data.repository.ImageParamSpec
 import com.aiblackbox.portal.ui.components.GlassCard
+import com.aiblackbox.portal.ui.voice.LabeledDropdown
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -74,6 +76,12 @@ import com.aiblackbox.portal.ui.theme.RadiusXl
 import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.ui.theme.glassSurface
 
+/**
+ * Provider-aware image-generation screen. The provider dropdown + param controls
+ * hydrate from GET /image/catalog (the SAME source as the Portal modal — Task 8),
+ * so the two surfaces stay aligned. Selecting a provider SWAPS the param controls
+ * to that provider's schema (enum -> dropdown, int -> chip stepper).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ImageGenScreen(
@@ -83,14 +91,18 @@ fun ImageGenScreen(
 ) {
     val view = LocalView.current
     var prompt by remember { mutableStateOf("") }
-    var selectedRatio by remember { mutableStateOf("1:1") }
-    var selectedCount by remember { mutableIntStateOf(1) }
     val state by viewModel.state.collectAsState()
     val resultUrl by viewModel.resultUrl.collectAsState()
     val error by viewModel.error.collectAsState()
     val taskStatus by viewModel.taskStatus.collectAsState()
+    val providers by viewModel.imageProviders.collectAsState()
+    val selectedProvider by viewModel.selectedImageProvider.collectAsState()
+    val paramValues by viewModel.imageParamValues.collectAsState()
 
     LaunchedEffect(origin) { viewModel.initialize(origin) }
+
+    val currentEntry: ImageCatalogProvider? =
+        providers.firstOrNull { it.provider == selectedProvider }
 
     Column(
         modifier = modifier
@@ -106,11 +118,33 @@ fun ImageGenScreen(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            "Nano Banana Pro (Gemini)",
+            currentEntry?.label ?: "Loading providers...",
             style = MaterialTheme.typography.bodySmall,
             color = Neutral500
         )
         Spacer(Modifier.height(20.dp))
+
+        // Provider selector — only meaningful with 2+ enabled providers, but always
+        // shown for parity with the Portal modal (and to surface the active provider).
+        if (providers.isNotEmpty()) {
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(RadiusMd)
+            ) {
+                Column(modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 4.dp)) {
+                    LabeledDropdown(
+                        label = "Provider",
+                        options = providers.map { it.provider to (it.label.ifBlank { it.provider }) },
+                        selectedId = selectedProvider,
+                        onSelect = { id ->
+                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            viewModel.selectImageProvider(id)
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
 
         // Prompt input inside a GlassCard
         GlassCard(
@@ -152,126 +186,30 @@ fun ImageGenScreen(
         }
         Spacer(Modifier.height(16.dp))
 
-        // Options card
-        GlassCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(RadiusMd)
-        ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                // Aspect Ratio
-                Text(
-                    "Aspect Ratio",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                    color = BbxDim
-                )
-                Spacer(Modifier.height(10.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf("1:1", "16:9", "9:16", "4:3", "3:4").forEach { ratio ->
-                        val selected = ratio == selectedRatio
-                        val interactionSource = remember { MutableInteractionSource() }
-                        val pressed by interactionSource.collectIsPressedAsState()
-                        val chipScale by animateFloatAsState(
-                            targetValue = if (pressed) 0.92f else 1f,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "chipScale"
+        // Dynamic params card — rendered from the selected provider's schema.
+        // enum -> dropdown; int -> chip stepper. Controls SWAP on provider change.
+        val params = currentEntry?.params ?: emptyList()
+        if (params.isNotEmpty()) {
+            GlassCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(RadiusMd)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    params.forEachIndexed { index, spec ->
+                        ImageParamControl(
+                            spec = spec,
+                            value = paramValues[spec.name] ?: spec.default ?: spec.options.firstOrNull() ?: "",
+                            onSelect = { v ->
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                viewModel.setImageParam(spec.name, v)
+                            }
                         )
-                        val chipBg by animateColorAsState(
-                            targetValue = if (selected) BbxAccent.copy(alpha = 0.18f) else Neutral200,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "chipBg"
-                        )
-                        val chipBorder by animateColorAsState(
-                            targetValue = if (selected) BbxAccent.copy(alpha = 0.5f) else Neutral300,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "chipBorder"
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .scale(chipScale)
-                                .clip(PillShape)
-                                .background(chipBg)
-                                .border(1.dp, chipBorder, PillShape)
-                                .clickable(
-                                    interactionSource = interactionSource,
-                                    indication = null
-                                ) {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                    selectedRatio = ratio
-                                }
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                ratio,
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                color = if (selected) BbxAccent else Neutral500
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-
-                // Number of images
-                Text(
-                    "Number of Images",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                    color = BbxDim
-                )
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1, 2, 3, 4).forEach { count ->
-                        val selected = count == selectedCount
-                        val interactionSource = remember { MutableInteractionSource() }
-                        val pressed by interactionSource.collectIsPressedAsState()
-                        val chipScale by animateFloatAsState(
-                            targetValue = if (pressed) 0.92f else 1f,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "countScale"
-                        )
-                        val chipBg by animateColorAsState(
-                            targetValue = if (selected) BbxAccent.copy(alpha = 0.18f) else Neutral200,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "countBg"
-                        )
-                        val chipBorder by animateColorAsState(
-                            targetValue = if (selected) BbxAccent.copy(alpha = 0.5f) else Neutral300,
-                            animationSpec = tween(DurationBase, easing = EaseStandard),
-                            label = "countBorder"
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .scale(chipScale)
-                                .clip(PillShape)
-                                .background(chipBg)
-                                .border(1.dp, chipBorder, PillShape)
-                                .clickable(
-                                    interactionSource = interactionSource,
-                                    indication = null
-                                ) {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                    selectedCount = count
-                                }
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
-                            Text(
-                                "$count",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                ),
-                                color = if (selected) BbxAccent else Neutral500
-                            )
-                        }
+                        if (index < params.lastIndex) Spacer(Modifier.height(18.dp))
                     }
                 }
             }
+            Spacer(Modifier.height(20.dp))
         }
-        Spacer(Modifier.height(20.dp))
 
         // Generate button with press animation
         val btnInteraction = remember { MutableInteractionSource() }
@@ -282,7 +220,7 @@ fun ImageGenScreen(
             label = "btnScale"
         )
         val isGenerating = state == GenState.SUBMITTING || state == GenState.POLLING
-        val btnEnabled = prompt.isNotBlank() && !isGenerating
+        val btnEnabled = prompt.isNotBlank() && selectedProvider != null && !isGenerating
 
         Box(
             modifier = Modifier
@@ -299,7 +237,14 @@ fun ImageGenScreen(
                     enabled = btnEnabled
                 ) {
                     view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                    viewModel.generateImage(prompt, selectedRatio, selectedCount)
+                    val provider = selectedProvider ?: return@clickable
+                    val intNames = params.filter { it.type == "int" }.map { it.name }.toSet()
+                    viewModel.generateImageForProvider(
+                        prompt = prompt,
+                        provider = provider,
+                        params = paramValues,
+                        intParamNames = intNames
+                    )
                 }
                 .padding(vertical = 14.dp),
             contentAlignment = Alignment.Center
@@ -444,5 +389,80 @@ fun ImageGenScreen(
         }
 
         Spacer(Modifier.height(180.dp))
+    }
+}
+
+/**
+ * One dynamic param control rendered from a catalog [ImageParamSpec].
+ *   enum -> [LabeledDropdown]; int -> a chip stepper across [min]..[max].
+ * The label uses the friendly name from [ImageCatalogRepository.IMAGE_PARAM_LABELS].
+ */
+@Composable
+private fun ImageParamControl(
+    spec: ImageParamSpec,
+    value: String,
+    onSelect: (String) -> Unit,
+) {
+    val label = ImageCatalogRepository.IMAGE_PARAM_LABELS[spec.name] ?: spec.name
+
+    if (spec.type == "enum") {
+        LabeledDropdown(
+            label = label,
+            options = spec.options.map { it to it },
+            selectedId = value,
+            onSelect = onSelect
+        )
+    } else {
+        // int (or any non-enum): chip stepper across min..max (default 1..4)
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+            color = BbxDim
+        )
+        Spacer(Modifier.height(10.dp))
+        val lo = spec.min ?: 1
+        val hi = spec.max ?: 4
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            (lo..hi).forEach { n ->
+                val sel = value == n.toString()
+                val interactionSource = remember { MutableInteractionSource() }
+                val pressed by interactionSource.collectIsPressedAsState()
+                val chipScale by animateFloatAsState(
+                    targetValue = if (pressed) 0.92f else 1f,
+                    animationSpec = tween(DurationBase, easing = EaseStandard),
+                    label = "countScale"
+                )
+                val chipBg by animateColorAsState(
+                    targetValue = if (sel) BbxAccent.copy(alpha = 0.18f) else Neutral200,
+                    animationSpec = tween(DurationBase, easing = EaseStandard),
+                    label = "countBg"
+                )
+                val chipBorder by animateColorAsState(
+                    targetValue = if (sel) BbxAccent.copy(alpha = 0.5f) else Neutral300,
+                    animationSpec = tween(DurationBase, easing = EaseStandard),
+                    label = "countBorder"
+                )
+                Box(
+                    modifier = Modifier
+                        .scale(chipScale)
+                        .clip(PillShape)
+                        .background(chipBg)
+                        .border(1.dp, chipBorder, PillShape)
+                        .clickable(
+                            interactionSource = interactionSource,
+                            indication = null
+                        ) { onSelect(n.toString()) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        "$n",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
+                        ),
+                        color = if (sel) BbxAccent else Neutral500
+                    )
+                }
+            }
+        }
     }
 }
