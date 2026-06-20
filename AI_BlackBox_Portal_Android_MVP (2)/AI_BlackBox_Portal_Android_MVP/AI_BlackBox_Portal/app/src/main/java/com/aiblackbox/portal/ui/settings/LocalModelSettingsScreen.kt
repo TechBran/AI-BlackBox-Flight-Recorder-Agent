@@ -121,7 +121,7 @@ fun LocalModelSettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(start = 16.dp, end = 16.dp, top = 100.dp, bottom = 24.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 100.dp, bottom = 160.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
