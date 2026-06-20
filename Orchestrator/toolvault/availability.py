@@ -23,6 +23,13 @@ FEATURES = {
             "gemini": "GOOGLE_API_KEY", "grok": "XAI_API_KEY",
             "grok_x": "XAI_API_KEY", "duckduckgo": None,
         },
+        "provider_tool": {
+            "perplexity": "perplexity_web_search", "openai": "openai_web_search",
+            "gemini": "gemini_web_search", "grok": "grok_web_search",
+            "grok_x": "grok_x_search", "duckduckgo": "duckduckgo_web_search",
+        },
+        "hint_noun": "web search",
+        "hint_prefix": "WEB SEARCH GUIDANCE: ",
         "keyless_floor": {"duckduckgo"},   # always-enabled, keyless (preserves current behavior)
     },
     "image": {
@@ -31,6 +38,11 @@ FEATURES = {
         "provider_env": {
             "gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY", "grok": "XAI_API_KEY",
         },
+        "provider_tool": {
+            "gemini": "gemini_image", "openai": "openai_image", "grok": "grok_image",
+        },
+        "hint_noun": "image generation",
+        "hint_prefix": "IMAGE GENERATION GUIDANCE: ",
         "keyless_floor": set(),            # NO free image provider
     },
 }
@@ -40,15 +52,10 @@ FEATURES = {
 # name stays exported (onboarding_routes + others import it).
 PROVIDER_ENV = dict(FEATURES["web_search"]["provider_env"])
 
-# provider id -> the ToolVault tool name that implements it
-PROVIDER_TOOL = {
-    "perplexity": "perplexity_web_search",
-    "openai": "openai_web_search",
-    "gemini": "gemini_web_search",
-    "grok": "grok_web_search",
-    "grok_x": "grok_x_search",
-    "duckduckgo": "duckduckgo_web_search",
-}
+# provider id -> the ToolVault tool name that implements it. Derived from the
+# web_search feature's provider_tool map so there is no dual source of truth; the
+# name stays exported (existing importers + tests use it).
+PROVIDER_TOOL = dict(FEATURES["web_search"]["provider_tool"])
 WEB_SEARCH_TOOLS = set(PROVIDER_TOOL.values())
 
 
@@ -141,23 +148,46 @@ def filter_available(entries: list, ctx=None) -> list:
     return [e for e in entries if _available(e)]
 
 
-def default_web_search_hint(tool_names) -> str:
-    """Return a one-paragraph web-search guidance hint for the system prompt,
-    or "" if no web-search tool is in tool_names. Built from WEB_SEARCH_DEFAULT
-    + the provided injected tool set. Stdlib-only (lean-venv-safe)."""
-    present = [t for t in tool_names if t in WEB_SEARCH_TOOLS]
+def default_provider_hint(tool_names, feature: str) -> str:
+    """Return a one-paragraph default-provider guidance hint for the system
+    prompt, or "" if no tool of ``feature`` is in ``tool_names``. Built from the
+    feature's default-preference env var (e.g. WEB_SEARCH_DEFAULT / IMAGE_DEFAULT)
+    + the provided injected tool set. Stdlib-only (lean-venv-safe).
+
+    Nudges toward the operator's preferred default provider while leaving the
+    others available to compare. ``feature`` is a key of ``FEATURES``."""
+    spec = FEATURES[feature]
+    provider_tool = spec["provider_tool"]
+    of_feature = set(provider_tool.values())
+    present = [t for t in tool_names if t in of_feature]
     if not present:
         return ""
+    noun = spec["hint_noun"]
     env = _read_env()
-    default_provider = (env.get("WEB_SEARCH_DEFAULT") or "").strip()
-    default_tool = PROVIDER_TOOL.get(default_provider)
+    default_provider = (env.get(spec["default_pref"]) or "").strip()
+    default_tool = provider_tool.get(default_provider)
     parts = []
     if default_tool and default_tool in present:
-        parts.append(f"For web search, prefer `{default_tool}`.")
+        parts.append(f"For {noun}, prefer `{default_tool}`.")
     else:
-        parts.append("Several web search tools are available.")
-    if len([t for t in present if t != "grok_x_search"]) > 1:
-        parts.append("Other web search engines are available too \u2014 you may run more than one to cross-check results.")
-    if "grok_x_search" in present:
-        parts.append("Use `grok_x_search` for real-time X (Twitter) discussion.")
-    return "WEB SEARCH GUIDANCE: " + " ".join(parts)
+        parts.append(f"Several {noun} tools are available.")
+    # Cross-check sentence when more than one of-feature tool is injected.
+    # web_search keeps its historical wording ("cross-check results") and counts
+    # the X/Twitter-specific tool separately; other features use "compare".
+    if feature == "web_search":
+        if len([t for t in present if t != "grok_x_search"]) > 1:
+            parts.append("Other web search engines are available too \u2014 you may run more than one to cross-check results.")
+        if "grok_x_search" in present:
+            parts.append("Use `grok_x_search` for real-time X (Twitter) discussion.")
+    else:
+        if len(present) > 1:
+            parts.append(f"Other {noun} providers are available too \u2014 you may run more than one to compare.")
+    return spec["hint_prefix"] + " ".join(parts)
+
+
+def default_web_search_hint(tool_names) -> str:
+    """Back-compat alias -> default_provider_hint(tool_names, "web_search").
+
+    Kept so existing callers + tests using this name (and the byte-identical web
+    hint output) continue to work unchanged."""
+    return default_provider_hint(tool_names, "web_search")

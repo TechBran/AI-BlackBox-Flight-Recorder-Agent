@@ -368,9 +368,14 @@ def build_tool_instructions(
     )
 
     result = header + "\n\n".join(sections) + "\n"
-    hint = availability.default_web_search_hint(tool_names)
-    if hint:
-        result += "\n" + hint + "\n"
+    # Append per-feature default-provider hints. Both may appear if both tool
+    # types are injected (web hint stays byte-identical via the back-compat path).
+    web_hint = availability.default_provider_hint(tool_names, "web_search")
+    if web_hint:
+        result += "\n" + web_hint + "\n"
+    image_hint = availability.default_provider_hint(tool_names, "image")
+    if image_hint:
+        result += "\n" + image_hint + "\n"
     return result
 
 
