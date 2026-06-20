@@ -94,6 +94,13 @@ def validate_module_dict(d: dict, folder_name: str, known_sources: set) -> list[
         if not isinstance(ex, str) or not ex.strip():
             errors.append("'executor' (optional) must be a non-empty string when present")
 
+    # Optional x-availability: presence-gate metadata consumed by
+    # availability.is_available (provider key + enabled-pref). When present it
+    # must be an object with a non-empty string "provider" and, if given, a
+    # "requires_env" list of strings.
+    if "x-availability" in d:
+        errors.extend(_validate_x_availability(d.get("x-availability")))
+
     return errors
 
 
@@ -141,4 +148,24 @@ def _validate_parameters(params, known_sources: set) -> list[str]:
                     f"known sources: {sorted(known_sources)}"
                 )
 
+    return errors
+
+
+def _validate_x_availability(gate) -> list[str]:
+    """Validate an optional top-level ``x-availability`` presence-gate object."""
+    errors: list[str] = []
+    if not isinstance(gate, dict):
+        return [
+            f"'x-availability' (optional) must be an object (dict), got "
+            f"{type(gate).__name__}"
+        ]
+    provider = gate.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+        errors.append("'x-availability.provider' must be a non-empty string")
+    if "requires_env" in gate:
+        req = gate.get("requires_env")
+        if not isinstance(req, list) or not all(isinstance(x, str) for x in req):
+            errors.append(
+                "'x-availability.requires_env' (optional) must be a list of strings"
+            )
     return errors

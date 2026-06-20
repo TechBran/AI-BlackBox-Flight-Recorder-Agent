@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from Orchestrator.toolvault.meta_tool import META_TOOL_SCHEMA
 from Orchestrator.toolvault import registry
+from Orchestrator.toolvault import availability
 from Orchestrator.toolvault.resolvers import resolve_schema
 from Orchestrator.toolvault.context import ToolContext
 from Orchestrator.toolvault.embeddings import (
@@ -191,7 +192,10 @@ def _select_names(
     seen = {"toolvault"}
 
     # --- Tier 1: always-on baseline, filtered by the requesting group ---
-    for entry in registry.load_canonical(group):
+    #     ...and by availability (an x-availability gate drops a tool when its
+    #     provider key is absent or the provider isn't enabled; no-op for the
+    #     ungated catalog of today).
+    for entry in availability.filter_available(registry.load_canonical(group)):
         if entry.get("tier") == TIER_1:
             name = entry.get("name")
             if name and name not in seen:
@@ -203,7 +207,7 @@ def _select_names(
         # ALL tools (all groups, all tiers), excluding what's already selected.
         searchable = {
             e.get("name"): e.get("description", "")
-            for e in registry.load_canonical()
+            for e in availability.filter_available(registry.load_canonical())
             if e.get("name") and e.get("name") not in seen
         }
         if searchable:

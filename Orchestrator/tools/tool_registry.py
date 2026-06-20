@@ -110,9 +110,19 @@ _EXECUTOR_NAMES: Dict[str, str] = {
 
 
 def get_tools_by_group(group: str) -> List[Dict]:
-    """Return canonical tool definitions belonging to a group."""
+    """Return canonical tool definitions belonging to a group.
+
+    Filtered through ``availability.filter_available`` so a tool carrying an
+    ``x-availability`` gate is dropped when its provider key is absent or the
+    provider is not enabled. ``availability`` is imported lazily (stdlib-only
+    module) to mirror the lazy ``_tv_registry`` import and avoid any import
+    cycle; it is a no-op on today's ungated catalog.
+    """
+    from Orchestrator.toolvault import availability
     _ensure_loaded()
-    return [t for t in _TOOL_DEFINITIONS if group in t.get("groups", [])]
+    return availability.filter_available(
+        [t for t in _TOOL_DEFINITIONS if group in t.get("groups", [])]
+    )
 
 
 def get_tool_by_name(name: str) -> Optional[Dict]:
@@ -285,7 +295,12 @@ def get_gemini_live_tools(group: str = "gemini_live") -> List[Dict]:
 
 
 def get_mcp_tools() -> list:
-    """Get all MCP-group tools as MCP Tool objects."""
+    """Get all MCP-group tools as MCP Tool objects.
+
+    ``_resolved_group("mcp")`` already routes through ``get_tools_by_group``,
+    which applies the ``availability`` presence-gate, so unavailable tools are
+    excluded before conversion (no-op on today's ungated catalog).
+    """
     return [to_mcp(t) for t in _resolved_group("mcp")]
 
 
