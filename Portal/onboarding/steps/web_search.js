@@ -135,11 +135,15 @@ function renderGrid(container) {
             });
         }
         // Whole card toggles the checkbox (matches the click-the-card feel of
-        // the sibling steps) — but ignore clicks that land on the input itself.
+        // the sibling steps) — but only for clicks on the card PADDING. The
+        // checkbox lives inside an implicit <label> (input is a descendant, no
+        // "for"), so clicking the box OR the label text already toggles once via
+        // the native label action; re-toggling here would double-fire change.
         const card = grid.querySelector(`.ob-cli-agent-card[data-provider="${cssEscape(p.id)}"]`);
         if (card) {
             card.addEventListener("click", (e) => {
-                if (e.target && e.target.tagName === "INPUT") return;
+                // Let the native label/input handle clicks inside the label.
+                if (e.target && (e.target.tagName === "INPUT" || (e.target.closest && e.target.closest("label")))) return;
                 const box = card.querySelector("input[type=\"checkbox\"]");
                 if (box) {
                     box.checked = !box.checked;
@@ -156,11 +160,15 @@ function renderCard(meta, checked) {
     const badge = keyless
         ? `<span class="ob-cli-agent-badge ob-cli-agent-badge-ok">&check; Free</span>`
         : `<span class="ob-cli-agent-badge ob-cli-agent-badge-ok">&check; Key on file</span>`;
-    const dataState = checked ? "ready" : "needs-auth";
+    // Every visible card has a key on file (keyless-unavailable providers are
+    // hidden), so an UNCHECKED card is "off", not "needs attention". Use the
+    // green "ready" state when selected and omit data-state when unselected so
+    // the card reads as a neutral, plain border (no misleading amber).
+    const dataState = checked ? "ready" : "";
 
     return `
         <div class="ob-cli-agent-card" data-provider="${escapeHtml(id)}"
-             data-state="${dataState}" tabindex="0">
+             ${dataState ? `data-state="${dataState}"` : ""} tabindex="0">
             <div class="ob-cli-agent-head">
                 <div class="ob-cli-agent-title">
                     <label class="ob-cli-agent-name" style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
