@@ -291,12 +291,15 @@ async def local_turn_prepare(request: Request):
     prompt = body.get("prompt") or ""
 
     try:
-        # Lean LOCAL profile: a few semantic snapshots (the teleport) + the most
-        # recent checkpoint, NO recent/keyword — kept small so the package leaves
-        # ~12K of the phone's 16K window for the agent loop. Defaults (3/1/5) are
-        # the Task-5-validated budget (persona ~2941 + ~1330/snapshot ≈ 8-10K <
-        # the 16000-char local cap); exposed via [context] config so they can be
-        # tuned on the live box (post-device timing) WITHOUT an APK/backend rebuild.
+        # Lean LOCAL profile (tools-only posture): we NO LONGER push memory into the
+        # phone's small window. RECENT and KEYWORD blocks are off, RECENT MEDIA is off
+        # (include_media=False), and the heavy behavioral_core persona is dropped below
+        # in favor of the minimal LOCAL_TOOL_CALLER_SYSTEM_PROMPT. The on-device model
+        # is a tool-caller: it PULLS the memory it needs at turn time via tools
+        # (search_snapshots etc.) rather than receiving a pushed fossil dump. The
+        # semantic_k/checkpoint_count knobs remain (config-tunable via [context] so the
+        # live box can be tuned post-device WITHOUT an APK/backend rebuild) for the
+        # small contextual seed they provide, but the package is kept deliberately lean.
         fossil, prov = build_fossil_context(
             prompt,
             operator=operator,

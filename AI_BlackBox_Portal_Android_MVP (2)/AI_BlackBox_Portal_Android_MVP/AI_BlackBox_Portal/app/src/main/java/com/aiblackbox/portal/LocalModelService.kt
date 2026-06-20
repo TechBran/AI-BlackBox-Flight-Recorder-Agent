@@ -18,6 +18,7 @@ import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.data.local.LocalEngineHolder
 import com.aiblackbox.portal.data.local.LocalModelManager
 import com.aiblackbox.portal.data.local.SamplerSettings
+import com.aiblackbox.portal.data.local.WarmInflightStore
 import com.aiblackbox.portal.data.local.shouldWarm
 import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.remote.REMOTE_CONTROL_PORT
@@ -84,6 +85,12 @@ class LocalModelService : Service() {
     // The inbound remote-control listener (control_phone). Started alongside the
     // foreground service when a task handler is registered; stopped on STOP/destroy.
     private var remoteServer: RemoteControlServer? = null
+
+    // Warm-loop guard, SHARED with ChatViewModel.preloadLocalEngine (same dedicated
+    // SharedPreferences file). The SERVICE is the PRIMARY warmer, so its load() is
+    // bracketed with setInflight(true/false) below: an OOM SIGKILL mid-service-warm
+    // leaves the flag set, so the next launch's auto-warm is skipped (no crash loop).
+    private val warmInflightStore by lazy { WarmInflightStore.fromContext(this) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -170,11 +177,22 @@ class LocalModelService : Service() {
                 // holder when we finish) instead of building a SECOND engine in parallel
                 // — two 3.66GB GPU loads at once OOM'd the device ("model can't finish").
                 LocalEngineHolder.beginWarming(modelPath)
+                // Warm-loop guard (SERVICE warm path, mirroring ChatViewModel.preloadLocalEngine):
+                // the SERVICE is the PRIMARY warmer, so its load() is where a device OOM most
+                // likely SIGKILLs the whole process mid-warm. Persist "in-flight" to disk
+                // (commit() = synchronous, so it is on disk BEFORE load begins) so that, if
+                // this load OOM-kills the process, the flag survives still-set and the next
+                // launch's preloadLocalEngine shouldAutoWarm() returns false -> skips the
+                // auto-warm (no crash/restart loop). Cleared on SUCCESS (after set()) and on a
+                // GRACEFUL (caught) failure below, exactly like the VM bracketing.
+                warmInflightStore.setInflight(true)
                 try {
                     withContext(Dispatchers.IO) { engine.load(File(modelPath), delegate) }
                     // Hand the WARM engine to the process holder (service owns it now).
                     // set() also clears the warming marker so waiters borrow it.
                     LocalEngineHolder.set(engine, modelPath, delegate)
+                    // Warm completed cleanly -> clear the in-flight flag (re-arm auto-warm).
+                    warmInflightStore.setInflight(false)
                 } finally {
                     // If load() threw (set() never ran), release the marker so a waiting
                     // consumer stops waiting and falls back to BUILD_OWN. No-op on success.
@@ -187,6 +205,10 @@ class LocalModelService : Service() {
                 // so the ViewModel builds its own engine. Log the CLASS name only
                 // (never a message — it could carry a device/path detail).
                 Log.w(TAG, "warm-load failed (${e.javaClass.simpleName}); VM fallback still works")
+                // GRACEFUL (caught) failure -> clear the disk flag: this was NOT a process
+                // kill, so the next launch may auto-warm again. (A real OOM SIGKILL never
+                // reaches here, leaving the flag set = the loop guard we want.)
+                runCatching { warmInflightStore.setInflight(false) }
                 runCatching { LocalEngineHolder.clearAndClose() }
                 stopSelfGracefully()
             }

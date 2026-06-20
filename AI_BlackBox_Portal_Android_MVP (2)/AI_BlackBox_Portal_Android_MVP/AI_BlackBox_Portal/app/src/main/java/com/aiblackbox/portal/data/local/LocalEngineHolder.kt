@@ -114,6 +114,10 @@ object LocalEngineHolder {
         engine = null
         modelPath = null
         delegate = null
+        // Tidy the holder invariant: a teardown mid-warm (e.g. applyLocalModelSettings
+        // calls clearAndClose) must not leave a stale warming marker pointing at a
+        // bundle that is no longer loading.
+        warmingPath = null
     }
 }
 

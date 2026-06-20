@@ -156,7 +156,8 @@ private const val MAX_CHAT_MESSAGES = 100
  * of carried turn-text chars is under this budget (turns are atomic â never split).
  * "Start lean, build context up; a buffer that drops the oldest entries first."
  *
- * 8000 chars â ~2K tokens. That leaves headroom under the 6144 window for the
+ * 4000 chars ≈ ~1.6K tokens at the real on-device density (~2.5 chars/token,
+ * not 4); device-tuned to fit the 6144 window with headroom for the
  * persona, any injected tool schemas, the current user message, the model's
  * output, AND the intra-turn tool-result growth the native loop adds (see
  * [com.aiblackbox.portal.data.local.MAX_TURN_TOOL_RESULT_CHARS]). Replaces the
