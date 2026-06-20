@@ -39,9 +39,15 @@ def _read_env() -> dict:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip('"').strip("'")
     # process env overrides .env for the keys we care about
-    for k in list(PROVIDER_ENV.values()) + ["WEB_SEARCH_ENABLED", "WEB_SEARCH_DEFAULT"]:
+    for k in list(PROVIDER_ENV.values()) + ["GEMINI_API_KEY", "WEB_SEARCH_ENABLED", "WEB_SEARCH_DEFAULT"]:
         if k and os.environ.get(k):
             env[k] = os.environ[k]
+    # Gemini key alias: the executor uses GEMINI_API_KEY (config derives it as
+    # GEMINI_API_KEY or GOOGLE_API_KEY), so the gemini gate -- keyed on
+    # GOOGLE_API_KEY -- must also pass when ONLY GEMINI_API_KEY is set. Mirror
+    # that fallback so gate-availability matches the executor's effective key.
+    if env.get("GEMINI_API_KEY") and not env.get("GOOGLE_API_KEY"):
+        env["GOOGLE_API_KEY"] = env["GEMINI_API_KEY"]
     return env
 
 

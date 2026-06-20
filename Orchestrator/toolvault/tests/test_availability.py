@@ -48,3 +48,15 @@ def test_filter_available_passes_ungated_and_drops_unavailable(monkeypatch):
     assert "roll_dice" in names
     assert "grok_web_search" not in names
     assert "duckduckgo_web_search" in names
+
+
+def test_gemini_gate_accepts_gemini_api_key_alias(tmp_path, monkeypatch):
+    # The executor's effective gemini key is GEMINI_API_KEY or GOOGLE_API_KEY;
+    # the gate (keyed on GOOGLE_API_KEY) must pass when ONLY GEMINI_API_KEY is set.
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=testkey\n")
+    monkeypatch.setattr(av, "_ROOT", str(tmp_path))
+    env = av._read_env()
+    assert env.get("GOOGLE_API_KEY") == "testkey"  # aliased from GEMINI_API_KEY
+    assert "gemini" in av.enabled_web_search_providers()
