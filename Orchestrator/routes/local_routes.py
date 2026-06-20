@@ -37,6 +37,21 @@ from Orchestrator.toolvault import meta_tool
 # permission = ask before each actuator call).
 _AUTONOMY_MODES = ("yolo", "permission")
 
+# Minimal system prompt for the on-device (local Gemma) tool-caller.
+#
+# The on-device Gemma model is a LEAN PHONE TOOL-CALLER, not a conversational
+# chatbot: it executes a few task items via tools and stops. It therefore does
+# NOT receive the heavy shared BlackBox persona (behavioral_core, ~4244 chars /
+# ~1061 tokens) that cloud/voice surfaces carry — that would burn ~1000 tokens
+# of the phone's tiny 6144-token window for tone/anti-sycophancy guidance the
+# tool-caller never needs. The shared behavioral_core stays in place for every
+# cloud/voice site; only this local /local/turn/prepare path swaps it for the
+# minimal instruction below.
+LOCAL_TOOL_CALLER_SYSTEM_PROMPT = (
+    "You are an on-device phone assistant. Use the available tools to carry "
+    "out the user's request. Keep replies brief."
+)
+
 # ---------------------------------------------------------------------------
 # `local` model catalog — descriptive entries ONLY.
 #
@@ -292,9 +307,13 @@ async def local_turn_prepare(request: Request):
             include_keyword=False,
         )
         tools = build_injected_tools(prompt, k=CFG.getint("context", "local_injected_tools_k", fallback=5))
-        persona = get_behavioral_core("chat")
+        # The on-device model is a lean tool-caller, so it gets the MINIMAL
+        # tool-caller instruction (LOCAL_TOOL_CALLER_SYSTEM_PROMPT) instead of
+        # the heavy shared behavioral_core persona — that frees ~1000 tokens in
+        # the phone's small window. The persona is deliberately NOT fetched here;
+        # cloud/voice sites keep get_behavioral_core unchanged.
         # Don't leave a trailing blank fossil block when there are no fossils.
-        system_prompt = persona + ("\n\n" + fossil if fossil else "")
+        system_prompt = LOCAL_TOOL_CALLER_SYSTEM_PROMPT + ("\n\n" + fossil if fossil else "")
         turn_id = uuid.uuid4().hex
         return {
             "success": True,

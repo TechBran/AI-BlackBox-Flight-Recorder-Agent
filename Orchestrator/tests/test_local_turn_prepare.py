@@ -15,6 +15,7 @@ from unittest import mock
 
 # Importing local_routes registers the route on the shared FastAPI `app`.
 import Orchestrator.routes.local_routes  # noqa: F401
+from Orchestrator.routes.local_routes import LOCAL_TOOL_CALLER_SYSTEM_PROMPT
 from Orchestrator.checkpoint import app
 from fastapi.testclient import TestClient
 
@@ -39,7 +40,10 @@ def test_prepare_happy_path():
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["success"] is True
-    assert "PERSONA" in data["system_prompt"]
+    # The heavy behavioral_core persona is intentionally NOT injected for the
+    # lean on-device tool-caller — only the minimal tool-caller instruction.
+    assert "PERSONA" not in data["system_prompt"]
+    assert data["system_prompt"].startswith(LOCAL_TOOL_CALLER_SYSTEM_PROMPT)
     assert "FOSSIL" in data["system_prompt"]
     assert data["tools"][0]["name"] == "roll_dice"
     assert data["provenance"]["checkpoint"] == ["SNAP-CP"]
@@ -116,13 +120,45 @@ def test_prepare_local_is_lean_no_fossil():
     assert kwargs["semantic_k"] == 0, "config [context].local_semantic_k must be 0"
     assert kwargs["checkpoint_count"] == 0, "config [context].local_checkpoint_count must be 0"
 
-    # Persona/system prompt is still present...
-    assert "PERSONA" in data["system_prompt"]
-    # ...but NO fossil/context block was pushed (system_prompt is persona-only,
-    # no trailing fossil section) and provenance carries no snapshots.
-    assert data["system_prompt"] == "PERSONA"
+    # The minimal tool-caller system prompt is present (the heavy persona is NOT)...
+    assert "PERSONA" not in data["system_prompt"]
+    # ...and NO fossil/context block was pushed (system_prompt is the minimal
+    # tool-caller instruction only) and provenance carries no snapshots.
+    assert data["system_prompt"] == LOCAL_TOOL_CALLER_SYSTEM_PROMPT
     assert data["provenance"]["semantic"] == []
     assert data["provenance"]["checkpoint"] == []
 
     # Tools are still injected - the model pulls memory via tools on demand.
+    assert data["tools"][0]["name"] == "roll_dice"
+
+def test_prepare_local_drops_persona():
+    """The on-device tool-caller does NOT receive the heavy behavioral_core
+    persona. Even when get_behavioral_core would return a long persona sentinel,
+    the prepare response's system_prompt must NOT contain it (persona is no
+    longer injected for the lean local path) and must instead be the short
+    tool-caller instruction. This frees ~1000 tokens in the phone's window.
+    """
+    PERSONA_SENTINEL = (
+        "BEHAVIORAL_CORE_PERSONA_SENTINEL " + ("blah " * 400)
+    )  # ~2000 chars — stands in for the real ~4244-char persona.
+    empty_fossil = ("", {"semantic": [], "checkpoint": [], "recent": [], "keyword": []})
+    with mock.patch("Orchestrator.routes.local_routes.build_fossil_context",
+                    return_value=empty_fossil), \
+         mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
+                    return_value=_TOOLS_RV), \
+         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+                    return_value=PERSONA_SENTINEL):
+        resp = client.post("/local/turn/prepare",
+                           json={"prompt": "roll dice", "operator": "Brandon"})
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["success"] is True
+
+    # The persona sentinel must NOT appear — persona is no longer injected.
+    assert "BEHAVIORAL_CORE_PERSONA_SENTINEL" not in data["system_prompt"]
+    # The system prompt IS the minimal tool-caller instruction (short).
+    assert data["system_prompt"] == LOCAL_TOOL_CALLER_SYSTEM_PROMPT
+    assert len(data["system_prompt"]) < 400, "tool-caller prompt should be short"
+    # Tools are still injected — the model carries out the request via tools.
     assert data["tools"][0]["name"] == "roll_dice"
