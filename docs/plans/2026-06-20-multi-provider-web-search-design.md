@@ -158,6 +158,18 @@ Keep the synthesized-answer + "Sources:" string. Normalize every adapter to a ci
 **v1 caveat:** Gemini grounding citations are `vertexaisearch` redirect URLs, not final URLs —
 accepted for v1; resolving them (follow redirects, adds latency) is a noted follow-up.
 
+### 9. Failure-path resilience (decided 2026-06-20, Brandon)
+
+The old `web_search` had **deterministic** resilience: Perplexity failure → automatic DuckDuckGo
+results. The per-provider design must not regress this into **probabilistic** resilience (relying on
+the model to retry with another tool). So `perform_provider_search` owns a backend fallback:
+- **General providers** (`perplexity`, `openai`, `gemini`, `grok`) that fail/rate-limit →
+  **auto-fall-back to DuckDuckGo**, result labeled e.g. `"<provider> unavailable — DuckDuckGo
+  results"`. The model always gets web results regardless of its own behavior.
+- **`grok_x_search`** (live X/Twitter) → **no DDG fallback** (DDG can't search X; a substitute
+  would mislead). Returns a clear failure so the model knows X search specifically failed.
+- **`duckduckgo_web_search`** → no fallback (it is the floor).
+
 ## Testing
 
 - Live feasibility: `diagnostics/websearch_spike.py` (done — all providers pass).
@@ -182,3 +194,6 @@ accepted for v1; resolving them (follow redirects, adds latency) is a noted foll
    writes `WEB_SEARCH_ENABLED` + `WEB_SEARCH_DEFAULT`.
 4. Provider-first tool names; `grok_*` for the xAI tools.
 5. Default hint lives in the tool-injection/context layer, not persona.
+6. **Backend (deterministic) failure fallback**: general providers → DuckDuckGo on failure;
+   `grok_x_search` fails cleanly (no DDG substitute); DuckDuckGo is the floor. Resilience must NOT
+   depend on the model choosing to retry.

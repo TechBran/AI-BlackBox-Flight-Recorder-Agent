@@ -188,6 +188,22 @@ def perform_provider_search(provider, query, search_recency_filter="month", use_
 
 Keep the legacy `perform_web_search()` as a thin alias → `perform_provider_search("perplexity", ...)` for the duration of the migration (removed in Task 4 once no caller remains). Reuse `_get_cache/_set_cache/_check_rate_limit/_fallback_ddg_search`.
 
+**Deterministic failure fallback (decided 2026-06-20 — see design §9):** `perform_provider_search` must NOT leave resilience to the model. When a **general** provider (`perplexity`, `openai`, `gemini`, `grok`) returns `ok=False`, automatically retry via the DuckDuckGo adapter and format the result with a clear note (e.g. prepend `"<source_label> unavailable — DuckDuckGo results:"`). **Exceptions:** `grok_x` (X/Twitter is a distinct source — return the clear failure, no DDG substitute) and `duckduckgo` itself (the floor — no fallback). Sketch:
+
+```python
+GENERAL_FALLBACK_PROVIDERS = {"perplexity", "openai", "gemini", "grok"}
+
+# inside perform_provider_search, after `r = fn(query, search_recency_filter)`:
+if not r.ok and provider in GENERAL_FALLBACK_PROVIDERS:
+    ddg = _search_duckduckgo(query, search_recency_filter)
+    if ddg.ok:
+        ddg.source_label = f"{r.source_label} unavailable — DuckDuckGo"
+        r = ddg
+out = _format_search_result(r, query)
+```
+
+Add tests: a general provider failing falls back to DDG (monkeypatch the provider to `ok=False`, DDG to `ok=True`, assert DDG answer + "unavailable" label); `grok_x` failing does NOT fall back (assert failure string, DDG adapter not called); `duckduckgo` failing returns failure (no recursion).
+
 **Step 4: Run tests, verify pass.**
 
 **Step 5: Live smoke** (DO NOT commit secrets; keys read from `.env`): `Orchestrator/venv/bin/python diagnostics/websearch_spike.py` still passes (adapters not yet wired, but the spike validates the upstream APIs unchanged).
