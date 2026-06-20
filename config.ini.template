@@ -39,6 +39,13 @@ semantic_threshold = 0.60
 checkpoint_snapshots = 2
 max_fossil_chars = 8000
 include_other_operators = false
+; On-device Gemma (local provider) starts LEAN: persona + tools only, NO pushed
+; fossil. semantic_k=0 + checkpoint_count=0 -> /local/turn/prepare builds an
+; empty fossil block; the model builds context conversationally and pulls memory
+; via tools on demand. These keys are local-path-only (cloud callers unaffected).
+local_semantic_k = 0
+local_checkpoint_count = 0
+local_injected_tools_k = 5
 
 [snapshot]
 include_model = true
