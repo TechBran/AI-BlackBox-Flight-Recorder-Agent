@@ -782,6 +782,7 @@ class GenIn(BaseModel):
     # Image generation options (Nano Banana Pro / Gemini Imagen)
     numberOfImages: Optional[int] = 1  # 1-4 images at a time
     referenceImages: Optional[List[ReferenceImage]] = None  # Up to 14 reference images for style guidance
+    provider: Optional[str] = None  # Image provider: "gemini" (default), "openai", "grok"
 
 class AudioAnalysisIn(BaseModel):
     file_path: str

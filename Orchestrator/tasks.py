@@ -42,6 +42,7 @@ from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.models import Task, TaskStatus, TaskType, task_db, task_queue, worker_running
 import Orchestrator.models as models_module  # For modifying worker_running global
 from Orchestrator.media_index import add_media_entry
+from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -299,13 +300,25 @@ def process_task(task: Task):
                    error_message=str(e),
                    progress=0)
 
+def _default_image_provider() -> str:
+    """Resolve the default image provider from env (IMAGE_DEFAULT), falling back
+    to DEFAULT_IMAGE_PROVIDER. Process env first, then .env via toolvault availability."""
+    import os
+    val = os.getenv("IMAGE_DEFAULT")
+    if not val:
+        try:
+            from Orchestrator.toolvault.availability import _read_env
+            val = _read_env().get("IMAGE_DEFAULT")
+        except Exception:
+            val = None
+    return (val or "").strip() or DEFAULT_IMAGE_PROVIDER
+
 def process_image_generation(task: Task):
     """Generate image(s) using Google Imagen (Nano Banana Pro)
 
     Supports multiple images, aspect ratios, resolutions, and reference images.
     Options are stored in task.result_data["options"] by the endpoint.
     """
-    from Orchestrator.routes.tts_routes import call_imagen
     update_task(task.task_id, progress=30)
 
     # Extract options from task.result_data
@@ -314,8 +327,11 @@ def process_image_generation(task: Task):
         options = task.result_data["options"]
         print(f"[WORKER] Image generation options: {options.get('aspectRatio', '16:9')} @ {options.get('resolution', '1K')}, count={options.get('numberOfImages', 1)}")
 
-    # Generate image(s) with options
-    images = call_imagen(task.prompt, GOOGLE_IMAGEN_MODEL, options)
+    # Route to a per-provider adapter; untagged tasks -> default provider (back-compat)
+    provider = (options.get("provider") or _default_image_provider())
+    fn = IMAGE_PROVIDERS.get(provider) or IMAGE_PROVIDERS[DEFAULT_IMAGE_PROVIDER]
+    print(f"[WORKER] Image provider: {provider}")
+    images = fn(task.prompt, options)
 
     update_task(task.task_id, progress=70)
 

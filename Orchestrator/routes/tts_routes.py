@@ -662,6 +662,10 @@ async def generate_image(inp: GenIn):
                 for ref in inp.referenceImages
             ]
 
+        # Route to a per-provider adapter when specified (default = gemini in worker)
+        if inp.provider:
+            image_options["provider"] = inp.provider
+
         task = create_task(
             TaskType.IMAGE_GENERATION,
             operator=inp.operator,
