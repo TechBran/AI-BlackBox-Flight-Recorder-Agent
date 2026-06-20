@@ -276,18 +276,25 @@ def _restrict(fmt, entries, names):
     ],
 )
 def test_format_parity(golden, fmt):
+    # web_search was intentionally removed by the multi-provider web-search
+    # feature (replaced by six per-provider tools); the frozen golden predates
+    # that removal, so exclude it from BOTH sides of the parity comparison while
+    # still proving every OTHER golden tool is byte-identical.
+    intentionally_removed = {"web_search"}
     current = _roundtrip(_current()[fmt])
     # No x-source marker may survive into any provider's output.
     assert _find_xsource_paths(current) == [], f"{fmt} leaked x-source markers"
     normalized = _strip_operator_enums(current)
-    golden_names = _names_of(fmt, golden[fmt])
-    # No migrated (golden) tool may be LOST.
+    golden_names = _names_of(fmt, golden[fmt]) - intentionally_removed
+    # No migrated (golden) tool may be LOST (except intentionally-removed ones).
     missing = golden_names - _names_of(fmt, normalized)
     assert not missing, f"{fmt} lost golden tools: {sorted(missing)}"
-    # Every golden tool must be byte-identical (modulo operator enum). NEW tools
-    # added after the golden capture (e.g. roll_dice) are allowed and ignored.
+    # Every remaining golden tool must be byte-identical (modulo operator enum).
+    # NEW tools added after the golden capture (e.g. roll_dice) are ignored; the
+    # intentionally-removed tool is dropped from the golden side too.
     restricted = _restrict(fmt, normalized, golden_names)
-    assert restricted == golden[fmt], f"{fmt} drifted from golden (beyond operator enum)"
+    golden_restricted = _restrict(fmt, golden[fmt], golden_names)
+    assert restricted == golden_restricted, f"{fmt} drifted from golden (beyond operator enum)"
 
 
 def test_all_formats_present_and_nonempty(golden):
