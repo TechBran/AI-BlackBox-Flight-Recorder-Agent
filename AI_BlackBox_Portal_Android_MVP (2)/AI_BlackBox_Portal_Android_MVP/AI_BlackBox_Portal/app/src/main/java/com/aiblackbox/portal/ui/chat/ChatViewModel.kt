@@ -147,21 +147,26 @@ enum class LocalReWarmAction { NONE, NOW, DEFER }
 private const val MAX_CHAT_MESSAGES = 100
 
 /**
- * How many prior conversation turns to feed into the ON-DEVICE model's prompt.
+ * Char budget for the rolling conversation history carried into the ON-DEVICE
+ * model's prompt (SL-2). The on-device session is now STATEFUL: recent turns are
+ * carried so the model remembers the conversation â but bounded, because the
+ * GPU context window is only ~6144 tokens.
  *
- * BlackBox architecture: the immutable snapshot ledger is the memory — NOT a
- * growing in-prompt transcript. Inter-turn recall will come from snapshot
- * semantic-search (the next stage); the on-device model only needs INTRA-turn
- * context, so each turn starts FRESH. `0` = no carried history.
+ * [budgetHistory] keeps the NEWEST turns and drops the OLDEST first until the sum
+ * of carried turn-text chars is under this budget (turns are atomic â never split).
+ * "Start lean, build context up; a buffer that drops the oldest entries first."
  *
- * This keeps every on-device prompt bounded regardless of session length, and was
- * the fix for the 4096-token overrun caused by accumulating the whole transcript
- * each turn (device-confirmed: `Input token ids are too long: 4292 >= 4096`). A
- * small sliding window can be re-enabled here later (e.g. for immediate "it"
- * follow-ups) without touching [FcLoop]. Only the on-device path uses this; the
- * cloud SSE path is unaffected (the server owns its own context budget).
+ * 8000 chars â ~2K tokens. That leaves headroom under the 6144 window for the
+ * persona, any injected tool schemas, the current user message, the model's
+ * output, AND the intra-turn tool-result growth the native loop adds (see
+ * [com.aiblackbox.portal.data.local.MAX_TURN_TOOL_RESULT_CHARS]). Replaces the
+ * earlier stateless count cap (which carried NO history to dodge a 4096-token
+ * overrun: `Input token ids are too long: 4292 >= 4096`); the char budget bounds
+ * the prompt regardless of session length while restoring recall. Device-tunable.
+ * Only the on-device path uses this; the cloud SSE path is unaffected (the server
+ * owns its own context budget).
  */
-private const val LOCAL_HISTORY_WINDOW_TURNS = 0
+private const val LOCAL_HISTORY_BUDGET_CHARS = 8000
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -865,14 +870,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
         _inputText.value = TextFieldValue()
 
-        // 2. History for the prompt. BlackBox architecture: the ledger is the
-        //    memory, so we DON'T carry the inter-turn transcript into the on-device
-        //    prompt — we window it to the last [LOCAL_HISTORY_WINDOW_TURNS] turns
-        //    (0 = fresh each turn). This keeps the per-turn prompt bounded (the
-        //    accumulated transcript previously overran the engine's token window).
-        //    The full visible conversation still lives in _messages (UI) and is
-        //    minted to the ledger; recall will come from snapshot search later.
-        val history = toFcHistory(_messages.value).takeLast(LOCAL_HISTORY_WINDOW_TURNS)
+        // 2. History for the prompt (SL-2). The on-device session is STATEFUL:
+        //    carry recent turns so the model remembers the conversation, but
+        //    SIZE-BOUNDED â [budgetHistory] keeps the NEWEST turns and drops the
+        //    OLDEST first until under [LOCAL_HISTORY_BUDGET_CHARS], so the per-turn
+        //    prompt stays under the ~6144-token window regardless of session length
+        //    (the accumulated transcript previously overran it). The full visible
+        //    conversation still lives in _messages (UI) and is minted to the ledger.
+        val history = budgetHistory(toFcHistory(_messages.value), LOCAL_HISTORY_BUDGET_CHARS)
 
         _chatState.value = ChatState.STREAMING
         startBackgroundService("Generating on-device response...")
@@ -1305,6 +1310,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val delegate = "gpu" // Edge Gallery parity: GPU ~10x faster; load() falls back to CPU on GPU-init failure
         val targetPath = bundle.file.absolutePath
+
+        // M3: SERIALIZE with the foreground-service warm. The service is the PRIMARY
+        // warmer ([preloadLocalEngine] kicks it via LocalModelService.start). If it is
+        // cold-loading THIS bundle, WAIT for it to pin the engine in the holder rather
+        // than building a SECOND engine concurrently — two parallel 3.66GB GPU loads
+        // OOM the device ("the model could not finish" / crash on launch). We give the
+        // async service a brief head start to publish its [LocalEngineHolder.warmingPath]
+        // marker, then keep waiting only while it is actively warming this exact bundle,
+        // capped by a grace window. If it never claims the warm (service not running /
+        // refused) we fall straight through to the unchanged USE_HOLDER/BUILD_OWN
+        // decision below — the graceful fallback is preserved.
+        run {
+            val start = android.os.SystemClock.elapsedRealtime()
+            while (LocalEngineHolder.getOrNull() == null &&
+                android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_GRACE_MS) {
+                val serviceWarmingThis = LocalEngineHolder.warmingPath == targetPath
+                val withinHeadStart =
+                    android.os.SystemClock.elapsedRealtime() - start < SERVICE_WARM_HEADSTART_MS
+                if (!serviceWarmingThis && !withinHeadStart) break
+                delay(SERVICE_WARM_POLL_MS)
+            }
+        }
 
         // R2-C: PREFER the warm, PROCESS-resident engine pinned by
         // [LocalModelService] when it matches the active bundle -- it is already
@@ -2709,6 +2736,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         /** Provider tag for on-device turns (logging / save traceability). */
         const val LOCAL_PROVIDER_ID = "local"
 
+        // M3 serialization ([localProviderOrWire] waits for the foreground service's
+        // SINGLE warm rather than racing it with a 2nd concurrent engine build — the
+        // double-warm that OOM'd the device on launch). HEADSTART covers the async gap
+        // between LocalModelService.start() and the service publishing its warming
+        // marker; GRACE caps the wait for a slow GPU cold load; POLL is the check tick.
+        private const val SERVICE_WARM_HEADSTART_MS = 2_500L
+        private const val SERVICE_WARM_GRACE_MS = 90_000L
+        private const val SERVICE_WARM_POLL_MS = 200L
+
         /**
          * Friendly text appended to the (possibly partial) reply when the on-device
          * engine faults mid-generation. Mirrors the SSE error path: surface a
@@ -2793,6 +2829,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * and is excluded by trimming the final user turn. Roles other than
          * "user"/"assistant" (system/tool placeholders) are ignored.
          */
+        /**
+         * SL-2 â size-bounded rolling history for the ON-DEVICE (`local`) prompt.
+         *
+         * Keep the NEWEST [turns] and drop the OLDEST first until the SUM of carried
+         * turn-text chars is <= [maxChars]; a turn is ATOMIC (whole include/exclude,
+         * never split). Order is preserved oldestânewest, matching what
+         * [FcLoop.buildAgentPrompt] expects.
+         *
+         * Empty input â empty. Everything fits â passthrough (unchanged). If even the
+         * SINGLE newest turn alone exceeds [maxChars] we still return THAT turn (never
+         * empty for a non-empty input): the user's latest context must not be silently
+         * dropped, and the per-turn soft-stop
+         * ([com.aiblackbox.portal.data.local.overTurnBudget] / trim) is the backstop
+         * against an over-budget prompt.
+         *
+         * PURE (Strings only) so it is JVM-unit-testable without the AndroidViewModel;
+         * counts chars the same way [com.aiblackbox.portal.data.local.TurnBudget] does
+         * (String.length).
+         */
+        fun budgetHistory(turns: List<FcLoop.Turn>, maxChars: Int): List<FcLoop.Turn> {
+            if (turns.isEmpty()) return emptyList()
+            var used = 0
+            var start = turns.size
+            // Walk newestâoldest, including a turn only while it fits whole.
+            for (i in turns.indices.reversed()) {
+                val cost = turns[i].text.length
+                if (used + cost > maxChars && start != turns.size) break
+                used += cost
+                start = i
+            }
+            // start == turns.size only when the newest turn alone is over budget; keep it.
+            if (start == turns.size) start = turns.size - 1
+            return turns.subList(start, turns.size)
+        }
+
+
         fun toFcHistory(messages: List<UiMessage>): List<FcLoop.Turn> {
             // Drop the in-flight assistant placeholder (last, streaming/empty) and
             // the just-appended user message (the current turn's text) from the
