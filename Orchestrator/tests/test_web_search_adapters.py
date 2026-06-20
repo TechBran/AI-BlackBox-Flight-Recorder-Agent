@@ -1,4 +1,3 @@
-import types
 import Orchestrator.web_tools as wt
 from Orchestrator.web_tools import SearchResult, _format_search_result, perform_provider_search
 
@@ -55,3 +54,49 @@ def test_gemini_adapter_parses_grounding(monkeypatch):
     r = wt._search_gemini("q", "month")
     assert "Gem answer" in r.answer
     assert any("redirect" in c for c in r.citations)
+
+
+def test_general_provider_failure_falls_back_to_ddg(monkeypatch):
+    monkeypatch.setitem(
+        wt.PROVIDER_SEARCHERS,
+        "perplexity",
+        lambda query, recency: SearchResult(
+            ok=False, source_label="Perplexity Sonar", error="HTTP 500"),
+    )
+    monkeypatch.setattr(
+        wt,
+        "_search_duckduckgo",
+        lambda query, recency: SearchResult(
+            ok=True, answer="ddg ans", citations=["u"], source_label="DuckDuckGo"),
+    )
+    out = perform_provider_search("perplexity", "q", use_cache=False)
+    assert "ddg ans" in out
+    assert "unavailable" in out
+
+
+def test_grok_x_failure_does_not_fall_back(monkeypatch):
+    monkeypatch.setitem(
+        wt.PROVIDER_SEARCHERS,
+        "grok_x",
+        lambda query, recency: SearchResult(
+            ok=False, source_label="Grok (X/Twitter)", error="HTTP 500"),
+    )
+
+    def _boom(query, recency):
+        raise AssertionError("_search_duckduckgo must not be called for grok_x")
+
+    monkeypatch.setattr(wt, "_search_duckduckgo", _boom)
+    out = perform_provider_search("grok_x", "q", use_cache=False)
+    assert "Search failed" in out
+    assert "ddg" not in out.lower()
+
+
+def test_duckduckgo_failure_no_recursion(monkeypatch):
+    monkeypatch.setitem(
+        wt.PROVIDER_SEARCHERS,
+        "duckduckgo",
+        lambda query, recency: SearchResult(
+            ok=False, source_label="DuckDuckGo", error="no results"),
+    )
+    out = perform_provider_search("duckduckgo", "q", use_cache=False)
+    assert "Search failed" in out

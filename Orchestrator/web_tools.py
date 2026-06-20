@@ -13,14 +13,12 @@ Both functions include:
 - Clean, LLM-friendly output formatting
 """
 
-import re
 import sys
 import time
 import requests
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any, Tuple
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 
 # Provider API configuration
 # Handles both Orchestrator context (from Orchestrator.config) and MCP context (from config directly)
@@ -340,6 +338,12 @@ PROVIDER_SEARCHERS = {
     "duckduckgo": _search_duckduckgo,
 }
 
+# General-purpose providers that should deterministically fall back to
+# DuckDuckGo on failure (resilience must not depend on the model retrying).
+# Excluded by design: grok_x (live X/Twitter is a distinct data source — a DDG
+# substitute would mislead) and duckduckgo itself (it is the floor).
+GENERAL_FALLBACK_PROVIDERS = {"perplexity", "openai", "gemini", "grok"}
+
 
 def perform_provider_search(provider: str, query: str,
                             search_recency_filter: str = "month",
@@ -370,6 +374,11 @@ def perform_provider_search(provider: str, query: str,
 
     print(f"[WEB_SEARCH] Searching {provider} for: {query} (recency: {search_recency_filter})")
     r = fn(query, search_recency_filter)
+    if not r.ok and provider in GENERAL_FALLBACK_PROVIDERS:
+        ddg = _search_duckduckgo(query, search_recency_filter)
+        if ddg.ok:
+            ddg.source_label = f"{r.source_label} unavailable — DuckDuckGo"
+            r = ddg
     out = _format_search_result(r, query)
     if r.ok and use_cache:
         _set_cache(cache_key, out, SEARCH_CACHE_TTL)
@@ -390,45 +399,6 @@ def perform_web_search(query: str, max_results: int = 5, use_cache: bool = True,
         search_recency_filter=search_recency_filter,
         use_cache=use_cache,
     )
-
-
-def _fallback_ddg_search(query: str, max_results: int = 5) -> str:
-    """Fallback to DuckDuckGo if Perplexity is unavailable or erroring."""
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        return (
-            f"Web search unavailable: Perplexity API key not configured and DuckDuckGo library not installed.\n"
-            f"Set PERPLEXITY_API_KEY in .env or install ddgs: pip install ddgs"
-        )
-
-    try:
-        print(f"[WEB_SEARCH] Fallback: searching DuckDuckGo for: {query}")
-        search_results = DDGS().text(query, max_results=max_results)
-
-        if not search_results:
-            return (
-                f"No results found for: \"{query}\"\n"
-                f"Try rephrasing with different keywords or simpler terms."
-            )
-
-        results = []
-        for i, result in enumerate(search_results):
-            title = result.get('title', 'No title')
-            url = result.get('href', result.get('link', 'No URL'))
-            snippet = result.get('body', result.get('snippet', ''))
-            results.append(f"{i+1}. **{title}**\n   URL: {url}\n   {snippet}\n")
-
-        formatted_result = "Web Search Results (fallback):\n\n" + "\n".join(results)
-        formatted_result += f"\nSource: DuckDuckGo (fallback) | Query: \"{query}\" | Results: {len(results)}/{max_results}"
-        return formatted_result
-
-    except Exception as e:
-        print(f"[WEB_SEARCH] DuckDuckGo fallback also failed: {e}")
-        return (
-            f"Search failed for: \"{query}\" (error: {e})\n"
-            f"Answer from your own knowledge instead."
-        )
 
 
 # =============================================================================
