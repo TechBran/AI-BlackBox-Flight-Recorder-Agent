@@ -1,0 +1,54 @@
+{
+  "name": "grok_image",
+  "description": "Generate images using xAI's Grok image model. Quality-first defaults (16:9). Returns a task_id that completes asynchronously.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "image",
+    "provider": "grok",
+    "requires_env": [
+      "XAI_API_KEY"
+    ]
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Detailed description of the image to generate. Be specific about subjects, style, composition, lighting, colors, and mood."
+      },
+      "aspectRatio": {
+        "type": "string",
+        "description": "Aspect ratio: '1:1' (square), '16:9' (landscape), '9:16' (portrait). Default: '16:9'",
+        "enum": [
+          "1:1",
+          "16:9",
+          "9:16"
+        ],
+        "default": "16:9"
+      },
+      "numberOfImages": {
+        "type": "integer",
+        "description": "Number of images to generate (1-4). Default: 1",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "grok_image(prompt=\"a retro 80s synthwave sunset\", aspectRatio=\"16:9\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

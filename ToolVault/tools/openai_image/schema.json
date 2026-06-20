@@ -1,0 +1,65 @@
+{
+  "name": "openai_image",
+  "description": "Generate images using OpenAI's gpt-image model. Quality-first defaults (1024x1024, high quality). Returns a task_id that completes asynchronously.",
+  "category": "media_generation",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "image",
+    "provider": "openai",
+    "requires_env": [
+      "OPENAI_API_KEY"
+    ]
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Detailed description of the image to generate. Be specific about subjects, style, composition, lighting, colors, and mood."
+      },
+      "size": {
+        "type": "string",
+        "description": "Image size: '1024x1024' (square), '1536x1024' (landscape), '1024x1536' (portrait), or 'auto'. Default: '1024x1024'",
+        "enum": [
+          "1024x1024",
+          "1536x1024",
+          "1024x1536",
+          "auto"
+        ],
+        "default": "1024x1024"
+      },
+      "quality": {
+        "type": "string",
+        "description": "Rendering quality: 'low', 'medium', or 'high'. Higher = more detail but slower/costlier. Default: 'high'",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "default": "high"
+      },
+      "numberOfImages": {
+        "type": "integer",
+        "description": "Number of images to generate (1-4). Default: 1",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "openai_image(prompt=\"a watercolor fox in a forest\", size=\"1024x1024\", quality=\"high\")",
+  "notes": "Async operation - use get_task_status to check progress."
+}

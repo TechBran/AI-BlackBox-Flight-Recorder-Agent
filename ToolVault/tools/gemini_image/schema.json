@@ -1,6 +1,6 @@
 {
-  "name": "generate_image",
-  "description": "Generate images using Gemini's Nano Banana Pro (gemini-3-pro-image-preview). Supports text-to-image AND image-to-image. For image-to-image, pass reference_images URLs from previous generations to guide style/content. Returns a task_id that completes asynchronously.",
+  "name": "gemini_image",
+  "description": "Generate images using Google Gemini's Nano Banana Pro (gemini-3-pro-image-preview). Supports text-to-image AND image-to-image: pass reference_images (URLs from prior generations or uploads) to guide style/content. Quality-first defaults (16:9, 1K). Returns a task_id that completes asynchronously.",
   "category": "media_generation",
   "groups": [
     "chat",
@@ -12,6 +12,13 @@
     "mcp"
   ],
   "tier": 2,
+  "x-availability": {
+    "feature": "image",
+    "provider": "gemini",
+    "requires_env": [
+      "GOOGLE_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {
@@ -24,7 +31,7 @@
         "items": {
           "type": "string"
         },
-        "description": "URLs of reference images for style/content guidance (e.g., ['/ui/uploads/sunset_abc123.png']). Use for image-to-image generation. Max 10 images recommended.",
+        "description": "URLs of reference images for style/content guidance (e.g., ['/ui/uploads/sunset_abc123.png']). Use for image-to-image generation. Max 14 images.",
         "maxItems": 14
       },
       "aspectRatio": {
@@ -41,11 +48,10 @@
       },
       "resolution": {
         "type": "string",
-        "description": "Image resolution: '1K' (1024px), '2K' (2048px), '4K' (4096px). Higher = more detail but slower. Default: '1K'",
+        "description": "Image resolution: '1K' (1024px) or '2K' (2048px). Higher = more detail but slower. Default: '1K'",
         "enum": [
           "1K",
-          "2K",
-          "4K"
+          "2K"
         ],
         "default": "1K"
       },
@@ -62,6 +68,6 @@
     ]
   },
   "returns": "task_id (string) for async status tracking via get_task_status",
-  "example": "generate_image(prompt=\"...\")",
-  "notes": "Async operation - use get_task_status to check progress."
+  "example": "gemini_image(prompt=\"a neon cyberpunk street at night\", aspectRatio=\"16:9\")",
+  "notes": "Async operation - use get_task_status to check progress. For image-to-image, pass reference_images."
 }
