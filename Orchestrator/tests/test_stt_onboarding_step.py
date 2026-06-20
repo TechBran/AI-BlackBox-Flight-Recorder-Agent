@@ -11,10 +11,13 @@ from Orchestrator.onboarding import state as st
 
 def test_transcription_in_all_steps():
     assert "transcription" in st.ALL_STEPS
-    # positioned between optional_integrations and pair_phone
+    # positioned between optional_integrations and web_search (web_search
+    # was inserted after transcription by the multi-provider web-search feature)
     i = st.ALL_STEPS.index("transcription")
     assert st.ALL_STEPS[i - 1] == "optional_integrations"
-    assert st.ALL_STEPS[i + 1] == "pair_phone"
+    assert st.ALL_STEPS[i + 1] == "web_search"
+    # web_search then leads into pair_phone
+    assert st.ALL_STEPS[i + 2] == "pair_phone"
 
 
 def test_step_complete_accepts_transcription(tmp_path, monkeypatch):
