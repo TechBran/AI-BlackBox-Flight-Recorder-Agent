@@ -283,12 +283,17 @@ def _search_gemini(query: str, recency: str) -> "SearchResult":
         return SearchResult(ok=False, error="API key not configured", source_label=label)
 
     body = {"contents": [{"parts": [{"text": query}]}], "tools": [{"google_search": {}}]}
+    # Send the key via the x-goog-api-key request header (documented alternative
+    # to the query-string key) so it never lands in the URL -- a URL with the key
+    # in the query string would otherwise be embedded in the exception string
+    # below and leak into LLM-facing / persisted error text.
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
     last_err = "all models failed"
     for model in GEMINI_SEARCH_MODELS:
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{model}:generateContent?key={GEMINI_API_KEY}")
+               f"{model}:generateContent")
         try:
-            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body, timeout=90)
+            resp = requests.post(url, headers=headers, json=body, timeout=90)
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
             continue

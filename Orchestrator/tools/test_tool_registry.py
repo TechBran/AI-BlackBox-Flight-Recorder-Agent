@@ -142,9 +142,9 @@ def test_executor_name_resolution():
 
 def test_get_tool_by_name():
     """Should find tools by canonical name."""
-    tool = get_tool_by_name("web_search")
+    tool = get_tool_by_name("web_fetch")
     assert tool is not None
-    assert tool["name"] == "web_search"
+    assert tool["name"] == "web_fetch"
 
 
 def test_get_tool_by_alias():

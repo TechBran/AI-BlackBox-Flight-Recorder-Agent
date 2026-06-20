@@ -3212,8 +3212,10 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         Execute a tool and return the result.
 
         Uses the unified BlackBoxToolExecutor for common tools (generate_image,
-        generate_video, lyria_music, web_search, web_fetch, search_memory, etc.)
-        and handles phone-specific tools locally.
+        generate_video, lyria_music, the per-provider web search tools,
+        web_fetch, search_memory, etc.) and handles phone-specific tools
+        locally. Any unmapped ToolVault tool name is routed through the
+        executor by its own name (catch-all below).
         """
         from Orchestrator.tools.blackbox_tools import execute_tool as unified_execute_tool
 
@@ -3227,7 +3229,6 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             "get_recent_snapshots": "list_recent_snapshots",
             "list_recent_snapshots": "list_recent_snapshots",
             # Web tools
-            "web_search": "web_search",
             "web_fetch": "web_fetch",
             # Generation tools
             "generate_image": "generate_image",
@@ -3258,14 +3259,19 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             "control_android_device": "control_android_device",
         }
 
-        # Use unified executor for all mapped tools
+        # Route through the unified executor. Mapped names use their renamed
+        # canonical (search_snapshots -> search_memory, etc.); any other
+        # ToolVault tool name (e.g. the per-provider web tools and any future
+        # tool advertised to phone sessions) is routed by its own name. An
+        # unknown name is handled gracefully by execute_tool, which returns a
+        # ToolResult(success=False, result="Unknown tool: ...") rather than
+        # raising, so a bad name can never crash a phone call.
         if name in unified_tool_map:
             unified_name = unified_tool_map[name]
-            result = await unified_execute_tool(unified_name, arguments, self.phone_session.operator)
-            return result.rich_result()
-
-        # Unknown tool
-        return f"Unknown tool: {name}"
+        else:
+            unified_name = name  # catch-all: route any other ToolVault tool by its own name
+        result = await unified_execute_tool(unified_name, arguments, self.phone_session.operator)
+        return result.rich_result()
 
     # =========================================================================
     # Session Saving

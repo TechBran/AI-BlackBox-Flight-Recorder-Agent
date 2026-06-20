@@ -85,3 +85,69 @@ def test_new_tool_routes_through_executor(monkeypatch, tool_name, provider):
     assert result.success is True, f"{tool_name} dispatch failed: {result.result}"
     assert "RESULTS for tracked robot" in result.result
     assert captured["provider"] == provider
+
+
+# =============================================================================
+# Phone-bridge catch-all guard
+# =============================================================================
+#
+# The phone voice bridge (Orchestrator/phone/bridge.py :: PhoneAIBridge._execute_tool)
+# used to hard-``return f"Unknown tool: {name}"`` for any name not in its
+# ``unified_tool_map`` -- and the six per-provider web tools are NOT in that map,
+# so phone web search silently broke. The fix removes the dead ``web_search`` map
+# entry and converts the fallthrough into a catch-all that routes any unmapped
+# ToolVault tool through the unified executor by its own name.
+
+
+def test_phone_bridge_source_has_no_web_search_map_and_no_hard_unknown():
+    """Source-level guard: the dead ``web_search`` map entry is gone and the
+    bridge no longer hard-returns "Unknown tool" without a catch-all."""
+    text = (REPO_ROOT / "Orchestrator/phone/bridge.py").read_text(encoding="utf-8")
+    assert '"web_search": "web_search"' not in text, (
+        "phone bridge still maps the deleted generic web_search tool."
+    )
+    assert 'return f"Unknown tool: {name}"' not in text, (
+        "phone bridge still hard-returns 'Unknown tool' instead of a catch-all."
+    )
+    assert "unified_name = name" in text, (
+        "phone bridge is missing the catch-all that routes unmapped ToolVault "
+        "tools by their own name."
+    )
+
+
+def test_phone_bridge_routes_unmapped_web_tool_through_executor(monkeypatch):
+    """``PhoneAIBridge._execute_tool`` must pass an UNMAPPED web tool name
+    (e.g. ``gemini_web_search``) straight through to the unified executor by its
+    own name -- this is what makes phone web search work again."""
+    import Orchestrator.tools.blackbox_tools as bbt
+    from Orchestrator.phone.bridge import PhoneAIBridge
+
+    captured = {}
+
+    class _FakeResult:
+        def rich_result(self):
+            return "EXECUTOR_RAN"
+
+    async def _fake_execute_tool(tool_name, tool_input, operator):
+        captured["tool_name"] = tool_name
+        captured["operator"] = operator
+        captured["input"] = tool_input
+        return _FakeResult()
+
+    # _execute_tool imports `execute_tool` from this module at call time.
+    monkeypatch.setattr(bbt, "execute_tool", _fake_execute_tool)
+
+    # Build a bridge without running the heavy __init__; _execute_tool only
+    # touches self.phone_session.operator.
+    bridge = object.__new__(PhoneAIBridge)
+    bridge.phone_session = type("S", (), {"operator": "Brandon"})()
+
+    out = asyncio.run(
+        bridge._execute_tool("gemini_web_search", {"query": "tracked robot"})
+    )
+
+    assert out == "EXECUTOR_RAN"
+    # Unmapped name routed through by its OWN name (catch-all), not dropped.
+    assert captured["tool_name"] == "gemini_web_search"
+    assert captured["operator"] == "Brandon"
+    assert captured["input"] == {"query": "tracked robot"}
