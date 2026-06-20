@@ -584,18 +584,19 @@ class LiteRtEngine(
          * so inter-turn history is NOT accumulated (see ChatViewModel's
          * `LOCAL_HISTORY_WINDOW_TURNS`).
          */
-        // 6144, walked DOWN from 16384 -> 8192 -> 6144 as the warm-time OOM was chased.
-        // The KV cache is pre-allocated ~proportional to this value (~hundreds of
-        // KB/token for a 4B model): ~6GB at 16384, ~3.2GB at 8192, ~2.4GB at 6144,
-        // all ON TOP of the ~3GB int4 weights. The device lmkd-killed the app during
-        // the GPU cold-load when only ~3.4GB was free, so the KV spike is the bomb,
-        // not the weights. Edge Gallery runs the SAME 4B model smoothly because it
-        // boots at 1024 and warns above ~10K. We can't go that low — the on-device
-        // agent's per-turn prompt overran 4096 ("4292 >= 4096") — so 6144 is the
-        // floor that still fits that prompt (~4.3K) + short tool-call generation
-        // while cutting the KV spike ~25% from 8192. This is the HARD CAP too:
-        // buildAndInitialize coerceAtMost()'s any per-model max_tokens override down
-        // to it, so no model config can re-introduce the bomb (device-tuned 2026-06-19).
+        // 6144 — the GPU-survivable ceiling on this device, found by bisection (device-
+        // proven 2026-06-19): 6144 warmed + survived; 8192 OOM'd (free mem → 831MB →
+        // SIGKILL); 16384 OOM'd (792MB). The KV cache is pre-allocated ~proportional to
+        // this value and lives in PINNED, UNPAGEABLE GPU buffers on this unified-memory
+        // SoC — which is why CPU ran 16384 fine (pageable RAM) but the GPU cannot.
+        // ~2.4GB KV at 6144 on top of the ~3.66GB int4 weights.
+        //
+        // STRATEGY (Brandon): START LEAN, build context up conversationally — never
+        // start heavy. The E4B on-device chat gets NO pushed BlackBox fossil context
+        // (PROVIDER_CAPS["local"] dropped); only the system prompt + tools. The model
+        // accretes its own per-turn statefulness within this 6144 window and PULLS
+        // memories on demand via tools (toolvault/search_snapshots — all snapshots stay
+        // discoverable). control_phone is already lean (no context) and fits trivially.
         const val DEFAULT_MAX_TOKENS: Int = 6144
 
         /**

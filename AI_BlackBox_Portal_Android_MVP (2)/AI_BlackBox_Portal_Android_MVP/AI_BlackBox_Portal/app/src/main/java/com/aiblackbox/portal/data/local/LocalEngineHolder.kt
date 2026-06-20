@@ -51,8 +51,34 @@ object LocalEngineHolder {
     var delegate: String? = null
         private set
 
+    // M3: the bundle path the SERVICE is currently cold-loading (null when idle).
+    // Set by [LocalModelService] before its ~10-75s load and cleared on success
+    // ([set]) or failure ([endWarming]). A consumer ([ChatViewModel.localProviderOrWire])
+    // reads it to WAIT for the in-flight service warm instead of building a SECOND
+    // engine concurrently -- two parallel 3.66GB GPU loads OOM'd the device on launch
+    // (the "phone goes crazy / model can't finish" double-warm).
+    @Volatile
+    var warmingPath: String? = null
+        private set
+
     /** The held warm engine, or null when nothing is held (consumer falls back). */
     fun getOrNull(): LiteRtEngine? = engine
+
+    /** Mark that the service has STARTED cold-loading [path] (M3 serialization). */
+    @Synchronized
+    fun beginWarming(path: String) {
+        warmingPath = path
+    }
+
+    /**
+     * Clear the warming marker for [path] (M3) — the service's load ENDED without a
+     * successful [set] (failure/cancel). No-op if a different path is now warming.
+     * (A SUCCESSFUL load clears it via [set].)
+     */
+    @Synchronized
+    fun endWarming(path: String) {
+        if (warmingPath == path) warmingPath = null
+    }
 
     /**
      * Store [engine] as the process-resident warm engine, recording the [modelPath]
@@ -72,6 +98,9 @@ object LocalEngineHolder {
         this.engine = engine
         this.modelPath = modelPath
         this.delegate = delegate
+        // The warm that produced this engine has COMPLETED — clear the marker so a
+        // waiting consumer stops waiting and borrows the engine (M3).
+        if (warmingPath == modelPath) warmingPath = null
     }
 
     /**

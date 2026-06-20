@@ -165,9 +165,21 @@ class LocalModelService : Service() {
                     Log.d(TAG, "on-device model already pinned for this bundle; warm skipped")
                     return@launch
                 }
-                withContext(Dispatchers.IO) { engine.load(File(modelPath), delegate) }
-                // Hand the WARM engine to the process holder (service owns it now).
-                LocalEngineHolder.set(engine, modelPath, delegate)
+                // M3: publish that THIS bundle is now cold-loading BEFORE the ~10-75s
+                // load, so a concurrent ChatViewModel warm WAITS for us (borrows the
+                // holder when we finish) instead of building a SECOND engine in parallel
+                // — two 3.66GB GPU loads at once OOM'd the device ("model can't finish").
+                LocalEngineHolder.beginWarming(modelPath)
+                try {
+                    withContext(Dispatchers.IO) { engine.load(File(modelPath), delegate) }
+                    // Hand the WARM engine to the process holder (service owns it now).
+                    // set() also clears the warming marker so waiters borrow it.
+                    LocalEngineHolder.set(engine, modelPath, delegate)
+                } finally {
+                    // If load() threw (set() never ran), release the marker so a waiting
+                    // consumer stops waiting and falls back to BUILD_OWN. No-op on success.
+                    LocalEngineHolder.endWarming(modelPath)
+                }
                 updateNotification(buildNotification(TEXT_READY))
                 Log.d(TAG, "on-device model pinned + ready (process-resident)")
             } catch (e: Throwable) {
