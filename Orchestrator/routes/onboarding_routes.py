@@ -85,6 +85,7 @@ class CurrentConfigResponse(BaseModel):
     tailscale: dict
     onboarding_state: dict
     stt: dict
+    web_search: dict
 
 
 class ValidateRequest(BaseModel):
@@ -210,6 +211,24 @@ def current_config() -> CurrentConfigResponse:
         "openai_file": (env.get("STT_OPENAI_FILE") or "").strip() or None,
         "google_model": (env.get("STT_GOOGLE_MODEL") or "").strip() or None,
     }
+    # Web-search preferences — like STT, these are PREFERENCES not secrets.
+    # Reuse the availability module (same module the ToolVault gate uses) so
+    # the enabled set is derived in ONE place (DRY). These are live-read by
+    # availability on every tool list — they deliberately are NOT in the
+    # /restart-status drift checks because they take effect without a restart.
+    from Orchestrator.toolvault.availability import enabled_web_search_providers, PROVIDER_ENV
+    enabled = enabled_web_search_providers()
+    web_search = {
+        "providers": {
+            prov: {
+                "key_present": (True if keyvar is None else bool(env.get(keyvar))),  # duckduckgo is keyless
+                "enabled": prov in enabled,
+            }
+            for prov, keyvar in PROVIDER_ENV.items()
+        },
+        "enabled": sorted(enabled),
+        "default": (env.get("WEB_SEARCH_DEFAULT") or "").strip(),
+    }
     return CurrentConfigResponse(
         providers=providers,
         operators=operators,
@@ -217,6 +236,7 @@ def current_config() -> CurrentConfigResponse:
         tailscale=tailscale,
         onboarding_state=_state.snapshot(),
         stt=stt,
+        web_search=web_search,
     )
 
 
