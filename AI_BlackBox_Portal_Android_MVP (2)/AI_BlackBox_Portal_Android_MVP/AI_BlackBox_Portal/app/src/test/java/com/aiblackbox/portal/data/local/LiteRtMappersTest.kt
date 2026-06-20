@@ -388,4 +388,44 @@ class LiteRtMappersTest {
         assertFalse("at the constant cap -> runs", overCap(callCount = max, max = max))
         assertTrue("one past the constant cap -> refused", overCap(callCount = max + 1, max = max))
     }
+
+    // -------------------------------------------------------------------------
+    // Soft context-window cap (settings: honor user value) -- resolveMaxTokens is
+    // the PURE core LiteRtEngine.buildAndInitialize consults. It HONORS the caller's
+    // explicit window, clamping ONLY into MIN_TOKENS..ABSOLUTE_MAX_TOKENS -- NOT to
+    // DEFAULT_MAX_TOKENS (6144). The engine config itself can't be built on the
+    // JDK-17 host JVM (UnsupportedClassVersionError; see the Mappers header), so the
+    // cap decision is tested here as a primitive.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `resolveMaxTokens honors an explicit value above the recommended default (not clamped to 6144)`() {
+        // The whole point of the SOFT cap: 8192 > DEFAULT_MAX_TOKENS (6144) is HONORED.
+        assertEquals(8192, resolveMaxTokens(8192))
+        // Sanity-pin that 8192 really is above the default it must NOT clamp to.
+        assertTrue("8192 must exceed DEFAULT_MAX_TOKENS", 8192 > LiteRtEngine.DEFAULT_MAX_TOKENS)
+    }
+
+    @Test
+    fun `resolveMaxTokens clamps an absurd value down to ABSOLUTE_MAX_TOKENS`() {
+        assertEquals(LiteRtEngine.ABSOLUTE_MAX_TOKENS, resolveMaxTokens(99999))
+    }
+
+    @Test
+    fun `resolveMaxTokens clamps a tiny value up to MIN_TOKENS`() {
+        assertEquals(LiteRtEngine.MIN_TOKENS, resolveMaxTokens(100))
+    }
+
+    @Test
+    fun `resolveMaxTokens passes the recommended default through unchanged`() {
+        // 6144 is in-range (MIN..ABSOLUTE) -> returned verbatim.
+        assertEquals(6144, resolveMaxTokens(6144))
+        assertEquals(LiteRtEngine.DEFAULT_MAX_TOKENS, resolveMaxTokens(LiteRtEngine.DEFAULT_MAX_TOKENS))
+    }
+
+    @Test
+    fun `resolveMaxTokens is exact at both range boundaries`() {
+        assertEquals(LiteRtEngine.MIN_TOKENS, resolveMaxTokens(LiteRtEngine.MIN_TOKENS))
+        assertEquals(LiteRtEngine.ABSOLUTE_MAX_TOKENS, resolveMaxTokens(LiteRtEngine.ABSOLUTE_MAX_TOKENS))
+    }
 }

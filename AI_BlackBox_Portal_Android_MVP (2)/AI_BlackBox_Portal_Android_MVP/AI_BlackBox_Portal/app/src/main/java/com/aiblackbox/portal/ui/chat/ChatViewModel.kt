@@ -192,6 +192,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         com.aiblackbox.portal.data.local.WarmInflightStore.fromContext(appContext)
     }
 
+    // Auto-warm-on-open SETTING (user preference, persisted): when DISABLED the
+    // [preloadLocalEngine] auto path skips the warm and the model loads lazily on the
+    // first send. Default TRUE (instant first send). Distinct from the warm-loop
+    // GUARD above, which is an automatic OOM-crash safety, not a user choice.
+    // See [LocalWarmPrefs].
+    private val localWarmPrefs by lazy {
+        com.aiblackbox.portal.data.local.LocalWarmPrefs.fromContext(appContext)
+    }
+
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
@@ -1496,6 +1505,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun preloadLocalEngine() {
         // Provider gate: only warm for the active local provider (see DESIGN NOTE).
         if (!ChatProvider.fromId(currentProvider).isLocal) return
+        // Auto-warm SETTING gate (user preference): if the user opted OUT of
+        // auto-warm-on-open, do NOT warm here -- leave the engine IDLE so the model
+        // loads LAZILY on the first send (runLocalEngineTurn's load() is idempotent).
+        // This is a user choice, checked BEFORE the OOM-crash guard; the send path
+        // never consults it, so a deliberate send always warms.
+        if (!localWarmPrefs.autoWarmEnabled()) {
+            _localEngineState.value = LocalEngineState.IDLE
+            Log.i(TAG, "skipping auto-warm: disabled by user setting; will warm lazily on first send")
+            return
+        }
         // Warm-loop guard (defense-in-depth): if the PREVIOUS warm is still marked
         // in-flight, the process was SIGKILLed mid-load (device OOM) and never ran
         // its success/failure cleanup. Auto-warming again would just OOM and crash

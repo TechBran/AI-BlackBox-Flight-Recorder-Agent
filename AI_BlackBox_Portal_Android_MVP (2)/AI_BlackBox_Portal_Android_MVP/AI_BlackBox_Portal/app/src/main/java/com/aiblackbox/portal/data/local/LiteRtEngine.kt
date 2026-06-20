@@ -73,6 +73,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   engine via [EngineConfig.maxNumTokens]. Defaults to [DEFAULT_MAX_TOKENS] —
  *   set explicitly because the litertlm default (null) is only 4096, far below
  *   what the on-device agent's per-turn prompt needs (see the constant's KDoc).
+ *   [DEFAULT_MAX_TOKENS] (6144) is the RECOMMENDED, GPU-safe default, NOT a hard
+ *   ceiling: an explicit value is HONORED, clamped only into the sane absolute
+ *   range [MIN_TOKENS]..[ABSOLUTE_MAX_TOKENS] (see [resolveMaxTokens]); the user
+ *   owns the OOM risk above the default (the settings UI warns).
  * @param supportImage whether this model bundle accepts IMAGE input (Task W4).
  *   When true, [load] sets [EngineConfig.visionBackend] (see [visionBackendFor])
  *   so the engine can run image inference, and [generateWithImage] is usable;
@@ -219,12 +223,15 @@ class LiteRtEngine(
         delegate: String,
         visionBackend: Backend?,
     ): Engine {
-        // HARD CAP the context window: the KV cache is pre-allocated ~proportional to
-        // maxNumTokens, so an oversized per-model config is a memory bomb (16384 thrashed/
-        // OOM'd the device). Clamp to DEFAULT_MAX_TOKENS so NO model config can exceed it.
-        val safeTokens = maxTokens.coerceAtMost(DEFAULT_MAX_TOKENS)
+        // SOFT-cap the context window: HONOR the caller's explicit value (a user-chosen
+        // window from settings), clamping ONLY to the sane absolute range
+        // [MIN_TOKENS]..[ABSOLUTE_MAX_TOKENS] — NOT to DEFAULT_MAX_TOKENS. The KV cache is
+        // pre-allocated ~proportional to maxNumTokens, so above 6144 (the GPU-survivable
+        // RECOMMENDED default) may OOM on this device; that is the USER's risk, surfaced
+        // by the settings OOM warning. We refuse only the absurd (typo/corrupt config).
+        val safeTokens = resolveMaxTokens(maxTokens)
         if (safeTokens != maxTokens) {
-            android.util.Log.w(TAG, "maxNumTokens clamped $maxTokens -> $safeTokens (KV-cache cap)")
+            android.util.Log.w(TAG, "maxNumTokens clamped $maxTokens -> $safeTokens (out of $MIN_TOKENS..$ABSOLUTE_MAX_TOKENS sane range)")
         }
         android.util.Log.i(TAG, "engine load: delegate=$delegate maxNumTokens=$safeTokens supportImage=$supportImage")
         val config = if (visionBackend != null) {
@@ -597,7 +604,32 @@ class LiteRtEngine(
         // accretes its own per-turn statefulness within this 6144 window and PULLS
         // memories on demand via tools (toolvault/search_snapshots — all snapshots stay
         // discoverable). control_phone is already lean (no context) and fits trivially.
+        //
+        // NOTE: 6144 is the RECOMMENDED, GPU-safe DEFAULT (used when no per-model value
+        // is set — callers do `cfg.maxTokens ?: DEFAULT_MAX_TOKENS`). It is NOT a hard
+        // ceiling: a user who explicitly raises the window in settings OWNS the OOM risk
+        // (the settings UI warns above this value). The effective value is clamped only
+        // to [MIN_TOKENS]..[ABSOLUTE_MAX_TOKENS] via [resolveMaxTokens].
         const val DEFAULT_MAX_TOKENS: Int = 6144
+
+        /**
+         * Absolute SANITY ceiling on the configured context window — the model's
+         * practical maximum. The user's explicit window choice is HONORED up to here;
+         * this only guards against an absurd value (a typo, a corrupt config) that
+         * would attempt an impossible KV-cache allocation. It is deliberately ABOVE the
+         * GPU-survivable [DEFAULT_MAX_TOKENS] (6144): going past 6144 may OOM on this
+         * device (device-proven), but that is the USER's risk to take via settings —
+         * not a value the app silently refuses. See [resolveMaxTokens].
+         */
+        const val ABSOLUTE_MAX_TOKENS: Int = 16384
+
+        /**
+         * Absolute FLOOR on the configured context window. Below this the per-turn
+         * prompt (persona + resident tool schemas + a screen dump) cannot fit at all
+         * (the litertlm default of 4096 already overran — see the [DEFAULT_MAX_TOKENS]
+         * KDoc), so an explicit tiny value is clamped UP to keep the engine usable.
+         */
+        const val MIN_TOKENS: Int = 512
 
         /**
          * Sampler defaults used to FILL a [SamplerSettings] field left null when a
@@ -708,6 +740,24 @@ fun resolveSampler(
         (temperature ?: LiteRtEngine.DEFAULT_SAMPLER_TEMPERATURE).toDouble(),
     )
 }
+
+/**
+ * Resolve the EFFECTIVE context window the engine is configured with from a
+ * [requested] value (the user's per-model choice, or [LiteRtEngine.DEFAULT_MAX_TOKENS]
+ * when none is set).
+ *
+ * SOFT cap: the requested value is HONORED, clamped ONLY into the sane absolute range
+ * [LiteRtEngine.MIN_TOKENS]..[LiteRtEngine.ABSOLUTE_MAX_TOKENS]. It is deliberately NOT
+ * clamped to [LiteRtEngine.DEFAULT_MAX_TOKENS] (6144) — a user who raises the window
+ * past the GPU-safe default owns the OOM risk (the settings UI warns above 6144). This
+ * only refuses the absurd (a typo/corrupt config), keeping the engine from attempting an
+ * impossible KV-cache allocation.
+ *
+ * PURE (primitives only) so it is JVM-unit-testable under JDK 17 — see the Mappers
+ * header for why constructing the engine in a host test throws UnsupportedClassVersionError.
+ */
+fun resolveMaxTokens(requested: Int): Int =
+    requested.coerceIn(LiteRtEngine.MIN_TOKENS, LiteRtEngine.ABSOLUTE_MAX_TOKENS)
 
 /**
  * The app-side native-loop STEP-CAP decision (Task W3 hardening, defense-in-depth):
