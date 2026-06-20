@@ -9,12 +9,36 @@ import os
 _ROOT = os.environ.get("BLACKBOX_ROOT") or os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# provider key -> env var that must be present (duckduckgo: none, it is keyless)
-PROVIDER_ENV = {
-    "perplexity": "PERPLEXITY_API_KEY", "openai": "OPENAI_API_KEY",
-    "gemini": "GOOGLE_API_KEY", "grok": "XAI_API_KEY",
-    "grok_x": "XAI_API_KEY", "duckduckgo": None,
+# Feature registry: each feature carries its enable/default preference env vars,
+# a provider->env map, and a keyless-floor set (providers always enabled, no key).
+# Extensible to video/music later -- add a feature entry and tag tool schemas with
+# x-availability.feature. web_search is the DEFAULT feature (back-compat: shipped
+# web tools have no `feature` key and must resolve to web_search).
+FEATURES = {
+    "web_search": {
+        "enabled_pref": "WEB_SEARCH_ENABLED",
+        "default_pref": "WEB_SEARCH_DEFAULT",
+        "provider_env": {
+            "perplexity": "PERPLEXITY_API_KEY", "openai": "OPENAI_API_KEY",
+            "gemini": "GOOGLE_API_KEY", "grok": "XAI_API_KEY",
+            "grok_x": "XAI_API_KEY", "duckduckgo": None,
+        },
+        "keyless_floor": {"duckduckgo"},   # always-enabled, keyless (preserves current behavior)
+    },
+    "image": {
+        "enabled_pref": "IMAGE_ENABLED",
+        "default_pref": "IMAGE_DEFAULT",
+        "provider_env": {
+            "gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY", "grok": "XAI_API_KEY",
+        },
+        "keyless_floor": set(),            # NO free image provider
+    },
 }
+
+# provider key -> env var that must be present (duckduckgo: none, it is keyless).
+# Derived from the web_search feature so there is no dual source of truth; the
+# name stays exported (onboarding_routes + others import it).
+PROVIDER_ENV = dict(FEATURES["web_search"]["provider_env"])
 
 # provider id -> the ToolVault tool name that implements it
 PROVIDER_TOOL = {
@@ -38,8 +62,14 @@ def _read_env() -> dict:
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip('"').strip("'")
-    # process env overrides .env for the keys we care about
-    for k in list(PROVIDER_ENV.values()) + ["GEMINI_API_KEY", "WEB_SEARCH_ENABLED", "WEB_SEARCH_DEFAULT"]:
+    # process env overrides .env for the keys we care about: every feature's
+    # provider env vars + enable/default prefs, plus the GEMINI_API_KEY alias.
+    keys = {"GEMINI_API_KEY"}
+    for spec in FEATURES.values():
+        keys.update(v for v in spec["provider_env"].values() if v)
+        keys.add(spec["enabled_pref"])
+        keys.add(spec["default_pref"])
+    for k in keys:
         if k and os.environ.get(k):
             env[k] = os.environ[k]
     # Gemini key alias: the executor uses GEMINI_API_KEY (config derives it as
@@ -51,17 +81,27 @@ def _read_env() -> dict:
     return env
 
 
-def enabled_web_search_providers() -> set:
+def enabled_providers(feature: str = "web_search") -> set:
+    """Resolve the enabled provider set for ``feature``.
+
+    Explicit ``<FEATURE>_ENABLED`` pref wins; otherwise default to every provider
+    whose key is present, plus the feature's keyless floor (web_search ->
+    duckduckgo; image -> none)."""
+    spec = FEATURES[feature]
     env = _read_env()
-    raw = (env.get("WEB_SEARCH_ENABLED") or "").strip()
+    raw = (env.get(spec["enabled_pref"]) or "").strip()
     if raw:
         return {p.strip() for p in raw.split(",") if p.strip()}
-    # Unset -> sensible default: every provider whose key is present, + duckduckgo
-    enabled = {"duckduckgo"}
-    for prov, key in PROVIDER_ENV.items():
+    enabled = set(spec["keyless_floor"])
+    for prov, key in spec["provider_env"].items():
         if key and env.get(key):
             enabled.add(prov)
     return enabled
+
+
+def enabled_web_search_providers() -> set:
+    """Back-compat alias (existing callers + tests use this name)."""
+    return enabled_providers("web_search")
 
 
 def is_available(entry: dict, enabled: set = None, env: dict = None) -> bool:
@@ -71,7 +111,10 @@ def is_available(entry: dict, enabled: set = None, env: dict = None) -> bool:
     if env is None:
         env = _read_env()
     if enabled is None:
-        enabled = enabled_web_search_providers()
+        # Resolve the enabled set against THIS entry's feature (default
+        # web_search -> shipped web tools, which carry no `feature` key).
+        feature = gate.get("feature", "web_search")
+        enabled = enabled_providers(feature)
     for k in (gate.get("requires_env") or []):
         if not env.get(k):
             return False
@@ -79,9 +122,23 @@ def is_available(entry: dict, enabled: set = None, env: dict = None) -> bool:
 
 
 def filter_available(entries: list, ctx=None) -> list:
-    enabled = enabled_web_search_providers()
+    # A mixed catalog (image + web tools) needs DIFFERENT enabled sets per
+    # feature, so we must NOT pass a single enabled set. Resolve env once, then
+    # let is_available() resolve the per-feature enabled set for each entry.
+    # Per-feature enabled sets are memoized so we only compute each once.
     env = _read_env()
-    return [e for e in entries if is_available(e, enabled, env)]
+    _enabled_cache: dict = {}
+
+    def _available(e: dict) -> bool:
+        gate = e.get("x-availability")
+        if not gate:
+            return True
+        feature = gate.get("feature", "web_search")
+        if feature not in _enabled_cache:
+            _enabled_cache[feature] = enabled_providers(feature)
+        return is_available(e, _enabled_cache[feature], env)
+
+    return [e for e in entries if _available(e)]
 
 
 def default_web_search_hint(tool_names) -> str:
