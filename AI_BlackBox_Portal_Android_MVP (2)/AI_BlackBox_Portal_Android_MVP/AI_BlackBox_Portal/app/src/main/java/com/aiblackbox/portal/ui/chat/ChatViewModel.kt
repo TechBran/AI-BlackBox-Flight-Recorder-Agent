@@ -166,7 +166,7 @@ private const val MAX_CHAT_MESSAGES = 100
  * Only the on-device path uses this; the cloud SSE path is unaffected (the server
  * owns its own context budget).
  */
-private const val LOCAL_HISTORY_BUDGET_CHARS = 8000
+private const val LOCAL_HISTORY_BUDGET_CHARS = 4000
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
