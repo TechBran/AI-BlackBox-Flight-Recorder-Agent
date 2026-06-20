@@ -1,0 +1,47 @@
+{
+  "name": "gemini_web_search",
+  "description": "Search the web using Google Gemini grounding (Google Search). Returns a synthesized answer with source citations.",
+  "category": "web",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "x-availability": {
+    "provider": "gemini",
+    "requires_env": [
+      "GOOGLE_API_KEY"
+    ]
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query to look up on the web"
+      },
+      "search_recency_filter": {
+        "type": "string",
+        "description": "Filter by recency: 'day','week','month','year' (default 'month')",
+        "enum": [
+          "hour",
+          "day",
+          "week",
+          "month",
+          "year"
+        ],
+        "default": "month"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "A synthesized answer with source citations",
+  "example": "gemini_web_search(query=\"...\")"
+}

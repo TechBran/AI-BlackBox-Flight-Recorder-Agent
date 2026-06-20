@@ -1,0 +1,45 @@
+{
+  "name": "duckduckgo_web_search",
+  "description": "Search the web using DuckDuckGo. Free fallback that needs no API key. Returns a list of result snippets.",
+  "category": "web",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "x-availability": {
+    "provider": "duckduckgo",
+    "requires_env": []
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query to look up on the web"
+      },
+      "search_recency_filter": {
+        "type": "string",
+        "description": "Filter by recency: 'day','week','month','year' (default 'month')",
+        "enum": [
+          "hour",
+          "day",
+          "week",
+          "month",
+          "year"
+        ],
+        "default": "month"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "A list of result snippets",
+  "example": "duckduckgo_web_search(query=\"...\")"
+}

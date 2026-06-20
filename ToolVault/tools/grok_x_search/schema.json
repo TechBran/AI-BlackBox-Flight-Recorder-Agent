@@ -1,0 +1,35 @@
+{
+  "name": "grok_x_search",
+  "description": "Search X (Twitter) in real time using xAI Grok. Returns a synthesized answer with sources from live X/Twitter posts.",
+  "category": "web",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 1,
+  "x-availability": {
+    "provider": "grok_x",
+    "requires_env": [
+      "XAI_API_KEY"
+    ]
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query to look up on the web"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "returns": "A synthesized answer with sources from live X/Twitter posts",
+  "example": "grok_x_search(query=\"...\")"
+}

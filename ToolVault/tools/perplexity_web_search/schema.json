@@ -1,5 +1,5 @@
 {
-  "name": "web_search",
+  "name": "perplexity_web_search",
   "description": "Search the web using Perplexity Sonar AI search. Returns a synthesized answer with source citations.",
   "category": "web",
   "groups": [
@@ -12,6 +12,12 @@
     "mcp"
   ],
   "tier": 1,
+  "x-availability": {
+    "provider": "perplexity",
+    "requires_env": [
+      "PERPLEXITY_API_KEY"
+    ]
+  },
   "parameters": {
     "type": "object",
     "properties": {
@@ -21,7 +27,7 @@
       },
       "search_recency_filter": {
         "type": "string",
-        "description": "Filter results by recency: 'day', 'week', 'month', 'year' (default: 'month')",
+        "description": "Filter by recency: 'day','week','month','year' (default 'month')",
         "enum": [
           "hour",
           "day",
@@ -36,6 +42,6 @@
       "query"
     ]
   },
-  "returns": "Returns a synthesized answer with source citations",
-  "example": "web_search(query=\"...\")"
+  "returns": "A synthesized answer with source citations",
+  "example": "perplexity_web_search(query=\"...\")"
 }
