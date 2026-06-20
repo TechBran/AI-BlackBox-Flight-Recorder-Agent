@@ -65,3 +65,6 @@ def _gemini_images(prompt, options):
 
 IMAGE_PROVIDERS = {"gemini": _gemini_images, "openai": _openai_images, "grok": _xai_images}
 DEFAULT_IMAGE_PROVIDER = "gemini"
+
+# tool name -> provider (dispatch sites map the called image tool to its provider)
+IMAGE_TOOL_PROVIDERS = {"gemini_image": "gemini", "openai_image": "openai", "grok_image": "grok"}

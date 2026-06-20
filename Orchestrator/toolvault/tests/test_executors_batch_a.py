@@ -34,7 +34,9 @@ BATCH_A = [
     "grok_x_search",
     "duckduckgo_web_search",
     "web_fetch",
-    "generate_image",
+    "gemini_image",
+    "openai_image",
+    "grok_image",
     "generate_video",
     "lyria_music",
     "extend_video",
@@ -188,13 +190,13 @@ def test_dispatch_routes_perplexity_web_search_to_module(monkeypatch):
     assert captured["provider"] == "perplexity"
 
 
-def test_dispatch_routes_generate_image_to_module(monkeypatch):
-    """generate_image executor posts via aiohttp; assert the module path runs.
+def test_dispatch_routes_gemini_image_to_module(monkeypatch):
+    """gemini_image executor posts via aiohttp; assert the module path runs.
 
     We don't run a real HTTP server — instead we confirm the dispatch resolves
     to the SAME callable the registry hands out (the module), proving the rail.
     """
-    module_ex = registry.get_executor("generate_image")
+    module_ex = registry.get_executor("gemini_image")
     assert module_ex is not None
     # The dispatcher resolves to this exact module callable (no alias here).
-    assert registry.get_executor("generate_image") is module_ex
+    assert registry.get_executor("gemini_image") is module_ex

@@ -38,6 +38,7 @@ from Orchestrator.models import TaskType
 from Orchestrator.monitoring import drift_state_for
 from Orchestrator.state import get_state, save_operator_state
 from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
+from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
@@ -483,7 +484,8 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                         "tool_use_id": tool_id,
                         "content": fetch_result
                     })
-                elif tool_name == "generate_image":
+                elif tool_name in IMAGE_TOOL_PROVIDERS:
+                    provider = IMAGE_TOOL_PROVIDERS[tool_name]
                     prompt = tool_input.get("prompt", "")
                     aspect_ratio = tool_input.get("aspectRatio", "16:9")
                     resolution = tool_input.get("resolution", "1K")
@@ -497,6 +499,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                         "aspectRatio": aspect_ratio,
                         "resolution": resolution,
                         "numberOfImages": num_images,
+                        "provider": provider,
                     }
 
                     # Process reference images for image-to-image generation
@@ -1107,7 +1110,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     max_chars = func_args.get("max_chars", 80000)
                     print(f"[GEMINI] Executing web fetch: {url_arg}")
                     result = perform_web_fetch(url_arg, max_chars)
-                elif func_name == "generate_image":
+                elif func_name in IMAGE_TOOL_PROVIDERS:
+                    provider = IMAGE_TOOL_PROVIDERS[func_name]
                     prompt = func_args.get("prompt", "")
                     aspect_ratio = func_args.get("aspectRatio", "16:9")
                     resolution = func_args.get("resolution", "1K")
@@ -1120,6 +1124,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                         "aspectRatio": aspect_ratio,
                         "resolution": resolution,
                         "numberOfImages": num_images,
+                        "provider": provider,
                     }
 
                     # Process reference images for image-to-image generation
@@ -1842,7 +1847,8 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = await run_blocking(perform_web_fetch, url, max_chars)
                                 yield {"type": "tool_result", "data": f"Fetched content from: {url}"}
 
-                            elif func_name == "generate_image":
+                            elif func_name in IMAGE_TOOL_PROVIDERS:
+                                provider = IMAGE_TOOL_PROVIDERS[func_name]
                                 prompt = func_args.get("prompt", "")
                                 aspect_ratio = func_args.get("aspectRatio", "16:9")
                                 resolution = func_args.get("resolution", "1K")
@@ -1856,6 +1862,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                     "aspectRatio": aspect_ratio,
                                     "resolution": resolution,
                                     "numberOfImages": num_images,
+                                    "provider": provider,
                                 }
 
                                 # Process reference images for image-to-image generation
@@ -2547,7 +2554,8 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     "content": fetch_result
                                 })
                                 yield {"type": "tool_result", "data": f"Fetched content from: {url}"}
-                            elif tool_name == "generate_image":
+                            elif tool_name in IMAGE_TOOL_PROVIDERS:
+                                provider = IMAGE_TOOL_PROVIDERS[tool_name]
                                 prompt = tool_input.get("prompt", "")
                                 aspect_ratio = tool_input.get("aspectRatio", "16:9")
                                 resolution = tool_input.get("resolution", "1K")
@@ -2561,6 +2569,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     "aspectRatio": aspect_ratio,
                                     "resolution": resolution,
                                     "numberOfImages": num_images,
+                                    "provider": provider,
                                 }
 
                                 # Process reference images for image-to-image generation
@@ -3032,7 +3041,7 @@ These are ALL the tools available to you. Use ONLY these exact tool names — no
 - **web_fetch** — Fetch and extract content from a URL
 
 ### Media Generation (async — returns task_id, poll with get_task_status)
-- **generate_image** — Create images from text prompts (fast, seconds)
+- **gemini_image / openai_image / grok_image** — Create images from text prompts (pick a provider; fast)
 - **generate_video** — Create videos with Veo 3.1 (5-20 minutes, quota-limited)
 - **lyria_music** — Create 30-second music tracks with Lyria (1-2 minutes)
 - **extend_video** — Extend an existing video with Veo 3.1 (5-20 minutes)
@@ -4419,7 +4428,8 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 })
                                 yield {"type": "tool_result", "data": f"Fetched content from: {url_arg}"}
 
-                            elif func_name == "generate_image":
+                            elif func_name in IMAGE_TOOL_PROVIDERS:
+                                provider = IMAGE_TOOL_PROVIDERS[func_name]
                                 prompt = func_args.get("prompt", "")
                                 aspect_ratio = func_args.get("aspectRatio", "16:9")
                                 resolution = func_args.get("resolution", "1K")
@@ -4433,6 +4443,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                     "aspectRatio": aspect_ratio,
                                     "resolution": resolution,
                                     "numberOfImages": num_images,
+                                    "provider": provider,
                                 }
 
                                 # Process reference images for image-to-image generation
@@ -5110,7 +5121,8 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = await run_blocking(perform_web_fetch, url, max_chars)
                                 yield {"type": "tool_result", "data": f"Fetched content from: {url}"}
 
-                            elif func_name == "generate_image":
+                            elif func_name in IMAGE_TOOL_PROVIDERS:
+                                provider = IMAGE_TOOL_PROVIDERS[func_name]
                                 prompt = func_args.get("prompt", "")
                                 aspect_ratio = func_args.get("aspectRatio", "16:9")
                                 resolution = func_args.get("resolution", "1K")
@@ -5124,6 +5136,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                     "aspectRatio": aspect_ratio,
                                     "resolution": resolution,
                                     "numberOfImages": num_images,
+                                    "provider": provider,
                                 }
 
                                 # Process reference images for image-to-image generation
@@ -5518,7 +5531,7 @@ def execute_list_media(media_type: str = None, limit: int = 20) -> dict:
         "total_in_index": stats.get("total_files", 0),
         "filter": media_type or "all",
         "media": formatted,
-        "usage_hint": "Use URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image."
+        "usage_hint": "Use URLs with generate_video(image_url=...) for image-to-video, or gemini_image(reference_images=[...]) for image-to-image."
     }
 
 
@@ -5558,7 +5571,7 @@ def execute_search_media(query: str, media_type: str = None, limit: int = 10) ->
         "filter": media_type or "all",
         "count": len(formatted),
         "results": formatted,
-        "usage_hint": "Use URLs with generate_video(image_url=...) for image-to-video, or generate_image(reference_images=[...]) for image-to-image."
+        "usage_hint": "Use URLs with generate_video(image_url=...) for image-to-video, or gemini_image(reference_images=[...]) for image-to-image."
     }
 
 
@@ -5928,7 +5941,7 @@ async def chat_save(request: Request):
         # Track queued media tasks to return to frontend
         media_tasks = []
 
-        # OLD TEXT-PARSING METHOD REMOVED - Now using tool calling (generate_image, generate_video, lyria_music tools)
+        # OLD TEXT-PARSING METHOD REMOVED - Now using tool calling (gemini_image/openai_image/grok_image, generate_video, lyria_music tools)
         # Images, videos, and music are now generated via proper tool calls handled in streaming endpoints
         # Tool definitions generated from Orchestrator/tools/tool_registry.py
 

@@ -63,6 +63,7 @@ from Orchestrator.fossils import (
 from Orchestrator.context_builder import build_fossil_context
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.tasks import create_task
+from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.behavioral_core import BEHAVIORAL_CORE_VOICE
@@ -384,12 +385,12 @@ You have tools to generate and find media. Here's how to use the different pipel
 
 3. IMAGE-TO-IMAGE (use reference images):
    - Find image URLs using list_media or search_media
-   - Call generate_image with reference_images parameter:
-     generate_image(prompt="new image description", reference_images=["/ui/uploads/ref1.png", "/ui/uploads/ref2.png"])
+   - Call a per-provider image tool with the reference_images parameter:
+     gemini_image(prompt="new image description", reference_images=["/ui/uploads/ref1.png", "/ui/uploads/ref2.png"])
    - Can include up to 10 reference images
 
 4. TEXT-TO-VIDEO/IMAGE (from scratch):
-   - Just use generate_video(prompt="...") or generate_image(prompt="...") without URL parameters
+   - Just use generate_video(prompt="...") or gemini_image(prompt="...") without URL parameters
 
 FINDING MEDIA:
 - Use list_media(media_type="image") to see available images
@@ -638,7 +639,8 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
             print(f"[GROK-LIVE] Executing web fetch: {url}")
             result = perform_web_fetch(url, max_chars)
             print(f"[GROK-LIVE] Web fetch result length: {len(result)} chars")
-        elif name == "generate_image":
+        elif name in IMAGE_TOOL_PROVIDERS:
+            provider = IMAGE_TOOL_PROVIDERS[name]
             prompt = arguments.get("prompt", "")
             aspect_ratio = arguments.get("aspectRatio", "16:9")
             resolution = arguments.get("resolution", "1K")
@@ -653,6 +655,7 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                 "aspectRatio": aspect_ratio,
                 "resolution": resolution,
                 "numberOfImages": num_images,
+                "provider": provider,
             }
             if reference_images:
                 image_options["reference_images"] = reference_images
