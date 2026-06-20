@@ -80,6 +80,15 @@ async def resolve_operator(provided):
     resolved, _needs = choose_operator(provided, operators, default)
     return resolved
 
+# Put the REPO ROOT on sys.path so the `Orchestrator` PACKAGE is importable.
+# get_mcp_tools() (below) lazily runs `from Orchestrator.toolvault import registry`
+# and `from Orchestrator.toolvault.resolvers import resolve_schema` — those resolve
+# the `Orchestrator` package, whose parent is the repo root. .mcp.json passes
+# BLACKBOX_ROOT (env) but NOT PYTHONPATH, so without this the spawned MCP process
+# fails every list_tools with "No module named 'Orchestrator'" → client gets zero
+# tools. Self-contained here so it works regardless of how the server is launched.
+sys.path.insert(0, str(BLACKBOX_ROOT))
+
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_search, perform_web_fetch
