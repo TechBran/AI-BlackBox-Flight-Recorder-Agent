@@ -1,15 +1,19 @@
 """Tests for Batch A module executors (Task 6.2).
 
-Batch A migrates 9 web + media tool executors OUT of the monolithic
+Batch A migrates web + media tool executors OUT of the monolithic
 ``blackbox_tools._execute_<name>`` methods INTO per-tool
 ``ToolVault/tools/<name>/executor.py`` modules. Once a module's ``executor.py``
 exists, ``registry.get_executor`` loads it and the dispatch façade
 (``BlackBoxToolExecutor.execute``) routes to it ahead of any legacy method.
 
 These tests run against the REAL on-disk modules (no tmp_path) — they assert the
-9 executors load cleanly (callable, no load_errors, correct 2-arg async
+executors load cleanly (callable, no load_errors, correct 2-arg async
 signature), smoke a couple via mocked network, and prove the dispatch rail +
-``ctx.operator`` flow end to end for ``web_search``.
+``ctx.operator`` flow end to end for the per-provider web search tools.
+
+The generic ``web_search`` tool was replaced by six per-provider tools
+(perplexity/openai/gemini/grok web + grok X + duckduckgo); BATCH_A and the
+web-search smoke/dispatch tests now target those.
 """
 
 import asyncio
@@ -23,7 +27,12 @@ from Orchestrator.tools.blackbox_tools import BlackBoxToolExecutor
 
 
 BATCH_A = [
-    "web_search",
+    "perplexity_web_search",
+    "openai_web_search",
+    "gemini_web_search",
+    "grok_web_search",
+    "grok_x_search",
+    "duckduckgo_web_search",
     "web_fetch",
     "generate_image",
     "generate_video",
@@ -72,7 +81,7 @@ def test_no_load_error_for_executor(name):
 
 
 def test_all_batch_a_loaded():
-    """Mirrors the brief's acceptance check: all 9 resolve to a callable."""
+    """Mirrors the brief's acceptance check: every Batch A tool resolves to a callable."""
     assert all(registry.get_executor(n) is not None for n in BATCH_A)
 
 
@@ -80,16 +89,16 @@ def test_all_batch_a_loaded():
 # 2. Routing smoke — run executors with the network mocked.
 # ---------------------------------------------------------------------------
 
-def test_web_search_executor_smoke(monkeypatch):
-    """web_search calls perform_web_search; mock it so no real Perplexity call."""
+def test_perplexity_web_search_executor_smoke(monkeypatch):
+    """perplexity_web_search calls perform_provider_search; mock it (no network)."""
     import Orchestrator.web_tools as web_tools
 
     monkeypatch.setattr(
-        web_tools, "perform_web_search",
-        lambda query, n, search_recency_filter="month": f"RESULTS for {query}",
+        web_tools, "perform_provider_search",
+        lambda provider, query, search_recency_filter="month": f"RESULTS for {query}",
     )
 
-    ex = registry.get_executor("web_search")
+    ex = registry.get_executor("perplexity_web_search")
     result = asyncio.run(ex({"query": "robots"}, ToolContext(operator="Brandon")))
 
     assert isinstance(result, ToolResult)
@@ -97,9 +106,9 @@ def test_web_search_executor_smoke(monkeypatch):
     assert "RESULTS for robots" in result.result
 
 
-def test_web_search_executor_requires_query():
+def test_perplexity_web_search_executor_requires_query():
     """Empty query short-circuits before any network call."""
-    ex = registry.get_executor("web_search")
+    ex = registry.get_executor("perplexity_web_search")
     result = asyncio.run(ex({}, ToolContext(operator="system")))
     assert isinstance(result, ToolResult)
     assert result.success is False
@@ -157,24 +166,26 @@ def test_get_media_executor_requires_input():
 #    ctx.operator flows from the executor instance end to end.
 # ---------------------------------------------------------------------------
 
-def test_dispatch_routes_web_search_to_module(monkeypatch):
+def test_dispatch_routes_perplexity_web_search_to_module(monkeypatch):
     import Orchestrator.web_tools as web_tools
 
     captured = {}
 
-    def _fake_search(query, n, search_recency_filter="month"):
+    def _fake_search(provider, query, search_recency_filter="month"):
+        captured["provider"] = provider
         captured["query"] = query
         return f"RESULTS for {query}"
 
-    monkeypatch.setattr(web_tools, "perform_web_search", _fake_search)
+    monkeypatch.setattr(web_tools, "perform_provider_search", _fake_search)
 
     ex = BlackBoxToolExecutor(operator="Brandon")
-    result = asyncio.run(ex.execute("web_search", {"query": "tracked robot"}))
+    result = asyncio.run(ex.execute("perplexity_web_search", {"query": "tracked robot"}))
 
     assert isinstance(result, ToolResult)
     assert result.success is True
     assert "RESULTS for tracked robot" in result.result
     assert captured["query"] == "tracked robot"
+    assert captured["provider"] == "perplexity"
 
 
 def test_dispatch_routes_generate_image_to_module(monkeypatch):

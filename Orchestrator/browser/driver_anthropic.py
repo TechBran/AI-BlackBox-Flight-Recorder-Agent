@@ -30,7 +30,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     from Orchestrator.tasks import create_task, generate_prompt_slug
     from Orchestrator.utils.async_helpers import run_blocking
     from Orchestrator.volume import read_text_safe
-    from Orchestrator.web_tools import perform_web_search, perform_web_fetch
+    from Orchestrator.web_tools import perform_web_fetch
     from Orchestrator.routes.chat_routes import (
         _cu_safe_params, _cu_save_to_blackbox,
         execute_bash_command, execute_text_editor,
@@ -348,13 +348,6 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     })
 
                 # ─── BlackBox tools (reuse execution logic) ───
-                elif tool_name == "web_search":
-                    query = tool_input.get("query", "")
-                    recency = tool_input.get("search_recency_filter", "month")
-                    print(f"[CU-BG]   web_search: {query}")
-                    search_result = await run_blocking(perform_web_search, query, search_recency_filter=recency)
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": search_result})
-
                 elif tool_name == "web_fetch":
                     url = tool_input.get("url", "")
                     max_chars = tool_input.get("max_chars", 80000)
@@ -456,11 +449,16 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     })
 
                 else:
+                    # Catch-all: route ANY other tool (incl. the per-provider web
+                    # search tools and dynamically-injected ToolVault tools) through
+                    # BlackBoxToolExecutor instead of reporting "Unknown tool".
+                    from Orchestrator.tools import BlackBoxToolExecutor
+                    executor = BlackBoxToolExecutor(operator=operator)
+                    tool_result = await executor.execute(tool_name, tool_input)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
-                        "content": f"Unknown tool: {tool_name}",
-                        "is_error": True
+                        "content": tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     })
 
             # Add tool results to history

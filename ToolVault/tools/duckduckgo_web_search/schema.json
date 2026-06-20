@@ -25,7 +25,7 @@
       },
       "search_recency_filter": {
         "type": "string",
-        "description": "Filter by recency: 'day','week','month','year' (default 'month')",
+        "description": "Filter by recency: 'hour','day','week','month','year' (default 'month')",
         "enum": [
           "hour",
           "day",

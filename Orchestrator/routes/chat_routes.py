@@ -39,7 +39,7 @@ from Orchestrator.monitoring import drift_state_for
 from Orchestrator.state import get_state, save_operator_state
 from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.volume import now_utc_iso, read_text_safe
-from Orchestrator.web_tools import perform_web_search, perform_web_fetch
+from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
 from Orchestrator.browser.dispatch import resolve_backend
 
@@ -304,26 +304,23 @@ def call_openai(messages: List[Dict], model: str, operator: str = "Brandon"):
                 tool_id = tool_call["id"]
                 args = json.loads(func["arguments"])
 
-                if tool_name == "web_search":
-                    query = args.get("query", "")
-                    recency = args.get("search_recency_filter", "month")
-                    print(f"[OPENAI] Executing web search: {query}")
-                    result = perform_web_search(query, search_recency_filter=recency)
-                elif tool_name == "web_fetch":
+                if tool_name == "web_fetch":
                     url = args.get("url", "")
                     max_chars = args.get("max_chars", 80000)
                     print(f"[OPENAI] Executing web fetch: {url}")
                     result = perform_web_fetch(url, max_chars)
-                elif tool_name in ("list_devices", "control_android_device",
-                                   "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
+                else:
+                    # Catch-all: route ANY other tool (incl. the per-provider web
+                    # search tools and dynamically-injected ToolVault tools) through
+                    # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator)
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
-                    result = tool_result.result
-                    print(f"[OPENAI] {tool_name}: {result[:100]}")
-                else:
-                    result = f"Unknown tool: {tool_name}"
+                    result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+                    if not result:
+                        result = f"Tool '{tool_name}' executed successfully (no output)."
+                    print(f"[OPENAI] {tool_name} (catch-all): {result[:100]}")
 
                 # Add tool result to messages
                 payload["messages"].append({
@@ -476,17 +473,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                 tool_id = tool_use.get("id", "")
                 tool_input = tool_use.get("input", {})
 
-                if tool_name == "web_search":
-                    query = tool_input.get("query", "")
-                    recency = tool_input.get("search_recency_filter", "month")
-                    print(f"[ANTHROPIC] Executing web search: {query}")
-                    search_result = perform_web_search(query, search_recency_filter=recency)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": search_result
-                    })
-                elif tool_name == "web_fetch":
+                if tool_name == "web_fetch":
                     url = tool_input.get("url", "")
                     max_chars = tool_input.get("max_chars", 80000)
                     print(f"[ANTHROPIC] Executing web fetch: {url}")
@@ -1115,12 +1102,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                 func_name = fc["functionCall"]["name"]
                 func_args = fc["functionCall"].get("args", {})
 
-                if func_name == "web_search":
-                    query = func_args.get("query", "")
-                    recency = func_args.get("search_recency_filter", "month")
-                    print(f"[GEMINI] Executing web search: {query}")
-                    result = perform_web_search(query, search_recency_filter=recency)
-                elif func_name == "web_fetch":
+                if func_name == "web_fetch":
                     url_arg = func_args.get("url", "")
                     max_chars = func_args.get("max_chars", 80000)
                     print(f"[GEMINI] Executing web fetch: {url_arg}")
@@ -1433,15 +1415,18 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     now = datetime.now()
                     result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
                     print(f"[GEMINI] get_current_time: {result}")
-                elif func_name in ("gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
+                else:
+                    # Catch-all: route ANY other tool (incl. the per-provider web
+                    # search tools and dynamically-injected ToolVault tools) through
+                    # BlackBoxToolExecutor instead of reporting "Unknown function".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator)
                     import asyncio
                     tool_result = asyncio.run(executor.execute(func_name, func_args))
-                    result = tool_result.result
-                    print(f"[GEMINI] {func_name}: {result[:100]}")
-                else:
-                    result = f"Unknown function: {func_name}"
+                    result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+                    if not result:
+                        result = f"Tool '{func_name}' executed successfully (no output)."
+                    print(f"[GEMINI] {func_name} (catch-all): {result[:100]}")
 
                 function_responses.append({
                     "functionResponse": {
@@ -1648,26 +1633,23 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
                 tool_id = tool_call["id"]
                 args = json.loads(func["arguments"])
 
-                if tool_name == "web_search":
-                    query = args.get("query", "")
-                    recency = args.get("search_recency_filter", "month")
-                    print(f"[XAI] Executing web search: {query}")
-                    result = perform_web_search(query, search_recency_filter=recency)
-                elif tool_name == "web_fetch":
+                if tool_name == "web_fetch":
                     url_arg = args.get("url", "")
                     max_chars = args.get("max_chars", 80000)
                     print(f"[XAI] Executing web fetch: {url_arg}")
                     result = perform_web_fetch(url_arg, max_chars)
-                elif tool_name in ("list_devices", "control_android_device",
-                                   "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
+                else:
+                    # Catch-all: route ANY other tool (incl. the per-provider web
+                    # search tools and dynamically-injected ToolVault tools) through
+                    # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator)
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
-                    result = tool_result.result
-                    print(f"[XAI] {tool_name}: {result[:100]}")
-                else:
-                    result = f"Unknown tool: {tool_name}"
+                    result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+                    if not result:
+                        result = f"Tool '{tool_name}' executed successfully (no output)."
+                    print(f"[XAI] {tool_name} (catch-all): {result[:100]}")
 
                 # Add tool result to messages
                 payload["messages"].append({
@@ -1853,14 +1835,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 func_args = {}
 
                             tool_result = ""
-                            if func_name == "web_search":
-                                query = func_args.get("query", "")
-                                recency = func_args.get("search_recency_filter", "month")
-                                print(f"[OPENAI-STREAM] Executing web search: {query}")
-                                tool_result = await run_blocking(perform_web_search, query, search_recency_filter=recency)
-                                yield {"type": "tool_result", "data": f"Found results for: {query}"}
-
-                            elif func_name == "web_fetch":
+                            if func_name == "web_fetch":
                                 url = func_args.get("url", "")
                                 max_chars = func_args.get("max_chars", 80000)
                                 print(f"[OPENAI-STREAM] Executing web fetch: {url}")
@@ -2561,18 +2536,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                             tool_id = tool_use.get("id", "")
                             tool_input = tool_use.get("input", {})
 
-                            if tool_name == "web_search":
-                                query = tool_input.get("query", "")
-                                recency = tool_input.get("search_recency_filter", "month")
-                                print(f"[ANTHROPIC-STREAM] Executing web search: {query}")
-                                search_result = await run_blocking(perform_web_search, query, search_recency_filter=recency)
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": search_result
-                                })
-                                yield {"type": "tool_result", "data": f"Found results for: {query}"}
-                            elif tool_name == "web_fetch":
+                            if tool_name == "web_fetch":
                                 url = tool_input.get("url", "")
                                 max_chars = tool_input.get("max_chars", 80000)
                                 print(f"[ANTHROPIC-STREAM] Executing web fetch: {url}")
@@ -3064,7 +3028,7 @@ These are ALL the tools available to you. Use ONLY these exact tool names — no
 - **list_recent_snapshots** — Get recent snapshots for a specific operator
 
 ### Web
-- **web_search** — Search the web for current information
+- **web search tools** (perplexity_web_search, openai_web_search, gemini_web_search, grok_web_search, grok_x_search for live X/Twitter, duckduckgo_web_search) — Search the web for current information
 - **web_fetch** — Fetch and extract content from a URL
 
 ### Media Generation (async — returns task_id, poll with get_task_status)
@@ -3123,7 +3087,7 @@ These are ALL the tools available to you. Use ONLY these exact tool names — no
 
 When answering questions, prioritize sources in this order:
 1. **SNAPSHOTS (Primary Truth)**: Search snapshots FIRST. They contain all past work, decisions, and operator preferences.
-2. **WEB SEARCH (Live Data)**: Use web_search for current information and documentation.
+2. **WEB SEARCH (Live Data)**: Use the web search tools (perplexity_web_search, grok_web_search, grok_x_search for live X/Twitter, etc.) for current information and documentation.
 3. **TRAINING DATA (Fallback)**: Only rely on built-in knowledge when snapshots and web don't have the answer.
 
 ## Media Rules
@@ -4442,20 +4406,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                             func_name = fc.get("name", "")
                             func_args = fc.get("args", {})
 
-                            if func_name == "web_search":
-                                query = func_args.get("query", "")
-                                recency = func_args.get("search_recency_filter", "month")
-                                print(f"[GEMINI-STREAM] Executing web search: {query}")
-                                result = await run_blocking(perform_web_search, query, search_recency_filter=recency)
-                                function_responses.append({
-                                    "functionResponse": {
-                                        "name": func_name,
-                                        "response": {"result": result}
-                                    }
-                                })
-                                yield {"type": "tool_result", "data": f"Found results for: {query}"}
-
-                            elif func_name == "web_fetch":
+                            if func_name == "web_fetch":
                                 url_arg = func_args.get("url", "")
                                 max_chars = func_args.get("max_chars", 80000)
                                 print(f"[GEMINI-STREAM] Executing web fetch: {url_arg}")
@@ -5152,14 +5103,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 func_args = {}
 
                             tool_result = ""
-                            if func_name == "web_search":
-                                query = func_args.get("query", "")
-                                recency = func_args.get("search_recency_filter", "month")
-                                print(f"[XAI-STREAM] Executing web search: {query}")
-                                tool_result = await run_blocking(perform_web_search, query, search_recency_filter=recency)
-                                yield {"type": "tool_result", "data": f"Found results for: {query}"}
-
-                            elif func_name == "web_fetch":
+                            if func_name == "web_fetch":
                                 url = func_args.get("url", "")
                                 max_chars = func_args.get("max_chars", 80000)
                                 print(f"[XAI-STREAM] Executing web fetch: {url}")

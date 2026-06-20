@@ -2,9 +2,17 @@
 """
 web_tools.py - Web search and fetch utilities for all AI models
 
-Provides two core capabilities:
-1. perform_web_search() - Search the web using Perplexity Sonar API (with DuckDuckGo fallback)
-2. perform_web_fetch() - Fetch and extract content from specific URLs
+Multi-provider web search: each provider (Perplexity Sonar, OpenAI Responses,
+Google Gemini google_search grounding, xAI Grok web + X/Twitter, DuckDuckGo) is
+an adapter behind perform_provider_search(provider, query, ...), with DuckDuckGo
+as the universal no-key fallback. The per-provider ToolVault tools
+(perplexity_web_search, openai_web_search, gemini_web_search, grok_web_search,
+grok_x_search, duckduckgo_web_search) call into this layer.
+
+Provides:
+1. perform_provider_search() - Search the web via a named provider (DDG fallback)
+2. perform_web_search()      - Legacy compatibility wrapper (-> Perplexity)
+3. perform_web_fetch()       - Fetch and extract content from specific URLs
 
 Both functions include:
 - Caching (15-minute TTL for search, 30-minute for fetch)
@@ -50,7 +58,7 @@ PERPLEXITY_AVAILABLE = bool(PERPLEXITY_API_KEY)
 if PERPLEXITY_AVAILABLE:
     print(f"[WEB_TOOLS] Perplexity Sonar API configured (key: ...{PERPLEXITY_API_KEY[-4:]})", file=sys.stderr)
 else:
-    print("[WEB_TOOLS] Warning: PERPLEXITY_API_KEY not set, will fall back to DuckDuckGo", file=sys.stderr)
+    print("[WEB_TOOLS] Boot: PERPLEXITY_API_KEY not set (perplexity_web_search unavailable; other providers + DuckDuckGo fallback unaffected)", file=sys.stderr)
 
 # =============================================================================
 # Configuration
@@ -124,7 +132,8 @@ def _check_rate_limit() -> bool:
 
 
 # =============================================================================
-# Web Search Function (Perplexity Sonar API with DuckDuckGo fallback)
+# Web Search (multi-provider: Perplexity / OpenAI / Gemini / Grok / DuckDuckGo,
+# with DuckDuckGo as the universal no-key fallback)
 # =============================================================================
 
 VALID_RECENCY_FILTERS = {"hour", "day", "week", "month", "year"}
@@ -248,14 +257,17 @@ def _search_perplexity(query: str, recency: str) -> "SearchResult":
 
 
 def _search_openai(query: str, recency: str) -> "SearchResult":
+    # recency not yet supported by this provider (see design follow-ups)
     return _responses_search(OPENAI_RESPONSES_URL_BASE, OPENAI_API_KEY, OPENAI_SEARCH_MODEL, "web_search", query)
 
 
 def _search_grok_web(query: str, recency: str) -> "SearchResult":
+    # recency not yet supported by this provider (see design follow-ups)
     return _responses_search(XAI_RESPONSES_URL_BASE, XAI_API_KEY, XAI_SEARCH_MODEL, "web_search", query)
 
 
 def _search_grok_x(query: str, recency: str) -> "SearchResult":
+    # recency not yet supported by this provider (see design follow-ups)
     return _responses_search(XAI_RESPONSES_URL_BASE, XAI_API_KEY, XAI_SEARCH_MODEL, "x_search", query)
 
 
@@ -265,6 +277,7 @@ def _search_gemini(query: str, recency: str) -> "SearchResult":
     Tries each model in GEMINI_SEARCH_MODELS until one returns < 400.
     Shape proven by diagnostics/websearch_spike.py.
     """
+    # recency not yet supported by this provider (see design follow-ups)
     label = "Google Gemini"
     if not GEMINI_API_KEY:
         return SearchResult(ok=False, error="API key not configured", source_label=label)
@@ -388,10 +401,10 @@ def perform_provider_search(provider: str, query: str,
 def perform_web_search(query: str, max_results: int = 5, use_cache: bool = True, search_recency_filter: str = "month") -> str:
     """Legacy web-search entry point (Perplexity Sonar).
 
-    Thin compatibility wrapper over perform_provider_search(). Preserved so the
-    existing callers keep working; a later task migrates them to the per-provider
-    tools and removes this alias. The ``max_results`` argument is advisory and
-    retained only for signature compatibility.
+    Thin compatibility wrapper over perform_provider_search(). KEPT because
+    callers remain that have not migrated to the per-provider ToolVault tools
+    (Orchestrator/phone/bridge.py and the executor tests). The ``max_results``
+    argument is advisory and retained only for signature compatibility.
     """
     return perform_provider_search(
         "perplexity",

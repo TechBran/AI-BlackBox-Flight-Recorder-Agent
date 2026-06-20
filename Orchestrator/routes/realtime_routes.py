@@ -64,7 +64,7 @@ from Orchestrator.fossils import (
     get_recent_checkpoints_for_operator
 )
 from Orchestrator.context_builder import build_fossil_context
-from Orchestrator.web_tools import perform_web_search, perform_web_fetch
+from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.tasks import create_task
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
@@ -770,12 +770,6 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             except Exception as e:
                 print(f"[REALTIME] Error getting recent snapshots: {e}")
                 result = f"Error retrieving recent snapshots: {str(e)}"
-        elif name == "web_search":
-            query = arguments.get("query", "")
-            recency = arguments.get("search_recency_filter", "month")
-            print(f"[REALTIME] Executing web search: {query}")
-            result = perform_web_search(query, search_recency_filter=recency)
-            print(f"[REALTIME] Web search result length: {len(result)} chars")
         elif name == "web_fetch":
             url = arguments.get("url", "")
             max_chars = arguments.get("max_chars", 80000)
@@ -1045,7 +1039,17 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
             result = f"Current date and time: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
             print(f"[REALTIME] get_current_time: {result}")
         else:
-            result = f"Unknown tool: {name}"
+            # Catch-all: route ANY other tool (incl. the per-provider web search
+            # tools and dynamically-injected ToolVault tools) through
+            # BlackBoxToolExecutor instead of reporting "Unknown tool".
+            from Orchestrator.tools import BlackBoxToolExecutor
+            operator = session.operator or "system"
+            executor = BlackBoxToolExecutor(operator=operator)
+            tool_result = await executor.execute(name, arguments)
+            result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+            if not result:
+                result = f"Tool '{name}' executed successfully (no output)."
+            print(f"[REALTIME] {name} (catch-all): {result[:100]}")
 
         # Send result back to OpenAI
         if session.openai_ws:
