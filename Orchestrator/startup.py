@@ -783,6 +783,8 @@ class GenIn(BaseModel):
     numberOfImages: Optional[int] = 1  # 1-4 images at a time
     referenceImages: Optional[List[ReferenceImage]] = None  # Up to 14 reference images for style guidance
     provider: Optional[str] = None  # Image provider: "gemini" (default), "openai", "grok"
+    size: Optional[str] = None  # OpenAI gpt-image size: 1024x1024 / 1536x1024 / 1024x1536 / auto
+    quality: Optional[str] = None  # OpenAI gpt-image quality: low / medium / high
 
 class AudioAnalysisIn(BaseModel):
     file_path: str

@@ -662,6 +662,13 @@ async def generate_image(inp: GenIn):
                 for ref in inp.referenceImages
             ]
 
+        # OpenAI gpt-image params -- copy through so they reach _openai_images via
+        # result_data["options"]. (gemini/grok ignore these; harmless if present.)
+        if inp.size:
+            image_options["size"] = inp.size
+        if inp.quality:
+            image_options["quality"] = inp.quality
+
         # Route to a per-provider adapter when specified (default = gemini in worker)
         if inp.provider:
             image_options["provider"] = inp.provider
@@ -682,6 +689,13 @@ async def generate_image(inp: GenIn):
     except Exception as e:
         print(f"ERROR: Failed to queue image generation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/image/catalog")
+async def image_catalog():
+    """Enabled image providers + their param schema -- the param SoT both the
+    Portal and Android image UIs hydrate from."""
+    from Orchestrator.image_catalog import build_image_catalog
+    return {"providers": build_image_catalog()}
 
 @app.post("/generate/video")
 async def generate_video(inp: GenIn):

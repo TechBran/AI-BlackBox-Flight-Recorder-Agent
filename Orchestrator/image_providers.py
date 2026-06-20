@@ -36,10 +36,16 @@ def _openai_images(prompt, options):
 
 def _xai_images(prompt, options):
     n = int(options.get("numberOfImages") or options.get("n") or 1)
+    body = {"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": n}
+    # xAI's images endpoint is OpenAI-compatible; per xAI docs the aspect-ratio
+    # field is `aspect_ratio`. Send it when set so grok's advertised aspectRatio
+    # actually applies; harmless (ignored) if a given model build doesn't honor it.
+    if options.get("aspectRatio"):
+        body["aspect_ratio"] = options["aspectRatio"]
     r = requests.post(
         XAI_IMAGES_URL,
         headers={"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"},
-        json={"model": XAI_IMAGE_MODEL, "prompt": prompt, "n": n}, timeout=180)
+        json=body, timeout=180)
     r.raise_for_status()
     out = []
     for d in r.json().get("data", []):
