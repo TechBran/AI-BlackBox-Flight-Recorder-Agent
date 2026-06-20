@@ -17,22 +17,36 @@ import re
 import sys
 import time
 import requests
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any, Tuple
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
-# Perplexity Sonar API configuration
+# Provider API configuration
 # Handles both Orchestrator context (from Orchestrator.config) and MCP context (from config directly)
 try:
-    from Orchestrator.config import PERPLEXITY_API_KEY, PERPLEXITY_URL
+    from Orchestrator.config import (PERPLEXITY_API_KEY, PERPLEXITY_URL,
+        OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
 except ImportError:
     try:
-        from config import PERPLEXITY_API_KEY, PERPLEXITY_URL
+        from config import (PERPLEXITY_API_KEY, PERPLEXITY_URL,
+            OPENAI_API_KEY, XAI_API_KEY, GEMINI_API_KEY)
     except ImportError:
         # Last-resort fallback if neither import path works (should never happen
         # in production; central config import is the authoritative source).
         PERPLEXITY_API_KEY = ""
         PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
+        OPENAI_API_KEY = ""
+        XAI_API_KEY = ""
+        GEMINI_API_KEY = ""
+
+# Provider endpoints / default search models. These are *choices*, not provider
+# facts; the working shapes are proven by diagnostics/websearch_spike.py.
+OPENAI_RESPONSES_URL_BASE = "https://api.openai.com"
+XAI_RESPONSES_URL_BASE = "https://api.x.ai"
+OPENAI_SEARCH_MODEL = "gpt-4.1"
+XAI_SEARCH_MODEL = "grok-4.3"
+GEMINI_SEARCH_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 PERPLEXITY_AVAILABLE = bool(PERPLEXITY_API_KEY)
 if PERPLEXITY_AVAILABLE:
@@ -118,97 +132,264 @@ def _check_rate_limit() -> bool:
 VALID_RECENCY_FILTERS = {"hour", "day", "week", "month", "year"}
 
 
-def perform_web_search(query: str, max_results: int = 5, use_cache: bool = True, search_recency_filter: str = "month") -> str:
-    """
-    Perform web search using Perplexity Sonar API. Falls back to DuckDuckGo if unavailable.
+# =============================================================================
+# Provider-adapter layer
+# =============================================================================
+#
+# Each web-search provider is an *adapter* taking (query, recency) and returning
+# a normalized SearchResult. A single dispatcher, perform_provider_search(),
+# handles caching / rate-limiting / output formatting so every provider shares
+# the same human/LLM output-string contract.
 
-    Args:
-        query: Search query string
-        max_results: Maximum number of results (advisory — Perplexity returns a synthesized answer)
-        use_cache: Whether to use cached results (default True)
-        search_recency_filter: Filter by recency: 'day', 'week', 'month', 'year' (default 'month')
 
-    Returns:
-        Synthesized answer with citations, ready for LLM consumption
+@dataclass
+class SearchResult:
+    """Normalized result returned by every provider adapter."""
+    answer: str = ""
+    citations: list = field(default_factory=list)
+    source_label: str = ""
+    ok: bool = True
+    error: str = ""
+
+
+def _format_search_result(r: "SearchResult", query: str) -> str:
+    """Render a SearchResult into the standard LLM-facing output string.
+
+    Reproduces the existing perform_web_search() contract: a "Web Search
+    Results:" block, an optional numbered "Sources:" list, and a trailing
+    "Source: <label> | Query: ..." provenance line.
     """
-    # Validate recency filter
+    if not r.ok:
+        label = r.source_label or "web search"
+        return (
+            f"Search failed via {label} for: \"{query}\" (error: {r.error})\n"
+            f"Answer from your own knowledge instead."
+        )
+
+    formatted_result = f"Web Search Results:\n\n{r.answer}\n"
+    if r.citations:
+        formatted_result += "\nSources:\n"
+        for i, cite in enumerate(r.citations, 1):
+            formatted_result += f"  {i}. {cite}\n"
+    formatted_result += f"\nSource: {r.source_label} | Query: \"{query}\""
+    return formatted_result
+
+
+def _responses_search(base_url: str, api_key: str, model: str, tool_type: str, query: str) -> "SearchResult":
+    """OpenAI-Responses-shaped search (used by both OpenAI and xAI/Grok).
+
+    POSTs to {base_url}/v1/responses with a single web-search/x-search tool.
+    Shape proven by diagnostics/websearch_spike.py.
+    """
+    if "x_search" in tool_type:
+        label = "Grok (X/Twitter)"
+    elif "x.ai" in base_url:
+        label = "Grok"
+    else:
+        label = "OpenAI"
+
+    if not api_key:
+        return SearchResult(ok=False, error="API key not configured", source_label=label)
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": query}],
+        "tools": [{"type": tool_type}],
+    }
+    try:
+        resp = requests.post(f"{base_url}/v1/responses", headers=headers, json=payload, timeout=90)
+    except Exception as e:
+        return SearchResult(ok=False, error=f"{type(e).__name__}: {e}", source_label=label)
+
+    if resp.status_code >= 400:
+        return SearchResult(ok=False, error=f"HTTP {resp.status_code}", source_label=label)
+
+    try:
+        d = resp.json()
+    except Exception as e:
+        return SearchResult(ok=False, error=f"bad JSON: {e}", source_label=label)
+
+    text = ""
+    top = d.get("output_text")
+    if isinstance(top, str):
+        text += top
+    for item in d.get("output", []) or []:
+        if item.get("type") == "message":
+            for c in item.get("content", []) or []:
+                if c.get("type") in ("output_text", "text"):
+                    text += c.get("text", "")
+    citations = list(d.get("citations") or [])
+    return SearchResult(answer=text, citations=citations, source_label=label)
+
+
+def _search_perplexity(query: str, recency: str) -> "SearchResult":
+    """Perplexity Sonar adapter (the historical default engine)."""
+    label = "Perplexity Sonar"
+    if not PERPLEXITY_API_KEY:
+        return SearchResult(ok=False, error="API key not configured", source_label=label)
+
+    headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "sonar",
+        "messages": [{"role": "user", "content": query}],
+        "search_recency_filter": recency,
+    }
+    try:
+        resp = requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        d = resp.json()
+        answer = d["choices"][0]["message"]["content"]
+        citations = list(d.get("citations", []) or [])
+        return SearchResult(answer=answer, citations=citations, source_label=label)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "unknown"
+        return SearchResult(ok=False, error=f"HTTP {status}", source_label=label)
+    except Exception as e:
+        return SearchResult(ok=False, error=f"{type(e).__name__}: {e}", source_label=label)
+
+
+def _search_openai(query: str, recency: str) -> "SearchResult":
+    return _responses_search(OPENAI_RESPONSES_URL_BASE, OPENAI_API_KEY, OPENAI_SEARCH_MODEL, "web_search", query)
+
+
+def _search_grok_web(query: str, recency: str) -> "SearchResult":
+    return _responses_search(XAI_RESPONSES_URL_BASE, XAI_API_KEY, XAI_SEARCH_MODEL, "web_search", query)
+
+
+def _search_grok_x(query: str, recency: str) -> "SearchResult":
+    return _responses_search(XAI_RESPONSES_URL_BASE, XAI_API_KEY, XAI_SEARCH_MODEL, "x_search", query)
+
+
+def _search_gemini(query: str, recency: str) -> "SearchResult":
+    """Google Gemini adapter using google_search grounding.
+
+    Tries each model in GEMINI_SEARCH_MODELS until one returns < 400.
+    Shape proven by diagnostics/websearch_spike.py.
+    """
+    label = "Google Gemini"
+    if not GEMINI_API_KEY:
+        return SearchResult(ok=False, error="API key not configured", source_label=label)
+
+    body = {"contents": [{"parts": [{"text": query}]}], "tools": [{"google_search": {}}]}
+    last_err = "all models failed"
+    for model in GEMINI_SEARCH_MODELS:
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={GEMINI_API_KEY}")
+        try:
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body, timeout=90)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+        if resp.status_code >= 400:
+            last_err = f"HTTP {resp.status_code}"
+            continue
+        try:
+            d = resp.json()
+        except Exception as e:
+            last_err = f"bad JSON: {e}"
+            continue
+        cand = (d.get("candidates") or [{}])[0]
+        parts = (cand.get("content") or {}).get("parts", []) or []
+        answer = "".join(p.get("text", "") for p in parts)
+        gm = cand.get("groundingMetadata") or {}
+        chunks = gm.get("groundingChunks") or []
+        citations = []
+        for ch in chunks:
+            uri = (ch.get("web") or {}).get("uri")
+            if uri:
+                citations.append(uri)
+        return SearchResult(answer=answer, citations=citations, source_label=label)
+
+    return SearchResult(ok=False, error=last_err, source_label=label)
+
+
+def _search_duckduckgo(query: str, recency: str) -> "SearchResult":
+    """DuckDuckGo adapter (keyless fallback engine)."""
+    label = "DuckDuckGo"
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return SearchResult(ok=False, error="ddgs library not installed", source_label=label)
+    try:
+        results = DDGS().text(query, max_results=5)
+    except Exception as e:
+        return SearchResult(ok=False, error=f"{type(e).__name__}: {e}", source_label=label)
+
+    if not results:
+        return SearchResult(ok=False, error="no results", source_label=label)
+
+    lines, citations = [], []
+    for i, result in enumerate(results, 1):
+        title = result.get("title", "No title")
+        url = result.get("href", result.get("link", "No URL"))
+        snippet = result.get("body", result.get("snippet", ""))
+        lines.append(f"{i}. **{title}**\n   URL: {url}\n   {snippet}")
+        if url and url != "No URL":
+            citations.append(url)
+    answer = "\n\n".join(lines)
+    return SearchResult(answer=answer, citations=citations, source_label=label)
+
+
+PROVIDER_SEARCHERS = {
+    "perplexity": _search_perplexity,
+    "openai": _search_openai,
+    "gemini": _search_gemini,
+    "grok": _search_grok_web,
+    "grok_x": _search_grok_x,
+    "duckduckgo": _search_duckduckgo,
+}
+
+
+def perform_provider_search(provider: str, query: str,
+                            search_recency_filter: str = "month",
+                            use_cache: bool = True) -> str:
+    """Dispatch a web search to a named provider adapter and format the result.
+
+    Shares caching, rate-limiting, and the output-string contract across every
+    provider. Returns an LLM-ready string (never raises for provider errors).
+    """
+    if not query:
+        return "Search query is required."
     if search_recency_filter not in VALID_RECENCY_FILTERS:
         search_recency_filter = "month"
 
-    # Check cache first
-    cache_key = f"search:{query}:{search_recency_filter}"
-    if use_cache:
-        cached = _get_cache(cache_key)
-        if cached:
-            print(f"[WEB_SEARCH] Cache hit for query: {query}")
-            return cached
+    fn = PROVIDER_SEARCHERS.get(provider)
+    if fn is None:
+        return f"Unknown web-search provider: {provider!r}"
 
-    # Check rate limit
+    cache_key = f"search:{provider}:{query}:{search_recency_filter}"
+    if use_cache:
+        hit = _get_cache(cache_key)
+        if hit:
+            print(f"[WEB_SEARCH] Cache hit for {provider}: {query}")
+            return hit
+
     if not _check_rate_limit():
         return "Rate limit exceeded. Please try again in a moment."
 
-    # If Perplexity not available, go straight to fallback
-    if not PERPLEXITY_AVAILABLE:
-        return _fallback_ddg_search(query, max_results)
+    print(f"[WEB_SEARCH] Searching {provider} for: {query} (recency: {search_recency_filter})")
+    r = fn(query, search_recency_filter)
+    out = _format_search_result(r, query)
+    if r.ok and use_cache:
+        _set_cache(cache_key, out, SEARCH_CACHE_TTL)
+    return out
 
-    try:
-        print(f"[WEB_SEARCH] Searching Perplexity Sonar for: {query} (recency: {search_recency_filter})")
 
-        headers = {
-            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "sonar",
-            "messages": [{"role": "user", "content": query}],
-            "search_recency_filter": search_recency_filter,
-        }
+def perform_web_search(query: str, max_results: int = 5, use_cache: bool = True, search_recency_filter: str = "month") -> str:
+    """Legacy web-search entry point (Perplexity Sonar).
 
-        response = requests.post(
-            PERPLEXITY_URL,
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        answer = data["choices"][0]["message"]["content"]
-        citations = data.get("citations", [])
-
-        # Format output for LLM consumption
-        formatted_result = f"Web Search Results:\n\n{answer}\n"
-        if citations:
-            formatted_result += "\nSources:\n"
-            for i, cite in enumerate(citations, 1):
-                formatted_result += f"  {i}. {cite}\n"
-        formatted_result += f"\nSource: Perplexity Sonar | Query: \"{query}\" | Recency: {search_recency_filter}"
-
-        # Cache the result
-        _set_cache(cache_key, formatted_result, SEARCH_CACHE_TTL)
-
-        print(f"[WEB_SEARCH] Perplexity returned {len(answer)} chars, {len(citations)} citations")
-        return formatted_result
-
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response else "unknown"
-        print(f"[WEB_SEARCH] Perplexity HTTP error {status}: {e}")
-        if status == 429:
-            return (
-                "Search rate limited by Perplexity. The search service is temporarily throttling requests.\n"
-                "Answer from your own knowledge if possible, or tell the user to try again in a minute."
-            )
-        # Fall back to DuckDuckGo on other HTTP errors
-        print("[WEB_SEARCH] Falling back to DuckDuckGo due to Perplexity error")
-        return _fallback_ddg_search(query, max_results)
-
-    except requests.Timeout:
-        print("[WEB_SEARCH] Perplexity request timed out, falling back to DuckDuckGo")
-        return _fallback_ddg_search(query, max_results)
-
-    except Exception as e:
-        print(f"[WEB_SEARCH] Perplexity error ({type(e).__name__}): {e}")
-        return _fallback_ddg_search(query, max_results)
+    Thin compatibility wrapper over perform_provider_search(). Preserved so the
+    existing callers keep working; a later task migrates them to the per-provider
+    tools and removes this alias. The ``max_results`` argument is advisory and
+    retained only for signature compatibility.
+    """
+    return perform_provider_search(
+        "perplexity",
+        query,
+        search_recency_filter=search_recency_filter,
+        use_cache=use_cache,
+    )
 
 
 def _fallback_ddg_search(query: str, max_results: int = 5) -> str:
