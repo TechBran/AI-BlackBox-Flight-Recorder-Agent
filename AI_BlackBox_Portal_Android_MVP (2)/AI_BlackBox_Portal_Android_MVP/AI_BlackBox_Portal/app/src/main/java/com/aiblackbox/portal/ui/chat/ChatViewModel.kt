@@ -182,6 +182,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         com.aiblackbox.portal.data.local.AutonomyStore.fromContext(appContext)
     }
 
+    // Warm-loop guard: a disk-persisted "warm in-flight" flag set BEFORE every
+    // on-device engine warm and cleared on its success / graceful failure. A
+    // SIGKILL mid-warm (device OOM) runs no cleanup, so the flag survives still-set
+    // into the next process start -- the AUTO-warm in [preloadLocalEngine] reads it
+    // and SKIPS, turning a crash/restart/auto-warm loop into a single failure
+    // (a deliberate send is the manual retry). See [WarmInflightStore].
+    private val warmInflightStore by lazy {
+        com.aiblackbox.portal.data.local.WarmInflightStore.fromContext(appContext)
+    }
+
     private var api: BlackBoxApi? = null
     private var repository: ChatRepository? = null
     private var taskRepository: TaskRepository? = null
@@ -910,8 +920,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val engineToLoad = localEngine
                 val modelFile = localEngineModelFile
                 if (engineToLoad != null && modelFile != null) {
-                    withContext(Dispatchers.IO) {
-                        engineToLoad.load(modelFile, localEngineDelegate)
+                    // Warm-loop guard: a SEND is the deliberate (manual-retry) warm, so
+                    // it is NOT blocked by the in-flight flag — but it still set/clears
+                    // it around load(): if THIS load OOM-kills the process, the next
+                    // launch's auto-warm sees the still-set flag and skips (no loop).
+                    warmInflightStore.setInflight(true)
+                    try {
+                        withContext(Dispatchers.IO) {
+                            engineToLoad.load(modelFile, localEngineDelegate)
+                        }
+                    } finally {
+                        // Cleared on success AND on a (caught) load throw — both are
+                        // graceful (the catch below surfaces the friendly error). Only
+                        // an actual process kill leaves it set.
+                        warmInflightStore.setInflight(false)
                     }
                 }
                 val persona = withContext(Dispatchers.IO) { cache.get(op) }
@@ -1184,8 +1206,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             val engineToLoad = localEngine
                             val modelFile = localEngineModelFile
                             if (engineToLoad != null && modelFile != null) {
-                                withContext(Dispatchers.IO) {
-                                    engineToLoad.load(modelFile, localEngineDelegate)
+                                // Warm-loop guard (send/vision = deliberate warm, not
+                                // gated): set/clear the disk flag around load() so an
+                                // OOM-kill here still leaves the flag set for the next
+                                // launch's auto-warm to skip on.
+                                warmInflightStore.setInflight(true)
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        engineToLoad.load(modelFile, localEngineDelegate)
+                                    }
+                                } finally {
+                                    warmInflightStore.setInflight(false)
                                 }
                             }
                             val persona = withContext(Dispatchers.IO) { cache?.get(op) ?: "" }
@@ -1465,6 +1496,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun preloadLocalEngine() {
         // Provider gate: only warm for the active local provider (see DESIGN NOTE).
         if (!ChatProvider.fromId(currentProvider).isLocal) return
+        // Warm-loop guard (defense-in-depth): if the PREVIOUS warm is still marked
+        // in-flight, the process was SIGKILLed mid-load (device OOM) and never ran
+        // its success/failure cleanup. Auto-warming again would just OOM and crash
+        // again -- an unbounded crash/restart loop. SKIP the auto-warm, RE-ARM the
+        // flag (so a deliberate send can retry), and leave the engine IDLE (the UI
+        // pill shows no spinner; a user send lazily warms). The send path does NOT
+        // consult this flag, so the manual retry is always available.
+        if (!com.aiblackbox.portal.data.local.WarmInflightStore.shouldAutoWarm(warmInflightStore.isInflight())) {
+            warmInflightStore.setInflight(false)
+            _localEngineState.value = LocalEngineState.IDLE
+            Log.w(TAG, "skipping auto-warm: prior warm did not complete (likely OOM-killed); send to retry")
+            return
+        }
         // R2-C: the FOREGROUND SERVICE is now the PRIMARY warmer -- it pins the
         // engine in the PROCESS-level [LocalEngineHolder] so it loads ONCE and
         // survives VM/process recycles. Best-effort + idempotent (a second start
@@ -1508,19 +1552,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             warmingModelPath = targetPath
             _localEngineState.value =
                 localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_STARTED)
+            // Warm-loop guard: persist "in-flight" to disk BEFORE load() so that, if
+            // load() OOM-SIGKILLs the process, the flag survives still-set and the
+            // next launch's preloadLocalEngine SKIPS the auto-warm (no crash loop).
+            warmInflightStore.setInflight(true)
             try {
                 // load() is idempotent + Mutex-serialized (instant if already loaded);
                 // a concurrent first-send simply awaits this same in-flight load.
                 withContext(Dispatchers.IO) { engine.load(modelFile, localEngineDelegate) }
+                // Warm completed cleanly -> clear the in-flight flag (re-arm).
+                warmInflightStore.setInflight(false)
                 _localEngineState.value =
                     localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_SUCCEEDED)
                 Log.d(TAG, "on-device engine warmed (READY) for $targetPath")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Cancellation (VM cleared / new warm) is NOT a fault — clear the
-                // in-flight marker so a re-trigger can warm again, then unwind.
+                // in-flight marker so a re-trigger can warm again, then unwind. This
+                // is a GRACEFUL stop, so clear the disk flag too (no crash occurred).
+                warmInflightStore.setInflight(false)
                 if (warmingModelPath == targetPath) warmingModelPath = null
                 throw e
             } catch (e: Exception) {
+                // GRACEFUL (caught) failure -> clear the disk flag: this was not a
+                // process kill, so the next launch may auto-warm again.
+                warmInflightStore.setInflight(false)
                 _localEngineState.value =
                     localEngineStateAfter(_localEngineState.value, LocalEngineEvent.WARM_FAILED)
                 // Clear the in-flight marker so the next trigger retries the warm.
