@@ -47,6 +47,36 @@ data class ModelConfig(
 )
 
 /**
+ * PURE merge of a USER settings change onto an existing per-model [ModelConfig]
+ * (on-device settings apply layer). Primitives + nullables only -> JVM-unit-testable
+ * with no Android/engine deps, mirroring [engineSourceFor]/[shouldWarm].
+ *
+ * Semantics: a NON-null argument OVERWRITES that field; a NULL argument LEAVES the
+ * existing value intact (so a caller can change just the context window without
+ * touching the sampler, or one sampler axis without the others). [sampler] is taken
+ * field-by-field -- a null [SamplerSettings.topK]/`topP`/`temperature` inside a
+ * provided [sampler] still preserves the old value (it is NOT a reset). Pass a null
+ * [sampler] to leave the whole sampler trio untouched.
+ *
+ * Fields not exposed to settings ([ModelConfig.supportImage], [ModelConfig.recommended],
+ * [ModelConfig.contextNote]) are copied verbatim from [old].
+ *
+ * @param old the model's current config (from its sidecar).
+ * @param maxTokens new context window, or null to keep [old]'s.
+ * @param sampler new sampler overrides (field-wise), or null to keep [old]'s trio.
+ */
+fun mergedConfig(
+    old: ModelConfig,
+    maxTokens: Int?,
+    sampler: SamplerSettings?,
+): ModelConfig = old.copy(
+    maxTokens = maxTokens ?: old.maxTokens,
+    topK = sampler?.topK ?: old.topK,
+    topP = sampler?.topP ?: old.topP,
+    temperature = sampler?.temperature ?: old.temperature,
+)
+
+/**
  * One on-device Gemma model that is present on disk.
  *
  * Returned by [LocalModelManager.installedModels] and [LocalModelManager.install].
@@ -354,9 +384,23 @@ class LocalModelManager(
     )
 
     private fun writeSidecar(bundle: LocalBundle, sizeBytes: Long, config: ModelConfig) {
+        writeSidecarRecord(bundle.slug, bundle.filename, sizeBytes, config)
+    }
+
+    /**
+     * Serialize a [SidecarRecord] for [slug] using the SAME [json] writer + sidecar
+     * path the install flow uses, so [updateModelConfig] persists a config that
+     * [installedModels] re-reads identically (round-trip stable).
+     */
+    private fun writeSidecarRecord(
+        slug: String,
+        filename: String,
+        sizeBytes: Long,
+        config: ModelConfig,
+    ) {
         val record = SidecarRecord(
-            slug = bundle.slug,
-            filename = bundle.filename,
+            slug = slug,
+            filename = filename,
             sizeBytes = sizeBytes,
             maxTokens = config.maxTokens,
             supportImage = config.supportImage,
@@ -366,7 +410,52 @@ class LocalModelManager(
             topP = config.topP,
             temperature = config.temperature,
         )
-        sidecarFor(bundle.slug).writeText(json.encodeToString(SidecarRecord.serializer(), record))
+        sidecarFor(slug).writeText(json.encodeToString(SidecarRecord.serializer(), record))
+    }
+
+    /**
+     * Persist a USER-updated context window + sampler for an already-installed [slug]
+     * (on-device settings apply layer). Loads the slug's existing sidecar, MERGES the
+     * new values onto its [ModelConfig] (the pure [mergedConfig]), and REWRITES the
+     * `<slug>.json` sidecar via the SAME [json] serializer + path the install flow
+     * uses -- so the change is what [installedModels] (and therefore the engine warm)
+     * reads on the next load.
+     *
+     * Merge semantics (see [mergedConfig]): a NON-null argument overwrites that field;
+     * a NULL argument leaves the existing value intact. Fields the caller never touches
+     * ([ModelConfig.supportImage], [ModelConfig.recommended], [ModelConfig.contextNote])
+     * are preserved verbatim. The recorded filename + size_bytes carry unchanged.
+     *
+     * No-op (returns false) when [slug] has no readable sidecar -- there is nothing on
+     * disk to reconfigure. Disk I/O runs on [Dispatchers.IO].
+     *
+     * NOTE: this only PERSISTS the new config. The engine's `maxNumTokens`/`samplerConfig`
+     * are fixed at `initialize()`, so a caller that wants the change to take effect must
+     * RE-WARM the engine (close + reload) AFTER this returns -- see
+     * [com.aiblackbox.portal.ui.chat.ChatViewModel.applyLocalModelSettings].
+     *
+     * @return true if a sidecar was found + rewritten; false if [slug] is not installed.
+     */
+    suspend fun updateModelConfig(
+        slug: String,
+        maxTokens: Int?,
+        sampler: SamplerSettings?,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val sidecar = sidecarFor(slug)
+        if (!sidecar.isFile) return@withContext false
+        val record = runCatching {
+            json.decodeFromString(SidecarRecord.serializer(), sidecar.readText())
+        }.getOrElse {
+            logWarn(
+                TAG,
+                "updateModelConfig: skipping unreadable sidecar '${sidecar.name}' " +
+                    "(${it.javaClass.simpleName})",
+            )
+            return@withContext false
+        }
+        val merged = mergedConfig(record.toModelConfig(), maxTokens, sampler)
+        writeSidecarRecord(record.slug, record.filename, record.sizeBytes, merged)
+        true
     }
 
     /** Small on-disk record that lets [installedModels] map files → slugs. */

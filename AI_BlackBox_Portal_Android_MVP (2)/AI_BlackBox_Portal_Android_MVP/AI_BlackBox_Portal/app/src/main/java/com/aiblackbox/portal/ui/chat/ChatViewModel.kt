@@ -1605,6 +1605,78 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Apply a USER-changed on-device context window + sampler, then RE-WARM the
+     * engine so the new values take effect (on-device settings apply layer; the
+     * settings SCREEN is a later task -- this is the headless helper it calls).
+     *
+     * The on-device engine's `maxNumTokens`/`samplerConfig` are FIXED at the native
+     * `initialize()`, so a live edit requires three steps, run off the main thread on
+     * [Dispatchers.IO] (disk write + native teardown):
+     *
+     *  1. PERSIST via [LocalModelManager.updateModelConfig] for the ACTIVE
+     *     [currentLocalModelSlug] -- rewrites the `<slug>.json` sidecar so the next
+     *     warm reads the new config (no-op + early-return if no model is installed,
+     *     or the slug has no sidecar).
+     *  2. DROP the stale-window engine: [invalidateLocalEngine] clears the VM
+     *     wiring (closing a VM-OWNED engine; never the borrowed holder one), AND
+     *     [LocalEngineHolder.clearAndClose] releases the PROCESS-held warm engine if
+     *     the service pinned one -- otherwise the service-owned engine, still
+     *     initialized at the OLD window, would be re-borrowed and the change lost.
+     *  3. RE-WARM via [preloadLocalEngine], which (via [LocalModelService.start] +
+     *     [localProviderOrWire]) rebuilds + loads the engine at the NEW config and
+     *     flips [localEngineState] to [LocalEngineState.WARMING] -> READY, so the UI
+     *     can show a "reloading on-device model" state through the existing pill.
+     *
+     * Provider-gated like the warm path: a no-op when the active provider is not the
+     * local one (we never pull a multi-GB model into RAM for a cloud-only session).
+     * Pass null for any axis to leave it unchanged (see [mergedConfig]).
+     *
+     * @param maxTokens new context window, or null to keep the current value.
+     * @param topK / topP / temperature sampler overrides, null to keep current.
+     */
+    fun applyLocalModelSettings(
+        maxTokens: Int?,
+        topK: Int?,
+        topP: Float?,
+        temperature: Float?,
+    ) {
+        // Provider gate: only re-warm for the active local provider (mirrors
+        // [preloadLocalEngine]); a cloud-only session has no engine to reconfigure.
+        if (!ChatProvider.fromId(currentProvider).isLocal) return
+        val slug = currentLocalModelSlug
+        if (slug.isBlank()) {
+            Log.w(TAG, "applyLocalModelSettings: no active on-device model slug; nothing to persist")
+            return
+        }
+        val client = api ?: return
+        val sampler = SamplerSettings(topK = topK, topP = topP, temperature = temperature)
+        viewModelScope.launch {
+            // (1) Persist the new config off the main thread (disk write).
+            val persisted = withContext(Dispatchers.IO) {
+                val manager = LocalModelManager.fromContext(
+                    appContext, LocalModelApi(client), deviceId = "android-device",
+                )
+                runCatching { manager.updateModelConfig(slug, maxTokens, sampler) }
+                    .getOrDefault(false)
+            }
+            if (!persisted) {
+                // Slug not installed / unreadable sidecar -> nothing to re-warm.
+                Log.w(TAG, "applyLocalModelSettings: no sidecar updated for '$slug'; skipping re-warm")
+                return@launch
+            }
+            // (2) Drop BOTH the VM wiring AND the process-held warm engine so the
+            // stale-window engine is not reused: invalidate clears VM state (and
+            // closes a VM-owned engine), clearAndClose releases the service-pinned
+            // engine if present (idempotent + guarded when nothing is held).
+            invalidateLocalEngine()
+            LocalEngineHolder.clearAndClose()
+            // (3) Re-warm at the NEW config; preload sets WARMING -> READY so the UI
+            // surfaces a "reloading on-device model" state via the existing pill.
+            preloadLocalEngine()
+        }
+    }
+
+    /**
      * Persist a completed on-device turn through the offline-resilient snapshot
      * queue (Task 2.5). The on-device engine works OFFLINE, so the turn is queued
      * to disk first (survives process death) and flushed in FIFO order when

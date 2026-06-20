@@ -553,4 +553,148 @@ class LocalModelManagerTest {
         assertTrue(returnedCfg.supportImage)
         assertEquals("Recommended — best on-device agent reliability", returnedCfg.contextNote)
     }
+
+    // -------------------------------------------------------------------------
+    // 9. mergedConfig — pure settings merge (on-device settings apply layer)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `mergedConfig overwrites maxTokens and the sampler trio, preserving other fields`() {
+        val old = ModelConfig(
+            maxTokens = 4096,
+            supportImage = true,
+            recommended = true,
+            contextNote = "keep me",
+            topK = 40,
+            topP = 0.9f,
+            temperature = 0.7f,
+        )
+        val merged = mergedConfig(
+            old,
+            maxTokens = 8192,
+            sampler = SamplerSettings(topK = 64, topP = 0.95f, temperature = 1.0f),
+        )
+        assertEquals("maxTokens overwritten", 8192, merged.maxTokens)
+        assertEquals("topK overwritten", 64, merged.topK)
+        assertEquals("topP overwritten", 0.95f, merged.topP)
+        assertEquals("temperature overwritten", 1.0f, merged.temperature)
+        // Untouched, non-settings fields must survive verbatim.
+        assertTrue("supportImage preserved", merged.supportImage)
+        assertTrue("recommended preserved", merged.recommended)
+        assertEquals("contextNote preserved", "keep me", merged.contextNote)
+    }
+
+    @Test
+    fun `mergedConfig leaves existing values when all args are null`() {
+        val old = ModelConfig(
+            maxTokens = 4096,
+            supportImage = true,
+            topK = 40,
+            topP = 0.9f,
+            temperature = 0.7f,
+        )
+        val merged = mergedConfig(old, maxTokens = null, sampler = null)
+        assertEquals("no-arg call leaves config unchanged", old, merged)
+    }
+
+    @Test
+    fun `mergedConfig changes only maxTokens when sampler is null`() {
+        val old = ModelConfig(maxTokens = 4096, topK = 40, topP = 0.9f, temperature = 0.7f)
+        val merged = mergedConfig(old, maxTokens = 2048, sampler = null)
+        assertEquals(2048, merged.maxTokens)
+        // Null sampler leaves the whole trio intact.
+        assertEquals(40, merged.topK)
+        assertEquals(0.9f, merged.topP)
+        assertEquals(0.7f, merged.temperature)
+    }
+
+    @Test
+    fun `mergedConfig preserves a sampler axis left null inside a provided sampler`() {
+        // A provided sampler with one null axis is a FIELD-WISE merge, not a reset:
+        // the null axis keeps the old value; the set axes overwrite.
+        val old = ModelConfig(maxTokens = 4096, topK = 40, topP = 0.9f, temperature = 0.7f)
+        val merged = mergedConfig(
+            old,
+            maxTokens = null,
+            sampler = SamplerSettings(topK = 64, topP = null, temperature = null),
+        )
+        assertEquals("maxTokens kept (null arg)", 4096, merged.maxTokens)
+        assertEquals("topK overwritten", 64, merged.topK)
+        assertEquals("topP preserved (null axis)", 0.9f, merged.topP)
+        assertEquals("temperature preserved (null axis)", 0.7f, merged.temperature)
+    }
+
+    @Test
+    fun `mergedConfig can set values on an all-default ModelConfig`() {
+        val merged = mergedConfig(
+            ModelConfig(),
+            maxTokens = 16384,
+            sampler = SamplerSettings(topK = 32, topP = 0.8f, temperature = 0.6f),
+        )
+        assertEquals(16384, merged.maxTokens)
+        assertEquals(32, merged.topK)
+        assertEquals(0.8f, merged.topP)
+        assertEquals(0.6f, merged.temperature)
+        // Defaults for untouched fields stay default.
+        assertFalse(merged.supportImage)
+        assertFalse(merged.recommended)
+        assertNull(merged.contextNote)
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. updateModelConfig — persist a user settings change (round-trip)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `updateModelConfig rewrites the sidecar and installedModels reads the new config`() = runTest {
+        val content = ByteArray(2048) { 4 }
+        val bundle = e4b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 8.0)
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "gpu") { _, _ -> }.isSuccess)
+
+        val ok = mgr.updateModelConfig(
+            "gemma-4-e4b",
+            maxTokens = 8192,
+            sampler = SamplerSettings(topK = 16, topP = 0.85f, temperature = 0.5f),
+        )
+        assertTrue("update reports success", ok)
+
+        // installedModels re-reads the SAME serializer/path -> sees the new config.
+        val cfg = mgr.installedModels().single().config
+        assertEquals(8192, cfg.maxTokens)
+        assertEquals(16, cfg.topK)
+        assertEquals(0.85f, cfg.topP)
+        assertEquals(0.5f, cfg.temperature)
+        // Non-settings fields the install wrote must survive the rewrite.
+        assertTrue("supportImage preserved through rewrite", cfg.supportImage)
+        assertTrue("recommended preserved through rewrite", cfg.recommended)
+        assertTrue("contextNote preserved", cfg.contextNote!!.contains("Recommended"))
+        // The model is still listed (filename/size carried through).
+        assertEquals("gemma-4-e4b", mgr.installedModels().single().slug)
+    }
+
+    @Test
+    fun `updateModelConfig with null args leaves the existing config unchanged`() = runTest {
+        val content = ByteArray(1024) { 3 }
+        val bundle = e2b.copy(sha256 = sha256Hex(content))
+        val mgr = manager(FakeDownloader(content), ramGb = 4.0)
+        assertTrue(mgr.install(bundle, operator = "Brandon", delegate = "cpu") { _, _ -> }.isSuccess)
+        val before = mgr.installedModels().single().config
+
+        assertTrue(mgr.updateModelConfig("gemma-4-e2b", maxTokens = null, sampler = null))
+
+        assertEquals("null-arg update is a no-change rewrite", before, mgr.installedModels().single().config)
+    }
+
+    @Test
+    fun `updateModelConfig returns false for an uninstalled slug (no sidecar)`() = runTest {
+        val mgr = manager(FakeDownloader(ByteArray(0)), ramGb = 8.0)
+        val ok = mgr.updateModelConfig(
+            "not-installed",
+            maxTokens = 8192,
+            sampler = SamplerSettings(topK = 16, topP = 0.85f, temperature = 0.5f),
+        )
+        assertFalse("no sidecar -> nothing persisted", ok)
+        assertTrue(mgr.installedModels().isEmpty())
+    }
 }
