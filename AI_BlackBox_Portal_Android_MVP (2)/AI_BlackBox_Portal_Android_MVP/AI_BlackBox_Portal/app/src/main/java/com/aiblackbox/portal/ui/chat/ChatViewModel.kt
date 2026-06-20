@@ -2837,7 +2837,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         const val NATIVE_PHONE_CONTROL_ADDENDUM =
             "\n\nTo act on the phone, call the matching action directly (e.g. " +
             "flashlight_on, show_map, open_app). " +
-            "Call one tool at a time; when the task is done, reply briefly."
+            "Call one tool at a time; when the task is done, reply briefly. " +
+            "You retain this conversation's recent turns."
 
         /**
          * The cloud-vault steering sentence, appended to
@@ -2849,7 +2850,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             " For a BlackBox capability you don't have a direct action for (roll " +
             "dice, generate an image, search memory, send something), call " +
             "find_blackbox_tool(query) FIRST, then run_blackbox_tool with the name " +
-            "it returns. Do NOT use web_search to find your tools."
+            "it returns. Do NOT use web_search to find your tools. " +
+            "Your long-term memory is NOT pre-loaded: call search_snapshots (or " +
+            "find_blackbox_tool) to recall older or deeper context when you need it."
 
         /**
          * PURE: the persona addendum for a NATIVE engine-driven turn. The phone

@@ -488,4 +488,36 @@ class ChatViewModelNativeToolTest {
         assertTrue("cloud sentence precedes the closing instruction", cloudIdx in 0 until closeIdx)
         assertEquals("exactly one closing instruction", closeIdx, s.lastIndexOf("Call one tool at a time"))
     }
+
+    // -- Lean/stateful posture (snapshot-ledger strategy reversal): the on-device
+    //    session NOW retains its own recent turns (it is stateful) and long-term
+    //    memory is NO LONGER pre-loaded into every turn -- the model must PULL it on
+    //    demand via its tools. The addendum must steer that, and must NOT carry the
+    //    old (now-false) "memory is already provided / pre-assembled" claim.
+
+    @Test
+    fun `nativeAddendum steers the lean stateful memory posture (cloud)`() {
+        val s = ChatViewModel.nativeAddendum(hasCloud = true)
+        assertTrue("tells the model it retains recent turns", s.contains("recent turns"))
+        assertTrue(
+            "tells the model long-term memory is not pre-loaded",
+            s.contains("not pre-loaded") || s.contains("NOT pre-loaded"),
+        )
+        assertTrue(
+            "names search_snapshots as the memory-pull tool",
+            s.contains("search_snapshots"),
+        )
+        // The stale snapshot-ledger nudge (context pre-assembled) is now FALSE.
+        assertFalse("no stale 'already provided' claim", s.contains("already provided"))
+        assertFalse("no stale 'pre-assembled' claim", s.contains("pre-assembled"))
+    }
+
+    @Test
+    fun `nativeAddendum keeps the recent-turns steering even offline`() {
+        // Statefulness is true on BOTH native paths (online prepare + offline cache),
+        // so the recent-turns reminder must survive the no-cloud variant.
+        val s = ChatViewModel.nativeAddendum(hasCloud = false)
+        assertTrue("recent-turns steering present offline too", s.contains("recent turns"))
+        assertFalse("no stale 'already provided' claim offline", s.contains("already provided"))
+    }
 }
