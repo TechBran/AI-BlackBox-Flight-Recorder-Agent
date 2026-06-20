@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui287"></script> <!-- v287: ElevenLabs Voice Lab panel -->
+  <script type="module" src="/ui/app-modular.js?v=genui288"></script> <!-- v288: provider-aware image modal (catalog-driven dropdown + dynamic params) -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -763,45 +763,17 @@
                     </div>
                 </div>
 
-                <!-- Image Generation Options (Nano Banana Pro) -->
+                <!-- Image Generation Options (provider-aware, catalog-driven) -->
                 <div id="imageGenOptions" class="image-gen-options hide">
                     <div class="gen-options-row">
-                        <!-- Aspect Ratio -->
+                        <!-- Provider selector (populated from GET /image/catalog) -->
                         <div class="gen-option-group">
-                            <label for="imageAspectRatio">Aspect Ratio</label>
-                            <select id="imageAspectRatio">
-                                <option value="1:1">1:1 (Square)</option>
-                                <option value="16:9" selected>16:9 (Landscape)</option>
-                                <option value="9:16">9:16 (Portrait)</option>
-                                <option value="4:3">4:3 (Standard)</option>
-                                <option value="3:4">3:4 (Portrait)</option>
-                                <option value="3:2">3:2 (Photo)</option>
-                                <option value="2:3">2:3 (Portrait Photo)</option>
-                                <option value="4:5">4:5 (Instagram)</option>
-                                <option value="5:4">5:4 (Large Format)</option>
-                                <option value="21:9">21:9 (Cinematic)</option>
-                            </select>
-                        </div>
-                        <!-- Resolution -->
-                        <div class="gen-option-group">
-                            <label for="imageResolution">Resolution</label>
-                            <select id="imageResolution">
-                                <option value="1K" selected>1K (Standard)</option>
-                                <option value="2K">2K (High)</option>
-                                <option value="4K">4K (Ultra)</option>
-                            </select>
-                        </div>
-                        <!-- Number of Images -->
-                        <div class="gen-option-group">
-                            <label for="imageCount">Images</label>
-                            <select id="imageCount">
-                                <option value="1" selected>1</option>
-                                <option value="2">2</option>
-                                <option value="3">3</option>
-                                <option value="4">4</option>
-                            </select>
+                            <label for="imageProvider">Provider</label>
+                            <select id="imageProvider"></select>
                         </div>
                     </div>
+                    <!-- Provider params rendered dynamically from the selected provider schema -->
+                    <div id="imageParams" class="gen-options-row"></div>
 
                     <!-- Reference Images Section -->
                     <div class="reference-images-section">

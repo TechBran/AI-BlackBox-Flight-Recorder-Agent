@@ -628,18 +628,20 @@ export async function generateImageAsync(prompt, options = {}) {
         const operator = getOperator();
         console.log('[DEBUG] Operator:', operator);
 
-        // Build request payload with Nano Banana Pro options
+        // Build request payload. Provider-aware: pull reference images out for
+        // special handling, then spread the remaining catalog params verbatim so
+        // their names match the catalog / GenIn (aspectRatio/resolution/
+        // numberOfImages/size/quality) regardless of which provider supplied them.
+        const { referenceImages, ...params } = options;
         const payload = {
             prompt,
             operator,
-            aspectRatio: options.aspectRatio || '16:9',
-            resolution: options.resolution || '1K',
-            numberOfImages: options.numberOfImages || 1
+            ...params
         };
 
-        // Add reference images if provided
-        if (options.referenceImages && options.referenceImages.length > 0) {
-            payload.referenceImages = options.referenceImages;
+        // Add reference images if provided (gemini-only image-to-image, v1)
+        if (referenceImages && referenceImages.length > 0) {
+            payload.referenceImages = referenceImages;
         }
 
         const response = await fetch('/generate/image', {
@@ -666,8 +668,10 @@ export async function generateImageAsync(prompt, options = {}) {
         console.log('[DEBUG] taskManager.addTask returned successfully');
 
         const imgCount = options.numberOfImages || 1;
-        const resInfo = options.resolution || '1K';
-        toast(`Image generation queued (${imgCount} image${imgCount > 1 ? 's' : ''} @ ${resInfo})...`);
+        // resolution (gemini) / size (openai) -- whichever the provider exposes
+        const qualInfo = options.resolution || options.size || options.quality;
+        const suffix = qualInfo ? ` @ ${qualInfo}` : '';
+        toast(`Image generation queued (${imgCount} image${imgCount > 1 ? 's' : ''}${suffix})...`);
 
         return data.task_id;
     } catch (error) {

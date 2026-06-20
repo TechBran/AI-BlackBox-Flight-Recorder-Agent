@@ -30,6 +30,176 @@ let referenceImages = [];
 /** Video start image for image-to-video (base64 encoded) */
 let videoStartImageData = null;
 
+/**
+ * Image-generation provider catalog (from GET /image/catalog).
+ * Each entry: { provider, label, default?, params:[{name,type,options?,min?,max?,default?}] }
+ * Cached after the first successful fetch.
+ */
+let imageCatalog = null;
+
+/** Fail-open single-provider catalog if GET /image/catalog is empty/errors. */
+const IMAGE_CATALOG_FALLBACK = [{
+    provider: 'gemini',
+    label: 'Gemini Nano Banana',
+    default: true,
+    params: [
+        { name: 'aspectRatio', type: 'enum', options: ['1:1', '16:9', '9:16', '4:3', '3:4'], default: '16:9' },
+        { name: 'resolution', type: 'enum', options: ['1K', '2K'], default: '1K' },
+        { name: 'numberOfImages', type: 'int', min: 1, max: 4, default: 1 }
+    ]
+}];
+
+/** Human-friendly labels for known param names (fallback: the raw name). */
+const IMAGE_PARAM_LABELS = {
+    aspectRatio: 'Aspect Ratio',
+    resolution: 'Resolution',
+    numberOfImages: 'Images',
+    size: 'Size',
+    quality: 'Quality'
+};
+
+/**
+ * Fetch the image provider catalog (cached). Fails open to a single-provider
+ * fallback so the modal is never broken if the endpoint errors/returns empty.
+ * @returns {Promise<Array>} list of provider entries
+ */
+async function fetchImageCatalog() {
+    if (imageCatalog) return imageCatalog;
+    try {
+        const res = await fetch('/image/catalog');
+        if (res.ok) {
+            const data = await res.json();
+            const providers = (data && data.providers) || [];
+            imageCatalog = providers.length > 0 ? providers : IMAGE_CATALOG_FALLBACK;
+        } else {
+            console.warn('[ImageModal] /image/catalog returned', res.status, '- using fallback');
+            imageCatalog = IMAGE_CATALOG_FALLBACK;
+        }
+    } catch (e) {
+        console.error('[ImageModal] Failed to fetch /image/catalog:', e);
+        imageCatalog = IMAGE_CATALOG_FALLBACK;
+    }
+    return imageCatalog;
+}
+
+/**
+ * Render one provider param into a labeled control inside #imageParams.
+ * enum -> <select>; int -> <input type="number">. Each control carries
+ * data-param="<name>" so the value can be read back keyed by its catalog name.
+ * @param {Object} param - { name, type, options?, min?, max?, default? }
+ * @returns {HTMLElement} the .gen-option-group wrapper
+ */
+function buildImageParamControl(param) {
+    const group = document.createElement('div');
+    group.className = 'gen-option-group';
+
+    const label = document.createElement('label');
+    label.textContent = IMAGE_PARAM_LABELS[param.name] || param.name;
+    group.appendChild(label);
+
+    let control;
+    if (param.type === 'enum') {
+        control = document.createElement('select');
+        (param.options || []).forEach(opt => {
+            const o = document.createElement('option');
+            o.value = opt;
+            o.textContent = opt;
+            if (String(opt) === String(param.default)) o.selected = true;
+            control.appendChild(o);
+        });
+    } else {
+        // int (or any non-enum): numeric input
+        control = document.createElement('input');
+        control.type = 'number';
+        if (param.min !== undefined && param.min !== null) control.min = param.min;
+        if (param.max !== undefined && param.max !== null) control.max = param.max;
+        control.value = (param.default !== undefined && param.default !== null) ? param.default : 1;
+    }
+    control.setAttribute('data-param', param.name);
+    control.dataset.paramType = param.type || 'string';
+    label.htmlFor = `imageParam_${param.name}`;
+    control.id = `imageParam_${param.name}`;
+    group.appendChild(control);
+    return group;
+}
+
+/**
+ * Render the params for the given provider into #imageParams, replacing whatever
+ * was there (so controls SWAP when the provider dropdown changes).
+ * @param {string} provider - provider slug
+ */
+function renderImageParams(provider) {
+    const container = $('imageParams');
+    if (!container) return;
+    container.innerHTML = '';
+    const entry = (imageCatalog || []).find(p => p.provider === provider);
+    if (!entry) return;
+    (entry.params || []).forEach(param => {
+        container.appendChild(buildImageParamControl(param));
+    });
+}
+
+/**
+ * Read back the rendered param controls in #imageParams into a plain object
+ * keyed by each control's catalog param name (data-param). int controls are
+ * parsed to Number; everything else is the raw string value.
+ * @returns {Object} params payload fragment
+ */
+function gatherImageParams() {
+    const params = {};
+    const container = $('imageParams');
+    if (!container) return params;
+    container.querySelectorAll('[data-param]').forEach(el => {
+        const name = el.getAttribute('data-param');
+        if (el.dataset.paramType === 'int') {
+            const n = parseInt(el.value, 10);
+            params[name] = Number.isNaN(n) ? undefined : n;
+        } else {
+            params[name] = el.value;
+        }
+    });
+    return params;
+}
+
+/**
+ * Populate #imageProvider from the catalog and render the default provider's
+ * params. Wires the change handler exactly once (idempotent across re-opens).
+ */
+async function setupImageProviderControls() {
+    const providerSelect = $('imageProvider');
+    if (!providerSelect) return;
+
+    const catalog = await fetchImageCatalog();
+
+    // Populate the provider dropdown (value=slug, text=label).
+    providerSelect.innerHTML = '';
+    let defaultProvider = catalog.length > 0 ? catalog[0].provider : null;
+    catalog.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.provider;
+        opt.textContent = p.label || p.provider;
+        if (p.default) {
+            opt.selected = true;
+            defaultProvider = p.provider;
+        }
+        providerSelect.appendChild(opt);
+    });
+
+    // Render the (default) provider's params.
+    if (defaultProvider) {
+        providerSelect.value = defaultProvider;
+        renderImageParams(defaultProvider);
+    }
+
+    // Wire change -> re-render params (only once).
+    if (!providerSelect.dataset.bound) {
+        providerSelect.addEventListener('change', () => {
+            renderImageParams(providerSelect.value);
+        });
+        providerSelect.dataset.bound = '1';
+    }
+}
+
 // =============================================================================
 // Music Presets
 // =============================================================================
@@ -135,10 +305,13 @@ export function setupGenerationModal() {
     if (btnGenImage) {
         btnGenImage.addEventListener('click', () => {
             currentType = 'image';
-            if (titleEl) titleEl.textContent = 'Generate Image (Nano Banana Pro)';
+            if (titleEl) titleEl.textContent = 'Generate Image';
             if (promptArea) promptArea.value = '';
             if (imageToVideoOption) imageToVideoOption.classList.add('hide');
             if (imageGenOptions) imageGenOptions.classList.remove('hide');
+            // Populate provider dropdown + render the default provider params
+            // (catalog-driven; fails open to a single default provider).
+            setupImageProviderControls();
             // Clear reference images
             referenceImages = [];
             if (referencePreview) {
@@ -305,17 +478,24 @@ export function setupGenerationModal() {
             if (modal) modal.classList.add('hide');
 
             if (currentType === 'image') {
-                // Gather Nano Banana Pro options
-                const aspectRatio = $("imageAspectRatio")?.value || '16:9';
-                const resolution = $("imageResolution")?.value || '1K';
-                const imageCount = parseInt($("imageCount")?.value || '1', 10);
+                // Provider-aware: gather the selected provider + each rendered
+                // param value (keyed by its catalog name: aspectRatio/resolution/
+                // numberOfImages/size/quality). Names match GET /image/catalog
+                // and the backend GenIn model.
+                const providerSelect = $('imageProvider');
+                const provider = providerSelect ? providerSelect.value : 'gemini';
+                const params = gatherImageParams();
 
-                // Generate with full options
+                // Reference images stay a gemini-only feature in v1.
+                const refs = (provider === 'gemini' && referenceImages.length > 0)
+                    ? referenceImages
+                    : null;
+
+                // Generate with the dynamic params + provider.
                 await generateImageAsync(prompt, {
-                    aspectRatio,
-                    resolution,
-                    numberOfImages: imageCount,
-                    referenceImages: referenceImages.length > 0 ? referenceImages : null
+                    provider,
+                    ...params,
+                    referenceImages: refs
                 });
 
                 // Clear reference images after generation

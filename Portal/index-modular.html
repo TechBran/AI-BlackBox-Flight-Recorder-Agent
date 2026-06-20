@@ -14,7 +14,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <!-- MODULAR VERSION: Uses ES6 modules instead of monolithic app.js -->
-  <script type="module" src="/ui/app-modular.js?v=genui184"></script> <!-- v184: force re-fetch of tts-stt.js (voice dropdown built from /tts/catalog) -->
+  <script type="module" src="/ui/app-modular.js?v=genui288"></script> <!-- v288: provider-aware image modal (catalog-driven dropdown + dynamic params) -->
 </head>
 <body>
   <div class="app">
@@ -497,32 +497,11 @@
                 <div id="imageGenOptions" class="image-gen-options hide">
                     <div class="gen-options-row">
                         <div class="gen-option-group">
-                            <label for="imageAspectRatio">Aspect Ratio</label>
-                            <select id="imageAspectRatio">
-                                <option value="1:1">1:1 (Square)</option>
-                                <option value="16:9" selected>16:9 (Landscape)</option>
-                                <option value="9:16">9:16 (Portrait)</option>
-                                <option value="4:3">4:3 (Standard)</option>
-                            </select>
-                        </div>
-                        <div class="gen-option-group">
-                            <label for="imageResolution">Resolution</label>
-                            <select id="imageResolution">
-                                <option value="1K" selected>1K (Standard)</option>
-                                <option value="2K">2K (High)</option>
-                                <option value="4K">4K (Ultra)</option>
-                            </select>
-                        </div>
-                        <div class="gen-option-group">
-                            <label for="imageCount">Images</label>
-                            <select id="imageCount">
-                                <option value="1" selected>1</option>
-                                <option value="2">2</option>
-                                <option value="3">3</option>
-                                <option value="4">4</option>
-                            </select>
+                            <label for="imageProvider">Provider</label>
+                            <select id="imageProvider"></select>
                         </div>
                     </div>
+                    <div id="imageParams" class="gen-options-row"></div>
                     <div class="reference-images-section">
                         <div class="reference-header">
                             <label>Reference Images (Optional)</label>
