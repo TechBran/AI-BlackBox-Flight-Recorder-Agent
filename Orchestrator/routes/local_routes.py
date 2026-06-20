@@ -305,6 +305,7 @@ async def local_turn_prepare(request: Request):
             checkpoint_count=CFG.getint("context", "local_checkpoint_count", fallback=1),
             include_recent=False,
             include_keyword=False,
+            include_media=False,  # lean tool-caller: no pushed RECENT MEDIA block (tools-only)
         )
         tools = build_injected_tools(prompt, k=CFG.getint("context", "local_injected_tools_k", fallback=5))
         # The on-device model is a lean tool-caller, so it gets the MINIMAL

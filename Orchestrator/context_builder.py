@@ -80,6 +80,7 @@ def build_fossil_context(
     checkpoint_count: int | None = None,
     include_recent: bool = True,
     include_keyword: bool = True,
+    include_media: bool = True,
 ) -> Tuple[str, dict]:
     """Retrieve fossils for `operator` and build the fossil-context string.
 
@@ -176,7 +177,7 @@ def build_fossil_context(
     # Recent media artifacts first (images/videos/music) so the model sees
     # them before snapshot text. Top-level import from neutral media module
     # — no circular dependency with chat_routes, errors propagate.
-    media_artifacts = get_recent_media_artifacts(operator, limit=10)
+    media_artifacts = get_recent_media_artifacts(operator, limit=10) if include_media else []
     if media_artifacts:
         media_lines = [
             "=== RECENT MEDIA (Available for Reference) ===",

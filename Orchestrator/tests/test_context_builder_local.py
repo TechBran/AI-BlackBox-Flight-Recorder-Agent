@@ -43,3 +43,26 @@ def test_local_profile_is_lean_and_capped():
 
 def test_local_provider_cap_reserves_loop_headroom():
     assert cb.PROVIDER_CAPS["local"] <= 16000
+
+
+def test_include_media_false_omits_recent_media_block():
+    """The lean on-device tool-caller passes include_media=False, so the RECENT
+    MEDIA block is NOT pushed (tools-only) even when media artifacts exist."""
+    fake_media = [{
+        "type": "image", "url": "http://x/y.png",
+        "prompt": "a cat", "created_at": "2026-06-19T00:00:00Z",
+    }]
+    common = dict(
+        semantic_k=0, checkpoint_count=0,
+        include_recent=False, include_keyword=False,
+    )
+    with mock.patch.object(cb, "semantic_retrieve", return_value=[]), \
+         mock.patch.object(cb, "get_recent_checkpoints_for_operator", return_value=[]), \
+         mock.patch.object(cb, "read_text_safe", return_value=""), \
+         mock.patch.object(cb, "get_recent_media_artifacts", return_value=fake_media):
+        lean_text, _ = cb.build_fossil_context(
+            "hi", "Brandon", provider="local", include_media=False, **common)
+        default_text, _ = cb.build_fossil_context(
+            "hi", "Brandon", provider="local", **common)  # include_media defaults True
+    assert "RECENT MEDIA" not in lean_text          # tools-only: no media push
+    assert "RECENT MEDIA" in default_text           # cloud/default still includes it
