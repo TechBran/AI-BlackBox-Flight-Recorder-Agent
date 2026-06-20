@@ -462,7 +462,7 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
                 f"IMPORTANT: Do NOT retry the same URL. Instead:\n"
                 f"1. If you have search results, try a different URL from the results\n"
                 f"2. If the page requires authentication, inform the user\n"
-                f"3. Try searching for the same information using web_search instead"
+                f"3. Try searching for the same information using a web search tool instead"
             )
 
         # Check content size
@@ -471,7 +471,7 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
             return (
                 f"⚠️ Page too large to fetch ({int(content_length)} bytes): {url}\n\n"
                 f"The page exceeds the download limit. Try:\n"
-                f"1. Search for the specific information you need using web_search instead\n"
+                f"1. Search for the specific information you need using a web search tool instead\n"
                 f"2. Try a different, more focused page on the same topic"
             )
 
@@ -483,7 +483,7 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
                 return (
                     f"⚠️ Page too large to fetch (exceeded {MAX_FETCH_SIZE} bytes): {url}\n\n"
                     f"The page exceeds the download limit. Try:\n"
-                    f"1. Search for the specific information you need using web_search instead\n"
+                    f"1. Search for the specific information you need using a web search tool instead\n"
                     f"2. Try a different, more focused page on the same topic"
                 )
 
@@ -548,14 +548,14 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
             f"⚠️ Timeout fetching URL (>{FETCH_TIMEOUT}s): {url}\n\n"
             f"IMPORTANT: Do NOT retry the same URL. The page is too slow to respond. Instead:\n"
             f"1. Try a different URL from your search results\n"
-            f"2. Use web_search to find the information from a different source"
+            f"2. Use a web search tool to find the information from a different source"
         )
     except requests.RequestException as e:
         return (
             f"⚠️ Network error fetching URL: {url}\nError: {str(e)}\n\n"
             f"IMPORTANT: Do NOT retry the same URL. Instead:\n"
             f"1. Try a different URL from your search results\n"
-            f"2. Use web_search to find alternative sources"
+            f"2. Use a web search tool to find alternative sources"
         )
     except Exception as e:
         print(f"[WEB_FETCH] Error: {str(e)}")
