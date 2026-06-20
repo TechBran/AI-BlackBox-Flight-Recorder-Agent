@@ -16,8 +16,9 @@ def test_transcription_in_all_steps():
     i = st.ALL_STEPS.index("transcription")
     assert st.ALL_STEPS[i - 1] == "optional_integrations"
     assert st.ALL_STEPS[i + 1] == "web_search"
-    # web_search then leads into pair_phone
-    assert st.ALL_STEPS[i + 2] == "pair_phone"
+    # web_search then leads into image (multi-provider image-gen feature), then pair_phone
+    assert st.ALL_STEPS[i + 2] == "image"
+    assert st.ALL_STEPS[i + 3] == "pair_phone"
 
 
 def test_step_complete_accepts_transcription(tmp_path, monkeypatch):

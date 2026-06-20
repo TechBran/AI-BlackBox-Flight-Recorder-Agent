@@ -86,6 +86,7 @@ class CurrentConfigResponse(BaseModel):
     onboarding_state: dict
     stt: dict
     web_search: dict
+    image: dict
 
 
 class ValidateRequest(BaseModel):
@@ -229,6 +230,22 @@ def current_config() -> CurrentConfigResponse:
         "enabled": sorted(enabled),
         "default": (env.get("WEB_SEARCH_DEFAULT") or "").strip(),
     }
+    # Image-generation preferences — same DRY pattern as web_search: reuse the
+    # availability gate so the enabled set is derived in ONE place. Like
+    # web_search these are live-read by availability on every tool list, so
+    # IMAGE_ENABLED/IMAGE_DEFAULT are deliberately NOT in /restart-status drift
+    # checks (they take effect without a restart). No keyless floor — every
+    # image provider needs a key.
+    from Orchestrator.toolvault.availability import enabled_providers, FEATURES
+    img_enabled = enabled_providers("image")
+    image = {
+        "providers": {
+            prov: {"key_present": bool(env.get(keyvar)), "enabled": prov in img_enabled}
+            for prov, keyvar in FEATURES["image"]["provider_env"].items()  # gemini/openai/grok, all have a key
+        },
+        "enabled": sorted(img_enabled),
+        "default": (env.get("IMAGE_DEFAULT") or "").strip(),
+    }
     return CurrentConfigResponse(
         providers=providers,
         operators=operators,
@@ -237,6 +254,7 @@ def current_config() -> CurrentConfigResponse:
         onboarding_state=_state.snapshot(),
         stt=stt,
         web_search=web_search,
+        image=image,
     )
 
 
