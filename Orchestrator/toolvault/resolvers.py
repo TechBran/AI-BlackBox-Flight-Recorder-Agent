@@ -23,15 +23,32 @@ from .context import ToolContext
 def _list_operators(ctx: ToolContext) -> list[str]:
     """Return the live list of operator names.
 
-    Lazy-imports the canonical backend source — ``Orchestrator.config.USERS_LIST``
-    — which is the same list returned by the ``GET /operators`` route
-    (``admin_routes.list_operators``). Importing ``config`` at module top-level
-    would trigger its config-file read side effects, so the import is deferred to
-    call time; this also lets tests monkeypatch this helper.
+    Prefers the canonical backend source ``Orchestrator.config.USERS_LIST`` (same
+    list as ``GET /operators``). But ``config.py`` drags heavy web deps
+    (fastapi/google/httpx/pydantic) that the LEAN MCP-server venv
+    (``MCP/blackbox_mcp_server.py`` lists tools for MCP clients) does NOT have, so
+    importing it there raises ModuleNotFoundError and the whole tool-list build
+    fails — leaving an MCP client with zero BlackBox tools. So fall back to reading
+    the operator list straight from ``config.ini`` with stdlib ``configparser``
+    (identical parsing to ``config.USERS_LIST``, zero heavy deps). The import is
+    deferred to call time (config-read side effects + lets tests monkeypatch this).
     """
-    from Orchestrator.config import USERS_LIST
-
-    return list(USERS_LIST)
+    try:
+        from Orchestrator.config import USERS_LIST
+        return list(USERS_LIST)
+    except Exception:
+        # Lean context (e.g. the MCP venv): read config.ini directly. Repo root is
+        # $BLACKBOX_ROOT (set by the MCP server) or three dirs up from this module
+        # (Orchestrator/toolvault/resolvers.py -> repo root).
+        import os
+        import configparser
+        root = os.environ.get("BLACKBOX_ROOT") or os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        cp = configparser.ConfigParser()
+        cp.read(os.path.join(root, "config.ini"))
+        raw = cp.get("users", "list", fallback="Brandon")
+        return [u.strip() for u in raw.split(",") if u.strip()]
 
 
 def _resolve_operators(ctx: ToolContext) -> dict:
