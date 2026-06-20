@@ -1605,6 +1605,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * The persisted AUTO-WARM-on-open setting (default true). Read by the on-device
+     * model settings screen to pre-fill its auto-warm Switch. A thin passthrough to
+     * [LocalWarmPrefs] -- the single store the [preloadLocalEngine] auto path reads.
+     */
+    fun autoWarmEnabled(): Boolean = localWarmPrefs.autoWarmEnabled()
+
+    /**
+     * Persist the AUTO-WARM-on-open setting from the settings screen Switch. When
+     * false the [preloadLocalEngine] auto path skips the warm and the model loads
+     * lazily on the first send. Thin passthrough to [LocalWarmPrefs].
+     */
+    fun setAutoWarmEnabled(enabled: Boolean) = localWarmPrefs.setAutoWarmEnabled(enabled)
+
+    /**
+     * The ACTIVE on-device model's persisted [ModelConfig] (maxTokens + sampler
+     * trio), used by the settings screen to PRE-FILL its window slider + sampler
+     * fields with the user's current per-model choice. Reads the sidecar for
+     * [currentLocalModelSlug] (falling back to the first installed model, matching
+     * [localProviderOrWire]'s selection) off the main thread. Returns an all-null
+     * [ModelConfig] (engine defaults) when no model is installed or the api is not
+     * ready, so callers can resolve each axis to its DEFAULT_* constant.
+     */
+    suspend fun currentLocalModelConfig(): com.aiblackbox.portal.data.local.ModelConfig {
+        val client = api ?: return com.aiblackbox.portal.data.local.ModelConfig()
+        return withContext(Dispatchers.IO) {
+            val manager = LocalModelManager.fromContext(
+                appContext, LocalModelApi(client), deviceId = "android-device",
+            )
+            val installed = runCatching { manager.installedModels() }.getOrDefault(emptyList())
+            val bundle = installed.firstOrNull { it.slug == currentLocalModelSlug }
+                ?: installed.firstOrNull()
+            bundle?.config ?: com.aiblackbox.portal.data.local.ModelConfig()
+        }
+    }
+
+    /**
      * Apply a USER-changed on-device context window + sampler, then RE-WARM the
      * engine so the new values take effect (on-device settings apply layer; the
      * settings SCREEN is a later task -- this is the headless helper it calls).
@@ -2306,6 +2342,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { historyStore.clear(currentOperator) }
     }
 
+    /**
+     * Clear the CURRENT operator's conversation (the on-device-settings reset).
+     *
+     * The on-device model accretes its per-turn statefulness inside its 6144-token
+     * window and PULLS memory on demand; this hard-resets that accumulated session
+     * context. Empties the in-memory `_messages` flow AND persists an EMPTY list for
+     * [currentOperator] through [ChatHistoryStore.save] (the same seam history is
+     * saved through), so the cleared session does not resurrect on the next operator
+     * load or app restart. A mid-turn DEFERred model re-warm is applied first (same
+     * guard as [clearHistory] -- the turn-completion path is skipped on cancel).
+     *
+     * The actual two-step effect (emit empty -> persist empty) is the pure,
+     * unit-tested [performClearLocalConversation]; this just binds it to this VM's
+     * `_messages` flow + `historyStore`.
+     */
+    fun clearLocalConversation() {
+        streamJob?.cancel()
+        processPendingLocalReWarm()
+        _chatState.value = ChatState.IDLE
+        val op = currentOperator
+        viewModelScope.launch {
+            performClearLocalConversation(
+                operator = op,
+                emit = { _messages.value = it },
+                save = { operator, messages -> historyStore.save(operator, messages) },
+            )
+        }
+    }
+
     fun cancelStream() {
         streamJob?.cancel()
         // I1 (final-pass review): see clearHistory -- a mid-turn model switch
@@ -2845,6 +2910,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * is pending (so calling it on every cancel/clear is safe).
          */
         fun consumePendingReWarm(pending: Boolean): Boolean = pending
+
+        /**
+         * PURE core of [clearLocalConversation] (Task: on-device settings screen).
+         * Mirrors the [localEngineStateAfter] / [consumePendingReWarm] convention so
+         * the clear path is unit-testable WITHOUT the AndroidViewModel (no Application,
+         * no main dispatcher). Two effects, in order:
+         *  1. [emit] the EMPTY message list (clears the in-memory `_messages` flow);
+         *  2. [save] the EMPTY list for [operator] through the SAME ChatHistoryStore
+         *     seam history is persisted through elsewhere (so the cleared session does
+         *     not resurrect on the next operator load / app restart).
+         * The instance method just binds [emit] to `_messages.value =` and [save] to
+         * `historyStore.save`.
+         */
+        suspend fun performClearLocalConversation(
+            operator: String,
+            emit: (List<UiMessage>) -> Unit,
+            save: suspend (String, List<UiMessage>) -> Unit,
+        ) {
+            emit(emptyList())
+            save(operator, emptyList())
+        }
 
         /**
          * The on-device engine readiness state machine (Task W1) — pure so the

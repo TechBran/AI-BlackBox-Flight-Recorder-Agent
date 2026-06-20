@@ -35,6 +35,7 @@ import com.aiblackbox.portal.ui.contacts.ContactsScreen
 import com.aiblackbox.portal.ui.voice.VoiceScreen
 import com.aiblackbox.portal.ui.voicelab.VoiceLabScreen
 import com.aiblackbox.portal.ui.updates.UpdatesScreen
+import com.aiblackbox.portal.ui.settings.LocalModelSettingsScreen
 
 object Routes {
     const val CHAT = "chat"
@@ -61,6 +62,7 @@ object Routes {
     const val SMS_INBOX = "sms_inbox"
     const val CONTACTS = "contacts"
     const val UPDATES = "updates"
+    const val LOCAL_MODEL_SETTINGS = "local_model_settings"
 }
 
 @Composable
@@ -207,6 +209,12 @@ fun BlackBoxNavGraph(
         composable(Routes.SMS_INBOX) { SmsInboxScreen(origin = origin, operator = operator) }
         composable(Routes.CONTACTS) { ContactsScreen(origin = origin, operator = operator) }
         composable(Routes.UPDATES) { UpdatesScreen(origin = origin) }
+        composable(Routes.LOCAL_MODEL_SETTINGS) {
+            // On-device model settings: tune window/sampler, auto-warm, clear,
+            // status -- wires to the existing ChatViewModel headless seams.
+            val vm = chatViewModel ?: viewModel<ChatViewModel>()
+            LocalModelSettingsScreen(viewModel = vm)
+        }
     }
 }
 

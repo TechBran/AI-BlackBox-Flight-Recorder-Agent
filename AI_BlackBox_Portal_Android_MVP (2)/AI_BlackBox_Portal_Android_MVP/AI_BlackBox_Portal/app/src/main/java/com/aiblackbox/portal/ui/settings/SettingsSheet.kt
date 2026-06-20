@@ -640,6 +640,13 @@ fun SettingsSheet(
                         )
                     },
                 )
+                Spacer(Modifier.height(12.dp))
+                // On-device model tuning (window/sampler, auto-warm, clear,
+                // status) lives on its own full screen -- opened via the nav
+                // host like the other tool destinations.
+                FullWidthMenuButton("\u2699\uFE0F  On-Device Model Settings") {
+                    onNavigate("local_model_settings"); onDismiss()
+                }
                 Spacer(Modifier.height(20.dp))
             }
 
