@@ -4,7 +4,7 @@
 
 const STEPS = [
     "welcome", "tailscale", "api_keys", "embeddings",
-    "optional_integrations", "transcription", "pair_phone", "cli_agents", "operator", "done",
+    "optional_integrations", "transcription", "web_search", "pair_phone", "cli_agents", "operator", "done",
 ];
 
 // IMPORTANT: if STEPS array changes, update STEP_LABELS to match.
@@ -19,6 +19,7 @@ const STEP_LABELS = {
     embeddings: "MEMORY & SEARCH",
     optional_integrations: "EXTRAS",
     transcription: "SPEECH",
+    web_search: "WEB SEARCH",
     pair_phone: "PAIR",
     cli_agents: "AGENTS",
     operator: "OPERATOR",
