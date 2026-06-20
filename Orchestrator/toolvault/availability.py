@@ -16,6 +16,17 @@ PROVIDER_ENV = {
     "grok_x": "XAI_API_KEY", "duckduckgo": None,
 }
 
+# provider id -> the ToolVault tool name that implements it
+PROVIDER_TOOL = {
+    "perplexity": "perplexity_web_search",
+    "openai": "openai_web_search",
+    "gemini": "gemini_web_search",
+    "grok": "grok_web_search",
+    "grok_x": "grok_x_search",
+    "duckduckgo": "duckduckgo_web_search",
+}
+WEB_SEARCH_TOOLS = set(PROVIDER_TOOL.values())
+
 
 def _read_env() -> dict:
     env = {}
@@ -65,3 +76,25 @@ def filter_available(entries: list, ctx=None) -> list:
     enabled = enabled_web_search_providers()
     env = _read_env()
     return [e for e in entries if is_available(e, enabled, env)]
+
+
+def default_web_search_hint(tool_names) -> str:
+    """Return a one-paragraph web-search guidance hint for the system prompt,
+    or "" if no web-search tool is in tool_names. Built from WEB_SEARCH_DEFAULT
+    + the provided injected tool set. Stdlib-only (lean-venv-safe)."""
+    present = [t for t in tool_names if t in WEB_SEARCH_TOOLS]
+    if not present:
+        return ""
+    env = _read_env()
+    default_provider = (env.get("WEB_SEARCH_DEFAULT") or "").strip()
+    default_tool = PROVIDER_TOOL.get(default_provider)
+    parts = []
+    if default_tool and default_tool in present:
+        parts.append(f"For web search, prefer `{default_tool}`.")
+    else:
+        parts.append("Several web search tools are available.")
+    if len([t for t in present if t != "grok_x_search"]) > 1:
+        parts.append("Other web search engines are available too \u2014 you may run more than one to cross-check results.")
+    if "grok_x_search" in present:
+        parts.append("Use `grok_x_search` for real-time X (Twitter) discussion.")
+    return "WEB SEARCH GUIDANCE: " + " ".join(parts)

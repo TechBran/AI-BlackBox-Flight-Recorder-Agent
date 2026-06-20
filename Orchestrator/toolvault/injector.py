@@ -367,7 +367,11 @@ def build_tool_instructions(
         "Use the toolvault tool to discover additional tools not listed here.\n"
     )
 
-    return header + "\n\n".join(sections) + "\n"
+    result = header + "\n\n".join(sections) + "\n"
+    hint = availability.default_web_search_hint(tool_names)
+    if hint:
+        result += "\n" + hint + "\n"
+    return result
 
 
 def _summarize_parameters(parameters: Optional[Dict]) -> List[str]:
