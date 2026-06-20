@@ -40,6 +40,19 @@ except ImportError:
 BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
+# The six per-provider web-search tools replaced the generic web_search tool.
+# They require real provider API keys, which the lean MCP venv lacks, so they
+# CANNOT run in-process here. Route them through the generic backend executor
+# (POST /local/tools/execute) which runs on the FULL backend with real keys.
+WEB_SEARCH_TOOL_NAMES = {
+    "perplexity_web_search",
+    "openai_web_search",
+    "gemini_web_search",
+    "grok_web_search",
+    "grok_x_search",
+    "duckduckgo_web_search",
+}
+
 # Operator resolution (pure decision logic lives in operator_resolution.py).
 # Same-dir import: when this server runs as a bare script
 # (MCP/venv/bin/python MCP/blackbox_mcp_server.py), the script's own directory
@@ -91,7 +104,7 @@ sys.path.insert(0, str(BLACKBOX_ROOT))
 
 # Import web_tools directly (stdlib + requests + bs4 only)
 sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
-from web_tools import perform_web_search, perform_web_fetch
+from web_tools import perform_web_fetch
 
 # E21 (2026-05-17): load tool_registry.py as a STANDALONE module to bypass
 # Orchestrator/tools/__init__.py, which re-exports blackbox_tools — and
@@ -358,13 +371,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             load_snapshot_index(force_refresh=True)
             index = load_snapshot_index()
             return [TextContent(type="text", text=f"Index refreshed. {len(index)} snapshots loaded.")]
-
-        elif name == "web_search":
-            query = arguments["query"]
-            max_results = arguments.get("max_results", 5)
-            recency = arguments.get("search_recency_filter", "month")
-            result = perform_web_search(query, max_results, search_recency_filter=recency)
-            return [TextContent(type="text", text=result)]
 
         elif name == "web_fetch":
             url = arguments["url"]
@@ -963,6 +969,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 if data_g.get("success"):
                     return [TextContent(type="text", text=str(data_g.get("result", "")))]
                 return [TextContent(type="text", text=f"Gmail error: {data_g.get('error') or data_g.get('result') or 'unknown'}")]
+
+            elif name in WEB_SEARCH_TOOL_NAMES:
+                operator = await resolve_operator(arguments.get("operator"))
+                params = {k: v for k, v in arguments.items() if k != "operator"}
+                resp = await client.post(
+                    f"{BLACKBOX_URL}/local/tools/execute",
+                    json={"tool": name, "params": params, "operator": operator},
+                )
+                data_ws = resp.json()
+                if data_ws.get("success"):
+                    return [TextContent(type="text", text=str(data_ws.get("result", "")))]
+                return [TextContent(type="text", text=f"Web search error: {data_ws.get('error') or data_ws.get('result') or 'unknown'}")]
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
