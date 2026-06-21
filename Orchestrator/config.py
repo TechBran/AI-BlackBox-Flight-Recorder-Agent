@@ -182,6 +182,15 @@ CU_MODEL_FILTERS = {
 EMBEDDINGS_ACTIVE_DEFAULT = CFG.get("embeddings", "active", fallback="gemini-embedding-001").strip()
 EMBEDDINGS_STORES_DIR     = str(Path("Manifest") / "embeddings")  # per-model binary vector stores
 OLLAMA_BASE_URL           = CFG.get("embeddings", "ollama_url", fallback="http://localhost:11434").strip()
+# Auto-migration recent-end gap guard (watcher broken-path target selection):
+# a fallback store that is frozen at an old date - missing the newest
+# snapshots - must NOT be auto-activated, or a broken active key would silently
+# lose recent memory from search. Reject a candidate store if it is missing
+# more than EMBEDDINGS_RECENT_GAP_MAX total index ids, OR if it is missing any
+# of the newest EMBEDDINGS_RECENT_GAP_TAIL snapshots (by counter). Prefer
+# "stay broken with a loud banner" over activating a stale store.
+EMBEDDINGS_RECENT_GAP_MAX  = CFG.getint("embeddings", "recent_gap_max", fallback=25)
+EMBEDDINGS_RECENT_GAP_TAIL = CFG.getint("embeddings", "recent_gap_tail", fallback=50)
 
 
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat

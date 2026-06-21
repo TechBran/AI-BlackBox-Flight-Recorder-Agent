@@ -441,6 +441,164 @@ async def test_broken_with_no_viable_target_stays_broken(
     assert _read_health_file(stores_dir)["state"] == "broken"
 
 
+# ── broken: recent-end gap guard on the candidate-store fallback (F4) ─────────
+#
+# A fallback store frozen at an old date (missing the NEWEST snapshots) must
+# NOT be auto-activated — a broken active key would otherwise silently lose
+# recent memory from search. The candidate-#2 block computes each store's
+# missing set against the live snapshot index and rejects a store with a
+# recent-end gap (more than RECENT_GAP_MAX total OR any of the newest
+# RECENT_GAP_TAIL snap_ids). Prefer "stay broken with a loud banner".
+
+
+def _build_index_only(index_path, n=60, start=100):
+    """Snapshot index with monotonic counters SNAP-20260612-{start..start+n-1}.
+
+    No volume bytes needed: the broken path never gap-heals, so the index is
+    consulted ONLY by the gap guard (store.missing). Returns the ordered ids.
+    """
+    index = {}
+    ids = []
+    for i in range(n):
+        sid = f"SNAP-20260612-{start + i}"
+        index[sid] = {
+            "byte_start": 0, "byte_end": 1,
+            "operator": "Brandon", "timestamp": "2026-06-12T00:00:00Z",
+            "type": "normal",
+        }
+        ids.append(sid)
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    fossils._index_cache = None
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_broken_rejects_candidate_store_missing_newest_snapshots(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
+):
+    """The only OTHER ready store is frozen old (missing the newest ids) → it is
+    rejected for a recent-end gap and the watcher stays broken, loudly."""
+    index_path, stores_dir, _ = env
+    calls, _ = migration_spy
+    ids = _build_index_only(index_path, n=60)          # 60 indexed snapshots
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")  # openai ready
+    rng = np.random.default_rng(11)
+    # openai store holds ONLY the oldest 10 — missing all 50 newest → stale
+    get_store(OPENAI_SLUG).append_many(
+        [(ids[i], rng.standard_normal(3072)) for i in range(10)]
+    )
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == []  # the stale store was NOT auto-activated
+    assert "no viable auto-migrate target" in health["detail"]
+    # the rejection reason names the slug + the recent gap (newest-tail miss)
+    assert OPENAI_SLUG in health["detail"]
+    assert "newest" in health["detail"]
+    assert _read_health_file(stores_dir)["state"] == "broken"
+
+
+@pytest.mark.asyncio
+async def test_broken_rejects_candidate_store_over_total_gap_cap(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
+):
+    """A store that HAS the newest tail but is missing more than RECENT_GAP_MAX
+    total ids is still rejected (the total-gap arm of the guard)."""
+    index_path, stores_dir, _ = env
+    calls, _ = migration_spy
+    ids = _build_index_only(index_path, n=60)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    # tighten the tail so the newest-tail arm passes, isolating the total-gap arm
+    monkeypatch.setattr(watcher, "RECENT_GAP_TAIL", 5)
+    monkeypatch.setattr(watcher, "RECENT_GAP_MAX", 25)
+    rng = np.random.default_rng(12)
+    # has the newest 5 (tail ok) but a big hole in the middle: missing 30 total
+    have = ids[:25] + ids[55:]   # 25 + 5 = 30 present, 30 missing (>25 cap)
+    get_store(OPENAI_SLUG).append_many(
+        [(sid, rng.standard_normal(3072)) for sid in have]
+    )
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == []
+    assert OPENAI_SLUG in health["detail"]
+    assert _read_health_file(stores_dir)["state"] == "broken"
+
+
+@pytest.mark.asyncio
+async def test_broken_accepts_complete_candidate_store_no_false_rejection(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
+):
+    """A COMPLETE candidate store (no recent-end gap) is still pickable — the
+    guard must not produce false rejections."""
+    index_path, stores_dir, _ = env
+    calls, _ = migration_spy
+    ids = _build_index_only(index_path, n=60)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    rng = np.random.default_rng(13)
+    # openai store has EVERY indexed snapshot → no gap → viable
+    get_store(OPENAI_SLUG).append_many(
+        [(sid, rng.standard_normal(3072)) for sid in ids]
+    )
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == [OPENAI_SLUG]  # complete store picked, no false rejection
+    assert "most complete cloud ready store" in health["detail"]
+
+
+@pytest.mark.asyncio
+async def test_broken_accepts_store_with_small_tail_only_gap(
+    env, catalogs, broken_provider, migration_spy, prior_broken_health, monkeypatch
+):
+    """A store missing only a handful of ids — none in the newest tail and
+    under the total cap — is NOT rejected (the guard is recent-end specific,
+    not 'must be 100% complete')."""
+    index_path, stores_dir, _ = env
+    calls, _ = migration_spy
+    ids = _build_index_only(index_path, n=60)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(watcher, "RECENT_GAP_TAIL", 50)
+    monkeypatch.setattr(watcher, "RECENT_GAP_MAX", 25)
+    rng = np.random.default_rng(14)
+    # missing exactly 3 ids, all OLD (indices 0-2), none in the newest 50 →
+    # 3 total < 25 cap AND 0 of the newest-50 missing → still viable
+    have = ids[3:]
+    get_store(OPENAI_SLUG).append_many(
+        [(sid, rng.standard_normal(3072)) for sid in have]
+    )
+
+    health = await watcher.run_health_check()
+
+    assert health["state"] == "broken"
+    assert calls == [OPENAI_SLUG]  # small old-only gap is acceptable
+    assert "most complete cloud ready store" in health["detail"]
+
+
+@pytest.mark.asyncio
+async def test_pick_migration_target_gap_guard_unit(
+    env, catalogs, monkeypatch
+):
+    """Direct _pick_migration_target unit: a stale candidate is rejected with a
+    reason naming the recent gap; the function returns (None, reasons)."""
+    index_path, stores_dir, _ = env
+    ids = _build_index_only(index_path, n=60)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    rng = np.random.default_rng(15)
+    get_store(OPENAI_SLUG).append_many(
+        [(ids[i], rng.standard_normal(3072)) for i in range(10)]  # oldest 10 only
+    )
+
+    target, why = await watcher._pick_migration_target(ACTIVE, None)
+
+    assert target is None
+    assert OPENAI_SLUG in why
+    assert "newest" in why
+
+
 @pytest.mark.asyncio
 async def test_broken_while_migration_already_running(
     env, catalogs, broken_provider, prior_broken_health, monkeypatch

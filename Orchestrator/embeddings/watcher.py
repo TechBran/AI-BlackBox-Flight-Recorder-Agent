@@ -96,6 +96,16 @@ WATCHER_FIRST_DELAY_S = 5 * 60     # don't pile onto startup
 WATCH_INTERVAL_OK_S = 24 * 3600    # daily while ok/superseded
 WATCH_INTERVAL_BROKEN_S = 3600     # hourly while broken: confirm/recover fast
 
+# Recent-end gap guard on auto-migration target selection (F4): a fallback
+# store frozen at an old date — missing the NEWEST snapshots — must never be
+# auto-activated, or a broken active key silently loses recent memory from
+# search. A candidate store is rejected if it is missing more than
+# RECENT_GAP_MAX index ids total, OR if it is missing ANY of the newest
+# RECENT_GAP_TAIL snapshots (by counter). Defaults from config; module-level
+# so tests can monkeypatch them.
+RECENT_GAP_MAX = config.EMBEDDINGS_RECENT_GAP_MAX    # max total missing ids
+RECENT_GAP_TAIL = config.EMBEDDINGS_RECENT_GAP_TAIL  # newest-N that must all be present
+
 # Cloud preflight = key present (same contract as embeddings_routes).
 _CLOUD_KEY_ATTRS = {"gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -199,6 +209,51 @@ async def _catalog_check(entry: dict) -> tuple:
     return model_id in ids, _pick_successor(model_id, candidates), None
 
 
+# ── recent-end gap guard (F4) ────────────────────────────────────────────────
+
+_SNAP_RX = re.compile(r"SNAP-(\d{8})-(\d+)")
+
+
+def _snap_sort_key(snap_id: str) -> tuple:
+    """(date, counter) ordering key; unparseable ids sort oldest (front)."""
+    m = _SNAP_RX.match(snap_id)
+    return (m.group(1), int(m.group(2))) if m else ("", 0)
+
+
+def _newest_tail(index_ids, n: int) -> set:
+    """The n newest snap_ids by (date, counter) — the must-be-present tail."""
+    return set(sorted(index_ids, key=_snap_sort_key)[-n:]) if index_ids else set()
+
+
+def _recent_gap_reason(slug: str, store, index_ids, newest_tail) -> "str | None":
+    """Reject reason if `store` has a recent-end gap, else None.
+
+    A candidate is unsafe when its missing set (index ids not yet embedded)
+    either exceeds RECENT_GAP_MAX total OR includes any of the newest-tail
+    ids. Either arm means activating it would drop recent snapshots from
+    search — better to stay broken with a loud banner.
+    """
+    try:
+        present = store.ids()
+    except Exception as e:  # noqa: BLE001 — an unreadable store is not a safe target
+        return f"rejected {slug}: store unreadable ({type(e).__name__})"
+    missing = index_ids - present
+    if not missing:
+        return None
+    missing_tail = missing & newest_tail
+    if missing_tail:
+        return (
+            f"rejected {slug}: missing {len(missing_tail)} of the newest "
+            f"{len(newest_tail)} snapshots (recent-end gap)"
+        )
+    if len(missing) > RECENT_GAP_MAX:
+        return (
+            f"rejected {slug}: missing {len(missing)} snapshots "
+            f"(> recent-gap cap {RECENT_GAP_MAX})"
+        )
+    return None
+
+
 # ── broken-path target selection ─────────────────────────────────────────────
 
 async def _pick_migration_target(active: str, successor_slug: "str | None") -> tuple:
@@ -226,24 +281,51 @@ async def _pick_migration_target(active: str, successor_slug: "str | None") -> t
     #    stores outrank cloud ones regardless of count: an automatic kick must
     #    never opt the operator into cloud spend while a local store exists
     #    (design-doc spend-consent rule); cloud is eligible only when none is.
-    stores = [
+    #    F4 recent-end gap guard: a store frozen at an old date (missing the
+    #    newest snapshots) is NOT a safe target — auto-activating it would
+    #    silently drop recent memory from search. Each candidate is checked
+    #    against the live snapshot index and rejected on a recent-end gap,
+    #    leaving the watcher broken (loud banner) over a stale cutover.
+    from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
+    try:
+        index_ids = set((await asyncio.to_thread(load_snapshot_index)).keys())
+    except Exception as e:  # noqa: BLE001 — no index = can't vet recency = no pick
+        index_ids = None
+        reasons.append(f"snapshot index unavailable for gap check ({type(e).__name__})")
+    newest_tail = _newest_tail(index_ids, RECENT_GAP_TAIL) if index_ids else set()
+
+    candidates = [
         s for s in list_stores(Path(config.EMBEDDINGS_STORES_DIR))
         if s["slug"] != active and s["slug"] in EMBEDDING_MODELS
         and s["count"] > 0 and ready(s["slug"])
     ]
-    if stores:
-        best = min(
-            stores,
-            key=lambda s: (
-                EMBEDDING_MODELS[s["slug"]]["privacy"] != "local",  # local first
-                -s["count"],                                        # then biggest
-            ),
+    # local-first, then biggest — same precedence; the guard filters within it
+    candidates.sort(
+        key=lambda s: (
+            EMBEDDING_MODELS[s["slug"]]["privacy"] != "local",
+            -s["count"],
         )
+    )
+    safe = []
+    for s in candidates:
+        if index_ids is None:
+            # Without an index we cannot prove recency — refuse to auto-activate
+            # any existing store rather than risk a silent recent-memory loss.
+            reasons.append(f"{s['slug']}: skipped (recency unverifiable)")
+            continue
+        reason = _recent_gap_reason(s["slug"], get_store(s["slug"]), index_ids, newest_tail)
+        if reason is None:
+            safe.append(s)
+        else:
+            reasons.append(reason)
+    if safe:
+        best = safe[0]  # already sorted local-first, biggest-first
         privacy = EMBEDDING_MODELS[best["slug"]]["privacy"]
         return best["slug"], (
             f"most complete {privacy} ready store ({best['count']} vectors)"
         )
-    reasons.append("no other ready store")
+    if not candidates:
+        reasons.append("no other ready store")
 
     # 3. lightest local model when the daemon already has it pulled
     fallback = _local_fallback_slug()
