@@ -982,6 +982,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     return [TextContent(type="text", text=str(data_ws.get("result", "")))]
                 return [TextContent(type="text", text=f"Web search error: {data_ws.get('error') or data_ws.get('result') or 'unknown'}")]
 
+            elif name in {t.name for t in get_mcp_tools()}:
+                # Generic catch-all: any real ToolVault tool not handled above
+                # (Google Workspace + any future tool) routes to the full backend
+                # executor, which has the real provider keys/creds. No per-tool
+                # MCP edits needed. Body shape matches the web_search branch.
+                operator = await resolve_operator(arguments.get("operator"))
+                params = {k: v for k, v in arguments.items() if k != "operator"}
+                resp = await client.post(
+                    f"{BLACKBOX_URL}/local/tools/execute",
+                    json={"tool": name, "params": params, "operator": operator},
+                )
+                data_tv = resp.json()
+                if data_tv.get("success"):
+                    return [TextContent(type="text", text=str(data_tv.get("result", "")))]
+                return [TextContent(type="text", text=f"Tool error: {data_tv.get('error') or data_tv.get('result') or 'unknown'}")]
+
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
