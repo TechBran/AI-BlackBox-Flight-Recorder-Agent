@@ -1,0 +1,34 @@
+{
+  "name": "update_sheet_values",
+  "description": "Write a 2D array of values into a range of a Google Spreadsheet. Values are entered with USER_ENTERED parsing (strings are interpreted as if typed in the UI — formulas, dates and numbers are parsed). Use read_sheet (no range) first to discover sheet titles and dimensions.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "spreadsheet_id": {
+        "type": "string",
+        "description": "The Google Sheets spreadsheet ID to write into."
+      },
+      "range": {
+        "type": "string",
+        "description": "A1-notation range to write (e.g. \"Sheet1!A1\" — the top-left anchor; values fill down/right from there)."
+      },
+      "values": {
+        "type": "array",
+        "items": {"type": "array"},
+        "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]]."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["spreadsheet_id", "range", "values"]
+  },
+  "returns": "JSON with updated_range and updated_cells (or an error string).",
+  "example": "update_sheet_values(spreadsheet_id=\"1AbC...\", range=\"Sheet1!A1\", values=[[\"Name\", \"Total\"], [\"Widget\", 42]])",
+  "notes": "valueInputOption is USER_ENTERED, so a string like \"=SUM(A1:A5)\" becomes a formula and \"5/1/2026\" becomes a date. For structural edits (add/delete sheets, formatting, merges) use sheets_batch_update instead."
+}

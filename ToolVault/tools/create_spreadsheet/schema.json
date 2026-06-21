@@ -1,0 +1,25 @@
+{
+  "name": "create_spreadsheet",
+  "description": "Create a new Google Spreadsheet in the operator's Google Drive. Returns the spreadsheet_id (use it with read_sheet / update_sheet_values / sheets_batch_update) and a shareable edit URL.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "Title for the new spreadsheet."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["title"]
+  },
+  "returns": "JSON with spreadsheet_id, title, and a docs.google.com/spreadsheets edit url (or an error string).",
+  "example": "create_spreadsheet(title=\"Q3 Budget\")",
+  "notes": "Requires Google Workspace connected for the operator (Sheets scope granted by the Google sign-in in onboarding). After creating, write data with update_sheet_values or restructure with sheets_batch_update."
+}

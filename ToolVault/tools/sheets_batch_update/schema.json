@@ -1,0 +1,30 @@
+{
+  "name": "sheets_batch_update",
+  "description": "Apply a raw Google Sheets API batchUpdate to a spreadsheet for full structural editing (add/delete/rename sheets, formatting, merges, conditional formatting, freezing rows, writing cells, etc). You supply the requests array exactly as the Google Sheets API expects it; it is passed through verbatim. Use read_sheet (no range) first to get sheet titles and sheet_id values to target.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "spreadsheet_id": {
+        "type": "string",
+        "description": "The Google Sheets spreadsheet ID to edit."
+      },
+      "requests": {
+        "type": "array",
+        "items": {"type": "object"},
+        "description": "a Google Sheets API batchUpdate `requests` array (full structural editing). Each item is one Sheets request object (e.g. addSheet, repeatCell, updateCells, mergeCells, deleteSheet)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["spreadsheet_id", "requests"]
+  },
+  "returns": "JSON with spreadsheet_id, applied (request count), and the API replies array (or an error string).",
+  "example": "sheets_batch_update(spreadsheet_id=\"1AbC...\", requests=[{\"addSheet\": {\"properties\": {\"title\": \"Summary\"}}}])",
+  "notes": "requests is the RAW Google Sheets API array, passed through verbatim. Worked examples:\n\n1) Add a new sheet/tab:\n[{\"addSheet\": {\"properties\": {\"title\": \"Summary\"}}}]\n\n2) Bold the header row of sheet 0 (repeatCell over a range):\n[{\"repeatCell\": {\"range\": {\"sheetId\": 0, \"startRowIndex\": 0, \"endRowIndex\": 1}, \"cell\": {\"userEnteredFormat\": {\"textFormat\": {\"bold\": true}}}, \"fields\": \"userEnteredFormat.textFormat.bold\"}}]\n\n3) Write values into cells (updateCells, 0-based indices):\n[{\"updateCells\": {\"start\": {\"sheetId\": 0, \"rowIndex\": 0, \"columnIndex\": 0}, \"rows\": [{\"values\": [{\"userEnteredValue\": {\"stringValue\": \"Name\"}}, {\"userEnteredValue\": {\"stringValue\": \"Total\"}}]}], \"fields\": \"userEnteredValue\"}}]\n\nThe sheetId comes from read_sheet (sheet_id). For simply writing a block of values, update_sheet_values (A1 + USER_ENTERED) is simpler than updateCells."
+}

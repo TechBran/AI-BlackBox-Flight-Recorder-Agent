@@ -1,0 +1,29 @@
+{
+  "name": "read_sheet",
+  "description": "Read a Google Spreadsheet by its spreadsheet_id. With a range (A1 notation, e.g. \"Sheet1!A1:C10\") it returns the cell values. Without a range it returns the sheet metadata (each sheet's title + grid rows/cols + sheet_id) so you can discover what ranges exist before reading or editing.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "spreadsheet_id": {
+        "type": "string",
+        "description": "The Google Sheets spreadsheet ID (from create_spreadsheet or a docs.google.com/spreadsheets URL)."
+      },
+      "range": {
+        "type": "string",
+        "description": "Optional A1-notation range to read (e.g. \"Sheet1!A1:C10\" or \"Data\"). If omitted, returns the sheet metadata instead of values."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["spreadsheet_id"]
+  },
+  "returns": "With a range: JSON {range, values}. Without a range: JSON {sheets: [{title, rows, cols, sheet_id}]}. (Or an error string.)",
+  "example": "read_sheet(spreadsheet_id=\"1AbC...\", range=\"Sheet1!A1:C10\")",
+  "notes": "Call read_sheet without a range first to discover sheet titles and dimensions, then read or edit a specific range. The sheet_id values are what sheets_batch_update requests reference."
+}
