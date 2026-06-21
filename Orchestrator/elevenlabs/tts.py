@@ -52,7 +52,7 @@ def _post(text: str, voice_id: str, model_id: str, output_format: str,
         headers=client.auth_headers(),
         params={"output_format": output_format},
         json=body,
-        timeout=60,
+        timeout=120,  # ElevenLabs TTS can be slow to generate; 60s cut off auto-TTS (Brandon 2026-06-20)
     )
 
 
