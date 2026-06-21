@@ -1,0 +1,30 @@
+{
+  "name": "slides_batch_update",
+  "description": "Apply a raw Google Slides API batchUpdate to a presentation for full structural editing (create/delete slides, insert text boxes and shapes, insert/replace text, add images, format text, move/resize elements, etc). You supply the requests array exactly as the Google Slides API expects it; it is passed through verbatim. Use read_presentation first to get slide and pageElement object_ids to target.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "presentation_id": {
+        "type": "string",
+        "description": "The Google Slides presentation ID to edit."
+      },
+      "requests": {
+        "type": "array",
+        "items": {"type": "object"},
+        "description": "a Google Slides API batchUpdate `requests` array (full structural editing). Each item is one Slides request object (e.g. createSlide, insertText, createShape, deleteObject, replaceAllText)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["presentation_id", "requests"]
+  },
+  "returns": "JSON with presentation_id, applied (request count), and the API replies array (or an error string).",
+  "example": "slides_batch_update(presentation_id=\"1AbC...\", requests=[{\"createSlide\": {\"slideLayoutReference\": {\"predefinedLayout\": \"TITLE_AND_BODY\"}}}])",
+  "notes": "requests is the RAW Google Slides API array, passed through verbatim. Worked examples:\n\n1) Add a new slide with a predefined layout:\n[{\"createSlide\": {\"objectId\": \"slide_x\", \"slideLayoutReference\": {\"predefinedLayout\": \"TITLE_AND_BODY\"}}}]\n\n2) Insert text into an existing shape/placeholder (objectId from read_presentation):\n[{\"insertText\": {\"objectId\": \"title_1\", \"insertionIndex\": 0, \"text\": \"Quarterly Review\"}}]\n\n3) Create a text box shape on a slide, then fill it (two requests):\n[{\"createShape\": {\"objectId\": \"box_1\", \"shapeType\": \"TEXT_BOX\", \"elementProperties\": {\"pageObjectId\": \"slide_1\", \"size\": {\"width\": {\"magnitude\": 3000000, \"unit\": \"EMU\"}, \"height\": {\"magnitude\": 1000000, \"unit\": \"EMU\"}}, \"transform\": {\"scaleX\": 1, \"scaleY\": 1, \"translateX\": 500000, \"translateY\": 500000, \"unit\": \"EMU\"}}}}, {\"insertText\": {\"objectId\": \"box_1\", \"insertionIndex\": 0, \"text\": \"Hello\"}}]\n\nThe slide and element object_ids come from read_presentation. When you supply your own objectId in createSlide/createShape, reference that same id in follow-up insertText requests."
+}

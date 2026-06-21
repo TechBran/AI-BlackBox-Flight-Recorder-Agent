@@ -1,0 +1,25 @@
+{
+  "name": "read_presentation",
+  "description": "Read a Google Slides presentation by its presentation_id. Returns the deck's title plus a structured list of slides — each slide's objectId and its pageElements (each element's objectId, type, and any text) — so you can discover what to target before editing with slides_batch_update.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "presentation_id": {
+        "type": "string",
+        "description": "The Google Slides presentation ID (from create_presentation or a docs.google.com/presentation URL)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["presentation_id"]
+  },
+  "returns": "JSON {presentation_id, title, slides: [{object_id, page_elements: [{object_id, type, text?}]}]} (or an error string).",
+  "example": "read_presentation(presentation_id=\"1AbC...\")",
+  "notes": "Call read_presentation first to get the slide object_ids and pageElement object_ids; those are what slides_batch_update requests reference (e.g. insertText targets a shape's object_id)."
+}
