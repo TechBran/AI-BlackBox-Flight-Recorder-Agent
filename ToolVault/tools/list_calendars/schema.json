@@ -1,0 +1,29 @@
+{
+  "name": "list_calendars",
+  "description": "List the calendars on the operator's Google account (the calendar list). Returns each calendar's id (use it as calendar_id with the other calendar tools), summary (name), whether it is the primary calendar, and the operator's accessRole.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": []
+  },
+  "returns": "JSON array of calendar objects {id, summary, primary, accessRole} (or an error string).",
+  "example": "list_calendars()",
+  "notes": "Requires Google Workspace connected for the operator. Use this to discover a calendar's id, then pass that id as calendar_id to create_event / list_events / update_event / delete_event. The calendar with primary=true is the default 'primary' calendar."
+}

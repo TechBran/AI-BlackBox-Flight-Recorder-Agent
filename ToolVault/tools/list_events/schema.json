@@ -1,0 +1,44 @@
+{
+  "name": "list_events",
+  "description": "List events on the operator's Google Calendar within a time window. Provide time_min and time_max as RFC3339 datetimes; recurring events are expanded into individual instances ordered by start time. Returns a list of event objects (id, summary, start, end, status, htmlLink, attendees, ...).",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "time_min": {
+        "type": "string",
+        "description": "Window start (inclusive lower bound) as an RFC3339 datetime, e.g. '2026-06-20T00:00:00Z'."
+      },
+      "time_max": {
+        "type": "string",
+        "description": "Window end (exclusive upper bound) as an RFC3339 datetime, e.g. '2026-06-21T00:00:00Z'."
+      },
+      "calendar_id": {
+        "type": "string",
+        "description": "Optional. Calendar id to query (default 'primary'). Use list_calendars to discover other calendar ids."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "time_min",
+      "time_max"
+    ]
+  },
+  "returns": "JSON array of event objects {id, summary, start, end, status, htmlLink, ...} (or an error string). An empty array means no events in the window.",
+  "example": "list_events(time_min=\"2026-06-20T00:00:00Z\", time_max=\"2026-06-21T00:00:00Z\")",
+  "notes": "Requires Google Workspace connected for the operator. Both time_min/time_max must be RFC3339 datetimes (include a 'Z' or timezone offset). Results use singleEvents=True + orderBy='startTime' so recurring series are returned as individual instances in chronological order. Take an event's id and pass it to update_event / delete_event."
+}

@@ -1,0 +1,64 @@
+{
+  "name": "create_event",
+  "description": "Create an event on the operator's Google Calendar. Provide a summary (title) and start/end times. Times accept an RFC3339 datetime (e.g. '2026-06-20T09:00:00-07:00' or '...Z') for a timed event, or a plain date (e.g. '2026-06-20') for an all-day event. Returns the created event's id, htmlLink, status, summary, start, and end.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string",
+        "description": "Event title."
+      },
+      "start": {
+        "type": "string",
+        "description": "Start time. RFC3339 datetime (contains 'T', e.g. '2026-06-20T09:00:00Z') for a timed event, OR an all-day date (e.g. '2026-06-20')."
+      },
+      "end": {
+        "type": "string",
+        "description": "End time. Same format as start: RFC3339 datetime for a timed event, OR an all-day date (for all-day events this is the EXCLUSIVE end date)."
+      },
+      "calendar_id": {
+        "type": "string",
+        "description": "Optional. Target calendar id (default 'primary'). Use list_calendars to discover other calendar ids."
+      },
+      "description": {
+        "type": "string",
+        "description": "Optional. Longer event description / notes."
+      },
+      "location": {
+        "type": "string",
+        "description": "Optional. Free-text location."
+      },
+      "attendees": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional. List of attendee email addresses to invite."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "summary",
+      "start",
+      "end"
+    ]
+  },
+  "returns": "JSON {id, htmlLink, status, summary, start, end} for the created event (or an error string).",
+  "example": "create_event(summary=\"Lunch\", start=\"2026-06-20T12:00:00-07:00\", end=\"2026-06-20T13:00:00-07:00\", attendees=[\"a@x.com\"])",
+  "notes": "Requires Google Workspace connected for the operator (Calendar scope granted by the Google sign-in in onboarding). For a timed event include 'T' and a timezone offset (or 'Z') in start/end; for an all-day event pass dates with no 'T' (the end date is exclusive). Use list_calendars to target a calendar other than 'primary'."
+}

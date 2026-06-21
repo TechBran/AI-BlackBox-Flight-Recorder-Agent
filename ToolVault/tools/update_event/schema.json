@@ -1,0 +1,66 @@
+{
+  "name": "update_event",
+  "description": "Update fields of an existing event on the operator's Google Calendar (a partial patch \u2014 only the fields you supply are changed). Identify the event by event_id. start/end accept an RFC3339 datetime OR an all-day date, same as create_event. Returns the updated event.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "description": "The event id to update (from list_events)."
+      },
+      "summary": {
+        "type": "string",
+        "description": "Optional. New event title."
+      },
+      "start": {
+        "type": "string",
+        "description": "Optional. New start. RFC3339 datetime (contains 'T') for a timed event, OR an all-day date."
+      },
+      "end": {
+        "type": "string",
+        "description": "Optional. New end. Same format as start."
+      },
+      "description": {
+        "type": "string",
+        "description": "Optional. New description / notes."
+      },
+      "location": {
+        "type": "string",
+        "description": "Optional. New free-text location."
+      },
+      "attendees": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional. Replacement list of attendee email addresses."
+      },
+      "calendar_id": {
+        "type": "string",
+        "description": "Optional. Calendar id the event lives on (default 'primary')."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "event_id"
+    ]
+  },
+  "returns": "JSON of the updated event (or an error string).",
+  "example": "update_event(event_id=\"abc123\", summary=\"Renamed\", start=\"2026-06-21T10:00:00Z\", end=\"2026-06-21T11:00:00Z\")",
+  "notes": "Requires Google Workspace connected for the operator. This is a partial patch: only the fields you pass are changed; omitted fields are left as-is. start/end follow the same datetime-vs-all-day-date rule as create_event. Supplying attendees REPLACES the attendee list. Get the event_id from list_events."
+}

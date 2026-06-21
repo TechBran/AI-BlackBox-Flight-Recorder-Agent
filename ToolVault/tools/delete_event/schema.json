@@ -1,0 +1,39 @@
+{
+  "name": "delete_event",
+  "description": "Delete an event from the operator's Google Calendar by its event_id. This cancels the event (and notifies attendees) and cannot be undone, so confirm the event_id is correct first.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "description": "The event id to delete (from list_events)."
+      },
+      "calendar_id": {
+        "type": "string",
+        "description": "Optional. Calendar id the event lives on (default 'primary')."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "event_id"
+    ]
+  },
+  "returns": "JSON {deleted: true, event_id} on success (or an error string).",
+  "example": "delete_event(event_id=\"abc123\")",
+  "notes": "Requires Google Workspace connected for the operator. Deletion cannot be undone and will cancel the event for attendees \u2014 verify the event_id with list_events before deleting. Pass calendar_id if the event is not on 'primary'."
+}
