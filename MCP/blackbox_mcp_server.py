@@ -987,6 +987,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 # (Google Workspace + any future tool) routes to the full backend
                 # executor, which has the real provider keys/creds. No per-tool
                 # MCP edits needed. Body shape matches the web_search branch.
+                # NOTE: ordering is load-bearing -- get_mcp_tools() includes the
+                # gmail_*/web_fetch/web_search names too, so any future dedicated
+                # branch MUST be added ABOVE this catch-all or it gets swallowed here.
                 operator = await resolve_operator(arguments.get("operator"))
                 params = {k: v for k, v in arguments.items() if k != "operator"}
                 resp = await client.post(
