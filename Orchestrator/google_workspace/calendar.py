@@ -17,6 +17,7 @@ message because it happens until the user re-consents to the Calendar scope.
 """
 
 from googleapiclient.errors import HttpError
+from Orchestrator.google_workspace._errors import http_error_to_dict
 
 from Orchestrator.gmail.service import get_calendar_service
 
@@ -26,26 +27,7 @@ def _err(msg):
 
 
 def _http_err(e):
-    """Map an HttpError to a customer-facing error dict.
-
-    403 = the operator's stored token predates the Calendar scope; the only fix
-    is to re-run the Google sign-in so the new scope is granted.
-    """
-    status = getattr(e, "status_code", None)
-    if status is None:
-        resp = getattr(e, "resp", None)
-        status = getattr(resp, "status", None)
-    try:
-        status = int(status) if status is not None else None
-    except (TypeError, ValueError):
-        status = None
-    if status == 403:
-        return _err(
-            "Google Workspace needs reconnect to grant Calendar access "
-            "(re-run the Google sign-in in onboarding)"
-        )
-    reason = getattr(e, "reason", None) or str(e)
-    return _err(f"Google Calendar API error: {reason} (status {status})")
+    return http_error_to_dict(e, "Calendar")
 
 
 def _time_field(value):

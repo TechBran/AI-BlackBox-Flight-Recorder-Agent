@@ -16,6 +16,7 @@ message because it happens until the user re-consents to the Drive scope.
 """
 
 from googleapiclient.errors import HttpError
+from Orchestrator.google_workspace._errors import http_error_to_dict
 from googleapiclient.http import MediaInMemoryUpload
 
 from Orchestrator.gmail.service import get_drive_service
@@ -26,26 +27,7 @@ def _err(msg):
 
 
 def _http_err(e):
-    """Map an HttpError to a customer-facing error dict.
-
-    403 = the operator's stored token predates the Drive scope; the only fix is
-    to re-run the Google sign-in so the new scope is granted.
-    """
-    status = getattr(e, "status_code", None)
-    if status is None:
-        resp = getattr(e, "resp", None)
-        status = getattr(resp, "status", None)
-    try:
-        status = int(status) if status is not None else None
-    except (TypeError, ValueError):
-        status = None
-    if status == 403:
-        return _err(
-            "Google Workspace needs reconnect to grant Drive access "
-            "(re-run the Google sign-in in onboarding)"
-        )
-    reason = getattr(e, "reason", None) or str(e)
-    return _err(f"Google Drive API error: {reason} (status {status})")
+    return http_error_to_dict(e, "Drive")
 
 
 # Text export targets for Google-native (application/vnd.google-apps.*) types.
