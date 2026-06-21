@@ -815,46 +815,75 @@ def _compute_tfidf_scores(texts: List[str], terms: List[str]) -> List[float]:
         scores.append(score)
     return scores
 
-def keyword_retrieve(vol_txt: str, query: str, k: int = 3) -> List[str]:
-    """Enhanced keyword retrieval with stop-word filtering, TF-IDF, and n-gram matching."""
+def _keyword_retrieve_scored(vol_txt: str, query: str, k: int = 3) -> List[Tuple[str, str]]:
+    """Core enhanced keyword retrieval (TF-IDF + n-gram boosts).
+
+    Returns ranked ``(snap_id, text)`` tuples so callers can choose ids or text
+    without re-running the scorer. The snap_id is extracted directly from each
+    snapshot block's START marker (canonical id, no text-equality reverse-map).
+    """
     terms = _extract_terms(query)
     bigrams = _generate_ngrams(query, 2)
     trigrams = _generate_ngrams(query, 3)
-    
+
     if not terms and not bigrams and not trigrams:
         return []
 
     snaps = split_snapshots(vol_txt)
     texts = [text for (text, _s, _e) in snaps[:]]  # Get all snapshots (no limit)
-    
+
     # Compute TF-IDF scores
     tfidf_scores = _compute_tfidf_scores(texts, terms)
-    
+
     # Score each snapshot
     scored = []
     for i, text in enumerate(texts):
         lc = text.lower()
-        
+
         # Base TF-IDF score
         score = tfidf_scores[i]
-        
+
         # Boost for exact phrase matches (n-grams)
         for bigram in bigrams:
             if bigram in lc:
                 score += 5.0  # Significant boost for 2-word phrase match
-        
+
         for trigram in trigrams:
             if trigram in lc:
                 score += 10.0  # Even larger boost for 3-word phrase match
-        
-        if score > 0:
-            scored.append((score, text))
-    
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _, t in scored[:k]]
 
-def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> List[str]:
-    """Operator-aware wrapper for enhanced keyword retrieval. Uses index for O(1) operator filtering.
+        if score > 0:
+            # Extract canonical snap_id from this block's START marker.
+            sid_m = START_RX.search(text)
+            sid = sid_m.group("snap") if sid_m else ""
+            scored.append((score, sid, text))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [(sid, text) for _, sid, text in scored[:k]]
+
+
+def keyword_retrieve(vol_txt: str, query: str, k: int = 3) -> List[str]:
+    """Enhanced keyword retrieval with stop-word filtering, TF-IDF, and n-gram matching.
+
+    Thin wrapper over :func:`_keyword_retrieve_scored` (returns snapshot texts).
+    """
+    return [text for _sid, text in _keyword_retrieve_scored(vol_txt, query, k)]
+
+
+def keyword_retrieve_ids(vol_txt: str, query: str, k: int = 3) -> List[str]:
+    """Same ranking as :func:`keyword_retrieve` but returns snap_ids.
+
+    Lets the hybrid fuser combine keyword + semantic results by snap_id without
+    rebuilding the full snap_to_text map or doing an O(n^2) text-equality remap.
+    """
+    return [sid for sid, _text in _keyword_retrieve_scored(vol_txt, query, k)]
+
+def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: str) -> List[Tuple[str, str]]:
+    """Core operator-aware keyword retrieval. Uses index for O(1) operator filtering.
+
+    Returns ranked ``(snap_id, text)`` tuples (carries the canonical snap_id
+    through both the index-scoring stage and the re-scoring refinement stage so
+    the hybrid fuser can combine by id without a text-equality reverse-map).
 
     Special case: "system" operator can see ALL snapshots from all operators.
     """
@@ -872,7 +901,8 @@ def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> 
         # FIX 1: Read as BYTES to use byte offsets correctly (not string slicing)
         vol_bytes = read_volume_bytes(VOL_PATH)
 
-        # Extract texts using byte offsets
+        # Extract texts using byte offsets (snap_id known from the index entry)
+        sids = []
         texts = []
         for snap_id, meta in recent:
             start = meta["byte_start"]
@@ -883,6 +913,7 @@ def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> 
                 snap_text = snap_bytes.decode('utf-8', errors='replace')
             else:
                 snap_text = ""
+            sids.append(snap_id)
             texts.append(snap_text)
 
         # Now run keyword matching on pre-filtered snapshots
@@ -927,25 +958,30 @@ def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> 
                     score += 10.0
 
             if score > 0:
-                scored.append((score, text))
+                scored.append((score, sids[i], text))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        base = [t for _, t in scored[:k]]
+        base = [(sid, t) for _, sid, t in scored[:k]]
     else:
         # Fallback to old method if index not available
-        base = keyword_retrieve(vol_txt, query, k=999999) if query else []  # Get all results (no limit)
-        base = filter_by_operator(base, op)
-    
+        base_texts = keyword_retrieve(vol_txt, query, k=999999) if query else []  # Get all results (no limit)
+        base_texts = filter_by_operator(base_texts, op)
+        # Recover the canonical snap_id from each block's START marker.
+        base = []
+        for t in base_texts:
+            m = START_RX.search(t)
+            base.append((m.group("snap") if m else "", t))
+
     # Re-score after operator filtering (optional refinement)
     terms = _extract_terms(query)
     bigrams = _generate_ngrams(query, 2)
     trigrams = _generate_ngrams(query, 3)
-    
+
     scored = []
-    for t in base:
+    for sid, t in base:
         lc = t.lower()
         score = sum(lc.count(w) for w in terms) if terms else 1
-        
+
         # Boost for phrases
         for bigram in bigrams:
             if bigram in lc:
@@ -953,12 +989,25 @@ def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> 
         for trigram in trigrams:
             if trigram in lc:
                 score += 10.0
-        
+
         if score > 0:
-            scored.append((score, t))
-    
+            scored.append((score, sid, t))
+
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _, t in scored[:k]]
+    return [(sid, t) for _, sid, t in scored[:k]]
+
+
+def keyword_retrieve_for_operator(vol_txt: str, query: str, k: int, op: str) -> List[str]:
+    """Operator-aware wrapper for enhanced keyword retrieval (returns texts).
+
+    Thin wrapper over :func:`_keyword_retrieve_for_operator_scored`.
+    """
+    return [text for _sid, text in _keyword_retrieve_for_operator_scored(vol_txt, query, k, op)]
+
+
+def keyword_retrieve_ids_for_operator(vol_txt: str, query: str, k: int, op: str) -> List[str]:
+    """Same ranking as :func:`keyword_retrieve_for_operator` but returns snap_ids."""
+    return [sid for sid, _text in _keyword_retrieve_for_operator_scored(vol_txt, query, k, op)]
 
 # -----------------------------------------------------------------------------
 # Checkpoint System (Per-Operator Memory Compression)
