@@ -70,6 +70,13 @@ META = {
         "modifiedTime": "2026-06-20T00:00:00Z",
         "webViewLink": "https://drive.google.com/file/d/bin1/view",
     },
+    "draw1": {
+        "id": "draw1",
+        "name": "Sketch",
+        "mimeType": "application/vnd.google-apps.drawing",
+        "modifiedTime": "2026-06-20T00:00:00Z",
+        "webViewLink": "https://docs.google.com/drawings/d/draw1/edit",
+    },
 }
 
 
@@ -89,7 +96,8 @@ class FakeFiles:
         self._recorder["list_q"] = q
         self._recorder["list_page_size"] = pageSize
         self._recorder["list_fields"] = fields
-        return FakeRequest({"files": list(CANNED_FILES)})
+        files = [] if self._recorder.get("empty_list") else list(CANNED_FILES)
+        return FakeRequest({"files": files})
 
     def get(self, fileId=None, fields=None):
         self._recorder.setdefault("get_ids", []).append(fileId)
@@ -179,6 +187,18 @@ def test_get_drive_file_plain_text_binary_decodes(recorder):
     assert result["id"] == "txt1"
     assert recorder["get_media_id"] == "txt1"
     assert result["content"] == "hello"
+
+
+def test_get_drive_file_native_no_export_returns_note(recorder):
+    # A Google-native type with NO mapped text export (e.g. a Drawing) must
+    # return metadata + a note WITHOUT calling export, and must not crash.
+    result = drive.get_drive_file("op", "draw1")
+    assert "error" not in result
+    assert result["id"] == "draw1"
+    assert "content" not in result
+    assert "note" in result
+    # export was NOT attempted for an unmapped native type
+    assert "export_id" not in recorder
 
 
 def test_get_drive_file_non_utf8_binary_returns_note(recorder):
@@ -343,3 +363,20 @@ def test_search_drive_files_executor_success(monkeypatch, recorder):
     payload = json.loads(res.result)
     assert isinstance(payload, list)
     assert payload[0]["id"] == "f1"
+
+
+def test_search_drive_files_executor_empty_list_is_success(monkeypatch, recorder):
+    # An empty result list is a SUCCESS, not a failure. This locks the bare-list
+    # executor contract (ok = not (isinstance(result, dict) and "error" in result))
+    # against a future refactor back to the sibling `"error" not in result`, which
+    # would misread an empty list.
+    import Orchestrator.gmail.service as svc
+    monkeypatch.setattr(svc, "workspace_connected", lambda op: True)
+    recorder["empty_list"] = True
+    mod = _load_executor("search_drive_files")
+    res = _run(mod.execute(
+        {"query": "name contains 'nomatch'", "operator": "op"},
+        ToolContext(operator="op"),
+    ))
+    assert res.success is True
+    assert json.loads(res.result) == []
