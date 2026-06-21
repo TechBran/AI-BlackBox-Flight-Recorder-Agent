@@ -194,6 +194,123 @@ def test_semantic_search_failure_returns_empty_list(capsys):
     assert "[SEMANTIC] Query embedding failed" in out
 
 
+# ── fast provider-down health signal (F8) ────────────────────────────────────
+#
+# When the active provider's query embed fails, semantic_search returns []
+# gracefully — but the UI banner used to stay "ok" until the watcher's next
+# pass (up to 24h). A small consecutive-failure counter flips health.json to
+# "degraded" after FAIL_THRESHOLD failures so the outage is visible fast, and
+# resets on the next success. Best-effort: a health-write failure never breaks
+# search.
+
+
+def _read_health_state(stores_dir):
+    import json
+    from pathlib import Path
+    p = Path(stores_dir) / "health.json"
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_fail_counter():
+    """Each F8 test starts from a clean consecutive-failure counter."""
+    search._reset_query_fail_counter()
+    yield
+    search._reset_query_fail_counter()
+
+
+def test_provider_down_flips_health_degraded_after_threshold(tmp_path, monkeypatch):
+    """Three consecutive query-embed failures flip health.json to degraded,
+    without waiting for the watcher's 24h pass."""
+    stores_dir = tmp_path / "embeddings"
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
+    monkeypatch.setattr(search.config, "EMBEDDINGS_QUERY_FAIL_THRESHOLD", 3)
+    _install_fake(GEMINI_SLUG, [0.0] * DIMS, fail=True)
+
+    # below threshold: no health flip yet (avoid false banner on a single blip)
+    assert search.semantic_search("q") == []
+    assert _read_health_state(stores_dir) is None
+    assert search.semantic_search("q") == []
+    assert _read_health_state(stores_dir) is None
+
+    # threshold reached: health.json flips to degraded
+    assert search.semantic_search("q") == []
+    health = _read_health_state(stores_dir)
+    assert health is not None
+    assert health["state"] == "degraded"
+    assert "unreachable" in health["detail"].lower() or "degraded" in health["detail"].lower()
+    # uses the watcher's health.json shape (the routes reader's keys)
+    assert {"state", "detail", "successor", "successor_slug", "checked_at"} <= set(health)
+
+
+def test_query_success_resets_counter_and_restores_ok(tmp_path, monkeypatch):
+    """A success after a degraded flip resets the counter and writes ok health."""
+    stores_dir = tmp_path / "embeddings"
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
+    monkeypatch.setattr(search.config, "EMBEDDINGS_QUERY_FAIL_THRESHOLD", 3)
+
+    # drive it to degraded with a failing provider
+    fail = _install_fake(GEMINI_SLUG, [0.0] * DIMS, fail=True)
+    for _ in range(3):
+        search.semantic_search("q")
+    assert _read_health_state(stores_dir)["state"] == "degraded"
+
+    # provider recovers + a row exists to search → success path runs
+    query = [0.5] * DIMS
+    providers._instances[GEMINI_SLUG] = FakeProvider(query)
+    get_store(GEMINI_SLUG).append("SNAP-OK", [0.5] * DIMS)
+
+    search.semantic_search("q")  # success resets the counter
+    health = _read_health_state(stores_dir)
+    assert health["state"] == "ok"
+
+    # and the counter is reset: the next 2 failures must NOT re-flip immediately
+    providers._instances[GEMINI_SLUG] = FakeProvider([0.0] * DIMS, fail=True)
+    search.semantic_search("q")
+    search.semantic_search("q")
+    assert _read_health_state(stores_dir)["state"] == "ok"  # still ok (under threshold)
+
+
+def test_success_does_not_overwrite_watcher_broken_state(tmp_path, monkeypatch):
+    """A query success must not clobber a watcher-written broken/superseded
+    health — only flip an ok→ok (it owns 'degraded', not the catalog states)."""
+    import json
+    stores_dir = tmp_path / "embeddings"
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
+    (stores_dir / "health.json").write_text(json.dumps({
+        "state": "superseded", "detail": "a newer model is available",
+        "successor": "gemini-embedding-2", "successor_slug": "gemini-embedding-2",
+        "checked_at": "2026-06-20T00:00:00+00:00",
+    }), encoding="utf-8")
+
+    query = [0.5] * DIMS
+    _install_fake(GEMINI_SLUG, query)
+    get_store(GEMINI_SLUG).append("SNAP-OK", [0.5] * DIMS)
+
+    search.semantic_search("q")  # success — must NOT clobber the superseded banner
+
+    assert _read_health_state(stores_dir)["state"] == "superseded"
+
+
+def test_health_write_failure_never_breaks_search(tmp_path, monkeypatch, capsys):
+    """A failed health write is best-effort: search still returns [] cleanly."""
+    stores_dir = tmp_path / "embeddings"
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(stores_dir))
+    monkeypatch.setattr(search.config, "EMBEDDINGS_QUERY_FAIL_THRESHOLD", 1)
+    _install_fake(GEMINI_SLUG, [0.0] * DIMS, fail=True)
+
+    def boom(state, detail):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(search, "_signal_query_health", boom)
+
+    # must not raise even though the health signal blows up
+    assert search.semantic_search("q") == []
+
+
 # ── empty store: [] — the Task-5 inline fallback is GONE (Task 16) ──────────
 
 def test_store_empty_returns_empty_even_with_inline_vectors(monkeypatch):

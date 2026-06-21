@@ -20,7 +20,9 @@ an empty store simply means nothing is embedded yet and yields [].
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
+from Orchestrator import config
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import VectorStore, get_active_slug, get_store
@@ -92,6 +94,92 @@ def _run_async(coro):
     return _EXECUTOR.submit(asyncio.run, coro).result()
 
 
+# ── fast provider-down health signal (F8) ────────────────────────────────────
+#
+# semantic_search returns [] gracefully when the active provider's query embed
+# fails — but the UI health banner used to stay "ok" until the watcher's next
+# pass (WATCH_INTERVAL_OK_S = 24h). That is up to a day of silently-empty
+# searches with no signal. A small consecutive-failure counter flips
+# health.json to "degraded" after config.EMBEDDINGS_QUERY_FAIL_THRESHOLD
+# consecutive QUERY-embed failures, and a success resets it. We reuse the
+# watcher's health.json (same dir, same shape) so /embeddings/status surfaces
+# it with zero new plumbing — and a single blip (under the threshold) never
+# raises a false banner. Everything here is BEST-EFFORT: the call site wraps
+# _signal_query_health in try/except so a failed health write can never break
+# search.
+
+_query_fail_lock = threading.Lock()
+_query_fail_count = 0
+_query_degraded_signalled = False  # we wrote degraded; restore ok on recovery
+
+
+def _reset_query_fail_counter() -> None:
+    """Reset the consecutive query-fail counter (startup / tests)."""
+    global _query_fail_count, _query_degraded_signalled
+    with _query_fail_lock:
+        _query_fail_count = 0
+        _query_degraded_signalled = False
+
+
+def _signal_query_health(state: str, detail: str) -> None:
+    """Write the watcher's health.json with our degraded/ok signal.
+
+    Reuses watcher._write_health (lazy import — watcher→migrate→search would
+    cycle at module load) so the file shape stays identical to the watcher's:
+    {state, detail, successor, successor_slug, checked_at}. An ok restore is
+    conservative: it only clears a health WE flipped to degraded, never a
+    watcher-written broken/superseded banner.
+    """
+    # lazy import breaks the search↔watcher↔migrate import cycle
+    from Orchestrator.embeddings import watcher as _watcher
+
+    if state == "ok":
+        # Only clear a degraded WE wrote — never clobber a watcher catalog state.
+        try:
+            current = _watcher._previous_state()
+        except Exception:  # noqa: BLE001 — unreadable health = leave it alone
+            current = None
+        if current != "degraded":
+            return
+    _watcher._write_health({
+        "state": state,
+        "detail": detail,
+        "successor": None,
+        "successor_slug": None,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _note_query_failure() -> None:
+    """One consecutive query-embed failure; flips health degraded at threshold."""
+    global _query_fail_count, _query_degraded_signalled
+    with _query_fail_lock:
+        _query_fail_count += 1
+        threshold = config.EMBEDDINGS_QUERY_FAIL_THRESHOLD
+        if _query_fail_count >= threshold and not _query_degraded_signalled:
+            _query_degraded_signalled = True
+            should_signal = True
+        else:
+            should_signal = False
+    if should_signal:
+        _signal_query_health(
+            "degraded",
+            "embedding provider unreachable - search temporarily degraded "
+            f"({threshold} consecutive query-embed failures)",
+        )
+
+
+def _note_query_success() -> None:
+    """A query embed succeeded: reset the counter; restore ok if we degraded."""
+    global _query_fail_count, _query_degraded_signalled
+    with _query_fail_lock:
+        was_degraded = _query_degraded_signalled
+        _query_fail_count = 0
+        _query_degraded_signalled = False
+    if was_degraded:
+        _signal_query_health("ok", "")
+
+
 # ── public API (legacy monitoring contracts) ─────────────────────────────────
 
 def generate_embedding_sync(text: str, purpose: str = "document") -> list[float] | None:
@@ -126,7 +214,20 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[s
     query_embedding = generate_embedding_sync(query, purpose="query")
     if not query_embedding:
         print("[SEMANTIC] Query embedding failed, falling back to keyword search")
+        # F8: flip health.json to "degraded" fast after a run of consecutive
+        # query-embed failures, instead of waiting up to 24h for the watcher.
+        # Best-effort — a health-signal failure must NEVER break search.
+        try:
+            _note_query_failure()
+        except Exception as e:  # noqa: BLE001
+            print(f"[SEMANTIC] health signal failed (non-fatal): {e}")
         return []
+    # query embed succeeded → clear any consecutive-failure streak (and restore
+    # an ok banner if we had flipped it to degraded). Best-effort, never raises.
+    try:
+        _note_query_success()
+    except Exception as e:  # noqa: BLE001
+        print(f"[SEMANTIC] health reset failed (non-fatal): {e}")
 
     # Opening the store can raise (corrupt dir, dims mismatch) — legacy
     # semantic_search never raised, and callers like agent_context.py catch

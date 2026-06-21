@@ -191,6 +191,10 @@ OLLAMA_BASE_URL           = CFG.get("embeddings", "ollama_url", fallback="http:/
 # "stay broken with a loud banner" over activating a stale store.
 EMBEDDINGS_RECENT_GAP_MAX  = CFG.getint("embeddings", "recent_gap_max", fallback=25)
 EMBEDDINGS_RECENT_GAP_TAIL = CFG.getint("embeddings", "recent_gap_tail", fallback=50)
+# Fast provider-down health signal (search.py query-embed path): after this
+# many CONSECUTIVE query-embed failures, flip health.json to "degraded"
+# immediately rather than waiting up to 24h for the watcher's next pass.
+EMBEDDINGS_QUERY_FAIL_THRESHOLD = CFG.getint("embeddings", "query_fail_threshold", fallback=3)
 
 
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat
