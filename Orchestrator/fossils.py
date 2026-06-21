@@ -559,6 +559,31 @@ def split_snapshots(vol_txt: str) -> List[Tuple[str, int, int]]:
         pos = e
     return snaps
 
+
+def split_snapshot_spans(vol_txt: str) -> List[Tuple[int, int]]:
+    """Like :func:`split_snapshots` but returns only the (start, end) CHAR offsets,
+    NOT a decoded substring per snapshot.
+
+    Same boundary logic (same START_RX/END_RX scan, same ``pos = e`` advance) so the
+    spans are byte-for-byte the (s, e) that split_snapshots would produce. Callers
+    that scan the whole corpus but only need a handful of substrings can slice
+    ``vol_txt[s:e]`` on demand instead of materializing ~7176 substrings (~89 MB).
+    """
+    spans = []
+    pos = 0
+    while True:
+        m_start = START_RX.search(vol_txt, pos)
+        if not m_start:
+            break
+        m_end = END_RX.search(vol_txt, m_start.end())
+        if not m_end:
+            break
+        s = m_start.start()
+        e = m_end.end()
+        spans.append((s, e))
+        pos = e
+    return spans
+
 def extract_snap_ids(blocks: List[str]) -> List[str]:
     """Extract snapshot IDs from snapshot text blocks.
 
@@ -821,19 +846,43 @@ def _keyword_retrieve_scored(vol_txt: str, query: str, k: int = 3) -> List[Tuple
     if not terms and not bigrams and not trigrams:
         return []
 
-    snaps = split_snapshots(vol_txt)
-    texts = [text for (text, _s, _e) in snaps[:]]  # Get all snapshots (no limit)
+    # PHASE 2b PEAK FIX: keep only the (start, end) char offsets into vol_txt, NOT a
+    # materialized list of ~7176 decoded snapshot substrings (~89 MB of str objects).
+    # Each snapshot is sliced from vol_txt on demand -- twice (corpus df pass, then
+    # scoring pass) -- holding only one lowered substring at a time, and the top-k
+    # substrings are sliced for the return value. This is byte-for-byte identical to
+    # the old _compute_tfidf_scores + scoring loop (same df pass, same `lc.count`,
+    # same `log(num_docs/df)` IDF, same bigram/trigram boosts, same `score > 0`
+    # filter, same iteration/sort order) -- it only changes WHERE/WHEN text is held.
+    spans = split_snapshot_spans(vol_txt)
+    num_docs = len(spans)
 
-    # Compute TF-IDF scores
-    tfidf_scores = _compute_tfidf_scores(texts, terms)
+    # Corpus document-frequency pass (matches _compute_tfidf_scores df pass).
+    df = {}
+    if terms:
+        for term in terms:
+            df[term] = 0
+        for s, e in spans:
+            lc = vol_txt[s:e].lower()
+            for term in terms:
+                if term in lc:
+                    df[term] += 1
 
-    # Score each snapshot
     scored = []
-    for i, text in enumerate(texts):
-        lc = text.lower()
+    for i, (s, e) in enumerate(spans):
+        lc = vol_txt[s:e].lower()
 
-        # Base TF-IDF score
-        score = tfidf_scores[i]
+        # Base TF-IDF score (inlined _compute_tfidf_scores per-doc math; the empty-
+        # terms case yields 1.0 exactly as _compute_tfidf_scores returned [1.0]*n).
+        if not terms:
+            score = 1.0
+        else:
+            score = 0.0
+            for term in terms:
+                tf = lc.count(term)
+                if tf > 0 and df[term] > 0:
+                    idf = math.log(num_docs / df[term])
+                    score += tf * idf
 
         # Boost for exact phrase matches (n-grams)
         for bigram in bigrams:
@@ -845,13 +894,18 @@ def _keyword_retrieve_scored(vol_txt: str, query: str, k: int = 3) -> List[Tuple
                 score += 10.0  # Even larger boost for 3-word phrase match
 
         if score > 0:
-            # Extract canonical snap_id from this block's START marker.
-            sid_m = START_RX.search(text)
-            sid = sid_m.group("snap") if sid_m else ""
-            scored.append((score, sid, text))
+            scored.append((score, i))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [(sid, text) for _, sid, text in scored[:k]]
+    out = []
+    for _, i in scored[:k]:
+        s, e = spans[i]
+        text = vol_txt[s:e]
+        # Extract canonical snap_id from this block's START marker.
+        sid_m = START_RX.search(text)
+        sid = sid_m.group("snap") if sid_m else ""
+        out.append((sid, text))
+    return out
 
 
 def keyword_retrieve(vol_txt: str, query: str, k: int = 3) -> List[str]:
@@ -892,21 +946,10 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
 
         # FIX 1: Read as BYTES to use byte offsets correctly (not string slicing)
         vol_bytes = read_volume_bytes(VOL_PATH)
+        vol_len = len(vol_bytes)
 
-        # Extract texts using byte offsets (snap_id known from the index entry)
-        sids = []
-        texts = []
-        for snap_id, meta in recent:
-            start = meta["byte_start"]
-            end = meta["byte_end"]
-            # Use byte-based extraction instead of string slicing
-            if start < len(vol_bytes) and end <= len(vol_bytes):
-                snap_bytes = vol_bytes[start:end]
-                snap_text = snap_bytes.decode('utf-8', errors='replace')
-            else:
-                snap_text = ""
-            sids.append(snap_id)
-            texts.append(snap_text)
+        # snap_ids are known from the index entries; keep just the id list.
+        sids = [snap_id for snap_id, _meta in recent]
 
         # Now run keyword matching on pre-filtered snapshots
         terms = _extract_terms(query)
@@ -916,17 +959,55 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
         if not terms and not bigrams and not trigrams:
             return []
 
-        tfidf_scores = _compute_tfidf_scores(texts, terms)
+        # PHASE 2b PEAK FIX: do NOT materialize the full decoded `texts` list.
+        # Holding `vol_bytes` (~37 MB) alongside a decoded-string copy of the WHOLE
+        # corpus (~89 MB of str objects) was the per-call high-water mark (~127 MB).
+        # Instead we decode each snapshot on demand (twice -- once for the corpus
+        # document-frequency pass, once for scoring) and keep only the lowered text
+        # for ONE snapshot at a time, then decode the top-k for the return value.
+        # This is byte-for-byte identical to the old _compute_tfidf_scores + scoring
+        # loop (same df pass, same `lc.count(term)` TF, same `log(num_docs/df)` IDF,
+        # same technical/recency/bigram/trigram boosts, same `score > 0` filter, same
+        # iteration/sort order) -- verified bit-equal -- it only changes WHERE/WHEN
+        # text is held. The cost is a second decode pass (CPU), trading it for memory.
+        num_texts = len(recent)
+
+        def _decode_lc(i):
+            meta = recent[i][1]
+            start = meta["byte_start"]
+            end = meta["byte_end"]
+            if start < vol_len and end <= vol_len:
+                return vol_bytes[start:end].decode('utf-8', errors='replace').lower()
+            return ""
+
+        # Corpus document-frequency pass (matches _compute_tfidf_scores df pass).
+        df = {}
+        if terms:
+            for term in terms:
+                df[term] = 0
+            for i in range(num_texts):
+                lc = _decode_lc(i)
+                for term in terms:
+                    if term in lc:
+                        df[term] += 1
+
+        technical_term_count = sum(1 for term in terms if term in TECHNICAL_TERMS)
         scored = []
+        for i in range(num_texts):
+            lc = _decode_lc(i)
 
-        num_texts = len(texts)
-
-        for i, text in enumerate(texts):
-            lc = text.lower()
-            score = tfidf_scores[i]
+            # Base TF-IDF score (inlined _compute_tfidf_scores per-doc math).
+            if not terms:
+                score = 1.0
+            else:
+                score = 0.0
+                for term in terms:
+                    tf = lc.count(term)
+                    if tf > 0 and df[term] > 0:
+                        idf = math.log(num_texts / df[term])
+                        score += tf * idf
 
             # Add technical term boost: if query contains technical terms, boost score
-            technical_term_count = sum(1 for term in terms if term in TECHNICAL_TERMS)
             if technical_term_count > 0:
                 # Check if this snapshot contains those technical terms
                 matched_technical = sum(1 for term in terms if term in TECHNICAL_TERMS and term in lc)
@@ -950,10 +1031,21 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
                     score += 10.0
 
             if score > 0:
-                scored.append((score, sids[i], text))
+                # Hold only the INDEX i (not the decoded text).
+                scored.append((score, i))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        base = [(sid, t) for _, sid, t in scored[:k]]
+        # Decode text for the top-k only (from vol_bytes byte offsets).
+        base = []
+        for _, i in scored[:k]:
+            meta = recent[i][1]
+            start = meta["byte_start"]
+            end = meta["byte_end"]
+            if start < vol_len and end <= vol_len:
+                t = vol_bytes[start:end].decode('utf-8', errors='replace')
+            else:
+                t = ""
+            base.append((sids[i], t))
     else:
         # Fallback to old method if index not available
         base_texts = keyword_retrieve(vol_txt, query, k=999999) if query else []  # Get all results (no limit)
