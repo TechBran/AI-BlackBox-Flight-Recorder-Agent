@@ -51,61 +51,32 @@ def cap_chars(text: str, max_chars: int) -> str:
 
 
 def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") -> List[str]:
-    """Hybrid retrieval combining keyword (TF-IDF) + semantic (embeddings) search.
+    """Hybrid retrieval — thin shim over the canonical retrieve() (Phase 3b).
 
-    Combines both approaches for best results:
-    - Keyword search: Fast, precise for specific terms
-    - Semantic search: Understands intent and context
+    Ranking now lives entirely in Orchestrator.retrieval.retrieve(): RRF fusion of
+    keyword + semantic candidates, a mild recency tie-break, MMR diversity, and a
+    junk-floor instead of a hard threshold. This INTENTIONALLY changes the old
+    40/60 weighted-sum ranking — that is the point of Phase 3b. This function is
+    now just retrieve() + byte-offset text decode (the SAME return type as before:
+    a list of decoded snapshot texts, highest-ranked first).
 
-    Returns top k snapshots ranked by combined score.
+    `vol_txt` is retained for signature/caller compatibility but is UNUSED —
+    retrieve() reads VOL_PATH itself (and embeds the query) internally.
     """
-    # Get more candidates from each method, then combine
-    candidate_k = min(k * 5, 20)  # Get 5x candidates from each (up to 20)
+    # Lazy import: retrieval.py imports from fossils at module top, so importing
+    # retrieve at fossils' module top would create an import cycle.
+    from Orchestrator.retrieval import retrieve
 
-    # 1. Keyword search (TF-IDF + n-grams) -> ranked snap_ids (no text reverse-map).
-    #    keyword_retrieve_ids* preserve the same scoring/recency/operator semantics
-    #    as the text-returning versions; we fuse BY snap_id below.
-    if operator:
-        keyword_ids = keyword_retrieve_ids_for_operator(vol_txt, query, candidate_k, operator)
-    else:
-        keyword_ids = keyword_retrieve_ids(vol_txt, query, candidate_k)
+    scored = retrieve(query, operator=operator, k=k, include_keyword=True)
 
-    # 2. Semantic search (embeddings) - lazy import to avoid circular dependency
-    from Orchestrator.monitoring import semantic_search
-    semantic_results = semantic_search(query, operator=operator, k=candidate_k)
-
-    # Normalize keyword scores (map rank to score): 1.0 for first, ->0.0 for last.
-    keyword_scores = {}
-    for rank, snap_id in enumerate(keyword_ids):
-        keyword_scores[snap_id] = 1.0 - (rank / max(len(keyword_ids), 1))
-
-    # Normalize semantic scores (already 0-1 from cosine similarity)
-    semantic_scores = {snap_id: score for snap_id, score in semantic_results}
-
-    # Combine scores with weights (fuse by snap_id)
-    KEYWORD_WEIGHT = 0.4   # 40% keyword
-    SEMANTIC_WEIGHT = 0.6  # 60% semantic
-
-    combined_scores = {}
-    all_snap_ids = set(keyword_scores.keys()) | set(semantic_scores.keys())
-
-    for snap_id in all_snap_ids:
-        kw_score = keyword_scores.get(snap_id, 0.0)
-        sem_score = semantic_scores.get(snap_id, 0.0)
-        combined_scores[snap_id] = (KEYWORD_WEIGHT * kw_score) + (SEMANTIC_WEIGHT * sem_score)
-
-    # Sort by combined score and take top k
-    sorted_snaps = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:k]
-
-    # Decode ONLY the <=k result snapshots' bytes (was: full snap_to_text rebuild
-    # over ALL ~7176 snapshots on every call). Same operator filter + byte-offset
+    # Decode ONLY the result snapshots' bytes (same operator filter + byte-offset
     # guard as before; a snap_id that is absent/operator-mismatched/out-of-bounds
-    # is skipped (mirrors the old `if snap_id in snap_to_text`).
+    # is skipped).
     index = load_snapshot_index()
     vol_bytes = read_volume_bytes(VOL_PATH)
 
     results = []
-    for snap_id, _score in sorted_snaps:
+    for snap_id, _score in scored:
         meta = index.get(snap_id)
         if not meta:
             continue
@@ -116,7 +87,7 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") ->
         if start < len(vol_bytes) and end <= len(vol_bytes):
             results.append(vol_bytes[start:end].decode('utf-8', errors='replace'))
 
-    print(f"[HYBRID] Combined {len(keyword_ids)} keyword + {len(semantic_results)} semantic results → {len(results)} final")
+    print(f"[HYBRID] retrieve() -> {len(results)} results")
     return results
 
 
