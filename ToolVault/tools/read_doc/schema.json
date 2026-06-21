@@ -1,0 +1,25 @@
+{
+  "name": "read_doc",
+  "description": "Read a Google Doc by its document_id. Returns the plain text plus a structured list of elements with their startIndex/endIndex (and any object/element IDs) so you can target precise docs_batch_update edits.",
+  "category": "google_workspace",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "document_id": {
+        "type": "string",
+        "description": "The Google Docs document ID (from create_doc or a docs.google.com URL)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": ["document_id"]
+  },
+  "returns": "JSON with document_id, title, text, an elements[] index map (startIndex/endIndex/type/text), and inline_object_ids (or an error string).",
+  "example": "read_doc(document_id=\"1AbCdEf...\")",
+  "notes": "The elements[] index map is the key to editing: each entry's startIndex/endIndex tells you exactly which range to target in a docs_batch_update request (e.g. updateTextStyle over a paragraph's range)."
+}
