@@ -42,7 +42,7 @@ from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.models import Task, TaskStatus, TaskType, task_db, task_queue, worker_running
 import Orchestrator.models as models_module  # For modifying worker_running global
 from Orchestrator.media_index import add_media_entry
-from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER
+from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -333,6 +333,37 @@ def process_image_generation(task: Task):
     print(f"[WORKER] Image provider: {provider}")
     images = fn(task.prompt, options)
 
+    # Provider-aware provenance: record the model + the params that ACTUALLY
+    # apply for the routed provider (not gemini's defaults regardless). openai
+    # bills size/quality; grok/gemini use aspectRatio; gemini also has resolution.
+    _IMAGE_MODELS = {
+        "gemini": GOOGLE_IMAGEN_MODEL,
+        "openai": OPENAI_IMAGE_MODEL,
+        "grok": XAI_IMAGE_MODEL,
+    }
+    recorded_model = _IMAGE_MODELS.get(provider, GOOGLE_IMAGEN_MODEL)
+    _num_images = options.get("numberOfImages", 1)
+    if provider == "openai":
+        image_metadata = {
+            "size": options.get("size", "auto"),
+            "quality": options.get("quality", "auto"),
+            "numberOfImages": _num_images,
+            "model": recorded_model,
+        }
+    elif provider == "grok":
+        image_metadata = {
+            "aspect_ratio": options.get("aspectRatio", "16:9"),
+            "numberOfImages": _num_images,
+            "model": recorded_model,
+        }
+    else:  # gemini (default)
+        image_metadata = {
+            "aspect_ratio": options.get("aspectRatio", "16:9"),
+            "resolution": options.get("resolution", "1K"),
+            "numberOfImages": _num_images,
+            "model": recorded_model,
+        }
+
     update_task(task.task_id, progress=70)
 
     # Save all generated images with prompt-based slug filename
@@ -357,11 +388,7 @@ def process_image_generation(task: Task):
             task_id=task.task_id,
             filename=filename,
             file_size=len(image_bytes),
-            extra_metadata={
-                "aspect_ratio": options.get("aspectRatio", "16:9"),
-                "resolution": options.get("resolution", "1K"),
-                "model": GOOGLE_IMAGEN_MODEL
-            }
+            extra_metadata=dict(image_metadata)
         )
 
     # Use first URL as primary result, store all URLs in result_data
@@ -376,9 +403,9 @@ def process_image_generation(task: Task):
         "all_urls": urls,
         "task_id": task.task_id,
         "prompt": task.prompt,
-        "model": GOOGLE_IMAGEN_MODEL,
-        "aspect_ratio": options.get("aspectRatio", "16:9"),
-        "resolution": options.get("resolution", "1K"),
+        "model": recorded_model,
+        "aspect_ratio": image_metadata.get("aspect_ratio"),
+        "resolution": image_metadata.get("resolution"),
         "created_at": now_utc_iso()
     }
     result_data["artifact"] = artifact

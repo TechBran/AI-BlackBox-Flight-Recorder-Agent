@@ -55,7 +55,7 @@ META_TOOL_SCHEMA = {
             },
             "tool_name": {
                 "type": "string",
-                "description": "For read: exact tool name to retrieve (e.g., 'send_sms', 'generate_image')"
+                "description": "For read: exact tool name to retrieve (e.g., 'send_sms', 'gemini_image')"
             },
             "category": {
                 "type": "string",

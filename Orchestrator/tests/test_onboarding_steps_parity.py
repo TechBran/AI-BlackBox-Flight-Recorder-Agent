@@ -21,6 +21,10 @@ ONBOARDING_JS = (
     Path(__file__).resolve().parents[2] / "Portal" / "onboarding" / "onboarding.js"
 )
 
+STEPS_DIR = (
+    Path(__file__).resolve().parents[2] / "Portal" / "onboarding" / "steps"
+)
+
 
 def _frontend_steps() -> list[str]:
     src = ONBOARDING_JS.read_text(encoding="utf-8")
@@ -48,4 +52,22 @@ def test_frontend_step_labels_cover_every_step():
     label_keys = re.findall(r"^\s*([a-z0-9_]+)\s*:", m.group(1), re.MULTILINE)
     assert set(label_keys) == set(ALL_STEPS), (
         f"STEP_LABELS keys {sorted(label_keys)} != ALL_STEPS {sorted(ALL_STEPS)}"
+    )
+
+
+def test_every_dynamically_imported_step_has_a_module_file():
+    """The wizard renders EVERY step via `await import("./steps/<step>.js")`
+    (onboarding.js renderStep) — there is no inline/special-cased step (welcome
+    and done both ship as modules). A step listed in STEPS without a matching
+    Portal/onboarding/steps/<step>.js module is a dead-end: the import throws and
+    the user is stuck on a "coming soon" placeholder with no way to advance.
+    This is exactly how the `image` step shipped broken (C1). Guard it: assert a
+    module file exists for every step the wizard imports.
+    """
+    missing = [s for s in _frontend_steps() if not (STEPS_DIR / f"{s}.js").is_file()]
+    assert not missing, (
+        "Onboarding steps listed in onboarding.js STEPS have NO module under "
+        f"Portal/onboarding/steps/: {missing}. The wizard import() will throw and "
+        "the user gets stuck on a placeholder with no next/skip. Create the "
+        "missing steps/<step>.js module(s)."
     )
