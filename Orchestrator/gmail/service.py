@@ -14,7 +14,15 @@ from googleapiclient.discovery import build
 
 from Orchestrator.config import GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/calendar",
+]
 TOKEN_DIR = Path("Manifest/gmail_tokens")
 TOKEN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -52,9 +60,17 @@ def is_connected(operator: str) -> bool:
     return tokens is not None and "refresh_token" in tokens
 
 
-def get_gmail_service(operator: str):
-    """Build an authenticated Gmail API service for an operator.
-    Returns None if not connected or tokens are invalid.
+def workspace_connected(operator: str) -> bool:
+    """True iff a stored token with a refresh_token exists for the operator.
+    The Workspace tools use this to return a clear "connect Google" message.
+    """
+    return is_connected(operator)
+
+
+def _get_credentials(operator: str) -> Optional[Credentials]:
+    """Build (and refresh if needed) shared OAuth credentials for an operator.
+    Returns None if no token, no refresh_token, or the refresh fails.
+    These credentials are scoped for Gmail + Docs/Sheets/Slides/Drive/Calendar.
     """
     tokens = load_tokens(operator)
     if not tokens or "refresh_token" not in tokens:
@@ -77,10 +93,48 @@ def get_gmail_service(operator: str):
             tokens["access_token"] = creds.token
             save_tokens(operator, tokens)
         except Exception as e:
-            print(f"[Gmail] Token refresh failed for {operator}: {e}")
+            print(f"[Google] Token refresh failed for {operator}: {e}")
             return None
 
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return creds
+
+
+def get_gmail_service(operator: str):
+    """Build an authenticated Gmail API service for an operator.
+    Returns None if not connected or tokens are invalid.
+    """
+    creds = _get_credentials(operator)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False) if creds else None
+
+
+def get_docs_service(operator: str):
+    """Build an authenticated Google Docs API service for an operator."""
+    creds = _get_credentials(operator)
+    return build("docs", "v1", credentials=creds, cache_discovery=False) if creds else None
+
+
+def get_sheets_service(operator: str):
+    """Build an authenticated Google Sheets API service for an operator."""
+    creds = _get_credentials(operator)
+    return build("sheets", "v4", credentials=creds, cache_discovery=False) if creds else None
+
+
+def get_slides_service(operator: str):
+    """Build an authenticated Google Slides API service for an operator."""
+    creds = _get_credentials(operator)
+    return build("slides", "v1", credentials=creds, cache_discovery=False) if creds else None
+
+
+def get_drive_service(operator: str):
+    """Build an authenticated Google Drive API service for an operator."""
+    creds = _get_credentials(operator)
+    return build("drive", "v3", credentials=creds, cache_discovery=False) if creds else None
+
+
+def get_calendar_service(operator: str):
+    """Build an authenticated Google Calendar API service for an operator."""
+    creds = _get_credentials(operator)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False) if creds else None
 
 
 def list_messages(operator: str, query: str = "", max_results: int = 10) -> List[Dict]:
