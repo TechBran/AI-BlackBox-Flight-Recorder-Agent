@@ -24,7 +24,7 @@ from Orchestrator.startup import AudioAnalysisIn
 from Orchestrator.config import VOL_PATH, GOOGLE_API_KEY, GEMINI_MODEL_DEFAULT
 from Orchestrator.fossils import load_snapshot_index
 from Orchestrator.models import TaskType, TaskStatus
-from Orchestrator.monitoring import semantic_search
+from Orchestrator.retrieval import retrieve
 from Orchestrator.tasks import create_task, update_task
 from Orchestrator.volume import read_volume_bytes
 
@@ -227,15 +227,20 @@ def fossil_get_snapshot(snap_id: str):
 # -----------------------------------------------------------------------------
 @app.get("/fossil/hybrid")
 def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
-    """Hybrid semantic + keyword search on snapshots.
-    Uses Google embeddings stored in each snapshot for semantic similarity,
-    combined with keyword matching for best results.
+    """Hybrid keyword + semantic search on snapshots (canonical retriever).
+
+    Routes through Orchestrator.retrieval.retrieve(): RRF fusion of keyword +
+    semantic candidates, a mild recency tie-break, and MMR diversity. This is no
+    longer semantic-only (the old docstring/name were a misnomer) — recency-aware
+    hybrid ranking now surfaces recent work near the top. The per-result `score`
+    field is retrieve()'s fused/recency score (NOT a raw cosine similarity); it is
+    kept under the JSON key `similarity` for response-shape backward compatibility.
     """
     try:
-        # Use semantic search with embeddings
-        semantic_results = semantic_search(q, operator=operator, k=limit)
+        # Canonical retriever: returns [(snap_id, score), ...] top-k, [] on failure.
+        scored = retrieve(q, operator=operator, k=limit)
 
-        if not semantic_results:
+        if not scored:
             return {"results": [], "message": "No results found or embeddings not available"}
 
         # Load index and volume for fetching content
@@ -243,7 +248,7 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
         vol_bytes = read_volume_bytes(VOL_PATH)
 
         results = []
-        for snap_id, similarity in semantic_results:
+        for snap_id, score in scored:
             if snap_id not in index:
                 continue
 
@@ -264,7 +269,9 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
                 "operator": meta.get("operator", "unknown"),
                 "timestamp": meta.get("timestamp", ""),
                 "type": meta.get("type", "normal"),
-                "similarity": round(similarity, 4),
+                # `similarity` key kept for API compat; value is now the fused
+                # recency-aware retrieve() score, not a raw cosine similarity.
+                "similarity": round(score, 4),
                 "snippet": snippet
             })
 
