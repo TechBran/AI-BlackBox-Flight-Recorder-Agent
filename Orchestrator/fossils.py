@@ -92,56 +92,57 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") ->
 
 
 def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.60) -> List[str]:
-    """Pure semantic retrieval with threshold filtering.
+    """Pure-semantic retrieval — a THIN SHIM over the canonical retrieve() (Phase 3b-2).
 
-    Returns snapshots where semantic similarity >= threshold, up to k results.
-    Uses embeddings for meaning-based search, separate from keyword search.
+    This is the shared semantic entry for the per-turn context (cloud chat/voice AND
+    the on-device lean profile via build_fossil_context), the Computer-Use context,
+    and tasks. Routing it through retrieve() unifies ALL of them on the one canonical
+    recency-aware ranker (RRF + mild recency tie-break + MMR diversity + junk-floor,
+    top-k). This INTENTIONALLY makes the per-turn semantic context recency-aware
+    instead of a hard >= threshold filter — that is the point of Phase 3b-2 (pre-
+    validated by the Phase-5 golden set: recency surfaces recent work AND single-event
+    facts still rank #1).
+
+    `include_keyword=False` is REQUIRED: every caller of semantic_retrieve already has
+    its OWN separate keyword channel, so the semantic channel must stay pure-semantic
+    (+recency+MMR) to avoid double-counting the keyword signal.
 
     Args:
         query: Search query text
-        operator: Filter by operator (empty string = all operators)
+        operator: Filter by operator (empty string / "system" = all operators)
         k: Maximum number of results to return
-        threshold: Minimum similarity score (0.0-1.0), default 0.60
+        threshold: RETAINED for signature/caller compatibility only. It is now
+            UNUSED and superseded by retrieve()'s own junk_floor + top-k (Phase 3).
 
     Returns:
-        List of snapshot texts, sorted by similarity (highest first)
+        List of decoded snapshot texts (SAME return type as before), highest-ranked
+        first.
     """
-    from Orchestrator.monitoring import semantic_search
+    # Lazy import: retrieval.py imports from fossils at module top, so importing
+    # retrieve at fossils' module top would create an import cycle.
+    from Orchestrator.retrieval import retrieve
 
-    # Get semantic results with scores
-    semantic_results = semantic_search(query, operator=operator, k=k * 2)  # Get extra candidates for threshold filtering
+    scored = retrieve(query, operator=operator, k=k, include_keyword=False)
 
-    # Filter by threshold
-    filtered_results = [(snap_id, score) for snap_id, score in semantic_results if score >= threshold]
-
-    # Limit to k results
-    filtered_results = filtered_results[:k]
-
-    if not filtered_results:
-        best = max((s for _, s in semantic_results), default=None)
-        print(f"[SEMANTIC] 0 of {len(semantic_results)} candidates cleared threshold "
-              f"{threshold} (best={best:.3f})" if best is not None
-              else f"[SEMANTIC] no candidates (empty store?) at threshold {threshold}")
-        return []
-
-    # Load index and volume for text retrieval
+    # Decode ONLY the result snapshots' bytes (same operator filter + byte-offset
+    # guard as the old body / hybrid_retrieve; a snap_id that is absent/operator-
+    # mismatched/out-of-bounds is skipped).
     index = load_snapshot_index()
     vol_bytes = read_volume_bytes(VOL_PATH)
 
-    # Convert snap_ids to text
     results = []
-    for snap_id, score in filtered_results:
-        if snap_id in index:
-            meta = index[snap_id]
-            start = meta["byte_start"]
-            end = meta["byte_end"]
+    for snap_id, _score in scored:
+        meta = index.get(snap_id)
+        if not meta:
+            continue
+        if operator and operator != "system" and meta.get("operator") != operator:
+            continue
+        start = meta["byte_start"]
+        end = meta["byte_end"]
+        if start < len(vol_bytes) and end <= len(vol_bytes):
+            results.append(vol_bytes[start:end].decode('utf-8', errors='replace'))
 
-            if start < len(vol_bytes) and end <= len(vol_bytes):
-                snap_bytes = vol_bytes[start:end]
-                snap_text = snap_bytes.decode('utf-8', errors='replace')
-                results.append(snap_text)
-
-    print(f"[SEMANTIC] Retrieved {len(results)} snapshots above threshold {threshold} (scores: {[f'{s:.3f}' for _, s in filtered_results[:5]]}{'...' if len(filtered_results) > 5 else ''})")
+    print(f"[SEMANTIC] retrieve() -> {len(results)} results")
     return results
 
 
