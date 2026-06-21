@@ -200,7 +200,7 @@ function renderGmailCardConfigured(p, s) {
                 <dt>Secret</dt>
                 <dd><code>${escapeHtml(secretPreview)}</code></dd>
             </dl>
-            <p class="ob-gmail-uri-hint">Already connected for Gmail? If you connected before Docs/Sheets/Slides/Calendar were added, click Reconnect once to grant the new Google Workspace permissions.</p>
+            <p class="ob-gmail-uri-hint">Already connected for Gmail? If you connected before Docs/Sheets/Slides/Drive/Calendar were added, click Reconnect once to grant the new Google Workspace permissions.</p>
         </div>
     `;
 }
