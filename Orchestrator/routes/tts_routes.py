@@ -551,6 +551,11 @@ def call_imagen(prompt: str, model: str, options: dict = None) -> list:
     options = options or {}
     aspect_ratio = options.get("aspectRatio", "16:9")
     resolution = options.get("resolution", "1K")
+    # Gemini imageConfig.imageSize only accepts 1K/2K/4K. GenIn.resolution is shared
+    # with video (defaults like "720p"/"1080p"), so coerce any non-image value to 1K
+    # to avoid an INVALID_ARGUMENT 400 from a stray video resolution.
+    if resolution not in ("1K", "2K", "4K"):
+        resolution = "1K"
     num_images = min(max(int(options.get("numberOfImages", 1)), 1), 4)  # Clamp 1-4
     reference_images = options.get("referenceImages", [])
 
@@ -571,7 +576,10 @@ def call_imagen(prompt: str, model: str, options: dict = None) -> list:
     # Add text prompt after images
     parts.append({"text": prompt})
 
-    url = f"{GEMINI_BASE_URL}/{model}:generateContent?key={GOOGLE_API_KEY}"
+    # Key goes in the x-goog-api-key HEADER (not the URL) so it can never leak into
+    # error strings / logs on a non-200, and to match the documented auth path.
+    url = f"{GEMINI_BASE_URL}/{model}:generateContent"
+    gemini_headers = {"x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json"}
 
     # Build generation config with Nano Banana Pro options
     # Note: responseModalities tells Gemini to return images
@@ -599,7 +607,7 @@ def call_imagen(prompt: str, model: str, options: dict = None) -> list:
         # Generate requested number of images
         for i in range(num_images):
             print(f"[IMAGE GEN] Generating image {i+1}/{num_images}...")
-            response = requests.post(url, json=payload, timeout=400)
+            response = requests.post(url, headers=gemini_headers, json=payload, timeout=400)
 
             # Log response details for debugging
             if response.status_code != 200:
