@@ -215,7 +215,7 @@ def test_create_doc_403_message_says_reconnect(monkeypatch):
 # --- tool executors -------------------------------------------------------
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _load_executor(tool_name):
