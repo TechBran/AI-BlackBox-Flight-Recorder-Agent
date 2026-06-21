@@ -107,7 +107,7 @@ def _capture_openai(monkeypatch, options):
     """Call _openai_images with all params and capture the request body."""
     captured = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
         captured["json"] = json
         b64 = base64.b64encode(b"X").decode()
         return _FakeResp(json_data={"data": [{"b64_json": b64}]})
@@ -120,7 +120,7 @@ def _capture_openai(monkeypatch, options):
 def _capture_xai(monkeypatch, options):
     captured = {}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
         captured["json"] = json
         b64 = base64.b64encode(b"X").decode()
         return _FakeResp(json_data={"data": [{"b64_json": b64}]})
@@ -135,7 +135,7 @@ def _capture_gemini(monkeypatch, options):
     captured = {}
     from Orchestrator.routes import tts_routes
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, **kwargs):
         captured["json"] = json
         b64 = base64.b64encode(b"X").decode()
         return _FakeResp(json_data={
