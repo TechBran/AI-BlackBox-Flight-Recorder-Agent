@@ -77,25 +77,23 @@ def test_hybrid_retrieve_surfaces_recent_work():
 def test_hybrid_retrieve_peak_is_bounded():
     """hybrid_retrieve's per-call peak stays BOUNDED (no unbounded / O(n^2) blowup).
 
-    hybrid_retrieve now delegates ranking to retrieve(). The dominant transient is
-    retrieve()'s `read_text_safe(VOL_PATH)` call (a fresh full-volume bytes-read +
-    utf-8 decode whose decode scratch spikes to several multiples of the ~35MB file)
-    PLUS the keyword TF-IDF scan PLUS the semantic candidate-vector lookup. There is
-    NO O(n^2) text-equality remap and NO per-snapshot full-corpus materialization —
-    the peak is a small constant multiple of the volume size, never a function of k
-    nor a quadratic of the snapshot count.
+    hybrid_retrieve delegates ranking to retrieve(). With a non-empty snapshot index
+    (the production case), the dominant transient is the keyword channel's streaming
+    TF-IDF scan over `read_volume_bytes` (per-snapshot decode, one snapshot held at a
+    time — see _keyword_retrieve_for_operator_scored's Phase-2b peak fix) PLUS the
+    semantic candidate-vector lookup. There is NO O(n^2) text-equality remap and NO
+    per-snapshot full-corpus materialization — the peak is a small constant multiple
+    of the volume size, never a function of k nor a quadratic of the snapshot count.
 
-    KNOWN REGRESSION (flagged for the retrieval.py owner; deliberately NOT fixed in
-    this task — retrieval.py is outside its edit scope): the OLD hybrid_retrieve
-    reused the caller's already-decoded `vol_txt` and never re-read from disk, so it
-    peaked ~38MB. retrieve() re-reads + re-decodes the whole volume via
-    read_text_safe on EVERY call, spiking the transient to ~250MB even though the
-    index-backed keyword path never consumes that decoded str (it decodes per-
-    snapshot from read_volume_bytes on demand — verified: passing "" yields the same
-    keyword ids when an index exists). Cheap follow-up: have retrieve() skip
-    read_text_safe when the snapshot index is non-empty. This test pins the CURRENT
-    honest ceiling so a future accidental blowup PAST it is caught, while documenting
-    the known spike; tighten to <100MB once retrieve() drops the redundant read.
+    FIXED (F2): retrieve() previously called `read_text_safe(VOL_PATH)` on EVERY call
+    — a fresh full-volume bytes-read + utf-8 decode that spiked the transient to
+    ~250MB — even though the index-backed keyword path IGNORES that decoded str (it
+    decodes per-snapshot from read_volume_bytes on demand; verified: passing "" yields
+    the SAME keyword ids when an index exists). retrieve() now skips read_text_safe
+    whenever the index is non-empty, dropping the steady-state peak to ~39MB. This
+    test pins an honest post-fix ceiling (<80MB, ~2x headroom over the ~39MB floor) so
+    that a reintroduced full-volume decode (~250MB) or an unbounded/O(n^2) blowup is
+    caught.
     """
     vol = _vol()
     q = "embeddings model switch reembed"
@@ -110,11 +108,12 @@ def test_hybrid_retrieve_peak_is_bounded():
     tracemalloc.stop()
 
     hybrid_mb = peak_hybrid / 1024 / 1024
-    # Current honest ceiling: dominated by read_text_safe's decode spike (~250MB on
-    # the ~35MB volume). Pin at 400MB so the documented spike passes but an UNBOUNDED
-    # blowup (e.g. a reintroduced full snap_to_text rebuild + O(n^2) remap, which
-    # pushes well past this) is still caught.
-    assert hybrid_mb < 400.0, (
-        f"hybrid_retrieve peak {hybrid_mb:.1f}MB exceeded the 400MB ceiling — a new "
-        f"unbounded allocation may have been introduced"
+    # Honest post-fix ceiling: the steady-state peak is ~39MB (the streaming keyword
+    # scan over read_volume_bytes, floored by the ~35MB volume). Pin at 80MB (~2x
+    # headroom) so a reintroduced full-volume read_text_safe decode (~250MB) or an
+    # unbounded / O(n^2) blowup is caught while real runs pass comfortably.
+    assert hybrid_mb < 80.0, (
+        f"hybrid_retrieve peak {hybrid_mb:.1f}MB exceeded the 80MB ceiling — a new "
+        f"unbounded allocation (e.g. a reintroduced full-volume decode) may have "
+        f"been introduced"
     )

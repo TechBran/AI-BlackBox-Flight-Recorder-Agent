@@ -155,7 +155,11 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     kw_ids: list[str] = []
     if include_keyword:
         try:
-            vol_txt = read_text_safe(VOL_PATH)
+            # The index-backed keyword path decodes snapshots from byte offsets on
+            # demand and IGNORES vol_txt entirely; vol_txt is only consumed in the
+            # no-index fallback. So pay the ~35MB full-volume read+decode (a ~250MB
+            # transient spike) ONLY when there is no index — otherwise pass "".
+            vol_txt = read_text_safe(VOL_PATH) if not index else ""
             kw_ids = keyword_retrieve_ids_for_operator(
                 vol_txt, query, candidate_n, operator or ""
             )
