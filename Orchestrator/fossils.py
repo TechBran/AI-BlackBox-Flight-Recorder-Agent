@@ -808,26 +808,44 @@ def _generate_ngrams(query: str, n: int = 2) -> List[str]:
 
     return ngrams
 
-def _compute_tfidf_scores(texts: List[str], terms: List[str]) -> List[float]:
-    """Compute TF-IDF scores for each text based on query terms."""
-    if not terms:
-        return [1.0] * len(texts)
-    
-    # Document frequency: how many documents contain each term
+def _streaming_tfidf_scores(decode_lc, num_docs: int, terms: List[str]) -> List[float]:
+    """Shared streaming base TF-IDF used by BOTH keyword scorers (de-dup).
+
+    ``decode_lc(i) -> str`` returns the LOWERED text of document ``i`` (decoded on
+    demand so no full ``texts`` list is materialized -- the Phase 2b peak-memory
+    fix). Runs the two passes (corpus document-frequency accumulation, then the
+    per-doc ``tf * idf`` base score) and returns the base TF-IDF score per doc
+    index. Callers layer their OWN boosts (bigram/trigram, technical-term,
+    recency) and any refinement stage on top -- those stay out of this helper.
+
+    Semantics are byte-for-byte identical to the math previously inlined in each
+    scorer (and to the old ``_compute_tfidf_scores``): same df pass, same
+    ``lc.count(term)`` TF, same ``log(num_docs/df[term])`` IDF, and the empty-
+    ``terms`` case yields ``1.0`` per doc.
+    """
+    # Corpus document-frequency pass.
     df = {}
-    for term in terms:
-        df[term] = sum(1 for text in texts if term in text.lower())
-    
-    # Compute TF-IDF score for each document
+    if terms:
+        for term in terms:
+            df[term] = 0
+        for i in range(num_docs):
+            lc = decode_lc(i)
+            for term in terms:
+                if term in lc:
+                    df[term] += 1
+
+    # Per-doc base TF-IDF pass.
     scores = []
-    num_docs = len(texts)
-    for text in texts:
-        lc = text.lower()
+    for i in range(num_docs):
+        if not terms:
+            scores.append(1.0)
+            continue
+        lc = decode_lc(i)
         score = 0.0
         for term in terms:
-            tf = lc.count(term)  # Term frequency in this document
+            tf = lc.count(term)
             if tf > 0 and df[term] > 0:
-                idf = math.log(num_docs / df[term])  # Inverse document frequency
+                idf = math.log(num_docs / df[term])
                 score += tf * idf
         scores.append(score)
     return scores
@@ -857,32 +875,17 @@ def _keyword_retrieve_scored(vol_txt: str, query: str, k: int = 3) -> List[Tuple
     spans = split_snapshot_spans(vol_txt)
     num_docs = len(spans)
 
-    # Corpus document-frequency pass (matches _compute_tfidf_scores df pass).
-    df = {}
-    if terms:
-        for term in terms:
-            df[term] = 0
-        for s, e in spans:
-            lc = vol_txt[s:e].lower()
-            for term in terms:
-                if term in lc:
-                    df[term] += 1
+    def _decode_lc(i):
+        s, e = spans[i]
+        return vol_txt[s:e].lower()
+
+    # Shared streaming base TF-IDF (df pass + per-doc tf*idf); boosts added below.
+    base = _streaming_tfidf_scores(_decode_lc, num_docs, terms)
 
     scored = []
     for i, (s, e) in enumerate(spans):
         lc = vol_txt[s:e].lower()
-
-        # Base TF-IDF score (inlined _compute_tfidf_scores per-doc math; the empty-
-        # terms case yields 1.0 exactly as _compute_tfidf_scores returned [1.0]*n).
-        if not terms:
-            score = 1.0
-        else:
-            score = 0.0
-            for term in terms:
-                tf = lc.count(term)
-                if tf > 0 and df[term] > 0:
-                    idf = math.log(num_docs / df[term])
-                    score += tf * idf
+        score = base[i]
 
         # Boost for exact phrase matches (n-grams)
         for bigram in bigrams:
@@ -980,32 +983,14 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
                 return vol_bytes[start:end].decode('utf-8', errors='replace').lower()
             return ""
 
-        # Corpus document-frequency pass (matches _compute_tfidf_scores df pass).
-        df = {}
-        if terms:
-            for term in terms:
-                df[term] = 0
-            for i in range(num_texts):
-                lc = _decode_lc(i)
-                for term in terms:
-                    if term in lc:
-                        df[term] += 1
+        # Shared streaming base TF-IDF (df pass + per-doc tf*idf); boosts added below.
+        base = _streaming_tfidf_scores(_decode_lc, num_texts, terms)
 
         technical_term_count = sum(1 for term in terms if term in TECHNICAL_TERMS)
         scored = []
         for i in range(num_texts):
             lc = _decode_lc(i)
-
-            # Base TF-IDF score (inlined _compute_tfidf_scores per-doc math).
-            if not terms:
-                score = 1.0
-            else:
-                score = 0.0
-                for term in terms:
-                    tf = lc.count(term)
-                    if tf > 0 and df[term] > 0:
-                        idf = math.log(num_texts / df[term])
-                        score += tf * idf
+            score = base[i]
 
             # Add technical term boost: if query contains technical terms, boost score
             if technical_term_count > 0:

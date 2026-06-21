@@ -35,11 +35,13 @@ PEAK measurement (test_keyword_scorer_peak_ceiling):
   ceiling of 55 MB (comfortably above the measured 38 MB, far below the OLD 127 MB).
 """
 import gc
+import math
 import tracemalloc
 
 from Orchestrator.fossils import (
     _keyword_retrieve_scored,
     _keyword_retrieve_for_operator_scored,
+    _streaming_tfidf_scores,
     keyword_retrieve_ids_for_operator,
     read_volume_bytes,
 )
@@ -151,3 +153,44 @@ def test_keyword_scorer_peak_ceiling():
         f"keyword scorer per-call peak {peak_mb:.1f}MB exceeds ceiling "
         f"{PEAK_CEILING_BYTES / 1024 / 1024:.0f}MB (OLD pre-2b was ~127MB)"
     )
+
+
+def test_shared_tfidf_helper_decode_path_agnostic():
+    """Guard: the shared base TF-IDF must be identical regardless of HOW a doc's
+    lowered text is decoded -- this is what keeps the operator and non-operator
+    scorers from silently desyncing if one's df/idf formula is later edited.
+
+    The non-op path decodes via vol_txt slices; the operator path decodes via
+    vol_bytes byte-offsets. We model both decode shapes over one shared corpus and
+    assert _streaming_tfidf_scores yields the same base score per doc for each.
+    """
+    docs = [
+        "embeddings model switch reembed pipeline",
+        "control phone on-device gemma agent",
+        "embeddings reembed model registry switch",
+        "ugv nav2 slam tuning costmap",
+        "no matching terms here at all",
+    ]
+    terms = ["embeddings", "model", "switch", "reembed"]
+    num_docs = len(docs)
+
+    # Non-op-style decode: lower a substring of a joined text (offset slice).
+    def decode_lc_text(i):
+        return docs[i].lower()
+
+    # Operator-style decode: lower a decoded byte slice.
+    raw = [d.encode("utf-8") for d in docs]
+    def decode_lc_bytes(i):
+        return raw[i].decode("utf-8", "replace").lower()
+
+    base_text = _streaming_tfidf_scores(decode_lc_text, num_docs, terms)
+    base_bytes = _streaming_tfidf_scores(decode_lc_bytes, num_docs, terms)
+
+    assert base_text == base_bytes, (
+        f"shared TF-IDF diverged across decode paths: {base_text} != {base_bytes}"
+    )
+    # Sanity: it actually computed real TF-IDF (some nonzero, the no-term doc is 0).
+    assert any(s > 0 for s in base_text)
+    assert base_text[-1] == 0.0
+    # Empty-terms contract: every doc scores exactly 1.0.
+    assert _streaming_tfidf_scores(decode_lc_text, num_docs, []) == [1.0] * num_docs
