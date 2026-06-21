@@ -210,11 +210,11 @@ function renderSummary(container, { config, state, error }) {
         rows.push(summaryRow("AI providers", "warn", "no keys configured"));
     }
 
-    // Optional integrations (Gmail) row
+    // Optional integrations (Google Workspace) row
     if (skipped.has("optional_integrations")) {
         rows.push(summaryRow("Optional integrations", "skip", "configure later"));
     } else if (config.providers?.gmail?.present) {
-        rows.push(summaryRow("Gmail", "ok", "OAuth client configured"));
+        rows.push(summaryRow("Google Workspace", "ok", "OAuth client configured"));
     } else {
         rows.push(summaryRow("Optional integrations", "skip", "none configured"));
     }

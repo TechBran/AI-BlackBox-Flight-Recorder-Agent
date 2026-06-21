@@ -1,5 +1,5 @@
 // Optional integrations step — fourth screen of the onboarding wizard.
-// Gmail OAuth (active) + Google Cloud service-account file (active) +
+// Google Workspace OAuth (Gmail + Docs/Sheets/Slides/Drive/Calendar, active) + Google Cloud service-account file (active) +
 // ElevenLabs API key (active) + Twilio (v1.1 deferred placeholder).
 // Save & continue is always enabled — every integration here is optional.
 //
@@ -13,8 +13,8 @@
 
 const GMAIL_PROVIDER = {
     id: "gmail",
-    label: "Gmail",
-    description: "Read your Gmail inbox so the AI can help triage emails, draft replies, and surface calendar invites.",
+    label: "Google Workspace",
+    description: "Connect Google with one sign-in: Gmail (triage, drafts), Docs, Sheets, Slides, Drive, and Calendar \u2014 so the AI can read and create documents, spreadsheets, presentations, files, and calendar events on your behalf.",
     consoleUrl: "https://console.cloud.google.com/apis/credentials",
     docsUrl: "https://developers.google.com/workspace/guides/create-credentials#oauth-client-id",
 };
@@ -192,7 +192,7 @@ function renderGmailCardConfigured(p, s) {
                     <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
                     Already configured
                 </span>
-                <button type="button" class="ob-replace-btn" data-provider="${p.id}">Replace</button>
+                <button type="button" class="ob-replace-btn" data-provider="${p.id}">Reconnect</button>
             </div>
             <dl class="ob-gmail-configured-detail">
                 <dt>Client ID</dt>
@@ -200,6 +200,7 @@ function renderGmailCardConfigured(p, s) {
                 <dt>Secret</dt>
                 <dd><code>${escapeHtml(secretPreview)}</code></dd>
             </dl>
+            <p class="ob-gmail-uri-hint">Already connected for Gmail? If you connected before Docs/Sheets/Slides/Calendar were added, click Reconnect once to grant the new Google Workspace permissions.</p>
         </div>
     `;
 }
@@ -276,7 +277,7 @@ function renderGmailCard(p, s) {
                         <li>Pick <strong>Web application</strong> as the type. Name it something like "AI BlackBox".</li>
                         ${redirectUrisHtml}
                         <li>Click <strong>Create</strong>. Google shows you a <em>Client ID</em> and <em>Client Secret</em> &mdash; paste both below.</li>
-                        <li>Don't forget to enable the <strong>Gmail API</strong> in <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">API Library</a>.</li>
+                        <li>Enable the required Google APIs in the <a href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener">API Library</a>: <strong>Gmail API</strong>, <strong>Google Docs API</strong>, <strong>Google Sheets API</strong>, <strong>Google Slides API</strong>, <strong>Google Drive API</strong>, and <strong>Google Calendar API</strong>. (A granted scope still returns 403 at call time if its API isn't enabled in the project.)</li>
                     </ol>
                 </div>
             </details>
@@ -916,8 +917,9 @@ async function validateGmail(container, state) {
                     OAuth flow constructed &middot; ${result.latency_ms}ms
                 </span>
                 <p class="ob-step-helper">
-                    You'll complete the actual Gmail authorization once setup is done &mdash; we'll
-                    send you to Google's consent screen from the System Menu.
+                    You'll complete the Google Workspace authorization once setup is done &mdash; we'll
+                    launch the Google sign-in from the System Menu so you can grant access to
+                    Gmail, Docs, Sheets, Slides, Drive, and Calendar.
                 </p>
             `;
         } else {
