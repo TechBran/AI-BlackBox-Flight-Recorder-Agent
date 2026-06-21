@@ -75,3 +75,12 @@ def test_config_stores_dir_ends_with_manifest_embeddings():
 def test_config_ollama_base_url():
     assert isinstance(config.OLLAMA_BASE_URL, str)
     assert config.OLLAMA_BASE_URL.startswith("http")
+
+
+def test_every_model_declares_explicit_semantic_threshold():
+    """A model-agnostic retriever requires each model to own its similarity
+    floor. Inheriting the global 0.60 silently mis-cuts a model whose score
+    distribution differs (regression guard for gemini-embedding-2 / F1)."""
+    missing = [slug for slug, e in EMBEDDING_MODELS.items()
+               if e.get("semantic_threshold") is None]
+    assert missing == [], f"models without an explicit semantic_threshold: {missing}"

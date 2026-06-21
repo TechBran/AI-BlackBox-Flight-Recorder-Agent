@@ -24,13 +24,18 @@ EMBEDDING_MODELS = {
         "label": "Gemini 2 (cloud, multimodal)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.20,
         "privacy": "cloud", "quality_note": "Newest Gemini embedding (multimodal); re-embed required to switch",
         "query_instruction": None, "keep_alive": None,
-        # semantic_threshold intentionally omitted → global 0.60 until measured post-migration
+        # Calibrated 2026-06-21 via scripts/calibrate_threshold.py over the live
+        # 7176-row store: worst real top-10 hit 0.5963, suggested floor 0.5463
+        # (worst - 0.05); 0.55 stays clear of every strong match and well under
+        # p10 (0.6291). Inheriting gemini-001's 0.60 was silently cutting good hits.
+        "semantic_threshold": 0.55,
     },
     "openai-text-embedding-3-large": {
         "provider": "openai", "model_id": "text-embedding-3-large", "dims": 3072,
         "label": "OpenAI (cloud)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.13,
         "privacy": "cloud", "quality_note": "Second cloud option (BYOK OpenAI key)",
         "query_instruction": None, "keep_alive": None,
+        "semantic_threshold": 0.55,  # documented default (no BYOK key to live-measure)
     },
     "qwen3-embedding-0.6b": {
         "provider": "ollama", "model_id": "qwen3-embedding:0.6b", "dims": 1024,
@@ -46,6 +51,7 @@ EMBEDDING_MODELS = {
         "privacy": "local", "quality_note": "MTEB #1 open-source; slow re-embeds on CPU",
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "5m",
+        "semantic_threshold": 0.50,  # documented default; local Qwen scores run low (0.6b uses 0.54), 16-row store not live-measurable
     },
 }
 EMBEDDING_MAX_CHARS = 10000  # truncate document text before embedding (existing behavior)
