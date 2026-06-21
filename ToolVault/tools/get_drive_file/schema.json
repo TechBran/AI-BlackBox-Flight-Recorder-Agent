@@ -1,0 +1,35 @@
+{
+  "name": "get_drive_file",
+  "description": "Read a Google Drive file by its id: returns the file metadata (name, mimeType, size, modifiedTime, webViewLink) plus a best-effort text rendering of its content. Google-native docs/sheets/slides are exported to text; binary files return text only if they decode as UTF-8, otherwise a note explains the content was omitted.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_id": {
+        "type": "string",
+        "description": "The Drive file id (from search_drive_files or a Drive URL)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "file_id"
+    ]
+  },
+  "returns": "JSON {id, name, mimeType, size, modifiedTime, webViewLink, content?} — `content` is included when a UTF-8 text rendering is feasible; otherwise a `note` field explains why (or an error string).",
+  "example": "get_drive_file(file_id=\"1AbC...\")",
+  "notes": "Metadata is always returned. For a Google Doc/Slides you get plain text, for a Google Sheet you get CSV. A binary file (e.g. an image or zip) returns metadata + a `note` instead of `content`. Use search_drive_files first to find the file_id."
+}

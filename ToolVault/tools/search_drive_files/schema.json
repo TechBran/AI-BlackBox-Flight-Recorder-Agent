@@ -1,0 +1,37 @@
+{
+  "name": "search_drive_files",
+  "description": "Search the operator's Google Drive for files (any type) using an optional Drive query string. Returns a list of files with their id (use it with get_drive_file / delete_drive_file), name, mimeType, modifiedTime, size, and a shareable webViewLink.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Optional. A raw Google Drive `q` search expression. Omit to list recent files. Examples: \"name contains 'budget'\", \"mimeType='application/pdf'\", \"modifiedTime > '2026-01-01T00:00:00'\"."
+      },
+      "page_size": {
+        "type": "integer",
+        "description": "Optional. Max number of files to return (default 20)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": []
+  },
+  "returns": "JSON array of file objects {id, name, mimeType, modifiedTime, size, webViewLink} (or an error string).",
+  "example": "search_drive_files(query=\"name contains 'roadmap'\")",
+  "notes": "Requires Google Workspace connected for the operator (Drive scope granted by the Google sign-in in onboarding). `query` is the RAW Drive API q expression: combine clauses with `and`, e.g. \"mimeType='application/vnd.google-apps.document' and name contains 'notes'\". Take a file id from the results and pass it to get_drive_file to read content."
+}

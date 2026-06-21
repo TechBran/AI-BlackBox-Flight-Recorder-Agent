@@ -1,0 +1,44 @@
+{
+  "name": "create_drive_file",
+  "description": "Create a new file (any type) in the operator's Google Drive. Supply a name and mimeType; optionally seed it with inline text content (uploaded as media). Returns the new file's id, name, mimeType, and a shareable webViewLink.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Name for the new file."
+      },
+      "mime_type": {
+        "type": "string",
+        "description": "The file's MIME type, e.g. 'text/plain', 'text/csv', 'application/json', or 'application/vnd.google-apps.folder' to create a folder."
+      },
+      "content": {
+        "type": "string",
+        "description": "Optional. Inline text content to upload as the file body (UTF-8). Omit for an empty file or a folder."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "name",
+      "mime_type"
+    ]
+  },
+  "returns": "JSON {id, name, mimeType, webViewLink} for the created file (or an error string).",
+  "example": "create_drive_file(name=\"notes.txt\", mime_type=\"text/plain\", content=\"hello\")",
+  "notes": "Requires Google Workspace connected for the operator. `content` is uploaded as media (UTF-8). To create a folder, pass mime_type='application/vnd.google-apps.folder' and omit content. For rich Google Docs/Sheets/Slides authoring use create_doc / create_spreadsheet / create_presentation instead."
+}

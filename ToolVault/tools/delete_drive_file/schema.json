@@ -1,0 +1,35 @@
+{
+  "name": "delete_drive_file",
+  "description": "Permanently delete a file from the operator's Google Drive by its id. This skips the trash and cannot be undone, so confirm the file_id is correct first.",
+  "category": "google_workspace",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone",
+    "mcp"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_id": {
+        "type": "string",
+        "description": "The Drive file id to delete (from search_drive_files)."
+      },
+      "operator": {
+        "type": "string",
+        "x-source": "operators",
+        "description": "Optional. If omitted, resolves to the BlackBox's current operator (single operator auto-selected; otherwise the system default). Do not hard-code an operator name."
+      }
+    },
+    "required": [
+      "file_id"
+    ]
+  },
+  "returns": "JSON {deleted: true, file_id} on success (or an error string).",
+  "example": "delete_drive_file(file_id=\"1AbC...\")",
+  "notes": "Requires Google Workspace connected for the operator. This is a PERMANENT delete (not move-to-trash) and cannot be undone — verify the file_id with get_drive_file / search_drive_files before deleting."
+}
