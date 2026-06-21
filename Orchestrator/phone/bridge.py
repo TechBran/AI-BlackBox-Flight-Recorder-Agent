@@ -2551,7 +2551,7 @@ CRITICAL PHONE CONTEXT:
 
 AVAILABLE CAPABILITIES:
 - BlackBox memory: search_snapshots, mint_snapshot, get_context
-- Media generation: generate_image, generate_video, lyria_music
+- Media generation: gemini_image/openai_image/grok_image, generate_video, lyria_music
 - Web browsing: web_search, web_fetch
 - Chrome automation: All claude-in-chrome tools
 - TTS/STT: text_to_speech, speech_to_text, analyze_audio
@@ -3211,7 +3211,7 @@ The user's speech is being transcribed and sent to you. Respond conversationally
         """
         Execute a tool and return the result.
 
-        Uses the unified BlackBoxToolExecutor for common tools (generate_image,
+        Uses the unified BlackBoxToolExecutor for common tools (gemini_image,
         generate_video, lyria_music, the per-provider web search tools,
         web_fetch, search_memory, etc.) and handles phone-specific tools
         locally. Any unmapped ToolVault tool name is routed through the
@@ -3231,7 +3231,6 @@ The user's speech is being transcribed and sent to you. Respond conversationally
             # Web tools
             "web_fetch": "web_fetch",
             # Generation tools
-            "generate_image": "generate_image",
             "generate_video": "generate_video",
             "lyria_music": "lyria_music",
             "get_task_status": "get_task_status",

@@ -50,7 +50,7 @@ You have access to these tools:
 - search_contacts: Search the contact book for people by name, phone number, tag, or keyword
 - save_contact: Save a new contact or update an existing one (requires name, notes, and tags)
 - get_current_time: Get the current date and time
-- generate_image: Generate an AI image
+- gemini_image / openai_image / grok_image: Generate an AI image (pick a provider)
 - create_cron_job: Schedule a recurring or one-time task (e.g., daily reminders, hourly checks)
 - edit_cron_job: Modify an existing scheduled task (change schedule, prompt, delivery, or pause/resume)
 - search_cron_jobs: List and search the user's scheduled tasks

@@ -27,6 +27,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     from Orchestrator.config import VOL_PATH
     from Orchestrator.fossils import hybrid_retrieve
     from Orchestrator.models import TaskType
+    from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
     from Orchestrator.tasks import create_task, generate_prompt_slug
     from Orchestrator.utils.async_helpers import run_blocking
     from Orchestrator.volume import read_text_safe
@@ -355,14 +356,16 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                     fetch_result = await run_blocking(perform_web_fetch, url, max_chars)
                     tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": fetch_result})
 
-                elif tool_name == "generate_image":
+                elif tool_name in IMAGE_TOOL_PROVIDERS:
+                    provider = IMAGE_TOOL_PROVIDERS[tool_name]
                     prompt = tool_input.get("prompt", "")
                     num_images = tool_input.get("numberOfImages", 1)
                     task = create_task(TaskType.IMAGE_GENERATION, operator="system", prompt=prompt,
                                        result_data={"options": {
                                            "aspectRatio": tool_input.get("aspectRatio", "16:9"),
                                            "resolution": tool_input.get("resolution", "1K"),
-                                           "numberOfImages": num_images
+                                           "numberOfImages": num_images,
+                                           "provider": provider
                                        }})
                     slug = generate_prompt_slug(prompt)
                     predicted_url = f"/ui/uploads/{slug}_{task.task_id}.png"

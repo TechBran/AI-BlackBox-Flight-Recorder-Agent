@@ -280,8 +280,8 @@ OUTPUT_SPEC_CORE = (
 OUTPUT_SPEC_TOOLS_STATIC = (
     "MULTIMODAL GENERATION (TOOL-BASED):\n"
     "You have access to the following tools for generating media. Use them by calling the tool function directly:\n\n"
-    "IMAGE GENERATION TOOL:\n"
-    '  Tool: generate_image\n'
+    "IMAGE GENERATION TOOLS (pick a provider):\n"
+    '  Tools: gemini_image / openai_image / grok_image\n'
     '  Parameters:\n'
     '    - prompt (required): Detailed description of the image to generate\n'
     '    - aspectRatio (optional): "16:9", "9:16", "1:1", "4:3", "3:4" (default: "16:9")\n'
