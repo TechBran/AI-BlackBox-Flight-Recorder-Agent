@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui287"/> <!-- v287: ElevenLabs Voice Lab panel (_voice-lab.css @imported in main.css) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui289"/> <!-- v287: ElevenLabs Voice Lab panel (_voice-lab.css @imported in main.css) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui288"></script> <!-- v288: provider-aware image modal (catalog-driven dropdown + dynamic params) -->
+  <script type="module" src="/ui/app-modular.js?v=genui289"></script> <!-- v288: provider-aware image modal (catalog-driven dropdown + dynamic params) -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -446,7 +446,7 @@
               <button id="btnComputerUse" class="btn">🖥️ Computer Use</button>
               <button id="btnCLIAgents" class="btn">💻 CLI Agents</button>
               <button id="btnVoiceAgents" class="btn">🎙️ Voice Agents</button>
-              <button id="btnGmail" class="btn">📧 Gmail</button>
+              <button id="btnGmail" class="btn">📧 Google Workspace</button>
             </div>
           </div>
         </div>
@@ -1892,7 +1892,7 @@
   <div id="gmailModal" class="modal hide">
     <div class="modal-card gmail-card">
       <div class="modal-head">
-        <h3>📧 Gmail</h3>
+        <h3>📧 Google Workspace</h3>
         <button class="modal-close" data-modal="gmailModal" type="button" aria-label="Close">✕</button>
       </div>
       <div class="modal-body gmail-body">
@@ -1901,14 +1901,15 @@
           <span class="gmail-status-value" id="gmailStatusValue">Checking…</span>
         </div>
         <div class="gmail-controls">
-          <button id="gmailConnectBtn" class="btn btn-primary" type="button" style="display:none;">Connect Gmail</button>
+          <button id="gmailConnectBtn" class="btn btn-primary" type="button" style="display:none;">Connect Google Workspace</button>
           <button id="gmailDisconnectBtn" class="btn btn-warn" type="button" style="display:none;">Disconnect</button>
           <button id="gmailRefreshBtn" class="btn" type="button" title="Refresh connection status">🔄 Refresh</button>
         </div>
         <p class="gmail-hint">
-          Connect Gmail to let voice/chat agents read your inbox, search messages, send replies,
-          and manage labels. Authorization opens in a new tab via Google OAuth — your password
-          never touches BlackBox. Tokens are stored per-operator on this device.
+          Connect Google once to let voice/chat agents use Gmail, Docs, Sheets, Slides, Drive, and
+          Calendar — read and create documents, manage your calendar, triage email, and more.
+          Authorization opens in a new tab via Google OAuth — your password never touches
+          BlackBox. Tokens are stored per-operator on this device.
         </p>
       </div>
     </div>

@@ -80,7 +80,7 @@ function startOAuthFlow() {
  */
 async function disconnect() {
     const op = getOperator() || 'Brandon';
-    if (!confirm(`Disconnect Gmail for operator "${op}"? You'll need to re-authorize via OAuth to reconnect.`)) {
+    if (!confirm(`Disconnect Google Workspace for operator "${op}"? You'll need to re-authorize via OAuth to reconnect.`)) {
         return;
     }
     try {
@@ -92,7 +92,7 @@ async function disconnect() {
             toastError(`Disconnect failed: ${err.substring(0, 100)}`);
             return;
         }
-        toast('Gmail disconnected');
+        toast('Google Workspace disconnected');
         await refreshStatus();
     } catch (err) {
         toastError(`Disconnect failed: ${err.message}`);

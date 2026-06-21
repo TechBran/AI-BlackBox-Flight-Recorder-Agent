@@ -356,12 +356,12 @@ fun SettingsSheet(
             }
 
             CollapsibleSection(
-                title = "📧 Gmail",
+                title = "📧 Google Workspace",
                 accent = Color(0xFF4A9EFF),
                 subtitle = gmailEmail.takeIf { gmailStatus == "connected" && it.isNotBlank() },
             ) {
             if (gmailLoading) {
-                Text("Checking Gmail...", style = MaterialTheme.typography.bodySmall, color = Neutral500)
+                Text("Checking Google Workspace...", style = MaterialTheme.typography.bodySmall, color = Neutral500)
             } else if (gmailStatus == "connected") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -396,13 +396,13 @@ fun SettingsSheet(
                 }
             } else {
                 Text(
-                    "Connect your Gmail to let AI read, search, and send emails.",
+                    "Connect Google to let AI use Gmail, Docs, Sheets, Slides, Drive, and Calendar.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Neutral500,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MenuButton("\uD83D\uDCE7 Connect Gmail") {
+                    MenuButton("\uD83D\uDCE7 Connect Google Workspace") {
                         try {
                             val authUrl = "$origin/auth/gmail/authorize?operator=$operator"
                             context.startActivity(
