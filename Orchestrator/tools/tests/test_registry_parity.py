@@ -280,7 +280,7 @@ def test_format_parity(golden, fmt):
     # feature (replaced by six per-provider tools); the frozen golden predates
     # that removal, so exclude it from BOTH sides of the parity comparison while
     # still proving every OTHER golden tool is byte-identical.
-    intentionally_removed = {"web_search"}
+    intentionally_removed = {"web_search", "generate_image"}
     current = _roundtrip(_current()[fmt])
     # No x-source marker may survive into any provider's output.
     assert _find_xsource_paths(current) == [], f"{fmt} leaked x-source markers"
