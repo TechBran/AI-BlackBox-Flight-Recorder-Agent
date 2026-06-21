@@ -100,3 +100,8 @@ recency_half_life_days = 90
 mmr_lambda = 0.7
 junk_floor = 0.40
 final_k = 10
+# OPT-IN provenance logging: when true, retrieve() prints one [RETRIEVAL] line
+# per final result (rrf relevance, age_days, recency_boost, final score, which
+# channels surfaced it). Observability only — does NOT change ranking. Off by
+# default (cheap path); flip to true to debug "why did I get these results".
+debug_log = false

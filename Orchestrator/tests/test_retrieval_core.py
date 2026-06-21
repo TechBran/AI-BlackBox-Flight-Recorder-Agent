@@ -11,6 +11,8 @@ Design (operator-locked):
 - fusion is Reciprocal Rank Fusion (scale-free), no rerank stage.
 - MMR breaks near-duplicate session clusters.
 """
+import re
+
 import numpy as np
 import pytest
 
@@ -96,3 +98,65 @@ def test_retrieve_live_returns_recent_snapshots():
     # The recency tie-break should surface recent (June 2026) work near the top.
     top_ids = [sid for sid, _ in results]
     assert any(sid.startswith("SNAP-202606") for sid in top_ids), top_ids
+
+
+# ── opt-in provenance logging (Phase 5.1) ─────────────────────────────────────
+
+def test_provenance_log_emitted_only_when_flag_enabled(capsys):
+    """[retrieval] debug_log gates a structured [RETRIEVAL] line per result.
+
+    Off by default (no log spam on the hot path); on => one line per final
+    result with the documented field shape. Observability only — ranking is
+    unchanged regardless of the flag. Skips when the live store/provider is
+    unavailable in the test env.
+    """
+    from Orchestrator.config import CFG
+    try:
+        from Orchestrator.embeddings.search import get_active_store
+        if get_active_store().count == 0:
+            pytest.skip("active store empty")
+    except Exception as e:  # noqa: BLE001 - provider/store unavailable
+        pytest.skip(f"active store/provider unavailable: {e}")
+
+    if not CFG.has_section("retrieval"):
+        CFG.add_section("retrieval")
+    had_key = CFG.has_option("retrieval", "debug_log")
+    prev = CFG.get("retrieval", "debug_log") if had_key else None
+
+    # 1. flag OFF -> no [RETRIEVAL] provenance lines.
+    try:
+        CFG.set("retrieval", "debug_log", "false")
+        results_off = retrieve("embeddings model switch reembed", "system", k=5)
+        if not results_off:
+            pytest.skip("retrieve returned nothing (query embed unavailable)")
+        off_out = capsys.readouterr().out
+        assert "-> sid=" not in off_out, off_out
+
+        # 2. flag ON -> one provenance line per result, matching the shape.
+        CFG.set("retrieval", "debug_log", "true")
+        results_on = retrieve("embeddings model switch reembed", "system", k=5)
+        on_out = capsys.readouterr().out
+    finally:
+        if had_key:
+            CFG.set("retrieval", "debug_log", prev)
+        else:
+            CFG.remove_option("retrieval", "debug_log")
+
+    # ranking unchanged by the flag (observability must not perturb results).
+    assert [s for s, _ in results_on] == [s for s, _ in results_off]
+
+    prov_lines = [ln for ln in on_out.splitlines() if ln.startswith("[RETRIEVAL] q=")]
+    assert len(prov_lines) == len(results_on), on_out
+
+    # exact field shape of one line: q=... -> sid=... rrf=.. age_days=.. recency_boost=.. final=.. channels=..
+    shape = re.compile(
+        r"^\[RETRIEVAL\] q=.{1,42} -> sid=(SNAP-\S+) "
+        r"rrf=-?\d+\.\d+ age_days=\d+\.\d+ recency_boost=-?\d+\.\d+ "
+        r"final=-?\d+\.\d+ channels=(semantic|keyword|semantic\+keyword|none)$"
+    )
+    for ln in prov_lines:
+        assert shape.match(ln), f"bad provenance line shape: {ln!r}"
+
+    # the logged sids are exactly the returned ones, in order.
+    logged_sids = [shape.match(ln).group(1) for ln in prov_lines]
+    assert logged_sids == [s for s, _ in results_on]

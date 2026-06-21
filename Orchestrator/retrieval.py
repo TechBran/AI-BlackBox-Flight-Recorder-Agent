@@ -121,6 +121,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     half_life = CFG.getfloat("retrieval", "recency_half_life_days", fallback=90.0)
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.7)
     junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
+    debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
 
     # 2. embed the query (purpose="query" — the retrieval_query fix).
     qv = _emb.generate_embedding_sync(query, purpose="query")
@@ -195,4 +196,29 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         for sid, _score in ranked[:window]
     ]
     picked = mmr_select(mmr_cands, k, mmr_lambda)
-    return [(sid, score_by_id[sid]) for sid in picked]
+    results = [(sid, score_by_id[sid]) for sid in picked]
+
+    # 9. OPT-IN provenance logging — answers "why did I get these results" from
+    #    logs alone. Cheap: only computed when [retrieval] debug_log = true, and
+    #    only over the final top-k. Does NOT touch ranking. The `rrf` field is the
+    #    pre-recency RRF relevance; `recency_boost` is the additive tie-break term;
+    #    `channels` shows which of semantic/keyword surfaced the id.
+    if debug_log:
+        sem_set = set(sem_ids)
+        kw_set = set(kw_ids)
+        for sid, final in results:
+            rel = relevance.get(sid, 0.0)
+            age = ages.get(sid, 3650.0)
+            boost = final - rel
+            chans = "+".join(
+                c for c, present in
+                (("semantic", sid in sem_set), ("keyword", sid in kw_set))
+                if present
+            ) or "none"
+            print(
+                f"[RETRIEVAL] q={query[:40]!r} -> sid={sid} "
+                f"rrf={rel:.6f} age_days={age:.1f} recency_boost={boost:.6f} "
+                f"final={final:.6f} channels={chans}"
+            )
+
+    return results
