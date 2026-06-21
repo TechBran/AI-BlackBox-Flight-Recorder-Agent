@@ -87,3 +87,16 @@ model_default = claude-opus-4-6
 gemini_model_default = gemini-2.5-computer-use-preview-10-2025
 max_iterations = 100
 session_timeout_s = 300
+
+[retrieval]
+# Canonical snapshot retriever (Orchestrator/retrieval.py). Operator-locked
+# defaults: recency is a MILD tie-break (relevance dominates), RRF fuses the
+# keyword + semantic rankings (scale-free), MMR breaks near-duplicate session
+# clusters, and a low junk floor replaces the old hard 0.60 threshold.
+candidate_n = 40
+rrf_c = 60
+recency_weight = 0.05
+recency_half_life_days = 90
+mmr_lambda = 0.7
+junk_floor = 0.40
+final_k = 10

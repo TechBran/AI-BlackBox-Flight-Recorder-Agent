@@ -266,6 +266,41 @@ class VectorStore:
                 break
         return results
 
+    def search_with_vectors(self, query_vec, k: int, allowed_ids=None) -> list:
+        """Top-k cosine matches WITH the matched row vector.
+
+        Identical scoring to :meth:`search` (ONE numpy mat-vec over the
+        pre-normalized matrix) but each result also carries the matched row,
+        as [(snap_id, score, vector_np), ...]. The returned vectors are the
+        L2-normalized stored rows (copied so callers can't mutate the matrix),
+        so a downstream `vec @ other_vec` is a true cosine similarity — exactly
+        what MMR diversity needs. Only the top-k rows are materialized; the
+        full matrix is never copied.
+        """
+        with self._lock:
+            self._ensure_open_locked()
+            matrix = self._get_matrix_locked()
+            ids = list(self._ids)
+            if matrix is None or matrix.shape[0] == 0:
+                return []
+
+            q = np.asarray(query_vec, dtype=np.float32)
+            norm = float(np.linalg.norm(q))
+            if norm > 0:
+                q = q / norm
+            scores = matrix @ q
+
+            results = []
+            for i in np.argsort(scores)[::-1]:
+                sid = ids[i]
+                if allowed_ids is not None and sid not in allowed_ids:
+                    continue
+                # Copy the row so the caller can never mutate the live matrix.
+                results.append((sid, float(scores[i]), matrix[i].copy()))
+                if len(results) >= k:
+                    break
+            return results
+
 
 # ── module-level helpers ─────────────────────────────────────────────────────
 
