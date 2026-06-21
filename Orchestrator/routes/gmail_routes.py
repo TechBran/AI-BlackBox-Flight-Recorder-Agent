@@ -25,6 +25,14 @@ from Orchestrator.gmail.service import (
 # Allow HTTP for local dev (OAuth library requires HTTPS by default)
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
+# Google auto-grants openid + userinfo.email + userinfo.profile alongside any
+# Workspace/Gmail scopes, so the returned scope set never matches the requested
+# set exactly. Relax oauthlib's strict scope-equality check, which would
+# otherwise raise "Scope has changed from ... to ..." and fail fetch_token on
+# every multi-scope (re-)consent. RFC 6749 3.3 allows the changed scope set;
+# we persist creds.scopes (the actual grant), so this loses no information.
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
 # In-memory store for PKCE code verifiers (keyed by state)
 _pending_verifiers: dict = {}
 
