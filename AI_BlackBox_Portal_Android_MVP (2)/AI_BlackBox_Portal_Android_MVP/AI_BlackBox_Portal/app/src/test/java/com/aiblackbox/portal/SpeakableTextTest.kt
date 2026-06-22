@@ -80,6 +80,36 @@ class SpeakableTextTest {
         )
     }
 
+    // --- Cross-surface parity (FIX I-1): JSON-validated envelope unwrap. ---
+    // Portal (JSON.parse) and reply_envelope.py (json.loads) only unwrap a
+    // LEADING object that ACTUALLY parses as JSON. These malformed-but-leading
+    // inputs must be PRESERVED on Android too (the old raw-regex wrongly
+    // extracted ui_reply, diverging from Portal).
+
+    @Test fun `trailing-comma envelope preserved (parity with Portal)`() {
+        // {"ui_reply":"hi",} is not valid JSON -> Portal preserves whole; Android must too.
+        assertEquals(
+            "{\"ui_reply\":\"hi\",}",
+            stripNonSpeakable("{\"ui_reply\":\"hi\",}")
+        )
+    }
+
+    @Test fun `fake ui_reply in non-JSON preserved (parity with Portal)`() {
+        // {not json but "ui_reply":"trap" here} does not parse -> preserve whole.
+        assertEquals(
+            "{not json but \"ui_reply\":\"trap\" here}",
+            stripNonSpeakable("{not json but \"ui_reply\":\"trap\" here}")
+        )
+    }
+
+    @Test fun `JSON5 nested envelope preserved (parity with Portal)`() {
+        // {data: {"ui_reply":"deep"}} is JSON5/invalid (unquoted key) -> preserve whole.
+        assertEquals(
+            "{data: {\"ui_reply\":\"deep\"}}",
+            stripNonSpeakable("{data: {\"ui_reply\":\"deep\"}}")
+        )
+    }
+
     @Test fun `null and empty return empty`() {
         assertEquals("", stripNonSpeakable(null))
         assertEquals("", stripNonSpeakable(""))

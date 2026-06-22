@@ -980,6 +980,11 @@ export function setBubbleState(btn, waiting) {
 export async function speak(text, btn) {
     if (ttsState.isFetching || ttsState.isPlaying) return;
 
+    // Sanitize before TTS (M-1): strip envelopes/artifacts/code/media URLs so
+    // any future caller of this exported helper is filtered like the other
+    // speak paths (_generateTTS / speakToBubble).
+    text = extractSpeakableText(text);
+
     try {
         ttsState.isFetching = true;
         setBubbleState(btn, true);

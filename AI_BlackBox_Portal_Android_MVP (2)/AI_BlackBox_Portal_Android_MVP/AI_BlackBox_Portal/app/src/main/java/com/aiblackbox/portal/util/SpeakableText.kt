@@ -1,5 +1,9 @@
 package com.aiblackbox.portal.util
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
 /**
  * Speakable-text sanitizer (plan §3.5) -- shared rules with the Portal web
  * surface (Portal/modules/tts-stt.js stripNonSpeakable).
@@ -34,9 +38,13 @@ object SpeakableText {
 
     private val WHITESPACE = Regex("""\s+""")
 
-    // ui_reply value out of a whole-message envelope object. Tolerant of
-    // whitespace and key order; only used after we confirm a LEADING { object.
-    private val UI_REPLY = Regex("""\"ui_reply\"\s*:\s*\"((?:[^\"\\]|\\.)*)\"""")
+    // Strict JSON parser (NOT lenient) used to validate a whole-message
+    // envelope. Mirrors Portal's JSON.parse / reply_envelope.py's json.loads:
+    // only a string that ACTUALLY parses as JSON is unwrapped. kotlinx is used
+    // (NOT org.json) because org.json is stubbed to no-op defaults under
+    // testUnitTests.returnDefaultValues=true, which would make the parse check
+    // a no-op in unit tests (see MarkdownText.kt's STRICT_JSON for precedent).
+    private val STRICT_JSON = Json { isLenient = false }
 
     /**
      * Produce speakable text from a raw reply. See class docs for the rules.
@@ -47,16 +55,26 @@ object SpeakableText {
         var out: String = text
 
         // 1. Whole-message {"ui_reply":...} envelope (optionally ```json-fenced).
-        //    LEADING-only: only unwrap when the envelope IS the whole message.
+        //    LEADING-only AND JSON-VALIDATED: only unwrap when the LEADING object
+        //    actually parses as JSON and carries a string "ui_reply". This mirrors
+        //    Portal (JSON.parse) and reply_envelope.py (json.loads) so the same
+        //    reply is spoken identically on every surface. Malformed-but-leading
+        //    input (trailing comma, fake ui_reply in non-JSON, JSON5) is PRESERVED.
         run {
             var candidate = out.trim()
             WHOLE_FENCE.find(candidate)?.let { candidate = it.groupValues[1].trim() }
-            if (candidate.startsWith("{") && candidate.contains("\"ui_reply\"")) {
-                UI_REPLY.find(candidate)?.let { m ->
-                    val raw = m.groupValues[1]
-                    // Unescape the JSON string body (\" \\ \n \t \r).
-                    val inner = unescapeJson(raw)
-                    if (inner.isNotBlank()) out = inner
+            if (candidate.startsWith("{")) {
+                try {
+                    val parsed = STRICT_JSON.parseToJsonElement(candidate)
+                    if (parsed is JsonObject) {
+                        val v = parsed["ui_reply"]
+                        if (v is JsonPrimitive && v.isString) {
+                            val inner = v.content
+                            if (inner.isNotBlank()) out = inner
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Not a parseable whole-message envelope -> leave text as-is.
                 }
             }
         }
@@ -76,30 +94,5 @@ object SpeakableText {
         out = WHITESPACE.replace(out, " ").trim()
 
         return out
-    }
-
-    private fun unescapeJson(s: String): String {
-        val sb = StringBuilder(s.length)
-        var i = 0
-        while (i < s.length) {
-            val c = s[i]
-            if (c == '\\' && i + 1 < s.length) {
-                when (val e = s[i + 1]) {
-                    '"' -> sb.append('"')
-                    '\\' -> sb.append('\\')
-                    '/' -> sb.append('/')
-                    'n' -> sb.append('\n')
-                    't' -> sb.append('\t')
-                    'r' -> sb.append('\r')
-                    'b' -> sb.append('\b')
-                    else -> { sb.append('\\'); sb.append(e) }
-                }
-                i += 2
-            } else {
-                sb.append(c)
-                i++
-            }
-        }
-        return sb.toString()
     }
 }
