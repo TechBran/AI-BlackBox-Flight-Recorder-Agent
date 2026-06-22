@@ -45,6 +45,12 @@ def _extract_first_json_object(s: str):
     """
     if not isinstance(s, str):
         return None
+    # Only a LEADING object counts as a whole-message envelope. If prose
+    # precedes the first brace, this is mid-prose JSON (e.g. a reply that
+    # merely quotes an envelope) and must NOT be extracted, else we corrupt
+    # a legitimate reply. Trailing text after a leading object is tolerated.
+    if not s.lstrip().startswith("{"):
+        return None
     n = len(s)
     depth = 0
     start = -1

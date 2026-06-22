@@ -115,13 +115,24 @@ def test_empty_ui_reply_falls_back_to_original():
     assert perspective == "p"
 
 
-def test_prose_then_envelope_extracts_envelope():
-    # Inline (not whole-string) leak: prose then a JSON object.
+def test_leading_envelope_with_trailing_text_unwraps():
+    # A LEADING envelope followed by stray trailing text is still unwrapped
+    # (preserves non-stream tolerance for models that append a note).
+    inner = json.dumps({"ui_reply": "the answer", "snapshot_perspective": "p"})
+    reply, perspective = unwrap_reply_envelope(inner + "\n\ntrailing note")
+    assert reply == "the answer"
+    assert perspective == "p"
+
+
+def test_prose_then_envelope_left_as_prose():
+    # Mid-prose JSON (prose BEFORE the brace) must NOT be extracted — that
+    # would corrupt a legit reply that merely quotes/mentions an envelope.
+    # Only a whole-message (leading) envelope is unwrapped.
     inner = json.dumps({"ui_reply": "extracted", "snapshot_perspective": "sp"})
     text = "Here is the answer: " + inner
     reply, perspective = unwrap_reply_envelope(text)
-    assert reply == "extracted"
-    assert perspective == "sp"
+    assert reply == text
+    assert perspective == ""
 
 
 def test_inline_fence_left_alone():
