@@ -1971,6 +1971,10 @@ def _unpack_call(result, media: bool = False):
 
 _HTML_TAG_RX = re.compile(r"<[^>]+>")
 _WS_RX = re.compile(r"\s+")
+# Strip URLs from the SNAPSHOT body/keywords: a media turn's reply carries the
+# predicted /ui/uploads/<slug>_<task-id>.png URL, whose kebab-cased filename
+# otherwise becomes task-id-fragment keyword noise in the immutable ledger.
+_URL_RX = re.compile(r"https?://\S+|/ui/uploads/\S+")
 
 
 def _strip_html(text):
@@ -1984,7 +1988,8 @@ def _strip_html(text):
     """
     if not isinstance(text, str):
         return ""
-    no_tags = _HTML_TAG_RX.sub("", text)
+    no_urls = _URL_RX.sub(" ", text)
+    no_tags = _HTML_TAG_RX.sub("", no_urls)
     return _WS_RX.sub(" ", no_tags).strip()
 
 

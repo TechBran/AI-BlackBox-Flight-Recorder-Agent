@@ -368,3 +368,24 @@ def test_call_openai_stays_two_tuple():
     src = inspect.getsource(cr.call_openai)
     assert "return text, total_usage\n" in src
     assert "media_tasks" not in src
+
+
+def test_strip_html_also_strips_urls_so_keywords_are_clean():
+    # A media turn's reply carries the predicted /ui/uploads/<slug>_<task-id>.png
+    # URL; its kebab-cased filename must NOT become task-id-fragment keyword noise
+    # in the immutable ledger.
+    from Orchestrator.tasks import _strip_html, _extract_keywords
+    reply = ("Image generation in progress. Image will be saved to: "
+             "/ui/uploads/a-perfectly-shaped-bright-red-a5128fa4-39b9-444e.png "
+             "for your red cube on a white table.")
+    clean = _strip_html(reply)
+    assert "/ui/uploads/" not in clean
+    assert "a5128fa4" not in clean
+    kws = _extract_keywords(clean)
+    joined = " ".join(kws)
+    assert "a5128fa4" not in joined and "ui-uploads" not in joined and "png" not in joined
+    # meaningful content survives
+    assert any(k in kws for k in ("red", "cube", "image"))
+
+    # absolute http(s) URLs are stripped too
+    assert "http" not in _strip_html("see https://example.com/x.png now")
