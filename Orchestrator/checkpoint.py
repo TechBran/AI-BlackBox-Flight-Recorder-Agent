@@ -84,7 +84,8 @@ Provide a comprehensive, structured summary:
 
         # Use Gemini 3.1 Pro for maximum context window (lazy import to avoid circular import)
         from Orchestrator.routes.chat_routes import call_gemini
-        compressed_summary, usage, _, _ = call_gemini(messages, model="gemini-3.1-pro-preview", operator=operator)
+        # call_gemini now returns 5 elements (2-media adds media_tasks last).
+        compressed_summary, usage, _, _, _ = call_gemini(messages, model="gemini-3.1-pro-preview", operator=operator)
 
         if not compressed_summary:
             print(f"[CHECKPOINT] Failed to generate compression for {operator}")

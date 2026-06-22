@@ -1607,12 +1607,18 @@ def process_chat_task(task: Task):
         # the embedded snapshot body (2-reasoning) and NEVER into the user reply.
         # OpenAI is response-only by design for now (Phase 3 deferred).
         reasoning = ""
+        # media_tasks: (task_id,type,prompt) for media the model created NATIVELY
+        # inside a call_* tool loop (2-media). The worker appends the existing
+        # loading-placeholder div per entry so Portal's existing pollers fire, and
+        # exposes a structured result_data['media_tasks'] for programmatic/Android
+        # consumers. call_openai stays answer-only (Phase 3 deferred) -> [].
+        media_tasks = []
         if provider == "anthropic":
-            raw, usage, reasoning = _unpack_call(call_anthropic(msg_list, selected_model, operator=active_operator))
+            raw, usage, reasoning, media_tasks = _unpack_call(call_anthropic(msg_list, selected_model, operator=active_operator))
         elif provider == "google":
-            raw, usage, media_parts, reasoning = _unpack_call(call_gemini(msg_list, selected_model, operator=active_operator), media=True)
+            raw, usage, media_parts, reasoning, media_tasks = _unpack_call(call_gemini(msg_list, selected_model, operator=active_operator), media=True)
         elif provider == "xai":
-            raw, usage, reasoning = _unpack_call(call_xai(msg_list, selected_model, operator=active_operator))
+            raw, usage, reasoning, media_tasks = _unpack_call(call_xai(msg_list, selected_model, operator=active_operator))
         else:
             raw, usage = call_openai(msg_list, selected_model, operator=active_operator)
 
@@ -1748,6 +1754,31 @@ def process_chat_task(task: Task):
             print(f"[ARTIFACT] Detected artifact generation command")
             ui_reply = parse_and_process_artifacts(ui_reply, active_operator)
 
+        # 2-media (PART 2): NATIVE non-stream media. When the model called
+        # generate_image/video/lyria_music inside a call_* tool loop, that loop
+        # created the background task but injected NO UI placeholder (it returned
+        # only predicted-URL text to the model). Append the EXACT existing
+        # loading-placeholder div per created task -- the SAME verbatim strings the
+        # legacy regex path uses (image/video/music) -- so Portal's EXISTING
+        # pollImageTasks / pollVideoTasks / pollMusicTasks fire with no new
+        # Portal/Android code. The divs land in ui_reply (rendered + polled) but are
+        # tag-stripped out of the snapshot body below (PART 1), so the immutable
+        # ledger never sees them. result_data['media_tasks'] (set later) carries the
+        # structured form for programmatic/Android consumers. Native + the legacy
+        # regex path now converge on the same placeholder contract (OD-5 floor kept).
+        for _mt in (media_tasks or []):
+            _tid = _mt.get("task_id")
+            _typ = _mt.get("type")
+            if not _tid or not _typ:
+                continue
+            if _typ == "image":
+                ui_reply = ui_reply + f'<div class="image-loading-placeholder" data-task-id="{_tid}" style="padding: 12px; background: #000000; border-radius: 8px; margin: 8px 0;">🖼️ Image generation in progress<span class="thinking-dots" style="display:inline-flex; gap:4px; margin-left:8px;"><span></span><span></span><span></span></span></div>'
+            elif _typ == "video":
+                ui_reply = ui_reply + f'<div class="video-loading-placeholder" data-task-id="{_tid}" style="padding: 12px; background: #000000; border-radius: 8px; margin: 8px 0;">🎬 Video generation in progress<span class="thinking-dots" style="display:inline-flex; gap:4px; margin-left:8px;"><span></span><span></span><span></span></span></div>'
+            elif _typ == "music":
+                ui_reply = ui_reply + f'<div class="music-loading-placeholder" data-task-id="{_tid}" style="padding: 12px; background: #000000; border-radius: 8px; margin: 8px 0;">🎵 Music generation in progress<span class="thinking-dots" style="display:inline-flex; gap:4px; margin-left:8px;"><span></span><span></span><span></span></span></div>'
+            print(f"[MEDIA-NATIVE] Appended {_typ} loading-placeholder for task {_tid}")
+
         update_task(task.task_id, progress=80)
 
         reply_alias = ui_reply
@@ -1778,11 +1809,18 @@ def process_chat_task(task: Task):
         # keywords. Keywords are extracted from the ANSWER only (not reasoning, not
         # HTML). When the model did not think, NO empty [REASONING] header is
         # appended.
-        _kw = _extract_keywords(reply_alias)
+        # Ledger hygiene (2-media PART 1): the live reply may carry media loading-
+        # placeholder <div>s (regex path + native media surfacing below). The UI
+        # needs them to render/poll, but they must NEVER pollute the immutable
+        # snapshot body or the deterministic keyword digest (HTML token noise like
+        # 'div'/'class'/'data-task-id'/'image-loading-placeholder'). Compute the
+        # snapshot body + keywords from a TAG-STRIPPED copy; ui_reply keeps the div.
+        clean = _strip_html(reply_alias)
+        _kw = _extract_keywords(clean)
         if _kw:
-            snap_text = reply_alias + "\n\nKeywords: " + ", ".join(_kw)
+            snap_text = clean + "\n\nKeywords: " + ", ".join(_kw)
         else:
-            snap_text = reply_alias
+            snap_text = clean
         if reasoning and reasoning.strip():
             snap_text = snap_text + "\n\n[REASONING]\n" + reasoning.strip()
         s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": ui_reply, "snap_text": snap_text})
@@ -1830,6 +1868,10 @@ def process_chat_task(task: Task):
             "ctx_tokens_since": s.ctx_tokens_since, "drift": drift_state_for(s),
             "retrieved": len(keyword_snaps) + len(recent_snaps),
             "inline_media": media_urls,
+            # 2-media: structured (task_id,type,prompt) for native non-stream media
+            # the model created in a tool loop. Portal renders/polls via the divs
+            # appended to ui_reply above; this is the programmatic/Android form.
+            "media_tasks": media_tasks or [],
             "checkpoint_triggered": checkpoint_triggered,
         }
 
@@ -1896,26 +1938,54 @@ def _to_kebab(token: str) -> str:
 def _unpack_call(result, media: bool = False):
     """Tolerantly unpack a sync provider call's return into a fixed shape.
 
-    Real call_anthropic/call_xai return (text, usage, reasoning); call_gemini
-    returns (text, usage, media_parts, reasoning). Older callers / test stubs may
-    still return the pre-2-reasoning arity (text, usage[, media_parts]) with no
-    reasoning element. Normalize so the worker always gets reasoning (default "")
-    and, for gemini, media_parts (default []).
+    Production arities (2-media):
+        call_anthropic/call_xai -> (text, usage, reasoning, media_tasks)
+        call_gemini             -> (text, usage, media_parts, reasoning, media_tasks)
+
+    Legacy / test-stub arities still tolerated (older shapes have no media_tasks
+    and/or no reasoning element):
+        non-gemini -> (text, usage) | (text, usage, reasoning)
+        gemini     -> (text, usage) | (text, usage, media_parts, reasoning)
+
+    Normalize so the worker ALWAYS gets reasoning (default ""), media_tasks
+    (default []) and, for gemini, media_parts (default []).
 
     Returns:
-        media=False -> (text, usage, reasoning)
-        media=True  -> (text, usage, media_parts, reasoning)
+        media=False -> (text, usage, reasoning, media_tasks)
+        media=True  -> (text, usage, media_parts, reasoning, media_tasks)
     """
     parts = list(result)
     text = parts[0] if len(parts) > 0 else ""
     usage = parts[1] if len(parts) > 1 else {}
     if media:
+        # gemini: (text, usage, media_parts, reasoning, media_tasks)
         media_parts = parts[2] if len(parts) > 2 else []
         reasoning = parts[3] if len(parts) > 3 else ""
-        return text, usage, media_parts, (reasoning or "")
-    # Non-gemini: a 3rd element is reasoning.
+        media_tasks = parts[4] if len(parts) > 4 else []
+        return text, usage, (media_parts or []), (reasoning or ""), (media_tasks or [])
+    # non-gemini: (text, usage, reasoning, media_tasks)
     reasoning = parts[2] if len(parts) > 2 else ""
-    return text, usage, (reasoning or "")
+    media_tasks = parts[3] if len(parts) > 3 else []
+    return text, usage, (reasoning or ""), (media_tasks or [])
+
+
+_HTML_TAG_RX = re.compile(r"<[^>]+>")
+_WS_RX = re.compile(r"\s+")
+
+
+def _strip_html(text):
+    """Strip HTML tags and collapse whitespace for the immutable snapshot body.
+
+    Media loading-placeholder <div>s (regex path + native 2-media surfacing) are
+    required in the live ui_reply so the Portal pollers fire, but they must never
+    land in the searchable ledger or in the keyword digest. Tag-stripping +
+    whitespace-collapse keeps the snapshot prose clean while the UI keeps the div.
+    Total on non-str input (returns "").
+    """
+    if not isinstance(text, str):
+        return ""
+    no_tags = _HTML_TAG_RX.sub("", text)
+    return _WS_RX.sub(" ", no_tags).strip()
 
 
 def _extract_keywords(text: str, k: int = 7) -> list:

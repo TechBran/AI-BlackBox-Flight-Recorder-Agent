@@ -64,6 +64,47 @@ CHAT_TOOLS_GEMINI = get_gemini_rest_tools("chat")
 CHAT_TOOLS_XAI = CHAT_TOOLS_OPENAI  # xAI uses OpenAI format
 
 
+# -----------------------------------------------------------------------------
+# 2-media: native non-stream media-task surfacing.
+#
+# When a model natively calls generate_image/video/lyria_music (etc.) inside a
+# call_* tool loop, that loop CREATES the background task but returns only
+# predicted-URL text to the model -- it does NOT inject a UI loading-placeholder.
+# The non-stream worker (tasks.py) needs the created (task_id, type, prompt) so it
+# can append the EXACT existing placeholder <div> (so Portal's existing pollers
+# fire) + a result_data['media_tasks'] array. Each call_* collects these into a
+# list and surfaces it as the LAST return element (normalized by _unpack_call).
+# -----------------------------------------------------------------------------
+# Tool-name -> media kind. Covers the native-loop tools (generate_image via
+# IMAGE_TOOL_PROVIDERS, generate_video, lyria_music) AND the ToolVault media
+# tools that reach a loop's catch-all (which surface task_id in ToolResult.data).
+_MEDIA_TOOL_KINDS = {
+    "generate_image": "image",
+    "gemini_image": "image",
+    "openai_image": "image",
+    "grok_image": "image",
+    "generate_video": "video",
+    "extend_video": "video",
+    "lyria_music": "music",
+    "elevenlabs_music": "music",
+}
+
+
+def _media_kind(tool_name: str):
+    """Return 'image'|'video'|'music' for a known media tool, else None."""
+    return _MEDIA_TOOL_KINDS.get(tool_name)
+
+
+def _record_media_task(media_tasks: list, task_id, kind: str, prompt: str = "") -> None:
+    """Append a {task_id,type,prompt} entry (dedup by task_id) if task_id truthy."""
+    if not task_id or not kind:
+        return
+    tid = str(task_id)
+    if any(m.get("task_id") == tid for m in media_tasks):
+        return
+    media_tasks.append({"task_id": tid, "type": kind, "prompt": (prompt or "")[:500]})
+
+
 def _last_user_msg(messages) -> str:
     """Extract text from the last user message (for ToolVault prompt injection)."""
     for m in reversed(messages if isinstance(messages, list) else []):
@@ -415,6 +456,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
 
     # Tool calling loop - continue until model stops using tools
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
     max_tool_calls = 30  # Prevent infinite loops
 
     for iteration in range(max_tool_calls):
@@ -503,6 +545,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                         prompt=prompt,
                         result_data={"options": image_options}
                     )
+                    _record_media_task(media_tasks, task.task_id, "image", prompt)
 
                     # Generate predicted URL (same logic as process_image_generation)
                     slug = generate_prompt_slug(prompt)
@@ -554,6 +597,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                             prompt=prompt,
                             result_data=video_data
                         )
+                        _record_media_task(media_tasks, task.task_id, "video", prompt)
                         predicted_url = f"/ui/uploads/{slug}_{task.task_id}.mp4"
                         result_message = f"Video EXTENSION started. Extending video at {video_url} with prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. The new clip will continue from where the original ended. Video will be saved to: {predicted_url}. Takes 5-20 minutes."
                     else:
@@ -589,6 +633,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                             image_data=image_data,
                             result_data={"options": video_options}
                         )
+                        _record_media_task(media_tasks, task.task_id, "video", prompt)
                         predicted_url = f"/ui/uploads/{slug}_{task.task_id}.mp4"
                         result_message = f"Video generation ({mode}) started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution} resolution. Video will be saved to: {predicted_url}. Takes 5-20 minutes."
                     if image_url:
@@ -661,6 +706,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                         prompt=prompt,
                         result_data=music_options
                     )
+                    _record_media_task(media_tasks, task.task_id, "music", prompt)
 
                     variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
                     result_message = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
@@ -897,6 +943,13 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result_message:
                         result_message = f"Tool '{tool_name}' executed successfully (no output)."
+                    # 2-media: ToolVault media executors surface task_id in .data; if
+                    # a media tool ran via the catch-all, surface it like the native
+                    # branches so the worker injects the placeholder + polls.
+                    _kind = _media_kind(tool_name)
+                    if _kind and getattr(tool_result, "data", None):
+                        _record_media_task(media_tasks, tool_result.data.get("task_id"),
+                                           _kind, tool_input.get("prompt", ""))
                     print(f"\033[33m[TOOLVAULT-EXEC] {tool_name} (catch-all): {result_message[:120]}\033[0m")
                     tool_results.append({
                         "type": "tool_result",
@@ -929,7 +982,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
             reasoning_parts.append("[redacted thinking]")
     reasoning = "\n".join(reasoning_parts)
 
-    return text, total_usage, reasoning
+    return text, total_usage, reasoning, media_tasks
 
 
 def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
@@ -1059,6 +1112,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
     # Tool calling loop
     max_tool_calls = 30
     parts = []
+    media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
     for iteration in range(max_tool_calls):
         url = f"{GEMINI_BASE_URL}/{model}:generateContent?key={GOOGLE_API_KEY}"
         r = requests.post(url, json=payload, timeout=200)
@@ -1070,8 +1124,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
             # Check for safety ratings
             prompt_feedback = data.get("promptFeedback", {})
             if prompt_feedback.get("blockReason"):
-                return f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})", {}, [], ""
-            return "(The model did not provide a response. This may be due to the safety policy.)", {}, [], ""
+                return f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})", {}, [], "", media_tasks
+            return "(The model did not provide a response. This may be due to the safety policy.)", {}, [], "", media_tasks
 
         # Extract ALL parts from response (text + inline media)
         parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -1140,6 +1194,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                         prompt=prompt,
                         result_data={"options": image_options}
                     )
+                    _record_media_task(media_tasks, task.task_id, "image", prompt)
 
                     # Generate predicted URL
                     slug = generate_prompt_slug(prompt)
@@ -1185,6 +1240,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                             prompt=prompt,
                             result_data=video_data
                         )
+                        _record_media_task(media_tasks, task.task_id, "video", prompt)
                         predicted_url = f"/ui/uploads/{slug}_{task.task_id}.mp4"
                         result = f"Video EXTENSION started. Extending video at {video_url}. Video will be saved to: {predicted_url}. Takes 5-20 minutes."
                     else:
@@ -1220,6 +1276,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                             image_data=image_data,
                             result_data={"options": video_options}
                         )
+                        _record_media_task(media_tasks, task.task_id, "video", prompt)
                         predicted_url = f"/ui/uploads/{slug}_{task.task_id}.mp4"
                         result = f"Video generation ({mode}) started. Creating {duration}s video at {resolution}. Video will be saved to: {predicted_url}. Takes 5-20 minutes."
                         if image_url:
@@ -1264,6 +1321,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                         prompt=prompt,
                         result_data=music_options
                     )
+                    _record_media_task(media_tasks, task.task_id, "music", prompt)
 
                     variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
                     result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
@@ -1418,6 +1476,11 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
                         result = f"Tool '{func_name}' executed successfully (no output)."
+                    # 2-media: surface a media task created via the catch-all executor.
+                    _kind = _media_kind(func_name)
+                    if _kind and getattr(tool_result, "data", None):
+                        _record_media_task(media_tasks, tool_result.data.get("task_id"),
+                                           _kind, func_args.get("prompt", ""))
                     print(f"[GEMINI] {func_name} (catch-all): {result[:100]}")
 
                 function_responses.append({
@@ -1473,7 +1536,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
         "total_tokens": um.get("totalTokenCount", um.get("promptTokenCount", 0) + um.get("candidatesTokenCount", 0))
     }
 
-    return text, usage, media_parts, reasoning
+    return text, usage, media_parts, reasoning, media_tasks
 
 
 def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
@@ -1603,6 +1666,7 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
 
     # Tool calling loop
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
     max_tool_calls = 30
 
     for iteration in range(max_tool_calls):
@@ -1648,6 +1712,12 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                     if not result:
                         result = f"Tool '{tool_name}' executed successfully (no output)."
+                    # 2-media: xAI media (image/video/music) all reach this catch-all;
+                    # the ToolVault executor surfaces task_id in .data -> surface it.
+                    _kind = _media_kind(tool_name)
+                    if _kind and getattr(tool_result, "data", None):
+                        _record_media_task(media_tasks, tool_result.data.get("task_id"),
+                                           _kind, args.get("prompt", ""))
                     print(f"[XAI] {tool_name} (catch-all): {result[:100]}")
 
                 # Add tool result to messages
@@ -1671,7 +1741,7 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
         if val:
             reasoning = val if isinstance(val, str) else str(val)
             break
-    return text, total_usage, reasoning
+    return text, total_usage, reasoning, media_tasks
 
 
 # -----------------------------------------------------------------------------
