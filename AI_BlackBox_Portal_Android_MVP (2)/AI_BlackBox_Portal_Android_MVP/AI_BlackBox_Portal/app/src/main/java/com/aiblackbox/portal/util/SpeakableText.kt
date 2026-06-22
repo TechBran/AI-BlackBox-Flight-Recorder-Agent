@@ -79,9 +79,9 @@ object SpeakableText {
             }
         }
 
-        // 2. Remove [ARTIFACT:...]...[/ARTIFACT] blocks, then a lone opener.
-        out = ARTIFACT_BLOCK.replace(out, " ")
-        out = ARTIFACT_OPENER.replace(out, " ")
+        // 2. Remove [ARTIFACT:...]...[/ARTIFACT] blocks, then a lone opener
+        //    (shared with the chat-bubble DISPLAY strip — see stripArtifactBlocks).
+        out = stripArtifactBlocks(out, replacement = " ")
 
         // 3. Fenced code/JSON -> the words "code block".
         out = FENCED_CODE.replace(out, " code block ")
@@ -93,6 +93,23 @@ object SpeakableText {
         // 5. Collapse leftover whitespace.
         out = WHITESPACE.replace(out, " ").trim()
 
+        return out
+    }
+
+    /**
+     * Remove [ARTIFACT:...]...[/ARTIFACT] blocks AND a lone unclosed [ARTIFACT:...]
+     * opener from [text], using the SAME regexes as the speakable-text sanitizer.
+     *
+     * Shared by the chat bubble DISPLAY path (Phase 6b): once an assistant turn's
+     * artifacts are surfaced as native download chips, the raw [ARTIFACT] block must
+     * not appear in the rendered prose. Pure (String in -> String out); normal prose
+     * is untouched. [replacement] is what each match collapses to (default "" for
+     * display so prose reads cleanly; the TTS path passes " ").
+     */
+    fun stripArtifactBlocks(text: String?, replacement: String = ""): String {
+        if (text.isNullOrEmpty()) return ""
+        var out = ARTIFACT_BLOCK.replace(text, replacement)
+        out = ARTIFACT_OPENER.replace(out, replacement)
         return out
     }
 }

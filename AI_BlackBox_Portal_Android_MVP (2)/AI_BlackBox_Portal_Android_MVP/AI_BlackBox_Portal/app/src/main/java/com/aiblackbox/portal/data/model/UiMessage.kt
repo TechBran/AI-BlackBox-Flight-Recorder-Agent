@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.data.model
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -18,7 +19,21 @@ data class UiMessage(
     val attachments: List<String> = emptyList(),  // other file URLs
     val tokens: TokenCount? = null,
     val mediaTasks: List<String> = emptyList(),   // pending image/video/music task IDs
+    val artifacts: List<ArtifactRef> = emptyList(), // downloadable artifacts from /chat/save (Phase 6b)
     val provenance: Provenance? = null,            // typed retrieval provenance (recent/keyword/semantic/checkpoint)
     val ttsAudioUrl: String? = null,              // URL of generated TTS audio for inline player
     val ttsGenerating: Boolean = false             // true while TTS is being generated
+)
+
+/**
+ * A downloadable artifact returned by /chat/save (Phase 6a backend). Rendered as a
+ * native download chip below the assistant bubble (Phase 6b). The file is served at
+ * {baseUrl}{url} (e.g. http://host:9091/artifacts/<id>).
+ */
+@Serializable
+data class ArtifactRef(
+    val filename: String,
+    val type: String,
+    val url: String,                 // "/artifacts/<id>" — resolve against baseUrl
+    @SerialName("size_kb") val sizeKb: Double = 0.0
 )

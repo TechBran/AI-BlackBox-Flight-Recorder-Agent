@@ -35,6 +35,7 @@ import com.aiblackbox.portal.data.local.toResultJsonString
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.OverlayConfirmUi
 import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
+import com.aiblackbox.portal.data.model.ArtifactRef
 import com.aiblackbox.portal.data.model.ChatMessage
 import com.aiblackbox.portal.data.model.ChatProvider
 import com.aiblackbox.portal.data.model.CompleteRequest
@@ -65,8 +66,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -1925,7 +1928,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Save conversation for snapshot (matches Portal /chat/save).
                 // provenance is forwarded so backend auto-mint records context lineage.
-                saveConversation(text, content.toString(), reasoning.toString(), streamModel, tokenCount, provenance)
+                // assistantMessageId pins the artifacts[] from the /chat/save response
+                // (Phase 6a) onto THIS streamed assistant turn (the last message).
+                saveConversation(text, content.toString(), reasoning.toString(), streamModel, tokenCount, provenance,
+                    assistantMessageId = _messages.value.lastOrNull()?.id)
 
                 // Persist to local storage
                 persistHistory()
@@ -2307,7 +2313,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         reasoning: String,
         model: String?,
         tokens: TokenCount?,
-        provenance: Provenance? = null
+        provenance: Provenance? = null,
+        assistantMessageId: String? = null
     ) {
         val repo = repository ?: return
         val request = buildSaveRequest(
@@ -2321,11 +2328,43 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
         viewModelScope.launch {
             try {
-                repo.saveConversation(request)
+                // /chat/save returns the raw JSON body, including the Phase 6a
+                // "artifacts" array. api.post -> ChatRepository.saveConversation
+                // already forwards the body verbatim, so just parse it here and
+                // attach the typed refs to the just-saved assistant message
+                // (mirrors how resolveMediaTaskInMessage attaches media). Tolerant:
+                // missing/[]/malformed -> no-op (parseArtifacts never throws).
+                val body = repo.saveConversation(request)
+                val artifacts = parseArtifacts(body)
+                if (artifacts.isNotEmpty()) {
+                    attachArtifactsToMessage(assistantMessageId, artifacts)
+                    // Persist so the chips survive a history reload.
+                    persistHistory()
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "saveConversation failed (non-critical): ${e.message}")
             }
         }
+    }
+
+    /**
+     * Attach [artifacts] to the just-saved assistant message and refresh the flow.
+     * Targets [assistantMessageId] when known; otherwise falls back to the last
+     * assistant message (the turn that just streamed). Replaces the message's
+     * artifacts list, mirroring how resolveMediaTaskInMessage updates a message.
+     */
+    private fun attachArtifactsToMessage(assistantMessageId: String?, artifacts: List<ArtifactRef>) {
+        val current = _messages.value.toMutableList()
+        if (current.isEmpty()) return
+        val idx = if (assistantMessageId != null) {
+            current.indexOfLast { it.id == assistantMessageId }
+        } else {
+            current.indexOfLast { it.role == "assistant" }
+        }
+        if (idx < 0) return
+        current[idx] = current[idx].copy(artifacts = artifacts)
+        _messages.value = current
+        Log.d(TAG, "Attached ${artifacts.size} artifact(s) to message ${current[idx].id}")
     }
 
     // =========================================================================
@@ -3646,6 +3685,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         fun parseProvenance(raw: String): Provenance? = try {
             provJson.decodeFromString(Provenance.serializer(), raw.trim())
         } catch (_: Exception) { null }
+
+        /**
+         * Parse the Phase 6a artifacts[] array out of a raw /chat/save response body.
+         * Each element is {filename, type, url, size_kb}. TOLERANT by contract: a
+         * missing key, an absent/empty/non-array "artifacts", or unparseable JSON all
+         * return an empty list — this NEVER throws (the save path must not fail a turn
+         * over artifact rendering). Elements missing filename or url are skipped;
+         * size_kb defaults to 0.0; type defaults to "".
+         */
+        @VisibleForTesting
+        fun parseArtifacts(rawBody: String?): List<ArtifactRef> {
+            if (rawBody.isNullOrBlank()) return emptyList()
+            return try {
+                val root = provJson.parseToJsonElement(rawBody)
+                val arr = (root as? JsonObject)?.get("artifacts")?.let { it as? JsonArray }
+                    ?: return emptyList()
+                arr.mapNotNull { el ->
+                    val obj = el as? JsonObject ?: return@mapNotNull null
+                    val filename = obj["filename"]?.jsonPrimitive?.contentOrNull
+                    val url = obj["url"]?.jsonPrimitive?.contentOrNull
+                    if (filename.isNullOrBlank() || url.isNullOrBlank()) return@mapNotNull null
+                    ArtifactRef(
+                        filename = filename,
+                        type = obj["type"]?.jsonPrimitive?.contentOrNull ?: "",
+                        url = url,
+                        sizeKb = obj["size_kb"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    )
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
 
         /**
          * Extract the provenance object from inside an SSE stream_start event's

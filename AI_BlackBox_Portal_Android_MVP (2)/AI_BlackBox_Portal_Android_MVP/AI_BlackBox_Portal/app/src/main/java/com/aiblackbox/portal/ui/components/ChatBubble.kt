@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,7 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.aiblackbox.portal.data.model.ArtifactRef
 import com.aiblackbox.portal.data.model.UiMessage
+import com.aiblackbox.portal.util.SpeakableText
 import com.aiblackbox.portal.ui.theme.AssistantBubbleShape
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
@@ -210,8 +214,12 @@ fun ChatBubble(
                         color = BbxWhite
                     )
                 } else {
+                    // Strip raw [ARTIFACT:...] blocks BEFORE rendering — once artifacts
+                    // are surfaced as native download chips (below), the bracket text must
+                    // never reach the bubble. Shared rule with the TTS sanitizer.
+                    val displayContent = SpeakableText.stripArtifactBlocks(message.content)
                     // Extract inline media URLs from content, render them, strip from text
-                    val (cleanContent, inlineMedia) = extractInlineMedia(message.content)
+                    val (cleanContent, inlineMedia) = extractInlineMedia(displayContent)
 
                     // Render extracted media inline
                     inlineMedia.forEach { media ->
@@ -301,6 +309,14 @@ fun ChatBubble(
                 }
             } else if (message.isStreaming) {
                 ThinkingIndicator(isThinking = true)
+            }
+
+            // ── Artifact download chips (Phase 6b) ──
+            // Native chips for files returned by /chat/save (artifacts[]); tapping
+            // opens {baseUrl}{url} via ACTION_VIEW. Renders regardless of bubble text
+            // so an artifact still surfaces even when the prose is empty.
+            if (message.artifacts.isNotEmpty()) {
+                ArtifactChips(artifacts = message.artifacts)
             }
 
             // ── TTS Audio Player (shown when ttsAudioUrl file exists) ──
@@ -489,6 +505,61 @@ private fun BubbleActionButton(
 private fun formatTime(timestamp: Long): String {
     val sdf = java.text.SimpleDateFormat("h:mm a", java.util.Locale.US)
     return sdf.format(java.util.Date(timestamp))
+}
+
+// =============================================================================
+// Artifact download chips (Phase 6b) — native Material3 AssistChips for the
+// files returned by /chat/save (UiMessage.artifacts). Tapping a chip opens
+// {baseUrl}{url} (e.g. http://host:9091/artifacts/<id>) via ACTION_VIEW,
+// mirroring overlay/IntentActuator's open_url. baseUrl is the same value the
+// rest of the bubble uses to resolve relative media (_cachedBaseUrl).
+// =============================================================================
+@Composable
+private fun ArtifactChips(artifacts: List<ArtifactRef>) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        artifacts.forEach { artifact ->
+            val sizeLabel = formatSizeKb(artifact.sizeKb)
+            val label = if (sizeLabel.isNotBlank()) {
+                "\uD83D\uDCE5 ${artifact.filename} ($sizeLabel)"
+            } else {
+                "\uD83D\uDCE5 ${artifact.filename}"
+            }
+            AssistChip(
+                onClick = {
+                    val fullUrl = if (artifact.url.startsWith("http")) artifact.url
+                        else "${_cachedBaseUrl}${artifact.url}"
+                    try {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                            data = android.net.Uri.parse(fullUrl)
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                    } catch (_: Exception) {
+                        // No activity can handle the view intent — fail silently.
+                    }
+                },
+                label = {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    labelColor = BbxWhite,
+                    containerColor = Color(0x14FFFFFF)
+                )
+            )
+        }
+    }
+}
+
+/** Format an artifact size in KB for the chip label. Blank when 0/unknown. */
+private fun formatSizeKb(sizeKb: Double): String = when {
+    sizeKb <= 0.0 -> ""
+    sizeKb >= 1024.0 -> String.format("%.1f MB", sizeKb / 1024.0)
+    sizeKb >= 10.0 -> "${sizeKb.toInt()} KB"
+    else -> String.format("%.1f KB", sizeKb)
 }
 
 // =============================================================================
