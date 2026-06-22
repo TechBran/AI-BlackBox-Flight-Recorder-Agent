@@ -134,6 +134,7 @@
             android:name=".NativeMainActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.AIBlackBox.NoBar"/>
 
         <!-- XR Overlay Activity — transparent floating panel in Home Space (Galaxy XR) -->
