@@ -39,6 +39,7 @@ from Orchestrator.monitoring import drift_state_for
 from Orchestrator.state import get_state, save_operator_state
 from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
+from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
@@ -3339,6 +3340,9 @@ async def persist_local_turn_and_mint(
         # Start with the model's final answer; if the phone reported tool use,
         # append a compact, bounded provenance block so the snapshot records
         # what the turn actually touched (the 4B never authors this).
+        # Phase 0 (0b-ii): defensive unwrap in case the on-device model leaked a
+        # reply envelope onto its final text; store the clean reply, not raw JSON.
+        final_response, _ = unwrap_reply_envelope(final_response)
         assistant_response = final_response
         if tool_transcript:
             lines = ["", "[TOOLS USED]"]
@@ -5952,17 +5956,23 @@ async def chat_save(request: Request):
             assistant_response = parse_and_process_artifacts(assistant_response, operator)
             has_artifacts = True
 
+        # Phase 0 (0a): defensive unwrap of a leaked reply envelope. If a model
+        # leaked {"ui_reply": ..., "snapshot_perspective": ...} onto the streamed
+        # text channel, store the clean reply in BOTH the snapshot and the turn,
+        # never raw JSON. Total function; never a parse-error sentinel.
+        assistant_response_unwrapped, _persp = unwrap_reply_envelope(assistant_response)
+
         # Build snap_text with reasoning (if provided) + response
         # This goes into the snapshot's Raw Session Log
         if reasoning:
-            snap_text = f"[REASONING]\n{reasoning}\n\n[RESPONSE]\n{assistant_response}"
+            snap_text = f"[REASONING]\n{reasoning}\n\n[RESPONSE]\n{assistant_response_unwrapped}"
         else:
-            snap_text = assistant_response
+            snap_text = assistant_response_unwrapped
 
         # Add to conversation log (this is what perform_mint reads from)
         if user_message:
             s.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_message})
-        s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": assistant_response, "snap_text": snap_text})
+        s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": assistant_response_unwrapped, "snap_text": snap_text})
 
         # Update counters
         total_tokens = tokens.get("prompt", 0) + tokens.get("completion", 0)

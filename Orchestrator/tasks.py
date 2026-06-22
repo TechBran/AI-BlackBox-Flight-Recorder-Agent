@@ -43,6 +43,7 @@ from Orchestrator.models import Task, TaskStatus, TaskType, task_db, task_queue,
 import Orchestrator.models as models_module  # For modifying worker_running global
 from Orchestrator.media_index import add_media_entry
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
+from Orchestrator.reply_envelope import unwrap_reply_envelope
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -1654,25 +1655,12 @@ def process_chat_task(task: Task):
                 except Exception as e:
                     print(f"[GEMINI3] Error saving inline media: {e}")
 
-        ui_reply, snap_persp = raw, ""
-        try:
-            json_str = _extract_first_json_object(raw)
-            if not json_str: raise json.JSONDecodeError("No JSON object found", raw, 0)
-            data = json.loads(json_str)
-            ui_reply = data.get("ui_reply", "").strip() or raw
-            snap_persp = data.get("snapshot_perspective", "").strip()
-        except (json.JSONDecodeError, AttributeError) as parse_err:
-            # Standard JSON parsing failed - try truncation-aware extraction
-            print(f"[PARSE] Standard JSON parsing failed: {str(parse_err)[:100]}")
-            truncated_reply = _extract_ui_reply_from_truncated(raw)
-            if truncated_reply:
-                print(f"[PARSE] Recovered ui_reply from truncated response ({len(truncated_reply)} chars)")
-                ui_reply = truncated_reply
-                snap_persp = "(Response was truncated - snapshot_perspective unavailable)"
-            else:
-                print(f"[PARSE] Could not recover ui_reply, using raw text")
-                ui_reply = _extract_clean_text(raw)
-                snap_persp = "(Could not parse snapshot_perspective)"
+        # Phase 0 (0b-i): robust defensive unwrap of the legacy reply envelope.
+        # Handles valid / fenced (```json) / triple-nested envelopes (happy path
+        # preserved: ui_reply + snapshot_perspective extracted) and, on any parse
+        # failure, stores the reply AS-IS (ui_reply=raw, snap_persp="") instead of
+        # embedding raw JSON or a parse-error sentinel into searchable memory.
+        ui_reply, snap_persp = unwrap_reply_envelope(raw)
 
         # SMS mode: cap response length and strip formatting
         if sms_mode:
