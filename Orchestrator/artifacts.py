@@ -160,12 +160,22 @@ def generate_docx(content: str, output_path: Path):
 
     doc.save(str(output_path))
 
-def parse_and_process_artifacts(ui_reply: str, operator: str) -> str:
+def parse_and_process_artifacts_with_meta(ui_reply: str, operator: str):
     """
     Parse [ARTIFACT:...] blocks, generate files, replace with download links.
-    Returns modified ui_reply with download buttons.
+
+    Returns a tuple (modified_ui_reply, artifacts_list) where:
+      - modified_ui_reply is byte-identical to what parse_and_process_artifacts
+        has always returned (Portal depends on this exact HTML).
+      - artifacts_list is a list of dicts, one per SUCCESSFULLY generated artifact:
+            {"filename": str, "type": str, "url": "/artifacts/<id>", "size_kb": float}
+        image_placeholder artifacts (no file) and error cases (no file) are NOT
+        included. This structured form lets native clients (e.g. Android, Phase 6b)
+        render download chips instead of parsing the [ARTIFACT] text / HTML.
     """
     pattern = r'\[ARTIFACT:([^:]+):([^\]]+)\](.*?)\[/ARTIFACT\]'
+
+    artifacts_list = []
 
     def process_match(match):
         filename = match.group(1).strip()
@@ -198,6 +208,13 @@ def parse_and_process_artifacts(ui_reply: str, operator: str) -> str:
             # Return download button HTML
             size_kb = artifact_path.stat().st_size / 1024
             print(f"[ARTIFACT] Success: {filename} ({size_kb:.1f} KB)")
+            # Structured metadata for native clients (only successful, file-backed artifacts)
+            artifacts_list.append({
+                "filename": filename,
+                "type": artifact_type,
+                "url": f"/artifacts/{artifact_id}",
+                "size_kb": round(size_kb, 1),
+            })
             return f'<div class="artifact-download"><a href="/artifacts/{artifact_id}" download="{filename}" class="btn artifact-btn">📥 Download {filename} ({size_kb:.1f} KB)</a></div>'
         except Exception as e:
             print(f"[ARTIFACT] Error generating {filename} (type={artifact_type}): {e}")
@@ -209,5 +226,18 @@ def parse_and_process_artifacts(ui_reply: str, operator: str) -> str:
                 error_msg = error_msg[:200] + "..."
             return f'<div class="artifact-error" style="color: #ff6b6b; padding: 12px; background: #1a1a1a; border-radius: 4px; margin: 8px 0;">⚠️ Failed to generate {filename}: {error_msg}</div>'
 
-    return re.sub(pattern, process_match, ui_reply, flags=re.DOTALL)
+    modified = re.sub(pattern, process_match, ui_reply, flags=re.DOTALL)
+    return modified, artifacts_list
+
+
+def parse_and_process_artifacts(ui_reply: str, operator: str) -> str:
+    """
+    Back-compat wrapper: parse [ARTIFACT:...] blocks, generate files, replace
+    with download links, and return ONLY the modified ui_reply string.
+
+    Thin wrapper around parse_and_process_artifacts_with_meta so existing callers
+    (admin_routes.reprocess, Portal-facing paths) keep their exact behavior.
+    """
+    modified, _artifacts = parse_and_process_artifacts_with_meta(ui_reply, operator)
+    return modified
 
