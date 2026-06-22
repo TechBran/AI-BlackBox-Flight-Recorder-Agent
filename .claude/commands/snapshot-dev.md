@@ -36,6 +36,7 @@ The `assistant_response` field becomes the snapshot body. Future semantic search
 - **Test totals** (how many tests, all passing?)
 - **Verification evidence** (probe results, log lines, build output summary)
 - **Search hint phrases** ("Search this snapshot via X, Y, Z") so future-Claude can grep semantically
+- **Resolution status (memory hygiene — REQUIRED when relevant)** — if this snapshot records the FIX for a previously-snapshotted bug/failure, say so explicitly: state FIXED/RESOLVED and reference the prior snapshot id (e.g. "supersedes the failure in SNAP-YYYYMMDD-NNNN"). Conversely, if you snapshot a bug you did NOT fully resolve, mark it OPEN. **Why:** semantic search ranks an older failure snapshot highly for the same topic, so without a resolution marker a future session retrieves the stale "it's broken" snapshot and acts on it (a real confabulation source — see the 2026-06-22 phantom Workspace-tool failure). The cross-reference lets retrieval self-correct.
 
 ## Procedure
 
