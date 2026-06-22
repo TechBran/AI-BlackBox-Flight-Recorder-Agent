@@ -37,12 +37,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
@@ -51,23 +53,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.ui.theme.RadiusMd
+import com.aiblackbox.portal.ui.voice.VoiceWaveform
+import com.aiblackbox.portal.ui.voice.WaveSpeaker
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
 
 // =============================================================================
-// AudioPlayerBar — production-grade waveform audio player
+// AudioPlayerBar — production-grade audio player
 //
-// Inspired by WhisperFlow / OpenAI voice app aesthetic:
-//   - Smooth mirrored waveform (top + bottom reflection)
+//   - Flowing red "ribbon" waveform (VoiceWaveform) that pulses while playing
+//   - Thin progress track + playhead beneath the ribbon (visible + scrubbable)
+//   - Play/pause + tap-to-seek + horizontal-drag-to-seek
 //   - Red accent on black background
-//   - Fluid reactive bars with spring animation
-//   - Gradient fade on played vs unplayed regions
 // =============================================================================
 
-private const val BAR_COUNT = 64
 private const val POLL_MS = 33L // ~30fps for smooth animation
 
 // Red accent palette on pure black
@@ -77,28 +76,6 @@ private val WaveRedGlow = Color(0x40EF4444)
 private val WaveUnplayed = Color(0xFF2A2A2A)
 private val WaveBg = Color(0xFF000000)
 private val TimeColor = Color(0xCCEF4444)
-
-/**
- * Generate a smooth, organic waveform pattern.
- * Uses layered sine waves with golden-ratio harmonics for a natural audio feel.
- */
-private fun generateWaveform(seed: String, count: Int): FloatArray {
-    val h = seed.hashCode()
-    val phi = 1.618033988f // golden ratio
-    return FloatArray(count) { i ->
-        val t = i.toFloat() / count
-        // 5 layered harmonics for rich organic shape
-        val w1 = sin((t * 2 * Math.PI * 3 + h * 0.013).toFloat()) * 0.28f
-        val w2 = sin((t * 2 * Math.PI * 5 * phi + h * 0.007).toFloat()) * 0.22f
-        val w3 = cos((t * 2 * Math.PI * 8 + h * 0.023).toFloat()) * 0.15f
-        val w4 = sin((t * 2 * Math.PI * 13 * phi + h * 0.003).toFloat()) * 0.10f
-        val w5 = cos((t * 2 * Math.PI * 21 + h * 0.017).toFloat()) * 0.07f
-        // Envelope: fade edges for natural look
-        val envelope = sin((t * Math.PI).toFloat()).coerceIn(0.3f, 1f)
-        val raw = (0.5f + w1 + w2 + w3 + w4 + w5) * envelope
-        raw.coerceIn(0.06f, 0.98f)
-    }
-}
 
 @Composable
 fun AudioPlayerBar(
@@ -150,8 +127,6 @@ fun AudioPlayerBar(
         }
     }
 
-    val waveform = remember(audioUrl) { generateWaveform(audioUrl, BAR_COUNT) }
-
     val playBtnBg by animateColorAsState(
         targetValue = if (thisPlaying) WaveRed else WaveRed.copy(alpha = 0.2f),
         animationSpec = tween(200), label = "btnBg"
@@ -190,13 +165,18 @@ fun AudioPlayerBar(
             }
         }
 
-        // ── Waveform ──
+        // ── Waveform (flowing red ribbon) + thin seek/progress track ──
         var canvasWidth by remember { mutableFloatStateOf(1f) }
+
+        // Pulse the ribbon while playing; rest (flat) when paused. The ribbon
+        // still flows via VoiceWaveform's own continuous phase animation.
+        val ribbonAmplitude = if (thisPlaying) (0.35f + breathe * 0.4f) else 0f
 
         Box(
             modifier = Modifier
                 .weight(1f)
                 .height(40.dp)
+                .onSizeChanged { canvasWidth = it.width.toFloat() }
                 .pointerInput(isThisActive) {
                     detectTapGestures { offset ->
                         if (canvasWidth > 0) {
@@ -224,69 +204,55 @@ fun AudioPlayerBar(
                     )
                 }
         ) {
+            // Flowing ribbon, forced to the red palette regardless of speaker.
+            VoiceWaveform(
+                amplitude = ribbonAmplitude,
+                speaker = WaveSpeaker.USER,
+                modifier = Modifier.fillMaxSize(),
+                height = 40.dp,
+                overrideColors = WaveRed to WaveRedDim
+            )
+
+            // Thin progress track + playhead beneath the ribbon so position is
+            // visible and scrubbable (the ribbon itself shows no played/unplayed).
             Canvas(modifier = Modifier.fillMaxSize()) {
-                canvasWidth = size.width
                 val cW = size.width
                 val cH = size.height
-                val centerY = cH / 2f
-                val gap = 1.8f
-                val barW = (cW - gap * (BAR_COUNT - 1)) / BAR_COUNT
-                val playedIdx = (animatedPosition * BAR_COUNT).toInt()
+                val trackY = cH * 0.92f                 // sit the track near the bottom
+                val trackH = 2.dp.toPx()
+                val frac = animatedPosition.coerceIn(0f, 1f)
 
-                waveform.forEachIndexed { i, amp ->
-                    // Breathing modulation when playing
-                    val liveAmp = if (thisPlaying) {
-                        val proximity = 1f - abs(i.toFloat() / BAR_COUNT - animatedPosition).coerceIn(0f, 0.3f) / 0.3f
-                        amp * (1f + proximity * breathe * 0.15f)
-                    } else amp
-
-                    val barH = liveAmp.coerceIn(0.06f, 0.98f) * cH * 0.85f
-                    val halfH = barH / 2f
-                    val x = i * (barW + gap)
-
-                    val isPlayed = i <= playedIdx
-                    val barColor = if (isPlayed) WaveRed else WaveUnplayed
-
-                    // Top half (mirrored waveform)
-                    drawRoundRect(
-                        color = barColor,
-                        topLeft = Offset(x, centerY - halfH),
-                        size = Size(barW, halfH),
-                        cornerRadius = CornerRadius(barW / 2f)
-                    )
-                    // Bottom half (reflection, slightly dimmer)
-                    drawRoundRect(
-                        color = barColor.copy(alpha = if (isPlayed) 0.5f else 0.3f),
-                        topLeft = Offset(x, centerY + 1f),
-                        size = Size(barW, halfH * 0.7f),
-                        cornerRadius = CornerRadius(barW / 2f)
-                    )
-                }
-
-                // Glow line at center
+                // Unplayed track (full width)
                 drawLine(
-                    color = WaveRed.copy(alpha = if (thisPlaying) 0.15f else 0.05f),
-                    start = Offset(0f, centerY),
-                    end = Offset(cW, centerY),
-                    strokeWidth = 0.5f
+                    color = WaveUnplayed,
+                    start = Offset(0f, trackY),
+                    end = Offset(cW, trackY),
+                    strokeWidth = trackH,
+                    cap = StrokeCap.Round
                 )
-
-                // Playhead — thin bright line
-                if (animatedPosition > 0.001f) {
-                    val px = animatedPosition * cW
+                // Played portion
+                if (frac > 0f) {
                     drawLine(
-                        color = WaveRed.copy(alpha = 0.9f),
-                        start = Offset(px, cH * 0.05f),
-                        end = Offset(px, cH * 0.95f),
-                        strokeWidth = 1.5f
-                    )
-                    // Glow dot at playhead
-                    drawCircle(
                         color = WaveRed,
-                        radius = 3f,
-                        center = Offset(px, centerY)
+                        start = Offset(0f, trackY),
+                        end = Offset(frac * cW, trackY),
+                        strokeWidth = trackH,
+                        cap = StrokeCap.Round
                     )
                 }
+                // Playhead — thin bright line spanning the ribbon + a dot on the track
+                val px = frac * cW
+                drawLine(
+                    color = WaveRed.copy(alpha = if (thisPlaying) 0.9f else 0.5f),
+                    start = Offset(px, cH * 0.05f),
+                    end = Offset(px, trackY),
+                    strokeWidth = 1.5f
+                )
+                drawCircle(
+                    color = WaveRed,
+                    radius = 3.5f,
+                    center = Offset(px, trackY)
+                )
             }
         }
 

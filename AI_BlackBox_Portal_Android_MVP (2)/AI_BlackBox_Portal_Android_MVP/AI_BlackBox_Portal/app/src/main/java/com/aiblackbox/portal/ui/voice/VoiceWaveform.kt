@@ -51,6 +51,11 @@ fun VoiceWaveform(
     // voice screen exactly as tuned; the small composer ribbon turns this up so
     // speech-level RMS (~0.05-0.15) reads clearly in its shorter height.
     sensitivity: Float = 1f,
+    // Optional gradient override (c1 to c2). When non-null it replaces the
+    // per-speaker palette — e.g. the audio player passes its red pair so the
+    // ribbon reads red regardless of [speaker]. Default null = existing callers
+    // (voice screen, composer mic) are unchanged.
+    overrideColors: Pair<Color, Color>? = null,
 ) {
     val gain = when (speaker) {
         WaveSpeaker.AI -> AI_GAIN
@@ -70,7 +75,7 @@ fun VoiceWaveform(
         label = "phase",
     )
 
-    val (c1, c2) = when (speaker) {
+    val (c1, c2) = overrideColors ?: when (speaker) {
         WaveSpeaker.USER -> BbxAccent to BbxRed
         WaveSpeaker.AI -> SolidGreen to AI_TEAL
         WaveSpeaker.IDLE -> BbxDim to BbxDim
