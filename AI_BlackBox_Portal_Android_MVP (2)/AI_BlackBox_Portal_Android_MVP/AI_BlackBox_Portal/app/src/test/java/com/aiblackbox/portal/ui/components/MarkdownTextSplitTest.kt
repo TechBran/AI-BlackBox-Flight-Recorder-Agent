@@ -109,4 +109,14 @@ class MarkdownTextSplitTest {
         assertTrue(codeBlocks(content).isEmpty())
         assertEquals(1, markdowns(content).size)
     }
+
+    // Chat text streams in deltas: a mid-stream UNBALANCED JSON blob must stay
+    // prose (no fence, no crash) until it completes and balances on a later delta.
+    @Test fun `partial unbalanced json mid-stream stays prose and does not crash`() {
+        val partial = "Here are the results so far:\n{\"results\": [{\"name\": \"slides_batch_upda"
+        val segments = splitContent(partial)
+        assertTrue(codeBlocks(partial).isEmpty())
+        assertEquals(1, segments.size)
+        assertTrue(segments[0] is ContentSegment.Markdown)
+    }
 }

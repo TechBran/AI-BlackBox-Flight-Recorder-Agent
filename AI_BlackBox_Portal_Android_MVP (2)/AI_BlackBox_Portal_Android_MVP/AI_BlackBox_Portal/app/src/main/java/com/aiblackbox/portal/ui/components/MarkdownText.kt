@@ -115,7 +115,7 @@ internal fun splitContent(content: String): List<ContentSegment> {
 
 private const val MIN_INLINE_JSON_CHARS = 80
 
-private val LENIENT_JSON = Json { isLenient = false; ignoreUnknownKeys = true }
+private val STRICT_JSON = Json { isLenient = false }
 
 /**
  * Split a prose [markdown] string into ordered prose / json-CodeBlock pieces.
@@ -211,7 +211,7 @@ private fun jsonRunEnd(s: String, start: Int): Int {
 
 /** Parse-gate: only treat the candidate as JSON if it actually parses. */
 private fun parsesAsJson(candidate: String): Boolean = try {
-    LENIENT_JSON.parseToJsonElement(candidate)
+    STRICT_JSON.parseToJsonElement(candidate)
     true
 } catch (_: Exception) {
     false
