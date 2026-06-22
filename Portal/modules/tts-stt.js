@@ -1026,12 +1026,74 @@ export async function speak(text, btn) {
 }
 
 /**
+ * Strip non-speakable content from a reply BEFORE it is sent to TTS.
+ *
+ * PURE + DOM-free (string in -> string out). Mirrors the Android
+ * SpeakableText.stripNonSpeakable rules and Orchestrator/reply_envelope.py's
+ * LEADING-only envelope rule. Order matters: unwrap envelope first, then strip
+ * artifacts/code/urls. Conservative: normal prose passes through unchanged.
+ *
+ * @param {string} text - Raw reply text
+ * @returns {string} Speakable text
+ */
+export function stripNonSpeakable(text) {
+    if (typeof text !== 'string' || !text) return '';
+
+    let out = text;
+
+    // 1. Whole-message {"ui_reply":...} envelope (optionally ```json-fenced).
+    //    LEADING-only: only unwrap when the envelope IS the whole message;
+    //    never extract mid-prose JSON (mirrors reply_envelope.py).
+    try {
+        let candidate = out.trim();
+        // Strip a whole-string code fence wrapping the entire payload.
+        const fence = candidate.match(/^```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/);
+        if (fence) candidate = fence[1].trim();
+        // Only a LEADING object counts as a whole-message envelope.
+        if (candidate.startsWith('{')) {
+            const obj = JSON.parse(candidate);
+            if (obj && typeof obj === 'object' && !Array.isArray(obj) &&
+                Object.prototype.hasOwnProperty.call(obj, 'ui_reply')) {
+                const inner = obj.ui_reply;
+                if (typeof inner === 'string' && inner.trim()) {
+                    out = inner;
+                }
+            }
+        }
+    } catch (e) {
+        // Not a parseable whole-message envelope -> leave text as-is.
+    }
+
+    // 2. Remove [ARTIFACT:...]...[/ARTIFACT] blocks (DOTALL, non-greedy),
+    //    plus a lone unclosed [ARTIFACT:...] opener.
+    out = out.replace(/\[ARTIFACT:[\s\S]*?\[\/ARTIFACT\]/g, ' ');
+    out = out.replace(/\[ARTIFACT:[^\]]*\]/g, ' ');
+
+    // 3. Fenced code/JSON blocks -> the words "code block" (don't read code aloud).
+    out = out.replace(/```[\s\S]*?```/g, ' code block ');
+
+    // 4. Bare media URLs (/ui/uploads/... and absolute .../ui/uploads/...) -> removed.
+    out = out.replace(/https?:\/\/[^\s)]*\/ui\/uploads\/\S+/g, ' ');
+    out = out.replace(/\/ui\/uploads\/\S+/g, ' ');
+
+    // 5. Collapse leftover whitespace.
+    out = out.replace(/\s+/g, ' ').trim();
+
+    return out;
+}
+
+/**
  * Extract only speakable text (removes media elements)
  * @param {string} text - HTML text
  * @returns {string} Clean text
  */
 export function extractSpeakableText(text) {
     if (!text) return "";
+
+    // Regex strip of raw markdown artifacts/urls/code/envelope FIRST
+    // (covers the auto-TTS accumulator path), then DOM-strip rendered
+    // HTML media elements below.
+    text = stripNonSpeakable(text);
 
     const temp = document.createElement('div');
     temp.innerHTML = text;

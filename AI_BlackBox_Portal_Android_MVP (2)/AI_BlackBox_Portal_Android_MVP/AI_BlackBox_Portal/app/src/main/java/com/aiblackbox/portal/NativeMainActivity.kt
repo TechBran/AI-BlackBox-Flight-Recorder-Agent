@@ -80,7 +80,9 @@ import java.io.File
 private fun buildTtsBatchBody(
     text: String, voice: String, model: String, format: String, provider: String, operator: String
 ): String = buildJsonObject {
-    put("text", text)
+    // §3.5: strip non-speakable content (artifacts/media-urls/fenced-code/
+    // {ui_reply} envelope) before TTS -- mirrors Portal stripNonSpeakable.
+    put("text", com.aiblackbox.portal.util.SpeakableText.stripNonSpeakable(text))
     put("voice", voice)
     put("model", model)
     put("format", format)
