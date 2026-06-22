@@ -401,6 +401,7 @@ fun Composer(
                             else
                                 GlassProviderPill,
                             elevation = 4.dp,
+                            borderOverride = androidx.compose.ui.graphics.Color.Transparent,
                         ),
                     contentAlignment = Alignment.Center
                 ) {

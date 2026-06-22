@@ -37,8 +37,8 @@ import androidx.compose.ui.unit.dp
 // Specific glass tints matching Portal's actual element backgrounds
 // These are more opaque than the generic glass tokens for better readability
 val GlassFloatingBubble = Color(0xF2222222)     // rgba(34,34,34,0.95) — topbar bubbles
-val GlassComposerInput  = Color(0xEB1C1C1E)     // rgba(28,28,30,0.92) — textarea wrapper
-val GlassProviderPill   = Color(0xE01C1C1E)     // rgba(28,28,30,0.88) — provider/model bubble
+val GlassComposerInput  = Color(0xFF1C1C1E)     // opaque (was 0.92) — textarea wrapper
+val GlassProviderPill   = Color(0xFF1C1C1E)     // opaque (was 0.88) — provider/model bubble
 
 @Immutable
 data class BlackBoxGlass(

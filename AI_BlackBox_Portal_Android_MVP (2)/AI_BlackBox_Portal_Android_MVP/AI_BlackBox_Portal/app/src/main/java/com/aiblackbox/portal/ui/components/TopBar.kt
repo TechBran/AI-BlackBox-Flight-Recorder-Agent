@@ -98,7 +98,7 @@ fun BlackBoxTopBar(
                 .align(Alignment.TopCenter)
                 .glassSurface(
                     shape = BubbleShape,
-                    bg = GlassFloatingBubble,
+                    bg = androidx.compose.ui.graphics.Color(0xFF222222), // opaque operator pill (shared token stays glass)
                     elevation = 8.dp,
                     borderOverride = androidx.compose.ui.graphics.Color.Transparent,
                 ),
