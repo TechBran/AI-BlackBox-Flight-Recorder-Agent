@@ -92,6 +92,8 @@ fun AudioPlayerBar(
     val duration by mgr.duration.collectAsState()
     val position by mgr.position.collectAsState()
     val hasError by mgr.hasError.collectAsState()
+    val outputAmplitude by mgr.amplitude.collectAsState()
+    val visualizerActive by mgr.visualizerActive.collectAsState()
     var isSeeking by remember { mutableStateOf(false) }
     var seekPosition by remember { mutableFloatStateOf(0f) }
 
@@ -168,9 +170,16 @@ fun AudioPlayerBar(
         // ── Waveform (flowing red ribbon) + thin seek/progress track ──
         var canvasWidth by remember { mutableFloatStateOf(1f) }
 
-        // Pulse the ribbon while playing; rest (flat) when paused. The ribbon
-        // still flows via VoiceWaveform's own continuous phase animation.
-        val ribbonAmplitude = if (thisPlaying) (0.35f + breathe * 0.4f) else 0f
+        // Drive the ribbon from the REAL audio output (Visualizer RMS) while
+        // playing, so it dances with the actual speech. If the Visualizer could
+        // not attach on this device, fall back to a gentle synthetic pulse so
+        // the ribbon still shows life. The ribbon also flows via VoiceWaveform's
+        // own continuous phase animation.
+        val ribbonAmplitude = when {
+            !thisPlaying -> 0f
+            visualizerActive -> (outputAmplitude * 1.5f).coerceIn(0f, 1f)
+            else -> 0.12f + breathe * 0.18f
+        }
 
         Box(
             modifier = Modifier
