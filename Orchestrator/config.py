@@ -217,17 +217,16 @@ CTX_MAX          = CFG.getint("budget", "context_tokens_max", fallback=128000)
 RECENT_TURNS_TOK = CFG.getint("budget", "recent_turns_tokens", fallback=12000)
 REPLY_BUF_TOK    = CFG.getint("budget", "reply_buffer_tokens", fallback=6000)
 
-# Static core of the system prompt (format rules, artifacts, rules — no tool descriptions)
+# Static core of the system prompt (tool/artifact/memory guidance — no tool descriptions).
+# Natural-language spec: respond in plain prose to the user. No JSON envelope is
+# required — the orchestrator persists the reply directly and composes snapshots
+# server-side. (The {ui_reply, snapshot_perspective} envelope was removed in the
+# Phase 1+2 pure-production cutover; do NOT re-introduce a final-reply JSON schema.)
 OUTPUT_SPEC_CORE = (
-    "This response is processed by an automated system and MUST strictly follow the specified JSON format. Any deviation will result in failure.\n\n"
-    "RESPONSE FORMAT:\n"
-    '{"ui_reply": string, "snapshot_perspective": string}\n\n'
-    "KEY DEFINITIONS:\n"
-    '- `ui_reply`: The complete, detailed, user-facing answer. If delivering a plan, include ALL steps here. This is what the user sees in the chat UI.\n'
-    '- `snapshot_perspective`: Your internal reasoning summary (1-15 lines) explaining how you arrived at the answer. '
-    'If a plan exists, include the full plan here as well (do not truncate). '
-    'ALWAYS end with a "Keywords:" line containing 5-7 lowercase, kebab-case terms (entities, configs, actions, IDs) plus 1-2 common aliases. '
-    'Example: "Keywords: dgx-spark, llama-405b, training-pipeline, lora, fine-tuning, model-weights, snapshot-protocol"\n\n'
+    "Respond in natural language directly to the user. Give the complete, detailed, "
+    "user-facing answer in plain prose. If delivering a plan, include ALL steps. "
+    "Do NOT wrap your response in a JSON object and do NOT emit snapshot format or "
+    "markers — the orchestrator handles snapshots and memory automatically.\n\n"
     "{TOOL_INSTRUCTIONS}\n\n"
     "BLACKBOX MEMORY SYSTEM (Snapshots):\n"
     "  The context you receive includes recent snapshots from the BlackBox - an immutable conversation ledger\n"
@@ -241,7 +240,7 @@ OUTPUT_SPEC_CORE = (
     '  You can reference existing images in your response using markdown image syntax: ![alt text](url)\n'
     '  The system will detect and render these images inline with your text.\n\n'
     "ARTIFACT/FILE GENERATION:\n"
-    "You can create downloadable files (text, PDF, CSV, DOCX) by including artifact blocks in your `ui_reply`:\n\n"
+    "You can create downloadable files (text, PDF, CSV, DOCX) by including artifact blocks in your reply:\n\n"
     '  Format: [ARTIFACT:filename.ext:type]\\ncontent\\n[/ARTIFACT]\n'
     '  Types: text (for .txt, .md, .json, .py, .js, etc.), pdf, csv, docx\n\n'
     '  TEXT FILE EXAMPLE:\n'
@@ -273,20 +272,14 @@ OUTPUT_SPEC_CORE = (
     '  2. Schedule follow-up\n'
     '  [/ARTIFACT]\n\n'
     '  Note: Artifacts are automatically processed and replaced with download buttons in the UI.\n\n'
-    "RULES:\n"
-    "1. Your entire output MUST be a single, raw JSON object. Start with `{` and end with `}`. NO extra text, headers, or code fences.\n"
-    "2. BOTH `ui_reply` and `snapshot_perspective` keys are MANDATORY in every response.\n"
-    "3. The `snapshot_perspective` value MUST NOT be empty. It must contain reasoning + keywords.\n"
-    "4. All string values must be standard JSON strings. Do not nest JSON-encoded strings within values.\n"
-    "5. The `snapshot_perspective` MUST end with a 'Keywords:' line. Do not skip this.\n"
-    "6. Tools are OPTIONAL - only use when the user explicitly requests an action (generating media, sending messages, etc.).\n"
-    "7. When user requests media generation, call the appropriate tool directly. Do NOT just write about generating media.\n"
-    "8. When generating ARTIFACT files (text, PDF, CSV, DOCX), do NOT call media generation tools unless the user explicitly asks for both.\n"
-    "9. MULTIPLE TOOL CALLS: You CAN call tools multiple times in a single response.\n"
-    "10. NEVER generate snapshot format or markers. The orchestrator handles snapshots - you ONLY output JSON.\n"
-    "11. Use search_snapshots when users ask about past conversations, historical context, or reference previous work.\n\n"
+    "TOOL USAGE RULES:\n"
+    "- Tools are OPTIONAL - only use when the user explicitly requests an action (generating media, sending messages, etc.).\n"
+    "- When the user requests media generation, call the appropriate tool directly. Do NOT just write about generating media.\n"
+    "- When generating ARTIFACT files (text, PDF, CSV, DOCX), do NOT call media generation tools unless the user explicitly asks for both.\n"
+    "- MULTIPLE TOOL CALLS: You CAN call tools multiple times in a single response.\n"
+    "- Use search_snapshots when users ask about past conversations, historical context, or reference previous work.\n\n"
     "CRITICAL: To use a tool, you MUST call it. Simply describing what you would do is NOT sufficient.\n\n"
-    "FINAL CHECK: Is the entire response a single JSON object with no extra text? Do both required keys exist? Does snapshot_perspective end with Keywords? Did you call the appropriate tool if the user requested an action?"
+    "FINAL CHECK: Did you call the appropriate tool if the user requested an action?"
 )
 
 # Legacy static OUTPUT_SPEC — hardcoded tool descriptions (used when TOOLVAULT_ENABLED=false)

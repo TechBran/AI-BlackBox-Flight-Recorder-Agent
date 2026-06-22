@@ -79,9 +79,9 @@ def _last_user_msg(messages) -> str:
     return ""
 
 
-# Cache the last injection result so _get_tools and _get_system_prompt
-# can share a single search pass within the same request.
-_inject_cache = {"prompt": "", "provider": "", "group": "", "tools": None, "instructions": "", "tool_names": set()}
+# Cache the last injection result so _get_tools can reuse a single search
+# pass (tool names / tools) within the same request.
+_inject_cache = {"prompt": "", "provider": "", "group": "", "tools": None, "tool_names": set()}
 
 
 def _extract_tool_names(tools: list) -> set:
@@ -120,23 +120,19 @@ def _get_tools(provider: str, prompt: str = "", group: str = "chat") -> list:
     """Get tools for an API call — dynamic (ToolVault) or static (legacy).
 
     When TOOLVAULT_ENABLED=true, uses semantic search to inject only
-    the tools relevant to this specific prompt. Also caches the tool
-    instructions for _get_system_prompt() to pick up.
+    the tools relevant to this specific prompt.
     """
     if TOOLVAULT_ENABLED and prompt.strip():
         from Orchestrator.toolvault.injector import inject_for_prompt
-        tools, instructions = inject_for_prompt(prompt, provider, group)
-        # Cache for _get_system_prompt to use
+        tools, _instructions = inject_for_prompt(prompt, provider, group)
         _inject_cache["prompt"] = prompt
         _inject_cache["provider"] = provider
         _inject_cache["group"] = group
         _inject_cache["tools"] = tools
-        _inject_cache["instructions"] = instructions
         _inject_cache["tool_names"] = _extract_tool_names(tools)
         return tools
 
     # Static fallback
-    _inject_cache["instructions"] = ""
     if provider == "anthropic":
         tools = CHAT_TOOLS_ANTHROPIC_CU if group == "chat_cu" else CHAT_TOOLS_ANTHROPIC
     elif provider in ("openai", "openai_rest", "xai", "grok"):
@@ -147,28 +143,6 @@ def _get_tools(provider: str, prompt: str = "", group: str = "chat") -> list:
         tools = CHAT_TOOLS_OPENAI
     _inject_cache["tool_names"] = _extract_tool_names(tools)
     return tools
-
-
-def _get_system_prompt(base_prompt: str = "") -> str:
-    """Get the system prompt with dynamic or static tool instructions.
-
-    When TOOLVAULT_ENABLED and _get_tools() was called with a prompt,
-    replaces the {TOOL_INSTRUCTIONS} placeholder with dynamically
-    generated instructions from the vault. Otherwise returns the
-    static OUTPUT_SPEC.
-
-    Args:
-        base_prompt: Additional system prompt to prepend (optional).
-                     The OUTPUT_SPEC is always included.
-    """
-    from Orchestrator.config import OUTPUT_SPEC, build_output_spec
-
-    instructions = _inject_cache.get("instructions", "")
-    spec = build_output_spec(instructions) if instructions else OUTPUT_SPEC
-
-    if base_prompt:
-        return base_prompt + "\n\n" + spec
-    return spec
 
 def call_openai(messages: List[Dict], model: str, operator: str = "Brandon"):
     if not OPENAI_API_KEY: raise HTTPException(400, "OPENAI_API_KEY not set")
