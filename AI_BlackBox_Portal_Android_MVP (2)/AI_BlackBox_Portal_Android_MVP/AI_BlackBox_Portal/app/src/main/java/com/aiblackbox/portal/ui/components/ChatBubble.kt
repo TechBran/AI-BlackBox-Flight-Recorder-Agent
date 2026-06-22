@@ -32,7 +32,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -116,14 +115,7 @@ fun ChatBubble(
                     if (isUser) Modifier.widthIn(max = maxUserBubbleWidth)
                     else Modifier.fillMaxWidth()
                 )
-                // Shadow with clip=false so it doesn't create a touch-clipping region
-                .shadow(
-                    elevation = 1.dp,
-                    shape = if (isUser) UserBubbleShape else AssistantBubbleShape,
-                    clip = false,
-                    ambientColor = Color.Black,
-                    spotColor = Color.Black
-                )
+                // Flat solid fill - no shadow rim (HD/production look)
                 // Use background(shape) instead of clip+background — applies visual rounding
                 // WITHOUT clipping the touch area of child composables
                 .background(
@@ -494,7 +486,6 @@ private fun BubbleActionButton(
             .size(34.dp)
             .clip(RoundedCornerShape(RadiusMd))
             .background(Color(0x0DFFFFFF)) // rgba(255,255,255,0.05)
-            .border(1.dp, Color(0x14FFFFFF), RoundedCornerShape(RadiusMd)) // rgba(255,255,255,0.08)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -548,7 +539,8 @@ private fun ArtifactChips(artifacts: List<ArtifactRef>) {
                 colors = AssistChipDefaults.assistChipColors(
                     labelColor = BbxWhite,
                     containerColor = Color(0x14FFFFFF)
-                )
+                ),
+                border = null // no gray outline (HD/production look)
             )
         }
     }

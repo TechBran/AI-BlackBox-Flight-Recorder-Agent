@@ -100,7 +100,7 @@ fun BlackBoxTopBar(
                     shape = BubbleShape,
                     bg = GlassFloatingBubble,
                     elevation = 8.dp,
-                    borderOverride = com.aiblackbox.portal.ui.theme.GlassBorderStrong,
+                    borderOverride = androidx.compose.ui.graphics.Color.Transparent,
                 ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {

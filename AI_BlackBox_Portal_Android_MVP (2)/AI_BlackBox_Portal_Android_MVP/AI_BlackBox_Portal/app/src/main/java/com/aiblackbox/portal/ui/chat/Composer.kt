@@ -153,7 +153,7 @@ fun Composer(
                     shape = RoundedCornerShape(24.dp),
                     bg = GlassComposerInput,
                     elevation = 8.dp,
-                    borderOverride = com.aiblackbox.portal.ui.theme.GlassBorderStrong,
+                    borderOverride = androidx.compose.ui.graphics.Color.Transparent,
                 )
                 .padding(horizontal = 4.dp, vertical = 4.dp)
         ) {
@@ -289,7 +289,7 @@ fun Composer(
                         shape = RoundedCornerShape(20.dp),
                         bg = GlassProviderPill,
                         elevation = 4.dp,
-                        borderOverride = com.aiblackbox.portal.ui.theme.GlassBorderStrong,
+                        borderOverride = androidx.compose.ui.graphics.Color.Transparent,
                     ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
