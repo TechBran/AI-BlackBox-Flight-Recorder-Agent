@@ -334,3 +334,26 @@ def test_openai_not_migrated_still_two_tuple():
     src = inspect.getsource(cr.call_openai)
     assert "return text, total_usage, reasoning" not in src
     assert "return text, total_usage" in src
+
+
+def test_call_gemini_safety_block_returns_4tuple(monkeypatch, _provider_keys):
+    # call_gemini's no-candidates / safety-block EARLY returns must emit the same
+    # 4-tuple arity as the happy path, or strict-unpacking callers (checkpoint.py:87
+    # does `a, b, c, d = call_gemini(...)`) raise ValueError on a live path.
+    cr = _provider_keys
+
+    blocked = {"promptFeedback": {"blockReason": "SAFETY"}}
+    monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(blocked))
+    result = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test")
+    assert len(result) == 4, "gemini safety-block return must be a 4-tuple"
+    text, usage, media_parts, reasoning = result  # must not raise
+    assert "blocked" in text.lower()
+    assert reasoning == ""
+    assert media_parts == []
+
+    no_candidates = {"candidates": []}
+    monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(no_candidates))
+    result2 = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test")
+    assert len(result2) == 4, "gemini no-candidates return must be a 4-tuple"
+    t2, u2, m2, r2 = result2  # must not raise
+    assert r2 == ""

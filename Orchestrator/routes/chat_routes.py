@@ -1070,8 +1070,8 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
             # Check for safety ratings
             prompt_feedback = data.get("promptFeedback", {})
             if prompt_feedback.get("blockReason"):
-                return f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})", {}, []
-            return "(The model did not provide a response. This may be due to the safety policy.)", {}, []
+                return f"(The model blocked the prompt. Reason: {prompt_feedback.get('blockReason')})", {}, [], ""
+            return "(The model did not provide a response. This may be due to the safety policy.)", {}, [], ""
 
         # Extract ALL parts from response (text + inline media)
         parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -1669,7 +1669,7 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
     for field in ("reasoning_content", "reasoning", "thinking", "thought"):
         val = message.get(field)
         if val:
-            reasoning = val
+            reasoning = val if isinstance(val, str) else str(val)
             break
     return text, total_usage, reasoning
 
