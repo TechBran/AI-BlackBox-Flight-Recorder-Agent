@@ -1601,12 +1601,18 @@ def process_chat_task(task: Task):
         # Call provider API (lazy imports to avoid circular dependency)
         from Orchestrator.routes.chat_routes import call_anthropic, call_gemini, call_openai, call_xai
         media_parts = []
+        # `reasoning` is the model's native chain-of-thought, separated from the
+        # answer by the sync call_* functions (anthropic thinking blocks / gemini
+        # thought parts / xai reasoning_content). Captured here so it can go LAST in
+        # the embedded snapshot body (2-reasoning) and NEVER into the user reply.
+        # OpenAI is response-only by design for now (Phase 3 deferred).
+        reasoning = ""
         if provider == "anthropic":
-            raw, usage = call_anthropic(msg_list, selected_model, operator=active_operator)
+            raw, usage, reasoning = _unpack_call(call_anthropic(msg_list, selected_model, operator=active_operator))
         elif provider == "google":
-            raw, usage, media_parts = call_gemini(msg_list, selected_model, operator=active_operator)
+            raw, usage, media_parts, reasoning = _unpack_call(call_gemini(msg_list, selected_model, operator=active_operator), media=True)
         elif provider == "xai":
-            raw, usage = call_xai(msg_list, selected_model, operator=active_operator)
+            raw, usage, reasoning = _unpack_call(call_xai(msg_list, selected_model, operator=active_operator))
         else:
             raw, usage = call_openai(msg_list, selected_model, operator=active_operator)
 
@@ -1765,16 +1771,20 @@ def process_chat_task(task: Task):
 
         # snap_text is the searchable snapshot body for this assistant turn.
         # Post-cutover the snapshot IS the actual response (no perspective-only
-        # body, no empty [REASONING] header, no sentinel). We append a
-        # deterministic server-side Keywords digest for recall. ORDERING:
-        # response-first, keywords-second so the 10K embed truncation never eats
-        # the answer or the keywords. (Reasoning, when added in a later sub-task,
-        # goes LAST so it is truncated first.)
+        # body, no sentinel). We append a deterministic server-side Keywords digest
+        # for recall, then the model's native reasoning LAST (2-reasoning). ORDERING
+        # (§2.5, adversarially verified): answer-first, keywords-second, reasoning-
+        # last, so the 10K embed truncation eats reasoning — never the answer or the
+        # keywords. Keywords are extracted from the ANSWER only (not reasoning, not
+        # HTML). When the model did not think, NO empty [REASONING] header is
+        # appended.
         _kw = _extract_keywords(reply_alias)
         if _kw:
             snap_text = reply_alias + "\n\nKeywords: " + ", ".join(_kw)
         else:
             snap_text = reply_alias
+        if reasoning and reasoning.strip():
+            snap_text = snap_text + "\n\n[REASONING]\n" + reasoning.strip()
         s.add_conversation_turn({"role": "assistant", "utc": utc_now, "text": ui_reply, "snap_text": snap_text})
         s.conv_turns_since  += 1
         s.conv_tokens_since += total_tok
@@ -1881,6 +1891,31 @@ def _to_kebab(token: str) -> str:
     t = re.sub(r"[^A-Za-z0-9]+", "-", token).strip("-").lower()
     t = re.sub(r"-{2,}", "-", t)
     return t
+
+
+def _unpack_call(result, media: bool = False):
+    """Tolerantly unpack a sync provider call's return into a fixed shape.
+
+    Real call_anthropic/call_xai return (text, usage, reasoning); call_gemini
+    returns (text, usage, media_parts, reasoning). Older callers / test stubs may
+    still return the pre-2-reasoning arity (text, usage[, media_parts]) with no
+    reasoning element. Normalize so the worker always gets reasoning (default "")
+    and, for gemini, media_parts (default []).
+
+    Returns:
+        media=False -> (text, usage, reasoning)
+        media=True  -> (text, usage, media_parts, reasoning)
+    """
+    parts = list(result)
+    text = parts[0] if len(parts) > 0 else ""
+    usage = parts[1] if len(parts) > 1 else {}
+    if media:
+        media_parts = parts[2] if len(parts) > 2 else []
+        reasoning = parts[3] if len(parts) > 3 else ""
+        return text, usage, media_parts, (reasoning or "")
+    # Non-gemini: a 3rd element is reasoning.
+    reasoning = parts[2] if len(parts) > 2 else ""
+    return text, usage, (reasoning or "")
 
 
 def _extract_keywords(text: str, k: int = 7) -> list:
