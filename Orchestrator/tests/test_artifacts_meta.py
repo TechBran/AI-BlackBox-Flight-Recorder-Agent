@@ -12,6 +12,15 @@ from Orchestrator.artifacts import (
     parse_and_process_artifacts,
     parse_and_process_artifacts_with_meta,
 )
+import pytest
+import Orchestrator.artifacts as _artifacts_mod
+
+
+@pytest.fixture(autouse=True)
+def _isolate_artifacts_dir(monkeypatch, tmp_path):
+    """Redirect artifact file writes to a tmp dir so tests never pollute the
+    non-gitignored Portal/artifacts/ (stray tester_* files could be swept into a commit)."""
+    monkeypatch.setattr(_artifacts_mod, "ARTIFACTS_DIR", tmp_path)
 
 
 def _href_urls(modified: str):
@@ -71,7 +80,7 @@ def test_two_artifacts_both_listed_and_linked():
         assert a["url"] in hrefs
 
     # Both backing files were actually created on disk.
-    from Orchestrator.config import ARTIFACTS_DIR
+    from Orchestrator.artifacts import ARTIFACTS_DIR
     for a in artifacts:
         artifact_id = a["url"].split("/artifacts/", 1)[1]
         assert (ARTIFACTS_DIR / artifact_id).exists()
