@@ -134,6 +134,149 @@ export function convertMediaUrlsToHtml(text) {
 // Markdown Rendering
 // =============================================================================
 
+// =============================================================================
+// Unfenced JSON Fencing (Phase A2, reply-parsing-and-rendering-hardening)
+// =============================================================================
+//
+// Some models narrate tool transcripts / dump structured results inline as prose
+// (e.g. {"results":[...]} or [ {...}, {...} ]). Fed to the markdown parser, the
+// JSON's markdown-significant chars (_ [] ** #) render as a mangled mess. Before
+// marked.parse we wrap any large/multi-line, *parse-validated* JSON run in a
+// ```json fence so it renders via the existing clean code-block path. Conservative
+// by design: a run is only fenced if it begins at a line start with { or [, is
+// multi-line OR >= 80 chars, brace/bracket-balances, and actually parses as JSON.
+// Anything else is left as prose -- so stray inline braces, [links](url),
+// table rows, citations [1], and short {x} tokens are untouched. Runs already
+// inside a ``` fenced region are skipped (no double-fencing). A partial/unbalanced
+// blob (mid-stream) is left unchanged (no fence, no throw) -- streaming-safe.
+
+const MIN_INLINE_JSON_CHARS = 80;
+
+/**
+ * Wrap any qualifying unfenced JSON run in a ```json fence.
+ * Pure function: returns the input unchanged when no run qualifies.
+ * @param {string} text - Raw assistant text (may contain markdown + JSON)
+ * @returns {string} text with qualifying JSON runs fenced
+ */
+export function fenceUnfencedJson(text) {
+    if (!text || typeof text !== 'string') return text;
+
+    let out = '';
+    let proseStart = 0;       // start of the not-yet-emitted prose run
+    let i = 0;
+    const n = text.length;
+
+    while (i < n) {
+        const c = text[i];
+        // Candidate must begin at the start of a line (after optional whitespace),
+        // and must not already be inside a ``` fenced region.
+        if ((c === '{' || c === '[') && atLineStart(text, i) && !insideFence(text, i)) {
+            const end = jsonRunEnd(text, i);   // exclusive end, or -1 if unbalanced
+            if (end > i) {
+                const candidate = text.substring(i, end);
+                const multiLine = candidate.indexOf('\n') !== -1;
+                if ((multiLine || candidate.length >= MIN_INLINE_JSON_CHARS) && parsesAsJson(candidate)) {
+                    // Emit prose preceding this blob verbatim, then the fenced JSON.
+                    out += text.substring(proseStart, i);
+                    out += '\n```json\n' + candidate + '\n```\n';
+                    i = end;
+                    proseStart = end;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+
+    // Trailing prose (or the whole string if nothing matched).
+    out += text.substring(proseStart);
+    return out;
+}
+
+/** True if [index] is the first non-whitespace char on its line. */
+function atLineStart(s, index) {
+    for (let j = index - 1; j >= 0; j--) {
+        const ch = s[j];
+        if (ch === '\n') return true;
+        if (ch !== ' ' && ch !== '\t') return false;
+    }
+    return true;   // start of string
+}
+
+/** True if the char at [index] sits inside a ``` fenced region. Counts fence
+ *  markers (lines whose first non-whitespace is ```) before [index]; an odd
+ *  count means we are currently open inside a fence. */
+function insideFence(s, index) {
+    let open = false;
+    let lineStart = 0;
+    for (let k = 0; k < index; k++) {
+        if (s[k] === '\n') {
+            lineStart = k + 1;
+        } else if (isFenceMarkerAt(s, lineStart, k)) {
+            open = !open;
+            // Skip to end of this line so we don't re-count the same marker.
+            while (k < index && s[k] !== '\n') k++;
+            lineStart = k + 1;
+        }
+    }
+    return open;
+}
+
+/** True if position [k] is the start of a ``` marker for the line beginning at
+ *  [lineStart] (i.e. only whitespace precedes it on the line and ``` follows). */
+function isFenceMarkerAt(s, lineStart, k) {
+    // k must be the first non-whitespace char of its line.
+    for (let j = lineStart; j < k; j++) {
+        if (s[j] !== ' ' && s[j] !== '\t') return false;
+    }
+    return s[k] === '`' && s[k + 1] === '`' && s[k + 2] === '`';
+}
+
+/**
+ * Brace/bracket-balance starting at the opening char at [start] ({ or [).
+ * Tracks string literals + escapes so braces inside JSON strings don't miscount.
+ * Returns the exclusive index just past the matching close, or -1 if unbalanced.
+ */
+function jsonRunEnd(s, start) {
+    let depth = 0;
+    let inStr = false;
+    let escaped = false;
+    const n = s.length;
+    for (let i = start; i < n; i++) {
+        const c = s[i];
+        if (inStr) {
+            if (escaped) {
+                escaped = false;
+            } else if (c === '\\') {
+                escaped = true;
+            } else if (c === '"') {
+                inStr = false;
+            }
+        } else {
+            if (c === '"') {
+                inStr = true;
+            } else if (c === '{' || c === '[') {
+                depth++;
+            } else if (c === '}' || c === ']') {
+                depth--;
+                if (depth === 0) return i + 1;
+                if (depth < 0) return -1;
+            }
+        }
+    }
+    return -1;   // never balanced
+}
+
+/** Parse-gate: only treat the candidate as JSON if it actually parses. */
+function parsesAsJson(candidate) {
+    try {
+        JSON.parse(candidate);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 /**
  * Convert markdown text to HTML using marked library
  * Also converts media URLs to embedded elements
@@ -143,8 +286,11 @@ export function convertMediaUrlsToHtml(text) {
 export function renderMarkdown(text) {
     if (typeof marked === 'undefined') return text;
     try {
-        // First convert any media URLs to HTML elements
-        const textWithMedia = convertMediaUrlsToHtml(text);
+        // Wrap unfenced JSON blobs in a ```json fence so they render via the
+        // clean code-block path instead of being mangled by the markdown parser.
+        const fenced = fenceUnfencedJson(text);
+        // Then convert any media URLs to HTML elements
+        const textWithMedia = convertMediaUrlsToHtml(fenced);
         const html = marked.parse(textWithMedia);
         return typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html) : html;
     } catch (e) {
