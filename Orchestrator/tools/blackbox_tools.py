@@ -11,6 +11,7 @@ This file provides:
 """
 
 import base64
+import json
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 from Orchestrator.contacts import search_contacts as _search_contacts, upsert_contact
@@ -41,6 +42,47 @@ BLACKBOX_TOOLS_GEMINI = get_gemini_live_tools("phone")
 # cycle now that tool_registry sources its definitions from the toolvault
 # registry). Same class object — `blackbox_tools.ToolResult is context.ToolResult`.
 from Orchestrator.toolvault.context import ToolResult  # noqa: E402
+
+
+def _coerce_stringified_json_args(tool_name, tool_input):
+    """Tolerate models that emit array/object params as JSON-encoded STRINGS.
+
+    Some models (esp. for deeply-nested params like the Google batchUpdate
+    `requests` array) send requests="[{...}]" instead of requests=[{...}]. The
+    value arrives as a genuine str, so an executor's isinstance(..., list) check
+    correctly rejects it. When the tool schema declares a param as array/object
+    and the incoming value is a JSON string of that kind, parse it back.
+    Conservative: only str values whose declared type is array/object and which
+    parse to the matching type are touched; everything else is left as-is so
+    normal validation still applies.
+    """
+    if not isinstance(tool_input, dict):
+        return tool_input
+    from Orchestrator.toolvault import registry
+    spec = registry.get_tool(tool_name)
+    if not spec:
+        return tool_input
+    props = (spec.get("parameters") or {}).get("properties") or {}
+    coerced = None
+    for key, val in tool_input.items():
+        if not isinstance(val, str):
+            continue
+        ptype = (props.get(key) or {}).get("type")
+        if ptype not in ("array", "object"):
+            continue
+        s = val.strip()
+        if not s or (ptype == "array" and s[0] != "[") or (ptype == "object" and s[0] != "{"):
+            continue
+        try:
+            parsed = json.loads(s)
+        except (ValueError, TypeError):
+            continue
+        if (ptype == "array" and isinstance(parsed, list)) or (ptype == "object" and isinstance(parsed, dict)):
+            if coerced is None:
+                coerced = dict(tool_input)
+            coerced[key] = parsed
+            print(f"[ARG-COERCE] {tool_name}.{key}: parsed stringified {ptype} -> native")
+    return coerced if coerced is not None else tool_input
 
 
 class BlackBoxToolExecutor:
@@ -74,6 +116,9 @@ class BlackBoxToolExecutor:
                 success=False,
                 result=f"Unknown tool: {tool_name}"
             )
+
+        # Models sometimes emit array/object params as JSON strings; parse back.
+        tool_input = _coerce_stringified_json_args(tool_name, tool_input)
 
         try:
             return await ex(
