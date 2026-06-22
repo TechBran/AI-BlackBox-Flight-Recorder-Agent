@@ -34,7 +34,7 @@ from Orchestrator.checkpoint import create_checkpoint_async, perform_mint, shoul
 from Orchestrator.config import ANTHROPIC_MODEL_DEFAULT, AUTO_ENABLE, CFG, CURRENT_OPERATOR, DEBOUNCE_MS, DEFAULT_PROVIDER, GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_IMAGEN_MODEL, GOOGLE_VEO_MODEL, ON_RED, ON_YELLOW, OPENAI_MODEL_DEFAULT, TOOLVAULT_ENABLED, TOKENS_THRESHOLD, TURNS_THRESHOLD, UPLOADS_DIR, USERS_DEFAULT, VOL_PATH, XAI_MODEL_DEFAULT
 from Orchestrator.behavioral_core import BEHAVIORAL_CORE_CHAT
 from Orchestrator.fossils import extract_snap_ids, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve, _extract_terms, _generate_ngrams
-from Orchestrator.monitoring import drift_state_for, extract_plan, _extract_clean_text
+from Orchestrator.monitoring import drift_state_for, extract_plan
 from Orchestrator.startup import ChatIn, GeminiProTTSIn, GoogleSSMLIn, LyriaMusicIn
 from Orchestrator.state import get_state, save_operator_state, task_lock, state_lock
 from Orchestrator.volume import now_utc_iso, read_text_safe
@@ -1229,123 +1229,6 @@ def process_browser_use(task: Task):
 def process_chat_task(task: Task):
     """Process a chat request asynchronously"""
     global CURRENT_OPERATOR
-
-    # --- Nested Helper Functions for robust JSON parsing ---
-    def _extract_first_json_object(s: str) -> Optional[str]:
-        """Extract the first complete JSON object from a string."""
-        if not isinstance(s, str): return None
-        i = 0; n = len(s); depth = 0; start = -1
-        in_str = False; esc = False
-        while i < n:
-            ch = s[i]
-            if in_str:
-                if esc: esc = False
-                elif ch == '\\': esc = True
-                elif ch == '"': in_str = False
-            else:
-                if ch == '"': in_str = True
-                elif ch == '{':
-                    if depth == 0: start = i
-                    depth += 1
-                elif ch == '}':
-                    if depth > 0:
-                        depth -= 1
-                        if depth == 0 and start != -1:
-                            return s[start:i+1]
-            i += 1
-        return None
-
-    def _extract_ui_reply_from_truncated(s: str) -> Optional[str]:
-        """Extract ui_reply from potentially truncated JSON response.
-
-        This handles the case where max_tokens cuts off the response mid-JSON.
-        We try to find and extract the ui_reply value even if the JSON is incomplete.
-        """
-        if not isinstance(s, str): return None
-
-        # Strip markdown fences if present
-        s = s.strip()
-        if s.startswith("```"):
-            # Remove opening fence (```json or ```)
-            first_newline = s.find('\n')
-            if first_newline != -1:
-                s = s[first_newline + 1:]
-        if s.endswith("```"):
-            s = s[:-3]
-        s = s.strip()
-
-        # Look for "ui_reply": pattern
-        patterns = ['"ui_reply":', "'ui_reply':"]
-        for pattern in patterns:
-            idx = s.find(pattern)
-            if idx == -1:
-                continue
-
-            # Find the start of the value (skip whitespace after colon)
-            val_start = idx + len(pattern)
-            while val_start < len(s) and s[val_start] in ' \t\n\r':
-                val_start += 1
-
-            if val_start >= len(s):
-                continue
-
-            # Check if it starts with a quote
-            if s[val_start] != '"':
-                continue
-
-            # Parse the JSON string value, handling escapes
-            val_start += 1  # skip opening quote
-            result = []
-            i = val_start
-            while i < len(s):
-                ch = s[i]
-                if ch == '\\' and i + 1 < len(s):
-                    # Handle escape sequence
-                    next_ch = s[i + 1]
-                    if next_ch == 'n':
-                        result.append('\n')
-                    elif next_ch == 't':
-                        result.append('\t')
-                    elif next_ch == 'r':
-                        result.append('\r')
-                    elif next_ch == '"':
-                        result.append('"')
-                    elif next_ch == '\\':
-                        result.append('\\')
-                    elif next_ch == '/':
-                        result.append('/')
-                    elif next_ch == 'b':
-                        result.append('\b')
-                    elif next_ch == 'f':
-                        result.append('\f')
-                    elif next_ch == 'u' and i + 5 < len(s):
-                        # Unicode escape \uXXXX
-                        try:
-                            code_point = int(s[i+2:i+6], 16)
-                            result.append(chr(code_point))
-                            i += 4  # extra skip for unicode
-                        except ValueError:
-                            result.append(next_ch)
-                    else:
-                        result.append(next_ch)
-                    i += 2
-                elif ch == '"':
-                    # End of string found - this is a complete extraction
-                    return ''.join(result)
-                else:
-                    result.append(ch)
-                    i += 1
-
-            # If we get here, the string was truncated (no closing quote found)
-            # Return what we have - it's better than nothing
-            if result:
-                extracted = ''.join(result)
-                # Add a note that it was truncated
-                if len(extracted) > 100:  # Only add note for substantial content
-                    return extracted + "\n\n[Response truncated due to length limit]"
-                return extracted
-
-        return None
 
     try:
         update_task(task.task_id, progress=5)
