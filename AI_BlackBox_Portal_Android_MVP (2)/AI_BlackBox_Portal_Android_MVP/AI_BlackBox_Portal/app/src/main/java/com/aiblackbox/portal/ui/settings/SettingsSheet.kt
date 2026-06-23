@@ -657,6 +657,62 @@ fun SettingsSheet(
             }
 
             // ══════════════════════════════════════════════════════════════
+            // System Prompt — per-operator persona (custom override OR lean
+            // default). Mirrors the voice-preferences pattern: VM owns the
+            // api-backed load/save/reset; the field re-seeds on operator switch.
+            // ══════════════════════════════════════════════════════════════
+            val persona by viewModel.operatorPersona.collectAsState()
+            val isCustom by viewModel.personaIsCustom.collectAsState()
+            // Load (and reload) the persona whenever the selected operator changes.
+            LaunchedEffect(operator) { viewModel.loadOperatorPersona(operator) }
+
+            CollapsibleSection(
+                title = "🧬 System Prompt",
+                accent = BbxAccent,
+            ) {
+                // Local edit buffer, re-seeded from the loaded persona. The
+                // remember(persona) key makes it re-seed when a new operator's
+                // persona arrives, so the field never shows the prior operator's text.
+                var draft by remember(persona) { mutableStateOf(persona) }
+
+                androidx.compose.material3.OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    placeholder = { Text("System prompt for this operator", color = Neutral500) },
+                    minLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = BbxWhite,
+                        unfocusedTextColor = BbxWhite,
+                        focusedBorderColor = BbxAccent,
+                        unfocusedBorderColor = Neutral300,
+                        cursorColor = BbxAccent
+                    )
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MenuButton("💾 Save") {
+                        viewModel.setOperatorPersona(operator, draft)
+                    }
+                    MenuButton("↺ Reset") {
+                        viewModel.resetOperatorPersona(operator)
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                Text(
+                    if (isCustom) "Custom persona" else "Using built-in default",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Neutral500
+                )
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // ══════════════════════════════════════════════════════════════
             // Operator — dropdown + add new
             // ══════════════════════════════════════════════════════════════
             SectionHeader("Operator", BbxDim)

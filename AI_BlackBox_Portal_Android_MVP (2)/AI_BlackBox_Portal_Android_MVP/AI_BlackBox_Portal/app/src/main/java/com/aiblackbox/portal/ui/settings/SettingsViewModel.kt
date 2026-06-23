@@ -12,10 +12,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+
+/** PUT body for /operator/persona/{operator}. Built with Json.encodeToString —
+ *  NEVER string interpolation (persona text is multi-line/quoted and would break JSON). */
+@Serializable
+data class PersonaPutBody(val persona: String)
 
 data class RegisteredApp(
     val appId: String = "",
@@ -175,6 +183,57 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setOperatorVoice(operator: String, voiceValue: String) {
         viewModelScope.launch { store.setOperatorVoice(operator, voiceValue) }
+    }
+
+    // ── Per-operator System Prompt (persona) ──
+    // _operatorPersona = the effective persona (custom override OR lean default,
+    // resolved server-side). _personaIsCustom drives the "Custom" vs "built-in
+    // default" caption. Loaded per-operator; reloaded after a save/reset so the
+    // UI reflects the just-persisted state without a second round-trip guess.
+    private val _operatorPersona = MutableStateFlow("")
+    val operatorPersona: StateFlow<String> get() = _operatorPersona
+    private val _personaIsCustom = MutableStateFlow(false)
+    val personaIsCustom: StateFlow<Boolean> get() = _personaIsCustom
+
+    fun loadOperatorPersona(operator: String) {
+        val a = api ?: return
+        viewModelScope.launch {
+            try {
+                val resp = a.get("/operator/persona/" + android.net.Uri.encode(operator))
+                val obj = Json.parseToJsonElement(resp).jsonObject
+                _operatorPersona.value = obj["persona"]?.jsonPrimitive?.content ?: ""
+                _personaIsCustom.value = obj["is_custom"]?.jsonPrimitive?.booleanOrNull ?: false
+            } catch (e: Exception) {
+                android.util.Log.w("Persona", "load failed", e)
+            }
+        }
+    }
+
+    fun setOperatorPersona(operator: String, text: String) {
+        val a = api ?: return
+        viewModelScope.launch {
+            try {
+                // Build the JSON body via the serializer, NOT interpolation: persona
+                // is multi-line/quoted and would corrupt a hand-built string.
+                val body = Json.encodeToString(PersonaPutBody(text))
+                a.put("/operator/persona/" + android.net.Uri.encode(operator), body)
+                loadOperatorPersona(operator)
+            } catch (e: Exception) {
+                android.util.Log.w("Persona", "save failed", e)
+            }
+        }
+    }
+
+    fun resetOperatorPersona(operator: String) {
+        val a = api ?: return
+        viewModelScope.launch {
+            try {
+                a.delete("/operator/persona/" + android.net.Uri.encode(operator))
+                loadOperatorPersona(operator)
+            } catch (e: Exception) {
+                android.util.Log.w("Persona", "reset failed", e)
+            }
+        }
     }
 
     fun addOperator(name: String) {
