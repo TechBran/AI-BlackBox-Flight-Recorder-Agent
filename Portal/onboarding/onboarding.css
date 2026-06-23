@@ -2121,16 +2121,16 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
  * amber accent to signal "needs attention" without being alarming.
  */
 .ob-cta-restart {
-    background: rgba(255, 180, 50, 0.95);
+    background: rgba(245, 166, 35, 0.95);
     color: #1a0f00;
     box-shadow:
         4px 4px 0 var(--ob-text-primary),
-        0 0 24px rgba(255, 180, 50, 0.25);
+        0 0 24px rgba(245, 166, 35, 0.25);
 }
 .ob-cta-restart:hover {
     box-shadow:
         6px 6px 0 var(--ob-text-primary),
-        0 0 32px rgba(255, 180, 50, 0.45);
+        0 0 32px rgba(245, 166, 35, 0.45);
 }
 .ob-cta-restart:disabled,
 .ob-cta-restart[disabled] {
@@ -2187,7 +2187,7 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     color: var(--ob-text-tertiary);
 }
 .ob-restart-status-warn {
-    color: rgba(255, 180, 50, 0.9);
+    color: rgba(245, 166, 35, 0.9);
 }
 .ob-restart-status-done {
     color: rgba(120, 220, 140, 0.9);
@@ -2447,7 +2447,7 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     transition: border-color 200ms, background 200ms;
 }
 .ob-cli-agent-card[data-state="missing"]    { border-left-color: rgba(255, 100, 100, 0.6); }
-.ob-cli-agent-card[data-state="needs-auth"] { border-left-color: rgba(255, 180, 50, 0.7); }
+.ob-cli-agent-card[data-state="needs-auth"] { border-left-color: rgba(245, 166, 35, 0.7); }
 .ob-cli-agent-card[data-state="ready"]      { border-left-color: rgba(80, 200, 100, 0.7); background: rgba(80, 200, 100, 0.04); }
 
 /* User-picked card highlight (radio-card selection). Replaces the inline
@@ -2496,7 +2496,7 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     flex-shrink: 0;
 }
 .ob-cli-agent-badge-ok         { background: rgba(80, 200, 100, 0.15);  color: rgba(180, 240, 200, 0.95); }
-.ob-cli-agent-badge-needs-auth { background: rgba(255, 180, 50, 0.15);  color: rgba(255, 220, 150, 0.95); }
+.ob-cli-agent-badge-needs-auth { background: rgba(245, 166, 35, 0.15);  color: rgba(255, 220, 150, 0.95); }
 .ob-cli-agent-badge-missing    { background: rgba(255, 100, 100, 0.13); color: rgba(255, 190, 190, 0.95); }
 .ob-cli-agent-badge-info       { background: rgba(100, 170, 255, 0.15); color: rgba(190, 220, 255, 0.95); }
 
@@ -2559,12 +2559,12 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     box-shadow: 5px 5px 0 var(--ob-text-primary), 0 0 24px rgba(255, 100, 100, 0.35);
 }
 .ob-cli-agent-action-auth {
-    background: rgba(255, 180, 50, 0.95);
+    background: rgba(245, 166, 35, 0.95);
     color: #1a0f00;
-    box-shadow: 3px 3px 0 var(--ob-text-primary), 0 0 18px rgba(255, 180, 50, 0.22);
+    box-shadow: 3px 3px 0 var(--ob-text-primary), 0 0 18px rgba(245, 166, 35, 0.22);
 }
 .ob-cli-agent-action-auth:hover {
-    box-shadow: 5px 5px 0 var(--ob-text-primary), 0 0 24px rgba(255, 180, 50, 0.4);
+    box-shadow: 5px 5px 0 var(--ob-text-primary), 0 0 24px rgba(245, 166, 35, 0.4);
 }
 .ob-cli-agent-action:disabled,
 .ob-cli-agent-action[disabled] {
@@ -2638,8 +2638,8 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     margin-top: 0.4rem;
 }
 .ob-update-banner-major {
-    background: rgba(255, 180, 50, 0.08);
-    border-left-color: rgba(255, 180, 50, 0.6);
+    background: rgba(245, 166, 35, 0.08);
+    border-left-color: rgba(245, 166, 35, 0.6);
 }
 .ob-update-banner-major strong {
     color: rgba(255, 220, 150, 0.95);
