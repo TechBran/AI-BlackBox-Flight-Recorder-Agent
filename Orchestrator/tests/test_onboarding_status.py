@@ -155,3 +155,43 @@ def test_embeddings_attention_when_health_broken_is_error_severity():
     rollup = sr.build_status(**inp)
     assert any(a["section"] == "embeddings" and a["severity"] == "error"
                for a in rollup["attention"])
+
+
+def test_web_search_optional_when_nothing_enabled():
+    inp = _empty_inputs()
+    inp["web_search"] = {"enabled": [], "providers": {}, "default": ""}
+    assert _section(sr.build_status(**inp), "web_search")["state"] == sr.OPTIONAL
+
+
+def test_web_search_ready_when_enabled_with_keys():
+    inp = _empty_inputs()
+    inp["web_search"] = {
+        "enabled": ["duckduckgo", "openai"],
+        "providers": {"duckduckgo": {"key_present": True, "enabled": True},
+                      "openai": {"key_present": True, "enabled": True}},
+        "default": "openai",
+    }
+    assert _section(sr.build_status(**inp), "web_search")["state"] == sr.READY
+
+
+def test_web_search_attention_when_enabled_provider_key_missing():
+    inp = _empty_inputs()
+    inp["web_search"] = {
+        "enabled": ["openai"],
+        "providers": {"openai": {"key_present": False, "enabled": True}},
+        "default": "openai",
+    }
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "web_search")["state"] == sr.ATTENTION
+    assert any(a["section"] == "web_search" and "key" in a["message"].lower()
+               for a in rollup["attention"])
+
+
+def test_image_attention_when_enabled_provider_key_missing():
+    inp = _empty_inputs()
+    inp["image"] = {
+        "enabled": ["gemini"],
+        "providers": {"gemini": {"key_present": False, "enabled": True}},
+        "default": "gemini",
+    }
+    assert _section(sr.build_status(**inp), "image")["state"] == sr.ATTENTION

@@ -143,6 +143,24 @@ def _derive_embeddings(embeddings):
     return READY, f"Active: {active}", items, []
 
 
+def _derive_feature(feature, label):
+    """Shared deriver for web_search + image (same enabled/key shape)."""
+    enabled = feature.get("enabled") or []
+    providers = feature.get("providers") or {}
+    items = [{"key": p, "label": p, "configured": meta.get("enabled", False),
+              "validated_at": None} for p, meta in providers.items()]
+    if not enabled:
+        return OPTIONAL, "Not enabled", items, []
+    # any enabled provider whose key is absent -> attention
+    missing = [p for p in enabled
+               if p in providers and not providers[p].get("key_present", False)]
+    if missing:
+        return ATTENTION, f"{', '.join(missing)} missing key", items, [
+            {"severity": "warn",
+             "message": f"{label}: {', '.join(missing)} enabled but key missing"}]
+    return READY, f"{len(enabled)} provider(s)", items, []
+
+
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
@@ -157,6 +175,10 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
             st, summary, items, atts = _derive_operator(operators)
         elif key == "embeddings":
             st, summary, items, atts = _derive_embeddings(embeddings)
+        elif key == "web_search":
+            st, summary, items, atts = _derive_feature(web_search, "Web Search")
+        elif key == "image":
+            st, summary, items, atts = _derive_feature(image, "Image")
         else:
             st, summary, items, atts = _derive_default(section, env, state)
         sections_out.append({
