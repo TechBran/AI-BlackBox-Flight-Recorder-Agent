@@ -137,6 +137,7 @@ def test_launch_with_zellij_backend_returns_201_no_token_in_response(
     monkeypatch.setattr(zellij_state, "_STATE_PATH", state_path)
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -148,10 +149,11 @@ def test_launch_with_zellij_backend_returns_201_no_token_in_response(
     assert r.status_code == 201, r.text
     body = r.json()
     assert "session_name" in body
-    # Terminal session names get a {unix_ts} suffix (changed 2026-05-26 after
-    # T23 device QA surfaced the "already exists" rc=1 launch regression).
-    # Match the prefix; the suffix is wall-clock and varies per test run.
-    assert body["session_name"].startswith("Brandon__terminal__"), body["session_name"]
+    # Phase 2 resume model: a non-fork launch uses the DETERMINISTIC name
+    # {op}__{provider}__{app_or_root} (no timestamp), so "open the terminal"
+    # always maps to the same resume identity.
+    assert body["session_name"] == "Brandon__terminal__root", body["session_name"]
+    assert body["resumed"] is False  # session_exists=False -> created, not resumed
     minted_name = body["session_name"]
     assert "session_url" in body
     # Same-origin proxy URL — must NOT be a raw localhost URL.
@@ -229,3 +231,112 @@ def test_backend_status_when_default_tmux(monkeypatch):
     assert body["configured_backend"] == "tmux"
     assert body["effective_backend"] == "tmux"
     assert body["web_daemon_running"] is False
+
+
+# --- Phase 2: attach-if-exists (resume) -------------------------------
+
+
+def test_launch_attaches_if_session_exists_no_relaunch(monkeypatch, tmp_path):
+    """Launching twice with the same (op, provider, app) and NO fork: the
+    second call must ATTACH the existing session (resumed=True) and NOT
+    call launch_session again (no duplicate)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    # First launch: session does NOT exist -> create.
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as first_launch:
+        c = _client()
+        r1 = c.post("/cli-agent/zellij/launch",
+                    json={"provider": "claude", "app": "grocery-store"},
+                    params={"op": "Brandon"})
+    assert r1.status_code == 201, r1.text
+    name1 = r1.json()["session_name"]
+    assert name1 == "Brandon__claude__grocery-store"
+    assert r1.json()["resumed"] is False
+    first_launch.assert_called_once()
+
+    # Second launch (same triple): session EXISTS -> attach, no relaunch.
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=True), \
+         patch.object(zellij_client, "launch_session") as second_launch:
+        r2 = c.post("/cli-agent/zellij/launch",
+                    json={"provider": "claude", "app": "grocery-store"},
+                    params={"op": "Brandon"})
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["session_name"] == name1, "same deterministic name on resume"
+    assert r2.json()["resumed"] is True
+    second_launch.assert_not_called()  # NO duplicate launch on resume
+
+    # Exactly one state row for the triple (idempotent upsert).
+    rows = zellij_state.load()
+    assert [row["session_name"] for row in rows] == [name1]
+
+
+def test_launch_fork_creates_distinct_session(monkeypatch, tmp_path):
+    """fork=true mints a UNIQUE timestamped name distinct from the
+    deterministic resume name, and always CREATES (never attaches)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    resume_name = "Brandon__claude__grocery-store"
+
+    # Even though a session with the resume name "exists", a fork must NOT
+    # attach to it — it forks a brand-new uniquely-named session.
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=True) as exists_probe, \
+         patch.object(zellij_client, "launch_session") as fork_launch:
+        c = _client()
+        r = c.post("/cli-agent/zellij/launch",
+                   json={"provider": "claude", "app": "grocery-store", "fork": True},
+                   params={"op": "Brandon"})
+
+    assert r.status_code == 201, r.text
+    forked = r.json()["session_name"]
+    assert forked != resume_name, "fork must be distinct from the resume name"
+    assert forked.startswith(resume_name + "__"), forked  # {resume}__{ts}
+    assert r.json()["resumed"] is False
+    # Fork never probes existence + always launches.
+    exists_probe.assert_not_called()
+    fork_launch.assert_called_once()
+
+
+def test_launch_collision_race_falls_back_to_resume(monkeypatch, tmp_path):
+    """If the existence probe missed but launch_session hits an existing
+    name (rc=1 race), the handler re-checks existence and treats it as a
+    successful RESUME rather than a 500."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+    import subprocess
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    # First probe says "absent" (race window), launch fails rc=1, second
+    # probe confirms the session now exists -> resume.
+    exists_results = iter([False, True])
+    err = subprocess.CalledProcessError(1, ["zellij"], output="", stderr="session exists")
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", side_effect=lambda n: next(exists_results)), \
+         patch.object(zellij_client, "launch_session", side_effect=err):
+        c = _client()
+        r = c.post("/cli-agent/zellij/launch",
+                   json={"provider": "terminal"},
+                   params={"op": "Brandon"})
+
+    assert r.status_code == 201, r.text
+    assert r.json()["resumed"] is True
+    assert r.json()["session_name"] == "Brandon__terminal__root"

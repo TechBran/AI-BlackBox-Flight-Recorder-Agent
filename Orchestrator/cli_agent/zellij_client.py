@@ -112,8 +112,17 @@ _TOKEN_LIST_LINE_RE = re.compile(
 
 # `zellij list-sessions --no-formatting` rows look like:
 #   bbx test [Created 2h 59m 20s ago]
+# OR (for sessions whose backend has exited but is resurrectable):
+#   Brandon__terminal__1780682262 [Created 17days 6h ago] (EXITED - attach to resurrect)
+#
+# The trailing ``(EXITED - attach to resurrect)`` suffix MUST be tolerated:
+# the original anchored-at-`]` regex matched ZERO rows on any box that had
+# accumulated exited sessions (verified live 2026-06-22 — `list_sessions()`
+# returned [] despite 18 sessions being present). We capture the optional
+# state suffix so resume / reconcile / reaper can distinguish live-vs-exited.
 _SESSION_LIST_LINE_RE = re.compile(
-    r'^(?P<name>\S+)\s+\[Created\s+(?P<created_at>[^\]]+)\]\s*$'
+    r'^(?P<name>\S+)\s+\[Created\s+(?P<created_at>[^\]]+)\]'
+    r'(?:\s+\((?P<state>[^)]*)\))?\s*$'
 )
 
 
@@ -489,9 +498,10 @@ def ensure_master_session_cookie() -> str:
     fresh exchange.
 
     Self-healing: if the exchange returns HTTP 401 the master auth
-    token on disk is stale (zellij's tokens.db was wiped by
-    reconcile_or_wipe between orchestrator restarts, OR by manual
-    revocation). We re-mint a fresh master token + re-exchange once.
+    token on disk is stale (the token was revoked, e.g. manual
+    revocation or a zellij reinstall). NOTE: reconcile_or_wipe no
+    longer wipes tokens.db, so a restart alone won't trigger this.
+    We re-mint a fresh master token + re-exchange once.
     """
     global _master_session_cookie, _master_token
     if _master_session_cookie is not None:
@@ -524,8 +534,9 @@ def refresh_master_session_cookie() -> str:
     """Force-refresh the session_token cookie (e.g. after upstream 401).
 
     Re-exchanges the master auth token for a new session cookie.
-    Self-heals: if the master auth_token itself is stale (zellij's
-    tokens.db was wiped OR the token was revoked), the /command/login
+    Self-heals: if the master auth_token itself is stale (the token was
+    revoked or zellij was reinstalled; reconcile_or_wipe no longer
+    wipes tokens.db), the /command/login
     will return 401; we delete the on-disk auth_token file, re-mint
     fresh, and try the exchange again. Same pattern as
     [ensure_master_session_cookie]; copied here so the proxy's
@@ -902,11 +913,17 @@ def launch_session(
 
 def list_sessions() -> list[dict]:
     """Return all Zellij sessions as
-    ``[{"name": str, "created_at": str}, ...]``.
+    ``[{"name": str, "created_at": str, "exited": bool}, ...]``.
 
     Runs ``zellij list-sessions --no-formatting``. This is a GLOBAL list
     — the orchestrator filters by operator-name-prefix in the route
     layer (audit I8); the adapter does not.
+
+    ``exited`` is True when zellij reports the session backend has exited
+    but is resurrectable (``(EXITED - attach to resurrect)`` suffix). Such
+    a session is STILL a valid resume target: attaching (which the
+    zellij-web client does on connect) resurrects it. Resume / reconcile /
+    reaper all treat exited-but-present rows as "the session exists."
     """
     try:
         result = _run([_ZELLIJ_BIN, "list-sessions", "--no-formatting"])
@@ -927,11 +944,38 @@ def list_sessions() -> list[dict]:
         if not match:
             logger.debug("list_sessions: skipping unparseable line: %r", line)
             continue
+        state = (match.group("state") or "")
         rows.append({
             "name": match.group("name"),
             "created_at": match.group("created_at").strip(),
+            "exited": "exited" in state.lower(),
         })
     return rows
+
+
+def session_exists(name: str) -> bool:
+    """Return True iff a zellij session named ``name`` currently exists —
+    whether RUNNING or EXITED-but-resurrectable.
+
+    The orchestrator's resume path uses this to decide attach-if-exists vs
+    create: a name present in ``list-sessions`` (even in the EXITED state)
+    must NOT be re-launched (``zellij --session NAME`` errors rc=1 on a
+    name collision — verified live 2026-06-22). Attaching resurrects an
+    exited session, so an exited row is a legitimate resume target.
+
+    Returns False on any zellij CLI failure (caller treats "can't tell" as
+    "doesn't exist" -> falls through to a normal launch, which is the safe
+    default).
+    """
+    try:
+        return any(s.get("name") == name for s in list_sessions())
+    except Exception as exc:  # noqa: BLE001 -- defensive; daemon may be down
+        logger.warning(
+            "session_exists(%s): list_sessions failed (%s) -- treating as absent",
+            name,
+            exc,
+        )
+        return False
 
 
 def kill_session(name: str) -> None:

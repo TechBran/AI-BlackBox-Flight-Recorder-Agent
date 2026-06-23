@@ -503,6 +503,14 @@ if ! grep -qE "^CLI_AGENT_BACKEND=" "$BLACKBOX_ROOT/.env" 2>/dev/null; then
     echo "[install] Appended CLI_AGENT_BACKEND=zellij to .env (was missing)"
 fi
 
+# CLI_AGENT_IDLE_DAYS: optional override for the zellij idle-session reaper
+# (default 7d in code). Appended for parity with CLI_AGENT_BACKEND so an
+# upgraded box has a knob to tune; harmless if left at the default.
+if ! grep -qE "^CLI_AGENT_IDLE_DAYS=" "$BLACKBOX_ROOT/.env" 2>/dev/null; then
+    sudo -u "$REAL_USER" bash -c "echo 'CLI_AGENT_IDLE_DAYS=7' >> '$BLACKBOX_ROOT/.env'"
+    echo "[install] Appended CLI_AGENT_IDLE_DAYS=7 to .env (was missing)"
+fi
+
 # ── Step 3b: config.ini from template (per-customer state — operators + pairing) ──
 # Customer ZIP doesn't ship config.ini (gitignored to prevent shipping the
 # author's operator roster + tailnet hostname). Wizard's operator + tailscale

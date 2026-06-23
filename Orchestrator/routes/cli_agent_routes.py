@@ -414,36 +414,66 @@ def _check_operator_allowed(op: str) -> None:
         raise HTTPException(403, f"Operator {op} not allowed")
 
 
-def _generate_zellij_session_name(
+def _zellij_resume_name(
     operator: str,
     provider: str,
     app: Optional[str],
 ) -> str:
-    """Compute the Zellij session name for an operator+provider+app combo.
+    """DETERMINISTIC session name = the resume identity for an
+    (operator, provider, app) triple. NO timestamp.
 
-    - CLI providers (``claude``/``gemini``/``codex``/``agy``):
-      ``{operator}__{provider}__{app_or_root}__{unix_ts}`` — unique per
-      launch so multiple parallel sessions of the same provider don't
-      collide.
-    - Terminal mode: ``{operator}__terminal__{unix_ts}`` — also unique
-      per launch. Reused-name was the AC10 v1 plan ("single terminal
-      session per operator, persistent shell history"), but that
-      requires "already exists" handling — when the user relaunches the
-      app, the named session still exists in zellij and ``zellij
-      --session NAME`` rejects the collision with rc=1. Switched to
-      suffixed names 2026-05-26 after T23 device QA on Z Fold 6
-      surfaced the regression (orchestrator log: "launch_session failed
-      (rc=1) for Brandon__terminal" repeating). The persistent-shell
-      win is a v1.1 feature that needs the deferred /reattach endpoint
-      (Phase 5).
+    Shape:
+      - CLI providers: ``{operator}__{provider}__{app_or_root}``
+      - Terminal mode: ``{operator}__terminal__{app_or_root}``
+        (``app_or_root`` = "root" when no app context).
 
-    Kept as a module-level pure function so T9 can unit-test it without
-    spinning up FastAPI.
+    "Open the terminal for app X" always maps to this same name, so a
+    relaunch ATTACHES the existing session instead of minting a new one
+    (Phase 2 resume — the deferred v1.1 piece). The "+ New" fork path
+    uses :func:`_zellij_fork_name` to append a uniqueness suffix.
+
+    Pure function so it can be unit-tested without FastAPI.
     """
     app_part = app if app else "root"
-    if provider == "terminal":
-        return f"{operator}__terminal__{int(time.time())}"
-    return f"{operator}__{provider}__{app_part}__{int(time.time())}"
+    return f"{operator}__{provider}__{app_part}"
+
+
+def _zellij_fork_name(
+    operator: str,
+    provider: str,
+    app: Optional[str],
+) -> str:
+    """UNIQUE session name for an explicit "+ New" fork.
+
+    ``{operator}__{provider}__{app_or_root}__{unix_ts}`` — the timestamp
+    suffix guarantees a distinct session even when the deterministic
+    resume session for the same triple is already running. This is the
+    "fork a second concurrent terminal for app X" path.
+
+    Pure function so it can be unit-tested without FastAPI.
+    """
+    app_part = app if app else "root"
+    return f"{operator}__{provider}__{app_part}__{int(time.time() * 1000)}"
+
+
+def _generate_zellij_session_name(
+    operator: str,
+    provider: str,
+    app: Optional[str],
+    fork: bool = False,
+) -> str:
+    """Compute the Zellij session name for an (operator, provider, app).
+
+    ``fork=False`` (default) -> deterministic resume name (no timestamp);
+    ``fork=True`` -> unique forked name (timestamp suffix). See
+    :func:`_zellij_resume_name` / :func:`_zellij_fork_name`.
+
+    Kept for backward-compat with existing callers/tests; new code can
+    call the two specific helpers directly.
+    """
+    if fork:
+        return _zellij_fork_name(operator, provider, app)
+    return _zellij_resume_name(operator, provider, app)
 
 
 def _validate_operator_prefix(session_name_: str, operator: str) -> bool:
@@ -487,10 +517,29 @@ async def zellij_launch(
     body: dict = Body(...),
     op: str = Query(...),
 ):
-    """Mint a Zellij token, create a fresh session, return the iframe URL.
+    """Launch OR resume a Zellij session and return the iframe URL.
 
-    Body: ``{"provider": "claude"|"gemini"|"codex"|"agy"|"terminal",
-              "app": "<app-name>" | null}``
+    Body::
+
+        {"provider": "claude"|"gemini"|"codex"|"agy"|"terminal",
+         "app": "<app-name>" | null,
+         "fork": false}   # optional; default false
+
+    Resume model (Phase 2):
+
+    - ``fork`` omitted/false -> ATTACH-IF-EXISTS on the DETERMINISTIC name
+      ``{op}__{provider}__{app_or_root}`` (no timestamp). If a zellij
+      session with that name already exists (running OR exited-and-
+      resurrectable) we DO NOT relaunch (that would error rc=1); we
+      upsert the state row and return the same connection info. The
+      zellij-web client resurrects an exited session on attach.
+    - ``fork`` true -> "+ New": mint a UNIQUE timestamped name so a second
+      concurrent session for the same triple can coexist with the resume
+      session. A fork always creates.
+
+    Either way the response is identical in shape (the client reattaches
+    by name via the app-proxy; the master-token cookie is injected
+    upstream by the orchestrator — clients never hold tokens).
     """
     _check_operator_allowed(op)
     _require_zellij_backend()
@@ -505,6 +554,7 @@ async def zellij_launch(
     app = body.get("app")
     if app is not None and not isinstance(app, str):
         raise HTTPException(400, "app must be a string or null")
+    fork = bool(body.get("fork", False))
 
     bare_binary = _ZELLIJ_PROVIDER_BINARIES[provider]
     # Resolve to absolute path: orchestrator service's PATH doesn't include
@@ -525,7 +575,10 @@ async def zellij_launch(
             500,
             f"Provider {provider!r} binary {bare_binary!r} not found in any known location",
         )
-    session_name_ = _generate_zellij_session_name(op, provider, app)
+    if fork:
+        session_name_ = _zellij_fork_name(op, provider, app)
+    else:
+        session_name_ = _zellij_resume_name(op, provider, app)
 
     # Phase 5 master-token model (2026-05-26): no per-session token mint.
     # The orchestrator's app-proxy (Orchestrator/routes/agent_routes.py)
@@ -539,24 +592,81 @@ async def zellij_launch(
     token_value: Optional[str] = None  # never returned to client
     expires_at: Optional[str] = None  # master token doesn't expire
 
-    # Launch the session (blocking subprocess call).
-    try:
-        await asyncio.to_thread(
-            zellij_client.launch_session,
+    # Attach-if-exists (Phase 2 resume). For a non-fork (deterministic)
+    # launch, check whether the session already exists in zellij — running
+    # OR exited-and-resurrectable. If so, SKIP the launch: re-running
+    # `zellij --session NAME` on an existing name errors rc=1 ("already
+    # exists"), and the client only needs the URL to reattach (the
+    # zellij-web client resurrects an exited session on attach). A fork
+    # always creates, so we never attach-if-exists for forks.
+    #
+    # `resumed` controls the state-write-failure cleanup below: we must
+    # NOT kill a session we merely attached to (G3 — a name-collision
+    # cleanup would destroy the user's live terminal). We only kill on a
+    # cleanup path for a session WE just created.
+    resumed = False
+    if not fork:
+        try:
+            resumed = await asyncio.to_thread(
+                zellij_client.session_exists, session_name_
+            )
+        except Exception as exc:  # noqa: BLE001 — treat "can't tell" as absent
+            logger.warning(
+                "zellij_launch: session_exists(%s) probe failed (%s) — "
+                "proceeding as create",
+                session_name_,
+                exc,
+            )
+            resumed = False
+
+    if resumed:
+        logger.info(
+            "zellij_launch: ATTACH-IF-EXISTS — session %s already present, "
+            "resuming (no relaunch)",
             session_name_,
-            binary,
         )
-    except zellij_client.ZellijBinaryMissing as exc:
-        logger.error("zellij_launch: %s", exc)
-        raise HTTPException(503, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "zellij_launch: launch_session(%s) failed: %s",
-            session_name_,
-            exc,
-            exc_info=True,
-        )
-        raise HTTPException(500, f"Failed to launch Zellij session: {exc}")
+    else:
+        # Launch the session (blocking subprocess call).
+        try:
+            await asyncio.to_thread(
+                zellij_client.launch_session,
+                session_name_,
+                binary,
+            )
+        except zellij_client.ZellijBinaryMissing as exc:
+            logger.error("zellij_launch: %s", exc)
+            raise HTTPException(503, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            # Race / probe-miss: the name may have been created between our
+            # existence probe and the launch (or the probe failed open).
+            # zellij errors rc=1 on a name collision. Treat that single
+            # case as a successful resume rather than a 500 — the session
+            # exists and is reattachable, which is exactly what the caller
+            # asked for. Re-check existence to confirm before swallowing.
+            collided = False
+            if not fork:
+                try:
+                    collided = await asyncio.to_thread(
+                        zellij_client.session_exists, session_name_
+                    )
+                except Exception:  # noqa: BLE001
+                    collided = False
+            if collided:
+                logger.info(
+                    "zellij_launch: launch_session(%s) hit an existing name "
+                    "(%s) — resuming the existing session instead",
+                    session_name_,
+                    exc,
+                )
+                resumed = True
+            else:
+                logger.error(
+                    "zellij_launch: launch_session(%s) failed: %s",
+                    session_name_,
+                    exc,
+                    exc_info=True,
+                )
+                raise HTTPException(500, f"Failed to launch Zellij session: {exc}")
 
     try:
         await asyncio.to_thread(
@@ -573,31 +683,46 @@ async def zellij_launch(
         # try to clean up, and surface 500 so the client doesn't think
         # the session is usable. No token-revoke cleanup needed (no
         # per-session token was minted).
+        #
+        # G3 GUARD: only kill a session WE created. If we RESUMED an
+        # existing session, killing it on a state-write failure would
+        # destroy the user's live terminal — exactly the regression this
+        # whole feature is meant to prevent. Leave a resumed session
+        # alone; the next launch/reconcile will re-establish its row.
         logger.error(
             "zellij_launch: state.add_session(%s) failed: %s",
             session_name_,
             exc,
             exc_info=True,
         )
-        try:
-            await asyncio.to_thread(zellij_client.kill_session, session_name_)
-        except Exception as cleanup_exc:  # noqa: BLE001
+        if not resumed:
+            try:
+                await asyncio.to_thread(zellij_client.kill_session, session_name_)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    "zellij_launch: cleanup kill_session(%s) failed: %s",
+                    session_name_,
+                    cleanup_exc,
+                )
+        else:
             logger.warning(
-                "zellij_launch: cleanup kill_session(%s) failed: %s",
+                "zellij_launch: NOT killing %s on state-write failure — "
+                "it is a RESUMED (pre-existing) session, not one we created",
                 session_name_,
-                cleanup_exc,
             )
         raise HTTPException(500, f"Failed to record Zellij session state: {exc}")
 
     logger.info(
         "zellij_launch: operator=%s provider=%s app=%s session=%s "
-        "token_name=%s expires_at=%s",
+        "token_name=%s expires_at=%s fork=%s resumed=%s",
         op,
         provider,
         app,
         session_name_,
         token_name,
         expires_at,
+        fork,
+        resumed,
     )
 
     return {
@@ -605,6 +730,7 @@ async def zellij_launch(
         "session_url": _zellij_session_url(session_name_, token_value),
         "token": token_value,
         "expires_at": expires_at,
+        "resumed": resumed,
     }
 
 

@@ -245,91 +245,121 @@ def _wipe(reason: str) -> None:
         )
 
 
+def _expired(row: dict, now: "_dt.datetime") -> bool:
+    """True iff a row carries an ``expires_at`` that is in the past.
+
+    Terminal rows have ``expires_at is None`` (never expire). Short-lived
+    rows (legacy per-session-token model) carried an ISO-8601 expiry; a
+    past expiry means the row is stale and reconcile may drop it.
+    """
+    raw = row.get("expires_at")
+    if not raw:
+        return False
+    try:
+        ts = _dt.datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        # Unparseable expiry -> treat as expired (defensive: don't keep a
+        # row we can't reason about).
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.timezone.utc)
+    return ts <= now
+
+
 def reconcile_or_wipe() -> None:
-    """Compare orchestrator state ↔ Zellij ``tokens.db`` at orchestrator
-    startup (audit C3).
+    """Reconcile orchestrator state against LIVE zellij sessions at startup,
+    PRESERVING terminal rows whose underlying session survived the restart
+    (audit C3 + Phase 2 survive-orchestrator-restart).
 
     .. IMPORTANT::
-       This MUST be called during orchestrator startup BEFORE any route
-       handler is registered (typically in a FastAPI ``startup`` event
-       with strict priority ordering — T7 wires this in). Calling
-       ``reconcile_or_wipe`` concurrent with ``mint_token`` /
-       ``launch_session`` / ``add_session`` WILL cause data loss: a
-       freshly-minted token can be classified as orphan on either side
-       and wiped out from under the in-flight request.
+       This MUST run during orchestrator startup BEFORE any route handler
+       is reachable (FastAPI defers request acceptance until startup
+       events complete — see startup_cli_agent_zellij). Running concurrent
+       with ``add_session`` / ``launch_session`` risks classifying a
+       freshly-created session as orphan. The ``_STATE_LOCK`` serializes
+       against the state mutators, but NOT against zellij's own session
+       lifecycle, so "reconcile fully done before /launch is reachable" is
+       the only safe sequencing.
 
-       The internal ``_STATE_LOCK`` acquired here serializes against
-       ``add_session`` / ``remove_session`` mutators, but it does NOT
-       cover Zellij's own ``tokens.db`` writes (those happen inside the
-       zellij binary, out of our control). The only safe sequencing is
-       "reconcile fully done before /launch is reachable."
+    Why this changed (Phase 2): the master-token model (2026-05-26) made
+    EVERY state row carry the constant ``token_name="master"`` placeholder
+    instead of a per-session token. The OLD token-set comparison therefore
+    never matched the real ``tokens.db`` (which holds ``master-blackbox``),
+    so it WIPED all terminal rows AND the persistent master token on every
+    restart — destroying still-live terminal sessions and forcing a
+    master-token re-mint. That defeats the locked requirement that a
+    session survive an orchestrator restart.
 
-    Four cases:
+    New policy — drive off LIVE SESSIONS, not tokens:
 
-    1. Both clean (no state rows, no Zellij tokens)        → no-op.
-    2. Both populated and ``token_name``s match            → no-op.
-    3. Both populated but ``token_name``s mismatch         → WIPE both.
-    4. One populated and the other empty                   → WIPE both.
+    - For each state row, ask zellij whether a session of that name still
+      EXISTS (running OR exited-and-resurrectable per ``list_sessions``).
+    - PRESERVE a row iff its session exists AND it is not an expired
+      short-lived row. Such a row is a live terminal the user can resume.
+    - DROP (do not preserve) a row whose session is gone (genuinely
+      orphaned — killed out-of-band) or whose ``expires_at`` is past.
+    - The persistent master token in ``tokens.db`` is NEVER wiped here —
+      it is intentionally long-lived (ensure_master_zellij_token loads,
+      not re-mints, across restarts).
 
-    The wipe is the safer default for a fresh-customer-install or a
-    reinstall with mismatched state — an orphaned token row points at a
-    session whose backend may or may not still exist, and trying to
-    salvage a partial mapping is more dangerous than starting clean.
+    Fresh-install / corrupt-state safety is preserved: a row with no
+    backing zellij session is still discarded, and if zellij is
+    unreachable we skip reconcile this boot (no destructive action on
+    uncertainty).
     """
     with _STATE_LOCK:
         state_rows = load()
-        state_token_names = {
-            row.get("token_name")
-            for row in state_rows
-            if row.get("token_name")
-        }
 
+        if not state_rows:
+            logger.info(
+                "zellij_state.reconcile_or_wipe: no state rows — nothing to "
+                "reconcile (no-op; persistent master token left intact)"
+            )
+            return
+
+        # Enumerate live zellij sessions (running + exited-resurrectable).
         try:
-            zellij_tokens = zellij_client.list_tokens()
-        except Exception as exc:  # noqa: BLE001 — defensive, daemon may be down
+            sessions = zellij_client.list_sessions()
+        except Exception as exc:  # noqa: BLE001 — daemon may be down at boot
             logger.warning(
-                "zellij_state.reconcile_or_wipe: cannot list zellij tokens (%s) "
-                "— skipping reconcile this boot. orchestrator will retry next start.",
+                "zellij_state.reconcile_or_wipe: cannot list zellij sessions "
+                "(%s) — skipping reconcile this boot (preserving existing "
+                "state; orchestrator retries next start)",
                 exc,
             )
             return
 
-        zellij_token_names = {t["name"] for t in zellij_tokens if "name" in t}
+        live_names = {s.get("name") for s in sessions if s.get("name")}
+        now = _dt.datetime.now(_dt.timezone.utc)
 
-        state_present = bool(state_token_names)
-        zellij_present = bool(zellij_token_names)
+        kept: list[dict] = []
+        dropped_orphan: list[str] = []
+        dropped_expired: list[str] = []
+        for row in state_rows:
+            name = row.get("session_name")
+            if not name:
+                continue
+            if _expired(row, now):
+                dropped_expired.append(name)
+                continue
+            if name in live_names:
+                kept.append(row)
+            else:
+                dropped_orphan.append(name)
 
-        if not state_present and not zellij_present:
-            logger.info(
-                "zellij_state.reconcile_or_wipe: both state and tokens.db clean "
-                "(no-op)"
+        if dropped_orphan or dropped_expired:
+            logger.warning(
+                "zellij_state.reconcile_or_wipe: dropping stale rows — "
+                "orphaned (no live session)=%s expired=%s; preserving %d "
+                "live terminal row(s)",
+                sorted(dropped_orphan),
+                sorted(dropped_expired),
+                len(kept),
             )
-            return
-
-        if state_present and zellij_present:
-            if state_token_names == zellij_token_names:
-                logger.info(
-                    "zellij_state.reconcile_or_wipe: state and tokens.db match "
-                    "(%d token(s); no-op)",
-                    len(state_token_names),
-                )
-                return
-            only_in_state = sorted(state_token_names - zellij_token_names)
-            only_in_zellij = sorted(zellij_token_names - state_token_names)
-            _wipe(
-                f"mismatch — only_in_state={only_in_state} "
-                f"only_in_zellij={only_in_zellij}"
-            )
-            return
-
-        # Exactly one side populated.
-        if state_present and not zellij_present:
-            _wipe(
-                f"state has {len(state_token_names)} token(s) "
-                "but tokens.db is empty"
-            )
+            save(kept)
         else:
-            _wipe(
-                f"tokens.db has {len(zellij_token_names)} token(s) "
-                "but state is empty"
+            logger.info(
+                "zellij_state.reconcile_or_wipe: all %d state row(s) backed "
+                "by a live zellij session — preserved across restart (no-op)",
+                len(kept),
             )

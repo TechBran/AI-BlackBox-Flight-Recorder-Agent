@@ -338,3 +338,78 @@ def test_ensure_config_backs_up_operator_edits_before_regenerating(tmp_path, mon
     assert backups, "no backup file created"
     backup_text = backups[0].read_text(encoding="utf-8")
     assert backup_text == operator_edited
+
+
+# --- list_sessions EXITED-suffix parsing (live parser bug fix) ----------
+
+
+def test_list_sessions_parses_exited_resurrectable_suffix():
+    """The original regex anchored at `]` matched ZERO rows on a box with
+    accumulated `(EXITED - attach to resurrect)` sessions. Confirm both
+    running and exited rows parse, with the `exited` flag set correctly."""
+    out = (
+        "Brandon__terminal__root [Created 3h 59m 23s ago]\n"
+        "Brandon__claude__root__1779878318 [Created 26days 15h 14m 55s ago] (EXITED - attach to resurrect)\n"
+    )
+    with patch.object(zellij_client, "_run", return_value=_mk_completed_process(stdout=out)):
+        rows = zellij_client.list_sessions()
+    by_name = {r["name"]: r for r in rows}
+    assert set(by_name) == {"Brandon__terminal__root", "Brandon__claude__root__1779878318"}
+    assert by_name["Brandon__terminal__root"]["exited"] is False
+    assert by_name["Brandon__claude__root__1779878318"]["exited"] is True
+
+
+def test_session_exists_true_for_running_and_exited():
+    out = (
+        "Brandon__terminal__root [Created 3h ago]\n"
+        "Brandon__claude__root [Created 9days ago] (EXITED - attach to resurrect)\n"
+    )
+    with patch.object(zellij_client, "_run", return_value=_mk_completed_process(stdout=out)):
+        assert zellij_client.session_exists("Brandon__terminal__root") is True
+        assert zellij_client.session_exists("Brandon__claude__root") is True  # exited still counts
+        assert zellij_client.session_exists("Brandon__gemini__root") is False
+
+
+def test_session_exists_false_on_cli_failure():
+    """If list_sessions raises, session_exists must return False (treat
+    'can't tell' as absent -> caller falls through to a normal launch)."""
+    with patch.object(zellij_client, "list_sessions", side_effect=RuntimeError("daemon down")):
+        assert zellij_client.session_exists("Brandon__terminal__root") is False
+
+
+# --- master token LOADS (not re-mints) across a simulated restart -------
+
+
+def test_ensure_master_zellij_token_loads_from_disk_no_remint(tmp_path, monkeypatch):
+    """Simulated restart: the master auth token persisted on disk must be
+    LOADED (not re-minted) so reattach keeps working across an
+    orchestrator restart. mint_token must NOT be called when the file
+    already holds a value."""
+    token_file = tmp_path / "zellij-master.token"
+    token_file.write_text("11111111-2222-3333-4444-555555555555", encoding="utf-8")
+    monkeypatch.setattr(zellij_client, "_MASTER_TOKEN_FILE", token_file)
+    # Clear the in-process cache so we exercise the disk-load path (the
+    # "fresh process after restart" condition).
+    monkeypatch.setattr(zellij_client, "_master_token", None)
+
+    with patch.object(zellij_client, "mint_token") as mock_mint:
+        value = zellij_client.ensure_master_zellij_token()
+
+    assert value == "11111111-2222-3333-4444-555555555555"
+    mock_mint.assert_not_called(), "master token must be loaded, never re-minted, across restart"
+
+
+def test_ensure_master_zellij_token_mints_only_when_absent(tmp_path, monkeypatch):
+    """Fresh install (no token file): mint once + persist."""
+    token_file = tmp_path / "sub" / "zellij-master.token"
+    monkeypatch.setattr(zellij_client, "_MASTER_TOKEN_FILE", token_file)
+    monkeypatch.setattr(zellij_client, "_master_token", None)
+
+    with patch.object(zellij_client, "mint_token",
+                      return_value=("master-blackbox", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")) as mock_mint:
+        value = zellij_client.ensure_master_zellij_token()
+
+    assert value == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    mock_mint.assert_called_once()
+    # Persisted for the NEXT restart to load.
+    assert token_file.read_text(encoding="utf-8").strip() == value

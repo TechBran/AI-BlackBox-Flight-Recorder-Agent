@@ -152,102 +152,125 @@ def test_remove_session_removes_matching_row(isolated_state):
     assert names == ["Brandon__claude__b"]
 
 
-# --- audit C3: reconcile_or_wipe 4-case coverage ----------------------
+# --- Phase 2: reconcile_or_wipe PRESERVES live-backed terminal rows -----
+#
+# The master-token model made every state row carry token_name="master",
+# so the OLD token-set comparison wiped all terminal rows on every restart.
+# reconcile_or_wipe now drives off LIVE zellij SESSIONS: a row is preserved
+# iff its session still exists (running OR exited-resurrectable) and it is
+# not an expired short-lived row; genuinely-orphaned rows are dropped.
 
 
-def test_reconcile_case1_both_clean_is_noop(isolated_state):
-    """Case 1: empty state + empty tokens.db → no-op (no wipe)."""
+def test_reconcile_no_state_rows_is_noop(isolated_state):
+    """No state rows -> nothing to reconcile (and the persistent master
+    token in tokens.db is NOT touched)."""
     assert not isolated_state.exists()
-    with patch.object(zellij_state.zellij_client, "list_tokens", return_value=[]):
+    with patch.object(zellij_state.zellij_client, "list_sessions", return_value=[]):
         zellij_state.reconcile_or_wipe()
-    # Still no state file (no-op).
     assert not isolated_state.exists()
 
 
-def test_reconcile_case2_both_populated_match_is_noop(isolated_state):
-    """Case 2: state and tokens.db have the same token_names → no-op."""
+def test_reconcile_preserves_row_with_live_session(isolated_state):
+    """A terminal row (expires_at=None) whose zellij session STILL EXISTS
+    is PRESERVED across a simulated restart (the survive-restart change)."""
     zellij_state.add_session(
-        "Brandon", "claude", None,
-        "Brandon__claude__a", "token_A", None,
-    )
-    zellij_state.add_session(
-        "Brandon", "claude", None,
-        "Brandon__claude__b", "token_B", None,
+        "Brandon", "terminal", None,
+        "Brandon__terminal__root", "master", None,
     )
     rows_before = zellij_state.load()
+    assert len(rows_before) == 1
 
     with patch.object(
-        zellij_state.zellij_client,
-        "list_tokens",
-        return_value=[
-            {"name": "token_A", "created_at": "2026-01-01"},
-            {"name": "token_B", "created_at": "2026-01-02"},
-        ],
+        zellij_state.zellij_client, "list_sessions",
+        return_value=[{"name": "Brandon__terminal__root", "created_at": "1h ago", "exited": False}],
     ):
         zellij_state.reconcile_or_wipe()
 
     rows_after = zellij_state.load()
-    assert rows_after == rows_before, "no-op case must not modify state"
+    assert rows_after == rows_before, "live-backed terminal row must be preserved"
 
 
-def test_reconcile_case3_state_populated_tokens_empty_wipes(isolated_state, monkeypatch, tmp_path):
-    """Case 3: state has rows, tokens.db empty → WIPE both."""
-    # Point _ZELLIJ_TOKENS_DB at a fake file we can verify is unlinked.
-    fake_tokens_db = tmp_path / "fake_tokens.db"
-    fake_tokens_db.write_text("not-a-real-db")
-    monkeypatch.setattr(zellij_state, "_ZELLIJ_TOKENS_DB", fake_tokens_db)
-
+def test_reconcile_preserves_row_with_exited_resurrectable_session(isolated_state):
+    """An EXITED-but-resurrectable session is still a valid resume target;
+    its row must be PRESERVED (the zellij-web client resurrects on attach)."""
     zellij_state.add_session(
-        "Brandon", "claude", None,
-        "Brandon__claude__a", "token_A", None,
-    )
-    assert isolated_state.exists()
-
-    with patch.object(zellij_state.zellij_client, "list_tokens", return_value=[]):
-        zellij_state.reconcile_or_wipe()
-
-    assert not isolated_state.exists(), "case 3 must wipe state file"
-    assert not fake_tokens_db.exists(), "case 3 must wipe tokens.db"
-
-
-def test_reconcile_case4_state_empty_tokens_populated_wipes(isolated_state, monkeypatch, tmp_path):
-    """Case 4: state empty, tokens.db populated → WIPE both."""
-    fake_tokens_db = tmp_path / "fake_tokens.db"
-    fake_tokens_db.write_text("not-a-real-db")
-    monkeypatch.setattr(zellij_state, "_ZELLIJ_TOKENS_DB", fake_tokens_db)
-
-    assert not isolated_state.exists()
-    assert fake_tokens_db.exists()
-
-    with patch.object(
-        zellij_state.zellij_client,
-        "list_tokens",
-        return_value=[{"name": "token_orphan", "created_at": "2026-01-01"}],
-    ):
-        zellij_state.reconcile_or_wipe()
-
-    # State file still absent (no-op for that side).
-    assert not isolated_state.exists()
-    # tokens.db was wiped.
-    assert not fake_tokens_db.exists(), "case 4 must wipe orphaned tokens.db"
-
-
-def test_reconcile_mismatch_wipes(isolated_state, monkeypatch, tmp_path):
-    """Bonus 5th case: both populated but token_names disagree → wipe."""
-    fake_tokens_db = tmp_path / "fake_tokens.db"
-    fake_tokens_db.write_text("not-a-real-db")
-    monkeypatch.setattr(zellij_state, "_ZELLIJ_TOKENS_DB", fake_tokens_db)
-
-    zellij_state.add_session(
-        "Brandon", "claude", None,
-        "Brandon__claude__a", "token_A", None,
+        "Brandon", "claude", "grocery-store",
+        "Brandon__claude__grocery-store", "master", None,
     )
     with patch.object(
-        zellij_state.zellij_client,
-        "list_tokens",
-        return_value=[{"name": "token_Z", "created_at": "2026-01-01"}],
+        zellij_state.zellij_client, "list_sessions",
+        return_value=[{"name": "Brandon__claude__grocery-store", "created_at": "2days ago", "exited": True}],
     ):
         zellij_state.reconcile_or_wipe()
+    rows = zellij_state.load()
+    names = [r["session_name"] for r in rows]
+    assert names == ["Brandon__claude__grocery-store"], "exited-resurrectable row must be preserved"
 
-    assert not isolated_state.exists(), "mismatch must wipe state"
-    assert not fake_tokens_db.exists(), "mismatch must wipe tokens.db"
+
+def test_reconcile_drops_orphaned_row_no_live_session(isolated_state):
+    """A row whose zellij session is GONE (killed out-of-band) is dropped
+    — genuinely orphaned, not resumable."""
+    zellij_state.add_session(
+        "Brandon", "terminal", None,
+        "Brandon__terminal__root", "master", None,
+    )
+    # zellij has a DIFFERENT session, not ours -> ours is orphaned.
+    with patch.object(
+        zellij_state.zellij_client, "list_sessions",
+        return_value=[{"name": "SomeoneElse__terminal__root", "created_at": "1h ago", "exited": False}],
+    ):
+        zellij_state.reconcile_or_wipe()
+    rows = zellij_state.load()
+    assert rows == [], "orphaned row (no live session) must be dropped"
+
+
+def test_reconcile_preserves_live_drops_orphan_in_same_pass(isolated_state):
+    """Mixed: one row live (preserve), one row orphaned (drop)."""
+    zellij_state.add_session(
+        "Brandon", "terminal", None,
+        "Brandon__terminal__root", "master", None,
+    )
+    zellij_state.add_session(
+        "Brandon", "claude", None,
+        "Brandon__claude__root", "master", None,
+    )
+    with patch.object(
+        zellij_state.zellij_client, "list_sessions",
+        return_value=[{"name": "Brandon__terminal__root", "created_at": "1h ago", "exited": False}],
+    ):
+        zellij_state.reconcile_or_wipe()
+    names = sorted(r["session_name"] for r in zellij_state.load())
+    assert names == ["Brandon__terminal__root"], "live preserved, orphan dropped"
+
+
+def test_reconcile_drops_expired_short_lived_row_even_if_session_present(isolated_state):
+    """A row with a PAST expires_at is stale and dropped even if a session
+    of that name happens to exist (legacy short-lived-token hygiene)."""
+    past = "2000-01-01T00:00:00+00:00"
+    zellij_state.add_session(
+        "Brandon", "claude", None,
+        "Brandon__claude__root", "token_old", past,
+    )
+    with patch.object(
+        zellij_state.zellij_client, "list_sessions",
+        return_value=[{"name": "Brandon__claude__root", "created_at": "1h ago", "exited": False}],
+    ):
+        zellij_state.reconcile_or_wipe()
+    assert zellij_state.load() == [], "expired row must be dropped"
+
+
+def test_reconcile_skips_when_zellij_unreachable_preserves_state(isolated_state):
+    """If zellij is down at boot, reconcile makes NO destructive change —
+    state is preserved (orchestrator retries next start). This protects a
+    live terminal during a transient zellij outage."""
+    zellij_state.add_session(
+        "Brandon", "terminal", None,
+        "Brandon__terminal__root", "master", None,
+    )
+    rows_before = zellij_state.load()
+    with patch.object(
+        zellij_state.zellij_client, "list_sessions",
+        side_effect=RuntimeError("zellij daemon down"),
+    ):
+        zellij_state.reconcile_or_wipe()
+    assert zellij_state.load() == rows_before, "must not wipe on zellij-unreachable"

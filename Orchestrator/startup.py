@@ -663,6 +663,41 @@ async def startup_cli_agent_zellij():
         )
 
 
+@app.on_event("startup")
+async def startup_cli_agent_zellij_reaper():
+    """Start the periodic zellij idle-session reaper (Phase 2 housekeeping).
+
+    The legacy reaper (Orchestrator/cli_agent/reaper.py reap_idle_sessions)
+    is tmux-only and was never scheduled — so on a zellij box NOTHING reaped
+    idle sessions, and ``(EXITED - attach to resurrect)`` zombies piled up
+    (26-day-old sessions observed live 2026-06-22). This in-process task
+    (mirroring live_session_reaper's pattern) sweeps hourly, deleting
+    BlackBox-named zellij sessions older than the 7-day idle threshold
+    (CLI_AGENT_IDLE_DAYS). Recently-used / resumed terminals keep a young
+    "Created" age (attach resets it) and are never reaped.
+
+    NEVER raises — maintenance, not boot criteria. Only starts when zellij
+    is the effective backend.
+    """
+    try:
+        from Orchestrator.cli_agent import get_backend
+        if get_backend() != "zellij":
+            logger.info(
+                "[ZELLIJ-REAPER] backend is not zellij — reaper not started"
+            )
+            return
+        from Orchestrator.cli_agent.reaper import (
+            start_zellij_reaper, ZELLIJ_REAP_INTERVAL_SEC,
+        )
+        start_zellij_reaper()
+        logger.info(
+            "[ZELLIJ-REAPER] idle zellij-session reaper started (sweep %.0fs, "
+            "7-day idle threshold)", ZELLIJ_REAP_INTERVAL_SEC,
+        )
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[ZELLIJ-REAPER] failed to start reaper (non-fatal): %s", e)
+
+
 @app.on_event("shutdown")
 async def shutdown_sms():
     """Stop the SMS system."""
