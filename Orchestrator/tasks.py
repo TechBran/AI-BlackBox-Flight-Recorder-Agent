@@ -1414,11 +1414,11 @@ def process_chat_task(task: Task):
             if _user_msg:
                 from Orchestrator.toolvault.injector import inject_for_prompt
                 _, tool_instructions = inject_for_prompt(_user_msg, inp.provider or DEFAULT_PROVIDER)
-                dynamic_core = build_core_system_prompt(tool_instructions)
+                dynamic_core = build_core_system_prompt(tool_instructions, operator=active_operator)
             else:
-                dynamic_core = STREAM_EXCERPT
+                dynamic_core = build_core_system_prompt("", operator=active_operator)
         else:
-            dynamic_core = STREAM_EXCERPT
+            dynamic_core = build_core_system_prompt("", operator=active_operator)
 
         sys_msg = {"role": "system", "content": sms_prompt_prefix + dynamic_core}
         msg_list = [sys_msg]

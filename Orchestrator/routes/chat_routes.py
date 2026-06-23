@@ -5765,17 +5765,17 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
         pass
 
     # Build system prompt — TOOLVAULT_ENABLED injects dynamic tool instructions
+    from Orchestrator.tasks import build_core_system_prompt
     if TOOLVAULT_ENABLED:
         from Orchestrator.toolvault.injector import inject_for_prompt
-        from Orchestrator.tasks import build_core_system_prompt
         user_text_sp = _last_user_msg(messages)
         if user_text_sp:
             _, tool_instructions = inject_for_prompt(user_text_sp, provider or "openai")
-            system_prompt = build_core_system_prompt(tool_instructions)
+            system_prompt = build_core_system_prompt(tool_instructions, operator=operator)
         else:
-            system_prompt = STREAM_EXCERPT
+            system_prompt = build_core_system_prompt("", operator=operator)
     else:
-        system_prompt = STREAM_EXCERPT
+        system_prompt = build_core_system_prompt("", operator=operator)
 
     # Final message list (system prompt + fossil block + original messages)
     context_messages = [

@@ -22,3 +22,9 @@ def test_custom_operator_persona_injected(monkeypatch):
 
 def test_stream_excerpt_still_builds_at_module_load():
     assert isinstance(tasks.STREAM_EXCERPT, str) and len(tasks.STREAM_EXCERPT) > 100
+
+def test_fallback_path_also_uses_operator_persona(monkeypatch):
+    # tool_instructions="" path (no user msg / toolvault off) must still honor persona
+    monkeypatch.setattr(state, "OPERATOR_PREFERENCES", {"Brandon": {"persona": "FALLBACK-CUSTOM"}})
+    out = tasks.build_core_system_prompt("", operator="Brandon")
+    assert "FALLBACK-CUSTOM" in out
