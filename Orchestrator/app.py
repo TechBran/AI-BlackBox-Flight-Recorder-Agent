@@ -77,6 +77,7 @@ from Orchestrator.tasks import *
 from Orchestrator.routes.task_routes import *
 from Orchestrator.routes.admin_routes import *
 from Orchestrator.routes.tts_routes import *
+from Orchestrator.routes.persona_routes import *
 from Orchestrator.routes.chat_routes import *
 from Orchestrator.routes.agent_routes import *
 from Orchestrator.routes.realtime_routes import *
