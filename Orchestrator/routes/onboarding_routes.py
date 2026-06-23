@@ -653,6 +653,61 @@ def onboarding_status() -> dict:
     return status_rollup.build_status(**_collect_status_inputs())
 
 
+@router.get("/status/stream")
+async def onboarding_status_stream():
+    """SSE live re-validation for the hub (fired on view, never on a timer).
+
+    Emits one `event: section` per section as its probe resolves, then a final
+    `event: done`. Reuses the StreamingResponse SSE pattern from logs_stream /
+    tailscale_install_stream. The ONLY section needing a live probe today is
+    tailscale (serve/HTTPS state); the rest re-emit their persisted-derived
+    state. A probe failure falls back to the persisted state — the stream never
+    crashes over one bad section."""
+    import asyncio
+    import json as _json
+
+    def _sse(event: str, payload: dict) -> bytes:
+        return f"event: {event}\ndata: {_json.dumps(payload)}\n\n".encode("utf-8")
+
+    async def gen():
+        # Start from the fast rollup (persisted truth) so every section has a
+        # baseline even if its live probe is a no-op.
+        base = status_rollup.build_status(**_collect_status_inputs())
+        sections = {s["key"]: s for s in base["sections"]}
+        ready_count = 0
+
+        for section in status_rollup.SECTIONS:
+            key = section["key"]
+            sec = sections[key]
+            atts = [a for a in base["attention"] if a.get("section") == key]
+
+            if key == "tailscale":
+                # The one genuinely-live probe — refine serve/HTTPS truth.
+                try:
+                    from Orchestrator.onboarding.validators import validate_tailscale
+                    res = await asyncio.to_thread(validate_tailscale)
+                    if not res.ok:
+                        sec = {**sec, "state": status_rollup.OPTIONAL,
+                               "summary": "Not connected"}
+                        atts = []
+                    # res.ok refines nothing beyond the persisted serve hint here;
+                    # the fast-read hint already classified serve-not-set.
+                except Exception:
+                    logger.exception("status stream: tailscale probe failed")
+
+            if sec["state"] == status_rollup.READY:
+                ready_count += 1
+            yield _sse("section", {
+                "key": key, "state": sec["state"], "summary": sec["summary"],
+                "attention": atts,
+            })
+            await asyncio.sleep(0)  # cooperative yield between probes
+
+        yield _sse("done", {"ready_count": ready_count, "total": len(status_rollup.SECTIONS)})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @router.post("/restart")
 async def restart_blackbox_service() -> dict:
     """Trigger a service restart. Wizard's done step calls this after the

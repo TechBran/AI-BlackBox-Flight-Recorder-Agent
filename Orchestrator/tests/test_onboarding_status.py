@@ -324,3 +324,45 @@ def test_status_route_does_no_tailscale_probe():
                side_effect=AssertionError("FAST read must not probe tailscale")):
         r = c.get("/onboarding/status")
     assert r.status_code == 200
+
+
+# ── SSE tests (Task 16): GET /onboarding/status/stream — live re-validation ──
+def _parse_sse(text):
+    """Minimal SSE parser -> list of (event, data_str)."""
+    events, ev, data = [], None, []
+    for line in text.splitlines():
+        if line.startswith("event:"):
+            ev = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data.append(line[len("data:"):].strip())
+        elif line == "":
+            if ev or data:
+                events.append((ev, "\n".join(data)))
+            ev, data = None, []
+    if ev or data:
+        events.append((ev, "\n".join(data)))
+    return events
+
+
+def test_status_stream_emits_section_events_then_done():
+    import json as _json
+    c = _client()
+    # Keep the live tailscale probe deterministic + cheap.
+    with patch("Orchestrator.onboarding.validators.validate_tailscale") as m:
+        from Orchestrator.onboarding.validators import ValidationResult
+        m.return_value = ValidationResult(ok=False, latency_ms=1, error="not running")
+        r = c.get("/onboarding/status/stream")
+    assert r.status_code == 200
+    assert "text/event-stream" in r.headers["content-type"]
+    events = _parse_sse(r.text)
+    kinds = [e[0] for e in events]
+    assert "section" in kinds
+    assert kinds[-1] == "done"
+    # every section event carries the contract keys
+    for ev, data in events:
+        if ev == "section":
+            payload = _json.loads(data)
+            assert set(payload) >= {"key", "state", "summary", "attention"}
+    done_payload = _json.loads(events[-1][1])
+    assert set(done_payload) >= {"ready_count", "total"}
+    assert done_payload["total"] == len(sr.SECTIONS)
