@@ -1,8 +1,12 @@
 package com.aiblackbox.portal
 
 import android.app.Application
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.aiblackbox.portal.data.remote.RemoteTaskRunner
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
+import com.aiblackbox.portal.data.voice.AudioPlaybackManager
 
 /**
  * Process-wide startup wiring. Registers the control_phone remote task handler
@@ -14,5 +18,14 @@ class PortalApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         remoteTaskHandlerFactory = { ctx -> RemoteTaskRunner(ctx) }
+
+        // Pause the playback Visualizer's audio-output capture while the whole
+        // app is backgrounded (saves CPU + avoids a background output tap with
+        // no on-screen consumer). Playback itself is unaffected; capture resumes
+        // on return to foreground if still playing.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) { AudioPlaybackManager.onAppBackground() }
+            override fun onStart(owner: LifecycleOwner) { AudioPlaybackManager.onAppForeground() }
+        })
     }
 }

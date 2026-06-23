@@ -56,6 +56,10 @@ fun VoiceWaveform(
     // ribbon reads red regardless of [speaker]. Default null = existing callers
     // (voice screen, composer mic) are unchanged.
     overrideColors: Pair<Color, Color>? = null,
+    // When true, pause the continuous phase animation while the ribbon is at
+    // rest (amplitude ~0) so idle bars in a list stop repainting at 60fps.
+    // Default false keeps the always-flowing behavior for the voice/mic ribbons.
+    pauseWhenIdle: Boolean = false,
 ) {
     val gain = when (speaker) {
         WaveSpeaker.AI -> AI_GAIN
@@ -68,7 +72,7 @@ fun VoiceWaveform(
         label = "amp",
     )
 
-    val phase by rememberInfiniteTransition(label = "wave").animateFloat(
+    val phaseState = rememberInfiniteTransition(label = "wave").animateFloat(
         initialValue = 0f,
         targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(tween(2200, easing = LinearEasing), RepeatMode.Restart),
@@ -85,7 +89,13 @@ fun VoiceWaveform(
 
     val level = if (speaker == WaveSpeaker.IDLE) IDLE_LEVEL else (IDLE_LEVEL + eased).coerceIn(0f, 1f)
 
+    // When pauseWhenIdle is set (list TTS bars), stop reading the phase State
+    // while at rest so the Canvas stops repainting every frame. IDLE breathing
+    // and active motion still animate; default (false) is byte-for-byte unchanged.
+    val animatePhase = !pauseWhenIdle || speaker == WaveSpeaker.IDLE || eased > 0.015f
+
     Canvas(modifier = modifier.fillMaxWidth().height(height)) {
+        val phase = if (animatePhase) phaseState.value else 0f
         val brush = Brush.horizontalGradient(
             listOf(color1.copy(alpha = 0f), color2, color1.copy(alpha = 0f))
         )

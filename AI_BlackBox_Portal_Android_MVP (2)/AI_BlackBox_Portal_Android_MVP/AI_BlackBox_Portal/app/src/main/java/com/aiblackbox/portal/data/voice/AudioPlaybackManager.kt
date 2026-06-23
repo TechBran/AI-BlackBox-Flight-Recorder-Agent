@@ -189,6 +189,19 @@ object AudioPlaybackManager {
         stop()
     }
 
+    /**
+     * App went to background: pause output capture (no on-screen consumer).
+     * Playback continues; only the Visualizer is disabled.
+     */
+    fun onAppBackground() {
+        if (_isPlaying.value) enableVisualizer(false)
+    }
+
+    /** App returned to foreground: resume capture if still playing. */
+    fun onAppForeground() {
+        if (_isPlaying.value) enableVisualizer(true)
+    }
+
     // =========================================================================
     // Visualizer - real-time output amplitude for the ribbon
     // =========================================================================

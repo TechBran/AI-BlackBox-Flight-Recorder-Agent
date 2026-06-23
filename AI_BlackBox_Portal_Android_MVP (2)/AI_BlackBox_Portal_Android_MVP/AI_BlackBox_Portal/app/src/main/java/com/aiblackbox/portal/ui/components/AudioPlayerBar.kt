@@ -219,7 +219,8 @@ fun AudioPlayerBar(
                 speaker = WaveSpeaker.USER,
                 modifier = Modifier.fillMaxSize(),
                 height = 40.dp,
-                overrideColors = WaveRed to WaveRedDim
+                overrideColors = WaveRed to WaveRedDim,
+                pauseWhenIdle = true,
             )
 
             // Thin progress track + playhead beneath the ribbon so position is
