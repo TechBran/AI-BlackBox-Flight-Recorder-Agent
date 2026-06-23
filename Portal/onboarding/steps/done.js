@@ -8,10 +8,13 @@
 // status pips. Big "Open Portal →" CTA. The customer has crossed a
 // threshold; the system is now theirs.
 
-let busy = false;
+// Per-render busy state — module globals would survive across remounts and
+// silently dead-lock the buttons (see E9 note in doRestart). Reset each render.
+let rs = { busy: false, restartBusy: false };
 
 export async function render(container, { next, back, skip, sigil }) {
-    container.innerHTML = `
+    rs = { busy: false, restartBusy: false };
+    container.innerHTML =`
         <section class="ob-step ob-done">
             <aside class="ob-step-sigil" aria-hidden="true">
                 <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "08"}</em></div>
@@ -265,8 +268,8 @@ function summaryRow(label, status, detail) {
 }
 
 async function completeAndOpen(btn) {
-    if (busy) return;
-    busy = true;
+    if (rs.busy) return;
+    rs.busy = true;
     btn.disabled = true;
     const orig = btn.innerHTML;
     btn.innerHTML = "Finalizing&hellip;";
@@ -292,7 +295,7 @@ async function completeAndOpen(btn) {
             summaryEl.appendChild(err);
         }
     } finally {
-        busy = false;
+        rs.busy = false;
     }
 }
 
@@ -306,8 +309,6 @@ async function completeAndOpen(btn) {
 // SIGTERM the service mid-response). Wait 5s, then poll /health every 2s
 // for up to 120s. When it returns 200, poll /restart-status until drift
 // clears, show "Restarted ✓" briefly, then fade back to State A.
-
-let restartBusy = false;
 
 async function initRestartButton() {
     const btn = document.getElementById("ob-done-restart");
@@ -368,8 +369,8 @@ function renderRestartState(btn, statusEl, data) {
 }
 
 async function doRestart(btn, statusEl) {
-    if (restartBusy) return;
-    restartBusy = true;
+    if (rs.restartBusy) return;
+    rs.restartBusy = true;
 
     // E9 followup (Brandon's MSO2 Ultra report 2026-05-17): customer clicked
     // button, nothing happened. Journal confirmed /onboarding/restart was
@@ -438,7 +439,7 @@ async function doRestart(btn, statusEl) {
         statusEl.classList.add("ob-restart-status-warn");
         statusEl.textContent = `Restart didn't complete: ${e.message}. Try again or open Portal anyway.`;
     } finally {
-        restartBusy = false;
+        rs.restartBusy = false;
     }
 }
 
