@@ -306,4 +306,70 @@ class ZellijWebSocketClientTest {
         assertNull("reconnectJob must be null after 4001 close", c.reconnectJobForTest())
         c.close()
     }
+
+    // --- Phase 1: detach vs close separation -----------------------------
+
+    @Test
+    fun `detach does not set userClosed — reconnect stays usable`() {
+        val c = newClient()
+        // detach() must NOT permanently close the instance, so the reconnect
+        // machinery (keyed on currentSessionName) stays usable after the
+        // renderer is unbound on navigation.
+        c.detach()
+        assertTrue("detach must NOT set userClosed", !c.isClosed())
+        // scheduleReconnect early-returns if userClosed — prove it still runs.
+        c.scheduleReconnectForTest()
+        assertTrue(
+            "reconnect must be schedulable after detach (userClosed still false)",
+            c.isReconnectScheduled(),
+        )
+        c.close()
+    }
+
+    @Test
+    fun `close permanently sets userClosed`() {
+        val c = newClient()
+        assertTrue("fresh client is not closed", !c.isClosed())
+        c.close()
+        assertTrue("close() must set isClosed()", c.isClosed())
+        // A detach after a permanent close is a harmless no-op (already torn
+        // down) and must not flip isClosed back.
+        c.detach()
+        assertTrue("isClosed must remain true after a post-close detach", c.isClosed())
+    }
+
+    @Test
+    fun `rebindListener is a no-op after permanent close`() {
+        val c = newClient()
+        c.close()
+        var rebound = false
+        c.rebindListener(object : ZellijWebSocketClient.Listener {
+            override fun onConnected() { rebound = true }
+            override fun onBytes(bytes: ByteArray, length: Int) {}
+            override fun onSwitchedSession(newSessionName: String) {}
+            override fun onDisconnected(code: Int, reason: String, willReconnect: Boolean) {}
+            override fun onError(throwable: Throwable) {}
+        })
+        // No live socket + permanently closed -> rebind ignored, no onConnected.
+        assertTrue("rebindListener must be ignored after close()", !rebound)
+    }
+
+    @Test
+    fun `detach drops the listener so bytes stop forwarding`() {
+        val c = newClient()
+        val bytesSeen = AtomicInteger(0)
+        c.setListenerForTest(object : ZellijWebSocketClient.Listener {
+            override fun onConnected() {}
+            override fun onBytes(bytes: ByteArray, length: Int) { bytesSeen.incrementAndGet() }
+            override fun onSwitchedSession(newSessionName: String) {}
+            override fun onDisconnected(code: Int, reason: String, willReconnect: Boolean) {}
+            override fun onError(throwable: Throwable) {}
+        })
+        // After detach the listener slot is null, so a disconnect fan-out is
+        // swallowed (no NPE) and no callback fires.
+        c.detach()
+        c.invokeOnDisconnectedForTest(1006, "x", true) // would call listener if bound
+        assertEquals("detached client must not forward to a listener", 0, bytesSeen.get())
+        c.close()
+    }
 }

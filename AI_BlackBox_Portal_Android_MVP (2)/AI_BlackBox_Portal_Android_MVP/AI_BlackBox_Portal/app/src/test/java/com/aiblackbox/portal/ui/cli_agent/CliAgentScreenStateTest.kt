@@ -1,6 +1,9 @@
 package com.aiblackbox.portal.ui.cli_agent
 
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.data.api.ZellijWebSocketClient
+import com.aiblackbox.portal.data.model.ZellijSession
+import com.aiblackbox.portal.data.model.ZellijSessionRow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.job
@@ -64,11 +67,16 @@ class CliAgentScreenStateTest {
         val baseUrl = server.url("").toString().trimEnd('/')
         api = BlackBoxApi(baseUrl)
         repo = CliAgentSessionRepository(api)
+        // The holder's kill() delegates to the process-lived
+        // TerminalSessionManager singleton; reset it so state can't leak
+        // across tests.
+        TerminalSessionManager.resetForTest()
     }
 
     @After
     fun tearDown() {
         server.close()
+        TerminalSessionManager.resetForTest()
     }
 
     /**
@@ -433,6 +441,49 @@ class CliAgentScreenStateTest {
         assertNull(
             "Live-session breadcrumb must be dropped on kill (token's revoked server-side)",
             holder.liveSessionFor("doomed"),
+        )
+    }
+
+    @Test
+    fun `kill tears down the process-lived TerminalSessionManager client`() = runTest {
+        val holder = newHolder(this)
+
+        // Seed a live client in the manager for a session name, the way the
+        // terminal screen does on mount. The factory points at an unreachable
+        // origin (NOT the MockWebServer) so the client's background connect
+        // coroutine fails fast on the manager's own scope without consuming
+        // any of this test's queued MockWebServer responses.
+        val deadApi = BlackBoxApi("http://127.0.0.1:1")
+        TerminalSessionManager.clientFactory = { s, _, sc ->
+            ZellijWebSocketClient(
+                origin = deadApi.getBaseUrl(),
+                sessionName = s.name,
+                coroutineScope = sc,
+            )
+        }
+        val live = ZellijSession(name = "managed", provider = "claude")
+        val noop = object : ZellijWebSocketClient.Listener {
+            override fun onConnected() {}
+            override fun onBytes(bytes: ByteArray, length: Int) {}
+            override fun onSwitchedSession(newSessionName: String) {}
+            override fun onDisconnected(code: Int, reason: String, willReconnect: Boolean) {}
+            override fun onError(throwable: Throwable) {}
+        }
+        val client = TerminalSessionManager.getOrConnect(live, deadApi, TerminalSessionManager.scope, noop)
+        assertTrue(TerminalSessionManager.hasLiveClient("managed"))
+
+        // Kill via the holder (the X-button path). Build the row directly so
+        // we don't have to round-trip a launch (which would interleave with
+        // the manager's connect coroutine). Backend DELETE = 204.
+        val row = ZellijSessionRow(name = "managed", provider = "claude")
+        server.enqueue(MockResponse.Builder().code(204).build())
+        holder.kill(row)
+        joinChildren()
+
+        assertTrue("manager client must be closed after kill", client.isClosed())
+        assertNull(
+            "manager must no longer hold the live client after kill",
+            TerminalSessionManager.liveClientFor("managed"),
         )
     }
 

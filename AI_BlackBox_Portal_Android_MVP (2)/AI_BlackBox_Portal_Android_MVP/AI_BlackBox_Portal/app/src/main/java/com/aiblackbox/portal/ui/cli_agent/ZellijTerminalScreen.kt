@@ -20,9 +20,10 @@ package com.aiblackbox.portal.ui.cli_agent
 // What differs from TerminalScreen:
 //   • Client: ZellijWebSocketClient(origin, sessionName, sessionToken, scope)
 //     instead of CliAgentWebSocket(baseUrl, sessionId, params, callbacks).
-//   • Connection: lifecycle ownership via DisposableEffect that calls
-//     client.close() on dispose — token is transient (audit I7) and dies
-//     with this composition.
+//   • Connection: lifecycle ownership lives in the process-scoped
+//     [TerminalSessionManager] (Phase 1, 2026-06-22). Entering binds (reuse
+//     live client or connect); leaving DETACHES the renderer but keeps the
+//     socket alive. Only the explicit X button (manager.kill + DELETE) closes.
 //   • Bytes: client.onBytes(bytes, length) feeds straight into
 //     TerminalEmulator.append(bytes, length).
 //   • Paste from Whisper: zellij protocol carries paste as bracketed-paste
@@ -54,7 +55,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,15 +92,19 @@ private const val TRANSCRIPT_ROWS = 2000
  * [ZellijWebSocketClient], and shows an [ExtraKeysBar] + [WhisperMicButton]
  * at the bottom.
  *
- * Lifecycle: the [ZellijWebSocketClient] is constructed when this composable
- * enters composition and closed in [DisposableEffect.onDispose]. The token
- * carried in [session] is transient (audit I7) and isn't persisted anywhere
- * outside this composition — after the WS handshake succeeds the server
- * holds session state.
+ * Lifecycle (Phase 1, 2026-06-22): the [ZellijWebSocketClient] is owned by
+ * the process-scoped [TerminalSessionManager], NOT this composition. Entering
+ * binds via [TerminalSessionManager.getOrConnect] (reusing a live client if
+ * one exists for this session name, else connecting a fresh one); leaving
+ * composition calls [TerminalSessionManager.detach] which stops forwarding
+ * bytes to the dead TerminalView but KEEPS the socket alive. The token
+ * carried in [session] is transient (audit I7); after the WS handshake the
+ * server holds session state.
  *
- * Back behavior: detach only — the zellij session survives in the
- * orchestrator. Killing happens through [SessionSwitcherTopBar]'s long-press
- * confirm flow.
+ * Back behavior: detach only — the zellij session survives both in the
+ * orchestrator AND on the client side (manager keeps the socket). Killing
+ * happens ONLY through [SessionSwitcherTopBar]'s X (manager.kill + backend
+ * DELETE).
  */
 @Composable
 fun ZellijTerminalScreen(
@@ -111,7 +115,6 @@ fun ZellijTerminalScreen(
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
-    val coroutineScope = rememberCoroutineScope()
 
     // --- Connection state surfaced to the banner ---------------------------
     var bannerText by remember { mutableStateOf<String?>("Connecting…") }
@@ -125,35 +128,28 @@ fun ZellijTerminalScreen(
     var cols by remember { mutableStateOf(DEFAULT_COLS) }
     var rows by remember { mutableStateOf(DEFAULT_ROWS) }
 
-    // --- ZellijWebSocketClient construction --------------------------------
+    // --- ZellijWebSocketClient ownership (Phase 1: persistent sessions) ----
+    //
+    // The client is NO LONGER constructed/owned by this composition. Phase 1
+    // (2026-06-22) hoists connection + session-handle ownership into the
+    // process-lived [TerminalSessionManager] so leaving this screen DETACHES
+    // the renderer (stops forwarding bytes to a dead TerminalView) but never
+    // CLOSES the socket. Re-entering the same session reuses the live client
+    // (no new POST /session, no new socket). Only the explicit X button
+    // (-> manager.kill + backend DELETE) closes a socket.
     //
     // Origin defaults to BlackBoxApi.getBaseUrl(); ZellijWebSocketClient
     // normalises http(s)/ws(s) variants internally. The sessionName comes
     // from the launch response (passed in via [session]). webClientId is
     // auto-generated (UUID) inside the client. Phase 5 (2026-05-26): the
-    // sessionToken is no longer passed — the orchestrator app-proxy
-    // injects the master cookie on upstream forward, so the client opens
-    // the WebSocket with no auth state of its own.
+    // sessionToken is no longer passed — the orchestrator app-proxy injects
+    // the master cookie on upstream forward, so the client opens the
+    // WebSocket with no auth state of its own.
     //
-    // remember(session.name) so that switching between sessions while
-    // staying in this Terminal branch swaps out the client cleanly rather
-    // than trying to retarget an open socket — simpler and matches the
-    // legacy TerminalScreen's `remember(operator, provider, appSlug)` key.
-    val client: ZellijWebSocketClient = remember(session.name) {
-        ZellijWebSocketClient(
-            origin = api.getBaseUrl(),
-            sessionName = session.name,
-            coroutineScope = coroutineScope,
-        )
-    }
-
-    // --- Connect on enter; ensure close on dispose --------------------------
-    //
-    // DisposableEffect keys on [client] so a session swap (new ZellijSession
-    // in props → new client via remember(session.name)) tears down the old
-    // socket and re-runs the connect block for the new one.
-    DisposableEffect(client) {
-        client.connect(object : ZellijWebSocketClient.Listener {
+    // remember(session.name) holds the manager-owned client reference stable
+    // for this composition; the manager (not this remember) owns its lifetime.
+    val listener = remember(session.name) {
+        object : ZellijWebSocketClient.Listener {
             override fun onConnected() {
                 Log.d(TAG, "ws onConnected")
                 bannerText = null
@@ -200,11 +196,46 @@ fun ZellijTerminalScreen(
                 bannerText = "Error: ${throwable.message ?: "unknown"}"
                 bannerKind = ZellijBannerKind.Error
             }
-        })
+        }
+    }
 
+    // Bind to the process-lived client for this session name. Returns the
+    // existing live client (re-binding this renderer) if one is held, else
+    // creates + connects a new one. The client's coroutines run on the
+    // manager's process scope (NOT this composition's rememberCoroutineScope)
+    // so reconnect survives navigation. We re-fetch the same instance on
+    // recomposition via remember(session.name).
+    // Was a live client already held for this session BEFORE this mount? If
+    // so, this mount is a REATTACH (nav return) and the fresh empty
+    // TerminalView needs a forced repaint to show the existing screen. false =
+    // first-ever launch, which repaints on attach.
+    val wasReused = remember(session.name) { TerminalSessionManager.hasLiveClient(session.name) }
+    val repaintDone = remember(session.name) { mutableStateOf(false) }
+
+    val client: ZellijWebSocketClient = remember(session.name) {
+        TerminalSessionManager.getOrConnect(
+            session = session,
+            api = api,
+            scope = TerminalSessionManager.scope,
+            listener = listener,
+        )
+    }
+
+    // --- Detach (NOT close) on dispose --------------------------------------
+    //
+    // Leaving composition (back nav, session swap) must DETACH only: stop
+    // forwarding bytes to this soon-to-be-dead TerminalView while keeping the
+    // socket alive in the manager. The session survives in the orchestrator
+    // AND on the client side; re-entry rebinds. NEVER call client.close()
+    // here — that is the explicit-kill-only path (the X button).
+    DisposableEffect(client) {
         onDispose {
             try {
-                client.close()
+                TerminalSessionManager.detach(
+                    name = session.name,
+                    cols = cols,
+                    rows = rows,
+                )
             } catch (_: Throwable) {
             }
         }
@@ -224,6 +255,17 @@ fun ZellijTerminalScreen(
             Log.w(TAG, "session.updateSize failed", t)
         }
         client.sendResize(cols = cols, rows = rows)
+        // On reattach (nav return), the new TerminalView is empty and the live
+        // socket only streams NEW output. Force zellij to repaint the existing
+        // screen, once, after the view is sized. The small delay lets the
+        // AndroidView factory attach the view before the repainted frame
+        // arrives (otherwise onBytes drops to a null view). First-ever launch
+        // paints on attach, so skip it there (wasReused == false).
+        if (wasReused && !repaintDone.value && cols > 0 && rows > 0) {
+            kotlinx.coroutines.delay(80)
+            client.requestRepaint()
+            repaintDone.value = true
+        }
     }
 
     // --- Compose UI ---------------------------------------------------------

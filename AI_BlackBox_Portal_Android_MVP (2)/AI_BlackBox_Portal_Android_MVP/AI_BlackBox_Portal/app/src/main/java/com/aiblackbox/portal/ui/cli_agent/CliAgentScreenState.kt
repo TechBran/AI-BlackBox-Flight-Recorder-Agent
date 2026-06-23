@@ -118,7 +118,19 @@ internal class CliAgentScreenState(
      */
     private val liveSessionsByName: MutableMap<String, ZellijSession> = mutableMapOf()
 
-    /** Look up a freshly-launched session by name, or null if not held. */
+    /**
+     * Look up a freshly-launched session by name, or null if this holder
+     * never launched it.
+     *
+     * Phase 1 note: the durable live CLIENT (the open socket) is owned by the
+     * process-lived [TerminalSessionManager], which survives navigation and
+     * holder rebuilds. This breadcrumb map only carries the launch-time
+     * token/url (audit I7) for sessions THIS holder launched. The screen's
+     * reattach path falls back to synthesising a ZellijSession from the row
+     * when this returns null, because under the master-token proxy model the
+     * session NAME alone is enough for [TerminalSessionManager.getOrConnect]
+     * to rebind a live client or reconnect by name.
+     */
     fun liveSessionFor(name: String): ZellijSession? = liveSessionsByName[name]
 
     /** True while the initial sessions fetch is in flight. */
@@ -218,6 +230,12 @@ internal class CliAgentScreenState(
      * only when the killed session was the last one.
      */
     fun kill(row: ZellijSessionRow) {
+        // Phase 1 (2026-06-22): the X button is the ONLY kill path. Tear down
+        // the process-lived client FIRST (closes the socket, drops it from
+        // [TerminalSessionManager]) so a reconnect can't race the backend
+        // DELETE and resurrect a half-killed session. Idempotent — a no-op
+        // if no live client is held for this name.
+        TerminalSessionManager.kill(row.name)
         scope.launch {
             try {
                 repository.killZellijSession(operator, row.name)

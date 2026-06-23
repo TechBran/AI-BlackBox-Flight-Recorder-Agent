@@ -204,16 +204,105 @@ class ZellijWebSocketClient(
         }
     }
 
-    /** Permanent close — disables reconnect and closes both sockets cleanly. */
+    /**
+     * Force zellij to repaint the full screen. Used on REATTACH: a returning
+     * renderer gets a brand-new (empty) TerminalView and the live socket only
+     * streams NEW output, so the existing screen would stay blank until the
+     * user produces output. zellij re-renders its whole frame on a
+     * TerminalResize, so we toggle one row to guarantee a dimension change
+     * even when the size is unchanged. No-op if closed or the control WS is
+     * not open yet (a fresh attach repaints on its own).
+     */
+    fun requestRepaint() {
+        if (userClosed.get()) return
+        if (wsControl == null) return
+        val c = lastCols
+        val r = lastRows
+        if (r > 1) {
+            sendResize(c, r - 1)
+            sendResize(c, r)
+        } else {
+            sendResize(c, r)
+        }
+    }
+
+    /**
+     * Detach the renderer WITHOUT closing the socket.
+     *
+     * Phase 1 (2026-06-22, session persistence): leaving the terminal
+     * Composable used to call [close], which sets `userClosed` permanently
+     * and defeats the reconnect machinery — orphaning a live server session.
+     * [detach] instead just drops the [listener] (so no more bytes are
+     * forwarded to a dead [com.termux.view.TerminalView]) while keeping
+     * both WebSockets open AND keeping `userClosed` false so reconnect stays
+     * usable. [TerminalSessionManager] keeps this instance alive across
+     * navigation; the next mount calls [rebindListener] to resume rendering.
+     *
+     * Idempotent and non-destructive: calling [detach] on an instance that
+     * was already [close]d is a harmless no-op (the socket is already gone).
+     */
+    fun detach() {
+        logd(TAG, "detach() — renderer unbound, socket kept alive")
+        listener = null
+    }
+
+    /**
+     * Re-attach a (new) renderer to a live client WITHOUT reconnecting.
+     *
+     * Used by [TerminalSessionManager] when the user returns to a session
+     * that already has a live socket: a fresh [com.termux.view.TerminalView]
+     * is built each mount (see ZellijTerminalScreen), so we swap the
+     * listener slot in place. The open WebSocket(s) keep flowing; no
+     * `POST /session`, no new socket. If the socket had dropped while
+     * detached, the reconnect machinery (keyed on `currentSessionName`)
+     * will have re-opened it under the covers and this new listener picks
+     * up from there.
+     *
+     * No-op if the instance was permanently [close]d.
+     */
+    fun rebindListener(listener: Listener) {
+        if (userClosed.get()) {
+            logw(TAG, "rebindListener() ignored — instance was permanently closed")
+            return
+        }
+        logd(TAG, "rebindListener() — renderer re-bound to live client")
+        this.listener = listener
+        // If the socket is still open, surface a connected state to the new
+        // renderer immediately so its banner clears without waiting for the
+        // next inbound byte. If it's mid-reconnect, the terminal onOpen will
+        // fire onConnected as usual.
+        if (wsTerminal != null) safeOnConnected()
+    }
+
+    /**
+     * Permanent close — disables reconnect and closes both sockets cleanly.
+     *
+     * Phase 1: this is now the ONLY teardown path that sets `userClosed`. It
+     * must be reached ONLY by an explicit kill (the X button), NEVER by
+     * navigation / dispose — use [detach] for that.
+     */
     fun close() {
         if (!userClosed.compareAndSet(false, true)) return
         logd(TAG, "close() — user-initiated")
+        listener = null
         try { reconnectJob.getAndSet(null)?.cancel() } catch (_: Throwable) {}
         try { wsTerminal?.close(NORMAL_CLOSURE, "client closing") } catch (_: Throwable) {}
         try { wsControl?.close(NORMAL_CLOSURE, "client closing") } catch (_: Throwable) {}
         wsTerminal = null
         wsControl = null
     }
+
+    /** True once [close] has permanently torn this instance down. */
+    fun isClosed(): Boolean = userClosed.get()
+
+    /** True while a live terminal socket is open (not closed, not mid-reconnect-gap). */
+    fun hasOpenSocket(): Boolean = wsTerminal != null && !userClosed.get()
+
+    /** Last grid dimensions this client knows about — for [TerminalSessionManager] bookkeeping. */
+    fun lastColsRows(): Pair<Int, Int> = lastCols to lastRows
+
+    /** Effective session name (flips on a SwitchedSession control frame). */
+    fun effectiveSessionName(): String = currentSessionName
 
     // --- Internals: HTTP pre-flight --------------------------------------
 

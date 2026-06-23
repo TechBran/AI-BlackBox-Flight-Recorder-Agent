@@ -165,27 +165,31 @@ fun CliAgentScreen(
                         sessions = screenState.sessions,
                         launchInFlight = screenState.launchInFlight,
                         onSelectSession = { row ->
-                            // Look up the freshly-launched session by name. If we
-                            // have a live token-bearing session, transition into
-                            // Terminal; otherwise toast — the orchestrator's
-                            // current API doesn't re-mint tokens for existing
-                            // sessions (audit I7), so the only way to reattach a
-                            // server-side session this holder never launched is
-                            // kill+relaunch. Brandon flagged this as the known
-                            // hand-off pain point (T23 device QA will surface
-                            // whether users hit it often).
+                            // Phase 1 (2026-06-22, session persistence): reattach
+                            // via [TerminalSessionManager] instead of toasting
+                            // "kill and relaunch". Resolution order:
+                            //   1. A live ZellijSession breadcrumb this holder
+                            //      launched (carries token/url) — best case.
+                            //   2. Otherwise synthesise a minimal ZellijSession
+                            //      from the row. Under the master-token proxy
+                            //      model the name alone is enough to (re)open the
+                            //      proxy WS; if the manager already holds a live
+                            //      client for that name, getOrConnect rebinds it
+                            //      (no new POST /session, no new socket).
+                            // Either path lands in Terminal state; the
+                            // ZellijTerminalScreen mount calls
+                            // TerminalSessionManager.getOrConnect with this
+                            // session, which reuses the live client when present.
+                            screenState.selectSession(row)
                             val live = screenState.liveSessionFor(row.name)
-                            if (live != null) {
-                                screenState.selectSession(row)
-                                state = CliAgentInternalState.Terminal(live)
-                            } else {
-                                screenState.selectSession(row)
-                                Toast.makeText(
-                                    context,
-                                    "No live token for ${row.name} — kill and relaunch to reattach.",
-                                    Toast.LENGTH_LONG,
-                                ).show()
-                            }
+                                ?: ZellijSession(
+                                    name = row.name,
+                                    provider = row.provider,
+                                    app = row.app,
+                                    createdAt = row.createdAt,
+                                    expiresAt = row.expiresAt,
+                                )
+                            state = CliAgentInternalState.Terminal(live)
                         },
                         onLaunchProvider = { provider ->
                             // Launch path — onLaunched callback drives the
@@ -194,9 +198,12 @@ fun CliAgentScreen(
                             screenState.launch(provider)
                         },
                         onKillSession = { row ->
-                            // If we're killing the session we're currently
-                            // viewing, fall back to EmptyState so the screen
-                            // doesn't show a stale terminal surface.
+                            // The X button is the ONLY kill path (Phase 1).
+                            // screenState.kill -> TerminalSessionManager.kill
+                            // (closes the socket, drops from the live map) +
+                            // backend DELETE. If we're killing the session we're
+                            // currently viewing, fall back to EmptyState so the
+                            // screen doesn't show a stale terminal surface.
                             val current = state
                             val killingCurrent =
                                 current is CliAgentInternalState.Terminal &&
@@ -319,6 +326,12 @@ private fun CliAgentBranches(
                     operator = operator,
                     session = s.session,
                     onBack = {
+                        // Phase 1: back DETACHES, never kills. The live client
+                        // stays in TerminalSessionManager (socket alive) and the
+                        // session row stays in [sessions], so the switcher can
+                        // reattach. clearCurrent() only drops the top-bar's
+                        // "current" selection — it does NOT close the socket or
+                        // drop the manager's live client.
                         screenState.clearCurrent()
                         onStateChange(CliAgentInternalState.EmptyState)
                     },
