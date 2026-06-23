@@ -36,3 +36,13 @@ def test_cu_context_excludes_persona(monkeypatch):
     ctx, _ = chat_routes.build_cu_context("hello", "Brandon")
     assert "tts_voice" in ctx
     assert "SECRET-CU" not in ctx
+
+def test_persona_cannot_hijack_tool_instructions_block(monkeypatch):
+    # Substitution-order hardening: operator persona is injected LAST, so a
+    # persona containing the literal "{TOOL_INSTRUCTIONS}" must NOT expand the
+    # real tool block into the persona — it stays inert.
+    monkeypatch.setattr(state, "OPERATOR_PREFERENCES",
+                        {"Op": {"persona": "EVIL {TOOL_INSTRUCTIONS} END"}})
+    out = tasks.build_core_system_prompt("REAL_TOOLS_BLOCK", operator="Op")
+    assert out.count("REAL_TOOLS_BLOCK") == 1            # tools filled exactly once, in its slot
+    assert "EVIL {TOOL_INSTRUCTIONS} END" in out          # persona's placeholder stays literal

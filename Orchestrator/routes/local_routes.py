@@ -510,7 +510,7 @@ async def local_device_autonomy(request: Request):
 # ---------------------------------------------------------------------------
 @app.get("/local/system-prompt")
 async def local_system_prompt(operator: Optional[str] = None):
-    """Return the BlackBox persona/tone/anti-sycophancy text for the on-device model.
+    """Return the BlackBox per-operator persona/tone text for the on-device model.
 
     The on-device Gemma agent loop runs ON the phone and never hits the cloud
     /chat path that prepends the persona, so it fetches that SAME text here once

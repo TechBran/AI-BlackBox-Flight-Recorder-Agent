@@ -2012,12 +2012,19 @@ CORE_TOOLS_STATIC = (
 
 
 def build_core_system_prompt(tool_instructions: str = "", operator=None) -> str:
-    """Build the core system prompt with per-operator persona + dynamic/static tools."""
+    """Build the core system prompt with per-operator persona + dynamic/static tools.
+
+    Substitution order is deliberate: the TRUSTED template content
+    ({TOOL_INSTRUCTIONS}) is filled first, and the operator-authored {PERSONA} is
+    injected LAST — so nothing inside an operator's persona text can be
+    re-interpreted as another placeholder (e.g. a persona literally containing
+    "{TOOL_INSTRUCTIONS}" stays inert rather than expanding the tool block).
+    """
     from Orchestrator.behavioral_core import get_persona
     persona = get_persona(operator, "chat")
-    body = CORE_SYSTEM_PROMPT.replace("{PERSONA}", persona)
     tools = tool_instructions if tool_instructions else CORE_TOOLS_STATIC
-    return body.replace("{TOOL_INSTRUCTIONS}", tools)
+    body = CORE_SYSTEM_PROMPT.replace("{TOOL_INSTRUCTIONS}", tools)
+    return body.replace("{PERSONA}", persona)
 
 
 # System prompt (static fallback — dynamicized at request time). Both the
