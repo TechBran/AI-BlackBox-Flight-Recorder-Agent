@@ -704,6 +704,130 @@ export async function syncVoiceDropdown() {
 }
 
 // =============================================================================
+// System Prompt (per-operator persona) Functions
+//
+// Mirrors the per-operator voice pattern above: load via GET, save via PUT,
+// reset via DELETE, and re-sync the textarea when the active operator changes.
+// The backend endpoints are:
+//   GET    /operator/persona/{operator} -> {operator, persona, is_custom, default}
+//   PUT    /operator/persona/{operator}  body {persona} -> {status, operator, persona, is_custom}
+//   DELETE /operator/persona/{operator} -> {status, operator, persona, is_custom:false}
+// Operator names can contain spaces, so always encodeURIComponent(operator).
+// =============================================================================
+
+/** Update the system-prompt hint line to reflect custom-vs-default state. */
+function updateSystemPromptHint(isCustom) {
+    const hint = document.getElementById("systemPromptHint");
+    if (!hint) return;
+    hint.textContent = isCustom
+        ? "Custom persona (overrides the built-in default for this operator)."
+        : "Using the built-in default persona for this operator.";
+}
+
+/**
+ * Load the active operator's effective persona into the textarea.
+ * If no operator is selected, leave the textarea empty and disabled.
+ */
+export async function syncSystemPromptTextarea() {
+    const textarea = document.getElementById("systemPromptTextarea");
+    if (!textarea) return;
+    const operator = (localStorage.getItem("bbx_operator") || "").trim();
+    if (!operator) {
+        textarea.value = "";
+        textarea.disabled = true;
+        const hint = document.getElementById("systemPromptHint");
+        if (hint) hint.textContent = "Select an operator to view or edit its persona.";
+        return;
+    }
+    textarea.disabled = false;
+    try {
+        const res = await fetch(`/operator/persona/${encodeURIComponent(operator)}`);
+        if (res.ok) {
+            const data = await res.json();
+            textarea.value = data.persona || "";
+            updateSystemPromptHint(!!data.is_custom);
+        } else {
+            console.warn("[PERSONA] Failed to fetch persona, status:", res.status);
+        }
+    } catch (err) {
+        console.warn("[PERSONA] Failed to fetch persona from server:", err);
+    }
+}
+
+/**
+ * Save the textarea content as the active operator's custom persona (PUT).
+ * Awaits the response (unlike the fire-and-forget voice save) so the user
+ * gets a clear success/failure toast.
+ */
+export async function saveSystemPrompt() {
+    const textarea = document.getElementById("systemPromptTextarea");
+    if (!textarea) return;
+    const operator = (localStorage.getItem("bbx_operator") || "").trim();
+    if (!operator) {
+        toast("Select an operator first");
+        return;
+    }
+    try {
+        const res = await fetch(`/operator/persona/${encodeURIComponent(operator)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ persona: textarea.value })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            updateSystemPromptHint(!!data.is_custom);
+            toast("System prompt saved");
+        } else {
+            toast("Failed to save system prompt");
+        }
+    } catch (err) {
+        console.warn("[PERSONA] Failed to save persona:", err);
+        toast("Error saving system prompt: " + err.message);
+    }
+}
+
+/**
+ * Reset the active operator's persona back to the built-in default (DELETE).
+ * On success, the textarea is repopulated with the returned default persona.
+ */
+export async function resetSystemPrompt() {
+    const textarea = document.getElementById("systemPromptTextarea");
+    if (!textarea) return;
+    const operator = (localStorage.getItem("bbx_operator") || "").trim();
+    if (!operator) {
+        toast("Select an operator first");
+        return;
+    }
+    try {
+        const res = await fetch(`/operator/persona/${encodeURIComponent(operator)}`, {
+            method: "DELETE"
+        });
+        if (res.ok) {
+            const data = await res.json();
+            textarea.value = data.persona || "";
+            updateSystemPromptHint(!!data.is_custom);
+            toast("Reset to default");
+        } else {
+            toast("Failed to reset system prompt");
+        }
+    } catch (err) {
+        console.warn("[PERSONA] Failed to reset persona:", err);
+        toast("Error resetting system prompt: " + err.message);
+    }
+}
+
+/**
+ * Wire the System Prompt section buttons and do the initial textarea load.
+ */
+export function initSystemPromptSection() {
+    const saveBtn = document.getElementById("btnSaveSystemPrompt");
+    const resetBtn = document.getElementById("btnResetSystemPrompt");
+    if (saveBtn) saveBtn.onclick = saveSystemPrompt;
+    if (resetBtn) resetBtn.onclick = resetSystemPrompt;
+    syncSystemPromptTextarea();
+}
+
+// =============================================================================
 // TTS Generation Functions
 // =============================================================================
 

@@ -52,6 +52,7 @@ import { initGeminiAudioRecorder } from './gemini-recorder.js';
 import {
     initVoiceSelector,
     syncVoiceDropdown,
+    initSystemPromptSection,
     initAutoTTS,
     setupNativeSTTCallbacks,
     attachGeneratedAudioPlayer
@@ -617,6 +618,7 @@ async function initApp() {
     // Phase 3: Features
     console.log('[Portal] Phase 3: Features...');
     initVoiceSelector();
+    initSystemPromptSection();
     initAutoTTS();
     setupNativeSTTCallbacks();  // Setup native Android mic callbacks
     setupNativeFileCallback();

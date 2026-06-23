@@ -855,6 +855,7 @@ function setupAllHandlers(getOperator, setOperator, clearAudioCache, addCustomOp
     wireCollapsibleSection("btnToggleTools", "toolsContent");
     wireCollapsibleSection("btnToggleApps", "appsContent");
     wireCollapsibleSection("btnToggleReasoning", "reasoningContent");
+    wireCollapsibleSection("btnToggleSystemPrompt", "systemPromptContent");
 
     // Manifest modal
     safeSetOnClick("btnManifest", async () => {

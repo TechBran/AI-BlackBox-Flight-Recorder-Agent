@@ -706,6 +706,8 @@ export async function initOperatorSelector() {
                 import('./ui-setup.js').then(({ refreshHealth }) => refreshHealth());
                 // Sync voice dropdown to new operator's preference
                 import('./tts-stt.js').then(({ syncVoiceDropdown }) => syncVoiceDropdown());
+                // Reload the System Prompt textarea for the newly selected operator
+                import('./tts-stt.js').then(m => m.syncSystemPromptTextarea && m.syncSystemPromptTextarea());
             }
         };
     } catch (e) {

@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui290"/> <!-- v287: ElevenLabs Voice Lab panel (_voice-lab.css @imported in main.css) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui291"/> <!-- v287: ElevenLabs Voice Lab panel (_voice-lab.css @imported in main.css) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -472,6 +472,22 @@
             <div id="menuRunningApps" class="menu-apps-list">
               <div class="no-apps-message">No apps running</div>
             </div>
+          </div>
+        </div>
+
+        <!-- System Prompt Section (Collapsible) — per-operator persona -->
+        <div class="menu-group system-prompt-section">
+          <button id="btnToggleSystemPrompt" class="btn-section-toggle" type="button">
+            <span class="section-title">🧬 System Prompt</span>
+            <span class="toggle-icon">▼</span>
+          </button>
+          <div id="systemPromptContent" class="section-content collapsed">
+            <textarea id="systemPromptTextarea" rows="8" placeholder="This operator's persona / behavior prompt…" spellcheck="true"></textarea>
+            <div class="system-prompt-actions">
+              <button id="btnSaveSystemPrompt" type="button" class="btn btn-primary">Save</button>
+              <button id="btnResetSystemPrompt" type="button" class="btn">Reset to default</button>
+            </div>
+            <p class="voice-hint" id="systemPromptHint">Saved per operator. Replaces the built-in persona for this operator.</p>
           </div>
         </div>
 

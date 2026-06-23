@@ -23,6 +23,51 @@
   color: #4a9eff;
 }
 
+/* System Prompt Section (per-operator persona) — same divider treatment as the
+   Voice Preferences section it sits directly above. Uses a collapsible
+   .btn-section-toggle header (like Apps/Reasoning) instead of an <h4>. */
+.system-prompt-section {
+  border-top: 1px solid var(--neutral-300);
+  padding-top: 12px;
+}
+
+.system-prompt-section .section-title {
+  color: #27d980;
+}
+
+#systemPromptTextarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 140px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--neutral-100);
+  color: var(--text);
+  border: 1px solid var(--neutral-400);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+#systemPromptTextarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#systemPromptTextarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.system-prompt-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* Voice Preferences Section */
 .voice-preferences-section {
   border-top: 1px solid var(--neutral-300);
