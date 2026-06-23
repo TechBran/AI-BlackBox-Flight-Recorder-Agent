@@ -7,8 +7,10 @@ package (persona + fossils + injected tools) and returns it; the phone then runs
 the on-device Gemma model locally on that package.
 
 The three building blocks (build_fossil_context, build_injected_tools,
-get_behavioral_core) are patched in the local_routes namespace so these tests
-exercise ONLY the handler's assembly/validation logic.
+get_persona) are patched in the local_routes namespace so these tests
+exercise ONLY the handler's assembly/validation logic. (get_persona is patched
+defensively even though the lean local prepare path no longer injects persona —
+the patch keeps the namespace honest if that ever changes.)
 """
 
 from unittest import mock
@@ -32,7 +34,7 @@ def test_prepare_happy_path():
                     return_value=_FOSSIL_RV), \
          mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
                     return_value=_TOOLS_RV), \
-         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+         mock.patch("Orchestrator.routes.local_routes.get_persona",
                     return_value="PERSONA"):
         resp = client.post("/local/turn/prepare",
                            json={"prompt": "roll dice", "operator": "Brandon"})
@@ -59,7 +61,7 @@ def test_prepare_blank_operator_400():
                     return_value=_FOSSIL_RV), \
          mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
                     return_value=_TOOLS_RV), \
-         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+         mock.patch("Orchestrator.routes.local_routes.get_persona",
                     return_value="PERSONA"):
         resp = client.post("/local/turn/prepare",
                            json={"prompt": "x", "operator": "  "})
@@ -75,7 +77,7 @@ def test_prepare_operator_passthrough():
                     return_value=_FOSSIL_RV) as m_fossil, \
          mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
                     return_value=_TOOLS_RV), \
-         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+         mock.patch("Orchestrator.routes.local_routes.get_persona",
                     return_value="PERSONA"):
         resp = client.post("/local/turn/prepare",
                            json={"prompt": "roll dice", "operator": "Brandon"})
@@ -106,7 +108,7 @@ def test_prepare_local_is_lean_no_fossil():
                     return_value=empty_fossil) as m_fossil, \
          mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
                     return_value=_TOOLS_RV), \
-         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+         mock.patch("Orchestrator.routes.local_routes.get_persona",
                     return_value="PERSONA"):
         resp = client.post("/local/turn/prepare",
                            json={"prompt": "roll dice", "operator": "Brandon"})
@@ -133,7 +135,7 @@ def test_prepare_local_is_lean_no_fossil():
 
 def test_prepare_local_drops_persona():
     """The on-device tool-caller does NOT receive the heavy behavioral_core
-    persona. Even when get_behavioral_core would return a long persona sentinel,
+    persona. Even when get_persona would return a long persona sentinel,
     the prepare response's system_prompt must NOT contain it (persona is no
     longer injected for the lean local path) and must instead be the short
     tool-caller instruction. This frees ~1000 tokens in the phone's window.
@@ -146,7 +148,7 @@ def test_prepare_local_drops_persona():
                     return_value=empty_fossil), \
          mock.patch("Orchestrator.routes.local_routes.build_injected_tools",
                     return_value=_TOOLS_RV), \
-         mock.patch("Orchestrator.routes.local_routes.get_behavioral_core",
+         mock.patch("Orchestrator.routes.local_routes.get_persona",
                     return_value=PERSONA_SENTINEL):
         resp = client.post("/local/turn/prepare",
                            json={"prompt": "roll dice", "operator": "Brandon"})

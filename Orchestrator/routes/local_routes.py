@@ -23,7 +23,7 @@ from typing import Optional
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from Orchestrator.behavioral_core import get_behavioral_core
+from Orchestrator.behavioral_core import get_persona
 from Orchestrator.checkpoint import app
 from Orchestrator.config import CFG
 from Orchestrator.context_builder import PROVIDER_CAPS, build_fossil_context
@@ -315,7 +315,7 @@ async def local_turn_prepare(request: Request):
         # tool-caller instruction (LOCAL_TOOL_CALLER_SYSTEM_PROMPT) instead of
         # the heavy shared behavioral_core persona — that frees ~1000 tokens in
         # the phone's small window. The persona is deliberately NOT fetched here;
-        # cloud/voice sites keep get_behavioral_core unchanged.
+        # cloud/voice sites keep get_persona unchanged.
         # Don't leave a trailing blank fossil block when there are no fossils.
         system_prompt = LOCAL_TOOL_CALLER_SYSTEM_PROMPT + ("\n\n" + fossil if fossil else "")
         turn_id = uuid.uuid4().hex
@@ -513,22 +513,24 @@ async def local_system_prompt(operator: Optional[str] = None):
     """Return the BlackBox persona/tone/anti-sycophancy text for the on-device model.
 
     The on-device Gemma agent loop runs ON the phone and never hits the cloud
-    /chat path that prepends the behavioral core, so it fetches that SAME text
-    here once and caches it (works offline after first fetch).
+    /chat path that prepends the persona, so it fetches that SAME text here once
+    and caches it (works offline after first fetch).
 
-    Sourced from ``behavioral_core.get_behavioral_core("chat")`` — the exact
-    constant (``BEHAVIORAL_CORE_CHAT``) the chat path prepends — so persona is
-    identical across providers; this endpoint does NOT re-author it.
+    Sourced from ``behavioral_core.get_persona(operator, "chat")`` — the exact
+    text the chat path prepends — so persona is identical across providers; this
+    endpoint does NOT re-author it.
 
-    The persona is operator-independent (operator-specific context like memory
-    and snapshots is functional content, not persona), so ``operator`` is
-    accepted for symmetry but does not change the output.
+    The persona is per-operator: each operator may set a custom persona (falling
+    back to the lean default when none is set). Because the persona now varies by
+    operator, the returned ``version`` (sha256(prompt)[:12]) legitimately differs
+    per operator, and the Android PersonaCache is operator-keyed so each
+    operator's persona caches independently.
 
-    Query: ?operator=<str> (optional, ignored)
+    Query: ?operator=<str> (optional; selects whose persona to return).
     Returns: {"prompt": <str>, "version": <stable 12-char sha256 hex of prompt>}.
     """
     try:
-        prompt = get_behavioral_core("chat")
+        prompt = get_persona(operator, "chat")
         version = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         return {"prompt": prompt, "version": version}
     except Exception as e:

@@ -402,12 +402,25 @@ def test_system_prompt_version_is_stable(client):
     assert r1.json()["version"] == r2.json()["version"]
 
 
-def test_system_prompt_is_behavioral_core_chat(client):
-    """Parity guard: the returned prompt is EXACTLY the chat behavioral core
-    (the same text the cloud /chat path prepends). If someone hand-rolls a
-    divergent persona string, this fails."""
-    from Orchestrator.behavioral_core import get_behavioral_core
+def test_system_prompt_is_operator_persona(client, monkeypatch):
+    """Parity guard: the returned prompt is EXACTLY the operator's persona
+    (the same text the cloud /chat path prepends via get_persona). An operator
+    with no custom persona gets the lean default; setting a custom persona makes
+    the endpoint return that custom text. If someone hand-rolls a divergent
+    persona string, this fails."""
+    from Orchestrator import state
+    from Orchestrator.behavioral_core import DEFAULT_PERSONA_CHAT
 
-    resp = client.get("/local/system-prompt")
+    # No custom persona set -> lean default.
+    monkeypatch.setattr(state, "OPERATOR_PREFERENCES", {})
+    resp = client.get("/local/system-prompt", params={"operator": "NoPersonaOp"})
     assert resp.status_code == 200
-    assert resp.json()["prompt"] == get_behavioral_core("chat")
+    assert resp.json()["prompt"] == DEFAULT_PERSONA_CHAT
+
+    # Custom persona set -> that custom text is returned for that operator.
+    monkeypatch.setattr(
+        state, "OPERATOR_PREFERENCES", {"CustomOp": {"persona": "CUSTOM-PERSONA-XYZ"}}
+    )
+    resp2 = client.get("/local/system-prompt", params={"operator": "CustomOp"})
+    assert resp2.status_code == 200
+    assert resp2.json()["prompt"] == "CUSTOM-PERSONA-XYZ"
