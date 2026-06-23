@@ -109,10 +109,12 @@ def validate_xai(api_key: str) -> ValidationResult:
 
 
 def validate_perplexity(api_key: str) -> ValidationResult:
-    """Validate Perplexity key via cheapest-possible chat completion (1-token).
+    """Validate Perplexity key via cheapest-possible chat completion.
 
     Perplexity exposes an OpenAI-compatible API at api.perplexity.ai. Same SDK
-    reuse pattern as xAI.
+    reuse pattern as xAI. NOTE: Perplexity rejects max_tokens < 16 with a 400
+    ("max_tokens must be at least 16"), so we ask for exactly 16 — the minimum
+    valid (and cheapest) probe.
     """
     def _fn():
         from openai import OpenAI
@@ -124,7 +126,7 @@ def validate_perplexity(api_key: str) -> ValidationResult:
         ) as client:
             resp = client.chat.completions.create(
                 model="sonar",
-                max_tokens=1,
+                max_tokens=16,
                 messages=[{"role": "user", "content": "hi"}],
             )
             return {"model": resp.model, "id": resp.id}
