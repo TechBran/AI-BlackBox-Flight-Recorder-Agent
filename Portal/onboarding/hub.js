@@ -6,6 +6,7 @@
 
 import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, renderPortalUrlCard, escapeHtml } from "./status.js";
 import { cssEscape } from "./util.js";
+import { openLogsModal, mountRestartControl, mountUpdatesBadge } from "./hub-controls.js";
 
 let sse = null;  // active EventSource — closed on re-render / unmount
 
@@ -59,6 +60,41 @@ export async function renderHub(container) {
     if (toolbar) {
         const urlCard = await renderPortalUrlCard();
         if (urlCard) toolbar.appendChild(urlCard);
+
+        // Operational controls — the same four affordances as the done step,
+        // reusing the shared (battle-tested) hub-controls.js implementation.
+        // The hub is post-completion (the sentinel is already written), so
+        // Open Portal is a plain /ui link — do NOT re-POST /onboarding/complete.
+        const controls = document.createElement("div");
+        controls.className = "ob-hub-controls";
+        controls.innerHTML = `
+            <a class="ob-cta-secondary ob-hub-open-portal" href="/ui">Open Portal &rarr;</a>
+            <button type="button" class="ob-cta-secondary" id="ob-hub-logs">View Logs</button>
+            <button type="button" class="ob-cta ob-cta-restart" id="ob-hub-restart" hidden>
+                <span class="ob-cta-restart-label">Restart Service</span>
+                <span class="ob-cta-arrow" aria-hidden="true">&#x21bb;</span>
+            </button>
+            <span class="ob-restart-status" id="ob-hub-restart-status" hidden></span>
+        `;
+        toolbar.appendChild(controls);
+
+        // Updates badge — its own full-width host below the toolbar row (the
+        // banner reads as a notice, not an inline control). Reuses the
+        // .ob-done-updates / .ob-update-banner styles already in the sheet.
+        const updatesHost = document.createElement("div");
+        updatesHost.id = "ob-hub-updates";
+        updatesHost.className = "ob-done-updates";
+        updatesHost.hidden = true;
+        toolbar.appendChild(updatesHost);
+
+        // Wire the shared controls (parameterized by element refs).
+        const logsBtn = controls.querySelector("#ob-hub-logs");
+        if (logsBtn) logsBtn.addEventListener("click", openLogsModal);
+        mountRestartControl(
+            controls.querySelector("#ob-hub-restart"),
+            controls.querySelector("#ob-hub-restart-status"),
+        );
+        mountUpdatesBadge(updatesHost);
     }
 
     openStream(container);

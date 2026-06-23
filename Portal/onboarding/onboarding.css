@@ -3091,3 +3091,33 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 @media (max-width: 720px) {
     .ob-hub-head { flex-direction: column; align-items: flex-start; }
 }
+
+/* Operational controls in the hub header toolbar — Open Portal / View Logs /
+ * Restart as a single button row. Reuses .ob-cta-secondary / .ob-cta-restart /
+ * .ob-restart-status / .ob-update-banner already defined above; this only lays
+ * the row out. The toolbar itself is flex-wrap so on narrow widths the controls
+ * group + Portal-URL card stack cleanly, and the updates host sits full-width
+ * on its own line below. */
+.ob-hub-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--ob-space-3);
+    flex-wrap: wrap;
+}
+/* The Open Portal link reuses .ob-cta-secondary (a <button> style) on an <a>;
+ * normalize anchor defaults so it reads as a button, not a link. */
+.ob-hub-open-portal {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    line-height: 1;
+}
+/* Updates host spans the full toolbar width on its own row (the toolbar is a
+ * flex container, so force a line break by claiming 100% basis). */
+#ob-hub-updates {
+    flex-basis: 100%;
+    margin: var(--ob-space-2) 0 0;
+}
+@media (max-width: 720px) {
+    .ob-hub-controls { width: 100%; }
+}
