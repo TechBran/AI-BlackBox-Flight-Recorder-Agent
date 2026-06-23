@@ -1975,7 +1975,6 @@ body::after {
     color: rgba(255,255,255,0.55);
     font-size: 0.88em;
 }
-@keyframes ob-spin { to { transform: rotate(360deg); } }
 
 /* ── E4: auth URL card — prominent copy-and-paste path because Tauri
    WebKitGTK doesn't auto-open target=_blank to system browser and
