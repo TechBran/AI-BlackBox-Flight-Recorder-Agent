@@ -131,3 +131,40 @@ def get_behavioral_core(modality: str) -> str:
     if modality == "voice":
         return BEHAVIORAL_CORE_VOICE
     return ""
+
+
+PERSONA_PREF_KEY = "persona"
+
+DEFAULT_PERSONA_CHAT = (
+    "You are the operator's AI Black Box assistant. Be direct, clear, and "
+    "grounded in what you can defend. Talk to the operator like a knowledgeable "
+    "peer, and match their tone and level of formality."
+)
+DEFAULT_PERSONA_VOICE = DEFAULT_PERSONA_CHAT
+
+# Functional voice-delivery mechanics — NOT persona, always appended for voice.
+VOICE_DELIVERY_NOTE = (
+    "ON SPEECH: Short sentences. Don't read URLs, code, file paths, or markdown "
+    "aloud — say \"I'll send that in text.\" Use natural prosody, not robot cadence."
+)
+
+
+def get_persona(operator, modality):
+    """Operator's persona for a modality; falls back to the lean default.
+
+    Empty/whitespace custom value -> default (so a cleared persona == default).
+    The state import is LAZY/inside the function: behavioral_core is imported by
+    config, and state imports config, so a top-level `from Orchestrator.state
+    import ...` would be a circular import.
+    """
+    default = DEFAULT_PERSONA_CHAT if modality == "chat" else DEFAULT_PERSONA_VOICE
+    if not operator:
+        return default
+    try:
+        from Orchestrator.state import get_operator_preference  # lazy: import cycle
+        saved = get_operator_preference(operator, PERSONA_PREF_KEY, None)
+    except Exception:
+        saved = None
+    if saved is not None and str(saved).strip():
+        return str(saved)
+    return default
