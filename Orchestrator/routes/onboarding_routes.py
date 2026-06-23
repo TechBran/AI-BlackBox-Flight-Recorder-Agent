@@ -559,6 +559,100 @@ def restart_status() -> RestartStatusResponse:
     )
 
 
+# ── M1: hub status rollup. FAST read — persisted data only, ZERO probes.
+#   (live re-validation lives in GET /onboarding/status/stream below.) ──
+from Orchestrator.onboarding import status_rollup
+
+
+def _collect_status_inputs() -> dict:
+    """Cheap, probe-free snapshots for status_rollup.build_status.
+
+    .env is read fresh (E8: dotenv_values, no os.environ pollution). The
+    capability dicts reuse the SAME availability gate current_config uses, so
+    the enabled set is derived in ONE place. NO subprocess / provider / tailscale
+    calls happen here — tailscale state is derived from persisted hints only.
+    """
+    from dotenv import dotenv_values
+    from Orchestrator.onboarding.secrets_writer import ENV_FILE
+    env = dict(dotenv_values(str(ENV_FILE)))
+    snap = _state.snapshot()
+    state = {
+        "completed_steps": snap["completed_steps"],
+        "skipped_steps": snap["skipped_steps"],
+        "validated_at": _state.validated_at(),
+    }
+
+    # Operators (module-level list; fail-soft to [])
+    try:
+        from Orchestrator.routes import admin_routes
+        operators = list(admin_routes.USERS_LIST)
+    except Exception:
+        operators = []
+
+    # Paired devices (fail-soft to [])
+    try:
+        from Orchestrator.routes.pairing_routes import list_paired_devices
+        paired = list_paired_devices()
+    except Exception:
+        paired = []
+
+    # web_search / image — reuse availability gate (DRY with current_config)
+    from Orchestrator.toolvault.availability import (
+        enabled_web_search_providers, enabled_providers, PROVIDER_ENV, FEATURES,
+    )
+    ws_enabled = enabled_web_search_providers()
+    web_search = {
+        "enabled": sorted(ws_enabled),
+        "providers": {
+            prov: {"key_present": (True if var is None else bool(env.get(var))),
+                   "enabled": prov in ws_enabled}
+            for prov, var in PROVIDER_ENV.items()
+        },
+        "default": (env.get("WEB_SEARCH_DEFAULT") or "").strip(),
+    }
+    img_enabled = enabled_providers("image")
+    image = {
+        "enabled": sorted(img_enabled),
+        "providers": {
+            prov: {"key_present": bool(env.get(var)), "enabled": prov in img_enabled}
+            for prov, var in FEATURES["image"]["provider_env"].items()
+        },
+        "default": (env.get("IMAGE_DEFAULT") or "").strip(),
+    }
+
+    # embeddings — read-only status dict (no probe side effects). Fail-soft.
+    try:
+        from Orchestrator.routes.embeddings_routes import embeddings_status
+        from fastapi import Response as _Resp
+        embeddings = embeddings_status(_Resp())
+    except Exception:
+        logger.exception("status rollup: embeddings_status failed")
+        embeddings = {"active": None, "health": {"state": "ok"}, "stores": [], "models": []}
+
+    # cli agents — installed/auth markers (filesystem only, no spawn). Fail-soft.
+    try:
+        cli = cli_agent_status()
+    except Exception:
+        logger.exception("status rollup: cli_agent_status failed")
+        cli = {"providers": {}, "ready": False}
+
+    restart = restart_status().model_dump()
+
+    return dict(
+        env=env, state=state, embeddings=embeddings, cli=cli,
+        web_search=web_search, image=image, paired=paired, operators=operators,
+        restart=restart, is_complete=_state.is_complete(),
+    )
+
+
+@router.get("/status")
+def onboarding_status() -> dict:
+    """Fast persisted rollup for the hub. State derived from PERSISTED data only
+    — no provider/tailscale/subprocess probe. Live re-validation is GET
+    /onboarding/status/stream."""
+    return status_rollup.build_status(**_collect_status_inputs())
+
+
 @router.post("/restart")
 async def restart_blackbox_service() -> dict:
     """Trigger a service restart. Wizard's done step calls this after the

@@ -292,3 +292,35 @@ def test_ready_count_is_exact():
     ready = [s["key"] for s in r["sections"] if s["state"] == sr.READY]
     assert sorted(ready) == ["api_keys", "embeddings", "operator"]
     assert r["ready_count"] == 3
+
+
+# ── Route tests (Task 13): GET /onboarding/status — fast read, zero probes ──
+from unittest.mock import patch
+import pytest
+
+
+def _client():
+    import Orchestrator.app  # noqa: F401 — registers onboarding routes
+    from fastapi.testclient import TestClient
+    from Orchestrator.checkpoint import app
+    return TestClient(app)
+
+
+def test_status_route_returns_contract_shape():
+    c = _client()
+    r = c.get("/onboarding/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) >= {"ready_count", "total", "is_complete", "sections", "attention"}
+    assert body["total"] == len(sr.SECTIONS)
+    assert {s["key"] for s in body["sections"]} == {s["key"] for s in sr.SECTIONS}
+
+
+def test_status_route_does_no_tailscale_probe():
+    """The FAST read must never shell out — patch the probe to raise; route
+    must still 200 (proving it was never called)."""
+    c = _client()
+    with patch("Orchestrator.onboarding.validators.validate_tailscale",
+               side_effect=AssertionError("FAST read must not probe tailscale")):
+        r = c.get("/onboarding/status")
+    assert r.status_code == 200
