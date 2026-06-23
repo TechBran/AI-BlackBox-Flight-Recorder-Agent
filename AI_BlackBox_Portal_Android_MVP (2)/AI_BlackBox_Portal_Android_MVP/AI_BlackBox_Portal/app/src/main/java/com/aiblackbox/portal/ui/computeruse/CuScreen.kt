@@ -17,6 +17,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -583,11 +585,9 @@ fun CuScreen(
             cuStepTotal = cuStepTotal,
             cuStatus = cuStatus,
             onTogglePolling = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 if (isPolling) viewModel.stopPolling() else viewModel.startPolling()
             },
             onRefresh = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.refreshScreenshot()
             },
             onStop = onStopCu,
@@ -607,7 +607,6 @@ fun CuScreen(
             onProviderExpandedChange = { providerDropdownExpanded = it },
             onModelExpandedChange = { modelDropdownExpanded = it },
             onBackendSelected = { backend ->
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.selectProvider(backend)
                 // Auto-select first model for new backend
                 val firstModel = cuModelsForBackend(backend, liveModels, cuModelBackends).firstOrNull()?.first
@@ -615,7 +614,6 @@ fun CuScreen(
                 providerDropdownExpanded = false
             },
             onModelSelected = { m ->
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 onModelChange(m)
                 modelDropdownExpanded = false
             }
@@ -628,7 +626,6 @@ fun CuScreen(
             expanded = deviceDropdownExpanded,
             onExpandedChange = { deviceDropdownExpanded = it },
             onDeviceSelected = { deviceId ->
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.selectDevice(deviceId)
                 onDeviceChange(deviceId)
                 deviceDropdownExpanded = false
@@ -714,8 +711,7 @@ fun CuScreen(
                     .padding(8.dp)
                     .clip(RoundedCornerShape(RadiusSm))
                     .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    .clickFeedback {
                         viewerExpanded = false
                     }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
@@ -739,13 +735,11 @@ fun CuScreen(
                 onTextChange = { typingText = it },
                 onSend = {
                     if (typingText.isNotBlank()) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         viewModel.typeText(typingText)
                         typingText = ""
                     }
                 },
                 onKey = { key ->
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.sendKey(key)
                 },
                 onDismiss = { showTypingInput = false }
@@ -755,11 +749,9 @@ fun CuScreen(
         // Quick actions row
         CuQuickActions(
             onSendKey = { key ->
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.sendKey(key)
             },
             onScroll = { direction ->
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.scroll(resW / 2, resH / 2, direction)
             }
         )
@@ -783,8 +775,7 @@ fun CuScreen(
                 .clip(RoundedCornerShape(20.dp))
                 .background(CuAccentBg)
                 .border(1.dp, CuAccentBorder, RoundedCornerShape(20.dp))
-                .clickable {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                .clickFeedback {
                     viewerExpanded = true
                 }
                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -1058,7 +1049,7 @@ private fun CuHeader(
                 .clip(PillShape)
                 .background(toggleBg)
                 .border(1.dp, toggleBorder, PillShape)
-                .clickable(
+                .clickFeedback(
                     interactionSource = toggleInteraction,
                     indication = null,
                     onClick = onTogglePolling
@@ -1100,7 +1091,7 @@ private fun CuHeaderButton(
             .clip(RoundedCornerShape(RadiusSm))
             .background(Color.White.copy(alpha = 0.08f))
             .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(RadiusSm))
-            .clickable(
+            .clickFeedback(
                 interactionSource = interaction,
                 indication = null,
                 onClick = onClick
@@ -1128,6 +1119,7 @@ private fun CuDeviceSelector(
     onExpandedChange: (Boolean) -> Unit,
     onDeviceSelected: (String) -> Unit,
 ) {
+    val feedback = rememberPressFeedback()
     val selectedDevice = devices.find { it.id == selectedDeviceId }
     val displayName = selectedDevice?.name ?: "BlackBox (Local)"
 
@@ -1154,7 +1146,7 @@ private fun CuDeviceSelector(
                     .clip(RoundedCornerShape(RadiusSm))
                     .background(CuAccentBg)
                     .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
-                    .clickable { onExpandedChange(true) }
+                    .clickFeedback { onExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1209,6 +1201,7 @@ private fun CuDeviceSelector(
                             }
                         },
                         onClick = {
+                            feedback()
                             if (isOnline) onDeviceSelected(device.id)
                         },
                         enabled = isOnline
@@ -1274,6 +1267,7 @@ private fun CuProviderModelRow(
     onBackendSelected: (String) -> Unit,
     onModelSelected: (String) -> Unit,
 ) {
+    val feedback = rememberPressFeedback()
     val backendName = CU_BACKENDS.find { it.id == selectedBackend }?.name ?: "Anthropic"
     val models = cuModelsForBackend(selectedBackend, liveModels, cuModelBackends)
     val modelName = models.find { it.first == model }?.second ?: models.firstOrNull()?.second ?: "Auto"
@@ -1292,7 +1286,7 @@ private fun CuProviderModelRow(
                     .clip(RoundedCornerShape(RadiusSm))
                     .background(CuAccentBg)
                     .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
-                    .clickable { onProviderExpandedChange(true) }
+                    .clickFeedback { onProviderExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1316,7 +1310,7 @@ private fun CuProviderModelRow(
                                 fontWeight = if (p.id == selectedBackend) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp)
                         },
-                        onClick = { onBackendSelected(p.id) }
+                        onClick = { feedback(); onBackendSelected(p.id) }
                     )
                 }
             }
@@ -1329,7 +1323,7 @@ private fun CuProviderModelRow(
                     .clip(RoundedCornerShape(RadiusSm))
                     .background(CuAccentBg)
                     .border(1.dp, CuAccentBorder, RoundedCornerShape(RadiusSm))
-                    .clickable { onModelExpandedChange(true) }
+                    .clickFeedback { onModelExpandedChange(true) }
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1353,7 +1347,7 @@ private fun CuProviderModelRow(
                                 fontWeight = if (id == model) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp)
                         },
-                        onClick = { onModelSelected(id) }
+                        onClick = { feedback(); onModelSelected(id) }
                     )
                 }
             }
@@ -1381,7 +1375,7 @@ private fun CuStopButton(onClick: () -> Unit) {
             .clip(RoundedCornerShape(RadiusSm))
             .background(CuError.copy(alpha = 0.2f))
             .border(1.dp, CuError.copy(alpha = 0.5f), RoundedCornerShape(RadiusSm))
-            .clickable(
+            .clickFeedback(
                 interactionSource = interaction,
                 indication = null,
                 onClick = onClick
@@ -1453,7 +1447,7 @@ private fun CuCompactButton(
             .clip(RoundedCornerShape(RadiusSm))
             .background(Color.White.copy(alpha = bgAlpha))
             .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(RadiusSm))
-            .clickable(
+            .clickFeedback(
                 interactionSource = interaction,
                 indication = null,
                 onClick = onClick
@@ -1588,7 +1582,7 @@ private fun CuPreflightBanner(
             text = "\u00D7",
             fontSize = 14.sp,
             color = Neutral500,
-            modifier = Modifier.clickable(onClick = onDismiss)
+            modifier = Modifier.clickFeedback(onClick = onDismiss)
         )
     }
 }

@@ -8,6 +8,9 @@ import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -572,18 +575,18 @@ fun TelephonyScreen(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.discover()
                 }) { Text(if (isDiscovering) "Scanning…" else "Discover", color = BbxAccent) }
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    view.performPressFeedback()
                     editingGateway = null
                     prefillIp = ""
                     prefillModel = "TG200"
                     showForm = true
                 }) { Text("+ Add", color = SolidGreen) }
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    view.performPressFeedback()
                     viewModel.loadGateways()
                 }) { Text("Refresh", color = BbxDim) }
             }
@@ -596,7 +599,7 @@ fun TelephonyScreen(
                 Modifier.fillMaxWidth()
                     .clip(RoundedCornerShape(RadiusMd))
                     .background(Neutral200)
-                    .clickable { viewModel.clearActionMessage() }
+                    .clickFeedback { viewModel.clearActionMessage() }
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text(msg, color = BbxDim, style = MaterialTheme.typography.bodySmall)
@@ -628,7 +631,6 @@ fun TelephonyScreen(
                     ip = ip,
                     model = model,
                     onAdd = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         editingGateway = null
                         prefillIp = ip
                         prefillModel = model
@@ -641,17 +643,14 @@ fun TelephonyScreen(
                 GatewayCard(
                     gw = gw,
                     onSetup = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         viewModel.resetWizard()
                         wizardGateway = gw
                     },
                     onEdit = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         editingGateway = gw
                         showForm = true
                     },
                     onRemove = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         confirmRemove = gw
                     }
                 )
@@ -806,7 +805,7 @@ private fun CardActionButton(label: String, color: Color, onClick: () -> Unit) {
         Modifier.clip(RoundedCornerShape(RadiusMd))
             .background(color.copy(alpha = 0.1f))
             .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(RadiusMd))
-            .clickable { onClick() }
+            .clickFeedback { onClick() }
             .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = color)
@@ -979,6 +978,7 @@ private class LineEditState(
 
 @Composable
 private fun LineEditorRow(idx: Int, ls: LineEditState, operators: List<String>) {
+    val feedback = rememberPressFeedback()
     val lineNum = (ls.slot ?: ((ls.span ?: 3) - 2)) + 1
     Column(
         Modifier.fillMaxWidth().padding(vertical = 6.dp)
@@ -997,7 +997,7 @@ private fun LineEditorRow(idx: Int, ls: LineEditState, operators: List<String>) 
             Spacer(Modifier.width(8.dp))
             Switch(
                 checked = ls.enabled.value,
-                onCheckedChange = { ls.enabled.value = it },
+                onCheckedChange = { feedback(); ls.enabled.value = it },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = BbxWhite,
                     checkedTrackColor = SolidGreen,
@@ -1299,8 +1299,9 @@ private fun NoticeBox(text: String, warn: Boolean) {
 
 @Composable
 private fun WizardButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    val feedback = rememberPressFeedback()
     Button(
-        onClick = onClick,
+        onClick = { feedback(); onClick() },
         enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(RadiusMd),
@@ -1355,6 +1356,7 @@ private fun DialogScaffold(
     onBack: () -> Unit = {},
     content: @Composable () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         GlassCard(
             modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -1378,12 +1380,12 @@ private fun DialogScaffold(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     if (showBack) {
-                        TextButton(onClick = onBack) { Text("Back", color = BbxDim) }
+                        TextButton(onClick = { feedback(); onBack() }) { Text("Back", color = BbxDim) }
                     }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = BbxDim) }
+                    TextButton(onClick = { feedback(); onDismiss() }) { Text("Cancel", color = BbxDim) }
                     Button(
-                        onClick = onConfirm,
+                        onClick = { feedback(); onConfirm() },
                         enabled = confirmEnabled,
                         shape = RoundedCornerShape(RadiusMd),
                         colors = ButtonDefaults.buttonColors(
@@ -1454,9 +1456,10 @@ private fun <T> FormDropdown(
     onSelect: (T) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val feedback = rememberPressFeedback()
     Box(Modifier.fillMaxWidth()) {
         Button(
-            onClick = { showMenu = true },
+            onClick = { feedback(); showMenu = true },
             modifier = Modifier.fillMaxWidth().height(44.dp),
             shape = RoundedCornerShape(RadiusMd),
             contentPadding = PaddingValues(horizontal = 12.dp),
@@ -1477,6 +1480,7 @@ private fun <T> FormDropdown(
                         )
                     },
                     onClick = {
+                        feedback()
                         showMenu = false
                         onSelect(opt)
                     }

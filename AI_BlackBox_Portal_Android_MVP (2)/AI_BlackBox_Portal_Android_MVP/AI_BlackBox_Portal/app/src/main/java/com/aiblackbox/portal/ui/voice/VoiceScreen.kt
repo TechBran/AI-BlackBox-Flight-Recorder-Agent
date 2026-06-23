@@ -19,6 +19,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -791,8 +792,7 @@ fun VoiceScreen(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().clickable {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                modifier = Modifier.fillMaxWidth().clickFeedback {
                     settingsExpanded = !settingsExpanded
                 }
             ) {
@@ -908,11 +908,7 @@ fun VoiceScreen(
                         .scale(if (shouldPulse) pulseScale else 1f)
                         .clip(CircleShape)
                         .background(stateColor)
-                        .clickable {
-                            view.performHapticFeedback(
-                                if (isConnected) HapticFeedbackConstants.CONTEXT_CLICK
-                                else HapticFeedbackConstants.CONFIRM
-                            )
+                        .clickFeedback {
                             if (isConnected) viewModel.toggleMic() else viewModel.connect(buildSessionConfig())
                         },
                     contentAlignment = Alignment.Center
@@ -957,8 +953,7 @@ fun VoiceScreen(
                         .size(44.dp)
                         .clip(CircleShape)
                         .glassSurface(shape = CircleShape, bg = Neutral200)
-                        .clickable {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        .clickFeedback {
                             viewModel.disconnect()
                         },
                     contentAlignment = Alignment.Center

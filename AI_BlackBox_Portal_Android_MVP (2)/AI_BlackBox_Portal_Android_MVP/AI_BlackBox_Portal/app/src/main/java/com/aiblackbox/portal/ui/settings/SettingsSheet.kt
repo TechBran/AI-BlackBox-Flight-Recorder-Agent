@@ -7,6 +7,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -120,6 +122,7 @@ fun SettingsSheet(
     viewModel: SettingsViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val feedback = rememberPressFeedback()
     val provider by viewModel.store.provider.collectAsState(initial = "gemini")
     val currentModel by viewModel.store.model.collectAsState(initial = "")
     val operator by viewModel.store.operator.collectAsState(initial = "Brandon")
@@ -293,7 +296,7 @@ fun SettingsSheet(
                                 .clip(RoundedCornerShape(RadiusMd))
                                 .background(Neutral200)
                                 .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
-                                .clickable {
+                                .clickFeedback {
                                     // Open app via reverse proxy in browser
                                     val proxyUrl = "$origin/app-proxy/${app.port}/"
                                     try {
@@ -483,6 +486,7 @@ fun SettingsSheet(
                                 )
                             },
                             onClick = {
+                                feedback()
                                 viewModel.setOperatorVoice(operator, voice.id)
                                 showVoiceMenu = false
                             }
@@ -493,7 +497,7 @@ fun SettingsSheet(
                 } // end Box(weight=1f) wrapping the voice dropdown
                 IconButton(
                     enabled = !previewing,
-                    onClick = { viewModel.previewVoice(currentVoice) }
+                    onClick = { feedback(); viewModel.previewVoice(currentVoice) }
                 ) {
                     Text(if (previewing) "…" else "▶", color = SolidGreen)
                 }
@@ -501,7 +505,7 @@ fun SettingsSheet(
                 // it: beside the voice picker. The screen itself gates on ElevenLabs
                 // status, so always-show is safe. (Menu item at "Generation" stays too.)
                 IconButton(
-                    onClick = { onNavigate("voice_lab"); onDismiss() }
+                    onClick = { feedback(); onNavigate("voice_lab"); onDismiss() }
                 ) {
                     Text("🎙️", color = SolidGreen)
                 }
@@ -542,6 +546,7 @@ fun SettingsSheet(
                             )
                         },
                         onClick = {
+                            feedback()
                             viewModel.setProvider(p.id)
                             showProviderMenu = false
                             // Auto-navigate for providers with dedicated screens
@@ -589,6 +594,7 @@ fun SettingsSheet(
                                 )
                             },
                             onClick = {
+                                feedback()
                                 viewModel.setModel(modelId, provider)
                                 showModelMenu = false
                             }
@@ -675,6 +681,7 @@ fun SettingsSheet(
                             )
                         },
                         onClick = {
+                            feedback()
                             viewModel.setOperator(op)
                             showOperatorMenu = false
                         }
@@ -685,6 +692,7 @@ fun SettingsSheet(
                 DropdownMenuItem(
                     text = { Text("+ New Operator", color = BbxAccent, fontWeight = FontWeight.Medium) },
                     onClick = {
+                        feedback()
                         showOperatorMenu = false
                         newOperatorName = ""
                         showAddOperatorDialog = true
@@ -714,6 +722,7 @@ fun SettingsSheet(
                     },
                     confirmButton = {
                         TextButton(onClick = {
+                            feedback()
                             val name = newOperatorName.trim()
                             if (name.isNotBlank()) {
                                 viewModel.addOperator(name)
@@ -722,7 +731,7 @@ fun SettingsSheet(
                         }) { Text("Create", color = BbxAccent) }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showAddOperatorDialog = false }) {
+                        TextButton(onClick = { feedback(); showAddOperatorDialog = false }) {
                             Text("Cancel", color = Neutral500)
                         }
                     },
@@ -785,9 +794,9 @@ fun SettingsSheet(
                         if (origin.isNotBlank()) {
                             IconButton(
                                 onClick = {
+                                    feedback()
                                     val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                     clip.setPrimaryClip(ClipData.newPlainText("Paired Server", origin))
-                                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                     android.widget.Toast.makeText(context, "Copied $origin", android.widget.Toast.LENGTH_SHORT).show()
                                 },
                                 modifier = Modifier.size(32.dp),
@@ -814,38 +823,32 @@ fun SettingsSheet(
             ) {
                 // Checkpoint
                 MenuButton("\uD83D\uDCBE Checkpoint") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.triggerCheckpoint()
                 }
 
                 // Clear History
                 MenuButton("\uD83D\uDDD1 Clear History") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     onClearHistory(); onDismiss()
                 }
 
                 // Cancel Stuck Tasks
                 MenuButton("\u26D4 Cancel Tasks") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.cancelAllTasks()
                 }
 
                 // Re-pair Device
                 MenuButton("\uD83D\uDD17 Re-pair Device") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     showRepairConfirm = true
                 }
 
                 // Restart Service
                 MenuButton("\uD83D\uDD04 Restart Service") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.restartService()
                 }
 
                 // Pair New Device — show QR code for another device to scan
                 var showPairQr by remember { mutableStateOf(false) }
                 MenuButton("\uD83D\uDCF2 Pair New Device") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     showPairQr = true
                 }
 
@@ -860,7 +863,6 @@ fun SettingsSheet(
                 // Manage Setup — opens the onboarding wizard in manage mode for credential edits.
                 // Single source of truth: same UI used at first-run setup, no Android-side reimplementation.
                 MenuButton("⚙️ Manage Setup") {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     val target = if (origin.isNotBlank()) "$origin/onboarding/?mode=manage"
                                  else "http://localhost:9091/onboarding/?mode=manage"
                     try {
@@ -885,7 +887,7 @@ fun SettingsSheet(
                     },
                     confirmButton = {
                         TextButton(onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                            feedback()
                             showRepairConfirm = false
                             // Clear origin from SharedPreferences and launch PairingActivity
                             context.getSharedPreferences(Constants.PREFS_NAME, android.content.Context.MODE_PRIVATE)
@@ -899,7 +901,7 @@ fun SettingsSheet(
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showRepairConfirm = false }) {
+                        TextButton(onClick = { feedback(); showRepairConfirm = false }) {
                             Text("Cancel", color = Neutral500)
                         }
                     },
@@ -954,7 +956,7 @@ private fun MenuButton(label: String, modifier: Modifier = Modifier, onClick: ()
             .clip(RoundedCornerShape(RadiusMd))
             .background(Neutral200)
             .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
-            .clickable(onClick = onClick)
+            .clickFeedback(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Text(
@@ -988,7 +990,7 @@ private fun CollapsibleSection(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(RadiusMd))
-                .clickable { expanded = !expanded }
+                .clickFeedback { expanded = !expanded }
                 .padding(vertical = 8.dp, horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1042,7 +1044,7 @@ private fun SettingsDropdown(
                 .clip(RoundedCornerShape(RadiusMd))
                 .background(Neutral200)
                 .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
-                .clickable { onExpandedChange(true) }
+                .clickFeedback { onExpandedChange(true) }
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1078,6 +1080,7 @@ private fun PairNewDeviceDialog(
     onDismiss: () -> Unit,
     viewModel: SettingsViewModel = viewModel()
 ) {
+    val feedback = rememberPressFeedback()
     // Fetch pairing token from backend on open (matches Portal POST /pair/start flow)
     var pairToken by remember { mutableStateOf<String?>(null) }
     var pairExp by remember { mutableLongStateOf(0L) }
@@ -1163,7 +1166,7 @@ private fun PairNewDeviceDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = { feedback(); onDismiss() }) {
                 Text("Done", color = BbxAccent)
             }
         },
@@ -1196,6 +1199,7 @@ private fun ToggleRow(
     onCheckedChange: (Boolean) -> Unit,
     checkedColor: Color = BbxAccent
 ) {
+    val feedback = rememberPressFeedback()
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1204,7 +1208,7 @@ private fun ToggleRow(
         Text(label, style = MaterialTheme.typography.bodyMedium, color = BbxDim)
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = { feedback(); onCheckedChange(it) },
             colors = SwitchDefaults.colors(
                 checkedThumbColor = checkedColor,
                 checkedTrackColor = checkedColor.copy(alpha = 0.3f),

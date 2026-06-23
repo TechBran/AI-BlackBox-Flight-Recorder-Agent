@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 
 /**
  * Reusable launch button with an inline busy state.
@@ -47,11 +48,12 @@ fun LaunchButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val feedback = rememberPressFeedback()
     Button(
         // `enabled` below already suppresses clicks when loading/disabled, so
         // no inner guard is needed — Material 3 won't dispatch onClick to a
         // disabled Button. Keep the single source of truth.
-        onClick = onClick,
+        onClick = { feedback(); onClick() },
         enabled = enabled && !isLoading,
         modifier = modifier,
     ) {

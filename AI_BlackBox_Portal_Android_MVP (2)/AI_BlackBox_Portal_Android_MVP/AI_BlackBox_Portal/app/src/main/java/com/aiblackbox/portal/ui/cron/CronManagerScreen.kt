@@ -7,6 +7,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -146,7 +149,7 @@ fun CronManagerScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.openCreateDialog()
                 },
                 containerColor = BbxAccent,
@@ -176,7 +179,6 @@ fun CronManagerScreen(
                 onSearchChange = { viewModel.setSearchQuery(it) },
                 statusFilter = statusFilter,
                 onFilterChange = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     viewModel.setStatusFilter(it)
                 }
             )
@@ -205,24 +207,19 @@ fun CronManagerScreen(
                         CronJobCard(
                             job = job,
                             onRun = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.runJob(job.id)
                             },
                             onToggle = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 if (job.status == "active") viewModel.pauseJob(job.id)
                                 else viewModel.resumeJob(job.id)
                             },
                             onEdit = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 viewModel.openEditDialog(job.id)
                             },
                             onHistory = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 viewModel.openHistory(job.id)
                             },
                             onDelete = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.requestDelete(job.id)
                             }
                         )
@@ -239,7 +236,6 @@ fun CronManagerScreen(
             isSaving = viewModel.isSaving.collectAsState().value,
             onDismiss = { viewModel.dismissEditDialog() },
             onSave = { name, prompt, schedule, hint, model, delivery, target, operator, oneShot ->
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.saveJob(name, prompt, schedule, hint, model, delivery, target, operator, oneShot)
             }
         )
@@ -266,14 +262,14 @@ fun CronManagerScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.confirmDelete()
                 }) {
                     Text("Delete", color = HistoryErrorRed)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.cancelDelete() }) {
+                TextButton(onClick = { view.performPressFeedback(); viewModel.cancelDelete() }) {
                     Text("Cancel", color = BbxDim)
                 }
             },
@@ -332,6 +328,7 @@ private fun FilterDropdown(
     labels: Map<String, String>,
     onSelect: (String) -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
 
     ExposedDropdownMenuBox(
@@ -360,6 +357,7 @@ private fun FilterDropdown(
                 DropdownMenuItem(
                     text = { Text(labels[option] ?: option, color = Neutral900) },
                     onClick = {
+                        feedback()
                         onSelect(option)
                         expanded = false
                     }
@@ -578,8 +576,9 @@ private fun ActionIconButton(
     onClick: () -> Unit,
     tint: Color
 ) {
+    val feedback = rememberPressFeedback()
     IconButton(
-        onClick = onClick,
+        onClick = { feedback(); onClick() },
         modifier = Modifier.size(32.dp)
     ) {
         Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(18.dp))
@@ -734,11 +733,9 @@ private fun EditJobDialog(
                         .padding(2.dp)
                 ) {
                     ScheduleTab("Simple", !useAdvanced) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         useAdvanced = false
                     }
                     ScheduleTab("Advanced", useAdvanced) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         useAdvanced = true
                         // Sync cron from simple
                         if (cronExpression.isBlank()) {
@@ -751,7 +748,6 @@ private fun EditJobDialog(
                     // Simple frequency selector
                     FormField("FREQUENCY") {
                         FrequencySelector(frequency) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             frequency = it
                         }
                     }
@@ -823,7 +819,6 @@ private fun EditJobDialog(
                 // Model
                 FormField("MODEL") {
                     ModelSelector(model) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         model = it
                     }
                 }
@@ -831,7 +826,6 @@ private fun EditJobDialog(
                 // Delivery
                 FormField("DELIVERY") {
                     DeliverySelector(delivery) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         delivery = it
                     }
                 }
@@ -874,7 +868,7 @@ private fun EditJobDialog(
                     Checkbox(
                         checked = oneShot,
                         onCheckedChange = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            view.performPressFeedback()
                             oneShot = it
                         },
                         colors = CheckboxDefaults.colors(
@@ -889,12 +883,13 @@ private fun EditJobDialog(
                     horizontalArrangement = Arrangement.End,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    TextButton(onClick = onDismiss) {
+                    TextButton(onClick = { view.performPressFeedback(); onDismiss() }) {
                         Text("Cancel", color = BbxDim)
                     }
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = {
+                            view.performPressFeedback()
                             nameError = name.isBlank()
                             promptError = prompt.isBlank()
                             if (nameError || promptError) return@Button
@@ -951,7 +946,7 @@ private fun RowScope.ScheduleTab(text: String, selected: Boolean, onClick: () ->
                     .border(1.dp, Color(0x1AFFFFFF), RoundedCornerShape(RadiusXs))
                 else Modifier
             )
-            .clickable(onClick = onClick)
+            .clickFeedback(onClick = onClick)
             .padding(vertical = 7.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -967,6 +962,7 @@ private fun RowScope.ScheduleTab(text: String, selected: Boolean, onClick: () ->
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val options = listOf("hourly" to "Every hour", "daily" to "Daily", "weekly" to "Weekly")
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
@@ -985,7 +981,7 @@ private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
             options.forEach { (value, label) ->
-                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { onSelect(value); expanded = false })
+                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
             }
         }
     }
@@ -994,6 +990,7 @@ private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelSelector(selected: String, onSelect: (String) -> Unit) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val options = listOf("gemini" to "Gemini", "openai" to "OpenAI", "claude" to "Claude", "grok" to "Grok", "computer-use" to "Computer Use")
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
@@ -1012,7 +1009,7 @@ private fun ModelSelector(selected: String, onSelect: (String) -> Unit) {
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
             options.forEach { (value, label) ->
-                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { onSelect(value); expanded = false })
+                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
             }
         }
     }
@@ -1021,6 +1018,7 @@ private fun ModelSelector(selected: String, onSelect: (String) -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DeliverySelector(selected: String, onSelect: (String) -> Unit) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val options = listOf("snapshot" to "Snapshot", "sms" to "SMS", "voice_call" to "Voice Call", "notification" to "Notification")
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
@@ -1039,7 +1037,7 @@ private fun DeliverySelector(selected: String, onSelect: (String) -> Unit) {
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
             options.forEach { (value, label) ->
-                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { onSelect(value); expanded = false })
+                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
             }
         }
     }
@@ -1055,6 +1053,7 @@ private fun HistoryDialog(
     isLoading: Boolean,
     onDismiss: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -1078,7 +1077,7 @@ private fun HistoryDialog(
                         style = MaterialTheme.typography.headlineMedium,
                         color = BbxWhite
                     )
-                    TextButton(onClick = onDismiss) {
+                    TextButton(onClick = { feedback(); onDismiss() }) {
                         Text("Close", color = BbxDim)
                     }
                 }

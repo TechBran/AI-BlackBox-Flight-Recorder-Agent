@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -166,7 +167,7 @@ private fun AttachmentThumbnail(
                 .size(22.dp)
                 .clip(CircleShape)
                 .background(BbxAccent)
-                .clickable(onClick = onRemove),
+                .clickFeedback(onClick = onRemove),
             contentAlignment = Alignment.Center
         ) {
             Text(

@@ -7,6 +7,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -123,8 +125,7 @@ fun ProviderBanner(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    .clickFeedback {
                         expanded = !expanded
                         onToggleExpand()
                     }
@@ -279,8 +280,7 @@ fun ProviderBanner(
                                             if (isSelected) accentColor.copy(alpha = 0.2f)
                                             else Neutral200
                                         )
-                                        .clickable {
-                                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                        .clickFeedback {
                                             onModelChange(id)
                                         }
                                         .padding(horizontal = 12.dp, vertical = 6.dp)
@@ -301,7 +301,7 @@ fun ProviderBanner(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         TextButton(onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                            view.performPressFeedback()
                             onNewSession()
                         }) {
                             Text(
@@ -311,7 +311,7 @@ fun ProviderBanner(
                             )
                         }
                         TextButton(onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                            view.performPressFeedback()
                             onSnapshot()
                         }) {
                             Text(
@@ -349,8 +349,7 @@ fun ProviderBanner(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(modeColor.copy(alpha = 0.15f))
-                                    .clickable {
-                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                    .clickFeedback {
                                         onPermissionModeChange()
                                     }
                                     .padding(horizontal = 10.dp, vertical = 4.dp)

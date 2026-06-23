@@ -18,6 +18,7 @@ package com.aiblackbox.portal.ui.cli_agent
 
 import android.content.res.Configuration
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -370,7 +371,7 @@ private fun ExtraKey(
                 BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 shape,
             )
-            .clickable(onClick = { onTap() })
+            .clickFeedback(onClick = { onTap() })
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.Center,
     ) {

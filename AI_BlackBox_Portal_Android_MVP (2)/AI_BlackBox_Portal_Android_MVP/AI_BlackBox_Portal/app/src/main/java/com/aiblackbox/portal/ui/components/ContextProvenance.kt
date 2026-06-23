@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,7 +58,7 @@ fun ContextProvenance(
     Column(modifier = modifier.testTag("context-provenance-root")) {
         Row(
             modifier = Modifier
-                .clickable { onToggle() }
+                .clickFeedback { onToggle() }
                 .semantics(mergeDescendants = true) {
                     contentDescription = if (expanded)
                         "Hide context snapshots, ${provenance.totalCount()} total"
@@ -118,7 +119,7 @@ private fun ProvenanceSection(
                         .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
                         .let { base ->
                             if (onSnapshotClick != null) {
-                                base.clickable { onSnapshotClick(fullId) }
+                                base.clickFeedback { onSnapshotClick(fullId) }
                             } else {
                                 base
                             }

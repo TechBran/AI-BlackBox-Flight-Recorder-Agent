@@ -1,13 +1,14 @@
 package com.aiblackbox.portal.ui.generation
 
 import android.app.Application
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -351,7 +352,7 @@ fun GoogleSsmlScreen(
                             .clip(RoundedCornerShape(RadiusSm))
                             .background(Neutral100)
                             .border(1.dp, Neutral300, RoundedCornerShape(RadiusSm))
-                            .clickable { langDropdownExpanded = true }
+                            .clickFeedback { langDropdownExpanded = true }
                             .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
                         Text(
@@ -383,6 +384,7 @@ fun GoogleSsmlScreen(
                                     )
                                 },
                                 onClick = {
+                                    view.performPressFeedback()
                                     viewModel.selectLanguage(lang)
                                     selectedVoice = null
                                     langDropdownExpanded = false
@@ -417,7 +419,7 @@ fun GoogleSsmlScreen(
                             .clip(RoundedCornerShape(RadiusSm))
                             .background(Neutral100)
                             .border(1.dp, Neutral300, RoundedCornerShape(RadiusSm))
-                            .clickable { voiceDropdownExpanded = true }
+                            .clickFeedback { voiceDropdownExpanded = true }
                             .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
                         if (selectedVoice != null) {
@@ -480,6 +482,7 @@ fun GoogleSsmlScreen(
                                     }
                                 },
                                 onClick = {
+                                    view.performPressFeedback()
                                     selectedVoice = voice
                                     voiceDropdownExpanded = false
                                 },
@@ -648,8 +651,7 @@ fun GoogleSsmlScreen(
                 .background(
                     if (canGenerate) BbxAccent else BbxAccent.copy(alpha = 0.4f)
                 )
-                .clickable(enabled = canGenerate) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                .clickFeedback(enabled = canGenerate) {
                     selectedVoice?.let { voice ->
                         viewModel.generate(
                             voiceName = voice.name,

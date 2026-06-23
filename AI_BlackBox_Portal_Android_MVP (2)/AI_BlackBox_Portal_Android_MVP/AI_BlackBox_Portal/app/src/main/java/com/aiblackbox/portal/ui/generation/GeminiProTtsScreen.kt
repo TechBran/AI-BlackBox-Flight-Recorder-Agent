@@ -1,7 +1,6 @@
 package com.aiblackbox.portal.ui.generation
 
 import android.app.Application
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -11,6 +10,9 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -310,7 +312,7 @@ fun GeminiProTtsScreen(
                 Switch(
                     checked = isMulti,
                     onCheckedChange = { checked ->
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         viewModel.setMultiSpeaker(checked)
                     },
                     colors = SwitchDefaults.colors(
@@ -346,7 +348,6 @@ fun GeminiProTtsScreen(
                     VoiceDropdown(
                         selectedVoice = selectedVoice,
                         onVoiceSelected = { voice ->
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             selectedVoice = voice
                         }
                     )
@@ -432,9 +433,6 @@ fun GeminiProTtsScreen(
                             VoiceDropdown(
                                 selectedVoice = speaker1Voice,
                                 onVoiceSelected = { voice ->
-                                    view.performHapticFeedback(
-                                        HapticFeedbackConstants.CLOCK_TICK
-                                    )
                                     speaker1Voice = voice
                                 }
                             )
@@ -514,9 +512,6 @@ fun GeminiProTtsScreen(
                             VoiceDropdown(
                                 selectedVoice = speaker2Voice,
                                 onVoiceSelected = { voice ->
-                                    view.performHapticFeedback(
-                                        HapticFeedbackConstants.CLOCK_TICK
-                                    )
                                     speaker2Voice = voice
                                 }
                             )
@@ -607,12 +602,11 @@ fun GeminiProTtsScreen(
                     if (btnEnabled) BbxAccent
                     else BbxAccent.copy(alpha = 0.4f)
                 )
-                .clickable(
+                .clickFeedback(
                     interactionSource = btnInteraction,
                     indication = null,
                     enabled = btnEnabled
                 ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.generate(
                         text = text,
                         voiceName = selectedVoice,
@@ -741,8 +735,7 @@ fun GeminiProTtsScreen(
                                 shape = RoundedCornerShape(RadiusLg),
                                 bg = GlassFloatingBubble
                             )
-                            .clickable {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            .clickFeedback {
                                 viewModel.reset()
                                 text = ""
                             }
@@ -775,6 +768,7 @@ private fun VoiceDropdown(
     selectedVoice: String,
     onVoiceSelected: (String) -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val selectedDesc = GEMINI_PRO_VOICES.find { it.name == selectedVoice }?.desc ?: ""
 
@@ -786,7 +780,7 @@ private fun VoiceDropdown(
                 .clip(RoundedCornerShape(RadiusSm))
                 .background(Neutral100)
                 .border(1.dp, GlassBorder, RoundedCornerShape(RadiusSm))
-                .clickable { expanded = true }
+                .clickFeedback { expanded = true }
                 .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
             Row(
@@ -838,6 +832,7 @@ private fun VoiceDropdown(
                         }
                     },
                     onClick = {
+                        feedback()
                         onVoiceSelected(voice.name)
                         expanded = false
                     },

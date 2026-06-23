@@ -3,6 +3,7 @@ package com.aiblackbox.portal.ui.components
 import androidx.annotation.VisibleForTesting
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -310,7 +311,7 @@ fun MarkdownText(
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
-                                    .clickable {
+                                    .clickFeedback {
                                         clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(segment.code))
                                         copied = true
                                     }

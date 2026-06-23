@@ -18,9 +18,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import android.view.HapticFeedbackConstants
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.components.GlassCard
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.theme.*
 
 @Composable
@@ -69,7 +70,7 @@ fun ContactsScreen(
                     color = BbxWhite
                 )
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    view.performPressFeedback()
                     viewModel.loadContacts()
                 }) { Text("Refresh", color = BbxDim) }
             }
@@ -128,11 +129,9 @@ fun ContactsScreen(
                         ContactCard(
                             contact = contact,
                             onEdit = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.showEdit(contact)
                             },
                             onDelete = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.showDelete(contact.id)
                             }
                         )
@@ -144,7 +143,7 @@ fun ContactsScreen(
         // FAB — Add new contact
         FloatingActionButton(
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                view.performPressFeedback()
                 viewModel.showEdit(null)
             },
             modifier = Modifier
@@ -192,6 +191,7 @@ private fun ContactCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     GlassCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(14.dp)) {
             // Left accent bar
@@ -283,10 +283,10 @@ private fun ContactCard(
                 // Action buttons
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    TextButton(onClick = onEdit, contentPadding = PaddingValues(0.dp)) {
+                    TextButton(onClick = { feedback(); onEdit() }, contentPadding = PaddingValues(0.dp)) {
                         Text("Edit", color = BbxAccent, style = MaterialTheme.typography.labelMedium)
                     }
-                    TextButton(onClick = onDelete, contentPadding = PaddingValues(0.dp)) {
+                    TextButton(onClick = { feedback(); onDelete() }, contentPadding = PaddingValues(0.dp)) {
                         Text("Delete", color = BbxRed, style = MaterialTheme.typography.labelMedium)
                     }
                 }
@@ -302,6 +302,7 @@ private fun EditContactDialog(
     onSave: (name: String, phone: String, email: String, relationship: String, notes: String, tags: String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     var name by remember { mutableStateOf(contact?.name ?: "") }
     var phone by remember { mutableStateOf(contact?.phone ?: "") }
     var email by remember { mutableStateOf(contact?.email ?: "") }
@@ -421,7 +422,7 @@ private fun EditContactDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onSave(name.trim(), phone.trim(), email.trim(), relationship.trim(), notes.trim(), tags.trim()) },
+                onClick = { feedback(); onSave(name.trim(), phone.trim(), email.trim(), relationship.trim(), notes.trim(), tags.trim()) },
                 enabled = name.isNotBlank() && !isSaving
             ) {
                 if (isSaving) {
@@ -436,7 +437,7 @@ private fun EditContactDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = { feedback(); onDismiss() }) {
                 Text("Cancel", color = Neutral500)
             }
         }
@@ -448,6 +449,7 @@ private fun DeleteConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Neutral100,
@@ -455,12 +457,12 @@ private fun DeleteConfirmDialog(
         title = { Text("Delete Contact", fontWeight = FontWeight.Bold) },
         text = { Text("Delete this contact? This action cannot be undone.", color = Neutral500) },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
+            TextButton(onClick = { feedback(); onConfirm() }) {
                 Text("Delete", color = BbxRed, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = { feedback(); onDismiss() }) {
                 Text("Cancel", color = Neutral500)
             }
         }

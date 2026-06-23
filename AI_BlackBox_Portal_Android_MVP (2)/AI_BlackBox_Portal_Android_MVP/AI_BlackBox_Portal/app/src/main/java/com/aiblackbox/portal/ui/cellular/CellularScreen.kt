@@ -40,10 +40,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
-import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.border
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import com.aiblackbox.portal.ui.components.GlassCard
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -225,17 +225,17 @@ fun CellularScreen(
         // Action buttons with haptic
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { view.performHapticFeedback(HapticFeedbackConstants.CONFIRM); viewModel.reconnect() },
+                onClick = { view.performPressFeedback(); viewModel.reconnect() },
                 colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
                 shape = RoundedCornerShape(RadiusMd)
             ) { Text("Reconnect") }
             OutlinedButton(
-                onClick = { view.performHapticFeedback(HapticFeedbackConstants.CONFIRM); viewModel.speedTest() },
+                onClick = { view.performPressFeedback(); viewModel.speedTest() },
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = BbxDim),
                 shape = RoundedCornerShape(RadiusMd)
             ) { Text("Speed Test") }
             OutlinedButton(
-                onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); viewModel.loadStatus() },
+                onClick = { view.performPressFeedback(); viewModel.loadStatus() },
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = BbxDim),
                 shape = RoundedCornerShape(RadiusMd)
             ) { Text("Refresh") }
@@ -265,7 +265,7 @@ fun CellularScreen(
             Button(
                 onClick = {
                     if (atCommand.isNotBlank()) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.sendAtCommand(atCommand); atCommand = ""
                     }
                 },

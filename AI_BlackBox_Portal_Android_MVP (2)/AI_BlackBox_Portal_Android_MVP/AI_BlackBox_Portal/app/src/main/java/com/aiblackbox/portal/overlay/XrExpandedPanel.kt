@@ -3,6 +3,8 @@ package com.aiblackbox.portal.overlay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +58,7 @@ private val OrbiterBackground = Color(0xB3141414)
 
 @Composable
 fun XrExpandedPanel(state: OverlayBridge.OverlayState) {
+    val feedback = rememberPressFeedback()
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier
@@ -93,7 +96,7 @@ fun XrExpandedPanel(state: OverlayBridge.OverlayState) {
 
         // ---- g. Bottom Bar ----
         Button(
-            onClick = { OverlayBridge.openPortal() },
+            onClick = { feedback(); OverlayBridge.openPortal() },
             colors = ButtonDefaults.buttonColors(containerColor = BbxRed),
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.fillMaxWidth().height(40.dp)
@@ -112,6 +115,7 @@ fun XrExpandedPanel(state: OverlayBridge.OverlayState) {
 
 @Composable
 private fun StatusBar(state: OverlayBridge.OverlayState) {
+    val feedback = rememberPressFeedback()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().height(48.dp)
@@ -136,7 +140,7 @@ private fun StatusBar(state: OverlayBridge.OverlayState) {
 
         // Minimize button
         IconButton(
-            onClick = { OverlayBridge.minimize() },
+            onClick = { feedback(); OverlayBridge.minimize() },
             modifier = Modifier.size(32.dp)
         ) {
             Text(
@@ -191,6 +195,7 @@ private fun DropdownSelector(
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val feedback = rememberPressFeedback()
 
     Box(modifier = modifier) {
         Row(
@@ -199,7 +204,7 @@ private fun DropdownSelector(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
                 .background(DarkSurface)
-                .clickable { expanded = true }
+                .clickFeedback { expanded = true }
                 .padding(horizontal = 8.dp, vertical = 6.dp)
         ) {
             Column(modifier = Modifier.weight(1f)) {
@@ -237,6 +242,7 @@ private fun DropdownSelector(
                         )
                     },
                     onClick = {
+                        feedback()
                         onSelect(option)
                         expanded = false
                     }
@@ -313,7 +319,7 @@ private fun ActionButton(
                 .clip(CircleShape)
                 .background(DarkSurface)
                 .border(2.dp, borderColor, CircleShape)
-                .clickable { onClick() }
+                .clickFeedback { onClick() }
         ) {
             Text(
                 text = iconText,
@@ -371,7 +377,7 @@ private fun TranscriptSection(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { isTranscriptExpanded = !isTranscriptExpanded }
+                .clickFeedback { isTranscriptExpanded = !isTranscriptExpanded }
                 .padding(vertical = 4.dp)
         ) {
             Text(
@@ -463,7 +469,7 @@ fun XrOrbiterControls(state: OverlayBridge.OverlayState) {
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(DarkSurface)
-                .clickable { OverlayBridge.toggleMic() }
+                .clickFeedback { OverlayBridge.toggleMic() }
         ) {
             Text(
                 text = "MIC",
@@ -481,7 +487,7 @@ fun XrOrbiterControls(state: OverlayBridge.OverlayState) {
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(DarkSurface)
-                .clickable { OverlayBridge.minimize() }
+                .clickFeedback { OverlayBridge.minimize() }
         ) {
             Text(
                 text = "MIN",
@@ -499,7 +505,7 @@ fun XrOrbiterControls(state: OverlayBridge.OverlayState) {
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(DarkSurface)
-                .clickable { OverlayBridge.toggleConnect() }
+                .clickFeedback { OverlayBridge.toggleConnect() }
         ) {
             Text(
                 text = "END",

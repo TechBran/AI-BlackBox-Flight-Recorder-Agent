@@ -3,6 +3,8 @@ package com.aiblackbox.portal.ui.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,6 +75,7 @@ fun LocalModelSection(
     accessibilityEnabled: Boolean = false,
     onEnableAccessibility: () -> Unit = {},
 ) {
+    val feedback = rememberPressFeedback()
     val state by viewModel.state.collectAsState()
 
     Column(Modifier.fillMaxWidth()) {
@@ -150,6 +153,7 @@ fun LocalModelSection(
             Switch(
                 checked = isYolo,
                 onCheckedChange = { yolo ->
+                    feedback()
                     viewModel.setAutonomy(if (yolo) AUTONOMY_YOLO else AUTONOMY_PERMISSION)
                 },
                 colors = SwitchDefaults.colors(
@@ -185,7 +189,7 @@ fun LocalModelSection(
                     if (accessibilityEnabled) SolidGreen.copy(alpha = 0.4f) else GlassBorder,
                     RoundedCornerShape(RadiusMd),
                 )
-                .clickable(onClick = onEnableAccessibility)
+                .clickFeedback(onClick = onEnableAccessibility)
                 .padding(12.dp),
         ) {
             Column {
@@ -375,7 +379,7 @@ private fun ActionPill(label: String, color: androidx.compose.ui.graphics.Color,
         modifier = Modifier
             .clip(RoundedCornerShape(RadiusMd))
             .border(1.dp, color.copy(alpha = if (enabled) 0.6f else 0.25f), RoundedCornerShape(RadiusMd))
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (enabled) Modifier.clickFeedback(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
         Text(

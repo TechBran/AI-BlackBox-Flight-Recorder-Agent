@@ -11,6 +11,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -218,11 +219,10 @@ fun VideoGenScreen(
                                 .clip(PillShape)
                                 .background(chipBg)
                                 .border(1.dp, chipBorder, PillShape)
-                                .clickable(
+                                .clickFeedback(
                                     interactionSource = interactionSource,
                                     indication = null
                                 ) {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                     selectedDuration = dur
                                 }
                                 .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -276,11 +276,10 @@ fun VideoGenScreen(
                                 .clip(PillShape)
                                 .background(chipBg)
                                 .border(1.dp, chipBorder, PillShape)
-                                .clickable(
+                                .clickFeedback(
                                     interactionSource = interactionSource,
                                     indication = null
                                 ) {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                     selectedRatio = ratio
                                 }
                                 .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -319,12 +318,11 @@ fun VideoGenScreen(
                     if (btnEnabled) BbxAccent
                     else BbxAccent.copy(alpha = 0.4f)
                 )
-                .clickable(
+                .clickFeedback(
                     interactionSource = btnInteraction,
                     indication = null,
                     enabled = btnEnabled
                 ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     viewModel.generateVideo(prompt, selectedRatio, selectedDuration)
                 }
                 .padding(vertical = 14.dp),
@@ -464,8 +462,7 @@ fun VideoGenScreen(
                                 shape = RoundedCornerShape(RadiusLg),
                                 bg = GlassFloatingBubble
                             )
-                            .clickable {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            .clickFeedback {
                                 viewModel.reset()
                                 prompt = ""
                             }

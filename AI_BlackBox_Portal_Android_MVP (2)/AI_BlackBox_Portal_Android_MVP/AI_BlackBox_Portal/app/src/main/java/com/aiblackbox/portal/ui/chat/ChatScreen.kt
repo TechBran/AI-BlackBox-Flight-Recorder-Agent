@@ -8,6 +8,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -132,8 +133,7 @@ fun ChatScreen(
                         .size(40.dp)
                         .clip(CircleShape)
                         .background(BbxAccent)
-                        .clickable {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        .clickFeedback {
                             scope.launch {
                                 listState.animateScrollToItem(messages.size - 1)
                             }

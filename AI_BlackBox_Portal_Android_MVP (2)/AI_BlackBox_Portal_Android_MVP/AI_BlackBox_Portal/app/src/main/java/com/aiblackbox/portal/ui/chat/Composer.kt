@@ -5,6 +5,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -182,7 +184,7 @@ fun Composer(
                 // Attach button (inside bubble, matches Portal .input-action-btn)
                 IconButton(
                     onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         onAttach()
                     },
                     modifier = Modifier.size(40.dp)
@@ -226,7 +228,7 @@ fun Composer(
                 if (showRecordAudio) {
                     IconButton(
                         onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                            view.performPressFeedback()
                             onRecordAudio()
                         },
                         modifier = Modifier.size(36.dp)
@@ -241,7 +243,7 @@ fun Composer(
 
                 // Whisper mic button (inside bubble)
                 IconButton(
-                    onClick = onWhisper,
+                    onClick = { view.performPressFeedback(); onWhisper() },
                     modifier = Modifier.size(36.dp)
                 ) {
                     MicIcon(
@@ -252,7 +254,7 @@ fun Composer(
 
                 // Send button (inside bubble)
                 IconButton(
-                    onClick = { if (hasText && !isStreaming) onSend() },
+                    onClick = { view.performPressFeedback(); if (hasText && !isStreaming) onSend() },
                     modifier = Modifier
                         .size(40.dp)
                         .scale(sendScale)
@@ -300,7 +302,7 @@ fun Composer(
                         // (loading…/ready/⚠) so the model warm is visible.
                         text = providerPillLabel(provider, localEngineState),
                         modifier = Modifier
-                            .clickable { onProviderMenuOpen(); showProviderMenu = true }
+                            .clickFeedback { onProviderMenuOpen(); showProviderMenu = true }
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontWeight = FontWeight.Medium,
@@ -325,6 +327,7 @@ fun Composer(
                                     )
                                 },
                                 onClick = {
+                                    view.performPressFeedback()
                                     onProviderChange(p.id)
                                     showProviderMenu = false
                                 }
@@ -348,7 +351,7 @@ fun Composer(
                     Text(
                         text = displayModel,
                         modifier = Modifier
-                            .clickable { showModelMenu = true }
+                            .clickFeedback { showModelMenu = true }
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontSize = 12.sp
@@ -369,6 +372,7 @@ fun Composer(
                                     )
                                 },
                                 onClick = {
+                                    view.performPressFeedback()
                                     onModelChange(id)
                                     showModelMenu = false
                                 }
@@ -383,7 +387,7 @@ fun Composer(
             // Auto-TTS toggle (matches Portal .toolbar-btn circular)
             IconButton(
                 onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     onAutoTtsToggle()
                     val msg = if (!autoTtsEnabled) "Auto-TTS ON — responses will be spoken"
                               else "Auto-TTS OFF"

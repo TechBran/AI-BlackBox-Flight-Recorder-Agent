@@ -15,6 +15,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -128,8 +129,7 @@ fun TaskPanel(
                             )
                         }
                     )
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    .clickFeedback {
                         isExpanded = !isExpanded
                     }
                     .padding(if (isExpanded) 12.dp else 10.dp),
@@ -209,8 +209,7 @@ fun TaskPanel(
                             fontSize = 14.sp,
                             modifier = Modifier
                                 .clip(CircleShape)
-                                .clickable {
-                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                .clickFeedback {
                                     isExpanded = false
                                 }
                                 .padding(4.dp)

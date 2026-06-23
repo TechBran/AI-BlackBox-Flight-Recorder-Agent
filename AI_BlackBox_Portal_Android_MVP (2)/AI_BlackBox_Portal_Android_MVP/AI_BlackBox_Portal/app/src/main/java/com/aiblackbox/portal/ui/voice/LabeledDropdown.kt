@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -38,6 +39,7 @@ fun LabeledDropdown(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val selectedLabel = options.firstOrNull { it.first == selectedId }?.second ?: ""
 
@@ -66,7 +68,7 @@ fun LabeledDropdown(
             options.forEach { (id, name) ->
                 DropdownMenuItem(
                     text = { Text(name, color = if (id == selectedId) BbxAccent else BbxWhite) },
-                    onClick = { onSelect(id); expanded = false },
+                    onClick = { feedback(); onSelect(id); expanded = false },
                 )
             }
         }

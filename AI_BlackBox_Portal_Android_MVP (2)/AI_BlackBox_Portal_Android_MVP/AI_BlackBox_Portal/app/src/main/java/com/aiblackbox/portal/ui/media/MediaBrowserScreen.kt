@@ -5,7 +5,6 @@ import android.app.DownloadManager
 import android.content.Context
 import android.net.Uri
 import android.os.Environment
-import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -13,6 +12,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -260,7 +261,7 @@ fun MediaBrowserScreen(
             text = { Text("Delete \"$filename\"? This cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.deleteFile(filename)
                     deleteConfirmFilename = null
                     if (expandedFilename == filename) expandedFilename = null
@@ -269,7 +270,10 @@ fun MediaBrowserScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { deleteConfirmFilename = null }) {
+                TextButton(onClick = {
+                    view.performPressFeedback()
+                    deleteConfirmFilename = null
+                }) {
                     Text("Cancel", color = BbxDim)
                 }
             }
@@ -301,7 +305,7 @@ fun MediaBrowserScreen(
                 )
             }
             IconButton(onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                view.performPressFeedback()
                 viewModel.loadMedia()
             }) {
                 Icon(
@@ -349,7 +353,7 @@ fun MediaBrowserScreen(
                 if (searchQuery.isNotEmpty()) {
                     IconButton(
                         onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            view.performPressFeedback()
                             searchQuery = ""
                         },
                         modifier = Modifier.size(24.dp)
@@ -377,7 +381,7 @@ fun MediaBrowserScreen(
                 FilterChip(
                     selected = selectedType == value,
                     onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         selectedType = value
                     },
                     label = {
@@ -464,16 +468,13 @@ fun MediaBrowserScreen(
                     isExpanded = expandedFilename == item.filename,
                     isDeleting = deleteInProgress == item.filename,
                     onToggleExpand = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         expandedFilename = if (expandedFilename == item.filename) null
                         else item.filename
                     },
                     onDownload = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         downloadFile(context, item.url, item.filename)
                     },
                     onDelete = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         deleteConfirmFilename = item.filename
                     }
                 )
@@ -493,7 +494,7 @@ fun MediaBrowserScreen(
             ) {
                 IconButton(
                     onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         if (currentPage > 1) currentPage--
                     },
                     enabled = currentPage > 1,
@@ -513,7 +514,7 @@ fun MediaBrowserScreen(
                 )
                 IconButton(
                     onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         if (currentPage < totalPages) currentPage++
                     },
                     enabled = currentPage < totalPages,
@@ -554,7 +555,7 @@ private fun MediaListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onToggleExpand() }
+                .clickFeedback { onToggleExpand() }
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -709,7 +710,7 @@ private fun MediaListItem(
                             .weight(1f)
                             .clip(RoundedCornerShape(RadiusSm))
                             .background(BbxAccent.copy(alpha = 0.12f))
-                            .clickable { onDownload() }
+                            .clickFeedback { onDownload() }
                             .padding(vertical = 10.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
@@ -732,7 +733,7 @@ private fun MediaListItem(
                             .weight(1f)
                             .clip(RoundedCornerShape(RadiusSm))
                             .background(Neutral200)
-                            .clickable { onDelete() }
+                            .clickFeedback { onDelete() }
                             .padding(vertical = 10.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically

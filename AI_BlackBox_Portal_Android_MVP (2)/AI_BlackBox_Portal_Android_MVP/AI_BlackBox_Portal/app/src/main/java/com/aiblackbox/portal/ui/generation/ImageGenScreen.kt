@@ -11,6 +11,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -137,7 +138,6 @@ fun ImageGenScreen(
                         options = providers.map { it.provider to (it.label.ifBlank { it.provider }) },
                         selectedId = selectedProvider,
                         onSelect = { id ->
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             viewModel.selectImageProvider(id)
                         }
                     )
@@ -200,7 +200,6 @@ fun ImageGenScreen(
                             spec = spec,
                             value = paramValues[spec.name] ?: spec.default ?: spec.options.firstOrNull() ?: "",
                             onSelect = { v ->
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 viewModel.setImageParam(spec.name, v)
                             }
                         )
@@ -231,13 +230,12 @@ fun ImageGenScreen(
                     if (btnEnabled) BbxAccent
                     else BbxAccent.copy(alpha = 0.4f)
                 )
-                .clickable(
+                .clickFeedback(
                     interactionSource = btnInteraction,
                     indication = null,
                     enabled = btnEnabled
                 ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                    val provider = selectedProvider ?: return@clickable
+                    val provider = selectedProvider ?: return@clickFeedback
                     val intNames = params.filter { it.type == "int" }.map { it.name }.toSet()
                     viewModel.generateImageForProvider(
                         prompt = prompt,
@@ -370,8 +368,7 @@ fun ImageGenScreen(
                                 shape = RoundedCornerShape(RadiusLg),
                                 bg = GlassFloatingBubble
                             )
-                            .clickable {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            .clickFeedback {
                                 viewModel.reset()
                                 prompt = ""
                             }
@@ -448,7 +445,7 @@ private fun ImageParamControl(
                         .clip(PillShape)
                         .background(chipBg)
                         .border(1.dp, chipBorder, PillShape)
-                        .clickable(
+                        .clickFeedback(
                             interactionSource = interactionSource,
                             indication = null
                         ) { onSelect(n.toString()) }

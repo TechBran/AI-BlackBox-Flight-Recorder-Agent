@@ -11,6 +11,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -201,7 +203,6 @@ fun MusicGenScreen(
                     options = MUSIC_MODEL_OPTIONS,
                     selectedId = selectedModel.id,
                     onSelect = { id ->
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         selectedModel = MusicModel.entries.firstOrNull { it.id == id } ?: MusicModel.LYRIA
                     }
                 )
@@ -253,11 +254,10 @@ fun MusicGenScreen(
                                     .clip(PillShape)
                                     .background(chipBg)
                                     .border(1.dp, chipBorder, PillShape)
-                                    .clickable(
+                                    .clickFeedback(
                                         interactionSource = interactionSource,
                                         indication = null
                                     ) {
-                                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                         if (selected) {
                                             // Deselect
                                             selectedPreset = null
@@ -438,7 +438,7 @@ fun MusicGenScreen(
                         Switch(
                             checked = forceInstrumental,
                             onCheckedChange = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                view.performPressFeedback()
                                 forceInstrumental = it
                             },
                             colors = SwitchDefaults.colors(
@@ -476,12 +476,11 @@ fun MusicGenScreen(
                     if (btnEnabled) BbxAccent
                     else BbxAccent.copy(alpha = 0.4f)
                 )
-                .clickable(
+                .clickFeedback(
                     interactionSource = btnInteraction,
                     indication = null,
                     enabled = btnEnabled
                 ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     when (selectedModel) {
                         MusicModel.LYRIA -> viewModel.generateMusic(prompt, negPrompt)
                         MusicModel.ELEVENLABS -> viewModel.generateElevenLabsMusic(
@@ -628,8 +627,7 @@ fun MusicGenScreen(
                                 shape = RoundedCornerShape(RadiusLg),
                                 bg = GlassFloatingBubble
                             )
-                            .clickable {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            .clickFeedback {
                                 viewModel.reset()
                                 prompt = ""
                                 negPrompt = ""

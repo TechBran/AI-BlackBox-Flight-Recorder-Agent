@@ -2,6 +2,8 @@ package com.aiblackbox.portal.ui.sms
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,12 +45,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import android.view.HapticFeedbackConstants
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -142,6 +142,8 @@ private fun SmsThreadListView(
         "xai" to "xAI"
     )
 
+    val feedback = rememberPressFeedback()
+
     Box(Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -171,7 +173,7 @@ private fun SmsThreadListView(
                             .background(if (connected) SolidGreen else BbxAccent)
                     )
                 }
-                TextButton(onClick = onRefresh) { Text("Refresh", color = BbxDim) }
+                TextButton(onClick = { feedback(); onRefresh() }) { Text("Refresh", color = BbxDim) }
             }
             Spacer(Modifier.height(8.dp))
 
@@ -228,12 +230,10 @@ private fun SmsThreadListView(
 
 @Composable
 private fun SmsThreadCard(thread: SmsThread, onClick: () -> Unit) {
-    val view = LocalView.current
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            .clickFeedback {
                 onClick()
             }
     ) {
@@ -326,6 +326,7 @@ private fun SmsConversationView(
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val feedback = rememberPressFeedback()
 
     // Scroll to bottom when messages change
     LaunchedEffect(messages.size) {
@@ -345,7 +346,7 @@ private fun SmsConversationView(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onBack) {
+            TextButton(onClick = { feedback(); onBack() }) {
                 Text("\u2190", color = BbxAccent, fontSize = 20.sp)
             }
             Spacer(Modifier.width(8.dp))
@@ -417,6 +418,7 @@ private fun SmsConversationView(
             // Send button - circular blue
             Button(
                 onClick = {
+                    feedback()
                     if (inputText.isNotBlank()) {
                         onSend(inputText.trim())
                         inputText = ""
@@ -445,6 +447,7 @@ private fun SmsFromNumberSelector(
     onSelectFromNumber: (String?) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val feedback = rememberPressFeedback()
 
     val selectedLabel = if (selectedFromNumber.isNullOrBlank()) {
         "Default line"
@@ -466,7 +469,7 @@ private fun SmsFromNumberSelector(
         )
         Box(modifier = Modifier.weight(1f)) {
             Button(
-                onClick = { showMenu = true },
+                onClick = { feedback(); showMenu = true },
                 modifier = Modifier.fillMaxWidth().height(36.dp),
                 shape = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp),
@@ -497,6 +500,7 @@ private fun SmsFromNumberSelector(
                         )
                     },
                     onClick = {
+                        feedback()
                         showMenu = false
                         onSelectFromNumber(null)
                     }
@@ -511,6 +515,7 @@ private fun SmsFromNumberSelector(
                             )
                         },
                         onClick = {
+                            feedback()
                             showMenu = false
                             onSelectFromNumber(line.number)
                         }
@@ -530,6 +535,7 @@ private fun SmsModelSelector(
 ) {
     var showProviderMenu by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
+    val feedback = rememberPressFeedback()
 
     val providerDisplay = providers.find { it.first == smsProvider }?.second ?: smsProvider
     val models = Constants.MODEL_CONFIG[smsProvider] ?: emptyList()
@@ -555,7 +561,7 @@ private fun SmsModelSelector(
             // Provider dropdown
             Box(modifier = Modifier.weight(1f)) {
                 Button(
-                    onClick = { showProviderMenu = true },
+                    onClick = { feedback(); showProviderMenu = true },
                     modifier = Modifier.fillMaxWidth().height(40.dp),
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp),
@@ -587,6 +593,7 @@ private fun SmsModelSelector(
                                 )
                             },
                             onClick = {
+                                feedback()
                                 showProviderMenu = false
                                 // When provider changes, pick the first model for that provider
                                 val newModels = Constants.MODEL_CONFIG[id] ?: emptyList()
@@ -601,7 +608,7 @@ private fun SmsModelSelector(
             // Model dropdown
             Box(modifier = Modifier.weight(1f)) {
                 Button(
-                    onClick = { showModelMenu = true },
+                    onClick = { feedback(); showModelMenu = true },
                     modifier = Modifier.fillMaxWidth().height(40.dp),
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp),
@@ -633,6 +640,7 @@ private fun SmsModelSelector(
                                 )
                             },
                             onClick = {
+                                feedback()
                                 showModelMenu = false
                                 onProviderModelChange(smsProvider, modelId)
                             }

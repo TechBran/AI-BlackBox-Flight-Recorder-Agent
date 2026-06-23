@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.aiblackbox.portal.data.api.BlackBoxApi
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -632,6 +633,7 @@ private fun TerminalTopBar(
     onBack: () -> Unit,
     onShowKeyboard: () -> Unit = {},
 ) {
+    val feedback = rememberPressFeedback()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -639,7 +641,7 @@ private fun TerminalTopBar(
             .padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onBack) {
+        TextButton(onClick = { feedback(); onBack() }) {
             Text(
                 text = "‹",
                 color = BbxWhite,
@@ -658,7 +660,7 @@ private fun TerminalTopBar(
         )
         // Explicit "show keyboard" button — fallback when tap-on-terminal
         // doesn't pop the IME (e.g. focus already held elsewhere).
-        TextButton(onClick = onShowKeyboard) {
+        TextButton(onClick = { feedback(); onShowKeyboard() }) {
             Text(
                 text = "⌨",
                 color = BbxWhite,

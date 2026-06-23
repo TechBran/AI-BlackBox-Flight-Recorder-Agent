@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.data.model.CliAgentApp
 import com.aiblackbox.portal.data.model.CliAgentSessionEntry
 import com.aiblackbox.portal.data.model.CliAgentProvider
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import kotlinx.coroutines.launch
 
 private val LiveDotColor = Color(0xFF27D980)   // Solid green — matches theme.SolidGreen
@@ -123,6 +124,7 @@ fun AppFolderPicker(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val feedback = rememberPressFeedback()
 
     var loading by remember { mutableStateOf(true) }
     var rows by remember { mutableStateOf(emptyList<AppRowState>()) }
@@ -257,6 +259,7 @@ fun AppFolderPicker(
             },
             confirmButton = {
                 TextButton(onClick = {
+                    feedback()
                     val toKill = confirm
                     killTarget = null
                     val sessionId = cliAgentSessionId(
@@ -300,7 +303,7 @@ fun AppFolderPicker(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { killTarget = null }) {
+                TextButton(onClick = { feedback(); killTarget = null }) {
                     Text("Cancel")
                 }
             },

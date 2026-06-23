@@ -48,6 +48,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import com.aiblackbox.portal.data.local.LiteRtEngine
 import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.LocalEngineState
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -87,6 +88,7 @@ fun LocalModelSettingsScreen(
     viewModel: ChatViewModel,
 ) {
     val context = LocalContext.current
+    val feedback = rememberPressFeedback()
     val engineState by viewModel.localEngineState.collectAsState()
 
     // Pre-fill from the ACTIVE model's persisted config (seam:
@@ -205,6 +207,7 @@ fun LocalModelSettingsScreen(
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = {
+                    feedback()
                     // Seam: persists the sampler trio AND re-warms (maxTokens=null
                     // leaves the window unchanged). Blank/unparseable fields fall back
                     // to the engine sampler defaults via resolveSampler.
@@ -240,6 +243,7 @@ fun LocalModelSettingsScreen(
                 Switch(
                     checked = autoWarm,
                     onCheckedChange = {
+                        feedback()
                         autoWarm = it
                         viewModel.setAutoWarmEnabled(it) // seam: LocalWarmPrefs
                     },
@@ -277,7 +281,7 @@ fun LocalModelSettingsScreen(
                 modifier = Modifier.padding(bottom = 10.dp),
             )
             Button(
-                onClick = { showClearConfirm = true },
+                onClick = { feedback(); showClearConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
                 shape = RoundedCornerShape(RadiusSm),
@@ -301,6 +305,7 @@ fun LocalModelSettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
+                    feedback()
                     showClearConfirm = false
                     viewModel.clearLocalConversation() // seam
                 }) {
@@ -308,7 +313,7 @@ fun LocalModelSettingsScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) {
+                TextButton(onClick = { feedback(); showClearConfirm = false }) {
                     Text("Cancel", color = Neutral500)
                 }
             },

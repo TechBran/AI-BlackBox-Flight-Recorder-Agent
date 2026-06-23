@@ -15,6 +15,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -380,7 +382,7 @@ private fun RoboticsHeader(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onToggleExpand() }
+                .clickFeedback { onToggleExpand() }
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -432,11 +434,12 @@ private fun CameraSelector(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val displayName = CAMERAS.find { it.first == selected }?.second ?: selected
+    val feedback = rememberPressFeedback()
 
     Box {
         FilterChip(
             selected = true,
-            onClick = { expanded = true },
+            onClick = { feedback(); expanded = true },
             label = {
                 Text(
                     text = displayName,
@@ -470,6 +473,7 @@ private fun CameraSelector(
                         )
                     },
                     onClick = {
+                        feedback()
                         onChange(id)
                         expanded = false
                     }
@@ -653,12 +657,13 @@ private fun ControlsRow(
     onTogglePolling: () -> Unit,
     onRefresh: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Button(
-            onClick = onTogglePolling,
+            onClick = { feedback(); onTogglePolling() },
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (isPolling) RobotRed.copy(alpha = 0.2f) else RobotGreenBg,
                 contentColor = if (isPolling) RobotRed else RobotGreen
@@ -673,7 +678,7 @@ private fun ControlsRow(
         }
 
         OutlinedButton(
-            onClick = onRefresh,
+            onClick = { feedback(); onRefresh() },
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.weight(1f),
             colors = ButtonDefaults.outlinedButtonColors(

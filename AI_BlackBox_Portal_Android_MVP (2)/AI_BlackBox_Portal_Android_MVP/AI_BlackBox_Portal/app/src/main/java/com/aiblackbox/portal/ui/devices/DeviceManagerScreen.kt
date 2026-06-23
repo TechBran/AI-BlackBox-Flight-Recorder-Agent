@@ -1,6 +1,5 @@
 package com.aiblackbox.portal.ui.devices
 
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -61,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.model.Device
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -142,7 +143,7 @@ fun DeviceManagerScreen(
                     // Sync Tailscale button
                     Button(
                         onClick = {
-                            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                            view.performPressFeedback()
                             viewModel.syncTailscale()
                         },
                         enabled = !isSyncing,
@@ -168,7 +169,7 @@ fun DeviceManagerScreen(
                     }
                     // Refresh button
                     IconButton(onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        view.performPressFeedback()
                         viewModel.loadDevices()
                     }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = BbxDim)
@@ -183,7 +184,6 @@ fun DeviceManagerScreen(
                 onSearchChange = { viewModel.setSearchQuery(it) },
                 typeFilter = typeFilter,
                 onFilterChange = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     viewModel.setTypeFilter(it)
                 }
             )
@@ -213,19 +213,15 @@ fun DeviceManagerScreen(
                             device = device,
                             isAdbConnected = viewModel.isAdbConnected(device),
                             onConnect = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.adbConnect(device.id)
                             },
                             onDisconnect = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.adbDisconnect(device.id)
                             },
                             onHealth = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                                 viewModel.checkHealth(device.id)
                             },
                             onRemove = {
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 viewModel.requestRemove(device.id)
                             }
                         )
@@ -248,14 +244,14 @@ fun DeviceManagerScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.confirmRemove()
                 }) {
                     Text("Remove", color = StatusOfflineRed)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.cancelRemove() }) {
+                TextButton(onClick = { view.performPressFeedback(); viewModel.cancelRemove() }) {
                     Text("Cancel", color = BbxDim)
                 }
             },
@@ -305,6 +301,7 @@ private fun DeviceSearchFilterBar(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DeviceTypeDropdown(selected: String, onSelect: (String) -> Unit) {
+    val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
     val options = listOf(
         "all" to "All Types",
@@ -339,7 +336,7 @@ private fun DeviceTypeDropdown(selected: String, onSelect: (String) -> Unit) {
             options.forEach { (value, label) ->
                 DropdownMenuItem(
                     text = { Text(label, color = Neutral900) },
-                    onClick = { onSelect(value); expanded = false }
+                    onClick = { feedback(); onSelect(value); expanded = false }
                 )
             }
         }
@@ -573,7 +570,7 @@ private fun DeviceActionButton(
     val view = LocalView.current
     Button(
         onClick = {
-            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            view.performPressFeedback()
             onClick()
         },
         colors = ButtonDefaults.buttonColors(

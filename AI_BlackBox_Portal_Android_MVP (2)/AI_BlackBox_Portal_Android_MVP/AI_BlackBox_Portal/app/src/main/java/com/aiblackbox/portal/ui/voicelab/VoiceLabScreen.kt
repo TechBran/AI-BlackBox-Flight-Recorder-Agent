@@ -15,6 +15,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -260,7 +262,6 @@ private fun CloneZone(
                 amplitude = amplitude,
                 onClick = {
                     if (!cloningEnabled) return@RecordButton
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     if (isRecording) {
                         viewModel.stopRecording()
                     } else {
@@ -277,7 +278,6 @@ private fun CloneZone(
                 label = "Upload",
                 enabled = cloningEnabled && !isRecording,
                 onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     filePicker.launch("audio/*")
                 },
             )
@@ -306,7 +306,7 @@ private fun CloneZone(
                         modifier = Modifier
                             .size(28.dp)
                             .clip(CircleShape)
-                            .clickable(enabled = cloneState != CloneState.SUBMITTING) {
+                            .clickFeedback(enabled = cloneState != CloneState.SUBMITTING) {
                                 viewModel.removeClonePart(idx)
                             },
                         contentAlignment = Alignment.Center,
@@ -347,7 +347,7 @@ private fun CloneZone(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(
                 checked = removeNoise,
-                onCheckedChange = { removeNoise = it },
+                onCheckedChange = { view.performPressFeedback(); removeNoise = it },
                 enabled = cloningEnabled,
                 colors = SwitchDefaults.colors(
                     checkedTrackColor = SolidGreen,
@@ -380,7 +380,6 @@ private fun CloneZone(
             enabled = canSubmit,
             loading = cloneState == CloneState.SUBMITTING,
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.submitClone(name, description, removeNoise, consent)
             },
         )
@@ -413,7 +412,7 @@ private fun RecordButton(
             .clip(RoundedCornerShape(RadiusMd))
             .background(if (enabled) bg else Neutral100)
             .border(1.dp, if (enabled) border else Neutral300, RoundedCornerShape(RadiusMd))
-            .clickable(enabled = enabled) { onClick() }
+            .clickFeedback(enabled = enabled) { onClick() }
             .padding(horizontal = 16.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -444,7 +443,7 @@ private fun ConsentRow(checked: Boolean, enabled: Boolean, onToggle: () -> Unit)
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(RadiusSm))
-            .clickable(enabled = enabled) { onToggle() }
+            .clickFeedback(enabled = enabled) { onToggle() }
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -508,7 +507,6 @@ private fun DesignZone(viewModel: VoiceLabViewModel, view: android.view.View) {
             enabled = description.isNotBlank() && designState != DesignState.GENERATING && designState != DesignState.SAVING,
             loading = designState == DesignState.GENERATING,
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.design(description, sampleText)
             },
         )
@@ -592,7 +590,6 @@ private fun DesignPreviewCard(
                 label = "Use this",
                 enabled = !saving,
                 onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                     expanded = true
                 },
             )
@@ -618,7 +615,6 @@ private fun DesignPreviewCard(
                 enabled = saveName.isNotBlank() && !saving,
                 loading = saving,
                 onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     onSave(saveName, saveDesc)
                 },
             )
@@ -658,7 +654,6 @@ private fun BrowseLibraryZone(viewModel: VoiceLabViewModel, view: android.view.V
             enabled = query.isNotBlank() && !searching,
             loading = searching,
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.searchLibrary(query)
             },
         )
@@ -687,7 +682,6 @@ private fun BrowseLibraryZone(viewModel: VoiceLabViewModel, view: android.view.V
                     adding = addingId == voice.voiceId,
                     addDisabled = addingId != null,
                     onAdd = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                         viewModel.addLibraryVoice(voice)
                     },
                 )
@@ -774,8 +768,7 @@ private fun ManageZone(viewModel: VoiceLabViewModel, view: android.view.View) {
                 modifier = Modifier
                     .size(34.dp)
                     .clip(CircleShape)
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    .clickFeedback {
                         viewModel.loadVoices()
                     },
                 contentAlignment = Alignment.Center,
@@ -816,7 +809,7 @@ private fun ManageZone(viewModel: VoiceLabViewModel, view: android.view.View) {
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .clickable { confirmDelete = voice },
+                            .clickFeedback { confirmDelete = voice },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = BbxRed, modifier = Modifier.size(20.dp))
@@ -833,13 +826,13 @@ private fun ManageZone(viewModel: VoiceLabViewModel, view: android.view.View) {
             text = { Text("Delete \"${voice.name}\"? This cannot be undone.", color = BbxDim) },
             confirmButton = {
                 TextButton(onClick = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.deleteVoice(voice.id)
                     confirmDelete = null
                 }) { Text("Delete", color = BbxRed) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = null }) { Text("Cancel", color = BbxDim) }
+                TextButton(onClick = { view.performPressFeedback(); confirmDelete = null }) { Text("Cancel", color = BbxDim) }
             },
             containerColor = Neutral100,
             tonalElevation = 0.dp,
@@ -917,7 +910,7 @@ private fun PrimaryButton(
             .fillMaxWidth()
             .clip(RoundedCornerShape(RadiusMd))
             .background(if (enabled) BbxAccent else Neutral200)
-            .clickable(enabled = enabled) { onClick() }
+            .clickFeedback(enabled = enabled) { onClick() }
             .padding(vertical = 13.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -943,7 +936,7 @@ private fun PillAction(label: String, enabled: Boolean, onClick: () -> Unit) {
             .clip(RoundedCornerShape(RadiusMd))
             .background(if (enabled) Neutral200 else Neutral100)
             .border(1.dp, Neutral300, RoundedCornerShape(RadiusMd))
-            .clickable(enabled = enabled) { onClick() }
+            .clickFeedback(enabled = enabled) { onClick() }
             .padding(horizontal = 16.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {

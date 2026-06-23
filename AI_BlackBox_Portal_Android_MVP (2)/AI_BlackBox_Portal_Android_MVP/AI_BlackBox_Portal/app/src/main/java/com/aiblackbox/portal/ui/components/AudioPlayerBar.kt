@@ -13,6 +13,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -153,8 +154,7 @@ fun AudioPlayerBar(
                 .size(34.dp)
                 .clip(CircleShape)
                 .background(playBtnBg)
-                .clickable {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                .clickFeedback {
                     if (!isThisActive) mgr.loadAndPlay(audioUrl)
                     else mgr.togglePlayPause()
                 },

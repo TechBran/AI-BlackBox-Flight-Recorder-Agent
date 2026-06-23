@@ -16,6 +16,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -228,7 +229,7 @@ fun HomeScreen(modifier: Modifier = Modifier) {
                             if (isActive) BbxAccent
                             else BbxAccent.copy(alpha = 0.25f)
                         )
-                        .clickable { activeIndex = index }
+                        .clickFeedback { activeIndex = index }
                 )
             }
         }

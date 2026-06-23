@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -570,7 +571,7 @@ class NativeMainActivity : ComponentActivity() {
                                     androidx.compose.ui.graphics.Color(0x33FFFFFF),
                                     androidx.compose.foundation.shape.CircleShape
                                 )
-                                .clickable {
+                                .clickFeedback {
                                     navController.popBackStack(Routes.CHAT, inclusive = false)
                                 },
                             contentAlignment = Alignment.Center

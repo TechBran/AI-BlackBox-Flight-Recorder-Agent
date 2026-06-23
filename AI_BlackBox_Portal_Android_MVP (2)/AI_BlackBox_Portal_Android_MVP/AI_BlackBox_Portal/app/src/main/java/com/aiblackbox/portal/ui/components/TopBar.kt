@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -126,7 +127,7 @@ fun BlackBoxTopBar(
                         ),
                         color = BbxAccent,
                         modifier = Modifier
-                            .clickable { showOperatorMenu = true }
+                            .clickFeedback { showOperatorMenu = true }
                             .padding(horizontal = 8.dp, vertical = 14.dp)
                     )
                     DropdownMenu(
@@ -187,7 +188,7 @@ fun BlackBoxTopBar(
                     style = MaterialTheme.typography.titleMedium,
                     color = BbxAccent,
                     modifier = Modifier
-                        .clickable { onMenuClick() }
+                        .clickFeedback { onMenuClick() }
                         .padding(horizontal = 14.dp, vertical = 14.dp)
                 )
             }

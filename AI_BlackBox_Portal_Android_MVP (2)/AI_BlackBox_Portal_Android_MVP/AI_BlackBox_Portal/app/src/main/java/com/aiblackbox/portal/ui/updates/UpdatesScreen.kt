@@ -4,7 +4,6 @@ package com.aiblackbox.portal.ui.updates
 
 import android.content.Intent
 import android.net.Uri
-import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -58,6 +57,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.data.model.EmbeddingsJob
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
 import com.aiblackbox.portal.data.model.UpdateCommit
@@ -143,7 +144,7 @@ fun UpdatesScreen(
                 Text("Updates", style = MaterialTheme.typography.headlineMedium, color = BbxWhite)
                 Button(
                     onClick = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.refreshStatus(forceFresh = true)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
@@ -160,7 +161,7 @@ fun UpdatesScreen(
                 is UpdatesUiState.Error -> StatusCard("Error", s.message, ErrRed)
                 is UpdatesUiState.GitNotInitialized -> GitNotInitializedCard(
                     onInit = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.refreshStatus(forceFresh = true)
                     },
                 )
@@ -173,7 +174,7 @@ fun UpdatesScreen(
                 is UpdatesUiState.UpdatesAvailable -> UpdatesAvailableCard(
                     s.status,
                     onInstall = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.startUpdate()
                     },
                 )
@@ -185,14 +186,14 @@ fun UpdatesScreen(
                 is UpdatesUiState.Failed -> FailedCard(
                     s.lastState,
                     onRollback = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.rollback()
                     },
                 )
                 is UpdatesUiState.Interrupted -> InterruptedCard(
                     s.lastState,
                     onRollback = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.rollback()
                     },
                 )
@@ -207,11 +208,11 @@ fun UpdatesScreen(
                     status = emb,
                     updateInFlight = embeddingsUpdateInFlight,
                     onUpdate = { slug ->
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         viewModel.startEmbeddingsMigration(slug)
                     },
                     onManage = {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        view.performPressFeedback()
                         context.startActivity(
                             Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))
                         )
@@ -644,6 +645,7 @@ private fun LogModal(
     restartLabel: String?,
     onClose: () -> Unit,
 ) {
+    val feedback = rememberPressFeedback()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onClose,
@@ -691,7 +693,7 @@ private fun LogModal(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
+            TextButton(onClick = { feedback(); onClose() }, modifier = Modifier.align(Alignment.End)) {
                 Text("Close", color = BbxAccent)
             }
         }

@@ -7,6 +7,8 @@ import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -140,7 +142,7 @@ fun ChatBubble(
 
                 Row(
                     modifier = Modifier
-                        .clickable { showThinking = !showThinking },
+                        .clickFeedback { showThinking = !showThinking },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -236,7 +238,7 @@ fun ChatBubble(
                                         .height(180.dp)
                                         .clip(RoundedCornerShape(RadiusMd))
                                         .background(Color(0xFF111111))
-                                        .clickable {
+                                        .clickFeedback {
                                             try {
                                                 val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
                                                     setDataAndType(android.net.Uri.parse(media.url), "video/*")
@@ -403,9 +405,8 @@ fun ChatBubble(
                             .size(34.dp)
                             .background(speakBg, RoundedCornerShape(RadiusMd))
                             .border(1.dp, speakBorder, RoundedCornerShape(RadiusMd))
-                            .clickable {
+                            .clickFeedback {
                                 android.util.Log.d("ChatBubble", "TTS BUTTON TAPPED: msg=${message.id.take(8)}, hasTts=$hasTtsAudio, generating=$isTtsGenerating")
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 if (hasTtsAudio) {
                                     com.aiblackbox.portal.data.voice.AudioPlaybackManager.loadAndPlay(message.ttsAudioUrl!!)
                                 } else {
@@ -444,9 +445,8 @@ fun ChatBubble(
                             .size(34.dp)
                             .background(copyBg, RoundedCornerShape(RadiusMd))
                             .border(1.dp, copyBorder, RoundedCornerShape(RadiusMd))
-                            .clickable {
+                            .clickFeedback {
                                 android.util.Log.d("ChatBubble", "COPY BUTTON TAPPED: msg=${message.id.take(8)}")
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 clipboardManager.setText(AnnotatedString(message.content))
                                 isCopied = true
                             },
@@ -486,7 +486,7 @@ private fun BubbleActionButton(
             .size(34.dp)
             .clip(RoundedCornerShape(RadiusMd))
             .background(Color(0x0DFFFFFF)) // rgba(255,255,255,0.05)
-            .clickable(onClick = onClick),
+            .clickFeedback(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         content()
@@ -508,6 +508,7 @@ private fun formatTime(timestamp: Long): String {
 @Composable
 private fun ArtifactChips(artifacts: List<ArtifactRef>) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val feedback = rememberPressFeedback()
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         artifacts.forEach { artifact ->
             val sizeLabel = formatSizeKb(artifact.sizeKb)
@@ -518,6 +519,7 @@ private fun ArtifactChips(artifacts: List<ArtifactRef>) {
             }
             AssistChip(
                 onClick = {
+                    feedback()
                     val fullUrl = if (artifact.url.startsWith("http")) artifact.url
                         else "${_cachedBaseUrl}${artifact.url}"
                     try {

@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.ZellijSessionRow
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import android.widget.Toast
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -103,6 +104,7 @@ fun SessionSwitcherTopBar(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val feedback = rememberPressFeedback()
 
     var dropdownExpanded by remember { mutableStateOf(false) }
     var shortcutsExpanded by remember { mutableStateOf(false) }
@@ -144,7 +146,7 @@ fun SessionSwitcherTopBar(
         ) {
             // ── Hamburger ──
             IconButton(
-                onClick = onOpenNavDrawer,
+                onClick = { feedback(); onOpenNavDrawer() },
                 modifier = Modifier.size(40.dp),
             ) {
                 Icon(
@@ -193,7 +195,7 @@ fun SessionSwitcherTopBar(
             // ── Chevron ──
             Box {
                 IconButton(
-                    onClick = { dropdownExpanded = true },
+                    onClick = { feedback(); dropdownExpanded = true },
                     modifier = Modifier.size(40.dp),
                 ) {
                     Icon(
@@ -270,6 +272,7 @@ fun SessionSwitcherTopBar(
                         },
                         enabled = !terminalInFlight,
                         onClick = {
+                            feedback()
                             // Keep menu open while in-flight so the spinner is visible.
                             onLaunchProvider("terminal")
                         },
@@ -291,7 +294,7 @@ fun SessionSwitcherTopBar(
                                     contentDescription = null,
                                 )
                             },
-                            onClick = { shortcutsExpanded = true },
+                            onClick = { feedback(); shortcutsExpanded = true },
                         )
                         DropdownMenu(
                             expanded = shortcutsExpanded,
@@ -309,6 +312,7 @@ fun SessionSwitcherTopBar(
                                     },
                                     enabled = !busy,
                                     onClick = {
+                                        feedback()
                                         onLaunchProvider(providerSlug)
                                     },
                                 )
@@ -342,12 +346,13 @@ fun SessionSwitcherTopBar(
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = {
+                    feedback()
                     onKillSession(row)
                     pendingKill = null
                 }) { Text("Kill") }
             },
             dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { pendingKill = null }) {
+                androidx.compose.material3.TextButton(onClick = { feedback(); pendingKill = null }) {
                     Text("Cancel")
                 }
             },
@@ -385,6 +390,7 @@ private fun SessionRowMenuItem(
     onClick: () -> Unit,
     onKillClick: () -> Unit,
 ) {
+    val feedback = rememberPressFeedback()
     DropdownMenuItem(
         text = {
             Row(
@@ -419,7 +425,7 @@ private fun SessionRowMenuItem(
                 )
                 Spacer(Modifier.width(4.dp))
                 IconButton(
-                    onClick = onKillClick,
+                    onClick = { feedback(); onKillClick() },
                     modifier = Modifier.size(36.dp),
                 ) {
                     Icon(
@@ -430,7 +436,7 @@ private fun SessionRowMenuItem(
                 }
             }
         },
-        onClick = onClick,
+        onClick = { feedback(); onClick() },
     )
 }
 

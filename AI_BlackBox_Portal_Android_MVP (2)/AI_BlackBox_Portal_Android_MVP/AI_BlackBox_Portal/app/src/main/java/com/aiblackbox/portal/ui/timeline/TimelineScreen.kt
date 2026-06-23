@@ -5,6 +5,8 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import com.aiblackbox.portal.ui.feedback.clickFeedback
+import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -154,8 +156,7 @@ fun TimelineScreen(
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(BbxAccent)
-                    .clickable {
-                        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    .clickFeedback {
                         if (searchQuery.isNotBlank()) {
                             viewModel.search(searchQuery, selectedOperator.ifBlank { null })
                         } else {
@@ -175,8 +176,7 @@ fun TimelineScreen(
                     modifier = Modifier
                         .clip(RoundedCornerShape(RadiusMd))
                         .background(Neutral200)
-                        .clickable {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        .clickFeedback {
                             showOperatorFilter = true
                         }
                         .padding(horizontal = 10.dp, vertical = 10.dp)
@@ -194,6 +194,7 @@ fun TimelineScreen(
                     DropdownMenuItem(
                         text = { Text("All Operators", color = if (selectedOperator.isBlank()) BbxAccent else BbxWhite) },
                         onClick = {
+                            view.performPressFeedback()
                             selectedOperator = ""
                             showOperatorFilter = false
                             viewModel.loadRecent(operator)
@@ -203,6 +204,7 @@ fun TimelineScreen(
                         DropdownMenuItem(
                             text = { Text(op, color = if (selectedOperator == op) BbxAccent else BbxWhite) },
                             onClick = {
+                                view.performPressFeedback()
                                 selectedOperator = op
                                 showOperatorFilter = false
                                 viewModel.loadRecent(op)
@@ -243,11 +245,10 @@ fun TimelineScreen(
                 fullContent = fullContent,
                 isLoading = isLoadingContent,
                 onBack = {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     viewModel.selectSnapshot(null)
                 },
                 onSnapIdClick = { snapId ->
-                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    view.performPressFeedback()
                     viewModel.navigateToSnapshot(snapId)
                 }
             )
@@ -266,7 +267,6 @@ fun TimelineScreen(
                 ) {
                     items(results, key = { it.snapId }) { snap ->
                         SnapshotCard(snap) {
-                            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                             viewModel.selectSnapshot(snap)
                         }
                     }
@@ -298,7 +298,7 @@ private fun SnapshotCard(snapshot: SnapshotResult, onClick: () -> Unit) {
             .offset(x = offsetX)
             .glassSurface(shape = RoundedCornerShape(RadiusMd), bg = Neutral100)
             .border(1.dp, borderColor, RoundedCornerShape(RadiusMd))
-            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+            .clickFeedback(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(14.dp)
     ) {
         // Header: Snap ID + Operator badge
@@ -383,7 +383,7 @@ private fun SnapshotDetail(
             modifier = Modifier
                 .clip(RoundedCornerShape(RadiusMd))
                 .background(Neutral200)
-                .clickable(onClick = onBack)
+                .clickFeedback(onClick = onBack)
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

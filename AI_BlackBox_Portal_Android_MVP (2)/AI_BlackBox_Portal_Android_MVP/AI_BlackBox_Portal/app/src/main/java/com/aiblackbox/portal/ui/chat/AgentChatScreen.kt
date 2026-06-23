@@ -66,6 +66,7 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.ClaudeAccent
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
@@ -652,23 +653,18 @@ fun AgentChatScreen(
             duration = duration,
             permissionMode = PERMISSION_MODES[permissionModeIdx],
             onModelChange = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.setModel(it)
             },
             onNewSession = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.newSession()
             },
             onSnapshot = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.triggerSnapshot()
             },
             onEndSession = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.endSession()
             },
             onPermissionModeChange = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.cyclePermissionMode()
             },
             accentColor = bannerAccent,
@@ -738,11 +734,9 @@ fun AgentChatScreen(
         PermissionDialog(
             request = req,
             onApprove = {
-                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 viewModel.respondPermission(true)
             },
             onDeny = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 viewModel.respondPermission(false)
             }
         )
@@ -903,6 +897,7 @@ private fun PermissionDialog(
     onApprove: () -> Unit,
     onDeny: () -> Unit
 ) {
+    val feedback = rememberPressFeedback()
     AlertDialog(
         onDismissRequest = onDeny,
         containerColor = Neutral100,
@@ -982,7 +977,7 @@ private fun PermissionDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onApprove) {
+            TextButton(onClick = { feedback(); onApprove() }) {
                 Text(
                     "Allow",
                     color = SolidGreen,
@@ -993,7 +988,7 @@ private fun PermissionDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDeny) {
+            TextButton(onClick = { feedback(); onDeny() }) {
                 Text(
                     "Deny",
                     color = BbxAccent,
