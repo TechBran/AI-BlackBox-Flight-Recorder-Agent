@@ -300,11 +300,8 @@ async function fetchJson(url) {
     }
 }
 
-// CSS.escape isn't guaranteed in every embedded webview; our provider ids are
-// [a-z_] so a minimal escape is enough for the attribute selectors above.
-function cssEscape(s) {
-    return String(s).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-}
+// cssEscape is the shared pure helper in ../util.js (de-duped across steps).
+import { cssEscape } from "../util.js";
 
 function escapeHtml(s) {
     if (s == null) return "";
