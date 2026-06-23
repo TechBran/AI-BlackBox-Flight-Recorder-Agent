@@ -2409,6 +2409,16 @@ body::after {
 .ob-cli-agent-card[data-state="needs-auth"] { border-left-color: rgba(255, 180, 50, 0.7); }
 .ob-cli-agent-card[data-state="ready"]      { border-left-color: rgba(80, 200, 100, 0.7); background: rgba(80, 200, 100, 0.04); }
 
+/* User-picked card highlight (radio-card selection). Replaces the inline
+ * SELECTED_STYLE literal that was duplicated in embeddings.js +
+ * transcription.js. data-state colors the LEFT border (capability state);
+ * this accent ring means "you chose this one". */
+.ob-cli-agent-card.ob-card-selected {
+    border-color: var(--ob-accent);
+    box-shadow: 0 0 0 1px var(--ob-accent), var(--ob-accent-glow);
+    background: var(--ob-accent-soft);
+}
+
 .ob-cli-agent-head {
     display: flex;
     justify-content: space-between;

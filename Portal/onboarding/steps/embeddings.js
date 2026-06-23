@@ -39,11 +39,7 @@
 // Reuses the .ob-cli-agent-* card/badge CSS plus thin ob-emb-* additions
 // (grid sizing, freshness lines, progress bar, banners) in onboarding.css.
 
-// Inline highlight for the selected card — same idiom as transcription.js.
-const SELECTED_STYLE =
-    "border-color: var(--ob-accent, #cc0000); " +
-    "box-shadow: 0 0 0 1px var(--ob-accent, #cc0000), var(--ob-accent-glow, 0 0 24px rgba(204,0,0,0.16)); " +
-    "background: rgba(204, 0, 0, 0.05);";
+// Selected-card highlight is the shared .ob-card-selected class (onboarding.css).
 
 const POLL_MS = 2000;
 
@@ -332,12 +328,12 @@ function renderCard(m) {
         : "";
 
     const dataState = m.ready || isActive ? "ready" : "needs-auth";
-    const styleAttr = isSelected ? ` style="${SELECTED_STYLE}"` : "";
+    const selectedClass = isSelected ? " ob-card-selected" : "";
 
     return `
-        <div class="ob-cli-agent-card" data-slug="${escapeHtml(m.slug)}"
+        <div class="ob-cli-agent-card${selectedClass}" data-slug="${escapeHtml(m.slug)}"
              data-state="${dataState}" role="radio"
-             aria-checked="${isSelected ? "true" : "false"}" tabindex="0"${styleAttr}>
+             aria-checked="${isSelected ? "true" : "false"}" tabindex="0">
             <div class="ob-cli-agent-head">
                 <div class="ob-cli-agent-title">
                     <span class="ob-cli-agent-name">${escapeHtml(m.label)}${isSelected ? " &check;" : ""}</span>

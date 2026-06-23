@@ -50,10 +50,7 @@ const PROVIDERS = [
 // Inline highlight for the selected card. The shared stylesheet only ships
 // per-data-state border colors (ready/needs-auth/missing) — none of which mean
 // "user picked this", so we layer a thin accent ring inline.
-const SELECTED_STYLE =
-    "border-color: var(--ob-accent, #cc0000); " +
-    "box-shadow: 0 0 0 1px var(--ob-accent, #cc0000), var(--ob-accent-glow, 0 0 24px rgba(204,0,0,0.16)); " +
-    "background: rgba(204, 0, 0, 0.05);";
+// Selected-card highlight is the shared .ob-card-selected class (onboarding.css).
 
 let catalog = null;       // {providers, resolved, default}
 let selected = "";        // currently-chosen provider id ("" == auto)
@@ -190,12 +187,12 @@ function renderCard(cat, meta) {
         : `<p class="ob-cli-agent-auth-blurb">${escapeHtml(meta.needsHint)}</p>`;
 
     const dataState = available ? "ready" : "needs-auth";
-    const styleAttr = isSelected ? ` style="${SELECTED_STYLE}"` : "";
+    const selectedClass = isSelected ? " ob-card-selected" : "";
 
     return `
-        <div class="ob-cli-agent-card" data-provider="${escapeHtml(id)}"
+        <div class="ob-cli-agent-card${selectedClass}" data-provider="${escapeHtml(id)}"
              data-state="${dataState}" role="radio"
-             aria-checked="${isSelected ? "true" : "false"}" tabindex="0"${styleAttr}>
+             aria-checked="${isSelected ? "true" : "false"}" tabindex="0">
             <div class="ob-cli-agent-head">
                 <div class="ob-cli-agent-title">
                     <span class="ob-cli-agent-name">${escapeHtml(label)}${isSelected ? " &check;" : ""}</span>
