@@ -32,7 +32,6 @@ from fastapi import HTTPException
 from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
 from Orchestrator.checkpoint import create_checkpoint_async, perform_mint, should_create_checkpoint
 from Orchestrator.config import ANTHROPIC_MODEL_DEFAULT, AUTO_ENABLE, CFG, CURRENT_OPERATOR, DEBOUNCE_MS, DEFAULT_PROVIDER, GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_IMAGEN_MODEL, GOOGLE_VEO_MODEL, ON_RED, ON_YELLOW, OPENAI_MODEL_DEFAULT, TOOLVAULT_ENABLED, TOKENS_THRESHOLD, TURNS_THRESHOLD, UPLOADS_DIR, USERS_DEFAULT, VOL_PATH, XAI_MODEL_DEFAULT
-from Orchestrator.behavioral_core import BEHAVIORAL_CORE_CHAT
 from Orchestrator.fossils import extract_snap_ids, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve, _extract_terms, _generate_ngrams
 from Orchestrator.monitoring import drift_state_for, extract_plan
 from Orchestrator.startup import ChatIn, GeminiProTTSIn, GoogleSSMLIn, LyriaMusicIn

@@ -84,9 +84,9 @@ from enum import Enum
 # Dual import form: fully-qualified when loaded as Orchestrator.config,
 # bare fallback when loaded standalone (some test paths do this).
 try:
-    from Orchestrator.behavioral_core import BEHAVIORAL_CORE_CHAT
+    from Orchestrator.behavioral_core import DEFAULT_PERSONA_CHAT
 except ImportError:
-    from behavioral_core import BEHAVIORAL_CORE_CHAT
+    from behavioral_core import DEFAULT_PERSONA_CHAT
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSONResponse, Response
@@ -320,10 +320,12 @@ OUTPUT_SPEC_TOOLS_STATIC = (
     "  Before making calls or sending texts, always search_contacts first.\n"
 )
 
-# Assemble the default OUTPUT_SPEC with behavioral core prepended so tone and
-# anti-sycophancy guidance is established before the JSON format spec.
+# Assemble the default OUTPUT_SPEC with the lean default persona prepended so
+# tone guidance is established before the format/tool spec. (Per-operator
+# personas are resolved at request time via behavioral_core.get_persona; this
+# module-level constant uses the lean default.)
 OUTPUT_SPEC = (
-    BEHAVIORAL_CORE_CHAT
+    DEFAULT_PERSONA_CHAT
     + "\n\n"
     + OUTPUT_SPEC_CORE.replace("{TOOL_INSTRUCTIONS}", OUTPUT_SPEC_TOOLS_STATIC)
 )
@@ -332,8 +334,9 @@ OUTPUT_SPEC = (
 def build_output_spec(tool_instructions: str = "") -> str:
     """Build the system prompt with dynamic or static tool instructions.
 
-    Behavioral core is prepended in both branches so tone guidance stays
-    consistent across ToolVault-on and ToolVault-off configurations.
+    The lean default persona is prepended in both branches so tone guidance
+    stays consistent across ToolVault-on and ToolVault-off configurations.
+    (Per-operator personas are resolved at request time via get_persona.)
 
     When TOOLVAULT_ENABLED and tool_instructions provided:
       Uses the dynamically generated instructions from the vault.
@@ -342,7 +345,7 @@ def build_output_spec(tool_instructions: str = "") -> str:
     """
     if tool_instructions:
         return (
-            BEHAVIORAL_CORE_CHAT
+            DEFAULT_PERSONA_CHAT
             + "\n\n"
             + OUTPUT_SPEC_CORE.replace("{TOOL_INSTRUCTIONS}", tool_instructions)
         )
