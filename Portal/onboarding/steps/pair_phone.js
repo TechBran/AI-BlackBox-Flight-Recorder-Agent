@@ -16,20 +16,25 @@
 // On render() entry, the previous interval (if any) is cleared so re-renders
 // (or back/skip navigation) don't leave zombie pollers.
 
-let pollRef = null;
-let activeToken = null;  // the token currently being polled — guards against stale tick races
+// Per-render poll state. Module-level singletons (pollRef/activeToken) leaked
+// across non-linear mounts; scope them per render() instead. `_active` points
+// at the most recent render's state so a NEW render can stop the OLD poller.
+let _active = null;
 
-function stopPolling() {
-    if (pollRef !== null) {
-        clearInterval(pollRef);
-        pollRef = null;
+function stopPolling(s) {
+    const st = s || _active;
+    if (st && st.pollRef !== null) {
+        clearInterval(st.pollRef);
+        st.pollRef = null;
     }
-    activeToken = null;
+    if (st) st.activeToken = null;
 }
 
 export async function render(container, { next, back, skip, sigil }) {
-    // First action: clear any zombie poller from a prior mount of this step
-    stopPolling();
+    // Supersede any prior render's poller, then install fresh per-render state.
+    stopPolling(_active);
+    const rs = { pollRef: null, activeToken: null };
+    _active = rs;
 
     container.innerHTML = `
         <section class="ob-step ob-pair-phone">
@@ -84,11 +89,11 @@ export async function render(container, { next, back, skip, sigil }) {
     `;
 
     document.getElementById("ob-pair-back").addEventListener("click", () => {
-        stopPolling();
+        stopPolling(rs);
         back();
     });
     document.getElementById("ob-pair-skip").addEventListener("click", () => {
-        stopPolling();
+        stopPolling(rs);
         skip();
     });
 
@@ -99,7 +104,7 @@ export async function render(container, { next, back, skip, sigil }) {
     // flow). If customer pairs out-of-band OR has stored credentials from
     // a prior session → click this button to mark complete.
     document.getElementById("ob-pair-mark-done").addEventListener("click", async () => {
-        stopPolling();
+        stopPolling(rs);
         // Best-effort: tell backend the step is complete so state reflects it
         try {
             await fetch("/onboarding/step/complete", {
@@ -129,16 +134,16 @@ export async function render(container, { next, back, skip, sigil }) {
     if (pairedDevices.length > 0) {
         renderAlreadyPaired(stage, pairedDevices, {
             next,
-            pairAnother: () => mintAndPoll(container, { next }),
+            pairAnother: () => mintAndPoll(container, { next }, rs),
         });
         return;
     }
 
     // No devices on record — mint a fresh pairing token + start QR/poll cycle.
-    await mintAndPoll(container, { next });
+    await mintAndPoll(container, { next }, rs);
 }
 
-async function mintAndPoll(container, { next }) {
+async function mintAndPoll(container, { next }, rs) {
     const stage = container.querySelector("#ob-pair-stage");
 
     // Mint
@@ -154,35 +159,35 @@ async function mintAndPoll(container, { next }) {
         token = data.token;
         exp = data.exp;
     } catch (e) {
-        renderError(stage, `Couldn't mint pairing token: ${escapeHtml(e.message)}`, () => mintAndPoll(container, { next }));
+        renderError(stage, `Couldn't mint pairing token: ${escapeHtml(e.message)}`, () => mintAndPoll(container, { next }, rs));
         return;
     }
 
     // Render the QR + waiting state
-    activeToken = token;
+    rs.activeToken = token;
     renderQR(stage, token, exp);
 
     // Begin polling
-    pollRef = setInterval(async () => {
+    rs.pollRef = setInterval(async () => {
         // Guard: if a new mintAndPoll cycle started (re-mint), abandon this tick
-        if (activeToken !== token) return;
+        if (rs.activeToken !== token) return;
         try {
             const r = await fetch(`/pair/status?token=${encodeURIComponent(token)}`);
             if (!r.ok) {
                 // Token gone server-side → re-mint
-                stopPolling();
-                renderExpired(stage, () => mintAndPoll(container, { next }));
+                stopPolling(rs);
+                renderExpired(stage, () => mintAndPoll(container, { next }, rs));
                 return;
             }
             const status = await r.json();
             if (status.claimed) {
-                stopPolling();
+                stopPolling(rs);
                 renderClaimed(stage, status, next);
                 return;
             }
             if (!status.exists || status.expires_in <= 0) {
-                stopPolling();
-                renderExpired(stage, () => mintAndPoll(container, { next }));
+                stopPolling(rs);
+                renderExpired(stage, () => mintAndPoll(container, { next }, rs));
                 return;
             }
             // Still waiting — update countdown
