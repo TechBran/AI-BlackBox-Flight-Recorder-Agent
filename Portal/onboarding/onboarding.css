@@ -1793,6 +1793,47 @@ body::after {
     margin-top: var(--ob-space-3);
 }
 
+/* ── M2: clickable, state-driven summary rows (done.js + hub) ──────────
+   Row is an <a> linking to /onboarding/?step=<key>. data-state drives the
+   glyph + left accent. summary text comes verbatim from the backend
+   /onboarding/status rollup (presentational only — no derivation here). */
+a.ob-summary-row {
+    text-decoration: none;
+    color: inherit;
+    border-left: 2px solid transparent;
+    padding-left: var(--ob-space-3);
+    transition: background 120ms ease, border-color 120ms ease;
+}
+a.ob-summary-row:hover,
+a.ob-summary-row:focus-visible {
+    background: var(--ob-surface-elevated);
+    outline: none;
+}
+a.ob-summary-row[data-state="ready"]     { border-left-color: var(--ob-state-ready); }
+a.ob-summary-row[data-state="attention"] { border-left-color: var(--ob-state-attention); }
+a.ob-summary-row[data-state="optional"]  { border-left-color: var(--ob-state-optional); }
+a.ob-summary-row[data-state="checking"]  { border-left-color: var(--ob-state-checking); }
+
+a.ob-summary-row[data-state="ready"]     .ob-summary-glyph { color: var(--ob-state-ready); }
+a.ob-summary-row[data-state="attention"] .ob-summary-glyph { color: var(--ob-state-attention); }
+a.ob-summary-row[data-state="optional"]  .ob-summary-glyph { color: var(--ob-state-optional); }
+a.ob-summary-row[data-state="checking"]  .ob-summary-glyph { color: var(--ob-state-checking); }
+
+/* "Set up →" CTA — only on attention rows; trailing edge of its own track. */
+a.ob-summary-row.ob-summary-has-cta {
+    grid-template-columns: 2.5rem auto 1fr auto;
+}
+.ob-summary-cta {
+    justify-self: end;
+    align-self: center;
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    font-weight: 600;
+    color: var(--ob-state-attention);
+    white-space: nowrap;
+}
+a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
+
 /* Large CTA variant for the handoff moment */
 .ob-cta-large {
     padding: var(--ob-space-5) var(--ob-space-12);
