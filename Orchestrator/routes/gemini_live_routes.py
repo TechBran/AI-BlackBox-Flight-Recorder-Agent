@@ -76,7 +76,7 @@ from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_gemini_live_tools
-from Orchestrator.behavioral_core import BEHAVIORAL_CORE_VOICE
+from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -328,7 +328,9 @@ Everything about {operator}'s projects, preferences, past decisions, and recent 
 Don't guess or hallucinate history — call search_snapshots proactively."""
             context_section = f"OPERATOR-SPECIFIC CONTEXT:\n{context if context else f'No recent context available for {operator} yet. This may be their first session or a fresh start.'}"
 
-        system_instructions = f"""{BEHAVIORAL_CORE_VOICE}
+        voice_persona = get_persona(operator, "voice") + "\n\n" + VOICE_DELIVERY_NOTE
+
+        system_instructions = f"""{voice_persona}
 
 IDENTITY:
 You are the voice interface for the AI Black Box Flight Recorder, connected to an immutable snapshot ledger and a multimodal toolchain. The operator's memory lives in the snapshots — treat it as your external long-term memory.
