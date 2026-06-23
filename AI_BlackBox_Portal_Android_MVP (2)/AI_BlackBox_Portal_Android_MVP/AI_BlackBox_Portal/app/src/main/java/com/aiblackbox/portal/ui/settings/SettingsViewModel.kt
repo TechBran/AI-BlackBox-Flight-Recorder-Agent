@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -138,6 +139,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun initialize(origin: String) {
         if (origin.isBlank() || api != null) return
         api = BlackBoxApi(origin)
+        // First persona load now that api is ready — the reactive collector's
+        // startup emissions were no-ops while api was null.
+        loadOperatorPersona(currentOperator)
         loadOperators()
         loadApps()
 
@@ -194,6 +198,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val operatorPersona: StateFlow<String> get() = _operatorPersona
     private val _personaIsCustom = MutableStateFlow(false)
     val personaIsCustom: StateFlow<Boolean> get() = _personaIsCustom
+
+    init {
+        // Rehydrate the persona reactively on EVERY operator change — including a
+        // switch made from the main-screen operator pill while this sheet is closed
+        // (the sheet's own effect can't fire when it isn't composed). This mirrors
+        // how voice already rehydrates via its per-operator Flow.
+        //   - distinctUntilChanged: store.operator re-emits on every preference
+        //     write, not just on operator changes, so we'd otherwise reload on each
+        //     voice/model save.
+        //   - clear first: never show the previous operator's persona for the new
+        //     operator while the async reload is in flight.
+        //   - no-op until api is ready; initialize() does the first load.
+        viewModelScope.launch {
+            store.operator.distinctUntilChanged().collect { op ->
+                _operatorPersona.value = ""
+                _personaIsCustom.value = false
+                loadOperatorPersona(op)
+            }
+        }
+    }
 
     fun loadOperatorPersona(operator: String) {
         val a = api ?: return

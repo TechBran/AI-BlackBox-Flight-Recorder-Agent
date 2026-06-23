@@ -663,17 +663,20 @@ fun SettingsSheet(
             // ══════════════════════════════════════════════════════════════
             val persona by viewModel.operatorPersona.collectAsState()
             val isCustom by viewModel.personaIsCustom.collectAsState()
-            // Load (and reload) the persona whenever the selected operator changes.
-            LaunchedEffect(operator) { viewModel.loadOperatorPersona(operator) }
+            // Reload is owned by SettingsViewModel's reactive collector on
+            // store.operator, so the persona rehydrates on an operator switch even
+            // when this sheet is closed (e.g. switched from the main-screen pill).
 
             CollapsibleSection(
                 title = "🧬 System Prompt",
                 accent = BbxAccent,
             ) {
-                // Local edit buffer, re-seeded from the loaded persona. The
-                // remember(persona) key makes it re-seed when a new operator's
-                // persona arrives, so the field never shows the prior operator's text.
-                var draft by remember(persona) { mutableStateOf(persona) }
+                // Local edit buffer, re-seeded from the loaded persona. Keyed on
+                // BOTH operator and persona so it always resets on an operator switch
+                // (even if two operators' persona text is byte-identical) and again
+                // when the freshly-loaded persona arrives — never showing the prior
+                // operator's text.
+                var draft by remember(operator, persona) { mutableStateOf(persona) }
 
                 androidx.compose.material3.OutlinedTextField(
                     value = draft,
