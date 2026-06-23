@@ -161,6 +161,30 @@ def _derive_feature(feature, label):
     return READY, f"{len(enabled)} provider(s)", items, []
 
 
+def _derive_cli_agents(cli):
+    providers = cli.get("providers") or {}
+    installed = {p: m for p, m in providers.items() if m.get("installed")}
+    items = [{"key": p, "label": p, "configured": m.get("installed", False),
+              "validated_at": None} for p, m in providers.items()]
+    if not installed:
+        return OPTIONAL, "No agents installed", items, []
+    # authenticated may be None (antigravity: implicit) — only False is a blocker
+    not_authed = [p for p, m in installed.items() if m.get("authenticated") is False]
+    if not_authed:
+        return ATTENTION, f"{', '.join(not_authed)} not signed in", items, [
+            {"severity": "warn",
+             "message": f"Agent installed but not authenticated: {', '.join(not_authed)}"}]
+    return READY, f"{len(installed)} agent(s) ready", items, []
+
+
+def _derive_pair_phone(paired):
+    items = [{"key": d.get("name", "device"), "label": d.get("name", "device"),
+              "configured": True, "validated_at": None} for d in paired]
+    if paired:
+        return READY, f"{len(paired)} device(s) paired", items, []
+    return OPTIONAL, "No phone paired", items, []
+
+
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
@@ -179,6 +203,10 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
             st, summary, items, atts = _derive_feature(web_search, "Web Search")
         elif key == "image":
             st, summary, items, atts = _derive_feature(image, "Image")
+        elif key == "cli_agents":
+            st, summary, items, atts = _derive_cli_agents(cli)
+        elif key == "pair_phone":
+            st, summary, items, atts = _derive_pair_phone(paired)
         else:
             st, summary, items, atts = _derive_default(section, env, state)
         sections_out.append({
@@ -191,6 +219,13 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
                 "section": key, "severity": a["severity"],
                 "message": a["message"], "cta_step": key,
             })
+    if restart.get("needs_restart"):
+        drifted = restart.get("drifted_keys") or []
+        attention_out.append({
+            "section": None, "severity": "warn",
+            "message": f"Service restart needed — {len(drifted)} setting(s) drifted",
+            "cta_step": "api_keys",
+        })
     ready_count = sum(1 for s in sections_out if s["state"] == READY)
     return {
         "ready_count": ready_count,

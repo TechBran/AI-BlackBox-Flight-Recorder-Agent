@@ -195,3 +195,45 @@ def test_image_attention_when_enabled_provider_key_missing():
         "default": "gemini",
     }
     assert _section(sr.build_status(**inp), "image")["state"] == sr.ATTENTION
+
+
+def test_cli_agents_attention_when_installed_not_authed():
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "claude": {"installed": True, "authenticated": False}}, "ready": False}
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "cli_agents")["state"] == sr.ATTENTION
+    assert any("auth" in a["message"].lower() for a in rollup["attention"]
+               if a["section"] == "cli_agents")
+
+
+def test_cli_agents_ready_when_all_ready():
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "claude": {"installed": True, "authenticated": True}}, "ready": True}
+    assert _section(sr.build_status(**inp), "cli_agents")["state"] == sr.READY
+
+
+def test_cli_agents_optional_when_none_installed():
+    inp = _empty_inputs()
+    inp["cli"] = {"providers": {
+        "claude": {"installed": False, "authenticated": False}}, "ready": False}
+    assert _section(sr.build_status(**inp), "cli_agents")["state"] == sr.OPTIONAL
+
+
+def test_pair_phone_ready_when_devices_paired():
+    inp = _empty_inputs()
+    inp["paired"] = [{"name": "Pixel"}]
+    assert _section(sr.build_status(**inp), "pair_phone")["state"] == sr.READY
+
+
+def test_pair_phone_optional_when_none():
+    assert _section(sr.build_status(**_empty_inputs()), "pair_phone")["state"] == sr.OPTIONAL
+
+
+def test_global_restart_drift_emits_attention_row():
+    inp = _empty_inputs()
+    inp["restart"] = {"needs_restart": True, "drifted_keys": ["OPENAI_API_KEY"]}
+    rollup = sr.build_status(**inp)
+    assert any(a.get("section") is None and "restart" in a["message"].lower()
+               for a in rollup["attention"])
