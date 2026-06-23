@@ -2248,6 +2248,17 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[OPENAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _mkind = _media_kind(func_name)
+                                if _mkind and getattr(tool_exec_result, "data", None):
+                                    _mtid = tool_exec_result.data.get("task_id")
+                                    if _mtid:
+                                        # Blanket media placeholder: a media tool reaching the
+                                        # catch-all (e.g. elevenlabs_music) emits the same SSE
+                                        # media-task event as the explicit native branches, so
+                                        # the UI shows + fills a placeholder. _mkind is
+                                        # image|video|music -> {kind}_task, the event clients handle.
+                                        print(f"[OPENAI-STREAM] Sending {_mkind}_task (catch-all): task_id={_mtid}")
+                                        yield {"type": f"{_mkind}_task", "data": {"task_id": str(_mtid), "prompt": func_args.get("prompt", "")}}
 
                             # Add tool result message
                             payload["messages"].append({
@@ -3052,6 +3063,17 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 if not result_message:
                                     result_message = f"Tool '{tool_name}' executed successfully (no output)."
                                 print(f"\033[33m[TOOLVAULT-EXEC] {tool_name} (catch-all): {result_message[:120]}\033[0m")
+                                _mkind = _media_kind(tool_name)
+                                if _mkind and getattr(tool_result, "data", None):
+                                    _mtid = tool_result.data.get("task_id")
+                                    if _mtid:
+                                        # Blanket media placeholder: a media tool reaching the
+                                        # catch-all (e.g. elevenlabs_music) emits the same SSE
+                                        # media-task event as the explicit native branches, so
+                                        # the UI shows + fills a placeholder. _mkind is
+                                        # image|video|music -> {kind}_task, the event clients handle.
+                                        print(f"[ANTHROPIC-STREAM] Sending {_mkind}_task (catch-all): task_id={_mtid}")
+                                        yield {"type": f"{_mkind}_task", "data": {"task_id": str(_mtid), "prompt": tool_input.get("prompt", "")}}
                                 tool_results.append({
                                     "type": "tool_result",
                                     "tool_use_id": tool_id,
@@ -4942,6 +4964,17 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 if not result_message:
                                     result_message = f"Tool '{func_name}' executed successfully (no output)."
                                 print(f"\033[33m[TOOLVAULT-EXEC] {func_name} (gemini catch-all): {result_message[:120]}\033[0m", flush=True)
+                                _mkind = _media_kind(func_name)
+                                if _mkind and getattr(tool_exec_result, "data", None):
+                                    _mtid = tool_exec_result.data.get("task_id")
+                                    if _mtid:
+                                        # Blanket media placeholder: a media tool reaching the
+                                        # catch-all (e.g. elevenlabs_music) emits the same SSE
+                                        # media-task event as the explicit native branches, so
+                                        # the UI shows + fills a placeholder. _mkind is
+                                        # image|video|music -> {kind}_task, the event clients handle.
+                                        print(f"[GEMINI-STREAM] Sending {_mkind}_task (catch-all): task_id={_mtid}")
+                                        yield {"type": f"{_mkind}_task", "data": {"task_id": str(_mtid), "prompt": func_args.get("prompt", "")}}
                                 function_responses.append({
                                     "functionResponse": {
                                         "name": func_name,
@@ -5474,6 +5507,17 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[XAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
                                 yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _mkind = _media_kind(func_name)
+                                if _mkind and getattr(tool_exec_result, "data", None):
+                                    _mtid = tool_exec_result.data.get("task_id")
+                                    if _mtid:
+                                        # Blanket media placeholder: a media tool reaching the
+                                        # catch-all (e.g. elevenlabs_music) emits the same SSE
+                                        # media-task event as the explicit native branches, so
+                                        # the UI shows + fills a placeholder. _mkind is
+                                        # image|video|music -> {kind}_task, the event clients handle.
+                                        print(f"[XAI-STREAM] Sending {_mkind}_task (catch-all): task_id={_mtid}")
+                                        yield {"type": f"{_mkind}_task", "data": {"task_id": str(_mtid), "prompt": func_args.get("prompt", "")}}
 
                             # Add tool result message
                             payload["messages"].append({
