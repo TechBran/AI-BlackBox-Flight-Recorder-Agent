@@ -41,7 +41,7 @@ export async function render(container, { next, back, skip, sigil }) {
         pending: existing.length === 0 ? [{ id: 0, name: "" }] : [],
     };
 
-    container.innerHTML = renderShell();
+    container.innerHTML = renderShell(sigil);
     rerender(container, state);
 
     document.getElementById("ob-operator-add").addEventListener("click", () => addRow(container, state));
@@ -53,7 +53,7 @@ export async function render(container, { next, back, skip, sigil }) {
     if (first) first.focus();
 }
 
-function renderShell() {
+function renderShell(sigil) {
     return `
         <section class="ob-step ob-operator">
             <aside class="ob-step-sigil" aria-hidden="true">
