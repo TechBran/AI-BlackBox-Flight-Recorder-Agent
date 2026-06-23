@@ -258,3 +258,37 @@ def test_tailscale_ready_when_validated_and_serve_hint_present():
     inp["state"]["validated_at"] = {"tailscale": 1.0}
     inp["env"] = {"BLACKBOX_TAILNET_HOSTNAME": "box.tail1234.ts.net"}
     assert _section(sr.build_status(**inp), "tailscale")["state"] == sr.READY
+
+
+def test_default_section_ready_when_completed_and_optional_when_skipped():
+    inp = _empty_inputs()
+    inp["state"]["completed_steps"] = ["optional_integrations"]
+    inp["state"]["skipped_steps"] = ["transcription"]
+    r = sr.build_status(**inp)
+    assert _section(r, "optional_integrations")["state"] == sr.READY
+    assert _section(r, "transcription")["state"] == sr.OPTIONAL
+    assert _section(r, "transcription")["skipped"] is True
+
+
+def test_ready_count_is_exact():
+    """ready_count is the exact number of READY sections. Construct a scenario
+    with exactly 3 READY (api_keys, operator, embeddings) and everything else
+    optional/attention, then assert the count is unambiguously 3."""
+    inp = _empty_inputs()
+    # api_keys -> READY: one key present AND validated
+    inp["env"] = {"OPENAI_API_KEY": "sk-xxx"}
+    inp["state"]["validated_at"] = {"openai": 1.0}
+    # operator -> READY: one operator present
+    inp["operators"] = ["Brandon"]
+    # embeddings -> READY: active, healthy, caught up
+    inp["embeddings"] = {
+        "active": "qwen3-0.6b",
+        "health": {"state": "ok", "successor": None},
+        "stores": [{"slug": "qwen3-0.6b", "missing": 0}],
+        "models": [],
+    }
+    # everything else left empty -> optional (tailscale/feature/pair_phone/cli/defaults)
+    r = sr.build_status(**inp)
+    ready = [s["key"] for s in r["sections"] if s["state"] == sr.READY]
+    assert sorted(ready) == ["api_keys", "embeddings", "operator"]
+    assert r["ready_count"] == 3

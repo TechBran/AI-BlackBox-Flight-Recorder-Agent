@@ -5,9 +5,10 @@ Single source of truth for:
   * GROUP_LABELS — display label per group.
   * The provider->section join + attention-derivation rules.
 
-build_status(env, state, embeddings, cli, web_search, image, paired, operators,
-restart) is PURE: it takes already-read snapshots and derives state from
-PERSISTED data only — zero subprocess/provider/tailscale probes. The route layer
+build_status(*, env, state, embeddings, cli, web_search, image, paired,
+operators, restart, is_complete=False) is PURE (keyword-only): it takes
+already-read snapshots and derives state from PERSISTED data only — zero
+subprocess/provider/tailscale probes. The route layer
 (onboarding_routes.py) reads those snapshots cheaply (dotenv_values + persisted
 state + GET-able persisted dicts) and passes them in. The SSE stream layer adds
 the live probes on top.
