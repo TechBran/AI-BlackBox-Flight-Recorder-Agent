@@ -167,7 +167,7 @@ fun ChatBubble(
 
             // ── Image attachments ──
             if (message.images.isNotEmpty()) {
-                message.images.forEach { url ->
+                message.images.distinctBy { it.substringBefore('?') }.forEach { url ->
                     AsyncImage(
                         model = url,
                         contentDescription = "Attached image",
@@ -213,7 +213,8 @@ fun ChatBubble(
                     // never reach the bubble. Shared rule with the TTS sanitizer.
                     val displayContent = SpeakableText.stripArtifactBlocks(message.content)
                     // Extract inline media URLs from content, render them, strip from text
-                    val (cleanContent, inlineMedia) = extractInlineMedia(displayContent)
+                    val renderedImages = message.images.map { it.substringBefore('?') }.toSet()
+                    val (cleanContent, inlineMedia) = extractInlineMedia(displayContent, renderedImages)
 
                     // Render extracted media inline
                     inlineMedia.forEach { media ->
@@ -581,8 +582,15 @@ private val URL_REGEX = Regex(
 private var _cachedBaseUrl: String = ""
 fun setChatBaseUrl(url: String) { _cachedBaseUrl = url }
 
-private fun extractInlineMedia(content: String): Pair<String, List<InlineMedia>> {
+private fun extractInlineMedia(
+    content: String,
+    alreadyRendered: Set<String> = emptySet(),
+): Pair<String, List<InlineMedia>> {
     val media = mutableListOf<InlineMedia>()
+    // Dedup: each unique media file renders once. Seeded with URLs already shown
+    // (e.g. images in message.images), so the model echoing the generated URL in
+    // prose + the task-resolution injecting it does NOT double-render.
+    val seen = HashSet(alreadyRendered)
     var cleaned = content
 
     URL_REGEX.findAll(content).forEach { match ->
@@ -604,7 +612,7 @@ private fun extractInlineMedia(content: String): Pair<String, List<InlineMedia>>
                 rawUrl
             }
 
-            media.add(InlineMedia(resolvedUrl, type))
+            if (seen.add(resolvedUrl.substringBefore('?'))) media.add(InlineMedia(resolvedUrl, type))
             // Remove the URL and any surrounding markdown image/link syntax
             cleaned = cleaned
                 .replace(Regex("""!\[[^\]]*\]\(\s*\Q$rawUrl\E\s*\)"""), "")  // ![alt](url)
