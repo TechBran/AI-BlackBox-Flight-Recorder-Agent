@@ -109,3 +109,29 @@ def test_no_step_hardcodes_sigil_number():
         "These step modules still hardcode a sigil number instead of deriving "
         f"it from STEPS via stepSigilContext: {offenders}"
     )
+
+
+STATUS_JS = (
+    Path(__file__).resolve().parents[2] / "Portal" / "onboarding" / "status.js"
+)
+
+
+def _status_section_keys() -> list[str]:
+    src = STATUS_JS.read_text(encoding="utf-8")
+    m = re.search(r"const SECTIONS\s*=\s*\[(.*?)\];", src, re.DOTALL)
+    assert m, "could not find `const SECTIONS = [...]` in Portal/onboarding/status.js"
+    return re.findall(r'key:\s*"([a-z0-9_]+)"', m.group(1))
+
+
+def test_status_sections_match_steps_minus_welcome_done():
+    """The status.js SECTIONS literal (left-rail + hub section model) must equal
+    STEPS minus welcome/done, IN ORDER — the rail re-groups via .filter(group),
+    so order = STEPS order. Drift = a section missing from the rail/hub."""
+    keys = _status_section_keys()
+    expected = [s for s in _frontend_steps() if s not in ("welcome", "done")]
+    assert keys == expected, (
+        "Portal/onboarding/status.js SECTIONS keys must equal STEPS minus "
+        "welcome/done, in order:\n"
+        f"  status.js SECTIONS: {keys}\n"
+        f"  expected (STEPS-2): {expected}"
+    )

@@ -4,7 +4,7 @@
 // All HTML comes from the presentational status.js — this file is
 // orchestration + the SSE lifecycle.
 
-import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, escapeHtml } from "./status.js";
+import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, escapeHtml } from "./status.js";
 import { cssEscape } from "./util.js";
 
 let sse = null;  // active EventSource — closed on re-render / unmount
@@ -39,9 +39,16 @@ export async function renderHub(container) {
                 <div class="ob-hub-readiness" id="ob-hub-readiness">${readinessHtml(readyCount, total)}</div>
             </div>
             <div class="ob-hub-attention" id="ob-hub-attention">${attentionHtml(data.attention)}</div>
-            <div class="ob-hub-groups" id="ob-hub-groups">${groupsHtml(sections)}</div>
+            <div class="ob-hub-body">
+                <div id="ob-hub-rail"></div>
+                <div class="ob-hub-groups" id="ob-hub-groups">${groupsHtml(sections)}</div>
+            </div>
         </section>
     `;
+
+    // Mount the left-rail navigator (M4) into the two-column body.
+    const railHost = container.querySelector("#ob-hub-rail");
+    if (railHost) railHost.appendChild(renderRail(sections));
 
     openStream(container);
 }
@@ -62,6 +69,7 @@ function openStream(container) {
         let payload;
         try { payload = JSON.parse(e.data); } catch (_) { return; }
         applySectionEvent(container, payload);
+        updateRailItem(container.querySelector(".ob-rail"), payload.key, payload.state);
         // A section probe may carry its own attention rows; merge them in.
         if (Array.isArray(payload.attention)) {
             mergeAttention(container, payload.section || payload.key, payload.attention);

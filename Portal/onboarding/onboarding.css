@@ -2978,3 +2978,80 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     .ob-hub { padding: var(--ob-space-8) var(--ob-space-6); }
     .ob-section-grid { grid-template-columns: 1fr; }
 }
+
+/* ════════════════════════════════════════════════════════════════
+ * M4 — Left-rail navigator (Direction C) + two-column hub body
+ * Persistent grouped section list with live status pips. Injected ONLY by
+ * renderHub() (never the linear renderStep path), so the first-run funnel
+ * stays rail-free. Pips switch color via data-state on the canonical
+ * --ob-state-* tokens (M0).
+ * ════════════════════════════════════════════════════════════════ */
+.ob-hub-body {
+    display: grid;
+    grid-template-columns: minmax(190px, 0.9fr) minmax(0, 5fr);
+    gap: var(--ob-space-10);
+    align-items: start;
+}
+.ob-rail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-6);
+    padding: var(--ob-space-2) var(--ob-space-5) var(--ob-space-2) 0;
+    border-right: 1px solid var(--ob-surface-border);
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) 60ms backwards;
+}
+.ob-rail-group { display: flex; flex-direction: column; gap: var(--ob-space-1); }
+.ob-rail-group-label {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--ob-text-tertiary);
+    margin-bottom: var(--ob-space-2);
+}
+.ob-rail-item {
+    display: flex;
+    align-items: center;
+    gap: var(--ob-space-3);
+    padding: var(--ob-space-2) var(--ob-space-3);
+    border-left: 2px solid transparent;
+    color: var(--ob-text-secondary);
+    text-decoration: none;
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    cursor: pointer;
+    transition: color var(--ob-motion-fast) var(--ob-ease-out),
+                border-color var(--ob-motion-fast) var(--ob-ease-out),
+                background var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-rail-item:hover {
+    color: var(--ob-text-primary);
+    background: linear-gradient(90deg, var(--ob-accent-soft) 0%, transparent 70%);
+}
+.ob-rail-item:focus-visible { outline: 2px solid var(--ob-text-primary); outline-offset: 2px; }
+.ob-rail-pip {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: var(--ob-state-optional);
+}
+.ob-rail-item[data-state="ready"]     .ob-rail-pip { background: var(--ob-state-ready); }
+.ob-rail-item[data-state="attention"] .ob-rail-pip { background: var(--ob-state-attention); }
+.ob-rail-item[data-state="optional"]  .ob-rail-pip { background: var(--ob-state-optional); }
+.ob-rail-item[data-state="checking"]  .ob-rail-pip {
+    background: var(--ob-state-checking);
+    animation: ob-rail-pip-pulse 1200ms var(--ob-ease-in-out, ease-in-out) infinite;
+}
+@keyframes ob-rail-pip-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+.ob-rail-label { flex: 1; }
+.ob-rail-required { font-size: var(--ob-text-xs); color: var(--ob-accent); line-height: 1; }
+
+@media (max-width: 900px) {
+    .ob-hub-body { grid-template-columns: 1fr; gap: var(--ob-space-8); }
+    .ob-rail {
+        border-right: none;
+        border-bottom: 1px solid var(--ob-surface-border);
+        padding: 0 0 var(--ob-space-6) 0;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: var(--ob-space-8);
+    }
+}

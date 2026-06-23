@@ -12,6 +12,24 @@ const GROUP_LABELS = {
     identity: "Identity",
 };
 
+// Shared section catalog — the 10 hub/rail sections (welcome+done are NOT
+// sections). Order matches onboarding.js STEPS minus welcome/done; the rail
+// re-groups via .filter(group) for display. Guarded against STEPS drift by
+// Orchestrator/tests/test_onboarding_steps_parity.py. Keep this a plain
+// greppable literal (no computed construction) or update that regex.
+export const SECTIONS = [
+    { key: "tailscale",              group: "network",      label: "Tailnet",     required: false },
+    { key: "api_keys",               group: "keys",         label: "API Keys",    required: true  },
+    { key: "embeddings",             group: "keys",         label: "Memory",      required: true  },
+    { key: "optional_integrations",  group: "capabilities", label: "Extras",      required: false },
+    { key: "transcription",          group: "capabilities", label: "Speech",      required: false },
+    { key: "web_search",             group: "capabilities", label: "Web Search",  required: false },
+    { key: "image",                  group: "capabilities", label: "Image",       required: false },
+    { key: "pair_phone",             group: "network",      label: "Pair Phone",  required: false },
+    { key: "cli_agents",             group: "capabilities", label: "Agents",      required: false },
+    { key: "operator",               group: "identity",     label: "Operators",   required: true  },
+];
+
 const PIP_TEXT = {
     ready: "✓ Ready",
     attention: "⚠ Attention",
@@ -82,6 +100,51 @@ export function attentionHtml(attention) {
             </div>
         `;
     }).join("");
+}
+
+// Presentational left-rail navigator (M4). `sections` is the array from GET
+// /onboarding/status (already fetched by the hub); we DERIVE NOTHING — state
+// comes straight off each section object. Returns the <nav>; the hub mounts it.
+export function renderRail(sections) {
+    const byKey = new Map((sections || []).map((s) => [s.key, s]));
+    const nav = document.createElement("nav");
+    nav.className = "ob-rail";
+    nav.setAttribute("aria-label", "Section navigator");
+    for (const group of GROUP_ORDER) {
+        const items = SECTIONS.filter((s) => s.group === group);
+        if (!items.length) continue;
+        const groupEl = document.createElement("div");
+        groupEl.className = "ob-rail-group";
+        groupEl.insertAdjacentHTML(
+            "beforeend",
+            `<div class="ob-rail-group-label">${escapeHtml(GROUP_LABELS[group] || group)}</div>`,
+        );
+        for (const sec of items) {
+            const live = byKey.get(sec.key);
+            const state = (live && live.state) || "checking";
+            const a = document.createElement("a");
+            a.className = "ob-rail-item";
+            a.href = `/onboarding/?step=${encodeURIComponent(sec.key)}`;
+            a.dataset.key = sec.key;
+            a.dataset.state = state;
+            a.innerHTML = `
+                <span class="ob-rail-pip" aria-hidden="true"></span>
+                <span class="ob-rail-label">${escapeHtml(sec.label)}</span>
+                ${sec.required ? `<span class="ob-rail-required" title="Required" aria-label="required">&lowast;</span>` : ""}
+            `;
+            groupEl.appendChild(a);
+        }
+        nav.appendChild(groupEl);
+    }
+    return nav;
+}
+
+// Live-update one rail item's pip (called from the hub's SSE section handler,
+// in lockstep with the tile update).
+export function updateRailItem(railEl, key, state) {
+    if (!railEl || !key) return;
+    const item = railEl.querySelector(`.ob-rail-item[data-key="${cssEscape(key)}"]`);
+    if (item && state) item.dataset.state = state;
 }
 
 // Live SSE fill — update one tile in place from an `event: section` payload.
