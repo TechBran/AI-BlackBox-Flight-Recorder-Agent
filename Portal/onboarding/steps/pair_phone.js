@@ -111,7 +111,30 @@ export async function render(container, { next, back, skip }) {
         next();
     });
 
-    // Mint a fresh pairing token + start the QR + poll cycle.
+    // E13: if devices are already paired (persistent registry), show the
+    // already-paired success view instead of a fresh QR — the phone won't
+    // re-claim a new token once it holds stored credentials, so polling
+    // alone would spin forever on revisit. Best-effort: any failure falls
+    // through to the normal mint/poll flow.
+    const stage = container.querySelector("#ob-pair-stage");
+    let pairedDevices = [];
+    try {
+        const r = await fetch("/onboarding/current-config");
+        if (r.ok) {
+            const cfg = await r.json();
+            pairedDevices = (cfg && cfg.paired_devices) || [];
+        }
+    } catch (_) { /* non-fatal — fall through to mint */ }
+
+    if (pairedDevices.length > 0) {
+        renderAlreadyPaired(stage, pairedDevices, {
+            next,
+            pairAnother: () => mintAndPoll(container, { next }),
+        });
+        return;
+    }
+
+    // No devices on record — mint a fresh pairing token + start QR/poll cycle.
     await mintAndPoll(container, { next });
 }
 
