@@ -1,7 +1,9 @@
 package com.aiblackbox.portal.ui.cli_agent
 
+import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.aiblackbox.portal.TerminalForegroundService
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.ZellijWebSocketClient
 import com.aiblackbox.portal.data.model.ZellijSession
@@ -54,6 +56,30 @@ import java.util.concurrent.ConcurrentHashMap
 object TerminalSessionManager {
 
     private const val TAG = "TerminalSessionMgr"
+
+    /**
+     * Application context, set once at process startup by
+     * [com.aiblackbox.portal.PortalApplication.onCreate] via [init]. The manager
+     * is a context-less `object`, so it cannot start a [TerminalForegroundService]
+     * on its own — this is the handle it uses to drive the FGS on count
+     * transitions. NULL until [init] runs; every service call below is guarded so
+     * that (a) unit tests that never call [init] never touch a real service, and
+     * (b) a very-early count change (before startup wiring) is a silent no-op
+     * rather than a crash. Stored as the APPLICATION context (never an Activity)
+     * so it is safe to retain for the process lifetime.
+     */
+    @Volatile
+    private var appContext: Context? = null
+
+    /**
+     * Wire the manager to the process so it can keep terminals warm in the
+     * background. Called ONCE from [com.aiblackbox.portal.PortalApplication.onCreate]
+     * with the Application context. Idempotent and best-effort; safe to call
+     * before any session exists. Until this runs, FGS drive is skipped (no crash).
+     */
+    fun init(appContext: Context) {
+        this.appContext = appContext.applicationContext
+    }
 
     /**
      * Factory producing a (not-yet-connected) [ZellijWebSocketClient] for a
@@ -132,11 +158,16 @@ object TerminalSessionManager {
                 return existing.client
             }
             // None live (or the prior one was killed) -> build + connect fresh.
+            // This is the only path that INCREASES the live count, so it drives the
+            // foreground service. Snapshot the count BEFORE inserting so we can
+            // detect the 0 -> 1 transition (start the FGS) vs. n -> n+1 (just update).
             Log.d(TAG, "getOrConnect: creating new client for '${session.name}'")
+            val before = activeCount()
             val client = clientFactory(session, api, scope)
             val live = LiveClient(client = client, session = session, renderBound = true)
             clients[session.name] = live
             client.connect(listener)
+            onLiveCountChanged(before, activeCount())
             return client
         }
     }
@@ -171,7 +202,19 @@ object TerminalSessionManager {
      *   disappearance).
      */
     fun kill(name: String): Boolean {
-        val live = synchronized(lock) { clients.remove(name) } ?: return false
+        // Take a COHERENT before/after snapshot under the SAME lock as
+        // getOrConnect so a concurrent launch+kill (or double-kill) can't
+        // compute overlapping counts and deliver a STOP that races a START
+        // (which would tear down the FGS while a session is live). The service
+        // drive fires AFTER releasing the lock so we never hold it across a
+        // Binder call. (Delivery ordering across threads is still not
+        // guaranteed — TerminalForegroundService.ACTION_STOP re-checks the live
+        // count to self-heal a reordered STOP.)
+        val (live, before, after) = synchronized(lock) {
+            val b = activeCount()
+            val removed = clients.remove(name) ?: return false
+            Triple(removed, b, activeCount())
+        }
         Log.d(TAG, "kill: '$name' — closing socket + dropping from map")
         try {
             live.client.close()
@@ -179,6 +222,8 @@ object TerminalSessionManager {
             Log.w(TAG, "kill: client.close() threw for '$name'", t)
         }
         live.renderBound = false
+        // n -> 0 stops the FGS, n -> n-1 updates its notification.
+        onLiveCountChanged(before, after)
         return true
     }
 
@@ -193,8 +238,63 @@ object TerminalSessionManager {
     fun activeNames(): Set<String> =
         clients.entries.filter { !it.value.client.isClosed() }.map { it.key }.toSet()
 
-    /** Number of currently-held live sessions (for a future FGS notification). */
+    /** Number of currently-held live sessions (for the FGS notification). */
     fun activeCount(): Int = activeNames().size
+
+    // --- Foreground-service drive (Phase 3) -------------------------------
+
+    /**
+     * Abstraction over [TerminalForegroundService]'s start/stop/update so the
+     * count-transition logic can be unit-tested without a real Android service.
+     * Production uses [RealServiceController] (guarded on [appContext]); tests
+     * swap in a recording fake. SAM-friendly: three best-effort, never-throwing ops.
+     */
+    @VisibleForTesting
+    internal interface ServiceController {
+        fun start()
+        fun update()
+        fun stop()
+    }
+
+    /**
+     * Default controller: drives the real [TerminalForegroundService], but only
+     * when [appContext] has been set ([init]). Before startup wiring — and in
+     * unit tests that never call [init] — every op is a silent no-op, so the
+     * manager never tries to start a real service off the JVM/Robolectric path.
+     */
+    private object RealServiceController : ServiceController {
+        override fun start() { appContext?.let { TerminalForegroundService.start(it) } }
+        override fun update() { appContext?.let { TerminalForegroundService.updateCount(it) } }
+        override fun stop() { appContext?.let { TerminalForegroundService.stop(it) } }
+    }
+
+    @Volatile
+    @VisibleForTesting
+    internal var serviceController: ServiceController = RealServiceController
+
+    /**
+     * Drive the foreground service from a live-count transition. The only three
+     * transitions that matter:
+     *  - 0 -> >=1 : first terminal opened — START the FGS.
+     *  - >=1 -> 0 : last terminal killed — STOP the FGS.
+     *  - any other change while live (n -> m, both >= 1) : UPDATE the count.
+     * All calls are best-effort (the controller swallows platform refusals) and
+     * skipped entirely when no context is set, so the manager's core
+     * detach/getOrConnect/kill semantics are unaffected if the FGS can't run.
+     */
+    private fun onLiveCountChanged(before: Int, after: Int) {
+        if (before == after) return
+        try {
+            when {
+                before == 0 && after > 0 -> serviceController.start()
+                before > 0 && after == 0 -> serviceController.stop()
+                after > 0 -> serviceController.update()
+            }
+        } catch (t: Throwable) {
+            // Defensive: a controller op must never break a connect/kill.
+            Log.w(TAG, "onLiveCountChanged: service drive threw (${t.javaClass.simpleName})")
+        }
+    }
 
     // --- Test hooks -------------------------------------------------------
 
@@ -211,6 +311,10 @@ object TerminalSessionManager {
                     coroutineScope = scope,
                 )
             }
+            // Restore FGS-drive defaults so one test's fake controller / wired
+            // context can't leak into the next (every test starts un-driven).
+            serviceController = RealServiceController
+            appContext = null
         }
     }
 

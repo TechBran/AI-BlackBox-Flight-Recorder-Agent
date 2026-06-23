@@ -7,6 +7,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.aiblackbox.portal.data.remote.RemoteTaskRunner
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.voice.AudioPlaybackManager
+import com.aiblackbox.portal.ui.cli_agent.TerminalSessionManager
 
 /**
  * Process-wide startup wiring. Registers the control_phone remote task handler
@@ -18,6 +19,12 @@ class PortalApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         remoteTaskHandlerFactory = { ctx -> RemoteTaskRunner(ctx) }
+
+        // Wire the process-lived terminal-session manager to the Application context
+        // so it can drive the TerminalForegroundService (Phase 3): start the FGS when
+        // the first terminal opens and stop it when the last is killed, keeping live
+        // terminal WebSockets warm while the app is backgrounded.
+        TerminalSessionManager.init(this)
 
         // Pause the playback Visualizer's audio-output capture while the whole
         // app is backgrounded (saves CPU + avoids a background output tap with

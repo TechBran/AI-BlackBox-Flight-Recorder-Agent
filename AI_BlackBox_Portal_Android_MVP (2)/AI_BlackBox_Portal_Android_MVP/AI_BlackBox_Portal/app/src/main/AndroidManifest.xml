@@ -91,6 +91,16 @@
             android:foregroundServiceType="connectedDevice"
             android:exported="false" />
 
+        <!-- Keeps terminal-session WebSockets (TerminalSessionManager) warm while the
+             app is backgrounded (Phase 3, terminal-session-persistence). connectedDevice
+             matches LocalModelService and dodges the dataSync 6h timeout. Started when
+             the first terminal opens, stopped when the last is killed. Additive + graceful:
+             if it can't start, terminals still work (just not background-warm). -->
+        <service
+            android:name=".TerminalForegroundService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+
         <service
             android:name=".overlay.OverlayService"
             android:foregroundServiceType="mediaProjection|microphone"

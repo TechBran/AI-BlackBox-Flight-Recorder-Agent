@@ -225,4 +225,143 @@ class TerminalSessionManagerTest {
         assertEquals(132, entry?.cols)
         assertEquals(50, entry?.rows)
     }
+
+    // --- Phase 3: foreground-service drive (count transitions) -----------
+
+    /**
+     * Recording fake [TerminalSessionManager.ServiceController] so the FGS-drive
+     * count transitions can be asserted without a real Android service. Installed
+     * via the [TerminalSessionManager.serviceController] test seam.
+     */
+    private class FakeController : TerminalSessionManager.ServiceController {
+        var starts = 0
+        var updates = 0
+        var stops = 0
+        override fun start() { starts++ }
+        override fun update() { updates++ }
+        override fun stop() { stops++ }
+    }
+
+    @Test
+    fun `first session start drives FGS start, last kill drives FGS stop`() {
+        val fake = FakeController()
+        TerminalSessionManager.serviceController = fake
+
+        // 0 -> 1 : START exactly once, no stop yet.
+        TerminalSessionManager.getOrConnect(session("t1"), api, scope, noopListener)
+        assertEquals("0->1 must START the FGS once", 1, fake.starts)
+        assertEquals(0, fake.stops)
+
+        // 1 -> 0 : STOP exactly once, still only one start.
+        TerminalSessionManager.kill("t1")
+        assertEquals("last kill must STOP the FGS once", 1, fake.stops)
+        assertEquals("no extra start on kill", 1, fake.starts)
+    }
+
+    @Test
+    fun `second concurrent session updates rather than restarts the FGS`() {
+        val fake = FakeController()
+        TerminalSessionManager.serviceController = fake
+
+        TerminalSessionManager.getOrConnect(session("t1"), api, scope, noopListener) // 0->1 start
+        TerminalSessionManager.getOrConnect(session("t2"), api, scope, noopListener) // 1->2 update
+
+        assertEquals("only the FIRST session starts the FGS", 1, fake.starts)
+        assertEquals("the second session UPDATES the count, not a restart", 1, fake.updates)
+        assertEquals(0, fake.stops)
+
+        // 2 -> 1 : still alive, so UPDATE (not stop).
+        TerminalSessionManager.kill("t1")
+        assertEquals("killing one of two updates, does not stop", 2, fake.updates)
+        assertEquals(0, fake.stops)
+
+        // 1 -> 0 : last one stops.
+        TerminalSessionManager.kill("t2")
+        assertEquals("killing the last STOPS the FGS", 1, fake.stops)
+    }
+
+    @Test
+    fun `reattaching an existing session does not re-drive the FGS`() {
+        val fake = FakeController()
+        TerminalSessionManager.serviceController = fake
+        val s = session("t1")
+
+        TerminalSessionManager.getOrConnect(s, api, scope, noopListener) // 0->1 start
+        TerminalSessionManager.detach(s.name)                            // no count change
+        TerminalSessionManager.getOrConnect(s, api, scope, noopListener) // rebind, no count change
+
+        assertEquals("rebind must not start again", 1, fake.starts)
+        assertEquals("detach/rebind must not touch the count", 0, fake.updates)
+        assertEquals(0, fake.stops)
+    }
+
+    @Test
+    fun `kill of an unknown name does not drive the FGS`() {
+        val fake = FakeController()
+        TerminalSessionManager.serviceController = fake
+
+        assertFalse(TerminalSessionManager.kill("never-existed"))
+        assertEquals(0, fake.starts)
+        assertEquals(0, fake.updates)
+        assertEquals(0, fake.stops)
+    }
+
+    @Test
+    fun `with no controller wired (default, no context) count changes never crash`() {
+        // Default RealServiceController + appContext null (reset between tests) means
+        // every drive op is a silent no-op — the manager must not throw.
+        TerminalSessionManager.getOrConnect(session("t1"), api, scope, noopListener)
+        TerminalSessionManager.getOrConnect(session("t2"), api, scope, noopListener)
+        assertTrue(TerminalSessionManager.kill("t1"))
+        assertTrue(TerminalSessionManager.kill("t2"))
+        // Reaching here without an exception is the assertion.
+        assertEquals(0, TerminalSessionManager.activeCount())
+    }
+
+    @Test
+    fun `concurrent launch and kill keep the FGS start-stop drive balanced (C1)`() {
+        // C1 regression: kill() must take a COHERENT before/after count
+        // snapshot under the same lock as getOrConnect. Otherwise a racing
+        // launch+kill (or double-kill) can fire START/STOP out of order or
+        // miss a STOP, leaving the FGS "started" with zero live sessions —
+        // i.e. a torn-down anchor for background terminals. We stress the
+        // interleaving; every time the live count returns to 0 the FGS must be
+        // stopped, so across the whole run STARTs must equal STOPs. (Plain-Int
+        // FakeController is not thread-safe, so use atomics here.)
+        val starts = AtomicInteger(0)
+        val stops = AtomicInteger(0)
+        TerminalSessionManager.serviceController =
+            object : TerminalSessionManager.ServiceController {
+                override fun start() { starts.incrementAndGet() }
+                override fun update() { /* count-preserving; not asserted */ }
+                override fun stop() { stops.incrementAndGet() }
+            }
+
+        repeat(40) { round ->
+            val threads = (0 until 6).map { i ->
+                Thread {
+                    val name = "c$round-$i"
+                    TerminalSessionManager.getOrConnect(session(name), api, scope, noopListener)
+                    TerminalSessionManager.kill(name)
+                }
+            }
+            threads.forEach { it.start() }
+            threads.forEach { it.join() }
+        }
+
+        // Every session created was killed by its own thread -> 0 live.
+        assertEquals(
+            "no live sessions after the stress run",
+            0,
+            TerminalSessionManager.activeCount(),
+        )
+        // Ending at 0 live, every 0->1 START must have a matching 1->0 STOP.
+        // A C1 race yields an extra START or a missing STOP -> imbalance ->
+        // an orphan "started" FGS with nothing behind it.
+        assertEquals(
+            "FGS start/stop drive must balance (no orphan 'started' at 0 sessions)",
+            starts.get(),
+            stops.get(),
+        )
+    }
 }
