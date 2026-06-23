@@ -185,6 +185,21 @@ def _derive_pair_phone(paired):
     return OPTIONAL, "No phone paired", items, []
 
 
+def _derive_tailscale(env, state):
+    """FAST read: persisted-only. Never probes. Live state arrives via SSE."""
+    validated = (state.get("validated_at", {}) or {}).get("tailscale")
+    serve_hint = bool((env.get("BLACKBOX_TAILNET_HOSTNAME") or "").strip())
+    items = [{"key": "tailnet", "label": env.get("BLACKBOX_TAILNET_HOSTNAME") or "(unset)",
+              "configured": serve_hint, "validated_at": validated}]
+    if not validated:
+        return OPTIONAL, "Not connected", items, []
+    if not serve_hint:
+        return ATTENTION, "HTTPS serve not set", items, [
+            {"severity": "warn",
+             "message": "Tailnet up but serve/HTTPS not set — phone pairing will fail"}]
+    return READY, "Connected", items, []
+
+
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
@@ -193,7 +208,9 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
     skipped = set(state.get("skipped_steps", []))
     for section in SECTIONS:
         key = section["key"]
-        if key == "api_keys":
+        if key == "tailscale":
+            st, summary, items, atts = _derive_tailscale(env, state)
+        elif key == "api_keys":
             st, summary, items, atts = _derive_api_keys(env, state)
         elif key == "operator":
             st, summary, items, atts = _derive_operator(operators)

@@ -237,3 +237,24 @@ def test_global_restart_drift_emits_attention_row():
     rollup = sr.build_status(**inp)
     assert any(a.get("section") is None and "restart" in a["message"].lower()
                for a in rollup["attention"])
+
+
+def test_tailscale_optional_when_never_validated():
+    assert _section(sr.build_status(**_empty_inputs()), "tailscale")["state"] == sr.OPTIONAL
+
+
+def test_tailscale_attention_when_validated_but_serve_not_set():
+    inp = _empty_inputs()
+    inp["state"]["validated_at"] = {"tailscale": 1.0}
+    # no serve hint in env -> serve-not-set attention
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "tailscale")["state"] == sr.ATTENTION
+    assert any("pair" in a["message"].lower() or "serve" in a["message"].lower()
+               for a in rollup["attention"] if a["section"] == "tailscale")
+
+
+def test_tailscale_ready_when_validated_and_serve_hint_present():
+    inp = _empty_inputs()
+    inp["state"]["validated_at"] = {"tailscale": 1.0}
+    inp["env"] = {"BLACKBOX_TAILNET_HOSTNAME": "box.tail1234.ts.net"}
+    assert _section(sr.build_status(**inp), "tailscale")["state"] == sr.READY
