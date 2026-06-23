@@ -66,6 +66,7 @@ export async function render(container, { next, back, skip, sigil }) {
     validating = false;
     migrating = false;
     pulling = false;
+    keepAliveBusy = null;
     cancelClicked = false;
     etaSamples = [];
     etaJobKey = null;
