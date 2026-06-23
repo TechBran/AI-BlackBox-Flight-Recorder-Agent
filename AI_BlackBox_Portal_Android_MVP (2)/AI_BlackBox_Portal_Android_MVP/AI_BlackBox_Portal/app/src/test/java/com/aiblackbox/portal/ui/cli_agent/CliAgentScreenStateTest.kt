@@ -104,12 +104,14 @@ class CliAgentScreenStateTest {
         scope: CoroutineScope,
         onLaunchedSessionNames: MutableList<String> = mutableListOf(),
         errors: MutableList<Pair<String, String>> = mutableListOf(),
+        resumeSignals: MutableList<Boolean> = mutableListOf(),
     ): CliAgentScreenState = CliAgentScreenState(
         scope = scope,
         repository = repo,
         operator = "Brandon",
         onLaunched = { onLaunchedSessionNames.add(it.name) },
         onError = { action, reason -> errors.add(action to reason) },
+        onResume = { resumed -> resumeSignals.add(resumed) },
     )
 
     // ── launchInFlight ───────────────────────────────────────────────────
@@ -216,6 +218,129 @@ class CliAgentScreenStateTest {
             server.requestCount,
         )
         assertEquals(1, holder.sessions.size)
+    }
+
+    // ── fork / resume (Phase 2-Android) ────────────────────
+
+    @Test
+    fun `launch with fork=true sends fork in the request body`() = runTest {
+        val holder = newHolder(this)
+
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"Brandon__claude___root__1__99","session_url":"x","token":"t","expires_at":null,"resumed":false}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"Brandon__claude___root__1__99","provider":"claude"}]}""")
+                .build()
+        )
+
+        holder.launch("claude", fork = true)
+        joinChildren()
+
+        val request = server.takeRequest()
+        val sentJson = kotlinx.serialization.json.Json
+            .parseToJsonElement(request.body!!.utf8())
+            .let { it as kotlinx.serialization.json.JsonObject }
+        assertEquals(
+            "fork must be threaded into the launch body as boolean true",
+            "true",
+            sentJson["fork"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content },
+        )
+    }
+
+    @Test
+    fun `launch default (no fork) omits fork from the request body`() = runTest {
+        val holder = newHolder(this)
+
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"s","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"s","provider":"claude"}]}""")
+                .build()
+        )
+
+        holder.launch("claude")
+        joinChildren()
+
+        val request = server.takeRequest()
+        val sentJson = kotlinx.serialization.json.Json
+            .parseToJsonElement(request.body!!.utf8())
+            .let { it as kotlinx.serialization.json.JsonObject }
+        assertTrue(
+            "default launch must NOT carry a fork key (resume path byte-compatible)",
+            "fork" !in sentJson.keys,
+        )
+    }
+
+    @Test
+    fun `onResume fires true when backend reports resumed`() = runTest {
+        val resumeSignals = mutableListOf<Boolean>()
+        val holder = newHolder(this, resumeSignals = resumeSignals)
+
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"s","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"s","provider":"claude"}]}""")
+                .build()
+        )
+
+        holder.launch("claude")
+        joinChildren()
+
+        assertEquals(
+            "onResume must fire exactly once with the parsed resumed flag",
+            listOf(true),
+            resumeSignals,
+        )
+    }
+
+    @Test
+    fun `onResume fires false for a fork`() = runTest {
+        val resumeSignals = mutableListOf<Boolean>()
+        val holder = newHolder(this, resumeSignals = resumeSignals)
+
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"s__forked","session_url":"x","token":"t","expires_at":null,"resumed":false}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"s__forked","provider":"claude"}]}""")
+                .build()
+        )
+
+        holder.launch("claude", fork = true)
+        joinChildren()
+
+        assertEquals(listOf(false), resumeSignals)
     }
 
     // ── kill ──────────────────────────────────────────────────────────────

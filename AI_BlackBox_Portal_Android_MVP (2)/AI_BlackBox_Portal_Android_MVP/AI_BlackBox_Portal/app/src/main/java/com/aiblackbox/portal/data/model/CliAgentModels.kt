@@ -130,6 +130,14 @@ data class ZellijSession(
     // field is reserved here for forward-compat with audit follow-ups
     // that may add server-side activity tracking.
     @SerialName("last_activity") val lastActivity: String? = null,
+    // Phase 2-Android (2026-06-22, session persistence): true when the
+    // launch ATTACHED an existing deterministic-name session rather than
+    // creating a fresh one. Mirrors ZellijLaunchResponse.resumed; the
+    // repository copies it through so the screen can surface a brief
+    // "Resumed session" vs "Started new session" signal. Default false
+    // keeps every existing synthesised-ZellijSession call site (which omit
+    // it) byte-compatible.
+    val resumed: Boolean = false,
 )
 
 @Serializable
@@ -140,6 +148,11 @@ data class ZellijLaunchResponse(
     // or empty token; field retained for wire compatibility but unused.
     val token: String? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
+    // Phase 2-Android (2026-06-22): backend resume contract. true = the
+    // launch reattached an existing deterministic-name session; false =
+    // created fresh (or forked). Older backends that predate the field
+    // simply omit it → defaults false (no resume signal), which is safe.
+    val resumed: Boolean = false,
 )
 
 @Serializable

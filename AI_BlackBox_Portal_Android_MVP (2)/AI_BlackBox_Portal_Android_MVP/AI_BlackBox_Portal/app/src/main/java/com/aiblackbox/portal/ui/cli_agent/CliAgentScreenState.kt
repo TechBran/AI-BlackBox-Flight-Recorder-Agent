@@ -81,6 +81,15 @@ internal class CliAgentScreenState(
      * one-line message suitable for a Toast.
      */
     private val onError: (action: String, reason: String) -> Unit = { _, _ -> },
+    /**
+     * Phase 2-Android (2026-06-22): non-intrusive resume signal. Invoked
+     * after a successful launch with `resumed = true` when the backend
+     * REATTACHED an existing deterministic-name session, or `false` when it
+     * created/forked a fresh one. Caller wires this to a brief Toast
+     * ("Resumed session" vs "Started new session"). Default no-op so the
+     * holder is usable without it (e.g. in tests that don't care).
+     */
+    private val onResume: (resumed: Boolean) -> Unit = {},
 ) {
     var sessions: List<ZellijSessionRow> by mutableStateOf(emptyList())
         private set
@@ -171,8 +180,13 @@ internal class CliAgentScreenState(
      *
      * @param provider one of [com.aiblackbox.portal.data.model.ZELLIJ_PROVIDER_SLUGS].
      * @param app optional workspace pin (basename of the Apps/ subdir).
+     * @param fork when true, ask the backend to mint a NEW concurrent session
+     *   for this provider/app instead of resuming the deterministic-name one.
+     *   The default (false) is the resume path — the correct default now that
+     *   the backend is attach-if-exists. Threaded straight to
+     *   [CliAgentSessionRepository.launchZellijSession].
      */
-    fun launch(provider: String, app: String? = null) {
+    fun launch(provider: String, app: String? = null, fork: Boolean = false) {
         // No-op guard: don't queue a duplicate launch for a provider
         // that's already mid-launch. The UI disables the button via
         // LaunchButton.isLoading, but a fast double-tap before
@@ -186,6 +200,7 @@ internal class CliAgentScreenState(
                     operator = operator,
                     provider = provider,
                     app = app,
+                    fork = fork,
                 )
                 // Synthesise a ZellijSessionRow from the launch response so
                 // we can seed the top bar / list immediately without
@@ -205,6 +220,11 @@ internal class CliAgentScreenState(
                 // not only on the just-fired launch callback.
                 liveSessionsByName[session.name] = session
                 onLaunched(session)
+                // Non-intrusive resume signal (Phase 2-Android). Fork always
+                // reports resumed = false; a default launch reports whatever
+                // the backend did (attach-if-exists). Cheap — the response is
+                // already parsed.
+                onResume(session.resumed)
                 // Schedule a follow-up refresh to pick up server-side
                 // fields the launch response didn't carry (createdAt etc).
                 refreshSessions()

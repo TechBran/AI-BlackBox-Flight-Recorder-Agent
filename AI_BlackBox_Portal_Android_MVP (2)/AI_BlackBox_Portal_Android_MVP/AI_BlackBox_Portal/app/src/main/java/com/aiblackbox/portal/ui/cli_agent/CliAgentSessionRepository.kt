@@ -96,6 +96,16 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
      *
      * Wraps POST /cli-agent/zellij/launch?op={operator}.
      *
+     * **Resume vs fork (Phase 2-Android, 2026-06-22).** The backend's launch
+     * is now attach-if-exists on a deterministic name `{op}__{provider}__{slug}`
+     * — calling this with [fork] = false (the default) RESUMES an existing
+     * session of that name instead of duplicating it (the returned
+     * [ZellijSession.resumed] reports which happened). Pass [fork] = true to
+     * mint a NEW concurrent session for the same provider/app: the backend
+     * appends a uniqueness suffix and always returns `resumed = false`.
+     *
+     * @param fork when true, force a brand-new concurrent session instead of
+     *   resuming the deterministic-name one (sends `"fork": true` in the body).
      * @throws IllegalArgumentException if [provider] is not in [ZELLIJ_PROVIDER_SLUGS].
      * @throws IOException on transport failure or non-2xx response.
      */
@@ -104,18 +114,19 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
         operator: String,
         provider: String,
         app: String? = null,
+        fork: Boolean = false,
     ): ZellijSession {
         require(provider in ZELLIJ_PROVIDER_SLUGS) {
             "Unknown Zellij provider '$provider'; expected one of $ZELLIJ_PROVIDER_SLUGS"
         }
         // Build the request body without a `null` app field when omitted.
-        val request = if (app == null) {
-            buildJsonObject { put("provider", JsonPrimitive(provider)) }
-        } else {
-            buildJsonObject {
-                put("provider", JsonPrimitive(provider))
-                put("app", JsonPrimitive(app))
-            }
+        // `fork` is only added when true so the default (resume) request body
+        // stays byte-for-byte identical to the pre-Phase-2 wire format —
+        // the backend treats a missing `fork` key as false.
+        val request = buildJsonObject {
+            put("provider", JsonPrimitive(provider))
+            if (app != null) put("app", JsonPrimitive(app))
+            if (fork) put("fork", JsonPrimitive(true))
         }
         val bodyStr = api.json.encodeToString(JsonObject.serializer(), request)
         val encodedOp = URLEncoder.encode(operator, "UTF-8")
@@ -133,6 +144,10 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
             createdAt = null,
             app = app,
             lastActivity = null,
+            // Phase 2-Android: surface whether the backend reattached an
+            // existing session (resume) vs created/forked a fresh one, so
+            // the screen can flash a brief "Resumed" / "Started new" signal.
+            resumed = parsed.resumed,
         )
     }
 

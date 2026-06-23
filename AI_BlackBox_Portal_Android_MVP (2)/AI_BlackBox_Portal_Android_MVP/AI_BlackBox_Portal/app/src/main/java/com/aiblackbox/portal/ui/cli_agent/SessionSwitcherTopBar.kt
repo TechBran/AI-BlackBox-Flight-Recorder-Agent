@@ -76,8 +76,10 @@ import kotlin.math.abs
  *   1. Live sessions (●/○ icon + provider · time · app-cwd),
  *      long-press → kill row.
  *   2. Divider.
- *   3. "+ Terminal" — launches a zellij terminal session.
- *   4. "⚡ Shortcuts ▶" — nested submenu for Claude/Gemini/Codex/Antigravity.
+ *   3. "+ Terminal" — launches (resumes) a zellij terminal session;
+ *      its trailing "＋" forks a NEW concurrent terminal.
+ *   4. "⚡ Shortcuts ▶" — nested submenu for Claude/Gemini/Codex/Antigravity;
+ *      each row TAP resumes, its trailing "＋ New" forks a fresh session.
  *
  * Per-provider [launchInFlight] (Set<String>, NOT Boolean) so the user can
  * fire "+ Terminal" and "Shortcuts → Claude" in rapid succession and see
@@ -101,6 +103,13 @@ fun SessionSwitcherTopBar(
     onKillSession: (ZellijSessionRow) -> Unit,
     onOpenNavDrawer: () -> Unit,
     launchInFlight: Set<String> = emptySet(),
+    /**
+     * Phase 2-Android (2026-06-22): FORK a NEW concurrent session for
+     * [provider] instead of resuming the deterministic-name one. Wired to
+     * the trailing "＋ New" icon button on each shortcut row + the
+     * "＋ New session" item. Default no-op keeps older call sites compiling.
+     */
+    onForkProvider: (provider: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -260,7 +269,7 @@ fun SessionSwitcherTopBar(
                         color = MaterialTheme.colorScheme.outlineVariant,
                     )
 
-                    // 2) + Terminal
+                    // 2) + Terminal (TAP = resume; trailing ＋ = fork new)
                     val terminalInFlight = "terminal" in launchInFlight
                     DropdownMenuItem(
                         text = { Text("+ Terminal") },
@@ -268,6 +277,13 @@ fun SessionSwitcherTopBar(
                             LeadingLaunchIcon(
                                 isLoading = terminalInFlight,
                                 icon = Icons.Default.Add,
+                            )
+                        },
+                        trailingIcon = {
+                            ForkNewButton(
+                                enabled = !terminalInFlight,
+                                contentDescription = "New terminal session",
+                                onClick = { onForkProvider("terminal") },
                             )
                         },
                         enabled = !terminalInFlight,
@@ -308,6 +324,21 @@ fun SessionSwitcherTopBar(
                                         LeadingLaunchIcon(
                                             isLoading = busy,
                                             icon = Icons.Default.PlayArrow,
+                                        )
+                                    },
+                                    // TAP the row = resume the deterministic
+                                    // session; tap the trailing ＋ = fork a NEW
+                                    // concurrent session. Mirrors the proven
+                                    // tap-row-vs-trailing-icon idiom used by the
+                                    // session list's kill (X) button — a VISIBLE
+                                    // affordance, not a hidden long-press (which
+                                    // T23 device QA flagged as undiscoverable).
+                                    trailingIcon = {
+                                        ForkNewButton(
+                                            enabled = !busy,
+                                            contentDescription =
+                                                "New ${titleCaseProvider(providerSlug)} session",
+                                            onClick = { onForkProvider(providerSlug) },
                                         )
                                     },
                                     enabled = !busy,
@@ -438,6 +469,38 @@ private fun SessionRowMenuItem(
         },
         onClick = { feedback(); onClick() },
     )
+}
+
+/**
+ * Trailing "＋ New" icon button for a launch row (＋ Terminal + each
+ * shortcut provider). TAP the row resumes the deterministic-name session;
+ * tapping THIS forks a brand-new concurrent one ([onClick] →
+ * [SessionSwitcherTopBar.onForkProvider]).
+ *
+ * A VISIBLE affordance was chosen over a hidden long-press because T23
+ * device QA found long-press undiscoverable on the Z Fold 6 (see the
+ * SessionRowMenuItem kill-button note). This reuses the same proven
+ * "tap row / trailing IconButton" idiom as the kill (X) button. Fires the
+ * shared native press feedback so it feels identical to every other tappable.
+ */
+@Composable
+private fun ForkNewButton(
+    enabled: Boolean,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    val feedback = rememberPressFeedback()
+    IconButton(
+        onClick = { feedback(); onClick() },
+        enabled = enabled,
+        modifier = Modifier.size(36.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Default.Add,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+    }
 }
 
 // =========================================================================

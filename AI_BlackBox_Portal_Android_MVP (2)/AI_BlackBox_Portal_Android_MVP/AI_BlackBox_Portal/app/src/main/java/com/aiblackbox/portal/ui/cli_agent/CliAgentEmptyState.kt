@@ -47,7 +47,10 @@ import androidx.compose.ui.unit.dp
  *     existing [AppFolderPicker] flow when they want to pin a workspace.
  *   - **Shortcuts ▾** — toggles inline reveal of four provider buttons
  *     (Claude / Gemini / Codex / Antigravity) in [PROVIDER_SHORTCUTS] order.
- *     Tapping a provider button invokes [onLaunchProvider] with that slug.
+ *     TAP a provider button → [onLaunchProvider] (resume the deterministic
+ *     session). LONG-PRESS a provider button → [onForkProvider] (fork a NEW
+ *     concurrent session of that provider). The long-press fork mirrors this
+ *     file's existing long-press idiom (+ Terminal long-press → folder picker).
  *
  * **Stateless except for the shortcuts-expanded toggle**, which is local
  * because the screen-level state holder doesn't care whether the panel
@@ -82,6 +85,12 @@ fun CliAgentEmptyState(
     launchInFlight: Set<String>,
     onLaunchProvider: (provider: String) -> Unit,
     onChooseFolderForTerminal: () -> Unit,
+    /**
+     * Phase 2-Android (2026-06-22): long-press a provider shortcut to fork a
+     * NEW concurrent session instead of resuming. Default no-op so older call
+     * sites / tests compile unchanged.
+     */
+    onForkProvider: (provider: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Local UI-only state: whether the shortcuts panel is expanded.
@@ -189,14 +198,49 @@ fun CliAgentEmptyState(
                 ) {
                     PROVIDER_SHORTCUTS.forEach { providerSlug ->
                         val busy = providerSlug in launchInFlight
-                        LaunchButton(
-                            label = titleCaseProvider(providerSlug),
-                            icon = Icons.Default.PlayArrow,
-                            isLoading = busy,
-                            enabled = true,
-                            onClick = { onLaunchProvider(providerSlug) },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        // TAP (the Button) = resume; LONG-PRESS (the wrapping
+                        // Box) = fork a new session. Same wrap-in-Box +
+                        // combinedClickable idiom as the "+ Terminal" button
+                        // above, so the visual/busy contract of LaunchButton
+                        // is preserved while adding the long-press fork route.
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    // The inner Button handles single-tap;
+                                    // these are the surrounding Box fallbacks
+                                    // for the long-press fork route.
+                                    onClick = {},
+                                    onLongClick = {
+                                        if (!busy) onForkProvider(providerSlug)
+                                    },
+                                    enabled = !busy,
+                                )
+                                // a11y: declare an explicit long-click action so
+                                // TalkBack can announce/invoke the fork.
+                                .semantics {
+                                    role = Role.Button
+                                    onLongClick(
+                                        label = "Fork new ${titleCaseProvider(providerSlug)} session",
+                                    ) {
+                                        if (!busy) {
+                                            onForkProvider(providerSlug)
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                },
+                        ) {
+                            LaunchButton(
+                                label = titleCaseProvider(providerSlug),
+                                icon = Icons.Default.PlayArrow,
+                                isLoading = busy,
+                                enabled = true,
+                                onClick = { onLaunchProvider(providerSlug) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                 }
             }

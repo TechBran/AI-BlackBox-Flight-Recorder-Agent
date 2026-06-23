@@ -134,6 +134,82 @@ class CliAgentSessionRepositoryTest {
     }
 
     @Test
+    fun `launchZellijSession omits fork field by default (resume path stays byte-compatible)`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"x","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
+                .build()
+        )
+
+        repo.launchZellijSession("Brandon", "claude")
+
+        val request = server.takeRequest()
+        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+        // The default (resume) request must NOT carry a fork key — the backend
+        // treats a missing fork as false, and we keep the wire format identical
+        // to the pre-Phase-2 launch body.
+        assertFalse(
+            "fork key must be absent on the default launch, got: ${request.body!!.utf8()}",
+            sentJson.containsKey("fork"),
+        )
+    }
+
+    @Test
+    fun `launchZellijSession includes fork=true in body when fork param set`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"Brandon__claude___root__1__1779750999","session_url":"http://x","token":"t","expires_at":null,"resumed":false}""")
+                .build()
+        )
+
+        val session = repo.launchZellijSession("Brandon", "claude", fork = true)
+        // A fork always reports resumed=false (it minted a fresh session).
+        assertFalse("fork must surface resumed=false", session.resumed)
+
+        val request = server.takeRequest()
+        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+        assertEquals("claude", sentJson["provider"]?.jsonPrimitive?.content)
+        assertEquals(
+            "fork must be serialized as the JSON boolean true",
+            true,
+            sentJson["fork"]?.jsonPrimitive?.content?.toBoolean(),
+        )
+    }
+
+    @Test
+    fun `launchZellijSession parses resumed=true from the launch response`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"Brandon__claude___root__1","session_url":"http://x","token":"t","expires_at":null,"resumed":true}""")
+                .build()
+        )
+
+        val session = repo.launchZellijSession("Brandon", "claude")
+        assertTrue("resumed=true must round-trip into ZellijSession.resumed", session.resumed)
+    }
+
+    @Test
+    fun `launchZellijSession defaults resumed to false when backend omits the field`() = runTest {
+        // Older backends predate the resumed field — must default to false.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"x","session_url":"x","token":"t","expires_at":null}""")
+                .build()
+        )
+
+        val session = repo.launchZellijSession("Brandon", "claude")
+        assertFalse("missing resumed must default to false", session.resumed)
+    }
+
+    @Test
     fun `launchZellijSession URL-encodes operator names with reserved chars`() = runTest {
         // "Brandon DEV" exercises the encoder for real — space → "+".
         // (Hyphens are unreserved and pass through; this case used to assert

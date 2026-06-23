@@ -125,6 +125,17 @@ fun CliAgentScreen(
                     Toast.LENGTH_SHORT,
                 ).show()
             },
+            // Phase 2-Android (2026-06-22): brief, non-intrusive resume signal.
+            // Backend launch is attach-if-exists on a deterministic name, so a
+            // plain tap may RESUME a still-running session — tell the user which
+            // happened. Forks always report resumed = false ("Started new").
+            onResume = { resumed ->
+                Toast.makeText(
+                    context,
+                    if (resumed) "Resumed session" else "Started new session",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            },
         )
     }
 
@@ -194,8 +205,14 @@ fun CliAgentScreen(
                         onLaunchProvider = { provider ->
                             // Launch path — onLaunched callback drives the
                             // state transition into Terminal once the
-                            // launch response is in.
+                            // launch response is in. With the attach-if-exists
+                            // backend this RESUMES the deterministic session.
                             screenState.launch(provider)
+                        },
+                        onForkProvider = { provider ->
+                            // FORK path (Phase 2-Android): mint a NEW concurrent
+                            // session of [provider] alongside any existing one.
+                            screenState.launch(provider, fork = true)
                         },
                         onKillSession = { row ->
                             // The X button is the ONLY kill path (Phase 1).
@@ -263,6 +280,11 @@ private fun CliAgentBranches(
                     launchInFlight = screenState.launchInFlight,
                     onLaunchProvider = { provider ->
                         screenState.launch(provider)
+                    },
+                    onForkProvider = { provider ->
+                        // Long-press fork (Phase 2-Android): force a new
+                        // concurrent session even from the empty state.
+                        screenState.launch(provider, fork = true)
                     },
                     onChooseFolderForTerminal = {
                         onStateChange(CliAgentInternalState.FolderPicker)
