@@ -1868,7 +1868,7 @@ body::after {
 .ob-auth-link {
     display: inline-block;
     padding: 0.5rem 1rem;
-    background: var(--accent, #4a9eff);
+    background: var(--ob-accent);
     color: white;
     border-radius: var(--radius-md, 8px);
     text-decoration: none;
@@ -1883,14 +1883,14 @@ body::after {
 .ob-auth-hint {
     margin-top: 0.75rem;
     padding: 0.5rem 0.75rem;
-    background: rgba(255, 180, 50, 0.06);
-    border-left: 3px solid rgba(255, 180, 50, 0.5);
+    background: var(--ob-attention-soft);
+    border-left: 3px solid var(--ob-attention);
     border-radius: var(--radius-sm, 6px);
     color: rgba(255,255,255,0.8);
     font-size: 0.9em;
 }
 .ob-auth-hint a {
-    color: var(--accent, #4a9eff);
+    color: var(--ob-accent);
     margin-left: 0.25rem;
 }
 
@@ -1902,8 +1902,8 @@ body::after {
     font-size: 0.9em;
 }
 .ob-banner-warn {
-    background: rgba(255, 180, 50, 0.08);
-    border-left: 3px solid rgba(255, 180, 50, 0.6);
+    background: var(--ob-attention-soft);
+    border-left: 3px solid var(--ob-attention);
 }
 .ob-banner-info {
     background: rgba(120, 200, 255, 0.06);
@@ -1915,7 +1915,7 @@ body::after {
 .ob-banner-link {
     display: inline-block;
     margin-top: 0.5rem;
-    color: var(--accent, #4a9eff);
+    color: var(--ob-accent);
     text-decoration: none;
     font-weight: 500;
 }
@@ -1939,7 +1939,7 @@ body::after {
     flex-wrap: wrap;
 }
 .ob-banner-link-primary {
-    background: var(--accent, #4a9eff);
+    background: var(--ob-accent);
     color: white;
     padding: 0.4rem 0.85rem;
     border-radius: var(--radius-sm, 6px);
@@ -2008,7 +2008,7 @@ body::after {
     flex-wrap: wrap;
 }
 .ob-copy-btn-primary {
-    background: var(--accent, #4a9eff);
+    background: var(--ob-accent);
     color: white;
     border: none;
     padding: 0.5rem 1rem;
@@ -2303,7 +2303,7 @@ body::after {
 }
 .ob-pair-prereq-link {
     display: inline-block;
-    color: var(--accent, #4a9eff);
+    color: var(--ob-accent);
     text-decoration: none;
     font-weight: 500;
     font-size: 0.92em;
@@ -2363,7 +2363,7 @@ body::after {
     user-select: all;
 }
 .ob-gmail-uri-copy {
-    background: var(--accent, #4a9eff);
+    background: var(--ob-accent);
     color: white;
     border: none;
     padding: 0.35rem 0.75rem;
