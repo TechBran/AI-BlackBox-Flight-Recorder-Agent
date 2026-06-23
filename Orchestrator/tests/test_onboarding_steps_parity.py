@@ -71,3 +71,25 @@ def test_every_dynamically_imported_step_has_a_module_file():
         "the user gets stuck on a placeholder with no next/skip. Create the "
         "missing steps/<step>.js module(s)."
     )
+
+
+def test_status_rollup_sections_match_all_steps_minus_welcome_done():
+    """The hub status rollup (Orchestrator/onboarding/status_rollup.py SECTIONS)
+    enumerates exactly ALL_STEPS minus welcome/done, in order. Add/move/remove a
+    step on either side without the other and this fails — the rollup's section
+    list can never silently drift from the canonical step list."""
+    from Orchestrator.onboarding.status_rollup import SECTIONS
+    section_keys = [s["key"] for s in SECTIONS]
+    expected = [s for s in ALL_STEPS if s not in ("welcome", "done")]
+    assert section_keys == expected, (
+        "status_rollup.SECTIONS drifted from state.ALL_STEPS:\n"
+        f"  sections: {section_keys}\n"
+        f"  expected: {expected}"
+    )
+
+
+def test_status_rollup_every_section_step_equals_key():
+    """Each section's `step` must equal its `key` (the hub links ?step=<key>)."""
+    from Orchestrator.onboarding.status_rollup import SECTIONS
+    for s in SECTIONS:
+        assert s["step"] == s["key"], f"section {s['key']!r}: step != key"
