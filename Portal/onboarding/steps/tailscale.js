@@ -21,15 +21,18 @@
 // Visual reference: Portal/onboarding/_mocks/tailscale.html (shows Branch C
 // with the disclosure expanded).
 
-let recheckBusy = false;
-let _currentAuthAbort = null;
-let _authInFlight = false;
-let _branchAGen = 0;
+// Per-render state — module globals leaked across non-linear hub mounts.
+// _active points at the latest render so a new render can abort the old
+// render's auth poll loop.
+let _active = null;
 
 export async function render(container, { next, back, skip, sigil }) {
-    // C1: abort any in-flight auth poll loop from a prior render of this step
-    if (_currentAuthAbort) _currentAuthAbort.aborted = true;
-    _currentAuthAbort = null;
+    // C1: abort any in-flight auth poll loop from a prior render, install fresh
+    // per-render state, and remember the real container for re-check re-renders.
+    if (_active && _active.authAbort) _active.authAbort.aborted = true;
+    const rs = { container, recheckBusy: false, authAbort: null,
+                 authInFlight: false, branchAGen: 0, serveDone: false };
+    _active = rs;
 
     // Initial loading state
     container.innerHTML = `
@@ -78,34 +81,40 @@ export async function render(container, { next, back, skip, sigil }) {
     // held only for the initial render call, not subsequent re-checks
     // fired from inside the step.
     const guardedRecheck = async () => {
-        if (recheckBusy) return;
-        recheckBusy = true;
+        if (rs.recheckBusy) return;
+        rs.recheckBusy = true;
         try {
-            await render(container, { next, back, skip });
+            await render(rs.container, { next, back, skip });
         } finally {
-            recheckBusy = false;
+            rs.recheckBusy = false;
         }
     };
 
+    const err = typeof result.error === "string" ? result.error : "";
     if (result.ok) {
-        renderBranchA(statusEl, result, { next, back, skip });
-    } else if (typeof result.error === "string" && result.error.includes("binary not found")) {
-        renderBranchB(statusEl, result, { back, skip, recheck: guardedRecheck });
+        renderBranchA(statusEl, result, { next, back, skip }, rs);
+    } else if (err.includes("binary not found")) {
+        renderBranchB(statusEl, result, { back, skip, recheck: guardedRecheck }, rs);
+    } else if (err.includes("BackendState") || err.includes("NeedsLogin") || err.includes("not authenticated")) {
+        // Genuinely installed-but-unauthenticated → the auth action card.
+        renderBranchC(statusEl, result, { back, skip, recheck: guardedRecheck }, rs);
     } else {
-        // BackendState mismatch OR any other error → "installed, needs auth".
-        // Re-checking is the recovery path.
-        renderBranchC(statusEl, result, { back, skip, recheck: guardedRecheck });
+        // Anything else (network error, backend down, unexpected) is NOT
+        // "needs auth" — show it honestly so Re-check is the recovery path
+        // without the misleading "installed" badge.
+        renderBranchC(statusEl, { ...result, _unexpected: true },
+                      { back, skip, recheck: guardedRecheck }, rs);
     }
 }
 
 // ── Branch A: already configured ────────────────────────────────
-async function renderBranchA(statusEl, result, { next, back, skip }) {
+async function renderBranchA(statusEl, result, { next, back, skip }, rs) {
     // I1: generation token — captured per renderBranchA invocation.
     // Used to bail post-await DOM mutations if user navigated away
     // or a Re-check triggered a fresh render. Mirrors T7's
     // _currentAuthAbort pattern (without needing per-call object refs).
-    _branchAGen++;
-    const myGen = _branchAGen;
+    rs.branchAGen++;
+    const myGen = rs.branchAGen;
 
     const hostname = (result.detail && result.detail.hostname) || "unknown";
     const ip = (result.detail && result.detail.ip) || "unknown";
@@ -134,7 +143,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
     // renewal automatically.
     // Promise + 60s client-side timeout (first-run ACME can be slow).
     let servePromise = null;
-    if (!window.__ob_tailscale_serve_done) {
+    if (!rs.serveDone) {
         const serveTimeout = new Promise(r => setTimeout(() => r({
             ok: false, error: "timeout", timed_out: true,
         }), 60_000));
@@ -142,7 +151,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
             .then(r => r.json())
             .catch(() => ({ ok: false, error: "network" }));
         servePromise = Promise.race([serveFetch, serveTimeout]).then(result => {
-            window.__ob_tailscale_serve_done = true;
+            rs.serveDone = true;
             return result;
         });
     }
@@ -186,7 +195,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
     const banners = document.getElementById("ob-tailscale-banners");
     if (!magicdnsEnabled) {
         banners.insertAdjacentHTML("beforeend", magicdnsBanner());
-        wireRecheckBtn(banners, { next, back, skip });
+        wireRecheckBtn(banners, { next, back, skip }, rs);
         wireBannerOpenBtn(banners);  // E4: synchronous window.open for admin link
     }
 
@@ -195,7 +204,7 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
         const pendingId = "ob-serve-pending";
         banners.insertAdjacentHTML("beforeend", servePendingBanner(pendingId));
         const result = await servePromise;
-        if (myGen !== _branchAGen) return;  // I1: superseded by re-render
+        if (myGen !== rs.branchAGen) return;  // I1: superseded by re-render
         const pendingEl = document.getElementById(pendingId);
         if (pendingEl) pendingEl.remove();
         if (result.ok) {
@@ -204,12 +213,12 @@ async function renderBranchA(statusEl, result, { next, back, skip }) {
         } else if (result.https_disabled) {
             banners.insertAdjacentHTML("beforeend",
                 httpsDisabledBanner(result.admin_url));
-            wireRecheckBtn(banners, { next, back, skip });
+            wireRecheckBtn(banners, { next, back, skip }, rs);
             wireBannerOpenBtn(banners);
         } else if (result.timed_out) {
             banners.insertAdjacentHTML("beforeend",
                 serveTimeoutBanner());
-            wireRecheckBtn(banners, { next, back, skip });
+            wireRecheckBtn(banners, { next, back, skip }, rs);
         }
     }
 }
@@ -333,7 +342,7 @@ function wireBannerOpenBtn(scope) {
 
 // Re-check wiring: each "Re-check" button re-runs the appropriate probe and
 // re-renders Branch A so banners refresh based on new state.
-function wireRecheckBtn(scope, navCallbacks) {
+function wireRecheckBtn(scope, navCallbacks, rs) {
     scope.querySelectorAll(".ob-banner-recheck").forEach(btn => {
         btn.addEventListener("click", async (e) => {
             e.preventDefault();
@@ -342,11 +351,11 @@ function wireRecheckBtn(scope, navCallbacks) {
             btn.textContent = "Checking...";
             // Reset serve guard so it can re-fire on re-check
             if (which === "cert" || which === "serve") {
-                window.__ob_tailscale_serve_done = false;
+                rs.serveDone = false;
             }
-            // Force full step re-render via top-level render — PASS THE REAL CALLBACKS
-            const container = scope.closest(".ob-step")?.parentElement || document.body;
-            await render(container, navCallbacks);
+            // Force full step re-render via top-level render into the real
+            // container the wizard/hub passed in — never document.body.
+            await render(rs.container, navCallbacks);
         });
     });
 }
@@ -451,12 +460,13 @@ async function startInstall(statusEl, { back, skip, recheck }) {
 }
 
 // ── Branch C: installed but not authenticated (also re-auth after 180-day expiry) ──
-function renderBranchC(statusEl, result, { back, skip, recheck }) {
+function renderBranchC(statusEl, result, { back, skip, recheck }, rs) {
     const errMsg = (result.error || "needs authentication").replace(/^RuntimeError:\s*/, "");
+    const unexpected = !!result._unexpected;
     statusEl.innerHTML = `
-        <div class="ob-status-badge ob-status-badge-installed" role="status">
-            <span class="ob-status-badge-pip" aria-hidden="true">&check;</span>
-            <span class="ob-status-badge-label">Tailscale installed</span>
+        <div class="ob-status-badge ${unexpected ? "ob-status-badge-error" : "ob-status-badge-installed"}" role="status">
+            <span class="ob-status-badge-pip" aria-hidden="true">${unexpected ? "!" : "&check;"}</span>
+            <span class="ob-status-badge-label">${unexpected ? "Couldn't determine Tailscale state" : "Tailscale installed"}</span>
         </div>
         <div class="ob-status-badge" role="status">
             <span class="ob-status-badge-pip" aria-hidden="true">!</span>
@@ -481,19 +491,19 @@ function renderBranchC(statusEl, result, { back, skip, recheck }) {
         ${renderStepNav({ showSkip: true })}
     `;
     document.getElementById("ob-auth-btn").addEventListener("click", () => {
-        if (_authInFlight) return;  // C2: prevent double-click parallel pollers
-        _authInFlight = true;
-        startAuth(statusEl, { back, skip, recheck })
-            .finally(() => { _authInFlight = false; });
+        if (rs.authInFlight) return;  // C2: prevent double-click parallel pollers
+        rs.authInFlight = true;
+        startAuth(statusEl, { back, skip, recheck }, rs)
+            .finally(() => { rs.authInFlight = false; });
     });
     wireStepNav(statusEl, { back, skip });
 }
 
-async function startAuth(statusEl, { back, skip, recheck }) {
+async function startAuth(statusEl, { back, skip, recheck }, rs) {
     // C1: install a fresh abort token for this auth attempt
-    if (_currentAuthAbort) _currentAuthAbort.aborted = true;
+    if (rs.authAbort) rs.authAbort.aborted = true;
     const myAbort = { aborted: false };
-    _currentAuthAbort = myAbort;
+    rs.authAbort = myAbort;
 
     const btn = document.getElementById("ob-auth-btn");
     const statusBox = document.getElementById("ob-auth-status");
