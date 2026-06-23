@@ -198,34 +198,23 @@ function updateProgress() {
     if (stepLabel) stepLabel.textContent = STEP_LABELS[STEPS[currentStepIdx]] || "";
 }
 
-// Terminal panel for revisit mode — shown instead of advancing the wizard.
-function renderRevisitDone() {
+// Revisit save → return to the console hub so the change is reflected in the
+// tiles. (Previously a terminal "close this page" panel.) Revisit never
+// mutated backend onboarding state, so this is purely a view switch.
+async function renderRevisitHub() {
+    // Dynamic import (D5) — keep the linear flow resilient to a hub load error.
+    const { renderHub, closeStream } = await import("./hub.js");
+    closeStream();  // drop any stream the prior step might share-mount (defensive)
+    const progress = document.querySelector(".ob-progress");
+    if (progress) progress.style.visibility = "hidden";
     const container = document.getElementById("ob-step-container");
-    container.innerHTML = `
-        <section class="ob-step">
-            <div class="ob-step-body">
-                <h1 class="ob-step-title">All set.</h1>
-                <p class="ob-step-lede">
-                    Your changes are saved. You can close this page, or head
-                    back to the BlackBox portal.
-                </p>
-                <nav class="ob-step-nav" aria-label="Step navigation">
-                    <a class="ob-cta" href="/ui">
-                        Back to BlackBox <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>
-                    </a>
-                    <button type="button" class="ob-skip" id="ob-revisit-reopen">
-                        Reopen this section <span aria-hidden="true">&rarr;</span>
-                    </button>
-                </nav>
-            </div>
-        </section>
-    `;
-    const reopen = document.getElementById("ob-revisit-reopen");
-    if (reopen) reopen.addEventListener("click", () => renderStep());
+    await renderHub(container);
+    // Reflect hub state in the address bar so a refresh stays on the hub.
+    try { history.replaceState(null, "", "/onboarding/?mode=manage"); } catch (_) {}
 }
 
 async function next() {
-    if (REVISIT_STEP) { renderRevisitDone(); return; }
+    if (REVISIT_STEP) { await renderRevisitHub(); return; }
     if (currentStepIdx >= STEPS.length - 1) return;
     if (busy) return;
     busy = true;
@@ -261,7 +250,7 @@ async function back() {
 }
 
 async function skip() {
-    if (REVISIT_STEP) { renderRevisitDone(); return; }
+    if (REVISIT_STEP) { await renderRevisitHub(); return; }
     if (currentStepIdx >= STEPS.length - 1) return;
     if (busy) return;
     busy = true;
@@ -284,18 +273,39 @@ async function skip() {
     }
 }
 
+// Hub view — hide the linear step-progress chrome (meaningless in the console)
+// and paint the grouped console hub.
+async function renderHubView() {
+    // Dynamic import (D5): a hub/status/util load error must never white-screen
+    // the linear first-run funnel — only the hub view degrades.
+    const { renderHub } = await import("./hub.js");
+    const progress = document.querySelector(".ob-progress");
+    if (progress) progress.style.visibility = "hidden";
+    const container = document.getElementById("ob-step-container");
+    await renderHub(container);
+}
+
 (async () => {
     try {
         await fetchState();
         if (REVISIT_STEP) {
-            // Deep-linked revisit: jump straight to the requested step,
-            // bypassing the completed→/ui redirect (post-onboarding re-entry
-            // is the whole point of the link).
+            // Deep-linked revisit: jump straight to the requested step. On save
+            // it now returns to the hub (see next()/skip()), not /ui.
             currentStepIdx = STEPS.indexOf(REVISIT_STEP);
-        } else if (state.is_complete && MODE === "setup") {
-            location.href = "/ui";
+            await renderStep();
             return;
         }
+        if (MODE === "manage") {
+            // Explicit console request — render the hub regardless of completion.
+            await renderHubView();
+            return;
+        }
+        if (state.is_complete) {
+            // Post-completion landing: the hub IS the home. No /ui bounce.
+            await renderHubView();
+            return;
+        }
+        // First-run guided funnel — unchanged.
         await renderStep();
     } catch (e) {
         const container = document.getElementById("ob-step-container");
