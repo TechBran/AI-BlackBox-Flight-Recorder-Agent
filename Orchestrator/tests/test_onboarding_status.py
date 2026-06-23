@@ -103,3 +103,55 @@ def test_rollup_top_level_shape():
     for sec in rollup["sections"]:
         assert set(sec) >= {"key", "group", "label", "state", "required",
                             "summary", "step", "skipped", "items"}
+
+
+def test_embeddings_attention_when_no_active_model():
+    inp = _empty_inputs()
+    inp["embeddings"] = {"active": None, "health": {"state": "ok"},
+                         "stores": [], "models": []}
+    assert _section(sr.build_status(**inp), "embeddings")["state"] == sr.ATTENTION
+
+
+def test_embeddings_ready_when_active_and_healthy_and_caught_up():
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-0.6b",
+        "health": {"state": "ok", "successor": None},
+        "stores": [{"slug": "qwen3-0.6b", "missing": 0}],
+        "models": [],
+    }
+    assert _section(sr.build_status(**inp), "embeddings")["state"] == sr.READY
+
+
+def test_embeddings_attention_when_index_behind():
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-0.6b", "health": {"state": "ok"},
+        "stores": [{"slug": "qwen3-0.6b", "missing": 42}], "models": [],
+    }
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "embeddings")["state"] == sr.ATTENTION
+    assert any("behind" in a["message"].lower() for a in rollup["attention"]
+               if a["section"] == "embeddings")
+
+
+def test_embeddings_attention_when_health_superseded():
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-0.6b",
+        "health": {"state": "superseded", "successor": "gemini-embedding-2"},
+        "stores": [{"slug": "qwen3-0.6b", "missing": 0}], "models": [],
+    }
+    rollup = sr.build_status(**inp)
+    assert _section(rollup, "embeddings")["state"] == sr.ATTENTION
+
+
+def test_embeddings_attention_when_health_broken_is_error_severity():
+    inp = _empty_inputs()
+    inp["embeddings"] = {
+        "active": "qwen3-0.6b", "health": {"state": "broken", "detail": "x"},
+        "stores": [{"slug": "qwen3-0.6b", "missing": 0}], "models": [],
+    }
+    rollup = sr.build_status(**inp)
+    assert any(a["section"] == "embeddings" and a["severity"] == "error"
+               for a in rollup["attention"])

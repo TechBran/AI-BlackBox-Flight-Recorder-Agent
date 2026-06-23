@@ -114,6 +114,35 @@ def _derive_default(section, env, state):
     return OPTIONAL, "Not set up", [], []
 
 
+def _derive_embeddings(embeddings):
+    active = embeddings.get("active")
+    health = embeddings.get("health") or {}
+    hstate = health.get("state", "ok")
+    items = [{"key": "active", "label": active or "(none)",
+              "configured": bool(active), "validated_at": None}]
+    if not active:
+        return ATTENTION, "No memory model active", items, [
+            {"severity": "warn", "message": "Memory index not initialized"}]
+    if hstate == "broken":
+        return ATTENTION, "Memory index broken", items, [
+            {"severity": "error",
+             "message": f"Memory health broken: {health.get('detail', '')}".strip()}]
+    if hstate == "superseded":
+        succ = health.get("successor") or "a newer model"
+        return ATTENTION, f"Upgrade available → {succ}", items, [
+            {"severity": "warn", "message": f"Memory model superseded by {succ}"}]
+    # caught-up check against the active store's `missing` count
+    behind = 0
+    for store in (embeddings.get("stores") or []):
+        if store.get("slug") == active:
+            behind = store.get("missing") or 0
+            break
+    if behind:
+        return ATTENTION, f"{behind} snapshot(s) behind", items, [
+            {"severity": "warn", "message": f"Memory index {behind} snapshot(s) behind"}]
+    return READY, f"Active: {active}", items, []
+
+
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
@@ -126,6 +155,8 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
             st, summary, items, atts = _derive_api_keys(env, state)
         elif key == "operator":
             st, summary, items, atts = _derive_operator(operators)
+        elif key == "embeddings":
+            st, summary, items, atts = _derive_embeddings(embeddings)
         else:
             st, summary, items, atts = _derive_default(section, env, state)
         sections_out.append({
