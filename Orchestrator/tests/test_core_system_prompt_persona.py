@@ -28,3 +28,11 @@ def test_fallback_path_also_uses_operator_persona(monkeypatch):
     monkeypatch.setattr(state, "OPERATOR_PREFERENCES", {"Brandon": {"persona": "FALLBACK-CUSTOM"}})
     out = tasks.build_core_system_prompt("", operator="Brandon")
     assert "FALLBACK-CUSTOM" in out
+
+def test_cu_context_excludes_persona(monkeypatch):
+    from Orchestrator.routes import chat_routes
+    monkeypatch.setattr(state, "OPERATOR_PREFERENCES",
+                        {"Brandon": {"tts_voice": "openai:onyx", "persona": "SECRET-CU"}})
+    ctx, _ = chat_routes.build_cu_context("hello", "Brandon")
+    assert "tts_voice" in ctx
+    assert "SECRET-CU" not in ctx

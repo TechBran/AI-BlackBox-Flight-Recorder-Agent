@@ -40,6 +40,7 @@ from Orchestrator.state import get_state, save_operator_state
 from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.reply_envelope import unwrap_reply_envelope
+from Orchestrator.behavioral_core import PERSONA_PREF_KEY
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
@@ -5691,6 +5692,8 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
         if prefs and isinstance(prefs, dict):
             pref_lines = ["=== OPERATOR PREFERENCES ==="]
             for key, val in prefs.items():
+                if key == PERSONA_PREF_KEY:
+                    continue
                 pref_lines.append(f"- {key}: {val}")
             context_parts.append("\n".join(pref_lines))
 
