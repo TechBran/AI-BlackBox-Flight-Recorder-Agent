@@ -63,8 +63,12 @@ export async function render(container, { next, back, skip, sigil }) {
     document.getElementById("ob-done-back").addEventListener("click", back);
 
     // Fetch summary data + render
-    const summary = await loadSummary();
-    renderSummary(container, summary);
+    // Source is the backend /onboarding/status rollup (M1) — the single source
+    // of the section list, so done shows every section (incl. embeddings/STT/
+    // web_search/image/agents) and each row deep-links to its step.
+    // Presentational only: no derivation here.
+    const status = await loadStatus();
+    renderSummary(container, status);
 
     // Wire the Open Portal CTA
     const openBtn = document.getElementById("ob-done-open");
@@ -160,109 +164,68 @@ async function initUpdatesBadge() {
     }
 }
 
-async function loadSummary() {
-    const data = { config: null, state: null, error: null };
+async function loadStatus() {
     try {
-        const [configR, stateR] = await Promise.all([
-            fetch("/onboarding/current-config"),
-            fetch("/onboarding/state"),
-        ]);
-        if (configR.ok) data.config = await configR.json();
-        if (stateR.ok) data.state = await stateR.json();
+        const r = await fetch("/onboarding/status");
+        if (!r.ok) return { error: `/onboarding/status returned ${r.status}` };
+        return await r.json();
     } catch (e) {
-        data.error = e.message;
+        return { error: e.message };
     }
-    return data;
 }
 
-function renderSummary(container, { config, state, error }) {
+function renderSummary(container, status) {
     const summaryEl = container.querySelector("#ob-done-summary");
-    if (error || !config || !state) {
+    if (!status || status.error || !Array.isArray(status.sections)) {
         summaryEl.innerHTML = `
             <p class="ob-step-helper">
-                Couldn't load the summary (${escapeHtml(error || "unknown error")}).
+                Couldn't load the summary (${escapeHtml((status && status.error) || "unknown error")}).
                 Setup is still complete &mdash; clicking Open Portal works.
             </p>
         `;
         return;
     }
 
-    const skipped = new Set(state.skipped_steps || []);
-    const completed = new Set(state.completed_steps || []);
-    const rows = [];
-
-    // Tailscale row
-    if (skipped.has("tailscale")) {
-        rows.push(summaryRow("Tailscale", "skip", "LAN-only mode"));
-    } else if (config.tailscale && config.tailscale.configured) {
-        const host = (config.tailscale.detail && config.tailscale.detail.hostname) || "configured";
-        rows.push(summaryRow("Tailscale", "ok", host));
-    } else {
-        rows.push(summaryRow("Tailscale", "warn", "not configured"));
-    }
-
-    // API keys row — count present LLM providers
-    const llmKeys = ["openai", "anthropic", "google"];
-    const presentLLM = llmKeys.filter(k => config.providers?.[k]?.present);
-    if (skipped.has("api_keys") && presentLLM.length === 0) {
-        rows.push(summaryRow("AI providers", "skip", "no keys yet"));
-    } else if (presentLLM.length > 0) {
-        const labels = presentLLM.map(k => k.charAt(0).toUpperCase() + k.slice(1)).join(", ");
-        rows.push(summaryRow("AI providers", "ok", `${presentLLM.length} configured · ${labels}`));
-    } else {
-        rows.push(summaryRow("AI providers", "warn", "no keys configured"));
-    }
-
-    // Optional integrations (Google Workspace) row
-    if (skipped.has("optional_integrations")) {
-        rows.push(summaryRow("Optional integrations", "skip", "configure later"));
-    } else if (config.providers?.gmail?.present) {
-        rows.push(summaryRow("Google Workspace", "ok", "OAuth client configured"));
-    } else {
-        rows.push(summaryRow("Optional integrations", "skip", "none configured"));
-    }
-
-    // Phone pairing row — E15b (Brandon 2026-05-17): also honor the "I've
-    // already paired this phone" manual completion (E14). Customer who clicked
-    // that button doesn't add an entry to paired_devices registry (the
-    // registry only logs OAuth-style /pair/claim handshakes), but they DO
-    // mark the step complete via /onboarding/step/complete. So the summary
-    // should reflect their self-reported intent in addition to the registry.
-    const pairedCount = (config.paired_devices || []).length;
-    if (skipped.has("pair_phone")) {
-        rows.push(summaryRow("Phone pairing", "skip", "pair later from System Menu"));
-    } else if (pairedCount > 0) {
-        const names = config.paired_devices.map(d => d.hostname || d.device_kind || "device").join(", ");
-        rows.push(summaryRow("Phone pairing", "ok", `${pairedCount} paired · ${names}`));
-    } else if (completed.has("pair_phone")) {
-        // E14 manual mark-complete path — no registry entry but step IS done
-        rows.push(summaryRow("Phone pairing", "ok", "marked as paired"));
-    } else {
-        rows.push(summaryRow("Phone pairing", "skip", "no devices paired"));
-    }
-
-    // Operators row
-    const operators = config.operators || [];
-    if (operators.length > 0) {
-        rows.push(summaryRow("Operators", "ok", `${operators.length} · ${operators.join(", ")}`));
-    } else {
-        rows.push(summaryRow("Operators", "warn", "none registered"));
-    }
-
+    const rows = status.sections.map(summaryRow).join("");
     summaryEl.innerHTML = `
         <ul class="ob-summary-list">
-            ${rows.join("")}
+            ${rows}
         </ul>
     `;
 }
 
-function summaryRow(label, status, detail) {
-    const glyph = status === "ok" ? "&check;" : (status === "skip" ? "&#8856;" : "!");
+// Glyph per status state — presentational mapping only.
+const STATE_GLYPH = {
+    ready: "&check;",
+    attention: "!",
+    optional: "&#8856;",   // ⊘
+    checking: "&hellip;",
+};
+
+// Maps one /onboarding/status section to a clickable summary row. The <li>
+// keeps .ob-summary-list semantics; the <a> is the row and deep-links to
+// ?step=<key>. Glyph + accent derive ONLY from section.state; the one-line
+// summary string is rendered verbatim from the backend (no derivation here).
+function summaryRow(section) {
+    const state = section.state || "optional";
+    const glyph = STATE_GLYPH[state] || "&#8856;";
+    const label = section.label || section.key || "";
+    const detail = section.summary || "";
+    const href = `/onboarding/?step=${encodeURIComponent(section.step || section.key)}`;
+    const showCta = state === "attention";
+    const ctaClass = showCta ? " ob-summary-has-cta" : "";
+    const cta = showCta
+        ? `<span class="ob-summary-cta" aria-hidden="true">Set up &rarr;</span>`
+        : "";
     return `
-        <li class="ob-summary-row ob-summary-${status}">
-            <span class="ob-summary-glyph" aria-hidden="true">${glyph}</span>
-            <span class="ob-summary-label">${escapeHtml(label)}</span>
-            <span class="ob-summary-detail">${escapeHtml(detail)}</span>
+        <li>
+            <a class="ob-summary-row${ctaClass}" data-state="${escapeHtml(state)}"
+               href="${escapeHtml(href)}">
+                <span class="ob-summary-glyph" aria-hidden="true">${glyph}</span>
+                <span class="ob-summary-label">${escapeHtml(label)}</span>
+                <span class="ob-summary-detail">${escapeHtml(detail)}</span>
+                ${cta}
+            </a>
         </li>
     `;
 }
