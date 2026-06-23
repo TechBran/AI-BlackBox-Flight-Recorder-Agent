@@ -51,7 +51,7 @@ const PLACEHOLDER_INTEGRATIONS = [
 
 let busy = false;
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     // Fetch current config + credentials in parallel — both inform rehydrate
     // state for the Gmail card and the service-account credential card.
     // Fail-open: empty responses mean render the original empty-input flow.
@@ -115,7 +115,7 @@ export async function render(container, { next, back, skip }) {
     container.innerHTML = `
         <section class="ob-step ob-optional">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>04</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "04"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">EXTRAS</div>
             </aside>
@@ -144,7 +144,7 @@ export async function render(container, { next, back, skip }) {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-extras-back">
-                        <span aria-hidden="true">&larr;</span> Back to API keys
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "API keys"}
                     </button>
                     <button type="button" class="ob-skip" id="ob-extras-skip">
                         Skip everything &mdash; configure later <span aria-hidden="true">&rarr;</span>

@@ -19,7 +19,7 @@ const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 let busy = false;
 let nextRowId = 1;  // monotonically increasing across re-renders
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     // Fetch current operator list — try/catch so a network blip doesn't
     // hard-block setup. Empty existing list falls through to fresh-install UX.
     let existing = [];
@@ -57,7 +57,7 @@ function renderShell() {
     return `
         <section class="ob-step ob-operator">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>07</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "07"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">OPERATOR</div>
             </aside>
@@ -86,7 +86,7 @@ function renderShell() {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-operator-back">
-                        <span aria-hidden="true">&larr;</span> Back to phone pairing
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "phone pairing"}
                     </button>
                 </nav>
             </div>

@@ -71,11 +71,11 @@ const PROVIDERS = [
 let lastStatus = null;  // cached most recent /status response
 let busyProvider = null;  // provider key whose terminal-spawn is in flight
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-cli-agents">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>06</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "06"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">AGENTS</div>
             </aside>
@@ -105,7 +105,7 @@ export async function render(container, { next, back, skip }) {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-cli-back">
-                        <span aria-hidden="true">&larr;</span> Back to pairing
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "pairing"}
                     </button>
                     <button type="button" class="ob-cta" id="ob-cli-continue" disabled>
                         Continue <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>

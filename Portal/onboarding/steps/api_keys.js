@@ -70,7 +70,7 @@ function makeInitialState(currentConfig) {
 
 let busy = false;  // prevents save-button double-fire
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     // Fetch current config first so we can rehydrate "already configured"
     // state per provider. Fail-open: empty config means render the original
     // empty-input flow.
@@ -91,7 +91,7 @@ export async function render(container, { next, back, skip }) {
     container.innerHTML = `
         <section class="ob-step ob-api-keys">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>03</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "03"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">KEYS</div>
             </aside>
@@ -119,7 +119,7 @@ export async function render(container, { next, back, skip }) {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-keys-back">
-                        <span aria-hidden="true">&larr;</span> Back to tailnet
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "tailnet"}
                     </button>
                     <button type="button" class="ob-skip" id="ob-keys-skip">
                         Skip &mdash; I'll add keys later <span aria-hidden="true">&rarr;</span>

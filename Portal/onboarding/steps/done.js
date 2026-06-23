@@ -10,11 +10,11 @@
 
 let busy = false;
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-done">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>08</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "08"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">DONE</div>
             </aside>
@@ -50,7 +50,7 @@ export async function render(container, { next, back, skip }) {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-done-back">
-                        <span aria-hidden="true">&larr;</span> Back to operator setup
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "operator setup"}
                     </button>
                 </nav>
             </div>

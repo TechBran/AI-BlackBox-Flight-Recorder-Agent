@@ -27,14 +27,14 @@ function stopPolling() {
     activeToken = null;
 }
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     // First action: clear any zombie poller from a prior mount of this step
     stopPolling();
 
     container.innerHTML = `
         <section class="ob-step ob-pair-phone">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>05</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "05"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">PAIR</div>
             </aside>
@@ -70,7 +70,7 @@ export async function render(container, { next, back, skip }) {
                 </div>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-pair-back">
-                        <span aria-hidden="true">&larr;</span> Back to extras
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "extras"}
                     </button>
                     <button type="button" class="ob-pair-mark-done" id="ob-pair-mark-done">
                         I've already paired this phone &mdash; mark complete <span aria-hidden="true">&check;</span>

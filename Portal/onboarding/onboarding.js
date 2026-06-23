@@ -27,6 +27,20 @@ const STEP_LABELS = {
     done: "DONE",
 };
 
+// Sigil + nav context derived from STEPS order — single source of truth.
+// Kills the drifted hardcoded "<em>05</em>" literals (two steps showed 05,
+// two showed 06, etc.) and the stale "/08" denominator. Returns the 1-based
+// 2-digit sigil number, the total, the step's own label, and the previous
+// step's label for the "Back to <x>" affordance.
+export function stepSigilContext(stepName) {
+    const idx = STEPS.indexOf(stepName);
+    const num = idx >= 0 ? String(idx + 1).padStart(2, "0") : "00";
+    const total = String(STEPS.length).padStart(2, "0");
+    const prev = idx > 0 ? STEPS[idx - 1] : null;
+    const backLabel = prev ? (STEP_LABELS[prev] || prev) : null;
+    return { num, total, label: STEP_LABELS[stepName] || stepName, backLabel };
+}
+
 const params = new URLSearchParams(location.search);
 const MODE = params.get("mode") === "manage" ? "manage" : "setup";
 
@@ -153,7 +167,8 @@ async function renderStep() {
     container.innerHTML = `<div class="ob-loading">Loading ${escapeHtml(stepName)}&hellip;</div>`;
     try {
         const mod = await import(`./steps/${stepName}.js`);
-        await mod.render(container, { state, next, back, skip, mode: MODE });
+        const sigil = stepSigilContext(stepName);
+        await mod.render(container, { state, next, back, skip, mode: MODE, sigil });
     } catch (e) {
         // Phase 2.1.1 ships before step components exist (Phases 2.2-2.7).
         // Render a clear placeholder so we know which step we're missing.

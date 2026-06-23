@@ -56,11 +56,11 @@ let catalog = null;       // {providers, resolved, default}
 let selected = "";        // currently-chosen provider id ("" == auto)
 let saving = false;       // prevents save double-fire
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-transcription">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>05</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "05"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">SPEECH</div>
             </aside>
@@ -88,7 +88,7 @@ export async function render(container, { next, back, skip }) {
                 <p id="ob-stt-auto-note" class="ob-step-helper" hidden></p>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-stt-back">
-                        <span aria-hidden="true">&larr;</span> Back to extras
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "extras"}
                     </button>
                     <button type="button" class="ob-cta" id="ob-stt-continue" disabled>
                         Continue <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>

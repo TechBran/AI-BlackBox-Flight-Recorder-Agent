@@ -26,7 +26,7 @@ let _currentAuthAbort = null;
 let _authInFlight = false;
 let _branchAGen = 0;
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     // C1: abort any in-flight auth poll loop from a prior render of this step
     if (_currentAuthAbort) _currentAuthAbort.aborted = true;
     _currentAuthAbort = null;
@@ -35,7 +35,7 @@ export async function render(container, { next, back, skip }) {
     container.innerHTML = `
         <section class="ob-step ob-tailscale">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>02</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "02"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">Tailnet</div>
             </aside>

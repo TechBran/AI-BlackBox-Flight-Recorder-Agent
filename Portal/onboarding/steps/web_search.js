@@ -38,11 +38,11 @@ const PROVIDERS = [
 let cfg = null;       // .web_search block from /onboarding/current-config
 let saving = false;   // prevents save double-fire
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-web-search">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>06</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "06"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">WEB SEARCH</div>
             </aside>
@@ -74,7 +74,7 @@ export async function render(container, { next, back, skip }) {
                 <p id="ob-ws-none-note" class="ob-step-helper" hidden></p>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-ws-back">
-                        <span aria-hidden="true">&larr;</span> Back to speech
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "speech"}
                     </button>
                     <button type="button" class="ob-cta" id="ob-ws-continue" disabled>
                         Continue <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>

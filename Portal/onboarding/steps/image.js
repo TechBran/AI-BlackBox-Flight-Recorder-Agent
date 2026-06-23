@@ -36,11 +36,11 @@ const PROVIDERS = [
 let cfg = null;       // .image block from /onboarding/current-config
 let saving = false;   // prevents save double-fire
 
-export async function render(container, { next, back, skip }) {
+export async function render(container, { next, back, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-image">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>07</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "07"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">IMAGE</div>
             </aside>
@@ -71,7 +71,7 @@ export async function render(container, { next, back, skip }) {
                 <p id="ob-img-none-note" class="ob-step-helper" hidden></p>
                 <nav class="ob-step-nav" aria-label="Step navigation">
                     <button type="button" class="ob-back" id="ob-img-back">
-                        <span aria-hidden="true">&larr;</span> Back to web search
+                        <span aria-hidden="true">&larr;</span> Back to ${sigil && sigil.backLabel ? sigil.backLabel.toLowerCase() : "web search"}
                     </button>
                     <button type="button" class="ob-cta" id="ob-img-continue" disabled>
                         Continue <span class="ob-cta-arrow" aria-hidden="true">&rarr;</span>

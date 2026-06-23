@@ -9,11 +9,11 @@
 // the same `export async function render(container, ctx)` signature and consume
 // the same design-system classes from onboarding.css.
 
-export async function render(container, { next, skip }) {
+export async function render(container, { next, skip, sigil }) {
     container.innerHTML = `
         <section class="ob-step ob-welcome">
             <aside class="ob-step-sigil" aria-hidden="true">
-                <div class="ob-step-sigil-num"><em>01</em></div>
+                <div class="ob-step-sigil-num"><em>${sigil ? sigil.num : "01"}</em></div>
                 <div class="ob-step-sigil-rule"></div>
                 <div class="ob-step-sigil-label">Welcome</div>
             </aside>

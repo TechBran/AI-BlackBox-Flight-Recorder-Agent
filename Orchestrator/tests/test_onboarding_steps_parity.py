@@ -93,3 +93,19 @@ def test_status_rollup_every_section_step_equals_key():
     from Orchestrator.onboarding.status_rollup import SECTIONS
     for s in SECTIONS:
         assert s["step"] == s["key"], f"section {s['key']!r}: step != key"
+
+
+def test_no_step_hardcodes_sigil_number():
+    """Sigil numbers must derive from STEPS order (stepSigilContext), never a
+    hardcoded literal — two steps previously both showed '05' and the denom was
+    a stale '/08'. Guard scoped to the sigil-num element so welcome.js's
+    decorative ob-feature-num <em>NN</em> pillar cards don't false-positive."""
+    offenders = []
+    for js in sorted(STEPS_DIR.glob("*.js")):
+        src = js.read_text(encoding="utf-8")
+        if re.search(r'ob-step-sigil-num"><em>\s*\d{2}\s*</em>', src):
+            offenders.append(js.name)
+    assert not offenders, (
+        "These step modules still hardcode a sigil number instead of deriving "
+        f"it from STEPS via stepSigilContext: {offenders}"
+    )
