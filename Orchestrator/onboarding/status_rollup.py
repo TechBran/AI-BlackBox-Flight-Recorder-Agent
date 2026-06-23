@@ -45,3 +45,104 @@ for _s in SECTIONS:
     _s["step"] = _s["key"]
 
 SECTION_BY_KEY = {s["key"]: s for s in SECTIONS}
+
+
+# Provider key env-vars that satisfy the api_keys section (the LLM provider set;
+# matches onboarding_routes.current_config's provider list, minus gmail/elevenlabs
+# which are surfaced under their own capability sections).
+_LLM_KEY_ENV = [
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+    "XAI_API_KEY", "PERPLEXITY_API_KEY",
+]
+# provider id (validated_at key) -> its env var, for the present-but-unvalidated check.
+_PROVIDER_KEY = {
+    "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+}
+
+
+def _present_keys(env: dict) -> list[str]:
+    return [k for k in _LLM_KEY_ENV if (env.get(k) or "").strip()]
+
+
+def _derive_api_keys(env, state):
+    present = _present_keys(env)
+    validated = state.get("validated_at", {}) or {}
+    items = [
+        {"key": prov, "label": prov,
+         "configured": bool((env.get(var) or "").strip()),
+         "validated_at": validated.get(prov)}
+        for prov, var in _PROVIDER_KEY.items()
+    ]
+    if not present:
+        return ATTENTION, "No API keys configured", items, [
+            {"severity": "warn", "message": "No LLM API key configured — chat will not work"}]
+    # present-but-unvalidated: any present key whose provider has no validated_at stamp
+    unvalidated = [prov for prov, var in _PROVIDER_KEY.items()
+                   if (env.get(var) or "").strip() and prov not in validated]
+    if unvalidated:
+        return ATTENTION, f"{len(present)} key(s); {len(unvalidated)} unvalidated", items, [
+            {"severity": "warn",
+             "message": f"Key present but never validated: {', '.join(unvalidated)}"}]
+    return READY, f"{len(present)} key(s) validated", items, []
+
+
+def _derive_operator(operators):
+    items = [{"key": op, "label": op, "configured": True, "validated_at": None}
+             for op in operators]
+    if not operators:
+        return ATTENTION, "No operators configured", items, [
+            {"severity": "warn", "message": "Add at least one operator"}]
+    return READY, f"{len(operators)} operator(s)", items, []
+
+
+# Dispatch table: key -> deriver returning (state, summary, items, attention_list).
+# Sections not yet wired fall back to the optional/persisted default.
+def _derive_default(section, env, state):
+    """Persisted fallback: completed -> ready, skipped -> optional, else optional."""
+    completed = set(state.get("completed_steps", []))
+    skipped = set(state.get("skipped_steps", []))
+    key = section["key"]
+    if key in completed:
+        return READY, "Configured", [], []
+    if key in skipped:
+        return OPTIONAL, "Skipped", [], []
+    if section["required"]:
+        return ATTENTION, "Not configured", [], [
+            {"severity": "warn", "message": f"{section['label']} required"}]
+    return OPTIONAL, "Not set up", [], []
+
+
+def build_status(*, env, state, embeddings, cli, web_search, image,
+                 paired, operators, restart, is_complete=False):
+    """PURE rollup from persisted snapshots. No probes. See module docstring."""
+    sections_out = []
+    attention_out = []
+    skipped = set(state.get("skipped_steps", []))
+    for section in SECTIONS:
+        key = section["key"]
+        if key == "api_keys":
+            st, summary, items, atts = _derive_api_keys(env, state)
+        elif key == "operator":
+            st, summary, items, atts = _derive_operator(operators)
+        else:
+            st, summary, items, atts = _derive_default(section, env, state)
+        sections_out.append({
+            "key": key, "group": section["group"], "label": section["label"],
+            "state": st, "required": section["required"], "summary": summary,
+            "step": section["step"], "skipped": key in skipped, "items": items,
+        })
+        for a in atts:
+            attention_out.append({
+                "section": key, "severity": a["severity"],
+                "message": a["message"], "cta_step": key,
+            })
+    ready_count = sum(1 for s in sections_out if s["state"] == READY)
+    return {
+        "ready_count": ready_count,
+        "total": len(SECTIONS),
+        "is_complete": is_complete,
+        "sections": sections_out,
+        "attention": attention_out,
+    }
