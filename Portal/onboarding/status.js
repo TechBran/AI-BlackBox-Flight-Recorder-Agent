@@ -147,6 +147,39 @@ export function updateRailItem(railEl, key, state) {
     if (item && state) item.dataset.state = state;
 }
 
+// Surface the Portal HTTPS URL (Android pairing / desktop access) in the hub
+// header. Hostname comes from /onboarding/current-config (same source as the
+// done summary). Fails open: LAN-only boxes (no BLACKBOX_TAILNET_HOSTNAME)
+// render nothing. Returns the element (or null), caller mounts it.
+export async function renderPortalUrlCard() {
+    let hostname = null;
+    try {
+        const r = await fetch("/onboarding/current-config");
+        if (r.ok) {
+            const cfg = await r.json();
+            hostname = (cfg && cfg.tailscale && cfg.tailscale.detail
+                        && cfg.tailscale.detail.hostname) || null;
+        }
+    } catch (_) { /* fail open */ }
+    if (!hostname) return null;
+
+    const url = `https://${hostname}`;
+    const el = document.createElement("div");
+    el.className = "ob-hub-url-card";
+    el.innerHTML = `
+        <span class="ob-hub-url-label">Portal URL</span>
+        <code class="ob-hub-url-code">${escapeHtml(url)}</code>
+        <button type="button" class="ob-hub-url-copy" aria-label="Copy Portal URL">Copy</button>
+    `;
+    el.querySelector(".ob-hub-url-copy").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        try { await navigator.clipboard.writeText(url); btn.textContent = "Copied ✓"; }
+        catch (_) { btn.textContent = "Copy failed"; }
+        setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    });
+    return el;
+}
+
 // Live SSE fill — update one tile in place from an `event: section` payload.
 export function applySectionEvent(root, ev) {
     if (!ev || !ev.key) return;

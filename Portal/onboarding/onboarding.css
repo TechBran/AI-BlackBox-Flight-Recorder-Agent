@@ -3055,3 +3055,39 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
         gap: var(--ob-space-8);
     }
 }
+
+/* M4 — hub header console band: title/readiness left, toolbar (Portal URL +
+ * future controls) right. Overrides the M3 .ob-hub-head column default. */
+.ob-hub-head {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: var(--ob-space-6);
+}
+.ob-hub-head-main { display: flex; flex-direction: column; gap: var(--ob-space-2); }
+.ob-hub-toolbar { display: flex; align-items: center; gap: var(--ob-space-4); flex-wrap: wrap; }
+.ob-hub-url-card {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ob-space-3);
+    padding: var(--ob-space-2) var(--ob-space-3) var(--ob-space-2) var(--ob-space-4);
+    border: 1px solid var(--ob-surface-border);
+    background: var(--ob-surface-elevated);
+}
+.ob-hub-url-label {
+    font-family: var(--ob-font-body); font-size: var(--ob-text-xs);
+    text-transform: uppercase; letter-spacing: 0.12em; color: var(--ob-text-tertiary);
+}
+.ob-hub-url-code { font-family: var(--ob-font-body); font-size: var(--ob-text-sm); color: var(--ob-text-primary); }
+.ob-hub-url-copy {
+    font-family: var(--ob-font-body); font-size: var(--ob-text-xs);
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--ob-accent);
+    background: none; border: 1px solid var(--ob-surface-border);
+    padding: var(--ob-space-1) var(--ob-space-3); cursor: pointer;
+    transition: border-color var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-hub-url-copy:hover { border-color: var(--ob-accent); }
+@media (max-width: 720px) {
+    .ob-hub-head { flex-direction: column; align-items: flex-start; }
+}

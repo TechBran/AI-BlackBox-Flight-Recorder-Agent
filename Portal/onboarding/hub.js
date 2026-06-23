@@ -4,7 +4,7 @@
 // All HTML comes from the presentational status.js — this file is
 // orchestration + the SSE lifecycle.
 
-import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, escapeHtml } from "./status.js";
+import { groupsHtml, readinessHtml, attentionHtml, applySectionEvent, renderRail, updateRailItem, renderPortalUrlCard, escapeHtml } from "./status.js";
 import { cssEscape } from "./util.js";
 
 let sse = null;  // active EventSource — closed on re-render / unmount
@@ -35,8 +35,11 @@ export async function renderHub(container) {
     container.innerHTML = `
         <section class="ob-hub">
             <div class="ob-hub-head">
-                <h1 class="ob-hub-title">Your <em>BlackBox</em> console.</h1>
-                <div class="ob-hub-readiness" id="ob-hub-readiness">${readinessHtml(readyCount, total)}</div>
+                <div class="ob-hub-head-main">
+                    <h1 class="ob-hub-title">Your <em>BlackBox</em> console.</h1>
+                    <div class="ob-hub-readiness" id="ob-hub-readiness">${readinessHtml(readyCount, total)}</div>
+                </div>
+                <div class="ob-hub-toolbar" id="ob-hub-toolbar"></div>
             </div>
             <div class="ob-hub-attention" id="ob-hub-attention">${attentionHtml(data.attention)}</div>
             <div class="ob-hub-body">
@@ -49,6 +52,14 @@ export async function renderHub(container) {
     // Mount the left-rail navigator (M4) into the two-column body.
     const railHost = container.querySelector("#ob-hub-rail");
     if (railHost) railHost.appendChild(renderRail(sections));
+
+    // Console-grade header affordance (M4): the Portal HTTPS URL (fail-open —
+    // LAN-only boxes render nothing).
+    const toolbar = container.querySelector("#ob-hub-toolbar");
+    if (toolbar) {
+        const urlCard = await renderPortalUrlCard();
+        if (urlCard) toolbar.appendChild(urlCard);
+    }
 
     openStream(container);
 }
