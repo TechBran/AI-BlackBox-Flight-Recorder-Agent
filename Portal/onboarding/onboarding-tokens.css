@@ -111,8 +111,24 @@
     --ob-success: #27d980;            /* validation success — green complement */
     --ob-success-soft: rgba(39, 217, 128, 0.12);
     --ob-success-glow: 0 0 24px rgba(39, 217, 128, 0.20);
-    --ob-warning: var(--ob-accent);            /* red — single attention signal matching Portal's identity */
-    --ob-warning-soft: var(--ob-accent-soft);  /* red — single attention signal matching Portal's identity */
+    /* ── Attention (amber) — distinct status state, adopted 2026-06-23
+     * (uplift design Decision #2). Reverses the earlier "collapse warning
+     * into red" choice: the console hub needs amber to mean "configured-
+     * but-wrong / required-unsatisfied" as a third signal alongside
+     * green=ready and red=error. ── */
+    --ob-attention: #f5a623;
+    --ob-attention-soft: rgba(245, 166, 35, 0.12);
+    --ob-attention-glow: 0 0 24px rgba(245, 166, 35, 0.20);
+    --ob-warning: var(--ob-attention);            /* repointed red→amber: warning IS the attention signal */
+    --ob-warning-soft: var(--ob-attention-soft);
+
+    /* ── Canonical status-state tokens (uplift). The .ob-section-card and
+     * every status pip read these four — one vocabulary, not the 4-5
+     * competing ad-hoc rgba sets scattered through the late-era CSS. ── */
+    --ob-state-ready: var(--ob-success);
+    --ob-state-attention: var(--ob-attention);
+    --ob-state-optional: var(--ob-text-tertiary);
+    --ob-state-checking: var(--ob-text-tertiary);
     --ob-error: #cc0000;              /* same as accent — error is primary signal */
     --ob-info: #4dd0e1;
 
@@ -143,6 +159,15 @@
     --ob-content-wide: 72rem;            /* ~1152px — for two-column layouts */
     --ob-step-min-height: 60vh;
     --ob-header-height: 72px;
+
+    /* ── Radius scale ── the wizard's index.html does NOT load Portal's
+     * _variables.css, so every `var(--radius-md, 8px)` in onboarding.css
+     * was silently using its inline fallback. Define the scale here so the
+     * tokens resolve (same values as Portal/styles/_variables.css). ── */
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-full: 9999px;
 }
 
 /* ── Accessibility: motion-sensitive users ──────────────────────
