@@ -366,3 +366,61 @@ def test_status_stream_emits_section_events_then_done():
     done_payload = _json.loads(events[-1][1])
     assert set(done_payload) >= {"ready_count", "total"}
     assert done_payload["total"] == len(sr.SECTIONS)
+
+
+# ── Validate-stored-key (troubleshooting re-validate without re-entering) ──
+
+def test_validate_uses_stored_env_key_when_no_credentials(tmp_path, monkeypatch):
+    """POST /onboarding/validate {provider} with NO credentials validates the
+    STORED .env key (the troubleshooting re-validate affordance) — the client
+    never re-handles the secret. On success validated_at is stamped. Without
+    the stored-key resolution this 400s on a missing credential field."""
+    import Orchestrator.onboarding.secrets_writer as sw
+    from Orchestrator.onboarding import validators
+    from Orchestrator.onboarding.validators import ValidationResult
+    from Orchestrator.routes import onboarding_routes
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-stored-abc123\n")
+    monkeypatch.setattr(sw, "ENV_FILE", env_file)
+
+    captured = {}
+    def fake_validate_openai(api_key):
+        captured["key"] = api_key
+        return ValidationResult(ok=True, latency_ms=5, detail={"model_count": 1})
+    monkeypatch.setattr(validators, "validate_openai", fake_validate_openai)
+
+    recorded = []
+    monkeypatch.setattr(onboarding_routes._state, "record_validation",
+                        lambda prov: recorded.append(prov))
+
+    c = _client()
+    r = c.post("/onboarding/validate", json={"provider": "openai"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert captured["key"] == "sk-stored-abc123"   # read from stored .env, not the request
+    assert recorded == ["openai"]                  # validated_at stamped on success
+
+
+def test_validate_still_prefers_request_credentials_when_supplied(tmp_path, monkeypatch):
+    """If the client DOES supply api_key, it wins over the stored value."""
+    import Orchestrator.onboarding.secrets_writer as sw
+    from Orchestrator.onboarding import validators
+    from Orchestrator.onboarding.validators import ValidationResult
+    from Orchestrator.routes import onboarding_routes
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-stored-OLD\n")
+    monkeypatch.setattr(sw, "ENV_FILE", env_file)
+    captured = {}
+    def fake(api_key):
+        captured["key"] = api_key
+        return ValidationResult(ok=True, latency_ms=1, detail={})
+    monkeypatch.setattr(validators, "validate_openai", fake)
+    monkeypatch.setattr(onboarding_routes._state, "record_validation", lambda p: None)
+
+    c = _client()
+    r = c.post("/onboarding/validate",
+               json={"provider": "openai", "credentials": {"api_key": "sk-NEW-from-request"}})
+    assert r.status_code == 200
+    assert captured["key"] == "sk-NEW-from-request"

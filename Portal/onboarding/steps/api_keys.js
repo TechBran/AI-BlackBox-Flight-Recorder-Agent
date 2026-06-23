@@ -204,8 +204,10 @@ function renderProviderCardConfigured(p, s) {
                     <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
                     Already configured &middot; ${escapeHtml(preview)}
                 </span>
+                <button type="button" class="ob-validate-btn ob-validate-existing" data-provider="${p.id}">Validate</button>
                 <button type="button" class="ob-replace-btn" data-provider="${p.id}">Replace</button>
             </div>
+            <div class="ob-provider-status" id="ob-status-${p.id}" data-status="idle"></div>
         </div>
     `;
 }
@@ -233,12 +235,15 @@ function wireSingleProviderCard(container, state, p) {
     const s = state[p.id];
 
     if (s.wasPresent && !s.replacing) {
-        // Configured-state card: wire Replace button only.
-        const replaceBtn = container.querySelector(
-            `.ob-provider-card[data-provider="${p.id}"] .ob-replace-btn`
-        );
+        // Configured-state card: wire Replace + re-Validate (troubleshooting).
+        const cardSel = `.ob-provider-card[data-provider="${p.id}"]`;
+        const replaceBtn = container.querySelector(`${cardSel} .ob-replace-btn`);
         if (replaceBtn) {
             replaceBtn.addEventListener("click", () => startReplacing(p, state, container));
+        }
+        const reValidateBtn = container.querySelector(`${cardSel} .ob-validate-existing`);
+        if (reValidateBtn) {
+            reValidateBtn.addEventListener("click", () => validateStoredProvider(p, container));
         }
         return;
     }
@@ -360,6 +365,55 @@ async function validateProvider(p, state, container) {
         input.disabled = false;
         validateBtn.disabled = state[p.id].value.length === 0;
         updateSaveButton(container, state);
+    }
+}
+
+// Re-validate an ALREADY-CONFIGURED key (troubleshooting). The backend reads
+// the stored .env value and validates it — the client never re-handles the
+// secret. On success the backend stamps validated_at, which clears the
+// "needs attention" state on the console hub + done summary.
+async function validateStoredProvider(p, container) {
+    const card = container.querySelector(`.ob-provider-card[data-provider="${p.id}"]`);
+    const btn = card ? card.querySelector(".ob-validate-existing") : null;
+    const statusEl = container.querySelector(`#ob-status-${p.id}`);
+    if (!statusEl) return;
+    if (btn) btn.disabled = true;
+    statusEl.dataset.status = "validating";
+    statusEl.innerHTML = `<span class="ob-status-pill ob-status-pill-validating">Validating&hellip;</span>`;
+    try {
+        const r = await fetch("/onboarding/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // No credentials — the backend validates the stored key for this provider.
+            body: JSON.stringify({ provider: p.id }),
+        });
+        const result = await r.json();
+        if (result.ok) {
+            statusEl.dataset.status = "ok";
+            const detailText = formatDetail(p.id, result.detail);
+            statusEl.innerHTML = `
+                <span class="ob-status-pill ob-status-pill-ok">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
+                    Validated &middot; ${result.latency_ms}ms${detailText ? ` &middot; ${escapeHtml(detailText)}` : ""}
+                </span>`;
+        } else {
+            statusEl.dataset.status = "error";
+            const errMsg = (result.error || "validation failed").replace(/^\w+Error:\s*/, "");
+            statusEl.innerHTML = `
+                <span class="ob-status-pill ob-status-pill-error">
+                    <span class="ob-status-pill-glyph" aria-hidden="true">!</span>
+                    ${escapeHtml(errMsg.slice(0, 120))}
+                </span>`;
+        }
+    } catch (e) {
+        statusEl.dataset.status = "error";
+        statusEl.innerHTML = `
+            <span class="ob-status-pill ob-status-pill-error">
+                <span class="ob-status-pill-glyph" aria-hidden="true">!</span>
+                Network error: ${escapeHtml(e.message.slice(0, 120))}
+            </span>`;
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 

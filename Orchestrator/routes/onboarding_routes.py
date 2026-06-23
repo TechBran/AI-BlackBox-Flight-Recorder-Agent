@@ -319,9 +319,42 @@ def delete_config_value(key: str) -> dict:
     return {"ok": True, **result}
 
 
+# Provider -> the .env var holding its API key. Lets an ALREADY-CONFIGURED key
+# be re-validated (a troubleshooting affordance) WITHOUT the client re-sending
+# it: POST /validate {provider} with no credentials reads the stored value
+# here. The client never has to hold the raw secret to validate it.
+_VALIDATE_KEY_ENV = {
+    "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY", "elevenlabs": "ELEVENLABS_API_KEY",
+}
+
+
+def _resolve_stored_creds(provider: str, creds: dict) -> dict:
+    """Fill missing credentials from the stored .env values so a configured key
+    can be re-validated without re-entering it. Only reads .env when a needed
+    credential is actually absent from the request."""
+    out = dict(creds or {})
+    need_key = provider in _VALIDATE_KEY_ENV and not out.get("api_key")
+    need_gmail = provider == "gmail" and not (out.get("client_id") and out.get("client_secret"))
+    if not (need_key or need_gmail):
+        return out
+    from dotenv import dotenv_values
+    from Orchestrator.onboarding.secrets_writer import ENV_FILE
+    env = dotenv_values(str(ENV_FILE))
+    if need_key:
+        stored = env.get(_VALIDATE_KEY_ENV[provider])
+        if stored:
+            out["api_key"] = stored
+    if need_gmail:
+        out.setdefault("client_id", env.get("GOOGLE_OAUTH_CLIENT_ID", "") or "")
+        out.setdefault("client_secret", env.get("GOOGLE_OAUTH_CLIENT_SECRET", "") or "")
+    return out
+
+
 @router.post("/validate", response_model=ValidateResponse)
 def validate(req: ValidateRequest) -> ValidateResponse:
-    creds = req.credentials
+    creds = _resolve_stored_creds(req.provider, req.credentials)
     try:
         if req.provider == "openai":
             result = validators.validate_openai(creds["api_key"])
