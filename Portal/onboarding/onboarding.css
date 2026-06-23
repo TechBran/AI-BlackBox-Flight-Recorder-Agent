@@ -2813,3 +2813,168 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     line-height: 1.35;
     opacity: 0.72;
 }
+
+/* ════════════════════════════════════════════════════════════════
+ * Console hub (M3) — .ob-section-card grouped tiles + readiness header
+ * Distilled from .ob-cli-agent-card[data-state]: one attribute switches
+ * the border-left accent. States are the 4 canonical ones (tokens from
+ * onboarding-tokens.css, added in M0). No new color literals here.
+ * ════════════════════════════════════════════════════════════════ */
+.ob-hub {
+    flex: 1;
+    max-width: var(--ob-content-wide);
+    width: 100%;
+    margin: 0 auto;
+    padding: var(--ob-space-12) var(--ob-space-10) var(--ob-space-16);
+    position: relative;
+    z-index: 1;
+    animation: ob-fade-up var(--ob-motion-moment) var(--ob-ease-out) backwards;
+}
+.ob-hub-head {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-2);
+    margin-bottom: var(--ob-space-10);
+}
+.ob-hub-title {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-light);
+    font-size: clamp(2.2rem, 5vw, var(--ob-text-3xl));
+    letter-spacing: -0.03em;
+    font-variation-settings: "opsz" 144, "SOFT" var(--ob-display-soft);
+    color: var(--ob-text-primary);
+}
+.ob-hub-title em {
+    font-style: italic;
+    color: var(--ob-accent);
+    font-weight: var(--ob-display-weight-regular);
+}
+.ob-hub-readiness {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+.ob-hub-readiness em {
+    font-style: normal;
+    color: var(--ob-state-ready);
+    font-weight: 600;
+}
+
+/* Attention header — derived warn/error rows with a "Set up" CTA */
+.ob-hub-attention {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ob-space-2);
+    margin-bottom: var(--ob-space-10);
+}
+.ob-attention-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ob-space-4);
+    padding: var(--ob-space-3) var(--ob-space-5);
+    background: var(--ob-accent-soft);
+    border-left: 3px solid var(--ob-attention);
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    color: var(--ob-text-primary);
+}
+.ob-attention-row[data-severity="error"] {
+    border-left-color: var(--ob-error);
+}
+.ob-attention-msg { flex: 1; }
+.ob-attention-cta {
+    color: var(--ob-attention);
+    text-decoration: none;
+    white-space: nowrap;
+    border-bottom: 1px solid currentColor;
+    font-weight: 500;
+}
+.ob-attention-cta:hover { opacity: 0.75; }
+
+/* Grouped sections */
+.ob-hub-group { margin-bottom: var(--ob-space-10); }
+.ob-hub-group-label {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--ob-text-tertiary);
+    margin-bottom: var(--ob-space-4);
+    padding-bottom: var(--ob-space-2);
+    border-bottom: 1px solid var(--ob-surface-border);
+}
+.ob-section-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--ob-space-4);
+}
+
+/* The tile — one attribute (data-state) switches the border-left accent */
+.ob-section-card {
+    display: block;
+    text-decoration: none;
+    background: var(--ob-surface-elevated);
+    border: 1px solid var(--ob-surface-border);
+    border-left-width: 3px;
+    border-left-color: var(--ob-state-optional);
+    padding: var(--ob-space-4) var(--ob-space-5);
+    transition: border-color var(--ob-motion-fast) var(--ob-ease-out),
+                background var(--ob-motion-fast) var(--ob-ease-out),
+                transform var(--ob-motion-fast) var(--ob-ease-out);
+}
+.ob-section-card:hover {
+    border-color: var(--ob-surface-border-emphasis);
+    background: var(--ob-surface-card-hover);
+    transform: translateY(-2px);
+}
+.ob-section-card:focus-visible {
+    outline: 2px solid var(--ob-text-primary);
+    outline-offset: 4px;
+}
+.ob-section-card[data-state="ready"]     { border-left-color: var(--ob-state-ready); }
+.ob-section-card[data-state="attention"] { border-left-color: var(--ob-state-attention); }
+.ob-section-card[data-state="optional"]  { border-left-color: var(--ob-state-optional); }
+.ob-section-card[data-state="checking"]  { border-left-color: var(--ob-state-checking); }
+
+.ob-section-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--ob-space-3);
+    margin-bottom: var(--ob-space-2);
+}
+.ob-section-card-label {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-medium);
+    font-size: var(--ob-text-lg);
+    color: var(--ob-text-primary);
+    font-variation-settings: "opsz" 36, "SOFT" var(--ob-display-soft);
+}
+.ob-section-card-pip {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ob-text-tertiary);
+    white-space: nowrap;
+}
+.ob-section-card[data-state="ready"]     .ob-section-card-pip { color: var(--ob-state-ready); }
+.ob-section-card[data-state="attention"] .ob-section-card-pip { color: var(--ob-state-attention); }
+.ob-section-card-summary {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    line-height: 1.5;
+    color: var(--ob-text-secondary);
+    min-height: 1.4em;
+}
+.ob-section-card[data-state="checking"] .ob-section-card-summary {
+    color: var(--ob-text-tertiary);
+    opacity: 0.7;
+}
+
+@media (max-width: 720px) {
+    .ob-hub { padding: var(--ob-space-8) var(--ob-space-6); }
+    .ob-section-grid { grid-template-columns: 1fr; }
+}
