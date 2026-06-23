@@ -60,6 +60,13 @@ fun VoiceWaveform(
     // rest (amplitude ~0) so idle bars in a list stop repainting at 60fps.
     // Default false keeps the always-flowing behavior for the voice/mic ribbons.
     pauseWhenIdle: Boolean = false,
+    // Baseline ribbon height when amplitude is ~0. Default IDLE_LEVEL gives the
+    // mic/voice ribbon a gentle breathing floor; the TTS player passes 0f so the
+    // ribbon goes truly FLAT on silence.
+    idleLevel: Float = IDLE_LEVEL,
+    // Amplitude ease duration (ms). Higher = smoother / less twitchy. Default 70
+    // keeps the mic responsive; the TTS player raises it to glide.
+    riseFallMs: Int = 70,
 ) {
     val gain = when (speaker) {
         WaveSpeaker.AI -> AI_GAIN
@@ -68,7 +75,7 @@ fun VoiceWaveform(
     val eased by animateFloatAsState(
         targetValue = (amplitude * gain * sensitivity).coerceIn(0f, 1f),
         // Easing: fluid but responsive — tracks the audio without trailing or twitching.
-        animationSpec = tween(70),
+        animationSpec = tween(riseFallMs),
         label = "amp",
     )
 
@@ -87,7 +94,7 @@ fun VoiceWaveform(
     val color1 by animateColorAsState(c1, tween(400), label = "c1")
     val color2 by animateColorAsState(c2, tween(400), label = "c2")
 
-    val level = if (speaker == WaveSpeaker.IDLE) IDLE_LEVEL else (IDLE_LEVEL + eased).coerceIn(0f, 1f)
+    val level = if (speaker == WaveSpeaker.IDLE) idleLevel else (idleLevel + eased).coerceIn(0f, 1f)
 
     // When pauseWhenIdle is set (list TTS bars), stop reading the phase State
     // while at rest so the Canvas stops repainting every frame. IDLE breathing

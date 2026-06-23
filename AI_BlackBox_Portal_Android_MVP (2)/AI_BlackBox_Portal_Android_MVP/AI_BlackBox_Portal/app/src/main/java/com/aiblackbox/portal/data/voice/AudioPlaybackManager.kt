@@ -1,34 +1,42 @@
 package com.aiblackbox.portal.data.voice
 
 import android.media.MediaPlayer
-import android.media.audiofx.Visualizer
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import kotlin.math.sqrt
 
 /**
- * Singleton audio playback manager — survives composable disposal (scrolling).
- * Only stops when explicitly paused/stopped or when release() is called (app close).
+ * Singleton audio playback manager - survives composable disposal (scrolling).
  *
- * While playing, a [Visualizer] taps the player's audio session and publishes a
- * real-time output [amplitude] (0f..1f) so UI (e.g. AudioPlayerBar's red ribbon)
- * reacts to the ACTUAL audio instead of a synthetic timer. Requires RECORD_AUDIO
- * (already granted for mic/STT). If the Visualizer cannot attach on a given
- * device, [visualizerActive] stays false and callers fall back to a synthetic
- * pulse.
+ * The playback ribbon's [amplitude] is driven by the ACTUAL audio bytes: on load
+ * the file's PCM is decoded into a per-window RMS envelope (AudioEnvelope), and a
+ * ~60fps tick samples that envelope at the live playback position. This tracks the
+ * speech smoothly + in sync, flattens to 0 on real silence, and works on every
+ * device (no Visualizer / no device-specific flakiness). [amplitudeReady] turns
+ * true once the envelope is decoded; until then callers may show a fallback.
  */
 object AudioPlaybackManager {
     private const val TAG = "AudioPlayback"
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var mediaPlayer: MediaPlayer? = null
     private var currentUrl: String? = null
     private var autoPlayOnPrepare = false
 
-    // Real-time output visualizer (amplitude source for the ribbon).
-    private var visualizer: Visualizer? = null
+    // Decoded amplitude envelope of the current clip (peak-normalized 0..1).
+    @Volatile private var envelope: FloatArray? = null
+    @Volatile private var envWindowMs: Int = 20
+    private var decodeJob: Job? = null
+    private var ampJob: Job? = null
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
@@ -48,14 +56,14 @@ object AudioPlaybackManager {
     private val _hasError = MutableStateFlow(false)
     val hasError: StateFlow<Boolean> = _hasError.asStateFlow()
 
-    // Real-time output amplitude (0f..1f) from the Visualizer while playing.
-    // Dips toward 0 on silence; exactly 0 (with visualizerActive=false) when the
-    // Visualizer is unavailable so callers can choose a synthetic fallback.
+    // Ribbon amplitude (0..1), sampled from the decoded envelope at the live
+    // playback position. 0 when not playing / before the envelope is ready.
     private val _amplitude = MutableStateFlow(0f)
     val amplitude: StateFlow<Float> = _amplitude.asStateFlow()
 
-    private val _visualizerActive = MutableStateFlow(false)
-    val visualizerActive: StateFlow<Boolean> = _visualizerActive.asStateFlow()
+    // True once the current clip's amplitude envelope has decoded.
+    private val _amplitudeReady = MutableStateFlow(false)
+    val amplitudeReady: StateFlow<Boolean> = _amplitudeReady.asStateFlow()
 
     /** Load and prepare audio from URL. If already loaded, does nothing. */
     fun load(url: String) {
@@ -67,27 +75,25 @@ object AudioPlaybackManager {
         _isPrepared.value = false
         _position.value = 0f
         autoPlayOnPrepare = false
-
+        decodeEnvelope(url)
         try {
             val player = MediaPlayer()
             player.setDataSource(url)
             player.setOnPreparedListener { mp ->
                 _duration.value = mp.duration.toLong()
                 _isPrepared.value = true
-                // Tap the output for a real amplitude signal before playback starts.
-                attachVisualizer(mp.audioSessionId)
-                // Auto-play if play() was called before prepare finished
                 if (autoPlayOnPrepare) {
                     autoPlayOnPrepare = false
                     mp.start()
                     _isPlaying.value = true
-                    enableVisualizer(true)
+                    startAmplitudeTick()
                 }
             }
             player.setOnCompletionListener {
                 _isPlaying.value = false
                 _position.value = 0f
-                enableVisualizer(false)
+                stopAmplitudeTick()
+                _amplitude.value = 0f
                 try { it.seekTo(0) } catch (_: Exception) {}
             }
             player.setOnErrorListener { _, what, extra ->
@@ -95,7 +101,7 @@ object AudioPlaybackManager {
                 _hasError.value = true
                 _isPlaying.value = false
                 autoPlayOnPrepare = false
-                enableVisualizer(false)
+                stopAmplitudeTick()
                 true
             }
             player.prepareAsync()
@@ -109,7 +115,6 @@ object AudioPlaybackManager {
     /** Load and immediately play (queues auto-play if still preparing) */
     fun loadAndPlay(url: String) {
         if (url == currentUrl && mediaPlayer != null && _isPrepared.value) {
-            // Already loaded and ready — just play
             play()
             return
         }
@@ -120,14 +125,13 @@ object AudioPlaybackManager {
     fun play() {
         val mp = mediaPlayer ?: return
         if (!_isPrepared.value) {
-            // Not ready yet — queue it
             autoPlayOnPrepare = true
             return
         }
         try {
             mp.start()
             _isPlaying.value = true
-            enableVisualizer(true)
+            startAmplitudeTick()
         } catch (e: Exception) {
             Log.e(TAG, "Play failed: ${e.message}")
             _hasError.value = true
@@ -138,7 +142,8 @@ object AudioPlaybackManager {
         autoPlayOnPrepare = false
         try { mediaPlayer?.pause() } catch (_: Exception) {}
         _isPlaying.value = false
-        enableVisualizer(false)
+        stopAmplitudeTick()
+        _amplitude.value = 0f
     }
 
     fun togglePlayPause() {
@@ -148,12 +153,11 @@ object AudioPlaybackManager {
     fun seekTo(fraction: Float) {
         val mp = mediaPlayer ?: return
         if (!_isPrepared.value) return
-        val seekMs = (fraction * mp.duration).toInt()
-        mp.seekTo(seekMs)
+        mp.seekTo((fraction * mp.duration).toInt())
         _position.value = fraction
     }
 
-    /** Update position — call from a polling coroutine */
+    /** Update position - call from a polling coroutine */
     fun updatePosition() {
         try {
             val mp = mediaPlayer
@@ -167,7 +171,10 @@ object AudioPlaybackManager {
     }
 
     fun stop() {
-        releaseVisualizer()
+        stopAmplitudeTick()
+        decodeJob?.cancel(); decodeJob = null
+        envelope = null
+        _amplitudeReady.value = false
         try {
             mediaPlayer?.let { mp ->
                 if (mp.isPlaying) mp.stop()
@@ -182,6 +189,7 @@ object AudioPlaybackManager {
         _duration.value = 0L
         _position.value = 0f
         _hasError.value = false
+        _amplitude.value = 0f
     }
 
     /** Call from Activity onDestroy */
@@ -189,112 +197,57 @@ object AudioPlaybackManager {
         stop()
     }
 
-    /**
-     * App went to background: pause output capture (no on-screen consumer).
-     * Playback continues; only the Visualizer is disabled.
-     */
+    /** App backgrounded: stop the amplitude tick (no on-screen consumer). Playback continues. */
     fun onAppBackground() {
-        if (_isPlaying.value) enableVisualizer(false)
+        stopAmplitudeTick()
     }
 
-    /** App returned to foreground: resume capture if still playing. */
+    /** App foregrounded: resume the amplitude tick if still playing. */
     fun onAppForeground() {
-        if (_isPlaying.value) enableVisualizer(true)
+        if (_isPlaying.value) startAmplitudeTick()
     }
 
-    // =========================================================================
-    // Visualizer - real-time output amplitude for the ribbon
-    // =========================================================================
+    // --- Amplitude envelope (decoded from the actual audio bytes) ------------
 
-    // Envelope smoothing applied in the capture callback: instant attack (track
-    // loud syllables) + slower release (ribbon glides down) so motion reads as
-    // natural, not strobing. The UI layer eases on top of this.
-    private const val RELEASE = 0.80f
-
-    // Silence watchdog: some emulators/OEM builds attach + enable a Visualizer
-    // successfully but only ever emit an all-128 (silent) buffer. Without this,
-    // visualizerActive would stay true with a dead ribbon and the synthetic
-    // fallback would never fire. If we see no real signal for SILENT_FRAME_LIMIT
-    // consecutive frames we declare the engine dead; once ANY real signal
-    // arrives we trust it (quiet passages just dip the ribbon).
-    private const val SIGNAL_EPS = 0.008f
-    private const val SILENT_FRAME_LIMIT = 30   // ~1.5s at the ~20Hz capture rate
-    @Volatile private var sawSignal = false
-    @Volatile private var silentFrames = 0
-
-    private fun attachVisualizer(sessionId: Int) {
-        releaseVisualizer()
-        // Construct first; only the ctor allocates the native engine.
-        val vis = try {
-            Visualizer(sessionId)
-        } catch (e: Exception) {
-            Log.w(TAG, "Visualizer ctor failed: ${e.message}")
-            return
-        }
-        // Assign the field immediately so a throw during configuration below is
-        // recoverable via releaseVisualizer() (otherwise the native engine leaks).
-        visualizer = vis
-        try {
-            val sizeRange = Visualizer.getCaptureSizeRange()  // e.g. [128, 1024]
-            vis.setCaptureSize(512.coerceIn(sizeRange[0], sizeRange[1]))
-            vis.setDataCaptureListener(
-                object : Visualizer.OnDataCaptureListener {
-                    override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
-                        if (waveform == null || waveform.isEmpty()) return
-                        // PCM8 waveform is centered at 128; RMS of the deviation -> 0f..1f.
-                        var sumSq = 0.0
-                        for (b in waveform) {
-                            val centered = (b.toInt() and 0xFF) - 128
-                            sumSq += (centered * centered).toDouble()
-                        }
-                        val rms = (sqrt(sumSq / waveform.size) / 128.0).toFloat().coerceIn(0f, 1f)
-                        // Silence watchdog (see fields above).
-                        if (!sawSignal) {
-                            if (rms > SIGNAL_EPS) {
-                                sawSignal = true
-                                _visualizerActive.value = true   // real signal (possibly after leading silence)
-                            } else if (++silentFrames >= SILENT_FRAME_LIMIT) {
-                                _visualizerActive.value = false  // attached but dead -> UI uses synthetic pulse
-                            }
-                        }
-                        // Atomic read-modify-write so concurrent callbacks don't lose updates.
-                        _amplitude.update { prev -> if (rms >= prev) rms else (prev * RELEASE + rms * (1f - RELEASE)) }
-                    }
-                    override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {}
-                },
-                Visualizer.getMaxCaptureRate(),  // milliHz; system-capped (~20Hz). UI eases the rest.
-                true,   // capture waveform
-                false   // no FFT
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Visualizer config failed: ${e.message}")
-            releaseVisualizer()
+    private fun decodeEnvelope(url: String) {
+        decodeJob?.cancel()
+        envelope = null
+        _amplitudeReady.value = false
+        decodeJob = scope.launch(Dispatchers.IO) {
+            val result = AudioEnvelope.decode(url)
+            if (result != null && currentUrl == url) {
+                envelope = result.first
+                envWindowMs = result.second
+                _amplitudeReady.value = true
+            }
         }
     }
 
-    private fun enableVisualizer(enabled: Boolean) {
-        val vis = visualizer
-        if (vis == null) {
-            _visualizerActive.value = false
-            if (!enabled) _amplitude.value = 0f
-            return
+    private fun startAmplitudeTick() {
+        if (ampJob?.isActive == true) return
+        ampJob = scope.launch {
+            while (isActive) {
+                val mp = mediaPlayer
+                val env = envelope
+                if (mp != null && _isPlaying.value && env != null && env.isNotEmpty()) {
+                    val posMs = try { mp.currentPosition } catch (_: Exception) { 0 }
+                    _amplitude.value = sampleEnvelope(env, posMs)
+                }
+                delay(16)  // ~60fps
+            }
         }
-        try {
-            vis.setEnabled(enabled)
-            _visualizerActive.value = enabled
-            if (enabled) { sawSignal = false; silentFrames = 0 }
-        } catch (e: Exception) {
-            Log.w(TAG, "Visualizer enable($enabled) failed: ${e.message}")
-            _visualizerActive.value = false
-        }
-        if (!enabled) _amplitude.value = 0f
     }
 
-    private fun releaseVisualizer() {
-        try { visualizer?.setEnabled(false) } catch (_: Exception) {}
-        try { visualizer?.release() } catch (_: Exception) {}
-        visualizer = null
-        _visualizerActive.value = false
-        _amplitude.value = 0f
+    private fun stopAmplitudeTick() {
+        ampJob?.cancel(); ampJob = null
+    }
+
+    private fun sampleEnvelope(env: FloatArray, posMs: Int): Float {
+        val fidx = posMs.toFloat() / envWindowMs
+        val i0 = fidx.toInt()
+        if (i0 < 0) return env.first()
+        if (i0 >= env.size - 1) return env.last()
+        val frac = fidx - i0
+        return env[i0] * (1f - frac) + env[i0 + 1] * frac
     }
 }

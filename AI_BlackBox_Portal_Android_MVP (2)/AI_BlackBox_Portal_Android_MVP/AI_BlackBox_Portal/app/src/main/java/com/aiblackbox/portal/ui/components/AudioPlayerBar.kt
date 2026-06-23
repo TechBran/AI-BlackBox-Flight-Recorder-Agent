@@ -94,7 +94,7 @@ fun AudioPlayerBar(
     val position by mgr.position.collectAsState()
     val hasError by mgr.hasError.collectAsState()
     val outputAmplitude by mgr.amplitude.collectAsState()
-    val visualizerActive by mgr.visualizerActive.collectAsState()
+    val amplitudeReady by mgr.amplitudeReady.collectAsState()
     var isSeeking by remember { mutableStateOf(false) }
     var seekPosition by remember { mutableFloatStateOf(0f) }
 
@@ -177,7 +177,7 @@ fun AudioPlayerBar(
         // own continuous phase animation.
         val ribbonAmplitude = when {
             !thisPlaying -> 0f
-            visualizerActive -> (outputAmplitude * 1.5f).coerceIn(0f, 1f)
+            amplitudeReady -> outputAmplitude.coerceIn(0f, 1f)
             else -> 0.12f + breathe * 0.18f
         }
 
@@ -213,12 +213,19 @@ fun AudioPlayerBar(
                     )
                 }
         ) {
-            // Flowing ribbon, forced to the red palette regardless of speaker.
+            // Same renderer as the mic ribbon (which looks great): a global
+            // amplitude drives the sine ribbon up/down. The smooth VU-meter feel
+            // comes from AudioPlaybackManager's attack/decay envelope on the
+            // Visualizer RMS; sensitivity de-gains the hot playback signal and
+            // idleLevel=0 lets it rest flat on silence.
             VoiceWaveform(
                 amplitude = ribbonAmplitude,
                 speaker = WaveSpeaker.USER,
                 modifier = Modifier.fillMaxSize(),
                 height = 40.dp,
+                sensitivity = 0.55f,
+                idleLevel = 0f,
+                riseFallMs = 70,
                 overrideColors = WaveRed to WaveRedDim,
                 pauseWhenIdle = true,
             )
