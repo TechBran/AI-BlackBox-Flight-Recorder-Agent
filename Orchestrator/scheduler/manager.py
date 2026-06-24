@@ -307,7 +307,10 @@ class CronJobManager:
         model = kwargs.get("model", "gemini")
         delivery = kwargs.get("delivery", "snapshot")
         delivery_target = kwargs.get("delivery_target")
-        frequency_hint = kwargs.get("frequency_hint")
+        # The cron is the single source of truth for the label: derive the
+        # frequency_hint from the schedule and ignore any client-supplied hint
+        # so the label can never contradict the actual schedule (M1.3).
+        frequency_hint = self._hint_from_cron(schedule)
         one_shot = 1 if kwargs.get("one_shot") else 0
 
         conn = sqlite3.connect(self.db_path)
@@ -444,6 +447,9 @@ class CronJobManager:
                 ) from exc
             next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
             updates["next_run_at"] = next_fire.isoformat() if next_fire else None
+            # Regenerate the label from the new cron — the cron is authoritative,
+            # so any client-supplied frequency_hint is overridden (M1.3).
+            updates["frequency_hint"] = self._hint_from_cron(updates["schedule"])
             schedule_changed = True
 
         # Normalise one_shot to integer
@@ -858,6 +864,128 @@ class CronJobManager:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Human-readable schedule label (cron is the single source of truth)
+    # ------------------------------------------------------------------
+
+    # Day-of-week names (cron: 0/7=Sun .. 6=Sat).
+    _DOW_NAMES = {
+        0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed",
+        4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun",
+    }
+
+    @classmethod
+    def _hint_from_cron(cls, schedule: str) -> str:
+        """
+        Derive a compact, human-readable frequency hint from a 5-field cron
+        expression. The cron is the single source of truth, so this label can
+        never contradict the actual schedule. All times are box-local, marked
+        with a trailing "(local)".
+
+        Covers the common minute / hour / day-of-week cases; anything it does
+        not specifically recognise degrades to echoing the raw cron, still
+        suffixed "(local)".
+        """
+        suffix = " (local)"
+        raw = (schedule or "").strip()
+        parts = raw.split()
+        if len(parts) != 5:
+            return (raw or "custom schedule") + suffix
+
+        minute, hour, dom, month, dow = parts
+
+        def _is_every(field: str) -> bool:
+            return field == "*"
+
+        # --- Sub-hour / sub-day rates ---------------------------------------
+        # "*/N * * * *"  -> every N minutes
+        if hour == "*" and dom == "*" and month == "*" and dow == "*":
+            if minute == "*":
+                return "Every minute" + suffix
+            if minute.startswith("*/"):
+                step = minute[2:]
+                return f"Every {step} minutes" + suffix
+            if minute.isdigit():
+                return f"Hourly at :{int(minute):02d}" + suffix
+
+        # "M */N * * *" -> every N hours at minute M
+        if (
+            minute.isdigit()
+            and hour.startswith("*/")
+            and dom == "*"
+            and month == "*"
+            and dow == "*"
+        ):
+            step = hour[2:]
+            return f"Every {step} hours at :{int(minute):02d}" + suffix
+
+        # --- Fixed time-of-day cases ----------------------------------------
+        time_label = None
+        if minute.isdigit() and hour.isdigit():
+            time_label = f"{int(hour):02d}:{int(minute):02d}"
+
+        if time_label is not None:
+            dow_label = cls._describe_dow(dow)
+            dom_is_every = _is_every(dom)
+            month_is_every = _is_every(month)
+
+            if dow_label is not None:
+                # Day-of-week constrained.
+                return f"{dow_label} at {time_label}" + suffix
+
+            if dom_is_every and month_is_every:
+                return f"Daily at {time_label}" + suffix
+
+            if dom.isdigit() and month_is_every:
+                return f"Monthly on day {int(dom)} at {time_label}" + suffix
+
+            if dom.isdigit() and month.isdigit():
+                return (
+                    f"Yearly on {int(month):02d}-{int(dom):02d} at {time_label}"
+                    + suffix
+                )
+
+        # --- Fallback: echo the cron, still box-local -----------------------
+        return raw + suffix
+
+    @classmethod
+    def _describe_dow(cls, dow: str) -> Optional[str]:
+        """
+        Describe a cron day-of-week field, or None if it means 'every day'.
+
+        Handles '*', ranges ('1-5'), explicit lists ('1,3,5') and single days.
+        """
+        if dow == "*" or dow == "?":
+            return None
+
+        # Weekday / weekend shorthands.
+        if dow == "1-5":
+            return "Weekdays"
+        if dow in ("0,6", "6,0", "6,7", "0", "6", "7"):
+            if dow in ("0,6", "6,0", "6,7"):
+                return "Weekends"
+
+        def _name(token: str) -> Optional[str]:
+            if token.isdigit():
+                return cls._DOW_NAMES.get(int(token) % 8 if int(token) == 7 else int(token))
+            return None
+
+        # Range a-b.
+        if "-" in dow and "," not in dow:
+            lo, _, hi = dow.partition("-")
+            lo_name, hi_name = _name(lo), _name(hi)
+            if lo_name and hi_name:
+                return f"{lo_name}-{hi_name}"
+
+        # Explicit list a,b,c (and single day, which has no comma).
+        tokens = dow.split(",")
+        names = [_name(t) for t in tokens]
+        if all(names):
+            return ", ".join(names)  # type: ignore[arg-type]
+
+        # Unrecognised — let the caller fall back to echoing the cron.
+        return None
 
     @staticmethod
     def _job_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
