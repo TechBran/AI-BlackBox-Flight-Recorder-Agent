@@ -11,19 +11,15 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         if not job_id:
             return ToolResult(False, "job_id is required")
 
-        # Handle pause/resume
+        # Translate pause/resume into a status update and fall through to the
+        # SINGLE update_job path (M2.4). update_job whitelists `status` and
+        # re-registers with APScheduler, so one call can both resume/pause AND
+        # change schedule/prompt/etc. — no early-return that drops field edits.
         if "pause" in params:
-            if params.pop("pause"):
-                job = manager.pause_job(job_id)
-                if job:
-                    return ToolResult(True, f"Cron job '{job['name']}' paused.", data={"job": job})
-            else:
-                job = manager.resume_job(job_id)
-                if job:
-                    return ToolResult(True, f"Cron job '{job['name']}' resumed.", data={"job": job})
-            return ToolResult(False, "Job not found")
+            updates_pause = params.pop("pause")
+            params["status"] = "paused" if updates_pause else "active"
 
-        # Update other fields
+        # Update fields (status, schedule, prompt, ...) in one update_job call.
         updates = {k: v for k, v in params.items() if v is not None}
         job = manager.update_job(job_id, **updates)
         if not job:

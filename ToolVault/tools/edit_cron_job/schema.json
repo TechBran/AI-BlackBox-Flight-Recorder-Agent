@@ -61,7 +61,15 @@
       },
       "pause": {
         "type": "boolean",
-        "description": "Set to true to pause the job, false to resume it"
+        "description": "Set to true to pause the job, false to resume it. Can be combined with field changes in the same call."
+      },
+      "one_shot": {
+        "type": "boolean",
+        "description": "Whether the job runs once then auto-deletes"
+      },
+      "operator": {
+        "type": "string",
+        "description": "Reassign the job to a different operator"
       }
     },
     "required": [
