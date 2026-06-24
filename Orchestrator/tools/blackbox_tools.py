@@ -44,17 +44,36 @@ BLACKBOX_TOOLS_GEMINI = get_gemini_live_tools("phone")
 from Orchestrator.toolvault.context import ToolResult  # noqa: E402
 
 
-def _coerce_stringified_json_args(tool_name, tool_input):
-    """Tolerate models that emit array/object params as JSON-encoded STRINGS.
+# Known string spellings of booleans models emit (case-insensitive). Empty
+# string maps to False (an absent/blank flag means "off"). Anything outside
+# these sets is left untouched so normal validation can still reject it rather
+# than us silently guessing.
+_BOOL_TRUE_STRINGS = {"true", "1", "yes", "on"}
+_BOOL_FALSE_STRINGS = {"false", "0", "no", "off", ""}
 
-    Some models (esp. for deeply-nested params like the Google batchUpdate
-    `requests` array) send requests="[{...}]" instead of requests=[{...}]. The
-    value arrives as a genuine str, so an executor's isinstance(..., list) check
-    correctly rejects it. When the tool schema declares a param as array/object
-    and the incoming value is a JSON string of that kind, parse it back.
-    Conservative: only str values whose declared type is array/object and which
-    parse to the matching type are touched; everything else is left as-is so
-    normal validation still applies.
+
+def _coerce_stringified_json_args(tool_name, tool_input):
+    """Tolerate models that emit array/object/boolean params as STRINGS.
+
+    Two model quirks, fixed at one schema-driven chokepoint so every tool
+    benefits:
+
+    1. array/object params sent as JSON-encoded strings — e.g. the Google
+       batchUpdate `requests` array arriving as requests="[{...}]" instead of
+       requests=[{...}]. The value is a genuine str, so an executor's
+       isinstance(..., list) check correctly rejects it; when the schema
+       declares the param array/object and the string parses to that kind, we
+       parse it back.
+
+    2. boolean params sent as strings — e.g. one_shot='false' / pause='false'.
+       Left as-is, 'false' is a truthy str (one_shot stored as 1 → job
+       auto-deletes; pause='false' pauses on a resume). When the schema
+       declares the param boolean and the value is a recognised true/false
+       spelling, we normalise it to a real bool.
+
+    Conservative: only str values whose declared type is array/object/boolean
+    and which match the expected shape are touched; everything else is left
+    as-is so normal validation still applies.
     """
     if not isinstance(tool_input, dict):
         return tool_input
@@ -68,8 +87,24 @@ def _coerce_stringified_json_args(tool_name, tool_input):
         if not isinstance(val, str):
             continue
         ptype = (props.get(key) or {}).get("type")
-        if ptype not in ("array", "object"):
+        if ptype not in ("array", "object", "boolean"):
             continue
+
+        if ptype == "boolean":
+            low = val.strip().lower()
+            if low in _BOOL_TRUE_STRINGS:
+                bool_val = True
+            elif low in _BOOL_FALSE_STRINGS:
+                bool_val = False
+            else:
+                # Not a recognised boolean spelling — leave it for validation.
+                continue
+            if coerced is None:
+                coerced = dict(tool_input)
+            coerced[key] = bool_val
+            print(f"[ARG-COERCE] {tool_name}.{key}: parsed stringified boolean -> {bool_val}")
+            continue
+
         s = val.strip()
         if not s or (ptype == "array" and s[0] != "[") or (ptype == "object" and s[0] != "{"):
             continue
