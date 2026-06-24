@@ -65,6 +65,48 @@ async def list_cron_contacts(operator: str):
     return {"contacts": contacts}
 
 
+@app.get("/api/cron/health")
+async def cron_health():
+    """Reconcile the DB (source of truth) against the live APScheduler (M3.3).
+
+    For every ACTIVE job, report whether a live trigger exists and its next
+    fire, alongside the DB's cached next_run_at, and flag DIVERGENCE — a job
+    the DB calls 'active' but for which the scheduler has no trigger (so it
+    would silently never fire). diverged_count is the headline number an
+    operator/monitor watches.
+    """
+    manager = get_scheduler_manager()
+    jobs = manager.list_jobs(status="active")
+
+    entries = []
+    diverged_count = 0
+    for job in jobs:
+        job_id = job["id"]
+        scheduled = None
+        try:
+            scheduled = manager.scheduler.get_job(job_id)
+        except Exception:  # scheduler not running / lookup failure → no trigger
+            scheduled = None
+
+        has_trigger = scheduled is not None
+        next_run_time = getattr(scheduled, "next_run_time", None) if scheduled else None
+        next_run = next_run_time.isoformat() if next_run_time else None
+        diverged = not has_trigger
+        if diverged:
+            diverged_count += 1
+
+        entries.append({
+            "job_id": job_id,
+            "name": job.get("name"),
+            "has_trigger": has_trigger,
+            "next_run": next_run,
+            "db_next_run": job.get("next_run_at"),
+            "diverged": diverged,
+        })
+
+    return {"jobs": entries, "diverged_count": diverged_count}
+
+
 @app.get("/api/cron/jobs")
 async def list_cron_jobs(operator: Optional[str] = None, status: Optional[str] = None):
     """List all cron jobs, optionally filtered by operator and/or status."""

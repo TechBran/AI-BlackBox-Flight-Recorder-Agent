@@ -692,6 +692,29 @@ Environment=TERM=xterm-256color COLORTERM=truecolor
 ProtectHome=no
 EOF
 
+# ── Step 4b2: time-sync boot gate for the cron scheduler (cron M3.3) ──
+# The cron scheduler computes every job's next fire — and decides on cold
+# restart whether a job was "due during downtime" (the catch-up path) — against
+# the box-local wall clock. On a no-RTC / RTC-skewed cold boot the clock can be
+# wrong (the classic "1970" or month-stale clock) for a few seconds until NTP
+# converges. If the orchestrator starts BEFORE that, fires are computed against
+# a bogus clock and missed-run catch-up misfires.
+#
+# Gate startup on time-sync so a fresh box always schedules against a synced
+# clock. After=time-sync.target orders us after systemd's time-sync milestone;
+# Wants=systemd-timesyncd pulls in the SNTP client that reaches that milestone
+# on a stock Ubuntu/Debian box (a no-op where the host runs chrony/ntpd instead
+# — those reach time-sync.target themselves). Lives in its own drop-in so it is
+# independent of the main unit + the cli-agent drop-in.
+sudo tee /etc/systemd/system/blackbox.service.d/time-sync.conf > /dev/null <<EOF
+# Time-sync boot gate for the cron scheduler (cron M3.3). DO NOT EDIT —
+# install.sh manages this file. Ensures a no-RTC cold boot computes cron
+# fires (and the cold-restart catch-up) against a synced wall clock.
+[Unit]
+After=time-sync.target
+Wants=systemd-timesyncd
+EOF
+
 # ── Step 4c: log rotation (audit M3 carry-forward) ──
 sudo tee /etc/logrotate.d/blackbox > /dev/null <<EOF
 /var/log/blackbox/*.log {

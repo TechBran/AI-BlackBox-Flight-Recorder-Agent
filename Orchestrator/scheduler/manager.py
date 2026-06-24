@@ -260,6 +260,14 @@ class CronJobManager:
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
+            # M3.3: WAL persists at the DB-file level, so concurrent readers
+            # (e.g. GET /api/cron/health) never block the scheduler's writes,
+            # and a writer never blocks readers. busy_timeout makes a connection
+            # that hits a transient lock WAIT (up to 5s) rather than immediately
+            # raising "database is locked". WAL is a one-time durable switch;
+            # busy_timeout is per-connection, so it is re-applied on each connect.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cron_jobs (
                     id                  TEXT PRIMARY KEY,

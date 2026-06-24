@@ -55,6 +55,19 @@ def test_pause_clears_next_run_at(temp_manager):
     )
 
 
+def test_init_db_enables_wal(temp_manager):
+    """M3.3: _init_db sets journal_mode=WAL, which persists at the DB-file
+    level, so concurrent readers (e.g. /api/cron/health) don't block the
+    scheduler's writes. WAL is durable — a brand-new connection still sees it."""
+    conn = sqlite3.connect(temp_manager.db_path)
+    try:
+        cur = conn.cursor()
+        mode = cur.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal", f"expected WAL journal mode, got {mode!r}"
+    finally:
+        conn.close()
+
+
 def test_startup_recomputes_frozen_next_run_at(temp_manager):
     """A stale next_run_at frozen by a prior process is recomputed on start()."""
     job = temp_manager.create_job(
