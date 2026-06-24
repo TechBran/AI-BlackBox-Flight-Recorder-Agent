@@ -660,6 +660,9 @@ class CronJobManager:
             conn.close()
 
         if deleted:
+            # Drop the per-job execution lock so deleted jobs don't accumulate
+            # stale Lock objects (and a reused id can't inherit an old lock).
+            self._job_locks.pop(job_id, None)
             logger.info("Deleted cron job %s", job_id)
         return deleted
 

@@ -76,3 +76,50 @@ def test_run_unknown_job_returns_404(client):
     background task is scheduled)."""
     resp = client.post("/api/cron/jobs/does-not-exist/run")
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_run_now_task_is_retained_then_cleaned(tmp_path, monkeypatch):
+    """B1: the fire-and-forget task MUST be held by a strong reference while it
+    runs (or the GC can collect it mid-flight and the job silently never
+    completes), and released once done. Verified by awaiting the handler on
+    THIS test's own loop — TestClient cancels the background task on request
+    teardown, which would hide the retention entirely.
+    """
+    import Orchestrator.app  # noqa: F401 — registers routes / loads cron_routes
+    from Orchestrator.routes import cron_routes
+    from Orchestrator.scheduler import get_scheduler_manager
+
+    db = tmp_path / "cron_retain_test.db"
+    monkeypatch.setattr(manager_mod, "DB_PATH", db)
+    monkeypatch.setattr(manager_mod, "_manager_instance", None, raising=False)
+    mgr = get_scheduler_manager()
+    job = mgr.create_job(
+        name="bg", prompt="hi", schedule="0 15 * * *", operator="system"
+    )
+    job_id = job["id"]
+
+    cron_routes._RUN_NOW_TASKS.clear()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_execute(jid):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(mgr, "_execute_job", gated_execute)
+
+    resp = await cron_routes.run_cron_job_now(job_id)
+    assert resp.status_code == 202
+
+    # In flight → exactly one retained task (not GC-collectable).
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(cron_routes._RUN_NOW_TASKS) == 1, "in-flight task not retained"
+
+    # Let it finish; the done-callback discards the ref.
+    release.set()
+    for _ in range(10):
+        if not cron_routes._RUN_NOW_TASKS:
+            break
+        await asyncio.sleep(0)
+    assert len(cron_routes._RUN_NOW_TASKS) == 0, "task ref not cleaned after done"

@@ -18,6 +18,12 @@ from Orchestrator.scheduler import get_scheduler_manager
 
 logger = logging.getLogger(__name__)
 
+# Strong references to in-flight fire-and-forget run-now tasks. The event loop
+# only holds a WEAK reference to a bare asyncio.Task, so without this the GC can
+# collect a long-running job (it awaits a 180-600s /chat call) mid-flight and it
+# would silently never complete. Each task self-removes on done.
+_RUN_NOW_TASKS: "set[asyncio.Task]" = set()
+
 
 class CronJobCreate(BaseModel):
     name: str
@@ -164,11 +170,14 @@ async def run_cron_job_now(job_id: str):
 
     async def _run() -> None:
         try:
-            await manager._execute_job(job_id)
+            await manager.run_job_now(job_id)
         except Exception:
             logger.exception("Background run-now failed for cron job %s", job_id)
 
-    asyncio.create_task(_run())
+    # Retain a strong reference until the task completes (see _RUN_NOW_TASKS).
+    task = asyncio.create_task(_run())
+    _RUN_NOW_TASKS.add(task)
+    task.add_done_callback(_RUN_NOW_TASKS.discard)
 
     return JSONResponse(
         status_code=202,
