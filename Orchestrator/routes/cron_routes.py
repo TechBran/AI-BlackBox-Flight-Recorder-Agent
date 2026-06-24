@@ -97,7 +97,11 @@ async def update_cron_job(job_id: str, body: CronJobUpdate):
     """Update an existing cron job."""
     manager = get_scheduler_manager()
     updates = {k: v for k, v in body.dict().items() if v is not None}
-    job = manager.update_job(job_id, **updates)
+    try:
+        job = manager.update_job(job_id, **updates)
+    except ValueError as e:
+        # Surface central validation failures (M2.1) as a 400, not a 500.
+        raise HTTPException(status_code=400, detail=str(e))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job": job}

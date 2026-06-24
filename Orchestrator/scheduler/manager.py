@@ -12,6 +12,7 @@ reloaded from SQLite and re-registered with APScheduler.
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -87,6 +88,23 @@ LOCAL_TZ = _resolve_local_tz()
 # Database path - lives alongside other Orchestrator databases
 # ---------------------------------------------------------------------------
 DB_PATH = Path(__file__).resolve().parent.parent / "cron_jobs.db"
+
+# ---------------------------------------------------------------------------
+# Field validation allow-lists (M2.1)
+#
+# Validation lives at ONE sink (CronJobManager._validate_job_fields, called by
+# both create_job and update_job) so all four surfaces — HTTP API, Portal,
+# ToolVault tool, Android — inherit it. The most dangerous bug this closes: a
+# job with delivery='sms'/'voice_call' but a blank delivery_target reported
+# success then silently never delivered (the executor's _build_prompt fell
+# through to snapshot mode).
+# ---------------------------------------------------------------------------
+VALID_DELIVERY = {"snapshot", "sms", "voice_call", "notification"}
+VALID_STATUS = {"active", "paused"}
+# Deliveries that require a real phone number.
+_TARGETED_DELIVERY = {"sms", "voice_call"}
+# E.164: a leading '+', a non-zero leading digit, then 6-14 more digits.
+_E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 
 # ---------------------------------------------------------------------------
 # Singleton
@@ -263,6 +281,73 @@ class CronJobManager:
             logger.info("CronJobManager shut down gracefully")
 
     # ------------------------------------------------------------------
+    # Central field validation (M2.1)
+    # ------------------------------------------------------------------
+
+    def _validate_job_fields(self, fields: Dict[str, Any], *, partial: bool) -> None:
+        """Validate cron-job fields at the single manager sink.
+
+        Called by both create_job (partial=False) and update_job
+        (partial=True). Raises ValueError with a clear message on any bad
+        value so every surface that goes through the manager — HTTP API,
+        Portal, ToolVault tool, Android — inherits identical rules.
+
+        On create (partial=False) ``operator`` is always required. On a
+        partial update only the fields actually present are checked, EXCEPT
+        the delivery/delivery_target coupling: callers that transition delivery
+        to sms/voice_call resolve the *effective* delivery+target (existing job
+        merged with the update) before calling, so a valid E.164 target is
+        always required when the effective delivery is targeted.
+
+        Args:
+            fields: The field values to validate (effective values for the
+                delivery coupling on update).
+            partial: True for update_job (only validate present fields), False
+                for create_job (operator required).
+        """
+        # --- delivery enum ---
+        if "delivery" in fields and fields["delivery"] is not None:
+            delivery = fields["delivery"]
+            if delivery not in VALID_DELIVERY:
+                raise ValueError(
+                    f"Invalid delivery '{delivery}'. Must be one of: "
+                    f"{', '.join(sorted(VALID_DELIVERY))}."
+                )
+
+        # --- status enum ---
+        if "status" in fields and fields["status"] is not None:
+            status = fields["status"]
+            if status not in VALID_STATUS:
+                raise ValueError(
+                    f"Invalid status '{status}'. Must be one of: "
+                    f"{', '.join(sorted(VALID_STATUS))}."
+                )
+
+        # --- operator: required on create, non-blank whenever present ---
+        operator_present = "operator" in fields
+        if not partial or operator_present:
+            operator = fields.get("operator")
+            if not operator_present or operator is None or not str(operator).strip():
+                raise ValueError("operator is required and must be non-empty.")
+
+        # --- delivery_target coupling: sms/voice_call need a valid E.164 ---
+        # Only enforce when the (effective) delivery is a targeted kind. The
+        # caller passes the effective delivery+target so transitions are caught.
+        delivery = fields.get("delivery")
+        if delivery in _TARGETED_DELIVERY:
+            target = fields.get("delivery_target")
+            if target is None or not str(target).strip():
+                raise ValueError(
+                    f"delivery '{delivery}' requires a delivery_target "
+                    f"(phone number in E.164 format, e.g. +15551234567)."
+                )
+            if not _E164_RE.match(str(target).strip()):
+                raise ValueError(
+                    f"delivery_target '{target}' is not a valid E.164 phone "
+                    f"number (expected +<country><number>, e.g. +15551234567)."
+                )
+
+    # ------------------------------------------------------------------
     # CRUD operations
     # ------------------------------------------------------------------
 
@@ -305,8 +390,20 @@ class CronJobManager:
         next_run_at = next_fire.isoformat() if next_fire else None
 
         model = kwargs.get("model", "gemini")
-        delivery = kwargs.get("delivery", "snapshot")
+        delivery = kwargs.get("delivery") or "snapshot"
         delivery_target = kwargs.get("delivery_target")
+
+        # Central field validation (M2.1). delivery has already defaulted to
+        # 'snapshot' above, so we only ever validate constrained values.
+        self._validate_job_fields(
+            {
+                "operator": operator,
+                "delivery": delivery,
+                "delivery_target": delivery_target,
+                "status": "active",
+            },
+            partial=False,
+        )
         # The cron is the single source of truth for the label: derive the
         # frequency_hint from the schedule and ignore any client-supplied hint
         # so the label can never contradict the actual schedule (M1.3).
@@ -435,6 +532,32 @@ class CronJobManager:
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:
             return self.get_job(job_id)
+
+        # Central field validation (M2.1). Only validate the fields actually
+        # being updated (partial=True) — but resolve the *effective* delivery
+        # and delivery_target by merging the update over the existing job, so a
+        # transition INTO sms/voice_call is caught even when the update only
+        # flips `delivery` and the target already lives on the row (or vice
+        # versa). The existing row is only fetched when a delivery-related
+        # field is in play, keeping the common no-delivery update cheap.
+        validation_fields: Dict[str, Any] = {
+            k: updates[k] for k in ("operator", "status") if k in updates
+        }
+        if "delivery" in updates or "delivery_target" in updates:
+            existing = self.get_job(job_id)
+            if existing is None:
+                return None
+            effective_delivery = (
+                updates["delivery"] if "delivery" in updates else existing.get("delivery")
+            )
+            effective_target = (
+                updates["delivery_target"]
+                if "delivery_target" in updates
+                else existing.get("delivery_target")
+            )
+            validation_fields["delivery"] = effective_delivery
+            validation_fields["delivery_target"] = effective_target
+        self._validate_job_fields(validation_fields, partial=True)
 
         # Validate new schedule if provided
         schedule_changed = False
