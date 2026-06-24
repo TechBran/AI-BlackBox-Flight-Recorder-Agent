@@ -11,16 +11,77 @@ reloaded from SQLite and re-registered with APScheduler.
 
 import asyncio
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Box-local timezone — the single authoritative scheduling baseline (M1.1).
+#
+# The PC's local wall clock is the truth for every cron job: there is NO
+# per-job timezone (box-local for ALL jobs is a locked decision). We resolve a
+# real, DST-aware IANA zone so that "0 15 * * *" means 15:00 *local*, and keeps
+# meaning 15:00 local across daylight-saving transitions.
+#
+# Resolution order (each step yields a real IANA zone where possible; a bare
+# fixed-offset tzinfo is the last resort because it is WRONG across DST):
+#   1. tzlocal.get_localzone()                         (preferred)
+#   2. ZoneInfo from the /etc/localtime symlink target
+#   3. ZoneInfo from /etc/timezone
+#   4. datetime.now().astimezone().tzinfo              (fixed offset, last resort)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_local_tz():
+    """Resolve a DST-aware box-local timezone with graceful fallbacks."""
+    # 1. Preferred: tzlocal gives a real IANA zone.
+    try:
+        from tzlocal import get_localzone
+
+        tz = get_localzone()
+        if tz is not None:
+            return tz
+    except Exception:  # pragma: no cover - import/availability dependent
+        logger.debug("tzlocal unavailable; falling back to OS tz detection", exc_info=True)
+
+    # 2. Derive the IANA name from the /etc/localtime symlink target.
+    try:
+        link = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in link:
+            zone_name = link.split(marker, 1)[1]
+            return ZoneInfo(zone_name)
+    except Exception:  # pragma: no cover - platform dependent
+        logger.debug("Could not derive tz from /etc/localtime symlink", exc_info=True)
+
+    # 3. /etc/timezone (Debian/Ubuntu) holds the IANA name directly.
+    try:
+        with open("/etc/timezone", "r", encoding="utf-8") as fh:
+            zone_name = fh.read().strip()
+        if zone_name:
+            return ZoneInfo(zone_name)
+    except Exception:  # pragma: no cover - platform dependent
+        logger.debug("Could not read /etc/timezone", exc_info=True)
+
+    # 4. Last resort: a fixed-offset tzinfo (NOT DST-aware).
+    logger.warning(
+        "Falling back to a fixed-offset local timezone; this is not DST-aware. "
+        "Install tzlocal or ensure /etc/localtime is a valid zoneinfo symlink."
+    )
+    return datetime.now().astimezone().tzinfo
+
+
+LOCAL_TZ = _resolve_local_tz()
 
 # ---------------------------------------------------------------------------
 # Database path - lives alongside other Orchestrator databases
@@ -92,8 +153,22 @@ class CronJobManager:
 
     def __init__(self) -> None:
         self.db_path = str(DB_PATH)
-        self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self.scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
         self._init_db()
+
+    # ------------------------------------------------------------------
+    # Trigger construction
+    # ------------------------------------------------------------------
+
+    def _build_trigger(self, schedule: str) -> CronTrigger:
+        """
+        Build a CronTrigger bound to the box-local timezone.
+
+        Single chokepoint for cron-expression parsing so that every trigger
+        the manager constructs interprets the schedule against the same
+        authoritative box-local wall clock (M1.1).
+        """
+        return CronTrigger.from_crontab(schedule, timezone=LOCAL_TZ)
 
     # ------------------------------------------------------------------
     # Database initialisation
@@ -213,7 +288,7 @@ class CronJobManager:
         """
         # Validate cron expression early
         try:
-            trigger = CronTrigger.from_crontab(schedule)
+            trigger = self._build_trigger(schedule)
         except (ValueError, KeyError) as exc:
             raise ValueError(f"Invalid cron expression '{schedule}': {exc}") from exc
 
@@ -357,7 +432,7 @@ class CronJobManager:
         schedule_changed = False
         if "schedule" in updates:
             try:
-                trigger = CronTrigger.from_crontab(updates["schedule"])
+                trigger = self._build_trigger(updates["schedule"])
             except (ValueError, KeyError) as exc:
                 raise ValueError(
                     f"Invalid cron expression '{updates['schedule']}': {exc}"
@@ -484,7 +559,7 @@ class CronJobManager:
 
         # Re-read schedule for next_run_at recalculation
         try:
-            trigger = CronTrigger.from_crontab(job["schedule"])
+            trigger = self._build_trigger(job["schedule"])
             next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
             next_run_at = next_fire.isoformat() if next_fire else None
         except Exception:
@@ -563,7 +638,7 @@ class CronJobManager:
         """
         Register (or replace) a job in APScheduler using its cron schedule.
         """
-        trigger = CronTrigger.from_crontab(job["schedule"])
+        trigger = self._build_trigger(job["schedule"])
 
         # Remove existing entry if present (idempotent re-register)
         try:
@@ -675,7 +750,7 @@ class CronJobManager:
             # ----- Update job stats -----
             # Recalculate next_run_at
             try:
-                trigger = CronTrigger.from_crontab(job["schedule"])
+                trigger = self._build_trigger(job["schedule"])
                 next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
                 next_run_at = next_fire.isoformat() if next_fire else None
             except Exception:

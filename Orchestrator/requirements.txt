@@ -1,0 +1,8 @@
+# Orchestrator Python dependencies.
+#
+# The root ./requirements.txt is the full pinned manifest; this file lists the
+# Orchestrator-specific runtime deps that the scheduler relies on so a fresh
+# box that installs the Orchestrator in isolation still gets them.
+
+apscheduler>=3.10.4
+tzlocal>=5.3.1   # box-local IANA timezone resolution for the cron scheduler (M1)
