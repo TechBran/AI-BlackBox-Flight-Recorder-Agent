@@ -235,6 +235,12 @@ class CronJobManager:
         # schedule coroutines from APScheduler's thread-pool threads.
         self._loop = asyncio.get_running_loop()
 
+        # Start the scheduler BEFORE registering jobs so that each add_job
+        # computes a live next_run_time, which _register_job_with_scheduler
+        # then persists — recomputing any next_run_at frozen by a prior
+        # process against the current box-local clock (M1.2).
+        self.scheduler.start()
+
         jobs = self.list_jobs(status="active")
         loaded = 0
         for job in jobs:
@@ -244,7 +250,6 @@ class CronJobManager:
             except Exception:
                 logger.exception("Failed to register job %s on startup", job["id"])
 
-        self.scheduler.start()
         logger.info(
             "CronJobManager started – %d active job(s) loaded from %d total",
             loaded,
@@ -522,13 +527,16 @@ class CronJobManager:
         if job is None:
             return None
 
-        # Update status in SQLite
+        # Update status in SQLite. A paused job has no next run, so clear the
+        # cached next_run_at — leaving a stale value would lie about a fire
+        # time that will never happen (M1.2).
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE cron_jobs SET status = 'paused', updated_at = ? WHERE id = ?",
+                "UPDATE cron_jobs SET status = 'paused', next_run_at = NULL, "
+                "updated_at = ? WHERE id = ?",
                 (now, job_id),
             )
             conn.commit()
@@ -657,6 +665,34 @@ class CronJobManager:
             replace_existing=True,
             misfire_grace_time=30,  # 30 seconds grace — prevents double-fire on restart
         )
+
+        # Persist the live next fire time so the row reflects the real clock,
+        # never a frozen cache. When the scheduler is running, add_job populates
+        # next_run_time immediately; persist it on create AND on every startup
+        # re-register so a stale value from a prior process is overwritten (M1.2).
+        #
+        # Only overwrite when the scheduler actually produced a next_run_time:
+        # if it is not running yet (e.g. create_job before start()), add_job
+        # leaves next_run_time unset and the value computed at INSERT time stands.
+        try:
+            scheduled = self.scheduler.get_job(job["id"])
+            next_run_time = getattr(scheduled, "next_run_time", None)
+            if next_run_time is not None:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE cron_jobs SET next_run_at = ? WHERE id = ?",
+                        (next_run_time.isoformat(), job["id"]),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception:
+            logger.exception(
+                "Failed to persist live next_run_at for job %s after register", job["id"]
+            )
+
         logger.debug("Registered job %s with scheduler (schedule=%s)", job["id"], job["schedule"])
 
     def _execute_job_sync_wrapper(self, job_id: str) -> None:
