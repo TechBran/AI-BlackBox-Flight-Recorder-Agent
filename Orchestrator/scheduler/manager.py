@@ -1052,9 +1052,21 @@ class CronJobManager:
             logger.error("Main event loop not available; cannot execute job %s", job_id)
             return
 
-        # CU jobs need longer timeout (10 min + buffer vs 5 min default)
+        # CU jobs need a longer timeout (10 min + buffer vs 5 min default).
+        # Key off the authoritative provider (M4.1a) — a CU job now carries a
+        # SPECIFIC CU model id (e.g. a "gemini-...computer-use" id), so the old
+        # model-string check ("computer-use"/"cu") would miss it and wrongly
+        # apply the short 300s budget to a CU run. _job_to_dict backfills the
+        # provider for legacy rows, so this stays correct for old CU jobs too.
         job = self.get_job(job_id)
-        timeout = 660 if job and job.get("model", "").lower() in ("computer-use", "cu") else 300
+        is_cu = bool(
+            job
+            and (
+                (job.get("provider") or "").lower() == "computer-use"
+                or job.get("model", "").lower() in ("computer-use", "cu")
+            )
+        )
+        timeout = 660 if is_cu else 300
 
         future = asyncio.run_coroutine_threadsafe(self._execute_job(job_id), loop)
         try:

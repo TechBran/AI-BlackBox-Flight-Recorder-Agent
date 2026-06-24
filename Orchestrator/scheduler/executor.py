@@ -96,9 +96,11 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
     # ------------------------------------------------------------------
     content = _build_prompt(job_name, prompt, delivery, delivery_target)
 
-    # CU is streaming-only — route through SSE consumer instead of /chat + polling
+    # CU is streaming-only — route through SSE consumer instead of /chat + polling.
+    # M4.1c: thread the resolved CU model through so a chosen CU model is honored
+    # (Auto/empty already resolved to CU_MODEL_DEFAULT above).
     if provider == "computer-use":
-        return await _execute_cu_job(job_name, content, operator)
+        return await _execute_cu_job(job_name, content, operator, model=resolved_model)
 
     payload = {
         "messages": [{"role": "user", "content": content}],
@@ -153,24 +155,67 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
 # Computer-use SSE execution
 # ---------------------------------------------------------------------------
 
-async def _execute_cu_job(job_name: str, content: str, operator: str) -> str:
+def _resolve_cu_model(model: Optional[str]) -> str:
+    """Resolve the CU model id to use for a CU cron job (M4.1c).
+
+    A chosen CU model is honored only when it passes the SAME capability
+    filters the /models/computer-use catalog uses (CU_MODEL_FILTERS, via
+    resolve_backend) — otherwise the CU streaming path could be handed an
+    arbitrary id that no driver can run. Falls back to CU_MODEL_DEFAULT when
+    the model is empty/Auto OR when the id fails the filters.
+    """
+    import re
+
+    from Orchestrator.config import CU_MODEL_DEFAULT, CU_MODEL_FILTERS
+
+    candidate = (model or "").strip()
+    if not candidate or candidate.lower() in ("computer-use", "cu"):
+        return CU_MODEL_DEFAULT
+
+    # A CU id is valid only if it matches one of the per-vendor capability
+    # patterns (the same data resolve_backend keys off). An unfilterable id
+    # must never reach the stream — fall back to the configured default.
+    if any(re.match(pattern, candidate) for pattern in CU_MODEL_FILTERS.values()):
+        return candidate
+
+    logger.warning(
+        "CU model '%s' fails CU_MODEL_FILTERS; falling back to default '%s'",
+        candidate, CU_MODEL_DEFAULT,
+    )
+    return CU_MODEL_DEFAULT
+
+
+async def _execute_cu_job(
+    job_name: str,
+    content: str,
+    operator: str,
+    model: Optional[str] = None,
+) -> str:
     """Execute a CU cron job by consuming the /chat/stream SSE endpoint.
 
     CU is streaming-only — it cannot go through /chat (which auto-routes
     CU to plain Anthropic, losing desktop control).
     Passes the original operator so the backend curates full context
     (snapshots, preferences, history) for the CU agent.
+
+    M4.1c: the chosen CU ``model`` is threaded through and honored when it
+    passes the capability filters; empty/Auto or an unfilterable id falls back
+    to CU_MODEL_DEFAULT (see _resolve_cu_model) so a bad id can never break the
+    CU streaming path.
     """
-    from Orchestrator.config import CU_MODEL_DEFAULT
+    cu_model = _resolve_cu_model(model)
 
     payload = {
         "messages": [{"role": "user", "content": content}],
         "provider": "computer-use",
-        "model": CU_MODEL_DEFAULT,
+        "model": cu_model,
         "operator": operator,
     }
 
-    logger.info("Executing CU cron job '%s' via /chat/stream (operator=%s)", job_name, operator)
+    logger.info(
+        "Executing CU cron job '%s' via /chat/stream (model=%s, operator=%s)",
+        job_name, cu_model, operator,
+    )
 
     result_text = ""
     error_text = ""
@@ -363,7 +408,13 @@ def _model_to_provider(model: str) -> str:
     """Map a model name to the provider string expected by /chat."""
     m = model.lower()
 
-    if m in ("computer-use", "cu"):
+    # M4.1c: CU sub-model ids map to "computer-use" so provider derivation of a
+    # CU job stays correct even from the bare model. The "computer-use"
+    # substring catches the gemini ("gemini-...computer-use") and openai
+    # ("computer-use-preview") CU ids; the bare aliases are the explicit forms.
+    # (Anthropic CU uses a normal claude id and is distinguished by the job's
+    # stored provider, not the model string.)
+    if m in ("computer-use", "cu") or "computer-use" in m:
         return "computer-use"
     if any(tok in m for tok in ("claude", "anthropic", "sonnet", "opus", "haiku")):
         return "anthropic"
