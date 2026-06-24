@@ -11,6 +11,16 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         if not job_id:
             return ToolResult(False, "job_id is required")
 
+        # Operator-ownership scoping (M2.5): only the owning operator (or the
+        # 'system' operator) may mutate a job. A non-owner — or a non-existent
+        # job — gets a GENERIC "Job not found" so the tool never leaks the
+        # existence of another operator's job.
+        existing = manager.get_job(job_id)
+        if existing is None or (
+            ctx.operator != "system" and existing.get("operator") != ctx.operator
+        ):
+            return ToolResult(False, "Job not found")
+
         # Translate pause/resume into a status update and fall through to the
         # SINGLE update_job path (M2.4). update_job whitelists `status` and
         # re-registers with APScheduler, so one call can both resume/pause AND
