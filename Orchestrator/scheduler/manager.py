@@ -172,6 +172,11 @@ class CronJobManager:
     def __init__(self) -> None:
         self.db_path = str(DB_PATH)
         self.scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
+        # Per-job execution locks (M2.6): serialise runs of the SAME job so a
+        # manual run-now can never collide with a scheduled fire and double-
+        # execute. A run that finds the lock already held SKIPS (it does not
+        # queue/block). Created lazily per job_id on first execution.
+        self._job_locks: Dict[str, asyncio.Lock] = {}
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -848,11 +853,38 @@ class CronJobManager:
 
     async def _execute_job(self, job_id: str) -> None:
         """
-        Core execution callback.
+        Core execution entry point with a per-job execution lock (M2.6).
+
+        Serialises runs of the SAME job: if this job's lock is already held
+        (a scheduled fire or another manual run-now is in flight), this call
+        SKIPS — it records a "skipped: already running" history note and
+        returns immediately rather than queueing/blocking and double-running.
+        Otherwise the real execution body runs inside the lock.
+
+        The check-then-acquire below is safe because the event loop is single
+        threaded and there is no ``await`` between ``lock.locked()`` and
+        ``async with lock`` — no other coroutine can interleave and grab the
+        lock in that window.
+        """
+        lock = self._job_locks.setdefault(job_id, asyncio.Lock())
+        if lock.locked():
+            logger.info(
+                "Skipping cron job %s: a run is already in progress", job_id
+            )
+            self._record_skipped_run(job_id)
+            return
+
+        async with lock:
+            await self._run_job_body(job_id)
+
+    async def _run_job_body(self, job_id: str) -> None:
+        """
+        Core execution body (runs INSIDE the per-job lock).
 
         Loads the job from SQLite, invokes the executor, records history,
         and updates run statistics.  If the job is marked as one_shot,
-        deletes it after execution.
+        deletes it after execution — but ONLY on success (a failed one-shot
+        survives so it is not silently destroyed).
         """
         job = self.get_job(job_id)
         if job is None:
@@ -866,22 +898,11 @@ class CronJobManager:
         delivery_status: str = "pending"
 
         try:
-            # Lazy import to avoid circular dependencies.
-            # executor.py is created in a later task.
-            # TODO: Replace stub with real executor call once executor.py exists.
-            try:
-                from Orchestrator.scheduler.executor import execute_cron_job
-                result_text = await execute_cron_job(job)
-                delivery_status = "delivered"
-            except ImportError:
-                logger.warning(
-                    "Executor module not yet available; stub-executing job %s (%s)",
-                    job_id,
-                    job["name"],
-                )
-                result_text = f"[stub] Job '{job['name']}' executed (executor not implemented)"
-                delivery_status = "stub"
-
+            # Lazy import to avoid circular dependencies. executor.py always
+            # exists and is importable, so any failure surfaces as an error.
+            from Orchestrator.scheduler.executor import execute_cron_job
+            result_text = await execute_cron_job(job)
+            delivery_status = "delivered"
         except Exception as exc:
             error_text = str(exc)
             delivery_status = "error"
@@ -979,10 +1000,45 @@ class CronJobManager:
             duration_ms,
         )
 
-        # ----- One-shot cleanup -----
-        if job.get("one_shot"):
-            logger.info("One-shot job %s completed, deleting", job_id)
+        # ----- One-shot cleanup (only on success) -----
+        # A one-shot whose run FAILED is left in place so it is not silently
+        # destroyed; it survives for inspection / retry (M2.6).
+        if job.get("one_shot") and error_text is None:
+            logger.info("One-shot job %s completed successfully, deleting", job_id)
             self.delete_job(job_id)
+
+    def _record_skipped_run(self, job_id: str) -> None:
+        """Write a history row noting a run was skipped because the job was
+        already running (M2.6). This does NOT touch run_count/error_count —
+        no work was performed; it is purely an audit trail of the skip."""
+        job = self.get_job(job_id)
+        if job is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO cron_job_history
+                    (job_id, run_at, prompt, model, result, delivery_status,
+                     duration_ms, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    now,
+                    job["prompt"],
+                    job["model"],
+                    None,
+                    "skipped",
+                    0,
+                    "skipped: a run for this job was already running",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Helpers
