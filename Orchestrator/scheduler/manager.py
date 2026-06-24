@@ -135,6 +135,20 @@ JOB_DEFAULTS = {
 }
 
 # ---------------------------------------------------------------------------
+# Cold-restart catch-up concurrency cap (M3.2 follow-up)
+#
+# After a long outage, many jobs can be past-due at once. start() enqueues one
+# catch-up task PER such job, and each drives a full /chat round-trip (plus any
+# SMS/voice delivery). The per-job lock only serialises a job against ITSELF —
+# nothing throttles ACROSS jobs — so an unbounded burst would hit the LLM
+# provider (rate-limit/429) and the SMS/voice path all at once on boot. This
+# semaphore drains the catch-up burst a few at a time. It does NOT delay startup
+# (tasks are still spawned immediately) and does NOT affect normal scheduled
+# fires (those never go through the catch-up path).
+# ---------------------------------------------------------------------------
+CATCHUP_CONCURRENCY = 3
+
+# ---------------------------------------------------------------------------
 # Field validation allow-lists (M2.1)
 #
 # Validation lives at ONE sink (CronJobManager._validate_job_fields, called by
@@ -235,6 +249,10 @@ class CronJobManager:
         # never complete (the same footgun as the run-now route). Each task
         # self-removes via a done-callback.
         self._catchup_tasks: "set[asyncio.Task]" = set()
+        # Caps how many cold-restart catch-up runs execute concurrently so a
+        # big post-outage burst drains a few at a time instead of detonating
+        # all at once against the LLM/SMS/voice path (M3.2 follow-up).
+        self._catchup_semaphore = asyncio.Semaphore(CATCHUP_CONCURRENCY)
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -411,7 +429,11 @@ class CronJobManager:
 
         async def _run() -> None:
             try:
-                await self._execute_job(job_id)
+                # Throttle the post-outage burst: at most CATCHUP_CONCURRENCY
+                # catch-up runs execute at once (normal scheduled fires are
+                # unaffected — they never reach here).
+                async with self._catchup_semaphore:
+                    await self._execute_job(job_id)
             except Exception:
                 logger.exception("Catch-up run failed for cron job %s", job_id)
 

@@ -172,3 +172,52 @@ def test_failed_register_marks_job_error_not_active(temp_manager):
     )
     # The good job is unaffected.
     assert _status(mgr, good["id"]) == "active"
+
+
+def test_catchup_burst_respects_concurrency_cap(temp_manager, monkeypatch):
+    """Many past-due jobs at boot must not all execute at once — the catch-up
+    semaphore caps concurrency so a post-outage burst drains a few at a time
+    (M3.2 follow-up) instead of detonating against the LLM/SMS/voice path."""
+    mgr = temp_manager
+    cap = manager_mod.CATCHUP_CONCURRENCY
+    n_jobs = cap + 3  # more past-due jobs than the cap
+
+    for i in range(n_jobs):
+        job = mgr.create_job(
+            name=f"j{i}", prompt="hi", schedule="0 15 * * *", operator="system"
+        )
+        past = (datetime.now(LOCAL_TZ) - timedelta(hours=2)).isoformat()
+        _set_next_run_at(mgr, job["id"], past)
+
+    state = {"running": 0, "peak": 0}
+
+    async def _run():
+        gate = asyncio.Event()
+
+        async def gated_execute(jid):
+            state["running"] += 1
+            state["peak"] = max(state["peak"], state["running"])
+            await gate.wait()  # hold so concurrency can accumulate
+            state["running"] -= 1
+
+        monkeypatch.setattr(mgr, "_execute_job", gated_execute)
+
+        await mgr.start()
+        # Let the catch-up tasks start and fill the semaphore; the surplus
+        # block waiting for a permit.
+        for _ in range(50):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.005)
+        peak_while_gated = state["peak"]
+        gate.set()  # release everyone; the rest drain through the semaphore
+        await asyncio.gather(*list(mgr._catchup_tasks), return_exceptions=True)
+        await mgr.shutdown()
+        return peak_while_gated
+
+    peak = asyncio.run(_run())
+
+    assert peak <= cap, f"catch-up exceeded the concurrency cap: {peak} > {cap}"
+    assert peak == cap, (
+        f"with {n_jobs} past-due jobs the burst should fill the cap "
+        f"({cap}), but peaked at {peak}"
+    )
