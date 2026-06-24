@@ -194,6 +194,7 @@ _CRON_JOBS_COLUMNS = [
     "schedule",
     "frequency_hint",
     "model",
+    "provider",
     "delivery",
     "delivery_target",
     "operator",
@@ -309,6 +310,18 @@ class CronJobManager:
                     error_count         INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            # M4.1a: explicit `provider` column (migration-safe). A cron job
+            # carries a SPECIFIC model id for ANY provider, so the row needs to
+            # remember WHICH provider that id belongs to (an empty/Auto model
+            # has no substring to guess from). ALTER it in only when absent so
+            # an existing DB created before this column upgrades cleanly and a
+            # second construction is a no-op. Newly stored rows still derive
+            # nothing here — defaults stay NULL and _job_to_dict backfills.
+            existing_cols = {
+                row[1] for row in cursor.execute("PRAGMA table_info(cron_jobs)")
+            }
+            if "provider" not in existing_cols:
+                cursor.execute("ALTER TABLE cron_jobs ADD COLUMN provider TEXT")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cron_job_history (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -577,6 +590,10 @@ class CronJobManager:
         next_run_at = next_fire.isoformat() if next_fire else None
 
         model = kwargs.get("model", "gemini")
+        # M4.1a: explicit provider. Stored verbatim when given; left None
+        # otherwise so _job_to_dict backfills it from the model on read (legacy
+        # rows and callers that only know a model still report a provider).
+        provider = kwargs.get("provider")
         delivery = kwargs.get("delivery") or "snapshot"
         delivery_target = kwargs.get("delivery_target")
 
@@ -604,9 +621,9 @@ class CronJobManager:
                 """
                 INSERT INTO cron_jobs (
                     id, name, prompt, schedule, frequency_hint,
-                    model, delivery, delivery_target, operator,
+                    model, provider, delivery, delivery_target, operator,
                     status, one_shot, created_at, updated_at, next_run_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -615,6 +632,7 @@ class CronJobManager:
                     schedule,
                     frequency_hint,
                     model,
+                    provider,
                     delivery,
                     delivery_target,
                     operator,
@@ -695,7 +713,7 @@ class CronJobManager:
         Update specified fields on a job.
 
         Supported fields: name, prompt, schedule, frequency_hint, model,
-        delivery, delivery_target, operator, status, one_shot.
+        provider, delivery, delivery_target, operator, status, one_shot.
 
         If the schedule is changed the job is re-registered with APScheduler
         and next_run_at is recalculated.
@@ -709,6 +727,7 @@ class CronJobManager:
             "schedule",
             "frequency_hint",
             "model",
+            "provider",
             "delivery",
             "delivery_target",
             "operator",
@@ -1462,4 +1481,11 @@ class CronJobManager:
         d = dict(row)
         # Normalise one_shot from int to bool for API consumers
         d["one_shot"] = bool(d.get("one_shot", 0))
+        # M4.1a: backfill provider from the model when the row has none. Legacy
+        # rows (written before the provider column) and callers that only set a
+        # model still report a sensible provider derived from the stored model.
+        # Lazy import keeps the executor<->manager edge out of import time.
+        if not d.get("provider"):
+            from Orchestrator.scheduler.executor import _model_to_provider
+            d["provider"] = _model_to_provider(d.get("model") or "")
         return d
