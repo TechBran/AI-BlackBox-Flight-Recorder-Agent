@@ -1,0 +1,32 @@
+{
+  "name": "cron_job_history",
+  "description": "Show the past runs of a scheduled task (cron job): when each run fired, whether it succeeded or failed, the error if any, and how long it took. Use to answer questions like 'did the 7am job run?' or 'why did my reminder fail?'.",
+  "category": "scheduling",
+  "groups": [
+    "chat",
+    "chat_cu",
+    "realtime",
+    "gemini_live",
+    "grok_live",
+    "phone"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "job_id": {
+        "type": "string",
+        "description": "The ID of the cron job whose run history to retrieve"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of past runs to return, most recent first (default 20)"
+      }
+    },
+    "required": [
+      "job_id"
+    ]
+  },
+  "returns": "List of past runs with run_at, outcome (success/error), error message, and duration",
+  "example": "cron_job_history(job_id=\"cron_...\")"
+}

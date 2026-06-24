@@ -33,7 +33,16 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             lines.append(f"   Schedule: {hint} | Delivery: {j['delivery']}")
             lines.append(f"   Prompt: {j['prompt'][:100]}{'...' if len(j.get('prompt','')) > 100 else ''}")
             if j.get("last_run_at"):
-                lines.append(f"   Last run: {j['last_run_at']}")
+                # Surface the run outcome so the AI can answer "did the 7am job
+                # fail?" without a separate history lookup (M2.7).
+                outcome = j.get("last_run_result")
+                outcome_str = f" ({outcome})" if outcome else ""
+                duration = j.get("last_run_duration_ms")
+                dur_str = f", {duration}ms" if duration is not None else ""
+                lines.append(f"   Last run: {j['last_run_at']}{outcome_str}{dur_str}")
+            errors = j.get("error_count")
+            if errors:
+                lines.append(f"   Errors: {errors}")
             lines.append("")
 
         return ToolResult(True, "\n".join(lines), data={"jobs": jobs})
