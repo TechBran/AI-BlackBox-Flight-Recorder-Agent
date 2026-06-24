@@ -31,6 +31,13 @@ from Orchestrator.scheduler.manager import CronJobManager
 def temp_manager(tmp_path, monkeypatch):
     db = tmp_path / "cron_jobs_test.db"
     monkeypatch.setattr(manager_mod, "DB_PATH", db)
+    # Zero out the retry backoff so the failure-path tests (which exhaust all
+    # retries) don't sleep the real 5s/30s schedule.
+    monkeypatch.setattr(
+        manager_mod,
+        "RETRY_BACKOFF_SECONDS",
+        [0] * (manager_mod.MAX_RETRIES + 1),
+    )
     # Build the manager against the patched DB path. The APScheduler instance is
     # created but never started, so add_job/get_job calls are harmless no-ops.
     return CronJobManager()

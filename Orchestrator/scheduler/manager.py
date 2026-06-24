@@ -90,6 +90,19 @@ LOCAL_TZ = _resolve_local_tz()
 DB_PATH = Path(__file__).resolve().parent.parent / "cron_jobs.db"
 
 # ---------------------------------------------------------------------------
+# Retry-on-failure configuration (M2.8)
+#
+# A failed execution is retried up to MAX_RETRIES times (so MAX_RETRIES+1
+# attempts total) WITHIN the single held per-job lock — no APScheduler
+# re-enqueue. RETRY_BACKOFF_SECONDS[i] is the delay BEFORE retry i (it is
+# indexed by retry number, so index 0 precedes the first retry). The list is
+# clamped to its last value if there are more retries than entries. Tests
+# monkeypatch RETRY_BACKOFF_SECONDS to zeros for speed.
+# ---------------------------------------------------------------------------
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = [5, 30]
+
+# ---------------------------------------------------------------------------
 # Field validation allow-lists (M2.1)
 #
 # Validation lives at ONE sink (CronJobManager._validate_job_fields, called by
@@ -881,16 +894,154 @@ class CronJobManager:
         """
         Core execution body (runs INSIDE the per-job lock).
 
-        Loads the job from SQLite, invokes the executor, records history,
-        and updates run statistics.  If the job is marked as one_shot,
-        deletes it after execution — but ONLY on success (a failed one-shot
-        survives so it is not silently destroyed).
+        Loads the job from SQLite and runs it with bounded retry-on-failure
+        (M2.8): up to MAX_RETRIES retries (MAX_RETRIES+1 attempts total), each
+        ATTEMPT writing its own history row, with a backoff sleep between
+        attempts. A succeeding attempt stops further retries. All retries run
+        within this single held lock — no APScheduler re-enqueue.
+
+        After the attempts resolve, run statistics are updated EXACTLY once:
+        run_count is incremented for the run, and error_count is incremented
+        once (not per attempt) only if the run ultimately failed; the job is
+        left scheduled/active on failure. A one-shot is deleted only on final
+        success (a failed one-shot survives — M2.6).
         """
         job = self.get_job(job_id)
         if job is None:
             logger.warning("_execute_job called for non-existent job %s", job_id)
             return
 
+        # --- Bounded retry loop: each attempt writes its own history row. ---
+        final_error: Optional[str] = None
+        last_duration_ms = 0
+        last_run_at = datetime.now(timezone.utc)
+        succeeded = False
+
+        for attempt in range(MAX_RETRIES + 1):
+            result_text, error_text, duration_ms, attempt_run_at = (
+                await self._attempt_once(job)
+            )
+            last_duration_ms = duration_ms
+            last_run_at = attempt_run_at
+
+            if error_text is None:
+                final_error = None
+                succeeded = True
+                if attempt > 0:
+                    logger.info(
+                        "Cron job %s succeeded on retry %d/%d",
+                        job_id, attempt, MAX_RETRIES,
+                    )
+                break
+
+            final_error = error_text
+            # More attempts remain → back off, then retry within the lock.
+            if attempt < MAX_RETRIES:
+                backoff = self._retry_backoff_for(attempt)
+                logger.warning(
+                    "Cron job %s attempt %d/%d failed (%s); retrying in %ss",
+                    job_id, attempt + 1, MAX_RETRIES + 1, error_text, backoff,
+                )
+                if backoff:
+                    await asyncio.sleep(backoff)
+
+        # --- Update job stats ONCE for the whole run (not per attempt). ---
+        try:
+            trigger = self._build_trigger(job["schedule"])
+            next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+            next_run_at = next_fire.isoformat() if next_fire else None
+        except Exception:
+            next_run_at = None
+
+        last_run_result = "success" if succeeded else "error"
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            if succeeded:
+                cursor.execute(
+                    """
+                    UPDATE cron_jobs
+                    SET last_run_at         = ?,
+                        last_run_result     = ?,
+                        last_run_duration_ms = ?,
+                        next_run_at         = ?,
+                        run_count           = run_count + 1,
+                        updated_at          = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        last_run_at.isoformat(),
+                        last_run_result,
+                        last_duration_ms,
+                        next_run_at,
+                        now_iso,
+                        job_id,
+                    ),
+                )
+            else:
+                # error_count increments ONCE for the failed run as a whole,
+                # not once per failed attempt.
+                cursor.execute(
+                    """
+                    UPDATE cron_jobs
+                    SET last_run_at         = ?,
+                        last_run_result     = ?,
+                        last_run_duration_ms = ?,
+                        next_run_at         = ?,
+                        run_count           = run_count + 1,
+                        error_count         = error_count + 1,
+                        updated_at          = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        last_run_at.isoformat(),
+                        last_run_result,
+                        last_duration_ms,
+                        next_run_at,
+                        now_iso,
+                        job_id,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        logger.info(
+            "Executed cron job %s (%s) result=%s duration=%dms",
+            job_id,
+            job["name"],
+            last_run_result,
+            last_duration_ms,
+        )
+
+        # ----- One-shot cleanup (only on success) -----
+        # A one-shot whose run FAILED (all retries exhausted) is left in place
+        # so it is not silently destroyed; it survives for inspection (M2.6).
+        if job.get("one_shot") and succeeded:
+            logger.info("One-shot job %s completed successfully, deleting", job_id)
+            self.delete_job(job_id)
+
+    @staticmethod
+    def _retry_backoff_for(attempt: int) -> float:
+        """Backoff (seconds) to wait BEFORE the retry following ``attempt``.
+
+        Indexed by attempt number; clamps to the last configured value when
+        there are more retries than entries. An empty list means no backoff.
+        """
+        if not RETRY_BACKOFF_SECONDS:
+            return 0
+        idx = min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)
+        return RETRY_BACKOFF_SECONDS[idx]
+
+    async def _attempt_once(self, job: Dict[str, Any]):
+        """Run the executor once and write THIS attempt's history row.
+
+        Returns ``(result_text, error_text, duration_ms, run_at)``. A non-None
+        error_text means the attempt failed.
+        """
+        job_id = job["id"]
         run_at = datetime.now(timezone.utc)
         start_ms = int(run_at.timestamp() * 1000)
         result_text: Optional[str] = None
@@ -911,7 +1062,6 @@ class CronJobManager:
         end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         duration_ms = end_ms - start_ms
 
-        # ----- Record history row -----
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
@@ -932,80 +1082,11 @@ class CronJobManager:
                     error_text,
                 ),
             )
-
-            # ----- Update job stats -----
-            # Recalculate next_run_at
-            try:
-                trigger = self._build_trigger(job["schedule"])
-                next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
-                next_run_at = next_fire.isoformat() if next_fire else None
-            except Exception:
-                next_run_at = None
-
-            last_run_result = "success" if error_text is None else "error"
-
-            if error_text is None:
-                cursor.execute(
-                    """
-                    UPDATE cron_jobs
-                    SET last_run_at         = ?,
-                        last_run_result     = ?,
-                        last_run_duration_ms = ?,
-                        next_run_at         = ?,
-                        run_count           = run_count + 1,
-                        updated_at          = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        run_at.isoformat(),
-                        last_run_result,
-                        duration_ms,
-                        next_run_at,
-                        datetime.now(timezone.utc).isoformat(),
-                        job_id,
-                    ),
-                )
-            else:
-                cursor.execute(
-                    """
-                    UPDATE cron_jobs
-                    SET last_run_at         = ?,
-                        last_run_result     = ?,
-                        last_run_duration_ms = ?,
-                        next_run_at         = ?,
-                        run_count           = run_count + 1,
-                        error_count         = error_count + 1,
-                        updated_at          = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        run_at.isoformat(),
-                        last_run_result,
-                        duration_ms,
-                        next_run_at,
-                        datetime.now(timezone.utc).isoformat(),
-                        job_id,
-                    ),
-                )
-
             conn.commit()
         finally:
             conn.close()
 
-        logger.info(
-            "Executed cron job %s (%s) result=%s duration=%dms",
-            job_id,
-            job["name"],
-            last_run_result,
-            duration_ms,
-        )
-
-        # ----- One-shot cleanup (only on success) -----
-        # A one-shot whose run FAILED is left in place so it is not silently
-        # destroyed; it survives for inspection / retry (M2.6).
-        if job.get("one_shot") and error_text is None:
-            logger.info("One-shot job %s completed successfully, deleting", job_id)
-            self.delete_job(job_id)
+        return result_text, error_text, duration_ms, run_at
 
     def _record_skipped_run(self, job_id: str) -> None:
         """Write a history row noting a run was skipped because the job was
