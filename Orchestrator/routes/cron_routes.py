@@ -5,12 +5,18 @@ Cron Job Management API Routes
 REST endpoints for the Portal UI to manage scheduled tasks.
 """
 
+import asyncio
+import logging
+
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
 from Orchestrator.checkpoint import app
 from Orchestrator.scheduler import get_scheduler_manager
+
+logger = logging.getLogger(__name__)
 
 
 class CronJobCreate(BaseModel):
@@ -139,12 +145,35 @@ async def resume_cron_job(job_id: str):
 
 @app.post("/api/cron/jobs/{job_id}/run")
 async def run_cron_job_now(job_id: str):
-    """Manually trigger a cron job to run immediately."""
+    """Manually trigger a cron job to run immediately (fire-and-forget, M2.9).
+
+    Returns 202 right away with a small ack and runs the job in the
+    background instead of blocking the request for the full job duration
+    (which could be 180-600s). The Portal's 5s history poll observes
+    completion. The background run goes through _execute_job, so the M2.6
+    per-job lock prevents a manual run from colliding with a scheduled fire
+    (a manual run that lands while one is already in flight simply records a
+    "skipped" history note).
+    """
     manager = get_scheduler_manager()
-    result = await manager.run_job_now(job_id)
-    if result is None:
+    # Validate the job exists BEFORE scheduling the background task, so an
+    # unknown id still returns 404 (not a fire-and-forget 202 for nothing).
+    job = manager.get_job(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"result": result}
+
+    async def _run() -> None:
+        try:
+            await manager._execute_job(job_id)
+        except Exception:
+            logger.exception("Background run-now failed for cron job %s", job_id)
+
+    asyncio.create_task(_run())
+
+    return JSONResponse(
+        status_code=202,
+        content={"status": "started", "job_id": job_id},
+    )
 
 
 @app.get("/api/cron/jobs/{job_id}/history")
