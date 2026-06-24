@@ -145,7 +145,12 @@ JOB_DEFAULTS = {
 # through to snapshot mode).
 # ---------------------------------------------------------------------------
 VALID_DELIVERY = {"snapshot", "sms", "voice_call", "notification"}
-VALID_STATUS = {"active", "paused"}
+# 'error' (M3.2): a job whose cron failed to register with the live scheduler
+# on startup. It is a recognised terminal-ish state — the job stays in the DB
+# and surfaces to operators rather than being silently dropped while it sits
+# 'active' but never fires. It is written by a direct UPDATE (not update_job),
+# which would re-validate and re-register it.
+VALID_STATUS = {"active", "paused", "error"}
 # Deliveries that require a real phone number.
 _TARGETED_DELIVERY = {"sms", "voice_call"}
 # E.164: a leading '+', a non-zero leading digit, then 6-14 more digits.
@@ -224,6 +229,12 @@ class CronJobManager:
         # execute. A run that finds the lock already held SKIPS (it does not
         # queue/block). Created lazily per job_id on first execution.
         self._job_locks: Dict[str, asyncio.Lock] = {}
+        # Strong refs to in-flight cold-restart catch-up tasks (M3.2). The event
+        # loop only weakly references a bare asyncio.Task, so without retaining
+        # it the GC could collect a catch-up run mid-flight and it would silently
+        # never complete (the same footgun as the run-now route). Each task
+        # self-removes via a done-callback.
+        self._catchup_tasks: "set[asyncio.Task]" = set()
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -300,7 +311,17 @@ class CronJobManager:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Load persisted active jobs into APScheduler and start the scheduler."""
+        """Load persisted active jobs into APScheduler and start the scheduler.
+
+        Cold-restart catch-up (M3.2): the persisted next_run_at is the durable
+        record of each job's next due fire. For every active job we CAPTURE
+        that stored value BEFORE _register_job_with_scheduler overwrites it with
+        the next FUTURE fire. If the captured value is in the PAST, the job was
+        due while the process was DOWN → we enqueue EXACTLY ONE coalesced
+        catch-up run (never N, even if several fires were missed). The catch-up
+        goes through _execute_job, so the per-job lock prevents it from
+        colliding with the job's normal next fire.
+        """
         # Capture the main event loop so _execute_job_sync_wrapper can
         # schedule coroutines from APScheduler's thread-pool threads.
         self._loop = asyncio.get_running_loop()
@@ -311,20 +332,104 @@ class CronJobManager:
         # process against the current box-local clock (M1.2).
         self.scheduler.start()
 
+        now = datetime.now(LOCAL_TZ)
         jobs = self.list_jobs(status="active")
         loaded = 0
+        caught_up = 0
         for job in jobs:
+            # Capture the PRE-restart next_run_at BEFORE re-registering, which
+            # overwrites it with the next future fire (M3.2 ordering).
+            captured_next_run_at = job.get("next_run_at")
             try:
                 self._register_job_with_scheduler(job)
                 loaded += 1
             except Exception:
-                logger.exception("Failed to register job %s on startup", job["id"])
+                logger.warning(
+                    "Failed to register job %s on startup; marking status='error'",
+                    job["id"],
+                    exc_info=True,
+                )
+                self._mark_job_status(job["id"], "error")
+                # A job that won't register also won't be caught up — skip it.
+                continue
+
+            # Cold-restart catch-up: a captured next_run_at in the past means
+            # the job was due during downtime. Enqueue ONE catch-up. Even if
+            # several fires were missed, this is the FIRST missed fire; we run
+            # it once and the re-register already set the next future fire.
+            if self._is_past(captured_next_run_at, now):
+                self._enqueue_catchup(job["id"])
+                caught_up += 1
 
         logger.info(
             "CronJobManager started – %d active job(s) loaded from %d total",
             loaded,
             len(jobs),
         )
+        logger.info(
+            "[CRON] startup: caught up %d missed job(s), %d up-to-date",
+            caught_up,
+            loaded - caught_up,
+        )
+
+    @staticmethod
+    def _is_past(next_run_at: Optional[str], now: datetime) -> bool:
+        """True if a persisted next_run_at parses to a time strictly before now.
+
+        Returns False for a null/blank/unparseable value (no spurious catch-up
+        on a job that never had a next fire). The comparison is timezone-aware:
+        a naive stored timestamp is interpreted as box-local.
+        """
+        if not next_run_at:
+            return False
+        try:
+            parsed = datetime.fromisoformat(next_run_at)
+        except (ValueError, TypeError):
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=LOCAL_TZ)
+        return parsed < now
+
+    def _enqueue_catchup(self, job_id: str) -> None:
+        """Enqueue exactly ONE catch-up run for a job missed during downtime.
+
+        Runs WITHOUT blocking startup: a tracked asyncio.Task drives the single
+        run through _execute_job (whose per-job lock prevents it from colliding
+        with the job's normal next fire). The task ref is retained in
+        self._catchup_tasks (with a done-callback that discards it) so the GC
+        can't collect a long-running catch-up mid-flight.
+        """
+        logger.info("[CRON] startup: enqueueing catch-up run for missed job %s", job_id)
+
+        async def _run() -> None:
+            try:
+                await self._execute_job(job_id)
+            except Exception:
+                logger.exception("Catch-up run failed for cron job %s", job_id)
+
+        task = asyncio.ensure_future(_run())
+        self._catchup_tasks.add(task)
+        task.add_done_callback(self._catchup_tasks.discard)
+
+    def _mark_job_status(self, job_id: str, status: str) -> None:
+        """Write a job's status via a direct UPDATE (M3.2 reload hardening).
+
+        Used to flag a job 'error' when it fails to register on startup. A
+        direct UPDATE is deliberate: update_job would re-validate and (for an
+        active status) re-register — exactly what just failed. This only stamps
+        the status + updated_at so the broken job surfaces to operators.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE cron_jobs SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     async def shutdown(self) -> None:
         """Gracefully shut down the scheduler."""
