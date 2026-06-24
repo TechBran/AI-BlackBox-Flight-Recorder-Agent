@@ -875,6 +875,13 @@ class CronJobManager:
         4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun",
     }
 
+    # Named day-of-week tokens -> cron numbers (so "mon-fri"/"sun" are
+    # understood identically to "1-5"/"0"). APScheduler accepts the named forms.
+    _DOW_NAME_TO_NUM = {
+        "sun": "0", "mon": "1", "tue": "2", "wed": "3",
+        "thu": "4", "fri": "5", "sat": "6",
+    }
+
     @classmethod
     def _hint_from_cron(cls, schedule: str) -> str:
         """
@@ -931,40 +938,63 @@ class CronJobManager:
             month_is_every = _is_every(month)
 
             if dow_label is not None:
-                # Day-of-week constrained.
+                # Day-of-week constrained (named or numeric).
                 return f"{dow_label} at {time_label}" + suffix
 
-            if dom_is_every and month_is_every:
-                return f"Daily at {time_label}" + suffix
+            # Date-based phrasing applies ONLY when the day-of-week field is
+            # unconstrained ("*"). A constrained-but-unrecognised dow must never
+            # be mislabelled "Daily" (that would re-introduce the very label vs
+            # schedule contradiction this method exists to prevent) — it falls
+            # through to the raw-cron echo instead.
+            if _is_every(dow):
+                if dom_is_every and month_is_every:
+                    return f"Daily at {time_label}" + suffix
 
-            if dom.isdigit() and month_is_every:
-                return f"Monthly on day {int(dom)} at {time_label}" + suffix
+                if dom.isdigit() and month_is_every:
+                    return f"Monthly on day {int(dom)} at {time_label}" + suffix
 
-            if dom.isdigit() and month.isdigit():
-                return (
-                    f"Yearly on {int(month):02d}-{int(dom):02d} at {time_label}"
-                    + suffix
-                )
+                if dom.isdigit() and month.isdigit():
+                    return (
+                        f"Yearly on {int(month):02d}-{int(dom):02d} at {time_label}"
+                        + suffix
+                    )
 
         # --- Fallback: echo the cron, still box-local -----------------------
         return raw + suffix
 
     @classmethod
+    def _normalize_dow_names(cls, dow: str) -> str:
+        """Replace named day tokens (mon, fri, sun, ...) with cron numbers, so
+        the digit-based logic in _describe_dow handles named and numeric forms
+        identically (e.g. 'mon-fri' -> '1-5', 'sat,sun' -> '6,0')."""
+        import re
+        return re.sub(
+            r"[A-Za-z]+",
+            lambda m: cls._DOW_NAME_TO_NUM.get(m.group(0).lower()[:3], m.group(0)),
+            dow,
+        )
+
+    @classmethod
     def _describe_dow(cls, dow: str) -> Optional[str]:
         """
-        Describe a cron day-of-week field, or None if it means 'every day'.
+        Describe a cron day-of-week field, or None if it means 'every day'
+        (dow == '*') OR the field is constrained but unrecognised (the caller
+        then echoes the raw cron rather than mislabelling it).
 
-        Handles '*', ranges ('1-5'), explicit lists ('1,3,5') and single days.
+        Handles '*', ranges ('1-5'/'mon-fri'), lists ('1,3,5'/'sat,sun') and
+        single days, in both numeric and named (mon..sun) forms.
         """
         if dow == "*" or dow == "?":
             return None
 
+        # Normalise named days to cron numbers up front.
+        dow = cls._normalize_dow_names(dow)
+
         # Weekday / weekend shorthands.
         if dow == "1-5":
             return "Weekdays"
-        if dow in ("0,6", "6,0", "6,7", "0", "6", "7"):
-            if dow in ("0,6", "6,0", "6,7"):
-                return "Weekends"
+        if dow in ("0,6", "6,0", "6,7"):
+            return "Weekends"
 
         def _name(token: str) -> Optional[str]:
             if token.isdigit():

@@ -80,3 +80,32 @@ def test_edit_schedule_overrides_client_hint(temp_manager):
     )
     hint = _raw_hint(temp_manager, job["id"])
     assert "whenever" not in (hint or ""), "client hint won over the cron"
+
+
+@pytest.mark.parametrize(
+    "schedule, expect_substr, forbid_substr",
+    [
+        # Named day-of-week forms APScheduler accepts must NOT be mislabelled
+        # "Daily" (the M1 review regression). They read with the right day sense.
+        ("5 4 * * sun", "Sun", "Daily"),
+        ("0 9 * * mon-fri", "Weekdays", "Daily"),
+        ("0 9 * * sat,sun", "Weekends", "Daily"),
+        ("0 9 * * MON-FRI", "Weekdays", "Daily"),  # case-insensitive
+        # Numeric forms remain correct.
+        ("30 6 * * 1-5", "Weekdays", "Daily"),
+        ("0 9 * * 0", "Sun", "Daily"),
+        ("0 9 * * 6,7", "Weekends", "Daily"),
+        # A genuinely unconstrained dow IS daily.
+        ("0 9 * * *", "Daily", None),
+    ],
+)
+def test_named_dow_not_mislabelled_daily(schedule, expect_substr, forbid_substr):
+    """Named/numeric day-of-week crons read correctly and never say 'Daily'
+    when the day-of-week field is actually constrained."""
+    hint = CronJobManager._hint_from_cron(schedule)
+    assert expect_substr in hint, f"{schedule!r} -> {hint!r} missing {expect_substr!r}"
+    if forbid_substr is not None:
+        assert forbid_substr not in hint, (
+            f"{schedule!r} -> {hint!r} wrongly contains {forbid_substr!r}"
+        )
+    assert "(local)" in hint, f"{schedule!r} -> {hint!r} missing (local) marker"
