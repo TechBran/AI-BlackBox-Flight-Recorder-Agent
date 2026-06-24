@@ -50,7 +50,10 @@ async function updateJob(jobId, updates) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates)
     });
-    if (!res.ok) throw new Error('Failed to update job');
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to update job');
+    }
     return (await res.json()).job;
 }
 

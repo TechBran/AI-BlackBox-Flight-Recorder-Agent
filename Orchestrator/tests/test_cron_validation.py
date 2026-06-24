@@ -163,6 +163,28 @@ def test_update_delivery_only_when_target_already_on_job_ok(temp_manager):
     assert updated["delivery"] == "sms"
 
 
+def test_update_target_only_to_invalid_on_sms_job_raises(temp_manager):
+    """Changing ONLY the target (delivery already sms) to a non-E.164 value
+    must raise — the effective delivery is still sms."""
+    job = temp_manager.create_job(
+        name="j", prompt="hi", schedule="0 15 * * *", operator="system",
+        delivery="sms", delivery_target="+15551234567",
+    )
+    with pytest.raises(ValueError):
+        temp_manager.update_job(job["id"], delivery_target="not-a-number")
+
+
+def test_update_blank_target_on_sms_job_raises(temp_manager):
+    """Blanking the target on an existing sms job must raise — you cannot
+    update a deliverable job into the silent-non-delivery state."""
+    job = temp_manager.create_job(
+        name="j", prompt="hi", schedule="0 15 * * *", operator="system",
+        delivery="sms", delivery_target="+15551234567",
+    )
+    with pytest.raises(ValueError):
+        temp_manager.update_job(job["id"], delivery_target="")
+
+
 # ---------------------------------------------------------------------------
 # PUT route surfaces ValueError as HTTP 400 (not 500)
 # ---------------------------------------------------------------------------
