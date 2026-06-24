@@ -75,8 +75,16 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
     delivery = job.get("delivery", "snapshot")
     delivery_target = job.get("delivery_target", "") or ""
 
-    resolved_model = _resolve_model_name(model)
-    provider = _model_to_provider(model)
+    # M4.1a/b: the job carries an explicit provider (backfilled from the model
+    # for legacy rows by the manager). Trust it as the dispatch provider, and
+    # only fall back to deriving from the model string if it is somehow blank.
+    provider = (job.get("provider") or "").strip() or _model_to_provider(model)
+
+    # M4.1b: Auto (empty/whitespace model) resolves to THIS provider's
+    # configured default at fire time — using the stored provider rather than
+    # guessing from an empty model string. A specific id is passed through
+    # verbatim.
+    resolved_model = _resolve_model_name(model, provider)
 
     logger.info(
         "Executing cron job '%s' (model=%s, provider=%s, delivery=%s, operator=%s)",
@@ -367,8 +375,13 @@ def _model_to_provider(model: str) -> str:
     return "google"
 
 
-def _resolve_model_name(model: str) -> str:
-    """Resolve shorthand aliases to full model IDs."""
+def _provider_default_model(provider: str) -> str:
+    """Return the configured *_MODEL_DEFAULT for a provider string.
+
+    The single map from a provider to its flagship default, used both for the
+    bare-alias aliasing below and for the Auto (empty model) resolution. An
+    unknown provider falls back to the Gemini default (same fallthrough the
+    legacy alias map used)."""
     from Orchestrator.config import (
         CU_MODEL_DEFAULT,
         GEMINI_MODEL_DEFAULT,
@@ -377,17 +390,42 @@ def _resolve_model_name(model: str) -> str:
         XAI_MODEL_DEFAULT,
     )
 
-    m = model.lower().strip()
+    return {
+        "computer-use": CU_MODEL_DEFAULT,
+        "anthropic": ANTHROPIC_MODEL_DEFAULT,
+        "openai": OPENAI_MODEL_DEFAULT,
+        "xai": XAI_MODEL_DEFAULT,
+        "google": GEMINI_MODEL_DEFAULT,
+    }.get(provider, GEMINI_MODEL_DEFAULT)
+
+
+def _resolve_model_name(model: str, provider: Optional[str] = None) -> str:
+    """Resolve a job's stored model to the model id sent to /chat.
+
+    Three cases:
+      * Auto — an empty/whitespace model resolves to ``provider``'s configured
+        *_MODEL_DEFAULT (M4.1b). The stored provider is authoritative; we no
+        longer guess a provider from an empty model string. With no provider
+        given it falls back to the Gemini default (legacy behaviour).
+      * A bare provider alias ("anthropic"/"gpt"/"grok"/…) resolves to that
+        provider's default.
+      * A specific id ("claude-opus-4-8", "gpt-5.1", …) passes through verbatim.
+    """
+    m = (model or "").lower().strip()
+
+    # Auto / empty → the provider's configured default at fire time.
+    if not m:
+        return _provider_default_model((provider or "google").strip().lower())
 
     if m in ("computer-use", "cu"):
-        return CU_MODEL_DEFAULT
+        return _provider_default_model("computer-use")
     if m in ("gemini", "google"):
-        return GEMINI_MODEL_DEFAULT
+        return _provider_default_model("google")
     if m in ("anthropic", "claude"):
-        return ANTHROPIC_MODEL_DEFAULT
+        return _provider_default_model("anthropic")
     if m in ("openai", "gpt"):
-        return OPENAI_MODEL_DEFAULT
+        return _provider_default_model("openai")
     if m in ("xai", "grok"):
-        return XAI_MODEL_DEFAULT
+        return _provider_default_model("xai")
 
     return model
