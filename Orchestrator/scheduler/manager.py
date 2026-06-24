@@ -103,6 +103,38 @@ MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = [5, 30]
 
 # ---------------------------------------------------------------------------
+# Misfire grace window (M3.1)
+#
+# How long after a job's scheduled fire time APScheduler will still run it
+# (rather than silently dropping it as "missed"). Deliberately WIDE — a fire
+# missed during a brief alive-but-busy window (event loop saturated, a long
+# prior run holding the per-job lock) must still count, not vanish. Six hours
+# gives generous headroom for those in-process stalls.
+#
+# This is NOT the cold-restart catch-up mechanism: a fire missed because the
+# whole process was DOWN is handled by start()'s persisted-next_run_at catch-up
+# (M3.2), since misfire_grace_time only applies to a live scheduler.
+# ---------------------------------------------------------------------------
+MISFIRE_GRACE_SECONDS = 6 * 3600
+
+# ---------------------------------------------------------------------------
+# Single-run job defaults (M3.1)
+#
+# coalesce=True       — if multiple fires of one job pile up while the scheduler
+#                       is alive, collapse them into a SINGLE run (never N).
+# max_instances=1     — never run two instances of the same job concurrently
+#                       (defence-in-depth alongside the per-job asyncio lock).
+#
+# Applied via job_defaults on the scheduler ctor AND per add_job so they hold
+# for both the live scheduler and every registered job.
+# ---------------------------------------------------------------------------
+JOB_DEFAULTS = {
+    "coalesce": True,
+    "max_instances": 1,
+    "misfire_grace_time": MISFIRE_GRACE_SECONDS,
+}
+
+# ---------------------------------------------------------------------------
 # Field validation allow-lists (M2.1)
 #
 # Validation lives at ONE sink (CronJobManager._validate_job_fields, called by
@@ -184,7 +216,9 @@ class CronJobManager:
 
     def __init__(self) -> None:
         self.db_path = str(DB_PATH)
-        self.scheduler = AsyncIOScheduler(timezone=LOCAL_TZ)
+        # job_defaults enforce the locked single-run policy (M3.1): coalesce
+        # piled-up fires into one + never run two instances concurrently.
+        self.scheduler = AsyncIOScheduler(timezone=LOCAL_TZ, job_defaults=JOB_DEFAULTS)
         # Per-job execution locks (M2.6): serialise runs of the SAME job so a
         # manual run-now can never collide with a scheduled fire and double-
         # execute. A run that finds the lock already held SKIPS (it does not
@@ -813,7 +847,14 @@ class CronJobManager:
             name=job["name"],
             args=[job["id"]],
             replace_existing=True,
-            misfire_grace_time=30,  # 30 seconds grace — prevents double-fire on restart
+            # M3.1: collapse piled-up fires into one run + never run two
+            # instances of the same job at once. Set explicitly here (not only
+            # via the scheduler's job_defaults) so the policy is unambiguous on
+            # every registered job. The wide MISFIRE_GRACE_SECONDS keeps a fire
+            # missed during a brief alive-but-busy window eligible to run.
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=MISFIRE_GRACE_SECONDS,
         )
 
         # Persist the live next fire time so the row reflects the real clock,
