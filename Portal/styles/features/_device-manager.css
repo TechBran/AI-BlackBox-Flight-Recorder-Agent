@@ -304,6 +304,114 @@
 }
 
 /* ============================================================================
+   Notification Subscriptions (read-only admin view)
+   ============================================================================ */
+
+.dm-subs-section {
+    flex-shrink: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 30vh;
+    min-height: 0;
+}
+
+.dm-subs-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--neutral-700);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.dm-subs-list {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+    padding-right: 4px;
+}
+
+.dm-subs-list::-webkit-scrollbar {
+    width: 4px;
+}
+.dm-subs-list::-webkit-scrollbar-thumb {
+    background: var(--neutral-300);
+    border-radius: var(--radius-full);
+}
+
+.dm-sub-row {
+    background: var(--neutral-100);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+}
+
+.dm-sub-row-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.dm-sub-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--neutral-900);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dm-sub-ops {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+}
+
+.dm-sub-op-tag {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+}
+
+.dm-sub-ops-all {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+}
+
+.dm-sub-ops-none {
+    font-size: 12px;
+    color: var(--neutral-400);
+}
+
+.dm-sub-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin-top: 4px;
+}
+
+.dm-sub-meta-item {
+    font-size: 11px;
+    color: var(--neutral-500);
+}
+
+/* ============================================================================
    Pair Modal
    ============================================================================ */
 

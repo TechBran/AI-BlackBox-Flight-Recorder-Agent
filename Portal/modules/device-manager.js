@@ -150,6 +150,13 @@ async function fetchScreenshot(deviceId) {
     return await res.json();
 }
 
+async function fetchSubscriptions() {
+    const res = await fetch('/notifications/subscriptions');
+    if (!res.ok) throw new Error('Failed to fetch subscriptions');
+    // Admin map: { device_id: { all, operators, tailnet_name, device_kind, display_name, updated_at } }
+    return await res.json();
+}
+
 // =============================================================================
 // Device List Rendering
 // =============================================================================
@@ -283,6 +290,83 @@ function renderDeviceList(devices) {
     container.querySelectorAll('.dm-action-btn').forEach(btn => {
         btn.addEventListener('click', handleDeviceAction);
     });
+}
+
+// =============================================================================
+// Notification Subscriptions (read-only admin view)
+// =============================================================================
+
+async function refreshSubscriptions() {
+    const container = $('dmSubsList');
+    if (!container) return;
+    try {
+        const subs = await fetchSubscriptions();
+        renderSubscriptions(subs);
+    } catch (e) {
+        console.error('[DeviceManager] Subscriptions refresh failed:', e);
+        container.innerHTML = `
+            <div class="dm-empty-state">
+                <p>Could not load subscriptions</p>
+                <p class="dm-empty-hint">${escapeHtml(e.message)}</p>
+            </div>`;
+    }
+}
+
+function formatUpdatedAt(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+}
+
+function renderSubscriptions(subs) {
+    const container = $('dmSubsList');
+    if (!container) return;
+
+    const entries = Object.entries(subs || {});
+    if (entries.length === 0) {
+        container.innerHTML = `
+            <div class="dm-empty-state">
+                <p>No devices subscribed yet</p>
+                <p class="dm-empty-hint">Devices self-register for operator notifications</p>
+            </div>`;
+        return;
+    }
+
+    container.innerHTML = entries.map(([deviceId, sub]) => {
+        sub = sub || {};
+        const name = sub.display_name || deviceId;
+        const kind = sub.device_kind ? ` (${escapeHtml(sub.device_kind)})` : '';
+
+        // Operators: "All operators" when all=true; named list; "(none)" when empty
+        let opsHtml;
+        if (sub.all) {
+            opsHtml = '<span class="dm-sub-ops-all">All operators</span>';
+        } else {
+            const ops = Array.isArray(sub.operators) ? sub.operators.filter(Boolean) : [];
+            opsHtml = ops.length
+                ? ops.map(o => `<span class="dm-sub-op-tag">${escapeHtml(String(o))}</span>`).join('')
+                : '<span class="dm-sub-ops-none">\u2014 (none)</span>';
+        }
+
+        const meta = [];
+        if (sub.tailnet_name) {
+            meta.push(`<span class="dm-sub-meta-item">${escapeHtml(sub.tailnet_name)}</span>`);
+        }
+        const updated = formatUpdatedAt(sub.updated_at);
+        if (updated) {
+            meta.push(`<span class="dm-sub-meta-item">Updated ${escapeHtml(updated)}</span>`);
+        }
+
+        return `
+        <div class="dm-sub-row">
+            <div class="dm-sub-row-head">
+                <span class="dm-sub-name">${escapeHtml(name)}${kind}</span>
+                <span class="dm-sub-ops">${opsHtml}</span>
+            </div>
+            ${meta.length ? `<div class="dm-sub-meta">${meta.join('')}</div>` : ''}
+        </div>`;
+    }).join('');
 }
 
 // =============================================================================
@@ -717,7 +801,10 @@ function escapeHtml(str) {
 
 function _startPolling() {
     _stopPolling();
-    _pollInterval = setInterval(refreshDeviceList, 10000);
+    _pollInterval = setInterval(() => {
+        refreshDeviceList();
+        refreshSubscriptions();
+    }, 10000);
 }
 
 function _stopPolling() {
@@ -739,6 +826,7 @@ export function initDeviceManager() {
             const modal = $('deviceManagerModal');
             if (modal) modal.classList.remove('hide');
             await refreshDeviceList();
+            refreshSubscriptions();
             _startPolling();
 
             // Show quick pair button if in Android app
