@@ -90,6 +90,7 @@ from Orchestrator.routes.twilio_routes import *
 from Orchestrator.routes.cellular_routes import *
 from Orchestrator.routes.asterisk_routes import *
 from Orchestrator.routes.cron_routes import *
+from Orchestrator.routes.notification_routes import *
 from Orchestrator.routes.browser_routes import *
 from Orchestrator.routes.internet_routes import *
 from Orchestrator.routes.gmail_routes import *
