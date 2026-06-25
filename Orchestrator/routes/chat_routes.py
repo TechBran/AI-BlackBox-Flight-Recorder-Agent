@@ -107,17 +107,27 @@ def _record_media_task(media_tasks: list, task_id, kind: str, prompt: str = "") 
 
 
 def _last_user_msg(messages) -> str:
-    """Extract text from the last user message (for ToolVault prompt injection)."""
+    """Extract text from the last user message (for ToolVault prompt injection).
+
+    Returns the FULL last user message — NO char cap. Truncating to the first
+    500 chars dropped trailing instructions (e.g. a cron job's appended
+    ``DELIVERY: send an SMS to …`` line) before they reached the semantic tool
+    embedder, so the matching tool (``send_sms``) scored below threshold and was
+    never injected. The genuine ceiling is the embedding provider's
+    ``EMBEDDING_MAX_CHARS`` (10000), enforced downstream in
+    ``Orchestrator/embeddings/providers.py:_truncate`` — far above any realistic
+    prompt; no app-level cap is needed here.
+    """
     for m in reversed(messages if isinstance(messages, list) else []):
         if m.get("role") == "user":
             content = m.get("content", "")
             if isinstance(content, str):
-                return content[:500]
+                return content
             if isinstance(content, list):
                 return " ".join(
                     p.get("text", "") for p in content
                     if isinstance(p, dict) and "text" in p
-                )[:500]
+                )
     return ""
 
 

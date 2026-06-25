@@ -50,6 +50,7 @@ PROVIDER_FORMATS = {
     "openai": "openai_rest",
     "openai_rest": "openai_rest",
     "openai_realtime": "openai_realtime",
+    "google": "gemini_rest",     # "google" is an alias for gemini (DEFAULT_PROVIDER)
     "gemini": "gemini_rest",
     "gemini_rest": "gemini_rest",
     "gemini_live": "gemini_live",
@@ -64,6 +65,7 @@ PROVIDER_DEFAULT_GROUP = {
     "openai": "chat",
     "openai_rest": "chat",
     "openai_realtime": "realtime",
+    "google": "chat",            # "google" is an alias for gemini (DEFAULT_PROVIDER)
     "gemini": "chat",
     "gemini_rest": "chat",
     "gemini_live": "gemini_live",

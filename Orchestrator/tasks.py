@@ -1481,12 +1481,15 @@ def process_chat_task(task: Task):
         # OUTPUT_SPEC / GM_FORMAT_RULES envelope mandate is no longer injected. The model
         # replies in natural-language prose; the worker treats prose as the reply.
         if TOOLVAULT_ENABLED:
-            _user_msg = ""
-            for _m in reversed(inp.messages):
-                if _m.get("role") == "user":
-                    _c = _m.get("content", "")
-                    _user_msg = _c[:500] if isinstance(_c, str) else ""
-                    break
+            # Use the SAME untruncated extraction as the streaming path
+            # (build_streaming_context -> _last_user_msg). The old inline
+            # _c[:500] cap dropped trailing instructions (e.g. a cron job's
+            # appended "DELIVERY: send an SMS to …" line) before they reached
+            # the semantic tool embedder, so send_sms scored below threshold and
+            # was never injected — no SMS was sent. Full prompt now; the
+            # embedding layer self-caps at EMBEDDING_MAX_CHARS.
+            from Orchestrator.routes.chat_routes import _last_user_msg
+            _user_msg = _last_user_msg(inp.messages)
             if _user_msg:
                 from Orchestrator.toolvault.injector import inject_for_prompt
                 _, tool_instructions = inject_for_prompt(_user_msg, inp.provider or DEFAULT_PROVIDER)
