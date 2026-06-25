@@ -308,3 +308,23 @@ async def test_edit_uses_existing_provider_when_only_model_changes(
     )
     assert res.success is False
     assert "definitely-not-a-claude-id" in res.result
+
+
+def test_specific_id_without_provider_is_still_validated(monkeypatch):
+    """M4.2 follow-up: a specific (bogus) model id with NO provider word must be
+    validated against the catalog of the provider DERIVED from the id (via
+    _model_to_provider), not silently allowed by fetching the nonexistent
+    /models/<id> (which 404s -> graceful-allow -> typo check skipped)."""
+    _mock_catalog(monkeypatch, models=["gemini-3.1-pro-preview"])
+    # Unknown id, no provider -> derives to google -> absent -> REJECTED (was
+    # silently allowed before the fix).
+    ok, msg = create_exec._validate_model("totally-made-up", None)
+    assert ok is False
+    assert "totally-made-up" in msg
+    # A claude-shaped bogus id derives to anthropic; absent from the mocked
+    # catalog -> rejected (proves derivation runs, not a blind allow).
+    ok2, _ = create_exec._validate_model("claude-bogus-xyz", None)
+    assert ok2 is False
+    # A real id present in the catalog still passes with no provider.
+    ok3, _ = create_exec._validate_model("gemini-3.1-pro-preview", None)
+    assert ok3 is True

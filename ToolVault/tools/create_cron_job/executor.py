@@ -78,7 +78,16 @@ def _validate_model(model, provider_word, operator=None):
     if m.lower() in _BARE_PROVIDER_WORDS:
         return True, None  # bare provider word -> provider default
 
-    provider_key = _normalize_provider_word(provider_word) or _normalize_provider_word(m) or "google"
+    provider_key = _normalize_provider_word(provider_word)
+    if not provider_key:
+        # No explicit provider word: derive the provider FROM the model id
+        # (claude-*->anthropic, gpt-*->openai, gemini-*->google, unknown->google)
+        # so a bogus id with no provider is validated against the right catalog.
+        # Treating the id itself as a provider word would fetch /models/<id> -> a
+        # 404 -> graceful-allow, silently skipping the typo check in the common
+        # "id only, no provider" path. Lazy import avoids any cycle.
+        from Orchestrator.scheduler.executor import _model_to_provider
+        provider_key = _model_to_provider(m)
 
     try:
         catalog = _fetch_catalog_models(provider_key, operator)
