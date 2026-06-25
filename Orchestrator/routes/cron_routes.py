@@ -31,6 +31,7 @@ class CronJobCreate(BaseModel):
     schedule: str                          # cron expression
     frequency_hint: Optional[str] = None   # human-readable
     model: Optional[str] = "gemini"
+    provider: Optional[str] = None         # canonical catalog key (M4); '' model = Auto
     delivery: Optional[str] = "snapshot"
     delivery_target: Optional[str] = None
     operator: str
@@ -43,6 +44,7 @@ class CronJobUpdate(BaseModel):
     schedule: Optional[str] = None
     frequency_hint: Optional[str] = None
     model: Optional[str] = None
+    provider: Optional[str] = None         # canonical catalog key (M4)
     delivery: Optional[str] = None
     delivery_target: Optional[str] = None
     operator: Optional[str] = None
@@ -127,6 +129,7 @@ async def create_cron_job(body: CronJobCreate):
             operator=body.operator,
             frequency_hint=body.frequency_hint,
             model=body.model,
+            provider=body.provider,
             delivery=body.delivery,
             delivery_target=body.delivery_target,
             one_shot=body.one_shot
