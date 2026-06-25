@@ -130,4 +130,105 @@ class RemoteControlServerTest {
         assertEquals("", extractOperator("not json"))
         assertEquals("", extractOperator("""{"task":"x"}"""))
     }
+
+    // /notify carries a top-level `operator` too — the shared tolerant decode reads it.
+    @Test fun extractOperator_reads_notify_payload() {
+        assertEquals("Sarah", extractOperator("""{"title":"Hi","operator":"Sarah","notif_id":"n1"}"""))
+    }
+
+    // ── MN.4: /notify route ──
+
+    /** Captures the last notification dispatched so /notify routing is exercised purely. */
+    private class FakeNotifier : Notifier {
+        var calls = 0
+        var lastTitle: String? = null
+        var lastBody: String? = null
+        var lastCategory: String? = null
+        var lastOperator: String? = null
+        var lastNotifId: String? = null
+        override fun postNotification(title: String, body: String, category: String, operator: String, notifId: String) {
+            calls++; lastTitle = title; lastBody = body; lastCategory = category
+            lastOperator = operator; lastNotifId = notifId
+        }
+    }
+
+    @Test fun post_notify_posts_and_trims_fields() {
+        val n = FakeNotifier()
+        val r = routeRequest("POST", "/notify",
+            """{"title":"  Build done  ","body":"  green  ","category":"ci","operator":"Brandon","notif_id":" n7 "}""",
+            FakeHandler(), n)
+        assertEquals(200, r.status)
+        assertTrue(r.json, r.json.contains("\"ok\":true"))
+        assertEquals(1, n.calls)
+        assertEquals("Build done", n.lastTitle)   // trimmed
+        assertEquals("green", n.lastBody)
+        assertEquals("ci", n.lastCategory)
+        assertEquals("Brandon", n.lastOperator)
+        assertEquals("n7", n.lastNotifId)
+    }
+
+    @Test fun post_notify_empty_body_is_allowed_metadata_only() {
+        val n = FakeNotifier()
+        val r = routeRequest("POST", "/notify",
+            """{"title":"New message","body":"","category":"chat","operator":"Sarah","notif_id":"m1"}""",
+            FakeHandler(), n)
+        assertEquals(200, r.status)
+        assertEquals(1, n.calls)
+        assertEquals("New message", n.lastTitle)
+        assertEquals("", n.lastBody)              // empty body accepted (title shown)
+    }
+
+    @Test fun post_notify_blank_title_and_body_is_400() {
+        val n = FakeNotifier()
+        val r = routeRequest("POST", "/notify", """{"title":"  ","body":"  ","category":"x"}""", FakeHandler(), n)
+        assertEquals(400, r.status)
+        assertEquals(0, n.calls)                  // nothing posted
+    }
+
+    @Test fun post_notify_malformed_json_is_400() {
+        val r = routeRequest("POST", "/notify", "not json", FakeHandler(), FakeNotifier())
+        assertEquals(400, r.status)
+        assertTrue(r.json, r.json.contains("invalid JSON"))
+    }
+
+    @Test fun post_notify_without_notifier_is_503() {
+        // notifier defaulted null (the old 4-arg call path) -> /notify is unavailable.
+        val r = routeRequest("POST", "/notify", """{"title":"hi"}""", FakeHandler())
+        assertEquals(503, r.status)
+    }
+
+    @Test fun wrong_method_on_notify_is_405() {
+        assertEquals(405, routeRequest("GET", "/notify", "", FakeHandler(), FakeNotifier()).status)
+    }
+
+    @Test fun notify_works_model_free_with_noop_handler() {
+        // A model-less device: no-op handler, but /notify still posts.
+        val n = FakeNotifier()
+        val r = routeRequest("POST", "/notify", """{"title":"x","body":"y"}""", NoopRemoteTaskHandler, n)
+        assertEquals(200, r.status)
+        assertEquals(1, n.calls)
+        // And /healthz reports not-ready on a model-less device.
+        assertTrue(routeRequest("GET", "/healthz", "", NoopRemoteTaskHandler).json.contains("\"ok\":false"))
+    }
+
+    // ── MN.4: /notify auth (subscription allow-list re-check) ──
+
+    @Test fun notify_off_tailnet_is_rejected() {
+        assertEquals(403, authorize("POST", "/notify", "8.8.8.8", "Brandon", "Brandon")?.status)
+    }
+
+    @Test fun notify_tailnet_default_predicate_accepts_all() {
+        // Default isSubscribed = accept-all -> tailnet source alone authorizes.
+        assertNull(authorize("POST", "/notify", "100.88.0.7", "Brandon", "Brandon"))
+    }
+
+    @Test fun notify_unsubscribed_operator_is_rejected() {
+        assertEquals(403, authorize("POST", "/notify", "100.88.0.7", "Mallory", "Brandon",
+            isSubscribed = { it == "Brandon" })?.status)
+    }
+
+    @Test fun notify_subscribed_operator_is_allowed() {
+        assertNull(authorize("POST", "/notify", "100.88.0.7", "Brandon", "Brandon",
+            isSubscribed = { it == "Brandon" }))
+    }
 }

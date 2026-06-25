@@ -135,7 +135,7 @@ class ProviderPickerViewModel(
             operatorProvider: () -> String,
             ioDispatcher: CoroutineDispatcher = Dispatchers.Main,
         ): ProviderPickerViewModel {
-            val deviceId = stableDeviceId(context)
+            val deviceId = com.aiblackbox.portal.util.DeviceId.stable(context)
             val localApi = LocalModelApi(api)
             val manager = LocalModelManager.fromContext(context, localApi, deviceId)
             return ProviderPickerViewModel(
@@ -147,16 +147,5 @@ class ProviderPickerViewModel(
             )
         }
 
-        /** Stable per-device id: ANDROID_ID, falling back to a constant. */
-        @Suppress("HardwareIds")
-        private fun stableDeviceId(context: Context): String {
-            val androidId = runCatching {
-                android.provider.Settings.Secure.getString(
-                    context.contentResolver,
-                    android.provider.Settings.Secure.ANDROID_ID,
-                )
-            }.getOrNull()
-            return androidId?.takeIf { it.isNotBlank() } ?: "android-device"
-        }
     }
 }

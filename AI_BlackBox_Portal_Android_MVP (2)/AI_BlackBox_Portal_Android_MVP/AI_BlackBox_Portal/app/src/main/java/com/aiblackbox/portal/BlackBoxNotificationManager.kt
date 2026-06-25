@@ -179,6 +179,83 @@ class BlackBoxNotificationManager(private val context: Context) {
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
+    /**
+     * Post a REAL system notification for an inbound remote `/notify` (MN.4), MODEL-FREE
+     * (plain [NotificationManagerCompat.notify], no LLM/Gemma anywhere in the path).
+     *
+     * **Idempotent retries.** The bus's [notifId] is mapped to a STABLE (tag, id): the
+     * id is the (tag, id) notify overload's tag so a retried push with the SAME notifId
+     * COLLAPSES onto the same notification instead of stacking a duplicate. When notifId
+     * is null (no idempotency key supplied) we fall back to a fresh time-based id (no
+     * collapse possible), preserving the old behaviour for keyless callers.
+     *
+     * **Metadata-only / empty body.** [body] may be empty (a metadata-only cross-operator
+     * push). The caller passes title + category; an empty body simply shows the title
+     * (and category, if provided) — [NotificationCompat] tolerates an empty content text.
+     */
+    fun showRemoteNotification(
+        title: String,
+        body: String,
+        operator: String? = null,
+        category: String? = null,
+        notifId: String? = null,
+    ) {
+        Log.d(TAG, "showRemoteNotification: title=$title, hasBody=${body.isNotBlank()}, notifId=$notifId")
+
+        val intent = Intent(context, PortalActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("from_notification", true)
+            putExtra("notif_category", category)
+            putExtra("notif_operator", operator)
+        }
+
+        // STABLE (tag, id): tag = notifId (the bus idempotency key); id = a stable hash of
+        // it so the (tag, id) notify overload collapses retries. A NanoHTTPD worker may
+        // deliver the same notifId more than once (bus retry) — using the SAME (tag, id)
+        // makes the second post UPDATE the first rather than stack a duplicate.
+        val tag: String? = notifId?.takeIf { it.isNotBlank() }
+        val id: Int = tag?.let { stableNotificationId(it) }
+            ?: (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            id, // distinct requestCode per (tag,id) so the PendingIntent isn't shared across notifs
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_TASKS)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setVibrate(longArrayOf(0, 200, 100, 200))
+            .build()
+
+        try {
+            if (hasNotificationPermission()) {
+                NotificationManagerCompat.from(context).notify(tag, id, notification)
+                Log.d(TAG, "Remote notification POSTED (tag=$tag, id=$id)")
+            } else {
+                Log.w(TAG, "Notification permission NOT granted, cannot show remote notification")
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException showing remote notification", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing remote notification", e)
+        }
+    }
+
+    /** Stable positive int id derived from a string key (the bus notif_id), so retries
+     *  collapse deterministically. abs(hashCode) keeps it positive; 0 is avoided. */
+    private fun stableNotificationId(key: String): Int {
+        val h = key.hashCode()
+        val abs = if (h == Int.MIN_VALUE) Int.MAX_VALUE else kotlin.math.abs(h)
+        return if (abs == 0) 1 else abs
+    }
+
     fun showTaskNotification(
         title: String,
         body: String,

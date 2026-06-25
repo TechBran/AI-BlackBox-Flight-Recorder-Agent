@@ -377,7 +377,7 @@ class LocalModelViewModel(
             onModelSelected: (String) -> Unit,
             ioDispatcher: CoroutineDispatcher = Dispatchers.Main,
         ): LocalModelViewModel {
-            val deviceId = stableDeviceId(context)
+            val deviceId = com.aiblackbox.portal.util.DeviceId.stable(context)
             val localApi = LocalModelApi(api)
             val manager = LocalModelManager.fromContext(context, localApi, deviceId)
             // Local mirror of the autonomy posture for the on-device phone-control
@@ -397,16 +397,5 @@ class LocalModelViewModel(
             )
         }
 
-        /** Stable per-device id: ANDROID_ID, falling back to a constant. */
-        @Suppress("HardwareIds")
-        private fun stableDeviceId(context: Context): String {
-            val androidId = runCatching {
-                android.provider.Settings.Secure.getString(
-                    context.contentResolver,
-                    android.provider.Settings.Secure.ANDROID_ID,
-                )
-            }.getOrNull()
-            return androidId?.takeIf { it.isNotBlank() } ?: "android-device"
-        }
     }
 }

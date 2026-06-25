@@ -36,6 +36,31 @@ const val REMOTE_CONTROL_PORT = 8765
 @Volatile
 var remoteTaskHandlerFactory: ((Context) -> RemoteTaskHandler)? = null
 
+/**
+ * Process-level seam between the model service (the PRODUCER of the Gemma-backed
+ * [RemoteTaskHandler]) and the listener FGS (the single OWNER of the control-port
+ * socket). [com.aiblackbox.portal.LocalModelService] PUBLISHES the live
+ * [RemoteTaskRunner] here when a model loads and CLEARS it on stop;
+ * [com.aiblackbox.portal.NotificationListenerFgs]'s [RemoteControlServer] reads it via
+ * its `handlerProvider` PER REQUEST, falling back to [NoopRemoteTaskHandler] when
+ * absent. This decouples the single socket binding (always the FGS) from the
+ * model-dependent task runner — `/notify` + `/healthz` stay up model-free while
+ * `/task` + `/status` light up exactly when Gemma is resident, with NO socket rebind.
+ */
+object RemoteTaskHandlerHolder {
+    @Volatile
+    private var handler: RemoteTaskHandler? = null
+
+    /** Publish the Gemma-backed handler (model service, on warm/listener start). */
+    fun set(h: RemoteTaskHandler) { handler = h }
+
+    /** Clear it (model service stop/destroy) — `/task` falls back to the no-op. */
+    fun clear() { handler = null }
+
+    /** The live handler, or [NoopRemoteTaskHandler] when no model service is hosting. */
+    fun current(): RemoteTaskHandler = handler ?: NoopRemoteTaskHandler
+}
+
 /** Status of one remote task, surfaced by GET /status/{id}. Field names match what
  *  the backend control_phone executor reads (phase / result / error). Terminal
  *  phases are EXACTLY `done` / `error` (the backend treats any other phase as
@@ -58,6 +83,36 @@ interface RemoteTaskHandler {
     fun healthz(): Boolean
 }
 
+/**
+ * No-op [RemoteTaskHandler] so the listener is constructable MODEL-FREE (MN.4). With
+ * no on-device Gemma installed there is nothing to run: `/healthz` reports not-ready,
+ * a `/task` submit yields an immediately-`error` status, and `/status` is always
+ * unknown (404). `/notify` is independent of this handler, so notifications still post
+ * on a device that has never installed a model. [LocalModelService] swaps in the real
+ * [RemoteTaskRunner] (via the shared handler holder) once a model loads.
+ */
+object NoopRemoteTaskHandler : RemoteTaskHandler {
+    override fun submitTask(task: String, operator: String): String = "no-model"
+    override fun taskStatus(taskId: String): RemoteStatus? =
+        if (taskId == "no-model")
+            RemoteStatus(phase = "error", error = "no on-device model is installed")
+        else null
+    override fun healthz(): Boolean = false
+}
+
+/**
+ * What a `POST /notify` ultimately invokes — posting a REAL system notification with
+ * NO model/LLM in the path (MN.4). Implemented by [NotificationListenerFgs] over
+ * [com.aiblackbox.portal.BlackBoxNotificationManager.showTaskNotification]. Pure
+ * interface so [routeRequest] stays JVM-unit-testable with a fake. The `notifId` is
+ * mapped to a stable (tag, id) by the implementation so retries COLLAPSE instead of
+ * stacking.
+ */
+fun interface Notifier {
+    /** Post (or re-post, idempotently keyed on [notifId]) a system notification. */
+    fun postNotification(title: String, body: String, category: String, operator: String, notifId: String)
+}
+
 /** A routed response: HTTP status + JSON body. A pure value (no NanoHTTPD types) so
  *  the routing logic is unit-testable on the JVM without binding a socket. */
 data class RemoteResponse(val status: Int, val json: String)
@@ -70,6 +125,20 @@ private val JSON = Json { ignoreUnknownKeys = true }
 @Serializable private data class TaskAccepted(@SerialName("task_id") val taskId: String)
 @Serializable private data class ErrorBody(val error: String)
 @Serializable private data class HealthBody(val ok: Boolean)
+// No default on `ok` so it is always emitted (the JSON instance has encodeDefaults=false,
+// which would otherwise drop a defaulted-true field from the wire).
+@Serializable private data class OkBody(val ok: Boolean)
+
+/** Inbound `/notify` payload from the backend notification bus. `body` may be EMPTY
+ *  for a metadata-only cross-operator push (title + category only). `notif_id` is the
+ *  bus's idempotency key — retries reuse it so the notification COLLAPSES. */
+@Serializable private data class NotifyRequest(
+    val title: String = "",
+    val body: String = "",
+    val category: String = "",
+    val operator: String = "",
+    @SerialName("notif_id") val notifId: String = "",
+)
 
 /**
  * PURE request router: (method, path, body) + handler -> [RemoteResponse]. No
@@ -77,10 +146,16 @@ private val JSON = Json { ignoreUnknownKeys = true }
  *   GET  /healthz      -> {"ok": <handler.healthz()>}
  *   POST /task         -> {"task_id": ...}    (400 if task missing/blank/bad JSON)
  *   GET  /status/{id}  -> RemoteStatus json   (404 if unknown id)
+ *   POST /notify       -> {"ok": true}        (MN.4; 400 bad JSON, 503 if no notifier)
  * Known path + wrong method -> 405; anything else -> 404.
+ *
+ * [notifier] is the MODEL-FREE notification poster (MN.4). It is defaulted to null so
+ * the existing 4-arg callers/tests are unaffected; a null notifier makes `/notify`
+ * return 503 (the listener was constructed without a poster — should not happen in
+ * production, where [NotificationListenerFgs] always supplies one).
  */
 fun routeRequest(method: String, path: String, body: String,
-                 handler: RemoteTaskHandler): RemoteResponse {
+                 handler: RemoteTaskHandler, notifier: Notifier? = null): RemoteResponse {
     val m = method.uppercase()
     return when {
         path == "/healthz" && m == "GET" ->
@@ -99,13 +174,36 @@ fun routeRequest(method: String, path: String, body: String,
                     TaskAccepted(handler.submitTask(req.task.trim(), req.operator.trim()))))
         }
 
+        path == "/notify" && m == "POST" -> {
+            val req = try {
+                JSON.decodeFromString<NotifyRequest>(body.ifBlank { "{}" })
+            } catch (e: Exception) {
+                return RemoteResponse(400, JSON.encodeToString(ErrorBody("invalid JSON body")))
+            }
+            // Need at least a title OR a body to show something useful. (A metadata-only
+            // push carries title + category with an EMPTY body — that is valid and the
+            // notifier renders title/category only.)
+            if (req.title.isBlank() && req.body.isBlank())
+                return RemoteResponse(400, JSON.encodeToString(ErrorBody("title or body required")))
+            if (notifier == null)
+                return RemoteResponse(503, JSON.encodeToString(ErrorBody("notifier unavailable")))
+            notifier.postNotification(
+                title = req.title.trim(),
+                body = req.body.trim(),
+                category = req.category.trim(),
+                operator = req.operator.trim(),
+                notifId = req.notifId.trim(),
+            )
+            RemoteResponse(200, JSON.encodeToString(OkBody(ok = true)))
+        }
+
         path.startsWith("/status/") && m == "GET" -> {
             val st = handler.taskStatus(path.removePrefix("/status/"))
             if (st == null) RemoteResponse(404, JSON.encodeToString(ErrorBody("unknown task")))
             else RemoteResponse(200, JSON.encodeToString(st))
         }
 
-        path == "/healthz" || path == "/task" || path.startsWith("/status/") ->
+        path == "/healthz" || path == "/task" || path == "/notify" || path.startsWith("/status/") ->
             RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
         else -> RemoteResponse(404, JSON.encodeToString(ErrorBody("not found")))
@@ -122,14 +220,27 @@ fun routeRequest(method: String, path: String, body: String,
  *  - POST /task additionally: the request's `operator` must match the device's bound
  *    operator (a different operator's hub cannot drive this device). Fail-closed: a
  *    blank bound operator rejects.
+ *  - POST /notify additionally (MN.4, defense in depth): the request's `operator` must
+ *    be one THIS device subscribed to. The check is delegated to [isSubscribed]
+ *    (device-local DataStore allow-list at the call site). Default [isSubscribed]
+ *    accepts everything, so a caller that does not supply the predicate keeps the
+ *    tailnet-only posture (and the existing tests are unaffected). Fail-open by design:
+ *    until a subscription is recorded the allow-list is empty == accept-all, so a fresh
+ *    box still receives tailnet-sourced notifications.
  */
 fun authorize(method: String, path: String, remoteIp: String,
-              requestOperator: String, boundOperator: String): RemoteResponse? {
+              requestOperator: String, boundOperator: String,
+              isSubscribed: (operator: String) -> Boolean = { true }): RemoteResponse? {
     if (!isTailnetSource(remoteIp))
         return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
-    if (path == "/task" && method.uppercase() == "POST") {
+    val m = method.uppercase()
+    if (path == "/task" && m == "POST") {
         if (boundOperator.isBlank() || requestOperator != boundOperator)
             return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
+    if (path == "/notify" && m == "POST") {
+        if (!isSubscribed(requestOperator))
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("device not subscribed for this operator")))
     }
     return null
 }
@@ -150,21 +261,41 @@ fun isTailnetSource(ip: String): Boolean {
     return false
 }
 
-/** Tolerant extract of the `operator` field from a JSON body ("" if absent/malformed). */
+/** Tolerant extract of the `operator` field from a JSON body ("" if absent/malformed).
+ *  Both /task and /notify carry an `operator` field at the top level, so a single
+ *  tolerant decode (TaskRequest reads `operator`, ignoring the other /notify keys via
+ *  ignoreUnknownKeys) serves both. */
 internal fun extractOperator(body: String): String =
     try { JSON.decodeFromString<TaskRequest>(body.ifBlank { "{}" }).operator } catch (e: Exception) { "" }
 
 /**
  * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [authorize] gates
  * every request to tailnet-source callers (Tailscale/WireGuard encrypts the
- * transport) and scopes POST /task to the device's bound operator. The socket binding
- * is device/compile-verified; the routing + auth it delegates to are unit-tested via
+ * transport), scopes POST /task to the device's bound operator, and scopes POST
+ * /notify to the device's subscription allow-list. The socket binding is
+ * device/compile-verified; the routing + auth it delegates to are unit-tested via
  * [routeRequest] / [authorize].
+ *
+ * **Single owner on the control port (MN.4).** Exactly ONE of these binds
+ * [REMOTE_CONTROL_PORT]; it is owned by [com.aiblackbox.portal.NotificationListenerFgs]
+ * (model-free, boot-survivable), NOT by the Gemma service. The Gemma task handler is
+ * INJECTED via [handlerProvider]: it returns [NoopRemoteTaskHandler] until
+ * [com.aiblackbox.portal.LocalModelService] publishes the real [RemoteTaskRunner] (when
+ * a model loads), so `/task` + `/status` work when Gemma is up while `/healthz` +
+ * `/notify` always work model-free.
+ *
+ * @param handlerProvider read PER REQUEST so an injected Gemma handler appears/vanishes
+ *   with the model service without rebinding the socket. Defaults to the no-op handler.
+ * @param notifier the model-free notification poster for `/notify`.
+ * @param subscriptionPredicate device-local allow-list re-check for `/notify` (true =
+ *   accept). Defaults to accept-all (tailnet-only posture).
  */
 class RemoteControlServer(
     port: Int,
-    private val handler: RemoteTaskHandler,
+    private val handlerProvider: () -> RemoteTaskHandler = { NoopRemoteTaskHandler },
+    private val notifier: Notifier? = null,
     private val operatorProvider: () -> String = { "" },
+    private val subscriptionPredicate: (operator: String) -> Boolean = { true },
 ) : NanoHTTPD(port) {
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
@@ -175,11 +306,12 @@ class RemoteControlServer(
         val path = session.uri ?: "/"
         val body = if (method.equals("POST", ignoreCase = true)) readBody(session) else ""
         val remoteIp = session.remoteIpAddress ?: ""
-        val requestOperator = if (path == "/task") extractOperator(body) else ""
-        authorize(method, path, remoteIp, requestOperator, operatorProvider())?.let { denied ->
+        // Both /task and /notify carry a top-level `operator`; everything else needs none.
+        val requestOperator = if (path == "/task" || path == "/notify") extractOperator(body) else ""
+        authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
-        val routed = routeRequest(method, path, body, handler)
+        val routed = routeRequest(method, path, body, handlerProvider(), notifier)
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
     }
 
