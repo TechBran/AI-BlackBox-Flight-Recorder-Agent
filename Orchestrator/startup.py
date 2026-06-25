@@ -309,6 +309,27 @@ async def startup_embeddings_watcher():
 
 
 @app.on_event("startup")
+async def startup_notify_bridge():
+    """Capture the main event loop for the sync→async notify() bridge (MN.7).
+
+    The highest-volume notification producer (tasks.py:update_task) runs in a
+    sync worker thread with no loop of its own. It schedules notify() onto THIS
+    loop via asyncio.run_coroutine_threadsafe — the same pattern the scheduler
+    uses. We must capture the loop from inside a running-loop coroutine, so this
+    is an async startup hook.
+
+    NEVER raises — a capture failure only means producers fall back to a logged
+    no-op (their own work is unaffected), so it must not block boot.
+    """
+    try:
+        from Orchestrator.notifications.bridge import set_main_loop
+        set_main_loop()
+        logger.info("[NOTIFY-BRIDGE] main event loop captured for background notify()")
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[NOTIFY-BRIDGE] failed to capture main loop (non-fatal): %s", e)
+
+
+@app.on_event("startup")
 async def startup_live_session_reaper():
     """Start the live voice-session reaper (memory-leak fix 2026-06-14).
 
