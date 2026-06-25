@@ -4,10 +4,109 @@
  */
 
 import { $, toast, toastSuccess, toastError } from './core-utils.js';
-import { getOperator } from './state-management.js';
+import { getOperator, fetchAvailableModels, getHydratedModels } from './state-management.js';
 
 // Cache server operator list (populated once on first modal open)
 let _operatorList = null;
+
+// Provider catalog keys offered in the cron picker — the SAME canonical keys
+// the chat composer uses (and that the M4.1 backend stores in job.provider).
+// Order matches the index.html <select id="cronProvider"> options.
+const CRON_PROVIDERS = ['google', 'openai', 'anthropic', 'xai', 'computer-use'];
+const CRON_DEFAULT_PROVIDER = 'google';
+
+// Legacy jobs (pre-M4.1) stored a coarse word in `model` and had no `provider`
+// field. Map those words back to the canonical catalog key so the edit form
+// can still select a sensible provider. Specific model ids fall through this.
+const LEGACY_MODEL_TO_PROVIDER = {
+    gemini: 'google',
+    google: 'google',
+    openai: 'openai',
+    gpt: 'openai',
+    claude: 'anthropic',
+    anthropic: 'anthropic',
+    grok: 'xai',
+    xai: 'xai',
+    'computer-use': 'computer-use'
+};
+
+/**
+ * Derive the canonical provider key for a job that lacks an explicit
+ * `provider` field (legacy rows). Tries the coarse legacy word map first,
+ * then scans every hydrated catalog for an id match.
+ * @param {string} model - the raw job.model value
+ * @returns {string} canonical provider key (defaults to CRON_DEFAULT_PROVIDER)
+ */
+function deriveProviderFromModel(model) {
+    if (!model) return CRON_DEFAULT_PROVIDER;
+    if (LEGACY_MODEL_TO_PROVIDER[model]) return LEGACY_MODEL_TO_PROVIDER[model];
+    for (const provider of CRON_PROVIDERS) {
+        if (getHydratedModels(provider).some(m => m.id === model)) return provider;
+    }
+    return CRON_DEFAULT_PROVIDER;
+}
+
+/**
+ * Resolve a friendly display name for a (provider, modelId) pair from the
+ * hydrated catalog. Falls back to the raw id when the catalog isn't loaded
+ * or the id is unknown — never throws, never shows blank.
+ * @param {string} provider - canonical provider key
+ * @param {string} modelId - specific model id ('' = Auto / provider default)
+ * @returns {string}
+ */
+function friendlyModelName(provider, modelId) {
+    if (provider === 'computer-use' && !modelId) return 'Computer Use';
+    const models = getHydratedModels(provider);
+    const match = models.find(m => m.id === (modelId || ''));
+    if (match) return match.name;
+    if (!modelId) return 'Auto';
+    return modelId;
+}
+
+/**
+ * Hydrate #cronModelId for the given provider via the shared chat-composer
+ * fetch (fetchAvailableModels mutates MODEL_CONFIG in place + caches), then
+ * read the hydrated list with getHydratedModels and build the options:
+ * a first `(Auto - <default>)` entry (value '') followed by every specific id.
+ * @param {string} provider - canonical provider key
+ * @param {string} [selectedId] - id to pre-select ('' = Auto)
+ */
+async function hydrateCronModelSelect(provider, selectedId) {
+    const sel = $('cronModelId');
+    if (!sel) return;
+
+    await fetchAvailableModels(provider);
+    const models = getHydratedModels(provider);
+
+    sel.innerHTML = '';
+    if (models.length === 0) {
+        // No catalog at all (offline + unknown provider) — synthesize Auto.
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '(Auto)';
+        sel.appendChild(opt);
+    } else {
+        // First entry from buildHydratedModels is always the Auto placeholder
+        // (id ''); the rest are specific ids. Render flat (cron has no optgroup).
+        models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            sel.appendChild(opt);
+        });
+    }
+
+    // Pre-select: explicit request → last-used (localStorage) → Auto ('').
+    let target = selectedId;
+    if (target === undefined || target === null) {
+        target = localStorage.getItem(`bb_cron_model_${provider}`) || '';
+    }
+    if ([...sel.options].some(o => o.value === target)) {
+        sel.value = target;
+    } else {
+        sel.value = '';
+    }
+}
 
 // =============================================================================
 // State
@@ -186,7 +285,7 @@ function renderJobList(jobs) {
             </div>
             <div class="cron-job-prompt">${escapeHtml(job.prompt)}</div>
             <div class="cron-job-meta">
-                <span class="cron-job-model">${job.model === 'computer-use' ? 'Computer Use' : job.model}</span>
+                <span class="cron-job-model">${escapeHtml(friendlyModelName(job.provider || deriveProviderFromModel(job.model), job.model))}</span>
                 ${job.operator ? `<span class="cron-job-operator">${escapeHtml(job.operator)}</span>` : ''}
                 <span class="cron-job-delivery">${deliveryLabel}</span>
                 ${job.run_count ? `<span class="cron-job-runs">${job.run_count} runs</span>` : ''}
@@ -260,7 +359,7 @@ async function handleJobAction(e) {
 // Edit Modal
 // =============================================================================
 
-function openEditModal(jobId) {
+async function openEditModal(jobId) {
     const modal = $('cronEditModal');
     if (!modal) return;
 
@@ -270,7 +369,6 @@ function openEditModal(jobId) {
     $('cronJobPrompt').value = '';
     $('cronFrequency').value = 'daily';
     $('cronTime').value = '07:00';
-    $('cronModel').value = 'gemini';
     $('cronDelivery').value = 'snapshot';
     $('cronDeliveryTarget').value = '';
     if ($('cronDeliverySource')) $('cronDeliverySource').value = 'manual';
@@ -302,10 +400,17 @@ function openEditModal(jobId) {
         $('cronEditJobId').value = job.id;
         $('cronJobName').value = job.name;
         $('cronJobPrompt').value = job.prompt;
-        $('cronModel').value = job.model || 'gemini';
         $('cronDelivery').value = job.delivery || 'snapshot';
         $('cronDeliveryTarget').value = job.delivery_target || '';
         $('cronOneShot').checked = !!job.one_shot;
+
+        // Provider+model: prefer the backend's canonical `provider` key; for a
+        // legacy job that predates M4.1 derive it from the coarse `model` word.
+        const provider = job.provider || deriveProviderFromModel(job.model);
+        if ($('cronProvider')) $('cronProvider').value = provider;
+        // Hydrate the model list for that provider, then select the saved id.
+        // job.model holds the specific id ('' = Auto / provider default).
+        await hydrateCronModelSelect(provider, job.model || '');
 
         // Populate operator selector with existing job's operator
         populateOperatorSelector(job.operator);
@@ -328,6 +433,11 @@ function openEditModal(jobId) {
         }
     } else {
         $('cronEditTitle').textContent = 'New Scheduled Job';
+        // Default provider = last-used (mirrors chat's bb_provider), else Google.
+        const provider = localStorage.getItem('bb_cron_provider') || CRON_DEFAULT_PROVIDER;
+        if ($('cronProvider')) $('cronProvider').value = provider;
+        // Hydrate models; selectedId undefined → picks up last-used per provider.
+        await hydrateCronModelSelect(provider);
         // Populate operator selector defaulting to current operator
         populateOperatorSelector();
     }
@@ -529,7 +639,12 @@ async function _doSaveJob() {
     const jobId = $('cronEditJobId')?.value;
     const name = $('cronJobName')?.value?.trim();
     const prompt = $('cronJobPrompt')?.value?.trim();
-    const model = $('cronModel')?.value;
+    const provider = $('cronProvider')?.value || CRON_DEFAULT_PROVIDER;
+    const model = $('cronModelId')?.value || '';
+    try {
+        localStorage.setItem('bb_cron_provider', provider);
+        localStorage.setItem(`bb_cron_model_${provider}`, model);
+    } catch (_) { /* storage disabled — non-fatal */ }
     const delivery = $('cronDelivery')?.value;
     const oneShot = $('cronOneShot')?.checked || false;
 
@@ -587,7 +702,7 @@ async function _doSaveJob() {
             await updateJob(jobId, {
                 name, prompt, schedule,
                 frequency_hint: frequencyHint,
-                model, delivery,
+                provider, model, delivery,
                 delivery_target: deliveryTarget || null,
                 operator,
                 one_shot: oneShot
@@ -598,7 +713,7 @@ async function _doSaveJob() {
             await createJob({
                 name, prompt, schedule,
                 frequency_hint: frequencyHint,
-                model, delivery,
+                provider, model, delivery,
                 delivery_target: deliveryTarget || null,
                 operator,
                 one_shot: oneShot
@@ -636,18 +751,21 @@ async function openHistoryModal(jobId) {
             return;
         }
 
-        container.innerHTML = history.map(h => `
+        container.innerHTML = history.map(h => {
+            const hProvider = h.provider || job?.provider || deriveProviderFromModel(h.model);
+            return `
             <div class="cron-history-item ${h.error ? 'cron-history-error' : 'cron-history-success'}">
                 <div class="cron-history-time">${formatTime(h.run_at)}</div>
                 <div class="cron-history-meta">
-                    <span class="cron-history-model">${h.model}</span>
+                    <span class="cron-history-model">${escapeHtml(friendlyModelName(hProvider, h.model))}</span>
                     <span class="cron-history-duration">${h.duration_ms}ms</span>
                     <span class="cron-history-status">${h.delivery_status || 'completed'}</span>
                 </div>
                 ${h.result ? `<div class="cron-history-result">${escapeHtml(h.result.substring(0, 300))}${h.result.length > 300 ? '...' : ''}</div>` : ''}
                 ${h.error ? `<div class="cron-history-error-text">${escapeHtml(h.error)}</div>` : ''}
             </div>
-        `).join('');
+        `;
+        }).join('');
     } catch (err) {
         container.innerHTML = `<div class="cron-empty-state">Failed to load history: ${err.message}</div>`;
     }
@@ -814,6 +932,17 @@ export function initCronManager() {
     const btnCancel = $('btnCancelCronEdit');
     if (btnCancel) {
         btnCancel.addEventListener('click', () => $('cronEditModal')?.classList.add('hide'));
+    }
+
+    // Provider change → re-hydrate the model dropdown (mirrors the chat
+    // composer's providerSelect → fetchAvailableModels → rebuild flow).
+    const providerSelect = $('cronProvider');
+    if (providerSelect) {
+        providerSelect.addEventListener('change', async () => {
+            const provider = providerSelect.value;
+            try { localStorage.setItem('bb_cron_provider', provider); } catch (_) { /* non-fatal */ }
+            await hydrateCronModelSelect(provider);
+        });
     }
 
     // Search input (debounced)

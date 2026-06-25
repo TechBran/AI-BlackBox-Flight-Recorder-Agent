@@ -631,6 +631,22 @@ export async function fetchAvailableModels(provider) {
 }
 
 /**
+ * Read the currently-hydrated model list for a provider from MODEL_CONFIG.
+ * Returns the live array (offline fallback OR the catalog hydrated in place by
+ * fetchAvailableModels) so callers outside this module — e.g. the cron picker —
+ * can populate their own <select> and resolve friendly names WITHOUT
+ * reimplementing the fetch/cache. Each entry is { id, name, backend? }; the
+ * first entry is always the `(Auto - …)` placeholder (id "").
+ *
+ * @param {string} provider - canonical catalog key ("google"|"anthropic"|"openai"|"xai"|"computer-use")
+ * @returns {Array<{id: string, name: string, backend?: string}>} (empty array for unknown provider)
+ */
+export function getHydratedModels(provider) {
+    const config = MODEL_CONFIG[provider];
+    return config && Array.isArray(config.models) ? config.models : [];
+}
+
+/**
  * Abbreviate operator name for compact display
  * - No spaces in abbreviated form
  * - Full name shown in dropdown and as title
