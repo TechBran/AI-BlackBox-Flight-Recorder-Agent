@@ -36,6 +36,19 @@ HEALTH_KEYS = {"state", "detail", "successor", "successor_slug", "checked_at"}
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _silence_notify(monkeypatch):
+    """MN.7: the watcher now fires notify() on a health-state transition. These
+    tests exercise watcher LOGIC (probe/catalog/migration/gap-heal) and assert
+    exact provider-call lists; a real notify() would drive mint_with_content →
+    an extra embed call. Stub notify to a no-op so the bus stays out of the way.
+    The transition-notify behaviour itself is covered in test_notify_producer_watcher.
+    """
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(watcher, "notify", _noop)
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Isolated index + stores + volume; cloud keys cleared (preflight = not ready)."""

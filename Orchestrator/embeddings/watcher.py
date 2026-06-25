@@ -85,6 +85,7 @@ from Orchestrator.embeddings.store import (
     get_store,
     list_stores,
 )
+from Orchestrator.notifications.bus import notify
 from Orchestrator.volume import read_volume_bytes
 
 HEALTH_FILE = "health.json"        # same name embeddings_routes reads
@@ -419,10 +420,44 @@ async def _probe_active(active: str) -> tuple:
         return False, f"{type(e).__name__}: {e}"
 
 
+async def _notify_state_transition(prev_state, state: str, detail: str) -> None:
+    """Fire a system index notification ONLY when the health state CHANGED.
+
+    A steady state (prev == state, e.g. the hourly broken->broken recheck, or a
+    daily ok->ok) is silent — re-notifying every run would spam. The first time
+    the index goes ok->broken / ok->superseded (or recovers) the operator is told
+    via notify(operator="system", category="index"). The watcher is already on
+    the event loop, so this awaits notify directly — no sync bridge. Wrapped so a
+    notify failure NEVER aborts the health check or its health.json write.
+    """
+    if prev_state == state:
+        return
+    # A fresh box (no prior health.json → prev_state is None) landing on "ok" is
+    # NOT a meaningful transition — staying silent avoids a "healthy" boot-noise
+    # notification. A first-ever broken/superseded IS actionable, so those still
+    # fire on None → broken / None → superseded.
+    if prev_state is None and state == "ok":
+        return
+    titles = {
+        "broken": "Embedding index broken",
+        "superseded": "Embedding model superseded",
+        "ok": "Embedding index healthy",
+    }
+    title = titles.get(state, "Embedding index: " + state)
+    try:
+        await notify("system", title, detail or title, category="index")
+    except Exception as e:  # noqa: BLE001 — a notify failure must not abort the check
+        print("[WATCHER] index notification failed (non-fatal): " + repr(e))
+
+
 async def run_health_check() -> dict:
     """One full watcher pass; writes health.json and returns the health dict."""
     active = get_active_slug()
     entry = EMBEDDING_MODELS.get(active)
+    # Capture the PRIOR state once, up front — used both for the transition
+    # notification (below) and the broken-path consecutive-run migration gate,
+    # before this run's health.json overwrites the file.
+    prev_state = _previous_state()
 
     # 1. probe the active model — one failure earns ONE in-run re-probe after
     #    RETRY_PROBE_DELAY_S; a transient blip (429 burst, hiccup) must not be
@@ -486,7 +521,7 @@ async def run_health_check() -> dict:
     #    broken. A first failing run writes broken health + a loud banner and
     #    defers; the hourly broken recheck confirms (or sees recovery) in ~1h.
     if state == "broken":
-        if _previous_state() != "broken":
+        if prev_state != "broken":
             health["detail"] += (
                 "; auto-migration deferred until a consecutive failing "
                 "run confirms (recheck in "
@@ -499,6 +534,7 @@ async def run_health_check() -> dict:
                 f"{health['detail']}"
             )
             print("[WATCHER] " + "=" * 64)
+            await _notify_state_transition(prev_state, state, health["detail"])
             return health
         target, why = await _pick_migration_target(active, successor_slug)
         if target is None:
@@ -513,6 +549,8 @@ async def run_health_check() -> dict:
                 health["detail"] += f" (migration not started: {e})"
                 _write_health(health)
         print(f"[WATCHER] state=broken: {health['detail']}")
+        # Steady broken->broken no-ops inside the helper (no spam each hour).
+        await _notify_state_transition(prev_state, state, health["detail"])
         return health
 
     # 5. ok → heal small vector gaps in the active store
@@ -524,6 +562,9 @@ async def run_health_check() -> dict:
     # 7. persist + report
     _write_health(health)
     print(f"[WATCHER] state={state}" + (f": {detail}" if detail else ""))
+    # ok/superseded: fires only on a real transition (broken->ok recovery,
+    # ok->superseded); steady ok->ok / superseded->superseded stay silent.
+    await _notify_state_transition(prev_state, state, health["detail"] or detail)
     return health
 
 
