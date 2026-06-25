@@ -3,8 +3,11 @@
 The single, deterministic entry point for the whole subsystem. ANY backend event
 calls ``await notify(operator, title, body, category)`` and the bus:
 
-  1. Computes the targets = SUBSCRIBED INTERSECT REACHABLE (a device must be BOTH
-     subscribed to the operator AND currently reachable on the tailnet).
+  1. Computes the targets = the operator's SUBSCRIBERS that are CURRENTLY ONLINE on
+     the tailnet (``reachable_subscribers``). Reachability is derived from the
+     SUBSCRIPTION ROW's ``tailnet_name`` joined against the live online tailnet node
+     set — NOT from the Gemma attestation registry. This is what lets a model-free
+     (notification-only) phone — which never attests — actually receive delivery.
   2. Fans the POST out to every target concurrently with a SHORT per-device
      timeout — one slow/dead device never stalls the others or the caller.
   3. ALWAYS records the event as a searchable snapshot (the durable inbox), via
@@ -21,7 +24,7 @@ Two design contracts:
 
 The Android ``/notify`` receiver is a later chunk, so the POST will fail against a
 real phone until then — that's fine: a failed POST is counted ``unreachable`` and
-the event still records. Tests mock both ``mesh.reachable_devices`` and the POST.
+the event still records. Tests mock both ``reachable_subscribers`` and the POST.
 """
 from __future__ import annotations
 
@@ -33,8 +36,8 @@ from typing import List, Optional
 
 import aiohttp
 
-from Orchestrator.local_provider import mesh
 from Orchestrator.checkpoint import mint_with_content
+from Orchestrator.notifications.reachability import reachable_subscribers
 from Orchestrator.notifications.subscriptions import SubscriptionStore
 
 logger = logging.getLogger(__name__)
@@ -157,7 +160,7 @@ def _record(operator: str, title: str, body: str, category: str, notif_id: str) 
     try:
         mint_with_content(operator, content, reason="NOTIFY")
         return True
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:
         logger.warning("[NOTIFY] snapshot record failed for op=%s: %s", operator, e)
         return False
 
@@ -170,26 +173,25 @@ async def notify(
     *,
     dedup_key: Optional[str] = None,
 ) -> NotifyResult:
-    """Route a notification to ``operator``'s subscribed+reachable devices + record.
+    """Route to ``operator``'s subscribers that are currently online + record.
 
-    NEVER raises; never blocks past the per-device timeout. Returns a NotifyResult.
+    Targets come from ``reachable_subscribers`` — the subscription row's
+    ``tailnet_name`` joined against the live online tailnet node set (NOT the Gemma
+    attestation registry), so a model-free phone is reachable. NEVER raises; never
+    blocks past the per-device timeout. Returns a NotifyResult.
     """
     notif_id = _make_notif_id(dedup_key)
 
-    # Compute targets = subscribed INTERSECT reachable. Both seams degrade to []
-    # on failure (Tailscale down / corrupt store), so this never raises.
+    # Compute targets = the operator's subscribers that are currently ONLINE on the
+    # tailnet, resolved from each subscription row's tailnet_name (NOT the Gemma
+    # attestation registry — see reachable_subscribers). Degrades to [] on any
+    # failure (Tailscale down / corrupt store), so this never raises.
     try:
-        subs = set(SubscriptionStore().subscribers_for(operator))
-    except Exception as e:  # pragma: no cover - defensive
-        logger.warning("[NOTIFY] subscriber lookup failed for op=%s: %s", operator, e)
-        subs = set()
-    try:
-        reachable = mesh.reachable_devices(operator)
-    except Exception as e:  # pragma: no cover - defensive
-        logger.warning("[NOTIFY] reachable_devices failed for op=%s: %s", operator, e)
-        reachable = []
+        targets = reachable_subscribers(operator)
+    except Exception as e:
+        logger.warning("[NOTIFY] reachable_subscribers failed for op=%s: %s", operator, e)
+        targets = []
 
-    targets = [d for d in reachable if d.get("device_id") in subs]
     total = len(targets)
 
     delivered: List[str] = []

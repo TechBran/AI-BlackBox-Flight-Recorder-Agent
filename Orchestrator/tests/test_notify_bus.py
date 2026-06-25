@@ -1,14 +1,16 @@
 """MN.2 — notify() bus tests.
 
-The bus fans a notification out to the operator's SUBSCRIBED INTERSECT REACHABLE
-devices, fire-and-forget (short per-device timeout, never blocks the caller), and
-ALWAYS records the event as a snapshot — even when zero devices are reachable.
+The bus fans a notification out to the operator's SUBSCRIBERS that are currently
+ONLINE on the tailnet (``reachable_subscribers`` — subscription-row reachability,
+NOT the Gemma attestation registry), fire-and-forget (short per-device timeout,
+never blocks the caller), and ALWAYS records the event as a snapshot — even when
+zero devices are reachable.
 
-These tests mock the two seams: ``mesh.reachable_devices`` (the reachable join)
-and the per-device POST (so nothing touches a real phone), plus
-``mint_with_content`` (so nothing touches the real volume). The per-device POST
-seam receives the resolved ``device`` dict so a test can decide behaviour /
-assert the payload per device without parsing base_url.
+These tests mock the two seams: ``reachable_subscribers`` (the
+subscription-row → online-target resolver) and the per-device POST (so nothing
+touches a real phone), plus ``mint_with_content`` (so nothing touches the real
+volume). The per-device POST seam receives the resolved ``device`` dict so a test
+can decide behaviour / assert the payload per device without parsing base_url.
 """
 
 import asyncio
@@ -20,11 +22,14 @@ from Orchestrator.notifications.bus import notify, NotifyResult
 
 
 def _device(device_id, operator="Brandon"):
-    """A reachable_devices() item, shaped like mesh.reachable_devices output."""
+    """A target item, shaped like reachable_subscribers() output.
+
+    ``operator`` is retained for call-site compatibility but is not part of a
+    reachable_subscribers row (it returns device_id + tailnet_name + node) — the
+    bus only reads ``device_id`` and ``node``.
+    """
     return {
-        "operator": operator,
         "device_id": device_id,
-        "model_slug": "gemma",
         "tailnet_name": device_id,
         "node": {
             "hostname": device_id,
@@ -64,19 +69,25 @@ def posts(monkeypatch):
     return sent
 
 
-def _patch_reachable(monkeypatch, devices):
-    monkeypatch.setattr(bus_mod.mesh, "reachable_devices", lambda operator=None: list(devices))
+def _patch_targets(monkeypatch, devices):
+    """Mock the subscription-row → online-target resolver to a fixed target list.
 
-
-def _patch_subscribers(monkeypatch, ids):
-    monkeypatch.setattr(bus_mod.SubscriptionStore, "subscribers_for", lambda self, op: list(ids))
+    reachable_subscribers already applies the subscribed ∩ online join, so a test
+    declares the FINAL online targets here (the model-free phone path is covered
+    end-to-end in test_notify_reachability).
+    """
+    monkeypatch.setattr(bus_mod, "reachable_subscribers", lambda operator: list(devices))
 
 
 @pytest.mark.asyncio
-async def test_posts_to_subscribed_intersect_reachable(monkeypatch, posts):
-    """Only devices that are BOTH subscribed AND reachable get a POST."""
-    _patch_reachable(monkeypatch, [_device("d-sub"), _device("d-unsub")])
-    _patch_subscribers(monkeypatch, ["d-sub", "d-offline"])
+async def test_posts_to_resolved_targets(monkeypatch, posts):
+    """Every device the resolver returns (subscribed + online) gets a POST.
+
+    The resolver already applies the subscribed ∩ online join, so a device that is
+    unsubscribed or offline simply never appears in its output — it is not a target
+    and is excluded entirely (not even counted unreachable).
+    """
+    _patch_targets(monkeypatch, [_device("d-sub")])
 
     result = await notify("Brandon", "Hello", "Body text", category="test")
 
@@ -86,17 +97,17 @@ async def test_posts_to_subscribed_intersect_reachable(monkeypatch, posts):
     assert len(posts) == 1
     assert posts[0]["device_id"] == "d-sub"
     assert posts[0]["payload"]["title"] == "Hello"
-    # d-unsub (reachable, unsubscribed) and d-offline (subscribed, unreachable)
-    # are both excluded entirely.
+    # A device the resolver excluded (unsubscribed or offline) appears nowhere.
     assert "d-unsub" not in result.delivered and "d-unsub" not in result.unreachable
     assert "d-offline" not in result.delivered
 
 
 @pytest.mark.asyncio
-async def test_zero_reachable_still_records_no_raise(monkeypatch, posts, _patch_record):
-    """Zero reachable devices → recorded=True, delivered=[], and no exception."""
-    _patch_reachable(monkeypatch, [])
-    _patch_subscribers(monkeypatch, ["d-sub"])
+async def test_zero_online_subscribers_still_records_no_raise(monkeypatch, posts, _patch_record):
+    """Zero online subscribers (subscribed but offline) → recorded=True,
+    delivered=[], and no exception. The resolver returns [] when no subscriber's
+    tailnet_name is currently online."""
+    _patch_targets(monkeypatch, [])
 
     result = await notify("Brandon", "T", "B")
 
@@ -108,10 +119,10 @@ async def test_zero_reachable_still_records_no_raise(monkeypatch, posts, _patch_
 
 
 @pytest.mark.asyncio
-async def test_zero_subscribers_records(monkeypatch, posts, _patch_record):
-    """Reachable but unsubscribed → no POST, but the event still records."""
-    _patch_reachable(monkeypatch, [_device("d-1")])
-    _patch_subscribers(monkeypatch, [])
+async def test_no_targets_records(monkeypatch, posts, _patch_record):
+    """No resolved targets (nobody subscribed, or none online) → no POST, but the
+    event still records in the durable inbox."""
+    _patch_targets(monkeypatch, [])
 
     result = await notify("Brandon", "T", "B")
 
@@ -124,8 +135,7 @@ async def test_zero_subscribers_records(monkeypatch, posts, _patch_record):
 @pytest.mark.asyncio
 async def test_one_failing_post_others_still_deliver_and_record(monkeypatch, _patch_record):
     """A device POST that raises is counted unreachable; the rest still deliver."""
-    _patch_reachable(monkeypatch, [_device("d-ok"), _device("d-bad")])
-    _patch_subscribers(monkeypatch, ["d-ok", "d-bad"])
+    _patch_targets(monkeypatch, [_device("d-ok"), _device("d-bad")])
 
     async def flaky_post(device, payload):
         if device["device_id"] == "d-bad":
@@ -145,8 +155,7 @@ async def test_one_failing_post_others_still_deliver_and_record(monkeypatch, _pa
 @pytest.mark.asyncio
 async def test_timeout_counts_unreachable_does_not_raise(monkeypatch, _patch_record):
     """A per-device POST that times out is unreachable; notify() never raises."""
-    _patch_reachable(monkeypatch, [_device("d-slow")])
-    _patch_subscribers(monkeypatch, ["d-slow"])
+    _patch_targets(monkeypatch, [_device("d-slow")])
 
     async def slow_post(device, payload):
         raise asyncio.TimeoutError()
@@ -162,8 +171,7 @@ async def test_timeout_counts_unreachable_does_not_raise(monkeypatch, _patch_rec
 @pytest.mark.asyncio
 async def test_records_in_every_case(monkeypatch, posts, _patch_record):
     """mint_with_content is called with [NOTIFY:category] content + the operator."""
-    _patch_reachable(monkeypatch, [_device("d-1")])
-    _patch_subscribers(monkeypatch, ["d-1"])
+    _patch_targets(monkeypatch, [_device("d-1")])
 
     await notify("Casey", "Deploy done", "All green", category="ops")
 
@@ -178,8 +186,7 @@ async def test_records_in_every_case(monkeypatch, posts, _patch_record):
 @pytest.mark.asyncio
 async def test_dedup_key_drives_notif_id(monkeypatch, posts, _patch_record):
     """A provided dedup_key yields a stable, derived notif_id (not random)."""
-    _patch_reachable(monkeypatch, [_device("d-1")])
-    _patch_subscribers(monkeypatch, ["d-1"])
+    _patch_targets(monkeypatch, [_device("d-1")])
 
     r1 = await notify("Brandon", "T", "B", dedup_key="job-42")
     r2 = await notify("Brandon", "T", "B", dedup_key="job-42")
@@ -195,8 +202,7 @@ async def test_metadata_only_across_operators(monkeypatch, posts, _patch_record)
     full body; a cross-operator 'all' recipient gets title/category/notif_id but
     NO full body.
     """
-    _patch_reachable(monkeypatch, [_device("d-owner"), _device("d-all")])
-    _patch_subscribers(monkeypatch, ["d-owner", "d-all"])
+    _patch_targets(monkeypatch, [_device("d-owner"), _device("d-all")])
 
     def fake_get(self, device_id):
         rows = {
@@ -220,3 +226,37 @@ async def test_metadata_only_across_operators(monkeypatch, posts, _patch_record)
     assert payloads["d-all"]["title"] == "Secret title"
     assert payloads["d-all"]["category"] == "alert"
     assert payloads["d-all"]["notif_id"]
+
+
+@pytest.mark.asyncio
+async def test_resolver_raises_does_not_raise_still_records(monkeypatch, posts, _patch_record):
+    """If reachable_subscribers raises, notify() swallows it (no targets) and still
+    records — the durable inbox is never collateral damage to a Tailscale glitch."""
+    def boom(operator):
+        raise RuntimeError("tailscale exploded")
+
+    monkeypatch.setattr(bus_mod, "reachable_subscribers", boom)
+
+    result = await notify("Brandon", "T", "B")
+
+    assert result.delivered == []
+    assert result.recorded is True
+    assert len(posts) == 0
+    assert len(_patch_record) == 1
+
+
+@pytest.mark.asyncio
+async def test_mint_raises_does_not_raise_recorded_false(monkeypatch, posts):
+    """If mint_with_content raises, notify() never raises — it degrades to
+    recorded=False rather than breaking the caller."""
+    _patch_targets(monkeypatch, [])
+
+    def boom(*a, **k):
+        raise RuntimeError("volume offline")
+
+    monkeypatch.setattr(bus_mod, "mint_with_content", boom)
+
+    result = await notify("Brandon", "T", "B")
+
+    assert result.recorded is False
+    assert result.delivered == []

@@ -119,12 +119,12 @@ def test_delete_unsubscribes(client):
 def test_send_returns_recorded_result(client, monkeypatch):
     """POST /notifications/send drives notify() and returns the NotifyResult.
 
-    The device fan-out (mesh + POST) and the snapshot record are mocked so the
-    test is fully offline.
+    The device fan-out (target resolution + POST) and the snapshot record are
+    mocked so the test is fully offline.
     """
     import Orchestrator.notifications.bus as bus_mod
 
-    monkeypatch.setattr(bus_mod.mesh, "reachable_devices", lambda operator=None: [])
+    monkeypatch.setattr(bus_mod, "reachable_subscribers", lambda operator: [])
     monkeypatch.setattr(
         bus_mod, "mint_with_content", lambda *a, **k: {"snap_id": "SNAP-TEST"}
     )
