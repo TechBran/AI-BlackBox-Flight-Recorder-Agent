@@ -206,6 +206,10 @@ fun CronManagerScreen(
                     items(jobs, key = { it.id }) { job ->
                         CronJobCard(
                             job = job,
+                            modelLabel = viewModel.friendlyModelName(
+                                viewModel.deriveProviderForJob(job),
+                                viewModel.specificModelId(job)
+                            ),
                             onRun = {
                                 viewModel.runJob(job.id)
                             },
@@ -234,9 +238,10 @@ fun CronManagerScreen(
         EditJobDialog(
             job = editingJob,
             isSaving = viewModel.isSaving.collectAsState().value,
+            viewModel = viewModel,
             onDismiss = { viewModel.dismissEditDialog() },
-            onSave = { name, prompt, schedule, hint, model, delivery, target, operator, oneShot ->
-                viewModel.saveJob(name, prompt, schedule, hint, model, delivery, target, operator, oneShot)
+            onSave = { name, prompt, schedule, hint, provider, model, delivery, target, operator, oneShot ->
+                viewModel.saveJob(name, prompt, schedule, hint, provider, model, delivery, target, operator, oneShot)
             }
         )
     }
@@ -375,6 +380,7 @@ private fun FilterDropdown(
 @Composable
 private fun CronJobCard(
     job: CronJob,
+    modelLabel: String,
     onRun: () -> Unit,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
@@ -464,7 +470,7 @@ private fun CronJobCard(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                MetaTag(job.model.replaceFirstChar { it.uppercase() })
+                MetaTag(modelLabel)
                 if (job.operator.isNotBlank()) {
                     MetaTag(job.operator)
                 }
@@ -618,8 +624,9 @@ private fun EmptyState() {
 private fun EditJobDialog(
     job: CronJob?,
     isSaving: Boolean,
+    viewModel: CronViewModel,
     onDismiss: () -> Unit,
-    onSave: (String, String, String, String, String, String, String, String, Boolean) -> Unit
+    onSave: (String, String, String, String, String, String, String, String, String, Boolean) -> Unit
 ) {
     var name by remember(job) { mutableStateOf(job?.name ?: "") }
     var prompt by remember(job) { mutableStateOf(job?.prompt ?: "") }
@@ -628,7 +635,16 @@ private fun EditJobDialog(
     var timeMinute by remember(job) { mutableStateOf("00") }
     var cronExpression by remember(job) { mutableStateOf(job?.schedule ?: "") }
     var useAdvanced by remember(job) { mutableStateOf(false) }
-    var model by remember(job) { mutableStateOf(job?.model ?: "gemini") }
+    // M4.4: canonical provider key + specific model id (or "" = Auto). For an
+    // existing job, preselect from job.provider (or derive it for legacy rows);
+    // model holds the saved specific id.
+    var provider by remember(job) {
+        mutableStateOf(if (job != null) viewModel.deriveProviderForJob(job) else viewModel.defaultCronProvider)
+    }
+    // A legacy coarse word in `model` (gemini/claude/grok/…) means "Auto for that
+    // provider" — it has no specific id, so resolve it to "" (Auto). A real id
+    // (e.g. "gemini-2.5-pro") is preserved.
+    var model by remember(job) { mutableStateOf(if (job != null) viewModel.specificModelId(job) else "") }
     var delivery by remember(job) { mutableStateOf(job?.delivery ?: "snapshot") }
     var deliveryTarget by remember(job) { mutableStateOf(job?.deliveryTarget ?: "") }
     var operator by remember(job) { mutableStateOf(job?.operator ?: "Brandon") }
@@ -636,6 +652,11 @@ private fun EditJobDialog(
     var nameError by remember { mutableStateOf(false) }
     var promptError by remember { mutableStateOf(false) }
     val view = LocalView.current
+
+    // Live model list for the selected provider (hydrated from /models/{key}).
+    val modelsForProvider by viewModel.modelsForProvider.collectAsState()
+    // Fetch the model list whenever the provider changes (also fires on open).
+    LaunchedEffect(provider) { viewModel.selectProvider(provider) }
 
     // Parse existing cron expression into simple mode
     LaunchedEffect(job) {
@@ -816,11 +837,27 @@ private fun EditJobDialog(
                     )
                 }
 
-                // Model
-                FormField("MODEL") {
-                    ModelSelector(model) {
-                        model = it
+                // Provider (canonical catalog key) + Model (specific id / Auto).
+                // Mirrors the chat composer two-control picker (M4.4 parity).
+                FormField("PROVIDER") {
+                    ProviderSelector(
+                        selected = provider,
+                        providers = viewModel.cronProviders
+                    ) { newProvider ->
+                        if (newProvider != provider) {
+                            provider = newProvider
+                            // New provider → reset to Auto; the model list re-hydrates
+                            // via LaunchedEffect(provider).
+                            model = ""
+                        }
                     }
+                }
+
+                FormField("MODEL") {
+                    LiveModelSelector(
+                        selected = model,
+                        models = modelsForProvider
+                    ) { model = it }
                 }
 
                 // Delivery
@@ -903,7 +940,7 @@ private fun EditJobDialog(
                                 schedule = buildSimpleCron(frequency, timeHour, timeMinute)
                                 hint = describeSimpleSchedule(frequency, timeHour, timeMinute)
                             }
-                            onSave(name, prompt, schedule, hint, model, delivery, deliveryTarget, operator, oneShot)
+                            onSave(name, prompt, schedule, hint, provider, model, delivery, deliveryTarget, operator, oneShot)
                         },
                         enabled = !isSaving,
                         colors = ButtonDefaults.buttonColors(containerColor = BbxAccent)
@@ -987,15 +1024,27 @@ private fun FrequencySelector(selected: String, onSelect: (String) -> Unit) {
     }
 }
 
+// Canonical catalog provider key → friendly label (the picker stores the KEY).
+private val CRON_PROVIDER_LABELS = mapOf(
+    "google" to "Google (Gemini)",
+    "openai" to "OpenAI",
+    "anthropic" to "Anthropic (Claude)",
+    "xai" to "xAI (Grok)",
+    "computer-use" to "Computer Use"
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ModelSelector(selected: String, onSelect: (String) -> Unit) {
+private fun ProviderSelector(
+    selected: String,
+    providers: List<String>,
+    onSelect: (String) -> Unit
+) {
     val feedback = rememberPressFeedback()
     var expanded by remember { mutableStateOf(false) }
-    val options = listOf("gemini" to "Gemini", "openai" to "OpenAI", "claude" to "Claude", "grok" to "Grok", "computer-use" to "Computer Use")
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
-            value = options.find { it.first == selected }?.second ?: selected,
+            value = CRON_PROVIDER_LABELS[selected] ?: selected,
             onValueChange = {},
             readOnly = true,
             modifier = Modifier
@@ -1008,8 +1057,51 @@ private fun ModelSelector(selected: String, onSelect: (String) -> Unit) {
             shape = RoundedCornerShape(RadiusSm)
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
-            options.forEach { (value, label) ->
-                DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
+            providers.forEach { key ->
+                DropdownMenuItem(
+                    text = { Text(CRON_PROVIDER_LABELS[key] ?: key, color = Neutral900) },
+                    onClick = { feedback(); onSelect(key); expanded = false }
+                )
+            }
+        }
+    }
+}
+
+/** Model dropdown hydrated from the VM's live list (Auto first). The list is
+ *  (id, displayName) pairs; selecting stores the specific id ("" = Auto). */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LiveModelSelector(
+    selected: String,
+    models: List<Pair<String, String>>,
+    onSelect: (String) -> Unit
+) {
+    val feedback = rememberPressFeedback()
+    var expanded by remember { mutableStateOf(false) }
+    // Display the selected id's name; fall back to a plain "Auto" / the raw id so
+    // a value not yet present in a still-loading list never renders blank.
+    val displayValue = models.firstOrNull { it.first == selected }?.second
+        ?: if (selected.isBlank()) "Auto" else selected
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = displayValue,
+            onValueChange = {},
+            readOnly = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
+            colors = glassTextFieldColors(),
+            singleLine = true,
+            shape = RoundedCornerShape(RadiusSm)
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
+            models.forEach { (id, label) ->
+                DropdownMenuItem(
+                    text = { Text(label, color = Neutral900) },
+                    onClick = { feedback(); onSelect(id); expanded = false }
+                )
             }
         }
     }

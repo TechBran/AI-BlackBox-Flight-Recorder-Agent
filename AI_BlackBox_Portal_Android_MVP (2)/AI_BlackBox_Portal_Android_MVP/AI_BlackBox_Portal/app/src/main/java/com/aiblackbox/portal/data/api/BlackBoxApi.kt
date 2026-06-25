@@ -3,6 +3,8 @@ package com.aiblackbox.portal.data.api
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -48,10 +50,33 @@ class BlackBoxApi(private val baseUrl: String) {
             .url("$baseUrl$path")
             .header("X-BlackBox-Client", "native-android/1.0")
 
+    /**
+     * Build an [IOException] for a non-2xx response, preferring the backend's
+     * FastAPI `detail` field over the bare HTTP status line (M2a fix). The
+     * backend raises HTTPException(detail="…") for validation errors (e.g.
+     * "delivery_target (E.164) is required for sms delivery") — surfacing that
+     * string lets the cron create/edit dialog show a real reason instead of a
+     * generic "HTTP 400: Bad Request". Best-effort: any read/parse failure or a
+     * missing `detail` falls back to "HTTP <code>: <reason>".
+     *
+     * NOTE: consumes the response body, so call this only on the error path.
+     */
+    private fun errorFor(response: Response): IOException {
+        val fallback = "HTTP ${response.code}: ${response.message}"
+        val detail = try {
+            val raw = response.body?.string()
+            if (raw.isNullOrBlank()) null
+            else json.parseToJsonElement(raw).jsonObject["detail"]?.jsonPrimitive?.content
+        } catch (_: Exception) {
+            null
+        }
+        return IOException(detail?.takeIf { it.isNotBlank() } ?: fallback)
+    }
+
     suspend fun get(path: String): String {
         val request = buildRequest(path).get().build()
         return client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.message}")
+            if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }
@@ -61,7 +86,7 @@ class BlackBoxApi(private val baseUrl: String) {
             .post(body.toRequestBody(jsonMediaType))
             .build()
         return client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.message}")
+            if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }
@@ -71,7 +96,7 @@ class BlackBoxApi(private val baseUrl: String) {
             .put(body.toRequestBody(jsonMediaType))
             .build()
         return client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.message}")
+            if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }
@@ -79,7 +104,7 @@ class BlackBoxApi(private val baseUrl: String) {
     suspend fun delete(path: String): String {
         val request = buildRequest(path).delete().build()
         return client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.message}")
+            if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }

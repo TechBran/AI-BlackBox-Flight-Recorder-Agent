@@ -10,6 +10,11 @@ data class CronJob(
     val prompt: String = "",
     val schedule: String = "",
     @SerialName("frequency_hint") val frequencyHint: String? = null,
+    // M4.4: canonical catalog provider key (google/anthropic/openai/xai/computer-use).
+    // Nullable + defaulted so old jobs (written before the backend provider column)
+    // round-trip cleanly; legacy rows are backfilled by the backend or derived from
+    // `model` on edit. `model` holds the SPECIFIC model id (or "" for Auto).
+    val provider: String? = null,
     val model: String = "gemini",
     val delivery: String = "snapshot",
     @SerialName("delivery_target") val deliveryTarget: String? = null,
@@ -54,6 +59,9 @@ data class CronJobCreateRequest(
     val prompt: String,
     val schedule: String,
     @SerialName("frequency_hint") val frequencyHint: String? = null,
+    // M4.4: canonical catalog provider key sent alongside the specific model id
+    // (identical to chat + Portal). Null = let the backend derive it from `model`.
+    val provider: String? = null,
     val model: String = "gemini",
     val delivery: String = "snapshot",
     @SerialName("delivery_target") val deliveryTarget: String? = null,
