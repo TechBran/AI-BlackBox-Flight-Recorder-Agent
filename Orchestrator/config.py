@@ -377,6 +377,17 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 DEFAULT_OPERATOR = os.getenv("DEFAULT_OPERATOR", "Brandon")
 DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "http://localhost:9091")
 
+# Canonical Orchestrator listen port. The app serves on this port (uvicorn in
+# Orchestrator/app.py); in-process clients that loop back to the local app
+# (e.g. the cron executor) derive http://localhost:<port> from this rather
+# than hardcoding 9091, so a fresh box that runs on a different port stays
+# self-consistent. Resolution order: ORCHESTRATOR_PORT env -> config.ini
+# [server] port -> 9091 default.
+ORCHESTRATOR_PORT = int(
+    os.getenv("ORCHESTRATOR_PORT")
+    or CFG.getint("server", "port", fallback=9091)
+)
+
 # Tailnet hostname (set by onboarding T2.3.1 after Tailscale validation succeeds).
 # When present, used to construct the canonical https://<hostname> origin for QR
 # pairing payloads — the local browser may load the Portal at localhost:9091, but

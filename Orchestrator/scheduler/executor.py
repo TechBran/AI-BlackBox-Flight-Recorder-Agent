@@ -21,7 +21,27 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://localhost:9091"
+
+def _base_url() -> str:
+    """Loopback base URL for the local Orchestrator, derived from config.
+
+    The executor only ever talks to the LOCAL app, so the host stays
+    loopback; the port comes from ORCHESTRATOR_PORT (the same canonical port
+    config the rest of the app uses) instead of a hardcoded 9091, so a fresh
+    box that runs on a different port reaches its own app. config is a leaf
+    module, so importing it here is import-cycle-safe; falls back to the 9091
+    default if config is somehow unavailable.
+    """
+    try:
+        from Orchestrator.config import ORCHESTRATOR_PORT
+
+        return f"http://localhost:{ORCHESTRATOR_PORT}"
+    except Exception:
+        return "http://localhost:9091"
+
+
+# Resolved once at import so the hot path doesn't re-read config per request.
+BASE_URL = _base_url()
 
 # ---------------------------------------------------------------------------
 # Polling configuration
