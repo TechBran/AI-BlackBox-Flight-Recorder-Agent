@@ -7,6 +7,7 @@ import com.aiblackbox.portal.TerminalForegroundService
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.ZellijWebSocketClient
 import com.aiblackbox.portal.data.model.ZellijSession
+import com.termux.terminal.TerminalSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -111,6 +112,16 @@ object TerminalSessionManager {
         @Volatile var rows: Int = DEFAULT_ROWS,
         /** True while a renderer is currently bound (Composable in composition). */
         @Volatile var renderBound: Boolean = false,
+        /**
+         * The Termux session that owns the [com.termux.terminal.TerminalEmulator]
+         * — and therefore the scrollback transcript. Persisted here (alongside the
+         * socket) so the emulator + its history survive a detach/reattach: on
+         * re-entry the fresh [com.termux.view.TerminalView] re-links to THIS
+         * session via attachSession, keeping scrollback intact. Created lazily by
+         * the screen's AndroidView factory through [getOrCreateTerminalSession];
+         * its PTY child is reaped in [kill].
+         */
+        @Volatile var terminalSession: TerminalSession? = null,
     )
 
     private val clients = ConcurrentHashMap<String, LiveClient>()
@@ -173,6 +184,38 @@ object TerminalSessionManager {
     }
 
     /**
+     * Get the persisted Termux [TerminalSession] for [name], creating it via
+     * [create] on first call and caching it on the live client so its emulator
+     * (and 2000-row scrollback transcript) survive navigation away + back. On
+     * re-entry the SAME session is returned, so the screen's fresh
+     * [com.termux.view.TerminalView] re-links to the existing emulator (history
+     * intact) instead of building an empty one.
+     *
+     * The screen always calls [getOrConnect] before its AndroidView factory
+     * runs, so a live client is normally held here; if somehow none is, the
+     * created session is returned UN-persisted (degrades to the old per-mount
+     * behavior) rather than crashing. Keyed by [name], so two different
+     * sessions never share an emulator (no scrollback cross-contamination).
+     */
+    fun getOrCreateTerminalSession(name: String, create: () -> TerminalSession): TerminalSession {
+        synchronized(lock) {
+            val live = clients[name]
+            val existing = live?.terminalSession
+            if (existing != null) {
+                Log.d(TAG, "getOrCreateTerminalSession: reusing persisted session for '$name' (scrollback preserved)")
+                return existing
+            }
+            val created = create()
+            if (live != null) {
+                live.terminalSession = created
+            } else {
+                Log.w(TAG, "getOrCreateTerminalSession: no live client for '$name'; session NOT persisted")
+            }
+            return created
+        }
+    }
+
+    /**
      * Stop rendering for [name] WITHOUT closing the socket. Called from the
      * Composable's `onDispose` on navigation away. The live client stays in
      * the map and the socket keeps flowing (the reconnect machinery stays
@@ -222,6 +265,14 @@ object TerminalSessionManager {
             Log.w(TAG, "kill: client.close() threw for '$name'", t)
         }
         live.renderBound = false
+        // Reap the persisted Termux session's PTY child (the local `sleep`) and
+        // release its emulator + scrollback — this session is gone for good.
+        try {
+            live.terminalSession?.finishIfRunning()
+        } catch (t: Throwable) {
+            Log.w(TAG, "kill: terminalSession.finishIfRunning() threw for '$name'", t)
+        }
+        live.terminalSession = null
         // n -> 0 stops the FGS, n -> n-1 updates its notification.
         onLiveCountChanged(before, after)
         return true
@@ -302,7 +353,10 @@ object TerminalSessionManager {
     @VisibleForTesting
     internal fun resetForTest() {
         synchronized(lock) {
-            clients.values.forEach { try { it.client.close() } catch (_: Throwable) {} }
+            clients.values.forEach {
+                try { it.client.close() } catch (_: Throwable) {}
+                try { it.terminalSession?.finishIfRunning() } catch (_: Throwable) {}
+            }
             clients.clear()
             clientFactory = { session, api, scope ->
                 ZellijWebSocketClient(

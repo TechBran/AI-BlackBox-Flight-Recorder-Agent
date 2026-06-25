@@ -528,6 +528,17 @@ fun ZellijTerminalScreen(
                     // bytes flow through the WS, not this PTY. Same trick
                     // [TerminalScreen] uses — see its long comment for why.
                     //
+                    // SCROLLBACK PERSISTENCE (2026-06-25): the TerminalSession
+                    // owns the TerminalEmulator, which owns the 2000-row
+                    // scrollback transcript. We hoist it into the process-lived
+                    // [TerminalSessionManager] (alongside the socket) and
+                    // get-or-create BY SESSION NAME, so navigating away and back
+                    // REUSES the same emulator — the scrollback survives instead
+                    // of being recreated empty on every mount. First launch runs
+                    // the lambda below to create it; a reattach returns the
+                    // persisted session and skips creation. (Reaped on the X
+                    // button via TerminalSessionManager.kill → finishIfRunning.)
+                    //
                     // argv convention (T23-surfaced bug, 2026-05-26):
                     // Termux TerminalSession's `args` is the FULL argv
                     // including argv[0], NOT extra args after the binary.
@@ -542,18 +553,36 @@ fun ZellijTerminalScreen(
                     // before the user saw it; ZellijWebSocketClient's
                     // auth pre-flight + version probe is slower so the
                     // error stayed visible.
-                    val sess = TerminalSession(
-                        /* shellPath      = */ "/system/bin/sleep",
-                        /* cwd            = */ "/",
-                        /* args           = */ arrayOf("sleep", "999999"),
-                        /* env            = */ arrayOf<String>(),
-                        /* transcriptRows = */ TRANSCRIPT_ROWS,
-                        /* client         = */ sessionClient,
-                    )
+                    val sess = TerminalSessionManager.getOrCreateTerminalSession(session.name) {
+                        TerminalSession(
+                            /* shellPath      = */ "/system/bin/sleep",
+                            /* cwd            = */ "/",
+                            /* args           = */ arrayOf("sleep", "999999"),
+                            /* env            = */ arrayOf<String>(),
+                            /* transcriptRows = */ TRANSCRIPT_ROWS,
+                            /* client         = */ sessionClient,
+                        )
+                    }
 
+                    // Rebind the emulator's session-client to THIS view's client.
+                    // First create: same instance. Reattach: swaps the previous
+                    // (dead-view) client out — releasing that view, so persisting
+                    // the session can't leak the old TerminalView — so emulator
+                    // callbacks (onTextChanged/onColorsChanged → onScreenUpdated)
+                    // target the live view.
+                    sess.updateTerminalSessionClient(sessionClient)
+
+                    // attachSession re-links this fresh view to the (possibly
+                    // persisted) emulator. On reuse it pulls in the existing
+                    // emulator with its transcript intact, so the user can scroll
+                    // back through history immediately on return.
                     view.attachSession(sess)
 
                     terminalView = view
+                    // Same instance the view just attached to: the composition and
+                    // the view feed ONE emulator (onBytes appends to
+                    // terminalSession.emulator = the persisted emulator). No
+                    // split-brain between what's fed and what's shown.
                     terminalSession = sess
                     view
                 },
