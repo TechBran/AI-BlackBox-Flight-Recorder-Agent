@@ -51,6 +51,27 @@ class NotificationSubscriptionStore(private val context: Context) {
     }
 
     /**
+     * Replace the entire allow-list with EXACTLY [operators] (blanks dropped). Used by
+     * the subscription UI's write-through so the device-local /notify re-check stays in
+     * lockstep with the backend routing record. An empty set means accept-all (the
+     * store's documented fail-open) — the UI passes empty ONLY for "All operators" (or
+     * the opt-in default, where the backend won't route here anyway).
+     */
+    suspend fun setOperators(operators: Set<String>) {
+        val cleaned = operators.mapNotNull { it.trim().takeIf(String::isNotEmpty) }.toSet()
+        context.notifSubsDataStore.edit { prefs ->
+            prefs[KEY_OPERATORS] = cleaned
+        }
+    }
+
+    /** Clear the allow-list (back to empty == accept-all). */
+    suspend fun clear() {
+        context.notifSubsDataStore.edit { prefs ->
+            prefs[KEY_OPERATORS] = emptySet()
+        }
+    }
+
+    /**
      * True iff this device should accept a `/notify` for [operator]. Empty allow-list
      * (nothing subscribed yet) accepts all; a blank operator (metadata-only push) is
      * always accepted. Blocking read for the listener's worker thread — never throws.
