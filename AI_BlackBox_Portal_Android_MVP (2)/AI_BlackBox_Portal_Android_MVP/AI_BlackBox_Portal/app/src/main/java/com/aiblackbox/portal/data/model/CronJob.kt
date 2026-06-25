@@ -53,6 +53,19 @@ data class CronHistoryEntry(
 @Serializable
 data class CronHistoryResponse(val history: List<CronHistoryEntry> = emptyList())
 
+// M5c: next-run preview parity with Portal M5b. POST /api/cron/preview
+// {schedule, count} -> {next_runs: [ISO box-local times]} (400 on invalid cron).
+@Serializable
+data class CronPreviewRequest(
+    val schedule: String,
+    val count: Int = 3
+)
+
+@Serializable
+data class CronPreviewResponse(
+    @SerialName("next_runs") val nextRuns: List<String> = emptyList()
+)
+
 @Serializable
 data class CronJobCreateRequest(
     val name: String,

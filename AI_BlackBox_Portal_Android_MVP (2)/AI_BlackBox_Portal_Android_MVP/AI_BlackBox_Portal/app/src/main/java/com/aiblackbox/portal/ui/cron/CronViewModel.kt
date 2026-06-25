@@ -10,6 +10,8 @@ import com.aiblackbox.portal.data.model.CronHistoryResponse
 import com.aiblackbox.portal.data.model.CronJob
 import com.aiblackbox.portal.data.model.CronJobCreateRequest
 import com.aiblackbox.portal.data.model.CronJobsResponse
+import com.aiblackbox.portal.data.model.CronPreviewRequest
+import com.aiblackbox.portal.data.model.CronPreviewResponse
 import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.util.Constants
 import kotlinx.coroutines.Job
@@ -90,6 +92,20 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     // 5-min in-memory cache keyed by canonical provider key (mirrors chat).
     private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
     private val modelsCacheTtlMs = 5 * 60 * 1_000L
+
+    // -- Next-run preview (M5c — POST /api/cron/preview while editing) --
+    // Mirrors Portal M5b: a debounced preview of the next ~3 fire times for the
+    // schedule the editor currently describes. The screen renders this StateFlow
+    // near the schedule field; an invalid mid-edit cron shows a subtle hint
+    // rather than crashing/toasting.
+    private val _schedulePreview = MutableStateFlow(SchedulePreview())
+    val schedulePreview: StateFlow<SchedulePreview> = _schedulePreview.asStateFlow()
+
+    private var previewJob: Job? = null
+    // Monotonic token so a stale in-flight response can't clobber a newer one
+    // (debounce stops most overlap, but a slow request could still land late).
+    private var previewSeq = 0L
+    private var lastPreviewedSchedule: String? = null
 
     // -- Polling --
     private var pollJob: Job? = null
@@ -244,6 +260,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissEditDialog() {
         _showEditDialog.value = false
         _editingJob.value = null
+        clearSchedulePreview()
     }
 
     fun saveJob(
@@ -293,12 +310,100 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
 
                 _showEditDialog.value = false
                 _editingJob.value = null
+                clearSchedulePreview()
                 loadJobs()
             } catch (e: Exception) {
                 _actionMessage.value = "Failed to save: ${e.message}"
             } finally {
                 _isSaving.value = false
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Next-run preview (M5c) — mirrors Portal refreshNextRunPreview
+    // -------------------------------------------------------------------------
+
+    /** UI state for the next-run preview shown near the schedule field. */
+    data class SchedulePreview(
+        val runs: List<String> = emptyList(),  // formatted box-local labels
+        val invalid: Boolean = false,           // mid-edit invalid cron (400)
+        val visible: Boolean = false            // hidden until there's something to show
+    )
+
+    /**
+     * Debounce (~300ms) a preview of the next [count] fire times for [schedule]
+     * via POST /api/cron/preview, then publish the result to [schedulePreview].
+     * Uses the SAME cron string the save path builds (the screen passes it in).
+     *
+     * A blank schedule hides the preview. A 400 (the user is mid-typing an
+     * invalid cron) sets `invalid` for a subtle hint — never a toast/crash. Any
+     * other failure (route not live, network drop) just hides the preview. A
+     * monotonic seq + a "did the schedule actually change" guard keep a stale
+     * late response from clobbering a newer one.
+     */
+    fun previewSchedule(schedule: String, count: Int = 3) {
+        val trimmed = schedule.trim()
+        if (trimmed.isBlank()) {
+            clearSchedulePreview()
+            return
+        }
+        // No-op if the schedule hasn't changed since the last preview request —
+        // avoids redundant POSTs when an unrelated form field triggers a refresh.
+        if (trimmed == lastPreviewedSchedule) return
+        lastPreviewedSchedule = trimmed
+
+        val api = api ?: return
+        val seq = ++previewSeq
+        previewJob?.cancel()
+        previewJob = viewModelScope.launch {
+            delay(300)  // debounce — one POST per typing pause
+            try {
+                val body = json.encodeToString(CronPreviewRequest(schedule = trimmed, count = count))
+                val response = api.post("/api/cron/preview", body)
+                if (seq != previewSeq) return@launch  // superseded by a newer request
+                val parsed = json.decodeFromString(CronPreviewResponse.serializer(), response)
+                val labels = parsed.nextRuns.map { formatPreviewTime(it) }
+                _schedulePreview.value = SchedulePreview(
+                    runs = labels,
+                    invalid = false,
+                    visible = true
+                )
+            } catch (e: Exception) {
+                if (seq != previewSeq) return@launch
+                // BlackBoxApi.errorFor surfaces the backend `detail` for a 400; the
+                // preview route raises 400 "Invalid cron expression '…'" mid-edit.
+                // Treat that as the subtle invalid hint; anything else hides quietly.
+                val msg = e.message.orEmpty()
+                if (msg.contains("Invalid cron", ignoreCase = true) ||
+                    msg.contains("HTTP 400")
+                ) {
+                    _schedulePreview.value = SchedulePreview(invalid = true, visible = true)
+                } else {
+                    _schedulePreview.value = SchedulePreview(visible = false)
+                }
+            }
+        }
+    }
+
+    /** Reset the preview (dialog closed / blank schedule). */
+    fun clearSchedulePreview() {
+        previewJob?.cancel()
+        previewSeq++
+        lastPreviewedSchedule = null
+        _schedulePreview.value = SchedulePreview()
+    }
+
+    /** Render a box-local ISO fire time as a compact "Jun 25, 3:00 PM" label.
+     *  The backend returns tz-aware ISO strings; we parse the offset and present
+     *  the wall-clock time. Best-effort — falls back to the raw string. */
+    private fun formatPreviewTime(isoStr: String): String {
+        return try {
+            val odt = java.time.OffsetDateTime.parse(isoStr)
+            val fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a")
+            odt.format(fmt)
+        } catch (_: Exception) {
+            isoStr
         }
     }
 
@@ -516,5 +621,6 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         pollJob?.cancel()
+        previewJob?.cancel()
     }
 }

@@ -69,6 +69,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
@@ -104,12 +105,30 @@ import com.aiblackbox.portal.ui.theme.RadiusSm
 import com.aiblackbox.portal.ui.theme.RadiusXs
 import com.aiblackbox.portal.ui.theme.SolidGreen
 
-// Portal status colors
-private val StatusActiveGreen = Color(0xFF4CAF50)
-private val StatusActiveBg = Color(0x264CAF50)
-private val StatusPausedAmber = Color(0xFFFFA726)
-private val StatusPausedBg = Color(0x1AFFA726)
+// Portal status colors (parity with _cron.css). Status drives ONLY the left
+// accent stripe + the badge pill — never a block fill of the card surface.
+private val StatusActiveGreen = Color(0xFF4CAF50)   // .cron-status-active accent
+private val StatusActiveBg = Color(0x264CAF50)      // badge pill bg
+private val StatusPausedAmber = Color(0xFFFFA726)   // .cron-status-paused accent
+private val StatusPausedBg = Color(0x1AFFA726)      // badge pill bg
+private val StatusErrorRed = Color(0xFFEF5350)      // .cron-status-error accent (M3)
+private val StatusErrorBg = Color(0x1AEF5350)       // badge pill bg
 private val HistoryErrorRed = Color(0xFFEF5350)
+
+// Resolved accent + badge for a job status. Mirrors Portal's statusClass map:
+// active -> green, error -> red, everything else (paused/…) -> amber.
+private data class CronStatusStyle(
+    val accent: Color,
+    val badgeText: String,
+    val badgeBg: Color,
+    val dimCard: Boolean   // paused cards are slightly dimmed (Portal opacity 0.85)
+)
+
+private fun cronStatusStyle(status: String): CronStatusStyle = when (status) {
+    "active" -> CronStatusStyle(StatusActiveGreen, "ACTIVE", StatusActiveBg, dimCard = false)
+    "error" -> CronStatusStyle(StatusErrorRed, "ERROR", StatusErrorBg, dimCard = false)
+    else -> CronStatusStyle(StatusPausedAmber, "PAUSED", StatusPausedBg, dimCard = true)
+}
 
 @Composable
 fun CronManagerScreen(
@@ -200,7 +219,7 @@ fun CronManagerScreen(
                 EmptyState()
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(jobs, key = { it.id }) { job ->
@@ -374,6 +393,11 @@ private fun FilterDropdown(
 
 // =============================================================================
 // Job Card (matching Portal .cron-job-card)
+//
+// Status is shown ONLY as a left-border accent stripe + the badge pill — there
+// is NO block fill of the card. The surface is the same neutral card surface
+// (Neutral100 == Portal --neutral-100) every sibling card in the app uses, so
+// active/paused/error read as a clean accent rather than a vivid wash.
 // =============================================================================
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -387,30 +411,35 @@ private fun CronJobCard(
     onHistory: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val style = cronStatusStyle(job.status)
     val isActive = job.status == "active"
-    val accentColor = if (isActive) StatusActiveGreen else StatusPausedAmber
-    // Border uses accent color; card bg stays solid black (no tinted fill)
-    val borderColor = accentColor.copy(alpha = 0.4f)
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            // Paused jobs read slightly recessed (Portal opacity 0.85).
+            .alpha(if (style.dimCard) 0.85f else 1f)
             .clip(RoundedCornerShape(RadiusMd))
-            .background(GlassBg)
-            .border(1.dp, borderColor, RoundedCornerShape(RadiusMd))
+            // Neutral card surface — the same dark surface as every other card
+            // in the app (no green/amber/red block fill).
+            .background(Neutral100)
+            // Subtle 1px border all around (Portal rgba(255,255,255,0.06)).
+            .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
     ) {
-        // Left accent bar (Portal: border-left: 3px solid)
+        // Left accent stripe (Portal: border-left: 3px solid <status>).
         Box(
             modifier = Modifier
                 .width(3.dp)
                 .matchParentSize()
-                .background(accentColor)
+                .background(style.accent)
         )
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 12.dp)
+                // Comfortable interior padding — extra on the left so content
+                // clears the accent stripe; generous all around so nothing clips.
+                .padding(start = 16.dp, end = 14.dp, top = 14.dp, bottom = 14.dp)
         ) {
             // Header row: badge + name + schedule
             Row(
@@ -419,9 +448,9 @@ private fun CronJobCard(
             ) {
                 // Status badge (Portal: .cron-job-status-badge)
                 StatusBadge(
-                    text = if (isActive) "ACTIVE" else "PAUSED",
-                    color = if (isActive) StatusActiveGreen else StatusPausedAmber,
-                    bgColor = if (isActive) StatusActiveBg else StatusPausedBg
+                    text = style.badgeText,
+                    color = style.accent,
+                    bgColor = style.badgeBg
                 )
                 Spacer(Modifier.width(10.dp))
                 // Job name
@@ -450,19 +479,20 @@ private fun CronJobCard(
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // Prompt preview (Portal: .cron-job-prompt)
+            // Prompt / description preview (Portal: .cron-job-prompt).
+            // 3 lines + ellipsis so it has breathing room and is NOT hard-clipped.
             if (job.prompt.isNotBlank()) {
                 Text(
                     job.prompt,
                     fontSize = 13.sp,
                     color = Neutral700,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
-                    lineHeight = 18.sp
+                    lineHeight = 19.sp
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
             }
 
             // Metadata tags (Portal: .cron-job-meta)
@@ -658,6 +688,19 @@ private fun EditJobDialog(
     // Fetch the model list whenever the provider changes (also fires on open).
     LaunchedEffect(provider) { viewModel.selectProvider(provider) }
 
+    // M5c: next-run preview. Recompute the cron string from whichever schedule
+    // input is active (the SAME logic the save path uses) and ask the VM to
+    // preview it (debounced ~300ms). Re-runs whenever any schedule input changes.
+    val schedulePreview by viewModel.schedulePreview.collectAsState()
+    LaunchedEffect(useAdvanced, frequency, timeHour, timeMinute, cronExpression) {
+        val scheduleStr = if (useAdvanced) {
+            cronExpression.trim()
+        } else {
+            buildSimpleCron(frequency, timeHour, timeMinute)
+        }
+        viewModel.previewSchedule(scheduleStr)
+    }
+
     // Parse existing cron expression into simple mode
     LaunchedEffect(job) {
         if (job != null && job.schedule.isNotBlank()) {
@@ -837,6 +880,10 @@ private fun EditJobDialog(
                     )
                 }
 
+                // M5c: live next-run preview (debounced POST /api/cron/preview),
+                // shown right under the schedule inputs for both tabs.
+                NextRunsPreview(schedulePreview)
+
                 // Provider (canonical catalog key) + Model (specific id / Auto).
                 // Mirrors the chat composer two-control picker (M4.4 parity).
                 FormField("PROVIDER") {
@@ -952,6 +999,52 @@ private fun EditJobDialog(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * M5c next-run preview row — renders the VM's debounced /api/cron/preview result
+ * under the schedule inputs. Mirrors Portal's #cronNextRuns: a "Next runs: …"
+ * line on success, a subtle muted hint for a mid-edit invalid cron, and nothing
+ * at all when there is no schedule to preview yet.
+ */
+@Composable
+private fun NextRunsPreview(state: CronViewModel.SchedulePreview) {
+    if (!state.visible) return
+    when {
+        state.invalid -> {
+            Text(
+                "— invalid schedule",
+                fontSize = 12.sp,
+                color = Neutral500,
+                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+            )
+        }
+        state.runs.isEmpty() -> {
+            Text(
+                "— no upcoming runs",
+                fontSize = 12.sp,
+                color = Neutral500,
+                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+            )
+        }
+        else -> {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "Next runs:",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Neutral600,
+                    letterSpacing = 0.4.sp
+                )
+                Text(
+                    state.runs.joinToString(", "),
+                    fontSize = 12.sp,
+                    color = Neutral700,
+                    lineHeight = 17.sp
+                )
             }
         }
     }
