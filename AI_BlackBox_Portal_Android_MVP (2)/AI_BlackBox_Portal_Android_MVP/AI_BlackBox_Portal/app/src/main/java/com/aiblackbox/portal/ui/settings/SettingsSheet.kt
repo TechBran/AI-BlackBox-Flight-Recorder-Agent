@@ -61,6 +61,8 @@ import androidx.core.graphics.set
 import androidx.core.net.toUri
 import androidx.compose.foundation.Image
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -970,6 +972,18 @@ fun SettingsSheet(
 
             Spacer(Modifier.height(24.dp))
 
+            // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+            // Notifications \u2014 device subscription (MN.6). Bound to the SAME
+            // live operators list as the Operator dropdown (auto-updates as
+            // operators are added). Opt-in: nothing selected by default. Each
+            // change writes through to BOTH the backend (routing) and the
+            // device-local allow-list (the /notify re-check), kept in sync by
+            // the VM. Placed last so it sits at the very bottom of the sheet.
+            // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+            NotificationsSection(origin = origin, operators = operators)
+
+            Spacer(Modifier.height(24.dp))
+
             // Version info
             Text(
                 "AI BlackBox Portal \u00B7 Native v1.0",
@@ -1275,5 +1289,112 @@ private fun ToggleRow(
                 uncheckedTrackColor = Neutral300
             )
         )
+    }
+}
+
+// =============================================================================
+// Notifications subscription (MN.6) — opt-in, live-operator-bound section.
+//
+// The phone subscribes itself for notifications by POSTing /notifications/subscribe
+// with its ANDROID_ID + its OWN tailnet IPv4 (the bus's join key) + the chosen
+// operators. The VM mirrors every change into the device-local allow-list too, so the
+// inbound /notify authorize re-check matches what the backend will route. Nothing is
+// selected by default (opt-in). The operator rows are driven by the SAME live list as
+// the Operator dropdown, so a newly-added operator shows up here with no manual refresh.
+// =============================================================================
+@Composable
+private fun NotificationsSection(
+    origin: String,
+    operators: List<String>,
+    viewModel: NotificationSubscriptionViewModel =
+        androidx.lifecycle.viewmodel.compose.viewModel(),
+) {
+    // Reconcile from the backend on open (and whenever the paired server changes).
+    LaunchedEffect(origin) { viewModel.initialize(origin) }
+
+    val allSelected by viewModel.allSelected.collectAsState()
+    val selected by viewModel.selectedOperators.collectAsState()
+    val tailnetAvailable by viewModel.tailnetAvailable.collectAsState()
+
+    CollapsibleSection(
+        title = "🔔 Notifications",
+        accent = Color(0xFF4A9EFF),
+    ) {
+        Text(
+            "Choose which operators this phone gets notifications for. Off by default.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Neutral500,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+
+        // All operators master toggle.
+        ToggleRow(
+            label = "All operators",
+            checked = allSelected,
+            onCheckedChange = { viewModel.setAll(it) },
+            checkedColor = Color(0xFF4A9EFF),
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // Per-operator checkboxes — disabled while "All operators" is on (it already
+        // covers them). Bound to the live operators list (auto-updates).
+        operators.forEach { op ->
+            val checked = allSelected || op in selected
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(RadiusMd))
+                    .then(
+                        if (allSelected) Modifier
+                        else Modifier.clickFeedback { viewModel.toggleOperator(op, op !in selected) }
+                    )
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = checked,
+                    enabled = !allSelected,
+                    onCheckedChange = { viewModel.toggleOperator(op, it) },
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = Color(0xFF4A9EFF),
+                        uncheckedColor = Neutral500,
+                        checkmarkColor = BbxWhite,
+                        disabledCheckedColor = Color(0xFF4A9EFF).copy(alpha = 0.4f),
+                    ),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    op,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (allSelected) Neutral500 else BbxWhite,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // One-line summary of what this phone currently receives.
+        val summary = when {
+            allSelected -> "all operators"
+            selected.isEmpty() -> "nothing (off)"
+            else -> selected.sorted().joinToString(", ")
+        }
+        Text(
+            "This phone receives notifications for: $summary",
+            style = MaterialTheme.typography.bodySmall,
+            color = Neutral500,
+        )
+
+        // Subtle hint when the phone is not on the tailnet — delivery needs Tailscale,
+        // but we still recorded the subscription (it activates once the phone is online).
+        if (!tailnetAvailable && (allSelected || selected.isNotEmpty())) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "⚠️ Not on Tailscale — saved, but delivery resumes once this phone is on the tailnet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = BbxAccent,
+            )
+        }
     }
 }
