@@ -23,7 +23,20 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# The notification bus (MN.2). _execute_job is async, so it awaits notify(...)
+# directly - no sync->async bridge. notify() never raises and always records a
+# searchable snapshot; we still wrap our calls in try/except so a bus regression
+# can never break a job's own error bookkeeping. Imported at module scope so
+# tests can monkeypatch `manager.notify`.
+from Orchestrator.notifications.bus import notify
+
 logger = logging.getLogger(__name__)
+
+# Operators we never push a notification to (pushing "to nobody"). 'system' is
+# the shared, ownerless operator used by infrastructure jobs; a blank/None
+# operator has no subscriber to route to. Consistent with other producers that
+# guard the system/blank operator before fanning out.
+_NO_NOTIFY_OPERATORS = {None, "", "system"}
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1139,9 @@ class CronJobManager:
         last_duration_ms = 0
         last_run_at = datetime.now(timezone.utc)
         succeeded = False
+        # The successful attempt's reply text — captured for a
+        # delivery='notification' push after stats are written (M5.1).
+        success_result_text: Optional[str] = None
 
         for attempt in range(MAX_RETRIES + 1):
             result_text, error_text, duration_ms, attempt_run_at = (
@@ -1137,6 +1153,7 @@ class CronJobManager:
             if error_text is None:
                 final_error = None
                 succeeded = True
+                success_result_text = result_text
                 if attempt > 0:
                     logger.info(
                         "Cron job %s succeeded on retry %d/%d",
@@ -1232,6 +1249,85 @@ class CronJobManager:
         if job.get("one_shot") and succeeded:
             logger.info("One-shot job %s completed successfully, deleting", job_id)
             self.delete_job(job_id)
+
+        # ----- Notification bus hooks (M5.1) -----
+        # Run LAST, after stats are durably written above, so a notify
+        # failure can never undo the job's own bookkeeping. fire_ts pins the
+        # dedup_key to THIS run so a retry-storm collapses to one alert.
+        await self._notify_run_outcome(
+            job,
+            succeeded=succeeded,
+            error_text=final_error,
+            result_text=success_result_text,
+            fire_ts=last_run_at.isoformat(),
+        )
+
+    async def _notify_run_outcome(
+        self,
+        job: Dict[str, Any],
+        *,
+        succeeded: bool,
+        error_text: Optional[str],
+        result_text: Optional[str],
+        fire_ts: str,
+    ) -> None:
+        """Push the run's outcome to the notification bus (M5.1).
+
+        Two cases, each wrapped so a bus failure NEVER propagates back into
+        _run_job_body (the job's status/stats are already durably written by
+        the time we get here):
+
+          * TERMINAL failure (all retries exhausted) -> notify(category='alert')
+            EXACTLY once. The dedup_key (cronfail:<job_id>:<fire_ts>) is stable
+            for this run, so the bus collapses any duplicate into one logical
+            alert.
+          * SUCCESS with delivery='notification' -> notify(category='cron')
+            with the reply text. This finally realizes the long-dead
+            'notification' delivery mode (it used to silently fall through to
+            snapshot). 'snapshot' delivery does NOT notify — auto-mint in the
+            /chat pipeline already persisted it.
+
+        Both cases suppress the 'system'/blank operator (we never push to
+        nobody), consistent with the other notification producers.
+        """
+        operator = job.get("operator")
+        if operator in _NO_NOTIFY_OPERATORS:
+            return
+
+        job_id = job["id"]
+        job_name = job.get("name") or job_id
+
+        if not succeeded:
+            # Terminal failure alert — idempotent per terminal failure via
+            # the dedup_key. notify() itself never raises, but we still guard
+            # so even an import/monkeypatch-level error stays contained.
+            try:
+                await notify(
+                    operator=operator,
+                    category="alert",
+                    title=f"Cron job failed: {job_name}",
+                    body=error_text or "Unknown error",
+                    dedup_key=f"cronfail:{job_id}:{fire_ts}",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send failure alert for cron job %s", job_id
+                )
+            return
+
+        # Success: realize delivery='notification' by actually delivering.
+        if (job.get("delivery") or "snapshot") == "notification":
+            try:
+                await notify(
+                    operator=operator,
+                    category="cron",
+                    title=job_name,
+                    body=result_text or "",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to deliver notification for cron job %s", job_id
+                )
 
     @staticmethod
     def _retry_backoff_for(attempt: int) -> float:
