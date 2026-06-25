@@ -4,26 +4,33 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import androidx.work.CoroutineWorker
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.WorkerParameters
 
 /**
- * Re-starts the model-free notification listener after a device reboot (MN.5) so the
+ * Re-arms the model-free notification listener after a device reboot (MN.5) so the
  * phone is a reachable notification target without the user re-opening the app.
  *
- * **Why a WorkManager hand-off instead of a direct start.** On Android 12+ a
- * [BroadcastReceiver] handling `ACTION_BOOT_COMPLETED` runs in a BACKGROUND context;
- * calling `startForegroundService()` from there throws
- * `ForegroundServiceStartNotAllowedException`. WorkManager's worker runs in a context
- * where starting the FGS is permitted (and is itself boot-persistent), so we enqueue a
- * [BootStartWorker] OneTimeWorkRequest and let it bring up [NotificationListenerFgs].
+ * **Why a DIRECT start (not a WorkManager hand-off).** The prior implementation
+ * enqueued a WorkManager `CoroutineWorker` and started the FGS from `doWork()`. That
+ * was WRONG: the `BOOT_COMPLETED` background-start exemption is tied to the broadcast
+ * receiver's `onReceive()` context window — a WorkManager worker runs in a PLAIN
+ * background context that does NOT inherit that exemption, so the deferred
+ * `startForegroundService()` threw `ForegroundServiceStartNotAllowedException`, which
+ * was then silently swallowed. The old KDoc claiming "WorkManager runs in a context
+ * where starting the FGS is permitted" was false.
  *
- * Registered (exported, with the BOOT_COMPLETED intent-filter) in the manifest;
- * requires the `RECEIVE_BOOT_COMPLETED` permission. Best-effort: a failure to enqueue
- * is swallowed (the listener simply comes up the next time the app is opened).
+ * **Why the direct start IS legal here.** On Android 14/15+ a `BOOT_COMPLETED` receiver
+ * may NOT start the foreground-service types `dataSync`, `camera`, `mediaPlayback`,
+ * `phoneCall`, `mediaProjection`, or `microphone`. [NotificationListenerFgs] is a
+ * `connectedDevice` FGS — NOT on that blocked list — so starting it straight from
+ * `onReceive()` (the exempt context) is permitted by the platform. It also needs no
+ * while-in-use permission, so the "can't create while in background" caveat does not
+ * apply. We therefore start it INLINE from this receiver, where the exemption is live.
+ *
+ * Registered (exported, with the BOOT_COMPLETED intent-filter) in the manifest; requires
+ * the `RECEIVE_BOOT_COMPLETED` permission. [NotificationListenerFgs.start] is itself
+ * best-effort + non-throwing — a platform refusal (e.g. an OEM that is stricter than
+ * AOSP) is logged inside it, and the listener still arms on the next app open, with the
+ * server-side durable snapshot inbox covering notifications until then.
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -36,40 +43,15 @@ class BootReceiver : BroadcastReceiver() {
         ) {
             return
         }
-        Log.d(TAG, "boot completed ($action); enqueuing listener (re)start")
-        runCatching {
-            val request = OneTimeWorkRequestBuilder<BootStartWorker>().build()
-            WorkManager.getInstance(context.applicationContext)
-                .enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
-        }.onFailure {
-            Log.w(TAG, "failed to enqueue boot worker (${it.javaClass.simpleName})")
-        }
+        Log.d(TAG, "boot completed ($action); arming notification listener (connectedDevice FGS)")
+        // Start DIRECTLY from the receiver — this is the exempt BOOT_COMPLETED context.
+        // connectedDevice is not in the boot-blocked FGS-type set, so the start is legal.
+        // NotificationListenerFgs.start is non-throwing; do NOT wrap in a worker (a worker
+        // would forfeit the boot exemption and the start would be refused).
+        NotificationListenerFgs.start(context.applicationContext)
     }
 
     companion object {
         private const val TAG = "BootReceiver"
-        const val WORK_NAME = "blackbox_notify_listener_boot_start"
-    }
-}
-
-/**
- * Brings up [NotificationListenerFgs] from a context where starting a foreground
- * service is permitted (run by WorkManager after boot, MN.5). [NotificationListenerFgs.start]
- * is itself best-effort + non-throwing, so this always reports success — a platform
- * refusal is already logged inside it and is not worth a WorkManager retry storm.
- */
-class BootStartWorker(
-    appContext: Context,
-    params: WorkerParameters,
-) : CoroutineWorker(appContext, params) {
-
-    override suspend fun doWork(): Result {
-        runCatching { NotificationListenerFgs.start(applicationContext) }
-            .onFailure { Log.w(TAG, "listener start from boot worker refused (${it.javaClass.simpleName})") }
-        return Result.success()
-    }
-
-    companion object {
-        private const val TAG = "BootStartWorker"
     }
 }

@@ -114,10 +114,12 @@
             android:foregroundServiceType="connectedDevice"
             android:exported="false" />
 
-        <!-- MN.5: re-starts NotificationListenerFgs after a reboot. Enqueues a WorkManager
-             OneTimeWorkRequest (NOT a direct startForegroundService, which is illegal from
-             a background boot context on Android 12+). exported=true is required to receive
-             the system BOOT_COMPLETED broadcast. -->
+        <!-- MN.5: re-arms NotificationListenerFgs after a reboot with a DIRECT start in the
+             receiver's onReceive() — the exempt BOOT_COMPLETED context. connectedDevice is
+             NOT in the boot-blocked FGS-type set (dataSync/camera/mediaPlayback/phoneCall/
+             mediaProjection/microphone), so the start is legal; a WorkManager hand-off would
+             instead FORFEIT the boot exemption (worker runs in a plain background context).
+             exported=true is required to receive the system BOOT_COMPLETED broadcast. -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

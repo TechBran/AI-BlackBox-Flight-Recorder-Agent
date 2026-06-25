@@ -27,8 +27,8 @@ import kotlinx.coroutines.runBlocking
  * ([RemoteControlServer]) on [REMOTE_CONTROL_PORT] — the SINGLE owner of that socket
  * (MN.4). It exists so the device can RECEIVE a server push and post a REAL system
  * notification **deterministically, with NO model/LLM in the path**, even when the app
- * is backgrounded or closed, and (via [BootReceiver] + WorkManager, MN.5) surviving a
- * reboot.
+ * is backgrounded or closed, and (via [BootReceiver]'s direct start in the exempt
+ * BOOT_COMPLETED receiver context, MN.5) surviving a reboot.
  *
  * **Why a NEW service (decoupling from Gemma).** The listener used to be hosted by
  * [LocalModelService] and was gated behind a Gemma-backed

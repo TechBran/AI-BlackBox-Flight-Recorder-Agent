@@ -129,7 +129,8 @@ class NativeMainActivity : ComponentActivity() {
         // the single control-port socket so the phone can receive a server push and post
         // a REAL system notification with no Gemma in the path, even backgrounded/closed.
         // Started from a foregrounded Activity so the FGS start is permitted. BootReceiver
-        // (MN.5) re-starts it after reboot via WorkManager.
+        // (MN.5) re-arms it after reboot via a direct start in the exempt BOOT_COMPLETED
+        // receiver context (connectedDevice is not boot-blocked).
         NotificationListenerFgs.start(this)
 
         // control_phone: also bring up LocalModelService's listener path, which now just
