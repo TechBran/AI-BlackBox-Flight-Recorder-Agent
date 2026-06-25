@@ -1,6 +1,6 @@
 {
   "name": "create_cron_job",
-  "description": "Create a scheduled task (cron job) that runs a prompt on a schedule. Use when the user wants recurring reminders, checks, or automated tasks.",
+  "description": "Create a scheduled task (cron job) that runs a prompt on a schedule. Use when the user wants recurring reminders, checks, or automated tasks. Cron jobs run server-side via the /chat path; the interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope and not selectable here.",
   "category": "scheduling",
   "groups": [
     "chat",
@@ -32,14 +32,11 @@
       },
       "model": {
         "type": "string",
-        "description": "Which AI model should execute this job. Use 'computer-use' for tasks needing desktop/browser/GUI interaction (default: gemini)",
-        "enum": [
-          "gemini",
-          "openai",
-          "claude",
-          "grok",
-          "computer-use"
-        ]
+        "description": "A provider word (gemini/openai/claude/grok/computer-use) for that provider's default, OR a specific model id from GET /models/{provider}. Empty = the provider's configured default (Auto). Use 'computer-use' for tasks needing desktop/browser/GUI interaction."
+      },
+      "provider": {
+        "type": "string",
+        "description": "Which provider routes this job: one of gemini, openai, claude, grok, computer-use. Optional; if omitted it is derived from the model. The interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope."
       },
       "delivery": {
         "type": "string",

@@ -1,6 +1,6 @@
 {
   "name": "edit_cron_job",
-  "description": "Edit an existing scheduled task (cron job). Change the prompt, schedule, delivery method, or other settings.",
+  "description": "Edit an existing scheduled task (cron job). Change the prompt, schedule, delivery method, or other settings. Cron jobs run server-side via the /chat path; the interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope and not selectable here.",
   "category": "scheduling",
   "groups": [
     "chat",
@@ -36,14 +36,11 @@
       },
       "model": {
         "type": "string",
-        "description": "Change which AI model executes this job",
-        "enum": [
-          "gemini",
-          "openai",
-          "claude",
-          "grok",
-          "computer-use"
-        ]
+        "description": "A provider word (gemini/openai/claude/grok/computer-use) for that provider's default, OR a specific model id from GET /models/{provider}. Empty = the provider's configured default (Auto). Use 'computer-use' for tasks needing desktop/browser/GUI interaction."
+      },
+      "provider": {
+        "type": "string",
+        "description": "Which provider routes this job: one of gemini, openai, claude, grok, computer-use. Optional; if omitted it is derived from the model. The interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope."
       },
       "delivery": {
         "type": "string",
