@@ -125,9 +125,16 @@ class NativeMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // control_phone: bring up the inbound remote-control LISTENER on app launch,
-        // independent of the chat provider, so the phone is a reachable control target.
-        // Listener-only (no engine warm) — control_phone wakes Gemma on demand.
+        // Notification RECEIVER (MN.4): bring up the MODEL-FREE listener FGS that owns
+        // the single control-port socket so the phone can receive a server push and post
+        // a REAL system notification with no Gemma in the path, even backgrounded/closed.
+        // Started from a foregrounded Activity so the FGS start is permitted. BootReceiver
+        // (MN.5) re-starts it after reboot via WorkManager.
+        NotificationListenerFgs.start(this)
+
+        // control_phone: also bring up LocalModelService's listener path, which now just
+        // PUBLISHES the Gemma task handler into the shared holder (the FGS above owns the
+        // socket). Listener-only (no engine warm) — control_phone wakes Gemma on demand.
         LocalModelService.startListener(this)
 
         // Normalize origin for API calls — handles Tailscale .ts.net domains

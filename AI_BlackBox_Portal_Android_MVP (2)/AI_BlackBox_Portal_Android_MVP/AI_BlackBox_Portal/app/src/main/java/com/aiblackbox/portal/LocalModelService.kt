@@ -21,8 +21,7 @@ import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.WarmInflightStore
 import com.aiblackbox.portal.data.local.shouldWarm
 import com.aiblackbox.portal.data.model.AttestRequest
-import com.aiblackbox.portal.data.remote.REMOTE_CONTROL_PORT
-import com.aiblackbox.portal.data.remote.RemoteControlServer
+import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.CoroutineScope
@@ -32,7 +31,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -82,9 +80,12 @@ class LocalModelService : Service() {
     @Volatile
     private var warmJob: Job? = null
 
-    // The inbound remote-control listener (control_phone). Started alongside the
-    // foreground service when a task handler is registered; stopped on STOP/destroy.
-    private var remoteServer: RemoteControlServer? = null
+    // The Gemma-backed remote task handler (control_phone /task + /status). Published
+    // into the process-level RemoteTaskHandlerHolder so the SINGLE control-port socket
+    // — owned by NotificationListenerFgs, NOT this service (MN.4) — can dispatch /task
+    // through it when a model is resident, then cleared on STOP/destroy so /task falls
+    // back to the no-op. This service no longer binds the socket itself.
+    private var remoteTaskHandler: com.aiblackbox.portal.data.remote.RemoteTaskHandler? = null
 
     // Warm-loop guard, SHARED with ChatViewModel.preloadLocalEngine (same dedicated
     // SharedPreferences file). The SERVICE is the PRIMARY warmer, so its load() is
@@ -102,7 +103,7 @@ class LocalModelService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                stopRemoteControlServer()
+                clearRemoteTaskHandler()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -114,7 +115,7 @@ class LocalModelService : Service() {
                 startForegroundWith(buildNotification(TEXT_PREPARING))
                 _isRunning = true
                 startWarmIfNeeded()
-                startRemoteControlServerIfPossible()
+                publishRemoteTaskHandler()
             }
             else -> {
                 // ACTION_START_LISTENER, OR a NULL-intent START_STICKY REDELIVERY after the
@@ -127,7 +128,7 @@ class LocalModelService : Service() {
                 // safe restart posture is just the lightweight listener.
                 startForegroundWith(buildNotification(TEXT_LISTENER))
                 _isRunning = true
-                startRemoteControlServerIfPossible()
+                publishRemoteTaskHandler()
             }
         }
         // START_STICKY: keep the cheap LISTENER alive across OS kills so the phone stays a
@@ -263,44 +264,45 @@ class LocalModelService : Service() {
     }
 
     /**
-     * Best-effort start of the inbound remote-control listener (control_phone). A
-     * no-op (logged) unless a [remoteTaskHandlerFactory] is registered (Task 6) — a
-     * listener with nothing safe to run stays OFF. NEVER throws into the service: a
-     * bind failure leaves remoteServer null and the rest of the service intact.
+     * Publish the Gemma-backed remote task handler so the SINGLE control-port socket —
+     * owned by [NotificationListenerFgs] (MN.4), NOT this service — can dispatch
+     * control_phone `/task` + `/status` through it, and ensure that listener FGS is up.
+     *
+     * A no-op (logged) unless a [remoteTaskHandlerFactory] is registered (Task 6) — there
+     * is nothing safe to run otherwise. This service NO LONGER binds the socket itself;
+     * it only injects the handler into [RemoteTaskHandlerHolder]. NEVER throws into the
+     * service. Notifications (`/notify`) work model-free via the FGS regardless of this.
      */
-    private fun startRemoteControlServerIfPossible() {
-        if (remoteServer != null) return
+    private fun publishRemoteTaskHandler() {
+        // Make sure the model-free listener FGS owns the socket (idempotent, best-effort).
+        runCatching { NotificationListenerFgs.start(applicationContext) }
+        if (remoteTaskHandler != null) return
         val factory = remoteTaskHandlerFactory
         if (factory == null) {
-            Log.d(TAG, "no remote task handler registered; inbound control listener stays off")
+            Log.d(TAG, "no remote task handler registered; control_phone /task stays no-op")
             return
         }
         runCatching {
-            RemoteControlServer(REMOTE_CONTROL_PORT, factory(applicationContext), operatorProvider = { boundOperator() }).also {
-                it.startServer()
-                remoteServer = it
-            }
-            Log.d(TAG, "remote control listener started on :$REMOTE_CONTROL_PORT")
+            val handler = factory(applicationContext)
+            RemoteTaskHandlerHolder.set(handler)
+            remoteTaskHandler = handler
+            Log.d(TAG, "remote task handler published; control_phone /task active")
         }.onFailure {
-            Log.w(TAG, "remote control listener start refused (${it.javaClass.simpleName})")
-            remoteServer = null
+            Log.w(TAG, "remote task handler publish refused (${it.javaClass.simpleName})")
+            remoteTaskHandler = null
         }
     }
 
-    /** Best-effort stop of the inbound listener. Never throws. */
-    private fun stopRemoteControlServer() {
-        runCatching { remoteServer?.stopServer() }
-        remoteServer = null
+    /** Best-effort clear of the published handler (control_phone /task falls back to the
+     *  no-op; the FGS keeps the socket + /notify alive). Never throws. */
+    private fun clearRemoteTaskHandler() {
+        runCatching { RemoteTaskHandlerHolder.clear() }
+        remoteTaskHandler = null
     }
-
-    /** The device's bound operator (BlackBoxStore), or "" — the scope POST /task is
-     *  authorized against. Read per request on the listener's worker thread. */
-    private fun boundOperator(): String =
-        runCatching { runBlocking { BlackBoxStore(applicationContext).operator.first() } }.getOrDefault("")
 
     override fun onDestroy() {
         _isRunning = false
-        stopRemoteControlServer()
+        clearRemoteTaskHandler()
         // Release the pinned engine — the service owns it, so its lifecycle ends here.
         runCatching { LocalEngineHolder.clearAndClose() }
         scope.cancel()
