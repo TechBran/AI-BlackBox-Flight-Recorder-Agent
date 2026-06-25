@@ -42,6 +42,7 @@ import Orchestrator.models as models_module  # For modifying worker_running glob
 from Orchestrator.media_index import add_media_entry
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
+from Orchestrator.notifications.bridge import notify_in_background
 # NOTE: call_imagen, call_google_tts_synthesize, call_gemini_tts, call_lyria_music
 # are imported lazily inside process_* functions to avoid circular imports
 # NOTE: call_openai, call_anthropic, call_gemini are imported lazily inside process_chat_task
@@ -202,6 +203,78 @@ def collect_pending_media_artifacts(operator: str, since_timestamp: Optional[str
 
     return artifacts
 
+# Task types whose terminal notification belongs to the "media" category (an
+# artifact landed); everything else (chat, checkpoint, CU, audio analysis) is a
+# plain "task". Derived from TaskType so a new media type is a one-line add.
+_MEDIA_TASK_TYPES = {
+    TaskType.IMAGE_GENERATION,
+    TaskType.VIDEO_GENERATION,
+    TaskType.LYRIA_MUSIC,
+    TaskType.ELEVENLABS_MUSIC,
+    TaskType.GOOGLE_TTS,
+    TaskType.GEMINI_TTS,
+}
+
+# Short human label per task type for the notification title.
+_TASK_LABELS = {
+    TaskType.IMAGE_GENERATION: "Image",
+    TaskType.VIDEO_GENERATION: "Video",
+    TaskType.LYRIA_MUSIC: "Music",
+    TaskType.ELEVENLABS_MUSIC: "Song",
+    TaskType.GOOGLE_TTS: "Speech",
+    TaskType.GEMINI_TTS: "Speech",
+    TaskType.AUDIO_ANALYSIS: "Audio analysis",
+    TaskType.CHAT: "Chat",
+    TaskType.CHECKPOINT: "Checkpoint",
+    TaskType.AGENT_CHAT: "Agent",
+    TaskType.BROWSER_USE: "Computer Use",
+    TaskType.USE_COMPUTER: "Computer Use",
+    TaskType.GEMINI_CU: "Device control",
+}
+
+
+def _emit_task_notification(task, new_status) -> None:
+    """Fire a fire-and-forget notification for a TERMINAL task status change.
+
+    ONE choke-point (update_task) covers every async worker. Only COMPLETED /
+    FAILED fire — progress and PROCESSING are noise. System-scope / unattributed
+    tasks (operator in None/""/"system") are SUPPRESSED: those are tool-generated
+    media that nobody subscribed to as themselves, so notifying would spam. The
+    whole body is wrapped so a notify failure NEVER breaks update_task's DB write.
+    """
+    try:
+        if new_status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            return
+        operator = task.operator
+        if operator in (None, "", "system"):
+            return  # system-scope / unattributed → suppress (no spam)
+
+        ttype = task.task_type
+        label = _TASK_LABELS.get(ttype, "Task")
+        category = "media" if ttype in _MEDIA_TASK_TYPES else "task"
+
+        if new_status == TaskStatus.COMPLETED:
+            title = f"{label} ready"
+            detail = (task.prompt or "").strip()
+            body = (detail[:160] + "…") if len(detail) > 160 else detail
+        else:  # FAILED
+            title = f"{label} failed"
+            err = (task.error_message or "").strip()
+            body = (err[:160] + "…") if len(err) > 160 else (err or "Task failed")
+
+        # dedup_key ties the notification to this task so a re-emit of the same
+        # terminal event reuses one inbox identity rather than duplicating.
+        notify_in_background(
+            operator,
+            title,
+            body,
+            category=category,
+            dedup_key=f"task:{task.task_id}:{new_status}",
+        )
+    except Exception as e:  # noqa: BLE001 — never let a notify break the producer
+        print(f"[NOTIFY] task notification failed (non-fatal) for {getattr(task, 'task_id', '?')}: {e}")
+
+
 def update_task(task_id: str, **kwargs):
     task = task_db.get_task(task_id)
     if task:
@@ -210,6 +283,10 @@ def update_task(task_id: str, **kwargs):
             if hasattr(task, key):
                 setattr(task, key, value)
         task_db.save_task(task)
+        # Wholesale notification choke-point: a TERMINAL status change here covers
+        # every async worker (media/chat/checkpoint/CU). Fire-and-forget; isolated.
+        if "status" in kwargs:
+            _emit_task_notification(task, kwargs["status"])
 
 
 def background_worker():
