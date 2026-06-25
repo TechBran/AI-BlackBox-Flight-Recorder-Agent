@@ -269,7 +269,7 @@ def _emit_task_notification(task, new_status) -> None:
             title,
             body,
             category=category,
-            dedup_key=f"task:{task.task_id}:{new_status}",
+            dedup_key=f"task:{task.task_id}:{getattr(new_status, 'value', new_status)}",
         )
     except Exception as e:  # noqa: BLE001 — never let a notify break the producer
         print(f"[NOTIFY] task notification failed (non-fatal) for {getattr(task, 'task_id', '?')}: {e}")
