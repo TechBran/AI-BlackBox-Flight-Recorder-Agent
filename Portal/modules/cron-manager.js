@@ -606,6 +606,9 @@ async function refreshNextRunPreview() {
 
     const schedule = currentScheduleExpr();
     if (!schedule) {
+        // Bump the token so an in-flight request can't re-render stale
+        // times over the now-empty field after it resolves (M5b review).
+        ++_previewSeq;
         el.classList.add('hide');
         return;
     }
