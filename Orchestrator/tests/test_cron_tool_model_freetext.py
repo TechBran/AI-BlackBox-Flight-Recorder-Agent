@@ -99,10 +99,10 @@ def _mock_catalog(monkeypatch, *, models=None, raises=False):
             raise RuntimeError("upstream down")
         return {"models": [{"id": m, "name": m} for m in (models or [])]}
 
-    # Patch in BOTH executor modules (they import lazily by attribute path, so
-    # patch the helper they call).
+    # _validate_model (defined in create_exec, imported by edit_exec) resolves
+    # _fetch_catalog_models from create_exec's module namespace, so patching the
+    # single chokepoint there covers BOTH the create and edit validation paths.
     monkeypatch.setattr(create_exec, "_fetch_catalog_models", fake_fetch)
-    monkeypatch.setattr(edit_exec, "_fetch_catalog_models", fake_fetch)
 
 
 # ---------------------------------------------------------------------------
