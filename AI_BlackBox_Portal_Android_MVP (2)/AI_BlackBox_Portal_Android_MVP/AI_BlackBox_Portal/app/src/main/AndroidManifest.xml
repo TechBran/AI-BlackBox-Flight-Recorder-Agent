@@ -13,9 +13,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <!-- MN.5: re-start the model-free NotificationListenerFgs after a reboot (via
-         BootReceiver -> WorkManager) so the device stays a reachable notification target
-         without the user re-opening the app. -->
+    <!-- MN.5: re-start the model-free NotificationListenerFgs after a reboot. BootReceiver
+         starts the connectedDevice FGS DIRECTLY from BOOT_COMPLETED (exempt from the
+         BOOT_COMPLETED FGS-type restrictions) so the device stays a reachable notification
+         target without the user re-opening the app. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
