@@ -13,8 +13,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
+from datetime import datetime, timedelta
+
 from Orchestrator.checkpoint import app
 from Orchestrator.scheduler import get_scheduler_manager
+from Orchestrator.scheduler.manager import LOCAL_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,11 @@ class CronJobUpdate(BaseModel):
     delivery_target: Optional[str] = None
     operator: Optional[str] = None
     one_shot: Optional[bool] = None
+
+
+class CronPreview(BaseModel):
+    schedule: str                          # candidate cron expression
+    count: int = 3                         # how many upcoming fires to preview
 
 
 @app.get("/api/cron/contacts")
@@ -107,6 +115,46 @@ async def cron_health():
         })
 
     return {"jobs": entries, "diverged_count": diverged_count}
+
+
+@app.post("/api/cron/preview")
+async def preview_cron(body: CronPreview):
+    """Preview the next N fire times for a candidate cron expression (M5.2).
+
+    Lets the Portal/editor show "runs next at …" WHILE the user types a
+    schedule, before any job is saved. Times are box-local (the same
+    authoritative wall clock every job uses), computed by stepping the
+    manager's single trigger chokepoint (_build_trigger) forward.
+
+    An invalid cron is the EXPECTED bad input here (the user is mid-edit),
+    so a from_crontab ValueError maps to a customer-facing 400 — never a 500.
+    """
+    manager = get_scheduler_manager()
+    try:
+        trigger = manager._build_trigger(body.schedule)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid cron expression '{body.schedule}': {e}",
+        )
+
+    # Step the trigger forward in box-local time: ask for the next fire at
+    # or after a moving cursor, then push the cursor to JUST PAST that fire
+    # so the following call yields the one after it. (Re-feeding the fire as
+    # APScheduler's previous_fire_time while holding 'now' fixed would keep
+    # returning the same fire — the cursor has to advance.) Clamp the count
+    # to a sane ceiling so a hostile/huge value can't spin the loop.
+    count = max(1, min(body.count, 25))
+    cursor = datetime.now(LOCAL_TZ)
+    next_runs = []
+    for _ in range(count):
+        fire = trigger.get_next_fire_time(None, cursor)
+        if fire is None:
+            break  # a finite schedule (e.g. a past one-off) can run dry
+        next_runs.append(fire.isoformat())
+        cursor = fire + timedelta(microseconds=1)
+
+    return {"next_runs": next_runs}
 
 
 @app.get("/api/cron/jobs")
