@@ -187,7 +187,9 @@ async function fetchHistory(jobId) {
 
 async function fetchContacts() {
     try {
-        const operator = getOperator() || window.__operator || 'Brandon';
+        // Fresh-box-safe operator fallback: current operator → server-driven
+        // operator list head → empty (NEVER a hardcoded person's name).
+        const operator = getOperator() || window.__operator || (_operatorList && _operatorList[0]) || '';
         const resp = await fetch(`/api/cron/contacts?operator=${encodeURIComponent(operator)}`);
         if (!resp.ok) return [];
         const data = await resp.json();
@@ -266,8 +268,16 @@ function renderJobList(jobs) {
     }
 
     container.innerHTML = jobs.map(job => {
-        const statusClass = job.status === 'active' ? 'cron-status-active' : 'cron-status-paused';
-        const statusLabel = job.status === 'active' ? 'Active' : 'Paused';
+        // Status drives the left-border accent + badge only (no block fill).
+        // M3 introduced status='error'; map it to the red accent/badge.
+        const statusClass = {
+            active: 'cron-status-active',
+            error: 'cron-status-error'
+        }[job.status] || 'cron-status-paused';
+        const statusLabel = {
+            active: 'Active',
+            error: 'Error'
+        }[job.status] || 'Paused';
         const hint = job.frequency_hint || job.schedule;
         const deliveryLabel = {
             snapshot: 'Snapshot',
@@ -375,6 +385,7 @@ async function openEditModal(jobId) {
     $('cronDeliveryTarget')?.classList.remove('hide');
     $('cronOneShot').checked = false;
     $('cronExpression').value = '';
+    $('cronNextRuns')?.classList.add('hide'); // clear any stale next-run preview
     $('cronDeliveryTargetWrap').classList.add('hide');
     $('cronDayWrap').classList.add('hide');
     $('cronIntervalWrap').classList.add('hide');
@@ -550,6 +561,120 @@ function updateSchedulePreview() {
             preview.textContent = expr ? describeCron(expr) : 'Enter a cron expression';
         }
     }
+    // Live next-run preview (debounced POST /api/cron/preview).
+    scheduleNextRunPreview();
+}
+
+// =============================================================================
+// Next-run Preview (M5.2 — POST /api/cron/preview while editing)
+// =============================================================================
+
+let _previewTimer = null;
+// Monotonic token so a stale in-flight response can't clobber a newer one
+// (debounce stops most overlap, but a slow request could still land late).
+let _previewSeq = 0;
+
+/**
+ * Resolve the cron expression the form currently describes, using the SAME
+ * schedule-building logic the save path uses: simpleToCron() for the simple
+ * tab, the raw #cronExpression for the advanced tab. Returns '' when there's
+ * nothing to preview yet (advanced tab, empty field).
+ * @returns {string}
+ */
+function currentScheduleExpr() {
+    const simpleActive = !$('cronSimpleSchedule')?.classList.contains('hide');
+    if (simpleActive) return simpleToCron().cron;
+    return $('cronExpression')?.value?.trim() || '';
+}
+
+/** Debounce the next-run preview ~300ms so we POST once per typing pause. */
+function scheduleNextRunPreview() {
+    clearTimeout(_previewTimer);
+    _previewTimer = setTimeout(refreshNextRunPreview, 300);
+}
+
+/**
+ * POST the current schedule to /api/cron/preview and render the next ~3 fire
+ * times near the schedule field. A 400 (user mid-typing an invalid cron) shows
+ * a subtle muted "invalid schedule" hint — NOT an error toast. Any other
+ * failure (e.g. the route 404s on an un-restarted server, or a network drop)
+ * silently hides the preview rather than nagging the user.
+ */
+async function refreshNextRunPreview() {
+    const el = $('cronNextRuns');
+    if (!el) return;
+
+    const schedule = currentScheduleExpr();
+    if (!schedule) {
+        el.classList.add('hide');
+        return;
+    }
+
+    const seq = ++_previewSeq;
+    let res;
+    try {
+        res = await fetch('/api/cron/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ schedule, count: 3 })
+        });
+    } catch {
+        // Network/transport error — keep the UI quiet, hide the hint.
+        if (seq === _previewSeq) el.classList.add('hide');
+        return;
+    }
+
+    if (seq !== _previewSeq) return; // a newer request superseded this one
+
+    if (res.status === 400) {
+        // Expected mid-typing invalid cron — subtle hint, no toast.
+        el.classList.remove('hide');
+        el.classList.add('cron-next-runs-invalid');
+        el.textContent = '— invalid schedule';
+        return;
+    }
+
+    if (!res.ok) {
+        // 404 (route not live yet) or any other status — hide gracefully.
+        el.classList.add('hide');
+        return;
+    }
+
+    let data;
+    try { data = await res.json(); } catch { el.classList.add('hide'); return; }
+    if (seq !== _previewSeq) return;
+
+    const runs = Array.isArray(data.next_runs) ? data.next_runs : [];
+    if (runs.length === 0) {
+        el.classList.remove('hide');
+        el.classList.add('cron-next-runs-invalid');
+        el.textContent = '— no upcoming runs';
+        return;
+    }
+
+    el.classList.remove('hide', 'cron-next-runs-invalid');
+    const label = document.createElement('span');
+    label.className = 'cron-next-runs-label';
+    label.textContent = 'Next runs:';
+    el.replaceChildren(label, document.createTextNode(' ' + runs.map(formatPreviewTime).join(', ')));
+}
+
+/**
+ * Render a box-local ISO fire time as a compact wall-clock label, e.g.
+ * "Jun 25 3:00 PM". The backend returns tz-aware ISO strings, so Date parses
+ * the offset correctly and toLocaleString reflects the box's local time.
+ * @param {string} isoStr
+ * @returns {string}
+ */
+function formatPreviewTime(isoStr) {
+    try {
+        return new Date(isoStr).toLocaleString(undefined, {
+            month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit'
+        });
+    } catch {
+        return isoStr;
+    }
 }
 
 function describeCron(cron) {
@@ -695,7 +820,10 @@ async function _doSaveJob() {
     }
 
     try {
-        const operator = $('cronOperator')?.value || getOperator() || 'Brandon';
+        // Fresh-box-safe operator fallback: the server-driven #cronOperator
+        // dropdown is the primary source; fall back to current operator, then
+        // the server operator list head, then empty (never a hardcoded name).
+        const operator = $('cronOperator')?.value || getOperator() || (_operatorList && _operatorList[0]) || '';
 
         if (jobId) {
             // Update existing
