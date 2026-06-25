@@ -81,3 +81,15 @@ data class CronJobCreateRequest(
     val operator: String = "",
     @SerialName("one_shot") val oneShot: Boolean = false
 )
+
+// Per-operator contact for the SMS / voice_call delivery target picker.
+// GET /api/cron/contacts?operator=<op> -> {contacts:[{name,phone,relationship}]}.
+@Serializable
+data class CronContact(
+    val name: String = "",
+    val phone: String = "",
+    val relationship: String = ""
+)
+
+@Serializable
+data class CronContactsResponse(val contacts: List<CronContact> = emptyList())

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,7 +48,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,6 +82,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.model.CronHistoryEntry
+import com.aiblackbox.portal.data.model.CronContact
 import com.aiblackbox.portal.data.model.CronJob
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
@@ -164,19 +165,7 @@ fun CronManagerScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = BbxBlack,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = {
-                    view.performPressFeedback()
-                    viewModel.openCreateDialog()
-                },
-                containerColor = BbxAccent,
-                contentColor = BbxWhite
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "New Job")
-            }
-        }
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -190,6 +179,23 @@ fun CronManagerScreen(
                 style = MaterialTheme.typography.headlineMedium,
                 color = BbxWhite
             )
+            Spacer(Modifier.height(12.dp))
+
+            // "+ New Job" action — a prominent full-width button ABOVE the search
+            // bar (replaces the old bottom-right FAB). Opens the same create dialog.
+            Button(
+                onClick = {
+                    view.performPressFeedback()
+                    viewModel.openCreateDialog()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
+                shape = RoundedCornerShape(RadiusSm)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, tint = BbxWhite, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("New Job", color = BbxWhite, fontWeight = FontWeight.SemiBold)
+            }
             Spacer(Modifier.height(12.dp))
 
             // Search + Filter bar (matching Portal .cron-top-bar)
@@ -219,7 +225,10 @@ fun CronManagerScreen(
                 EmptyState()
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    // Generous bottom padding so the LAST card scrolls fully clear
+                    // of the bottom chat composer + nav bar (its actions stay visible).
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 120.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(jobs, key = { it.id }) { job ->
@@ -427,10 +436,14 @@ private fun CronJobCard(
             .border(1.dp, GlassBorder, RoundedCornerShape(RadiusMd))
     ) {
         // Left accent stripe (Portal: border-left: 3px solid <status>).
+        // A REAL thin stripe: full card height, 3dp wide, pinned to the left
+        // edge. (matchParentSize() here used to fill the WHOLE card, washing the
+        // status color across the surface — the "solid fill" bug.)
         Box(
             modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxHeight()
                 .width(3.dp)
-                .matchParentSize()
                 .background(style.accent)
         )
 
@@ -677,7 +690,14 @@ private fun EditJobDialog(
     var model by remember(job) { mutableStateOf(if (job != null) viewModel.specificModelId(job) else "") }
     var delivery by remember(job) { mutableStateOf(job?.delivery ?: "snapshot") }
     var deliveryTarget by remember(job) { mutableStateOf(job?.deliveryTarget ?: "") }
-    var operator by remember(job) { mutableStateOf(job?.operator ?: "Brandon") }
+    // Live operator list + box default (Fix 4) and per-operator contacts (Fix 5).
+    val operatorOptions by viewModel.operators.collectAsState()
+    val defaultOperator by viewModel.defaultOperator.collectAsState()
+    val previewContacts by viewModel.previewContacts.collectAsState()
+    // Default the selection to the editing job's operator, else the box default
+    // operator — never a hardcoded name. (Resolved once at first composition;
+    // if the default arrives later, the LaunchedEffect below seeds a blank pick.)
+    var operator by remember(job) { mutableStateOf(job?.operator ?: "") }
     var oneShot by remember(job) { mutableStateOf(job?.oneShot ?: false) }
     var nameError by remember { mutableStateOf(false) }
     var promptError by remember { mutableStateOf(false) }
@@ -687,6 +707,23 @@ private fun EditJobDialog(
     val modelsForProvider by viewModel.modelsForProvider.collectAsState()
     // Fetch the model list whenever the provider changes (also fires on open).
     LaunchedEffect(provider) { viewModel.selectProvider(provider) }
+
+    // Fix 4: when creating a NEW job, seed the operator pick from the box default
+    // once it loads (the editing job already carries its own operator). Only fills
+    // a still-blank selection so it never overrides a user choice.
+    LaunchedEffect(defaultOperator, operatorOptions) {
+        if (operator.isBlank()) {
+            operator = defaultOperator.ifBlank { operatorOptions.firstOrNull() ?: "" }
+        }
+    }
+
+    // Fix 5: (re)load the selected operator's contacts whenever SMS/voice delivery
+    // is active and the operator changes, so the contacts picker tracks the operator.
+    LaunchedEffect(delivery, operator) {
+        if (delivery == "sms" || delivery == "voice_call") {
+            viewModel.fetchContacts(operator)
+        }
+    }
 
     // M5c: next-run preview. Recompute the cron string from whichever schedule
     // input is active (the SAME logic the save path uses) and ask the VM to
@@ -914,9 +951,18 @@ private fun EditJobDialog(
                     }
                 }
 
-                // Delivery target (for SMS / voice)
+                // Delivery target (for SMS / voice) — pick from the selected
+                // operator's live contacts OR type an E.164 number manually (Fix 5).
                 if (delivery == "sms" || delivery == "voice_call") {
-                    FormField("PHONE NUMBER") {
+                    if (previewContacts.isNotEmpty()) {
+                        FormField("CONTACT") {
+                            ContactPicker(
+                                contacts = previewContacts,
+                                selectedPhone = deliveryTarget
+                            ) { phone -> deliveryTarget = phone }
+                        }
+                    }
+                    FormField(if (previewContacts.isNotEmpty()) "OR ENTER A NUMBER" else "PHONE NUMBER") {
                         OutlinedTextField(
                             value = deliveryTarget,
                             onValueChange = { deliveryTarget = it },
@@ -930,17 +976,13 @@ private fun EditJobDialog(
                     }
                 }
 
-                // Operator
+                // Operator — a DROPDOWN of the live operator list (Fix 4), not a
+                // free-text field. Default = editing job's operator, else box default.
                 FormField("OPERATOR") {
-                    OutlinedTextField(
-                        value = operator,
-                        onValueChange = { operator = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
-                        colors = glassTextFieldColors(),
-                        shape = RoundedCornerShape(RadiusSm)
-                    )
+                    OperatorSelector(
+                        selected = operator,
+                        operators = operatorOptions
+                    ) { operator = it }
                 }
 
                 // One-shot toggle
@@ -1223,6 +1265,104 @@ private fun DeliverySelector(selected: String, onSelect: (String) -> Unit) {
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
             options.forEach { (value, label) ->
                 DropdownMenuItem(text = { Text(label, color = Neutral900) }, onClick = { feedback(); onSelect(value); expanded = false })
+            }
+        }
+    }
+}
+
+/** Operator dropdown hydrated from the live operator list (Fix 4). Mirrors the
+ *  M4.4 provider/model ExposedDropdownMenuBox pattern used elsewhere in this
+ *  screen. Shows the current selection (or a placeholder while the list loads);
+ *  selecting stores the operator name verbatim. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OperatorSelector(
+    selected: String,
+    operators: List<String>,
+    onSelect: (String) -> Unit
+) {
+    val feedback = rememberPressFeedback()
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = selected.ifBlank { "Select operator" },
+            onValueChange = {},
+            readOnly = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
+            colors = glassTextFieldColors(),
+            singleLine = true,
+            shape = RoundedCornerShape(RadiusSm)
+        )
+        // Graceful fallback: if the list hasn't loaded, still show the current pick.
+        val options = if (operators.isEmpty() && selected.isNotBlank()) listOf(selected) else operators
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
+            if (options.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("No operators available", color = Neutral500) },
+                    onClick = { expanded = false }
+                )
+            } else {
+                options.forEach { op ->
+                    DropdownMenuItem(
+                        text = { Text(op, color = Neutral900) },
+                        onClick = { feedback(); onSelect(op); expanded = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Contacts dropdown for SMS/voice delivery (Fix 5). Lists the selected
+ *  operator's contacts as "Name · phone"; picking one sets delivery_target to
+ *  that phone. A manual E.164 text field sits alongside this in the dialog. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ContactPicker(
+    contacts: List<CronContact>,
+    selectedPhone: String,
+    onSelect: (String) -> Unit
+) {
+    val feedback = rememberPressFeedback()
+    var expanded by remember { mutableStateOf(false) }
+    val matched = contacts.firstOrNull { it.phone == selectedPhone }
+    val display = when {
+        matched != null -> "${matched.name} · ${matched.phone}"
+        else -> "Choose a contact"
+    }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = display,
+            onValueChange = {},
+            readOnly = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = Neutral900),
+            colors = glassTextFieldColors(),
+            singleLine = true,
+            shape = RoundedCornerShape(RadiusSm)
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = Neutral100) {
+            contacts.forEach { c ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(c.name.ifBlank { c.phone }, color = Neutral900, fontSize = 14.sp)
+                            Text(
+                                if (c.relationship.isNotBlank()) "${c.phone} · ${c.relationship}" else c.phone,
+                                color = Neutral500,
+                                fontSize = 11.sp
+                            )
+                        }
+                    },
+                    onClick = { feedback(); onSelect(c.phone); expanded = false }
+                )
             }
         }
     }

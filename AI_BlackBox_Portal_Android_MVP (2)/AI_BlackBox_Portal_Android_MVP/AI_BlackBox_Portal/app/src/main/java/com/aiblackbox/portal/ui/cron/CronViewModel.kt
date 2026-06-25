@@ -9,6 +9,8 @@ import com.aiblackbox.portal.data.model.CronHistoryEntry
 import com.aiblackbox.portal.data.model.CronHistoryResponse
 import com.aiblackbox.portal.data.model.CronJob
 import com.aiblackbox.portal.data.model.CronJobCreateRequest
+import com.aiblackbox.portal.data.model.CronContact
+import com.aiblackbox.portal.data.model.CronContactsResponse
 import com.aiblackbox.portal.data.model.CronJobsResponse
 import com.aiblackbox.portal.data.model.CronPreviewRequest
 import com.aiblackbox.portal.data.model.CronPreviewResponse
@@ -93,6 +95,24 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
     private val modelsCache = mutableMapOf<String, Pair<Long, List<Pair<String, String>>>>()
     private val modelsCacheTtlMs = 5 * 60 * 1_000L
 
+    // -- Live operator list (Fix 4) --
+    // Sourced from GET /operators -> {operators:[...], default:"..."} so the
+    // create/edit dialog's Operator field is a DROPDOWN of real operators, never
+    // a free-text box hardcoded to "Brandon". Falls back to whatever it last had.
+    private val _operators = MutableStateFlow<List<String>>(emptyList())
+    val operators: StateFlow<List<String>> = _operators.asStateFlow()
+
+    private val _defaultOperator = MutableStateFlow("")
+    /** The box default operator (GET /operators .default). "" until loaded. Used
+     *  as the dialog's operator default when creating a NEW job. */
+    val defaultOperator: StateFlow<String> = _defaultOperator.asStateFlow()
+
+    // -- Per-operator contacts for the SMS/voice delivery-target picker (Fix 5) --
+    // GET /api/cron/contacts?operator=<op>. Re-fetched whenever the selected
+    // operator changes; the dialog shows these alongside a manual E.164 field.
+    private val _previewContacts = MutableStateFlow<List<CronContact>>(emptyList())
+    val previewContacts: StateFlow<List<CronContact>> = _previewContacts.asStateFlow()
+
     // -- Next-run preview (M5c — POST /api/cron/preview while editing) --
     // Mirrors Portal M5b: a debounced preview of the next ~3 fire times for the
     // schedule the editor currently describes. The screen renders this StateFlow
@@ -136,6 +156,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         api = newApi
         repository = ChatRepository(newApi)
         loadJobs()
+        loadOperators()
         startPolling()
     }
 
@@ -560,6 +581,59 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                 // Offline seed already published above.
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Operators (Fix 4) + Contacts (Fix 5)
+    // -------------------------------------------------------------------------
+
+    /** Hydrate the live operator list from GET /operators. Best-effort: on
+     *  failure the existing list (possibly empty) is kept and the dialog falls
+     *  back gracefully. */
+    fun loadOperators() {
+        val api = api ?: return
+        viewModelScope.launch {
+            try {
+                val response = api.get("/operators")
+                val obj = json.parseToJsonElement(response).jsonObject
+                val ops = obj["operators"]?.jsonArray?.mapNotNull {
+                    try { it.jsonPrimitive.content } catch (_: Exception) { null }
+                }.orEmpty()
+                if (ops.isNotEmpty()) _operators.value = ops
+                obj["default"]?.jsonPrimitive?.content?.let { _defaultOperator.value = it }
+            } catch (e: Exception) {
+                Log.d(TAG, "Operator fetch failed: ${e.message}")
+            }
+        }
+    }
+
+    /** Fetch the per-operator contact book for the SMS/voice delivery-target
+     *  picker (GET /api/cron/contacts?operator=<op>). Publishes to
+     *  [previewContacts]; a blank operator or any failure clears the list so the
+     *  manual phone field is still usable. Re-call when the operator changes. */
+    fun fetchContacts(operator: String) {
+        val api = api ?: return
+        val op = operator.trim()
+        if (op.isEmpty()) {
+            _previewContacts.value = emptyList()
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val encoded = java.net.URLEncoder.encode(op, "UTF-8")
+                val response = api.get("/api/cron/contacts?operator=$encoded")
+                val parsed = json.decodeFromString(CronContactsResponse.serializer(), response)
+                _previewContacts.value = parsed.contacts
+            } catch (e: Exception) {
+                Log.d(TAG, "Contact fetch failed for $op: ${e.message}")
+                _previewContacts.value = emptyList()
+            }
+        }
+    }
+
+    /** Clear the cached contacts (dialog dismissed / delivery switched away). */
+    fun clearContacts() {
+        _previewContacts.value = emptyList()
     }
 
     // -------------------------------------------------------------------------
