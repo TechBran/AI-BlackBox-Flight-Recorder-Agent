@@ -67,7 +67,10 @@ def test_load_contacts_round_trips_flags(isolated_contacts):
     assert saved["is_operator_self"] is True
 
 
-def test_upsert_flags_default_false(isolated_contacts):
+def test_flagless_create_defaults_open(isolated_contacts):
+    """A flag-less CREATE (the model/voice save_contact path) defaults a new
+    contact to inbound_allowed=True (backward-compatible / opt-out) and
+    is_operator_self=False."""
     contact = contacts_mod.upsert_contact(
         name="Bob",
         notes="",
@@ -76,8 +79,40 @@ def test_upsert_flags_default_false(isolated_contacts):
         created_by="Brandon",
         phone="+15551112222",
     )
-    assert contact["inbound_allowed"] is False
+    assert contact["inbound_allowed"] is True
     assert contact["is_operator_self"] is False
+
+
+def test_flagless_update_preserves_flags(isolated_contacts):
+    """REGRESSION (HIGH data-loss): a flag-less update of an existing contact —
+    e.g. the model/voice save_contact path changing only notes — must NOT wipe
+    previously-set flags. Both True flags must survive."""
+    contacts_mod.upsert_contact(
+        name="Anna",
+        notes="orig",
+        tags=[],
+        operator="Brandon",
+        created_by="Brandon",
+        phone="+14108166914",
+        inbound_allowed=True,
+        is_operator_self=True,
+    )
+
+    # Same contact (matched by name), no flags passed — only notes change.
+    contacts_mod.upsert_contact(
+        name="Anna",
+        notes="updated note",
+        tags=[],
+        operator="Brandon",
+        created_by="grok-live",
+        phone="+14108166914",
+    )
+
+    data = contacts_mod.load_contacts()
+    saved = next(c for c in data["Brandon"].values() if c["name"] == "Anna")
+    assert saved["inbound_allowed"] is True
+    assert saved["is_operator_self"] is True
+    assert saved["notes"] == "updated note"
 
 
 def test_post_contacts_persists_flags(isolated_contacts):

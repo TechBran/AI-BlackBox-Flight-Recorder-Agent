@@ -14,8 +14,8 @@ class ContactUpsertRequest(BaseModel):
     relationship: Optional[str] = None
     notes: Optional[str] = ""
     tags: Optional[List[str]] = []
-    inbound_allowed: Optional[bool] = False   # may this number text in?
-    is_operator_self: Optional[bool] = False  # is this the operator's own line?
+    inbound_allowed: Optional[bool] = None   # may this number text in? (None = leave unchanged)
+    is_operator_self: Optional[bool] = None  # is this the operator's own line? (None = leave unchanged)
 
 
 @router.get("")
@@ -52,8 +52,8 @@ async def upsert_contact(req: ContactUpsertRequest):
         phone=req.phone,
         email=req.email,
         relationship=req.relationship,
-        inbound_allowed=bool(req.inbound_allowed),
-        is_operator_self=bool(req.is_operator_self),
+        inbound_allowed=req.inbound_allowed,    # None = leave unchanged (additive)
+        is_operator_self=req.is_operator_self,  # None = leave unchanged (additive)
     )
     resp = {"success": True, "contact": contact}
     if contact.get("warning"):

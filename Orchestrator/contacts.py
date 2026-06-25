@@ -34,7 +34,8 @@ def _normalize_phone(phone: str) -> str:
 
 
 def _apply_inbound_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Read-time migration defaults (non-destructive — never written to disk).
+    """Read-time migration defaults. The read itself does not rewrite the file
+    (a later save_contacts() would materialize the defaults onto disk).
 
     Legacy records predate the inbound-SMS flags. Preserve the current
     "in book => can text in" behavior so nobody is locked out:
@@ -59,7 +60,7 @@ def load_contacts() -> Dict[str, Any]:
     """Read contacts.json. Creates file with {} if missing.
 
     Applies read-time inbound-SMS defaults (see ``_apply_inbound_defaults``);
-    the on-disk file is not rewritten.
+    the read itself does not rewrite the file.
     """
     CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
     if not CONTACTS_FILE.exists():
@@ -185,8 +186,8 @@ def upsert_contact(
     phone: Optional[str] = None,
     email: Optional[str] = None,
     relationship: Optional[str] = None,
-    inbound_allowed: bool = False,
-    is_operator_self: bool = False
+    inbound_allowed: Optional[bool] = None,
+    is_operator_self: Optional[bool] = None
 ) -> Dict[str, Any]:
     """
     Create or update a contact. Matches existing by name (case-insensitive).
@@ -223,8 +224,13 @@ def upsert_contact(
             contact["email"] = email
         if relationship is not None:
             contact["relationship"] = relationship
-        contact["inbound_allowed"] = inbound_allowed
-        contact["is_operator_self"] = is_operator_self
+        # Additive contract: only overwrite a flag when the caller explicitly
+        # provided it. Flag-less callers (model/voice save_contact) must NOT
+        # wipe a previously-set flag back to False.
+        if inbound_allowed is not None:
+            contact["inbound_allowed"] = inbound_allowed
+        if is_operator_self is not None:
+            contact["is_operator_self"] = is_operator_self
         contact["updated_at"] = now
     else:
         # Create new
@@ -237,8 +243,12 @@ def upsert_contact(
             "relationship": relationship or "",
             "notes": notes,
             "tags": tags,
-            "inbound_allowed": inbound_allowed,
-            "is_operator_self": is_operator_self,
+            # New contacts default OPEN to inbound: backward-compatible with the
+            # legacy migration default ("in book => can text in") so a flag-less
+            # create (model/voice save_contact) stays textable; opt-out by
+            # passing inbound_allowed=False for outbound-only contacts.
+            "inbound_allowed": bool(inbound_allowed) if inbound_allowed is not None else True,
+            "is_operator_self": bool(is_operator_self),  # None -> False
             "created_by": created_by,
             "created_at": now,
             "updated_at": now
