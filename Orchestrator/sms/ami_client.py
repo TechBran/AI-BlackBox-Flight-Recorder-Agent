@@ -15,6 +15,48 @@ from typing import Callable, Optional
 log = logging.getLogger("sms.ami")
 
 
+def _strip_unrenderable(text: str) -> str:
+    """Drop characters this gateway can't render in an SMS.
+
+    Empirically (verified on the TG200), supplementary-plane emoji — code points
+    above U+FFFF, e.g. 📌 🚀 — arrive garbled (rendered as stray glyphs like "ߚ"),
+    while Basic-Multilingual-Plane symbols (⚖ — accented letters) render fine. So
+    we remove ONLY astral-plane code points (the ones proven to corrupt) and keep
+    everything that renders, then collapse any whitespace the removal orphaned.
+    """
+    stripped = "".join(ch for ch in text if ord(ch) <= 0xFFFF)
+    # A dropped "📌 " leaves a leading/doubled space — tidy runs of spaces/tabs
+    # (NOT newlines, which the gateway renders correctly) back down to one.
+    import re
+    return re.sub(r"[ \t]{2,}", " ", stripped)
+
+
+def _encode_sms_body(message: str) -> str:
+    """Make an SMS body safe to embed in the line-oriented AMI ``Command:`` field.
+
+    AMI is line-oriented: a raw CR/LF terminates the ``Command:`` field and a
+    blank line terminates the whole action. A multi-line body (e.g. a briefing
+    with a header, a blank separator line, then bullets) is therefore guillotined
+    at the first newline — the gateway only ever sees the first line, so the
+    recipient gets a header-only SMS.
+
+    This mirrors the INBOUND convention (``_handle_received_sms`` URL-decodes the
+    gateway's percent-encoded ``Content``): we percent-encode only the
+    framing-breakers so the gateway decodes them back to real characters on the
+    handset, and — if it does not — the full body still arrives (showing ``%0A``
+    rather than vanishing). Only characters that can corrupt the field/action
+    framing or the quoted CLI token are encoded; everything else stays literal so
+    an undecoded body is still readable. ``%`` is encoded first so a literal ``%``
+    in the user's text round-trips instead of being read as the start of an escape.
+    """
+    return (
+        message.replace("%", "%25")   # first — keep a literal % from looking like an escape
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")          # the actual bug: bare newline truncated the field
+        .replace('"', "%22")          # protects the quoted CLI arg (replaces the unreliable \" escape)
+    )
+
+
 class AMISMSClient:
     """Async AMI client specialised for TG200 SMS operations."""
 
@@ -474,8 +516,11 @@ class AMISMSClient:
         if not self._authenticated:
             return {"success": False, "error": "Not connected to AMI"}
 
-        # Escape double quotes in message body
-        safe_msg = message.replace('"', '\\"')
+        # Make the body safe for the line-oriented AMI Command: field. First drop
+        # characters the gateway can't render (astral-plane emoji garble), then
+        # percent-encode the framing-breakers so a raw newline can't truncate the
+        # field to its first line (the header-only bug). See the two helpers.
+        safe_msg = _encode_sms_body(_strip_unrenderable(message))
 
         command = f'gsm send sms {span} {destination} "{safe_msg}"'
         log.info("Sending SMS to %s via span %d (%d chars)", destination, span, len(message))
