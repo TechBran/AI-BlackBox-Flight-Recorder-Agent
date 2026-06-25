@@ -42,6 +42,7 @@ from Orchestrator.agent_context import (
 )
 from Orchestrator.config import USERS_DEFAULT
 from Orchestrator.models import AGENT_AUTO_APPROVE_PATTERNS, AGENT_PERMISSION_PATTERNS, AgentSession, RegisteredApp
+from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
 from Orchestrator.volume import now_utc_iso
 from starlette.websockets import WebSocketState
@@ -527,6 +528,25 @@ def background_process_reader(session: AgentSession):
     print(f"[AGENT] Background reader ended for session {session.session_id}")
     with agent_lock:
         session.status = "completed"
+
+    # MN.7: agent/CLI session completion. This thread runs INDEPENDENTLY of any
+    # WebSocket client (the process keeps going even if the Portal disconnects),
+    # so it is the right place to tell a disconnected operator the run finished.
+    # Sync thread → fire-and-forget via the bridge; fully isolated so a notify
+    # failure never affects the reader's own completion bookkeeping. An
+    # unattributed session (no operator) is suppressed to avoid spam.
+    try:
+        operator = (session.operator or "").strip()
+        if operator and operator != "system":
+            notify_in_background(
+                operator,
+                "Agent session finished",
+                f"Your Claude Code session in {session.working_directory or 'the workspace'} finished.",
+                category="agent",
+                dedup_key=f"agent:{session.session_id}:{session.message_count}",
+            )
+    except Exception as e:  # noqa: BLE001 — never let a notify break the reader
+        print(f"[AGENT] completion notification failed (non-fatal): {e}")
 
 
 async def streaming_reader_task(session: AgentSession, websocket: WebSocket):
