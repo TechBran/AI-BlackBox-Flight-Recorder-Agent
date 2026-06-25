@@ -68,7 +68,13 @@ async def list_cron_contacts(operator: str):
         save_contacts(data)
     book = data.get(operator, {})
     contacts = [
-        {"name": c.get("name", ""), "phone": c.get("phone", ""), "relationship": c.get("relationship", "")}
+        {
+            "name": c.get("name", ""),
+            "phone": c.get("phone", ""),
+            "relationship": c.get("relationship", ""),
+            "inbound_allowed": c.get("inbound_allowed", True),
+            "is_operator_self": c.get("is_operator_self", False),
+        }
         for c in book.values() if c.get("phone")
     ]
     contacts.sort(key=lambda c: c["name"].lower())

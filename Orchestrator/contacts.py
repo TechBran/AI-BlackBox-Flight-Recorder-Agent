@@ -27,14 +27,46 @@ SEED_CONTACT = {
 }
 
 
+def _normalize_phone(phone: str) -> str:
+    """Strip to last 10 digits for cross-book comparison."""
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _apply_inbound_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-time migration defaults (non-destructive — never written to disk).
+
+    Legacy records predate the inbound-SMS flags. Preserve the current
+    "in book => can text in" behavior so nobody is locked out:
+      - missing ``inbound_allowed``  => True
+      - missing ``is_operator_self`` => False
+    An explicit value (including ``False``) is always preserved.
+    """
+    for book in data.values():
+        if not isinstance(book, dict):
+            continue
+        for contact in book.values():
+            if not isinstance(contact, dict):
+                continue
+            if "inbound_allowed" not in contact:
+                contact["inbound_allowed"] = True
+            if "is_operator_self" not in contact:
+                contact["is_operator_self"] = False
+    return data
+
+
 def load_contacts() -> Dict[str, Any]:
-    """Read contacts.json. Creates file with {} if missing."""
+    """Read contacts.json. Creates file with {} if missing.
+
+    Applies read-time inbound-SMS defaults (see ``_apply_inbound_defaults``);
+    the on-disk file is not rewritten.
+    """
     CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
     if not CONTACTS_FILE.exists():
         CONTACTS_FILE.write_text("{}")
         return {}
     try:
-        return json.loads(CONTACTS_FILE.read_text())
+        return _apply_inbound_defaults(json.loads(CONTACTS_FILE.read_text()))
     except (json.JSONDecodeError, IOError):
         return {}
 
@@ -114,6 +146,36 @@ def search_contacts(query: str, operator: str) -> List[Dict[str, Any]]:
     return [contact for _, contact in results[:10]]
 
 
+def _scan_self_flag_collision(
+    data: Dict[str, Any], phone: Optional[str], operator: str
+) -> Optional[str]:
+    """Cross-book scan for an identity collision (write-time guard).
+
+    Returns a warning string if the same number (last-10-digit match) is already
+    flagged ``is_operator_self`` in a DIFFERENT operator's book, else None. Soft
+    enforcement: the caller still saves — the storage has no global unique key,
+    so the rule + warning carry the uniqueness guarantee.
+    """
+    target = _normalize_phone(phone)
+    if not target:
+        return None
+    for other_op, book in data.items():
+        if other_op == operator or not isinstance(book, dict):
+            continue
+        for contact in book.values():
+            if not isinstance(contact, dict):
+                continue
+            if not contact.get("is_operator_self"):
+                continue
+            if _normalize_phone(contact.get("phone", "")) == target:
+                return (
+                    f"This number is already flagged as operator-self in "
+                    f"{other_op}'s book (contact \"{contact.get('name', '')}\"). "
+                    f"Saved anyway, but a number should identify one operator."
+                )
+    return None
+
+
 def upsert_contact(
     name: str,
     notes: str,
@@ -122,16 +184,25 @@ def upsert_contact(
     created_by: str,
     phone: Optional[str] = None,
     email: Optional[str] = None,
-    relationship: Optional[str] = None
+    relationship: Optional[str] = None,
+    inbound_allowed: bool = False,
+    is_operator_self: bool = False
 ) -> Dict[str, Any]:
     """
     Create or update a contact. Matches existing by name (case-insensitive).
-    Returns the saved contact.
+    Returns the saved contact. When ``is_operator_self`` collides with another
+    operator's self-flag for the same number, a ``warning`` key is included on
+    the returned contact (it still saves).
     """
     data = load_contacts()
     ensure_operator_book(data, operator)
     book = data[operator]
     now = datetime.now(timezone.utc).isoformat()
+
+    # Write-time identity guard: scan OTHER books before saving.
+    warning = None
+    if is_operator_self:
+        warning = _scan_self_flag_collision(data, phone, operator)
 
     # Check for existing contact with same name
     existing_id = None
@@ -152,6 +223,8 @@ def upsert_contact(
             contact["email"] = email
         if relationship is not None:
             contact["relationship"] = relationship
+        contact["inbound_allowed"] = inbound_allowed
+        contact["is_operator_self"] = is_operator_self
         contact["updated_at"] = now
     else:
         # Create new
@@ -164,6 +237,8 @@ def upsert_contact(
             "relationship": relationship or "",
             "notes": notes,
             "tags": tags,
+            "inbound_allowed": inbound_allowed,
+            "is_operator_self": is_operator_self,
             "created_by": created_by,
             "created_at": now,
             "updated_at": now
@@ -171,4 +246,6 @@ def upsert_contact(
         book[contact_id] = contact
 
     save_contacts(data)
+    if warning:
+        return {**contact, "warning": warning}
     return contact
