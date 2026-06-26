@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -22,7 +23,9 @@ data class Contact(
     val relationship: String,
     val notes: String,
     val tags: List<String>,
-    val createdAt: String
+    val createdAt: String,
+    val inboundAllowed: Boolean = true,
+    val isOperatorSelf: Boolean = false
 )
 
 class ContactsViewModel(application: Application) : AndroidViewModel(application) {
@@ -101,7 +104,10 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
                         relationship = obj["relationship"]?.jsonPrimitive?.content ?: "",
                         notes = obj["notes"]?.jsonPrimitive?.content ?: "",
                         tags = obj["tags"]?.jsonArray?.mapNotNull { it.jsonPrimitive.content } ?: emptyList(),
-                        createdAt = obj["created_at"]?.jsonPrimitive?.content ?: ""
+                        createdAt = obj["created_at"]?.jsonPrimitive?.content ?: "",
+                        // SMS flags; legacy/absent => inbound allowed, not operator-self
+                        inboundAllowed = obj["inbound_allowed"]?.jsonPrimitive?.booleanOrNull ?: true,
+                        isOperatorSelf = obj["is_operator_self"]?.jsonPrimitive?.booleanOrNull ?: false
                     )
                 }
             } catch (_: Exception) {
@@ -122,7 +128,9 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
         email: String,
         relationship: String,
         notes: String,
-        tags: String
+        tags: String,
+        inboundAllowed: Boolean,
+        isOperatorSelf: Boolean
     ) {
         val api = api ?: return
         if (_isSaving.value) return
@@ -131,12 +139,20 @@ class ContactsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             try {
                 val tagsJson = tags.split(",").map { it.trim() }.filter { it.isNotBlank() }.joinToString(",") { "\"$it\"" }
-                val body = """{"operator":"$operator","name":"${name.replace("\"", "\\\"")}","phone":"$phone","email":"$email","relationship":"$relationship","notes":"${notes.replace("\"", "\\\"")}","tags":[$tagsJson]}"""
+                val body = """{"operator":"$operator","name":"${name.replace("\"", "\\\"")}","phone":"$phone","email":"$email","relationship":"$relationship","notes":"${notes.replace("\"", "\\\"")}","tags":[$tagsJson],"inbound_allowed":$inboundAllowed,"is_operator_self":$isOperatorSelf}"""
 
                 // Always use POST — backend upserts by name (case-insensitive match)
-                api.post("/contacts", body)
+                val response = api.post("/contacts", body)
                 val existingId = _editingContact.value?.id
-                _actionMessage.value = if (existingId != null) "Contact updated" else "Contact created"
+
+                // Surface the write-time identity guard warning if present (save still succeeded)
+                val warning = try {
+                    json.parseToJsonElement(response).jsonObject["warning"]?.jsonPrimitive?.content
+                } catch (_: Exception) {
+                    null
+                }
+                _actionMessage.value = warning
+                    ?: if (existingId != null) "Contact updated" else "Contact created"
 
                 _showEditDialog.value = false
                 _editingContact.value = null

@@ -80,6 +80,10 @@ async function saveContact(data) {
         if (result.success) {
             toastSuccess(_editingContact ? 'Contact updated' : 'Contact added');
         }
+        // Surface the write-time identity guard warning (non-blocking — save succeeded)
+        if (result.warning) {
+            toast(result.warning);
+        }
         hideEditForm();
         await fetchContacts();
     } catch (e) {
@@ -200,6 +204,14 @@ function showEditForm(contact) {
     const tags = _editingContact && Array.isArray(_editingContact.tags)
         ? _editingContact.tags.join(', ')
         : '';
+    // Per-contact SMS flags (defaults: inbound allowed, not operator self)
+    const inboundAllowed = _editingContact
+        ? _editingContact.inbound_allowed !== false
+        : true;
+    const isOperatorSelf = _editingContact
+        ? _editingContact.is_operator_self === true
+        : false;
+    const opName = escapeHtml(getOperator());
 
     container.innerHTML = `
         <div class="contacts-edit-form">
@@ -226,6 +238,18 @@ function showEditForm(contact) {
             <div class="form-row">
                 <label class="form-label" for="contactTags">Tags (comma-separated)</label>
                 <input type="text" id="contactTags" value="${escapeHtml(tags)}" placeholder="vip, developer, nyc..." />
+            </div>
+            <div class="form-row">
+                <label class="form-label" for="contactInboundAllowed" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="contactInboundAllowed" ${inboundAllowed ? 'checked' : ''} />
+                    Allow inbound texts
+                </label>
+            </div>
+            <div class="form-row">
+                <label class="form-label" for="contactIsOperatorSelf" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                    <input type="checkbox" id="contactIsOperatorSelf" ${isOperatorSelf ? 'checked' : ''} />
+                    This number IS operator ${opName}
+                </label>
             </div>
             <div class="form-actions">
                 <button id="btnContactCancel" class="btn">Cancel</button>
@@ -264,6 +288,8 @@ function handleSave() {
     const relationship = ($('contactRelationship')?.value || '').trim();
     const notes = ($('contactNotes')?.value || '').trim();
     const tagsRaw = ($('contactTags')?.value || '').trim();
+    const inboundAllowed = !!$('contactInboundAllowed')?.checked;
+    const isOperatorSelf = !!$('contactIsOperatorSelf')?.checked;
 
     if (!name) {
         toastError('Name is required');
@@ -274,7 +300,11 @@ function handleSave() {
         ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean)
         : [];
 
-    const data = { name, phone, email, relationship, notes, tags };
+    const data = {
+        name, phone, email, relationship, notes, tags,
+        inbound_allowed: inboundAllowed,
+        is_operator_self: isOperatorSelf
+    };
 
     // If editing, include the existing contact id
     if (_editingContact && _editingContact.id) {

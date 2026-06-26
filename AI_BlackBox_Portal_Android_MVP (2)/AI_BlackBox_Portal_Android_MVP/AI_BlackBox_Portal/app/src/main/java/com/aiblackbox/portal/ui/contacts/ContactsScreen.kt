@@ -168,9 +168,10 @@ fun ContactsScreen(
     if (showEditDialog) {
         EditContactDialog(
             contact = editingContact,
+            operator = operator,
             isSaving = isSaving,
-            onSave = { name, phone, email, relationship, notes, tags ->
-                viewModel.saveContact(name, phone, email, relationship, notes, tags)
+            onSave = { name, phone, email, relationship, notes, tags, inboundAllowed, isOperatorSelf ->
+                viewModel.saveContact(name, phone, email, relationship, notes, tags, inboundAllowed, isOperatorSelf)
             },
             onDismiss = { viewModel.hideEdit() }
         )
@@ -298,8 +299,9 @@ private fun ContactCard(
 @Composable
 private fun EditContactDialog(
     contact: Contact?,
+    operator: String,
     isSaving: Boolean,
-    onSave: (name: String, phone: String, email: String, relationship: String, notes: String, tags: String) -> Unit,
+    onSave: (name: String, phone: String, email: String, relationship: String, notes: String, tags: String, inboundAllowed: Boolean, isOperatorSelf: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val feedback = rememberPressFeedback()
@@ -309,6 +311,9 @@ private fun EditContactDialog(
     var relationship by remember { mutableStateOf(contact?.relationship ?: "") }
     var notes by remember { mutableStateOf(contact?.notes ?: "") }
     var tags by remember { mutableStateOf(contact?.tags?.joinToString(", ") ?: "") }
+    // SMS flags; new contacts default to inbound-allowed, not operator-self
+    var inboundAllowed by remember { mutableStateOf(contact?.inboundAllowed ?: true) }
+    var isOperatorSelf by remember { mutableStateOf(contact?.isOperatorSelf ?: false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -418,11 +423,22 @@ private fun EditContactDialog(
                         unfocusedLabelColor = Neutral500
                     )
                 )
+                SwitchRow(
+                    label = "Allow inbound texts",
+                    checked = inboundAllowed,
+                    onCheckedChange = { feedback(); inboundAllowed = it }
+                )
+                SwitchRow(
+                    label = if (operator.isNotBlank()) "This number IS operator $operator"
+                            else "This number IS the operator",
+                    checked = isOperatorSelf,
+                    onCheckedChange = { feedback(); isOperatorSelf = it }
+                )
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { feedback(); onSave(name.trim(), phone.trim(), email.trim(), relationship.trim(), notes.trim(), tags.trim()) },
+                onClick = { feedback(); onSave(name.trim(), phone.trim(), email.trim(), relationship.trim(), notes.trim(), tags.trim(), inboundAllowed, isOperatorSelf) },
                 enabled = name.isNotBlank() && !isSaving
             ) {
                 if (isSaving) {
@@ -442,6 +458,37 @@ private fun EditContactDialog(
             }
         }
     )
+}
+
+@Composable
+private fun SwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            color = BbxWhite,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = BbxWhite,
+                checkedTrackColor = BbxAccent,
+                uncheckedThumbColor = Neutral500,
+                uncheckedTrackColor = Neutral300
+            )
+        )
+    }
 }
 
 @Composable
