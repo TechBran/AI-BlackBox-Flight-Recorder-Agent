@@ -91,12 +91,24 @@ def _make_router(monkeypatch, books):
 
     calls = []
 
-    async def fake_chat(sender, body, operator, contact_name):
+    # **kwargs absorbs the M3 is_peer flag (and any future _route_through_chat
+    # kwargs) so the stub stays compatible as the real signature grows.
+    async def fake_chat(sender, body, operator, contact_name, **kwargs):
         calls.append({"sender": sender, "body": body, "operator": operator,
-                      "contact_name": contact_name})
+                      "contact_name": contact_name, **kwargs})
         return "reply"
 
     monkeypatch.setattr(r, "_route_through_chat", fake_chat)
+
+    # Neutralize the M3 peer-inbound notification bus so the precedence tests
+    # never fire the real bus (which would mint a snapshot). Peer notification is
+    # asserted separately in test_sms_peer_path.
+    async def _noop_notify(*a, **k):
+        return None
+
+    import Orchestrator.sms.router as _router_mod
+    monkeypatch.setattr(_router_mod, "notify", _noop_notify)
+
     r._chat_calls = calls
     r._fake_store = store
     r._fake_mgr = mgr

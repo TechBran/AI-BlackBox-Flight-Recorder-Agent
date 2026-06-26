@@ -1302,6 +1302,52 @@ def process_browser_use(task: Task):
         print(f"[WORKER] Browser task {task.task_id} error: {e}")
 
 
+def build_sms_prompt_prefix(
+    sms_contact_name: str,
+    sms_sender: str,
+    sms_peer: bool = False,
+    operator=None,
+) -> str:
+    """Build the SMS-mode system prefix prepended to the core system prompt.
+
+    The base SMS rules (160-char target, plain text, etc.) apply in every SMS
+    reply. When ``sms_peer`` is True the inbound is from a whitelisted
+    NON-operator (e.g. Anna texting the operator's AI), so the prefix gains
+    'on the operator's behalf' framing — the model speaks AS the operator's
+    assistant to a third party. The operator's own persona still loads
+    separately via build_core_system_prompt; this only frames the SMS turn.
+
+    A 'self' inbound (sms_peer False — the operator texting their own AI) keeps
+    today's framing with no on-behalf language.
+    """
+    op_label = (operator or "the operator")
+    if sms_peer:
+        intro = (
+            f"IMPORTANT: You are responding to an SMS text message from {sms_contact_name} "
+            f"({sms_sender}). {sms_contact_name} is NOT {op_label} — you are replying to "
+            f"{sms_contact_name} ON {op_label}'s behalf, as {op_label}'s assistant. "
+            f"Speak to {sms_contact_name} accordingly (do not pretend to be {op_label} in "
+            f"the first person; act as {op_label}'s helpful assistant).\n"
+        )
+    else:
+        intro = (
+            f"IMPORTANT: You are responding to an SMS text message from {sms_contact_name} "
+            f"({sms_sender}).\n"
+        )
+    return (
+        intro
+        + "SMS RULES:\n"
+        "- Keep responses under 160 characters when possible (1 SMS segment)\n"
+        "- Maximum 1500 characters total (will be split into multiple messages automatically)\n"
+        "- Plain text ONLY — NO markdown, NO formatting, NO bullet points, NO headers\n"
+        "- Be concise and conversational, like a real text message\n"
+        "- Do NOT use asterisks, backticks, or any special formatting\n"
+        "- You can send longer responses if needed — the system splits them into multiple texts\n"
+        "- To send SMS to someone else, use the send_sms tool\n"
+        "- Respond naturally as a helpful AI assistant via text message\n\n"
+    )
+
+
 def process_chat_task(task: Task):
     """Process a chat request asynchronously"""
     global CURRENT_OPERATOR
@@ -1458,22 +1504,23 @@ def process_chat_task(task: Task):
         sms_mode = inp_dict.get("sms_mode", False)
         sms_sender = inp_dict.get("sms_sender", "")
         sms_contact_name = inp_dict.get("sms_contact_name", "unknown")
+        # M3: a whitelisted PEER (non-operator, e.g. Anna) texting in. The router
+        # tags the payload sms_peer=True; the reply is then framed as on the
+        # operator's behalf. Absent/False -> a 'self' inbound (today's framing).
+        sms_peer = inp_dict.get("sms_peer", False)
         sms_prompt_prefix = ""
 
         if sms_mode:
-            sms_prompt_prefix = (
-                f"IMPORTANT: You are responding to an SMS text message from {sms_contact_name} ({sms_sender}).\n"
-                "SMS RULES:\n"
-                "- Keep responses under 160 characters when possible (1 SMS segment)\n"
-                "- Maximum 1500 characters total (will be split into multiple messages automatically)\n"
-                "- Plain text ONLY — NO markdown, NO formatting, NO bullet points, NO headers\n"
-                "- Be concise and conversational, like a real text message\n"
-                "- Do NOT use asterisks, backticks, or any special formatting\n"
-                "- You can send longer responses if needed — the system splits them into multiple texts\n"
-                "- To send SMS to someone else, use the send_sms tool\n"
-                "- Respond naturally as a helpful AI assistant via text message\n\n"
+            sms_prompt_prefix = build_sms_prompt_prefix(
+                sms_contact_name=sms_contact_name,
+                sms_sender=sms_sender,
+                sms_peer=sms_peer,
+                operator=active_operator,
             )
-            print(f"[SMS-MODE] Processing SMS from {sms_contact_name} ({sms_sender}) for operator {active_operator}")
+            print(
+                f"[SMS-MODE] Processing SMS from {sms_contact_name} ({sms_sender}) "
+                f"for operator {active_operator} (peer={bool(sms_peer)})"
+            )
 
         # Build system prompt — converged on the streaming target (no JSON envelope).
         # Phase 1+2 cutover: the non-stream path uses the SAME core prompt as the

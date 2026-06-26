@@ -8,6 +8,18 @@ import pytest
 
 from Orchestrator.sms.manager import AMIConnectionManager
 from Orchestrator.sms.router import SMSRouter, Resolution
+
+
+@pytest.fixture(autouse=True)
+def _silence_notify(monkeypatch):
+    """M3: neutralize the peer-inbound notification bus across this module so the
+    peer-classified routing tests never fire the real notify() (which would mint
+    a snapshot). Peer notification is asserted in test_sms_peer_path."""
+    async def _noop(*a, **k):
+        return None
+    import Orchestrator.sms.router as _router_mod
+    monkeypatch.setattr(_router_mod, "notify", _noop)
+
 from Orchestrator.sms.tests.test_manager import FakeClient, _gw
 
 
@@ -45,7 +57,7 @@ async def test_inbound_reply_goes_out_same_gateway(monkeypatch):
         lambda sender, owner: Resolution("Brandon", {"name": "Alice", "phone": sender}, "peer"),
     )
 
-    async def fake_chat(sender, body, operator, contact_name):
+    async def fake_chat(sender, body, operator, contact_name, **kwargs):
         return "hello back"
 
     monkeypatch.setattr(router, "_route_through_chat", fake_chat)
@@ -73,7 +85,7 @@ async def test_inbound_unknown_sender_dropped_before_chat(monkeypatch):
 
     called = {"chat": False}
 
-    async def fake_chat(*args):
+    async def fake_chat(*args, **kwargs):
         called["chat"] = True
         return "should not happen"
 
@@ -100,7 +112,7 @@ async def test_inbound_reply_falls_back_to_default_when_gateway_unknown(monkeypa
         lambda sender, owner: Resolution("Brandon", {"name": "Alice", "phone": sender}, "peer"),
     )
 
-    async def fake_chat(*args):
+    async def fake_chat(*args, **kwargs):
         return "ok"
 
     monkeypatch.setattr(router, "_route_through_chat", fake_chat)

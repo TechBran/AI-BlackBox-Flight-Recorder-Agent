@@ -14,7 +14,21 @@ import logging
 from collections import namedtuple
 from datetime import datetime, timezone
 
+# Notification bus (MN.2). Imported at module scope so the M3 peer-inbound hook
+# can ``await notify(...)`` directly (handle_incoming is async, running on the
+# AMI client's event loop — no sync->async bridge needed; mirrors
+# scheduler.manager's async _notify_run_outcome). notify() never raises and
+# always records a searchable snapshot. Tests monkeypatch ``router.notify``.
+try:
+    from Orchestrator.notifications.bus import notify
+except ImportError:  # pragma: no cover - import-path fallback (mirrors load_contacts)
+    from notifications.bus import notify
+
 log = logging.getLogger("sms.router")
+
+# Notification body preview cap for a peer inbound — keep the alert short; the
+# full inbound is already persisted to the SMS store + the chat thread.
+PEER_NOTIFY_PREVIEW_CHARS = 200
 
 # The fixed, spoofable system/self seed number. A contact whose phone is this
 # number can NEVER satisfy the inbound whitelist, regardless of created_by /
@@ -330,6 +344,12 @@ class SMSRouter:
             return
 
         contact_name = contact.get("name", sender) if contact else sender
+        # M3: consume the classification. A 'peer' inbound is a whitelisted
+        # NON-operator (e.g. Anna) texting the operator's AI — the reply is
+        # framed as on the operator's behalf AND the operator is notified so they
+        # can take over via send_manual. A 'self' inbound is the operator
+        # themselves — no peer framing, no notification.
+        is_peer = classification == "peer"
         log.info(
             "SMS routed to operator=%s contact=%s class=%s",
             operator, contact_name, classification,
@@ -354,10 +374,34 @@ class SMSRouter:
             gateway_id=gateway_id or "",
         )
 
+        # 3b. M3 — notify the operator when a whitelisted PEER (not themselves)
+        #     texts in, so they know e.g. Anna messaged and can take over via the
+        #     existing send_manual path. notify() never raises and always records
+        #     a searchable snapshot; we await it directly (handle_incoming is
+        #     async). No notification on a 'self' inbound (the operator's own line).
+        if is_peer:
+            try:
+                preview = body[:PEER_NOTIFY_PREVIEW_CHARS]
+                if len(body) > PEER_NOTIFY_PREVIEW_CHARS:
+                    preview += "…"
+                await notify(
+                    operator,
+                    f"SMS from {contact_name}",
+                    preview,
+                    category="sms",
+                    dedup_key=f"sms-inbound:{operator}:{sender}:{timestamp}",
+                )
+            except Exception:
+                # notify() is engineered never to raise; guard anyway so an alert
+                # failure never blocks the auto-reply.
+                log.exception("Peer-inbound notification failed for SMS from %s", sender)
+
         # 4. Process through main chat pipeline (replaces process_incoming_sms)
         reply = ""
         try:
-            reply = await self._route_through_chat(sender, body, operator, contact_name)
+            reply = await self._route_through_chat(
+                sender, body, operator, contact_name, is_peer=is_peer
+            )
         except Exception:
             log.exception("Chat pipeline failed for SMS from %s", sender)
 
@@ -393,8 +437,22 @@ class SMSRouter:
         else:
             log.warning("No AI reply generated for SMS from %s", sender)
 
-    async def _route_through_chat(self, sender: str, body: str, operator: str, contact_name: str) -> str:
-        """Route SMS through the main /chat pipeline for full context retrieval."""
+    async def _route_through_chat(
+        self,
+        sender: str,
+        body: str,
+        operator: str,
+        contact_name: str,
+        is_peer: bool = False,
+    ) -> str:
+        """Route SMS through the main /chat pipeline for full context retrieval.
+
+        ``is_peer`` (M3): the inbound is from a whitelisted NON-operator (e.g.
+        Anna). It is surfaced to the model as ``sms_peer=True`` in the payload so
+        tasks.py can frame the reply as on the operator's behalf; the operator's
+        own persona/memory still loads (their voice). Omitted/False for a 'self'
+        inbound.
+        """
         import time
         import aiohttp
         from Orchestrator.state import get_operator_preference
@@ -404,6 +462,10 @@ class SMSRouter:
 
         sms_context = f"[SMS from {contact_name} ({sender})]: {body}"
 
+        # NOTE (M4): this payload dict is the extension point for SMS thread
+        # history — M4 will set payload["messages"] = [*prior_turns, current].
+        # Keep additions to this dict simple key/value entries (like sms_peer
+        # below) so that prepend stays a clean, isolated change.
         payload = {
             "messages": [{"role": "user", "content": sms_context}],
             "operator": operator,
@@ -412,6 +474,7 @@ class SMSRouter:
             "sms_mode": True,
             "sms_sender": sender,
             "sms_contact_name": contact_name,
+            "sms_peer": is_peer,
         }
 
         try:
