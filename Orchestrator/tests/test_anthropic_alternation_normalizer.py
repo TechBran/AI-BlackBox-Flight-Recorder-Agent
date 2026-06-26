@@ -12,7 +12,10 @@ place, and a correctly-alternating list is returned unchanged.
 Content may be a plain str OR a list of content blocks (multimodal). The merge
 must never drop or corrupt content blocks.
 """
-from Orchestrator.routes.chat_routes import _normalize_alternation
+from Orchestrator.routes.chat_routes import (
+    _normalize_alternation,
+    _prepare_anthropic_messages,
+)
 
 
 def _roles(msgs):
@@ -179,3 +182,82 @@ def test_three_consecutive_users_collapse_to_one():
     assert _roles(out) == ["user"]
     for tok in ("1", "2", "3"):
         assert tok in out[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# _prepare_anthropic_messages: extract system FIRST, then normalize the
+# user/assistant-only convo. Guards the dormant gap where an interleaved
+# system row breaks list-adjacency so two surrounding user turns never merge,
+# then system extraction drops the row -> [user, user] -> Anthropic 400.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_interspersed_system_between_users_still_merges():
+    # [user, system, user]: the system row sits BETWEEN two user turns. After
+    # extracting system out first, the two users are adjacent and must merge to
+    # ONE user turn. (Pre-fix this produced [user, user] and 400'd.)
+    system_text, convo = _prepare_anthropic_messages([
+        {"role": "user", "content": "u1"},
+        {"role": "system", "content": "sys note"},
+        {"role": "user", "content": "u2"},
+    ])
+    assert _roles(convo) == ["user"], (
+        "interspersed system row must not block the two user turns from merging")
+    # Strict alternation: no two adjacent same roles.
+    roles = _roles(convo)
+    assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1))
+    # Both user payloads survive in the merged turn.
+    assert "u1" in convo[0]["content"]
+    assert "u2" in convo[0]["content"]
+    # System text is extracted unchanged.
+    assert "sys note" in system_text
+    # No system row leaks into the conversation array.
+    assert all(m["role"] != "system" for m in convo)
+
+
+def test_prepare_front_loaded_system_normal_path_unchanged():
+    # The real-world BlackBox shape: system front-loaded, convo alternates.
+    system_text, convo = _prepare_anthropic_messages([
+        {"role": "system", "content": "be helpful"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "thanks"},
+    ])
+    assert _roles(convo) == ["user", "assistant", "user"]
+    assert convo[0]["role"] == "user"
+    assert system_text == "be helpful"
+    assert all(m["role"] != "system" for m in convo)
+
+
+def test_prepare_multiple_system_rows_joined():
+    system_text, convo = _prepare_anthropic_messages([
+        {"role": "system", "content": "first"},
+        {"role": "system", "content": "second"},
+        {"role": "user", "content": "hi"},
+    ])
+    assert system_text == "first\n\nsecond"
+    assert _roles(convo) == ["user"]
+
+
+def test_prepare_trailing_consecutive_users_still_merge():
+    # Defends the SMS-style thread through the prepare wrapper too.
+    system_text, convo = _prepare_anthropic_messages([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "yo"},
+        {"role": "assistant", "content": "hey"},
+        {"role": "user", "content": "there?"},
+        {"role": "user", "content": "hello??"},
+    ])
+    assert _roles(convo) == ["user", "assistant", "user"]
+    assert system_text == "sys"
+    assert "there?" in convo[-1]["content"]
+    assert "hello??" in convo[-1]["content"]
+
+
+def test_prepare_no_system_returns_empty_system_text():
+    system_text, convo = _prepare_anthropic_messages([
+        {"role": "user", "content": "u1"},
+        {"role": "user", "content": "u2"},
+    ])
+    assert system_text == ""
+    assert _roles(convo) == ["user"]

@@ -419,15 +419,36 @@ def _normalize_alternation(messages: List[Dict]) -> List[Dict]:
     return out
 
 
+def _prepare_anthropic_messages(messages: List[Dict]):
+    """Split system text out and return an alternation-safe conversation.
+
+    Returns ``(system_text, convo)`` where ``system_text`` is the joined
+    content of every system row (extracted from the ORIGINAL list, unchanged)
+    and ``convo`` is the user/assistant-only conversation with consecutive
+    same-role turns merged so roles strictly alternate.
+
+    System is extracted and filtered out *before* normalizing. This matters:
+    a system row interleaved between two user turns (e.g. ``[user, system,
+    user]``) would otherwise break list-adjacency so the two user turns never
+    merge, and then system extraction drops the row -- leaving ``[user, user]``,
+    the exact Anthropic 400 ("roles must alternate") this guard exists to
+    prevent. Filtering system out first lets the normalizer see the real
+    user/assistant adjacency.
+    """
+    system_text = "\n\n".join([m.get("content", "") for m in messages if m.get("role") == "system"])
+    convo = _normalize_alternation([m for m in messages if m.get("role") in ("user", "assistant")])
+    return system_text, convo
+
+
 def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
     if not ANTHROPIC_API_KEY: raise HTTPException(400, "ANTHROPIC_API_KEY not set")
-    # Defense-in-depth: collapse any consecutive same-role turns so the
-    # conversation array alternates (Anthropic 400s otherwise). Safe no-op on
-    # an already-alternating list; leaves system rows in place.
-    messages = _normalize_alternation(messages)
-    system_text = "\n\n".join([m.get("content","") for m in messages if m.get("role") == "system"])
+    # Defense-in-depth: extract system text, then collapse any consecutive
+    # same-role turns so the conversation array alternates (Anthropic 400s
+    # otherwise). System is pulled out BEFORE normalizing so an interleaved
+    # system row can't break adjacency and reintroduce consecutive roles.
+    system_text, convo = _prepare_anthropic_messages(messages)
     amsgs = []
-    for m in messages:
+    for m in convo:
         if m.get("role") in ("user", "assistant"):
             content = m.get("content")
             if isinstance(content, list): # Handle multimodal content
