@@ -115,6 +115,63 @@ def test_flagless_update_preserves_flags(isolated_contacts):
     assert saved["notes"] == "updated note"
 
 
+def test_partial_update_preserves_notes_and_tags(isolated_contacts):
+    """REGRESSION (data loss): a partial update that OMITS notes/tags must NOT
+    wipe them. A model-facing save_contact partial call (e.g. only setting a
+    flag or relationship) preserves existing notes + tags."""
+    contacts_mod.upsert_contact(
+        name="Brandon",
+        notes="hello",
+        tags=["x"],
+        operator="Brandon",
+        created_by="Brandon",
+        phone="+17165551234",
+    )
+
+    # Partial update omitting notes/tags entirely — only relationship changes.
+    contacts_mod.upsert_contact(
+        name="Brandon",
+        notes=None,
+        tags=None,
+        operator="Brandon",
+        created_by="Brandon",
+        relationship="self",
+        is_operator_self=True,
+    )
+
+    data = contacts_mod.load_contacts()
+    saved = next(c for c in data["Brandon"].values() if c["name"] == "Brandon")
+    assert saved["notes"] == "hello"
+    assert saved["tags"] == ["x"]
+    assert saved["relationship"] == "self"
+    assert saved["is_operator_self"] is True
+
+
+def test_explicit_empty_notes_still_clears(isolated_contacts):
+    """An explicit notes="" / tags=[] is a real caller intent → still clears."""
+    contacts_mod.upsert_contact(
+        name="Brandon",
+        notes="hello",
+        tags=["x"],
+        operator="Brandon",
+        created_by="Brandon",
+        phone="+17165551234",
+    )
+
+    contacts_mod.upsert_contact(
+        name="Brandon",
+        notes="",
+        tags=[],
+        operator="Brandon",
+        created_by="Brandon",
+    )
+
+    data = contacts_mod.load_contacts()
+    saved = next(c for c in data["Brandon"].values() if c["name"] == "Brandon")
+    assert saved["notes"] == ""
+    assert saved["tags"] == []
+
+
 def test_post_contacts_persists_flags(isolated_contacts):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

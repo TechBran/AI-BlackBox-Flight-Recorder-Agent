@@ -179,8 +179,8 @@ def _scan_self_flag_collision(
 
 def upsert_contact(
     name: str,
-    notes: str,
-    tags: List[str],
+    notes: Optional[str],
+    tags: Optional[List[str]],
     operator: str,
     created_by: str,
     phone: Optional[str] = None,
@@ -216,8 +216,14 @@ def upsert_contact(
         # Update existing
         contact = book[existing_id]
         contact["name"] = name
-        contact["notes"] = notes
-        contact["tags"] = tags
+        # Additive contract: only overwrite when the caller explicitly provided
+        # the field (an explicit "" / [] still clears — real caller intent;
+        # omission [None] preserves). A model-facing partial save_contact must
+        # not wipe existing notes/tags.
+        if notes is not None:
+            contact["notes"] = notes
+        if tags is not None:
+            contact["tags"] = tags
         if phone is not None:
             contact["phone"] = phone
         if email is not None:
@@ -241,8 +247,8 @@ def upsert_contact(
             "phone": phone or "",
             "email": email or "",
             "relationship": relationship or "",
-            "notes": notes,
-            "tags": tags,
+            "notes": notes if notes is not None else "",
+            "tags": tags if tags is not None else [],
             # New contacts default OPEN to inbound: backward-compatible with the
             # legacy migration default ("in book => can text in") so a flag-less
             # create (model/voice save_contact) stays textable; opt-out by

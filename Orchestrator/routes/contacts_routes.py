@@ -12,8 +12,8 @@ class ContactUpsertRequest(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     relationship: Optional[str] = None
-    notes: Optional[str] = ""
-    tags: Optional[List[str]] = []
+    notes: Optional[str] = None   # None = leave unchanged on update
+    tags: Optional[List[str]] = None  # None = leave unchanged on update
     inbound_allowed: Optional[bool] = None   # may this number text in? (None = leave unchanged)
     is_operator_self: Optional[bool] = None  # is this the operator's own line? (None = leave unchanged)
 
@@ -45,8 +45,8 @@ async def upsert_contact(req: ContactUpsertRequest):
     from Orchestrator.contacts import upsert_contact
     contact = upsert_contact(
         name=req.name,
-        notes=req.notes or "",
-        tags=req.tags or [],
+        notes=req.notes,    # None = leave unchanged (additive)
+        tags=req.tags,      # None = leave unchanged (additive)
         operator=req.operator,
         created_by=req.operator,
         phone=req.phone,
