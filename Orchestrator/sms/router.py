@@ -535,12 +535,25 @@ class SMSRouter:
         sms_context = f"[SMS from {contact_name} ({sender})]: {body}"
 
         # M4: prepend the recent SMS thread (oldest-first) as conversation turns,
-        # then append the live current user turn. A first-ever inbound (no prior
+        # then add the live current user turn. A first-ever inbound (no prior
         # thread) yields exactly the single current user turn (today's behavior).
+        #
+        # SMS defaults to Anthropic, which REQUIRES strict user/assistant
+        # alternation and 400s on consecutive same-role turns. When a peer sends
+        # two texts with no intervening AI reply, the trailing history turn is
+        # already a `user` turn — appending the current text as a SECOND user dict
+        # would produce [..., user, user] and the peer would get NO reply. So
+        # MERGE the current text into a trailing user turn instead of appending a
+        # second one. (This also absorbs the de-dup "current-not-found" edge,
+        # which likewise leaves a trailing user turn.)
         history_turns = self._build_thread_messages(
             operator, sender, body, line_number=line_number or "",
         )
-        messages = [*history_turns, {"role": "user", "content": sms_context}]
+        if history_turns and history_turns[-1]["role"] == "user":
+            history_turns[-1]["content"] += "\n" + sms_context
+            messages = history_turns
+        else:
+            messages = [*history_turns, {"role": "user", "content": sms_context}]
 
         payload = {
             "messages": messages,

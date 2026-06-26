@@ -210,6 +210,42 @@ async def test_second_inbound_includes_prior_exchange(make_router, capture_chat_
 
 
 # ===========================================================================
+# 4.2 -- two consecutive inbounds (AI hasn't replied yet) must NOT yield
+#        adjacent user turns. SMS defaults to Anthropic, which 400s on
+#        consecutive same-role turns -> the peer would get NO reply. The live
+#        current turn must MERGE into the trailing user history turn.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_consecutive_inbounds_no_adjacent_user_turns(make_router, capture_chat_payload):
+    r = make_router({"Brandon": {"c1": _contact("Anna", "+2223334444")}})
+    store = r._store_obj
+
+    # Anna texts twice with NO intervening AI reply (the AI hadn't answered the
+    # first yet). The stored rows are [inbound A, inbound B(current)].
+    store.store_message(operator="Brandon", direction="inbound", phone_number="+2223334444",
+                        contact_name="Anna", body="first message",
+                        timestamp="2026-06-25T11:59:00+00:00", line_number="+15550000000")
+
+    await r.handle_incoming(sender="+2223334444", body="second message", span=3,
+                            recvtime="2026-06-25 12:00:00", gateway_id="g1")
+
+    messages = _msgs(capture_chat_payload[-1])
+    roles = [m["role"] for m in messages]
+    # STRICT alternation: no two adjacent turns share a role (Anthropic rule).
+    assert all(roles[i] != roles[i + 1] for i in range(len(roles) - 1)), roles
+    # First non-system message is a user turn.
+    assert roles[0] == "user"
+    # The current text appears exactly once (merged, not duplicated).
+    current_count = sum(1 for m in messages if "second message" in m["content"])
+    assert current_count == 1
+    # Both the prior unanswered text AND the current text are present (the prior
+    # inbound is not lost — it's merged into the single user turn).
+    joined = " ".join(m["content"] for m in messages)
+    assert "first message" in joined
+    assert "second message" in joined
+
+
+# ===========================================================================
 # 4.2 -- consecutive same-direction outbound segments MERGE into one turn
 # ===========================================================================
 @pytest.mark.asyncio
