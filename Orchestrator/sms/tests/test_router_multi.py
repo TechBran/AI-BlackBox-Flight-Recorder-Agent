@@ -7,7 +7,7 @@ sockets, no real chat pipeline — `_route_through_chat` and
 import pytest
 
 from Orchestrator.sms.manager import AMIConnectionManager
-from Orchestrator.sms.router import SMSRouter
+from Orchestrator.sms.router import SMSRouter, Resolution
 from Orchestrator.sms.tests.test_manager import FakeClient, _gw
 
 
@@ -37,10 +37,12 @@ async def test_inbound_reply_goes_out_same_gateway(monkeypatch):
     store = FakeStore()
     router = SMSRouter(m, store)
 
-    # Known sender -> matched operator.
+    # Known sender -> matched operator. The inbound path now resolves via the
+    # 5-tier resolve_inbound seam (not _find_operator_by_phone, which is the
+    # outbound send_manual contact-name lookup).
     monkeypatch.setattr(
-        router, "_find_operator_by_phone",
-        lambda phone: ("Brandon", {"name": "Alice", "phone": phone}),
+        router, "resolve_inbound",
+        lambda sender, owner: Resolution("Brandon", {"name": "Alice", "phone": sender}, "peer"),
     )
 
     async def fake_chat(sender, body, operator, contact_name):
@@ -94,8 +96,8 @@ async def test_inbound_reply_falls_back_to_default_when_gateway_unknown(monkeypa
     router = SMSRouter(m, store)
 
     monkeypatch.setattr(
-        router, "_find_operator_by_phone",
-        lambda phone: ("Brandon", {"name": "Alice", "phone": phone}),
+        router, "resolve_inbound",
+        lambda sender, owner: Resolution("Brandon", {"name": "Alice", "phone": sender}, "peer"),
     )
 
     async def fake_chat(*args):

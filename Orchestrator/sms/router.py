@@ -11,20 +11,60 @@ Flow:
 
 import asyncio
 import logging
+from collections import namedtuple
 from datetime import datetime, timezone
 
 log = logging.getLogger("sms.router")
 
+# The fixed, spoofable system/self seed number. A contact whose phone is this
+# number can NEVER satisfy the inbound whitelist, regardless of created_by /
+# is_operator_self / tags. Gate by the NUMBER (last-10-digit), not by metadata,
+# so a real operator contact that merely has created_by="system" is unaffected.
+SEED_PHONE = "+17164512527"
+
 
 def _normalize_phone(phone: str) -> str:
-    """Strip to last 10 digits for comparison."""
-    digits = "".join(c for c in phone if c.isdigit())
+    """Strip to last 10 digits for comparison.
+
+    Last-10-digit normalization — kept byte-for-byte in agreement with
+    ``contacts._normalize_phone`` (None-safe). The two are intentionally
+    identical; if one changes, change both.
+    """
+    digits = "".join(c for c in (phone or "") if c.isdigit())
     return digits[-10:] if len(digits) >= 10 else digits
 
 
 def _phones_match(a: str, b: str) -> bool:
     """Compare two phone numbers by their last 10 digits."""
     return _normalize_phone(a) == _normalize_phone(b)
+
+
+# Result of inbound operator resolution.
+#   operator      — resolved operator, or None when the SMS must be dropped.
+#   contact       — the matched contact dict, or None.
+#   classification — 'self'  (matched contact has is_operator_self=True),
+#                    'peer'  (inbound_allowed=True, is_operator_self=False),
+#                    or None (no match / drop).
+# M2 COMPUTES + returns classification; M3 consumes it (peer notification +
+# tagging the chat payload). handle_incoming does not act on it yet.
+Resolution = namedtuple("Resolution", ["operator", "contact", "classification"])
+
+
+def _classify(contact: dict) -> str:
+    """'self' if the contact is the operator's own line, else 'peer'."""
+    return "self" if contact.get("is_operator_self") else "peer"
+
+
+def _recency_key(contact: dict) -> str:
+    """Sort key for the most-recently-updated tiebreak.
+
+    Contacts carry ISO-8601 ``updated_at``/``created_at`` strings (see
+    contacts._make_seed_contact / upsert_contact); ISO-8601 sorts correctly as
+    text. Missing both -> "" so timestamped contacts always outrank undated ones,
+    and undated contacts preserve their USERS_LIST encounter order via a stable
+    sort.
+    """
+    return contact.get("updated_at") or contact.get("created_at") or ""
 
 
 class SMSRouter:
@@ -40,12 +80,16 @@ class SMSRouter:
     @staticmethod
     def _is_system_seed(contact: dict) -> bool:
         """The auto-injected system/self seed contact must NEVER satisfy the
-        inbound whitelist (its number is fixed + spoofable). Real operator-added
-        self contacts (created_by != 'system') are unaffected."""
-        if (contact.get("created_by") or "") == "system":
-            return True
-        tags = [str(t).lower() for t in (contact.get("tags") or [])]
-        return "system" in tags
+        inbound whitelist (its number is fixed + spoofable).
+
+        Gate ONLY the literal seed phone +17164512527 — NOT all
+        created_by="system" contacts. A real operator contact can legitimately
+        carry created_by="system" (e.g. Anna's self-marker for Brandon was
+        created during system seeding); the old metadata-based check wrongly
+        excluded it from identity matching. The number is the spoofable fact, so
+        the number is what we gate.
+        """
+        return _phones_match(contact.get("phone", ""), SEED_PHONE)
 
     def _find_operator_by_phone(self, phone: str):
         """Route incoming SMS to the correct operator.
@@ -115,33 +159,144 @@ class SMSRouter:
                 return p.get("phone_number", "") or "", (p.get("operator") or None)
         return "", None
 
-    def _find_in_operator_book(self, owner, sender):
-        """Match `sender` ONLY against `owner`'s contact book.
+    def resolve_inbound(self, sender: str, owner) -> Resolution:
+        """Deterministic 5-tier inbound operator resolution (first match wins).
 
-        A dedicated line can only be reached by someone whitelisted FOR THAT
-        OWNER — being in another operator's book does not count.
+        Every tier crossed is logged. The seed phone is gated everywhere via
+        ``_is_system_seed``. ``load_contacts`` guarantees every contact carries
+        ``inbound_allowed`` (default True for legacy) and ``is_operator_self``
+        (default False).
 
-        READ-ONLY: never fabricates a book (no ensure_operator_book) and skips
-        the auto-injected system/self seed contact, so a bookless owner has an
-        empty whitelist and the fixed system number can't whitelist itself.
+        Args:
+            sender: the inbound sender's phone number (E.164).
+            owner:  the operator who owns the receiving line, or None for an
+                    unowned line. Pass the value from ``_resolve_line``.
+
+        Resolution order:
+          1. Owned line — sender must be inbound_allowed in OWNER's book ->
+             owner; else DROP (owned lines are strict — no fall-through).
+          2. Identity   — unowned line: sender is is_operator_self in some book.
+             Multiple self-flags -> most-recently-updated + WARNING.
+          3. Single whitelist — sender inbound_allowed in exactly one book.
+          4. Multi-match      — inbound_allowed in several books -> most-recently-
+             updated + WARNING naming all candidate operators.
+          5. No match -> DROP.
 
         Returns:
-            (owner, contact) if found in owner's book, else (None, None).
+            Resolution(operator, contact, classification). On a drop:
+            Resolution(None, None, None).
         """
         try:
             from Orchestrator.contacts import load_contacts
+            from Orchestrator.config import USERS_LIST
         except ImportError:
             from contacts import load_contacts
+            from config import USERS_LIST
 
         data = load_contacts()
-        contacts = data.get(owner, {})
-        for _cid, contact in contacts.items():
-            if self._is_system_seed(contact):
-                continue
-            contact_phone = contact.get("phone", "")
-            if contact_phone and _phones_match(sender, contact_phone):
-                return owner, contact
-        return None, None
+
+        # ---- Tier 1: Line ownership (STRICT — owned lines never fall through).
+        if owner:
+            for _cid, contact in (data.get(owner, {}) or {}).items():
+                if self._is_system_seed(contact):
+                    continue
+                if not _phones_match(sender, contact.get("phone", "")):
+                    continue
+                if not contact.get("inbound_allowed"):
+                    log.info(
+                        "SMS %s on %s's owned line: contact found but inbound_allowed=False -> DROP",
+                        sender, owner,
+                    )
+                    return Resolution(None, None, None)
+                cls = _classify(contact)
+                log.info(
+                    "SMS %s resolved via tier1 (owned line) -> operator=%s class=%s",
+                    sender, owner, cls,
+                )
+                return Resolution(owner, contact, cls)
+            log.info(
+                "SMS %s on %s's owned line: not inbound_allowed in owner's book -> DROP",
+                sender, owner,
+            )
+            return Resolution(None, None, None)
+
+        # ---- Gather every (non-seed) contact in every book that matches sender.
+        #      Preserve USERS_LIST encounter order for the no-timestamp tiebreak.
+        ordered_ops = list(USERS_LIST)
+        # Defensive: include any book not in USERS_LIST (deterministic order).
+        for op in data:
+            if op not in ordered_ops:
+                ordered_ops.append(op)
+
+        self_matches = []   # (operator, contact) where is_operator_self
+        peer_matches = []   # (operator, contact) where inbound_allowed, not self
+        for operator in ordered_ops:
+            for _cid, contact in (data.get(operator, {}) or {}).items():
+                if self._is_system_seed(contact):
+                    continue
+                if not _phones_match(sender, contact.get("phone", "")):
+                    continue
+                if contact.get("is_operator_self"):
+                    self_matches.append((operator, contact))
+                elif contact.get("inbound_allowed"):
+                    peer_matches.append((operator, contact))
+
+        # ---- Tier 2: Operator-identity (unowned line).
+        if self_matches:
+            if len(self_matches) > 1:
+                # Defensive — M1 warns at write time; surface it again here.
+                candidates = ", ".join(op for op, _ in self_matches)
+                log.warning(
+                    "SMS %s: is_operator_self collision across operators [%s] "
+                    "-> routing to most-recently-updated",
+                    sender, candidates,
+                )
+            operator, contact = self._pick_most_recent(self_matches)
+            log.info(
+                "SMS %s resolved via tier2 (operator-identity) -> operator=%s class=self",
+                sender, operator,
+            )
+            return Resolution(operator, contact, "self")
+
+        # ---- Tier 3 / Tier 4: inbound_allowed whitelist match(es).
+        if peer_matches:
+            if len(peer_matches) > 1:
+                candidates = ", ".join(op for op, _ in peer_matches)
+                log.warning(
+                    "SMS %s: inbound_allowed multi-match collision across operators "
+                    "[%s] -> routing to most-recently-updated",
+                    sender, candidates,
+                )
+                operator, contact = self._pick_most_recent(peer_matches)
+                log.info(
+                    "SMS %s resolved via tier4 (multi-match) -> operator=%s class=peer",
+                    sender, operator,
+                )
+            else:
+                operator, contact = peer_matches[0]
+                log.info(
+                    "SMS %s resolved via tier3 (single whitelist) -> operator=%s class=peer",
+                    sender, operator,
+                )
+            return Resolution(operator, contact, "peer")
+
+        # ---- Tier 5: No match.
+        return Resolution(None, None, None)
+
+    @staticmethod
+    def _pick_most_recent(matches):
+        """Most-recently-updated tiebreak with a stable USERS_LIST fallback.
+
+        ``matches`` is a list of (operator, contact) already in USERS_LIST
+        encounter order. Sort DESCENDING by the contact's updated_at/created_at
+        (ISO-8601, text-comparable). Python's sort is stable, so contacts with
+        equal (or absent) timestamps keep their input order — i.e. the first
+        operator listed in USERS_LIST wins when nothing else distinguishes them.
+        Always returns one (operator, contact).
+        """
+        # Stable sort: highest recency key first; ties keep input (USERS_LIST) order.
+        ranked = sorted(matches, key=lambda m: _recency_key(m[1]), reverse=True)
+        return ranked[0]
 
     async def handle_incoming(self, sender: str, body: str, span: str, recvtime: str, gateway_id: str = None):
         """Process an incoming SMS from one of the gateway AMI clients.
@@ -158,19 +313,22 @@ class SMSRouter:
         # 1. Resolve the LINE (our number + owner) from (gateway_id, span).
         line_number, owner = self._resolve_line(gateway_id, span)
 
-        # 2. Scope the whitelist by line ownership (only ever TIGHTENS).
-        #    Owned line: match ONLY the owner's book. Unowned line: search all.
-        #    Either way, no contact match -> DROP before any chat/task/send/store.
-        if owner:
-            operator, contact = self._find_in_operator_book(owner, sender)
-        else:
-            operator, contact = self._find_operator_by_phone(sender)
+        # 2. Resolve the operator via the deterministic 5-tier precedence rule.
+        #    Owned lines are strict; unowned lines walk identity -> single
+        #    whitelist -> multi-match (most-recently-updated + WARNING). No match
+        #    -> DROP before any chat/task/send/store. The classification ('self'
+        #    /'peer') is COMPUTED here for M3 (peer notification + payload tag);
+        #    M2 only logs it and does not yet act on it.
+        operator, contact, classification = self.resolve_inbound(sender, owner)
         if not operator:
             log.info("Ignoring SMS from unknown number: %s", sender)
             return
 
         contact_name = contact.get("name", sender) if contact else sender
-        log.info("SMS routed to operator=%s contact=%s", operator, contact_name)
+        log.info(
+            "SMS routed to operator=%s contact=%s class=%s",
+            operator, contact_name, classification,
+        )
 
         # 2. Normalize timestamp to ISO 8601
         try:

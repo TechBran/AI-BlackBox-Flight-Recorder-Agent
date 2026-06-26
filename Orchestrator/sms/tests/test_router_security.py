@@ -78,13 +78,21 @@ _CONTACTS = {
 
 @pytest.fixture
 def router(monkeypatch):
-    """Build a router with fakes and a hermetic contact loader."""
+    """Build a router with fakes and a hermetic contact loader.
+
+    The stub mirrors production ``load_contacts`` by applying the same read-time
+    inbound-SMS migration defaults (``_apply_inbound_defaults``) the real loader
+    guarantees: a flag-less legacy contact reads back ``inbound_allowed=True``.
+    Without this, the M2 resolver — which gates on ``inbound_allowed`` — would
+    see the flag absent and wrongly drop a whitelisted sender.
+    """
+    import copy
     import Orchestrator.contacts as contacts_mod
     import Orchestrator.config as config_mod
 
-    monkeypatch.setattr(contacts_mod, "load_contacts", lambda: {
-        op: dict(book) for op, book in _CONTACTS.items()
-    })
+    monkeypatch.setattr(contacts_mod, "load_contacts", lambda: contacts_mod._apply_inbound_defaults(
+        {op: copy.deepcopy(book) for op, book in _CONTACTS.items()}
+    ))
     monkeypatch.setattr(contacts_mod, "ensure_operator_book", lambda data, op: False)
     monkeypatch.setattr(config_mod, "USERS_LIST", list(_CONTACTS.keys()))
 
@@ -206,13 +214,17 @@ SEED_ON_DISK = {
 
 
 def _patch_contacts(monkeypatch, books):
-    """Point the hermetic loader at `books` (deep-copied per call)."""
+    """Point the hermetic loader at `books` (deep-copied per call).
+
+    Applies the production read-time inbound-SMS defaults so flag-less legacy
+    contacts behave exactly as the real ``load_contacts`` returns them.
+    """
     import copy
     import Orchestrator.contacts as contacts_mod
     import Orchestrator.config as config_mod
 
     monkeypatch.setattr(contacts_mod, "load_contacts",
-                        lambda: copy.deepcopy(books))
+                        lambda: contacts_mod._apply_inbound_defaults(copy.deepcopy(books)))
     monkeypatch.setattr(config_mod, "USERS_LIST", list(books.keys()) or ["Brandon"])
 
 
