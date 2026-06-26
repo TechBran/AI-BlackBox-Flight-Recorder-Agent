@@ -365,8 +365,66 @@ def call_openai(messages: List[Dict], model: str, operator: str = "Brandon"):
     text = message.get("content", "")
     return text, total_usage
 
+def _as_block_list(content) -> List[Dict]:
+    """Coerce a message's content into a list of content blocks.
+
+    A plain str becomes a single ``{"type": "text", "text": ...}`` block; a
+    list is returned as-is (already block-shaped); anything else is wrapped as
+    a text block of its str() so nothing is silently dropped.
+    """
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if content is None:
+        return []
+    return [{"type": "text", "text": str(content)}]
+
+
+def _normalize_alternation(messages: List[Dict]) -> List[Dict]:
+    """Merge consecutive same-role user/assistant turns so roles alternate.
+
+    The Anthropic Messages API 400s ("messages: roles must alternate") on two
+    adjacent same-role turns. Any caller (SMS peer threads, future batchers,
+    etc.) that emits consecutive same-role messages would trip it. This pure
+    pass collapses each run of adjacent same-role user/assistant turns into a
+    single turn, concatenating their content:
+
+      - str + str  -> joined with a newline.
+      - list + list -> block lists concatenated (no blocks dropped).
+      - str + list / list + str -> both coerced to block lists and concatenated
+        (the str becomes a ``{"type": "text", ...}`` block).
+
+    System rows are left untouched and never merged across (system is handled
+    separately by call_anthropic). A correctly-alternating list is returned
+    unchanged. The first conversation turn keeps whatever role the input
+    started with — no turns are invented.
+    """
+    out: List[Dict] = []
+    for m in messages:
+        role = m.get("role")
+        if out and role in ("user", "assistant") and out[-1].get("role") == role:
+            prev = out[-1]
+            prev_content = prev.get("content")
+            cur_content = m.get("content")
+            if isinstance(prev_content, str) and isinstance(cur_content, str):
+                prev["content"] = prev_content + "\n" + cur_content
+            else:
+                # At least one side is a block list (multimodal); coerce both to
+                # block lists and concatenate so no content blocks are dropped.
+                prev["content"] = _as_block_list(prev_content) + _as_block_list(cur_content)
+            continue
+        # Shallow-copy so we never mutate the caller's dict when merging.
+        out.append(dict(m))
+    return out
+
+
 def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
     if not ANTHROPIC_API_KEY: raise HTTPException(400, "ANTHROPIC_API_KEY not set")
+    # Defense-in-depth: collapse any consecutive same-role turns so the
+    # conversation array alternates (Anthropic 400s otherwise). Safe no-op on
+    # an already-alternating list; leaves system rows in place.
+    messages = _normalize_alternation(messages)
     system_text = "\n\n".join([m.get("content","") for m in messages if m.get("role") == "system"])
     amsgs = []
     for m in messages:
