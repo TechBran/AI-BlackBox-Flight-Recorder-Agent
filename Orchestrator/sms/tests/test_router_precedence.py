@@ -183,6 +183,23 @@ async def test_tier1_owned_line_self_contact_classifies_self(monkeypatch):
     assert res.classification == "self"
 
 
+@pytest.mark.asyncio
+async def test_tier1_owned_line_self_identity_bypasses_inbound_allowed(monkeypatch):
+    """Tier1/tier2 symmetry: an operator's OWN self-contact reaches their OWN
+    dedicated line even with inbound_allowed=False. Identity is independent of
+    the inbound whitelist on BOTH paths ("your own line always reaches you"). M5
+    exposes both flags as independent toggles, so "IS operator on + Allow inbound
+    off" must NOT lock the operator out of their own line."""
+    r = _make_router(monkeypatch, {
+        "Brandon": {"c1": _contact("Me", "+13335557777",
+                                    inbound_allowed=False, is_operator_self=True)},
+    })
+    res = r.resolve_inbound("+13335557777", owner="Brandon")
+    assert res.operator == "Brandon"
+    assert res.contact["name"] == "Me"
+    assert res.classification == "self"
+
+
 # ===========================================================================
 # Tier 2 — Operator-identity (unowned line)
 # ===========================================================================

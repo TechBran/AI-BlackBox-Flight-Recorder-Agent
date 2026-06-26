@@ -50,11 +50,6 @@ def _phones_match(a: str, b: str) -> bool:
 Resolution = namedtuple("Resolution", ["operator", "contact", "classification"])
 
 
-def _classify(contact: dict) -> str:
-    """'self' if the contact is the operator's own line, else 'peer'."""
-    return "self" if contact.get("is_operator_self") else "peer"
-
-
 def _recency_key(contact: dict) -> str:
     """Sort key for the most-recently-updated tiebreak.
 
@@ -202,18 +197,28 @@ class SMSRouter:
                     continue
                 if not _phones_match(sender, contact.get("phone", "")):
                     continue
+                # Operator identity bypasses the inbound whitelist gate (mirrors
+                # tier2): your own line always reaches you, even with
+                # inbound_allowed=False. M5 exposes both flags as independent
+                # toggles, so this must NOT lock an operator out of their own line.
+                if contact.get("is_operator_self"):
+                    log.info(
+                        "SMS %s resolved via tier1 (owned line, operator identity) -> operator=%s class=self",
+                        sender, owner,
+                    )
+                    return Resolution(owner, contact, "self")
                 if not contact.get("inbound_allowed"):
                     log.info(
                         "SMS %s on %s's owned line: contact found but inbound_allowed=False -> DROP",
                         sender, owner,
                     )
                     return Resolution(None, None, None)
-                cls = _classify(contact)
+                # Non-self at this point -> always "peer".
                 log.info(
-                    "SMS %s resolved via tier1 (owned line) -> operator=%s class=%s",
-                    sender, owner, cls,
+                    "SMS %s resolved via tier1 (owned line) -> operator=%s class=peer",
+                    sender, owner,
                 )
-                return Resolution(owner, contact, cls)
+                return Resolution(owner, contact, "peer")
             log.info(
                 "SMS %s on %s's owned line: not inbound_allowed in owner's book -> DROP",
                 sender, owner,
