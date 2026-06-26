@@ -1,10 +1,9 @@
 """Executor for send_sms (migrated from blackbox_tools._execute_send_sms)."""
-import aiohttp
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
-    """Send an SMS message via cellular modem or Twilio."""
+    """Send an SMS message via the TG200 cellular gateway (Asterisk)."""
     phone_number = params.get("phone_number", "")
     message = params.get("message", "")
     from_number = params.get("from_number") or None
@@ -48,36 +47,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         except Exception as e:
             return ToolResult(False, f"TG200 SMS error: {str(e)}")
 
-    # Twilio path (fallback when Asterisk not available)
-    try:
-        from Orchestrator.config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
-
-        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-            return ToolResult(False, "Twilio not configured")
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-                auth=aiohttp.BasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-                data={
-                    "To": phone_number,
-                    "From": TWILIO_PHONE_NUMBER,
-                    "Body": message
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                result = await resp.json()
-
-                if resp.status in (200, 201):
-                    sid = result.get("sid", "")
-                    return ToolResult(
-                        success=True,
-                        result=f"SMS sent to {phone_number}. Message SID: {sid}",
-                        data={"sid": sid, "to": phone_number}
-                    )
-                else:
-                    error = result.get("message", str(result))
-                    return ToolResult(False, f"Failed to send SMS: {error}")
-
-    except Exception as e:
-        return ToolResult(False, f"SMS error: {str(e)}")
+    # TG200/Asterisk is the only supported SMS path. If it is not the
+    # configured provider (or is disabled), SMS is unavailable.
+    return ToolResult(
+        False,
+        "SMS unavailable: TG200/Asterisk is not configured "
+        "(set TELEPHONY_PROVIDER=asterisk and enable the gateway).",
+    )

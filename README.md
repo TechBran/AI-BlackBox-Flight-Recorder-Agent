@@ -90,7 +90,7 @@ Once onboarding completes, the Portal is at:
 | **MCP server** | Stdio MCP server registered with claude/gemini/codex on every session — exposes 62 BlackBox tools (snapshot search/get/mint, web search + fetch, image/video/music generation, Gmail, devices, robot control if paired) plus 4 read-only MCP resources for index stats and operator list |
 | **Telephony** | Asterisk + PJSIP outbound/inbound calls via a TG200 SIP-to-GSM gateway (2 SIM cards / TG200-2 unit) plus Twilio integration for direct VoIP |
 | **Cellular** | SIM7600G-H USB modem for failover internet AND a second voice channel (8 kHz PCM16 audio bridge to Asterisk) |
-| **SMS** | Inbound/outbound SMS via both Twilio and the TG200 GSM gateway |
+| **SMS** | Inbound/outbound SMS via the TG200 GSM gateway |
 | **Multimodal generation** | Image (Gemini Imagen / Veo), Video (Veo 3.1), Music (Lyria), TTS variants — all callable from chat as tools |
 | **Scheduled tasks** | APScheduler-backed cron with SQLite persistence — schedule any model to run on cadence and deliver via chat/SMS/email |
 | **Memory** | Immutable byte-offset volume + 3072-dim embedding index across every conversation; semantic + recency retrieval injected into every prompt |
@@ -513,7 +513,7 @@ persistence. Schedule any model (Claude, GPT, Gemini, ...) to run a
 prompt on cadence and deliver the result via:
 
 - Chat (appended to your conversation log)
-- SMS (via TG200 or Twilio)
+- SMS (via the TG200 GSM gateway)
 - Email (Gmail OAuth)
 - Phone call (`make_phone_call` tool)
 

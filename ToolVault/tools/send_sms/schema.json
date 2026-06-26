@@ -1,6 +1,6 @@
 {
   "name": "send_sms",
-  "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS. For long messages, the system automatically splits into multiple SMS segments (160 chars each, up to 10 segments). Use search_contacts first to find the recipient's number.",
+  "description": "Send an SMS text message via the TG200 cellular gateway. The message is delivered as a real cellular SMS in a single send (messages longer than 1600 characters are truncated). Use search_contacts first to find the recipient's number.",
   "category": "communication",
   "groups": [
     "chat",
@@ -20,7 +20,7 @@
       },
       "message": {
         "type": "string",
-        "description": "The text message to send. Plain text only, no markdown. Max ~1500 characters (auto-split into 160-char segments)."
+        "description": "The text message to send. Plain text only, no markdown. Up to ~1600 characters (longer messages are truncated)."
       },
       "from_number": {
         "type": "string",
