@@ -58,6 +58,43 @@ def test_migration_on_legacy_db(tmp_path, monkeypatch):
     assert len(rows) == 1 and rows[0]["line_number"] == ""   # legacy row backfilled to ''
 
 
+def test_get_conversation_same_second_ordered_by_id(tmp_path, monkeypatch):
+    # Two messages with the SAME timestamp: an inbound then an outbound.
+    # ORDER BY timestamp alone is non-deterministic for the tie; the secondary
+    # ``id`` key must keep them in INSERTION order (inbound first, lower id).
+    s = _store(tmp_path, monkeypatch)
+    same_ts = "2026-06-25T12:00:00+00:00"
+    s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
+                    contact_name="A", body="question", timestamp=same_ts)
+    s.store_message(operator="Brandon", direction="outbound", phone_number="+14105550001",
+                    contact_name="A", body="answer", timestamp=same_ts)
+    rows = s.get_conversation("Brandon", "+14105550001")
+    assert [r["direction"] for r in rows] == ["inbound", "outbound"]
+    assert [r["body"] for r in rows] == ["question", "answer"]
+    assert rows[0]["id"] < rows[1]["id"]
+
+
+def test_get_recent_returns_newest_window_chronologically(tmp_path, monkeypatch):
+    # Insert 5 messages with increasing timestamps; get_conversation(recent=True,
+    # limit=3) must return the LAST 3 (newest window) in chronological order.
+    s = _store(tmp_path, monkeypatch)
+    for i in range(5):
+        s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
+                        contact_name="A", body=f"m{i}",
+                        timestamp=f"2026-06-25T12:00:0{i}+00:00")
+    recent = s.get_conversation("Brandon", "+14105550001", limit=3, recent=True)
+    assert [r["body"] for r in recent] == ["m2", "m3", "m4"]  # last 3, oldest-first
+
+
+def test_get_recent_fewer_than_window(tmp_path, monkeypatch):
+    # When fewer rows than the window exist, recent=True returns them all, oldest-first.
+    s = _store(tmp_path, monkeypatch)
+    s.store_message(operator="Brandon", direction="inbound", phone_number="+14105550001",
+                    contact_name="A", body="only", timestamp="2026-06-25T12:00:00+00:00")
+    recent = s.get_conversation("Brandon", "+14105550001", limit=20, recent=True)
+    assert [r["body"] for r in recent] == ["only"]
+
+
 def test_migration_idempotent(tmp_path, monkeypatch):
     # constructing MessageStore twice on the same db must be safe
     db = tmp_path / "sms.db"

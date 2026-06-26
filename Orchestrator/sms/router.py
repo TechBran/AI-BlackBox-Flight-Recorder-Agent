@@ -30,6 +30,12 @@ log = logging.getLogger("sms.router")
 # full inbound is already persisted to the SMS store + the chat thread.
 PEER_NOTIFY_PREVIEW_CHARS = 200
 
+# M4 — recent SMS thread auto-injection window. The N most-recent stored rows
+# (both directions) are prepended to the /chat payload as conversation turns.
+# Bounded by COUNT (newest-kept) to protect the per-turn prefill budget and the
+# 45s SMS reply deadline — do NOT inject unbounded history.
+SMS_THREAD_WINDOW = 20
+
 # The fixed, spoofable system/self seed number. A contact whose phone is this
 # number can NEVER satisfy the inbound whitelist, regardless of created_by /
 # is_operator_self / tags. Gate by the NUMBER (last-10-digit), not by metadata,
@@ -400,7 +406,8 @@ class SMSRouter:
         reply = ""
         try:
             reply = await self._route_through_chat(
-                sender, body, operator, contact_name, is_peer=is_peer
+                sender, body, operator, contact_name,
+                is_peer=is_peer, line_number=line_number,
             )
         except Exception:
             log.exception("Chat pipeline failed for SMS from %s", sender)
@@ -437,6 +444,66 @@ class SMSRouter:
         else:
             log.warning("No AI reply generated for SMS from %s", sender)
 
+    def _build_thread_messages(
+        self,
+        operator: str,
+        sender: str,
+        current_body: str,
+        line_number: str = "",
+    ) -> list:
+        """Assemble the recent SMS thread as chat turns (M4).
+
+        Fetches the most recent ``SMS_THREAD_WINDOW`` stored rows for this
+        ``(operator, sender, line_number)`` thread (oldest-first), then:
+          - DROPS the just-stored current inbound (``handle_incoming`` persisted
+            it before this runs, so it is the trailing inbound row matching
+            ``current_body``) — exactly once — so it isn't duplicated; it is
+            re-appended as the live final user turn.
+          - MERGES consecutive same-direction rows into ONE turn (a single AI
+            reply is stored as one outbound row per 160-char segment).
+          - MAPS inbound -> ``user``, outbound -> ``assistant``.
+          - DROPS a leading ``assistant`` turn so the first non-system message is
+            a ``user`` (Anthropic requires the first turn be ``user``).
+
+        Returns the history turns (WITHOUT the current text). On any failure or an
+        empty thread, returns ``[]`` so the caller falls back to today's single
+        current user turn.
+        """
+        try:
+            rows = self.store.get_conversation(
+                operator, sender, limit=SMS_THREAD_WINDOW,
+                line_number=line_number or "", recent=True,
+            )
+        except Exception:
+            log.exception("SMS thread fetch failed for %s; falling back to single turn", sender)
+            return []
+
+        # Drop the trailing current-inbound row exactly once (the one
+        # handle_incoming just stored: last inbound row whose body == current).
+        for i in range(len(rows) - 1, -1, -1):
+            r = rows[i]
+            if r.get("direction") == "inbound" and r.get("body") == current_body:
+                del rows[i]
+                break
+
+        # Merge consecutive same-direction rows into one turn, mapping direction
+        # -> role. inbound -> user, outbound -> assistant.
+        turns: list = []
+        for r in rows:
+            role = "assistant" if r.get("direction") == "outbound" else "user"
+            body = r.get("body") or ""
+            if turns and turns[-1]["role"] == role:
+                turns[-1]["content"] += body
+            else:
+                turns.append({"role": role, "content": body})
+
+        # First non-system message must be a user turn (Anthropic). If the merged
+        # history would lead with an assistant turn, drop it.
+        if turns and turns[0]["role"] == "assistant":
+            turns = turns[1:]
+
+        return turns
+
     async def _route_through_chat(
         self,
         sender: str,
@@ -444,6 +511,7 @@ class SMSRouter:
         operator: str,
         contact_name: str,
         is_peer: bool = False,
+        line_number: str = "",
     ) -> str:
         """Route SMS through the main /chat pipeline for full context retrieval.
 
@@ -452,6 +520,10 @@ class SMSRouter:
         tasks.py can frame the reply as on the operator's behalf; the operator's
         own persona/memory still loads (their voice). Omitted/False for a 'self'
         inbound.
+
+        ``line_number`` (M4): the resolved receiving line, used to scope the
+        recent-thread fetch so a peer texting two different owned lines doesn't
+        bleed across threads.
         """
         import time
         import aiohttp
@@ -462,12 +534,16 @@ class SMSRouter:
 
         sms_context = f"[SMS from {contact_name} ({sender})]: {body}"
 
-        # NOTE (M4): this payload dict is the extension point for SMS thread
-        # history — M4 will set payload["messages"] = [*prior_turns, current].
-        # Keep additions to this dict simple key/value entries (like sms_peer
-        # below) so that prepend stays a clean, isolated change.
+        # M4: prepend the recent SMS thread (oldest-first) as conversation turns,
+        # then append the live current user turn. A first-ever inbound (no prior
+        # thread) yields exactly the single current user turn (today's behavior).
+        history_turns = self._build_thread_messages(
+            operator, sender, body, line_number=line_number or "",
+        )
+        messages = [*history_turns, {"role": "user", "content": sms_context}]
+
         payload = {
-            "messages": [{"role": "user", "content": sms_context}],
+            "messages": messages,
             "operator": operator,
             "provider": sms_provider,
             "model": sms_model,

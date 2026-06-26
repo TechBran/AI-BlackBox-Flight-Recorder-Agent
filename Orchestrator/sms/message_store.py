@@ -141,12 +141,25 @@ class MessageStore:
 
     def get_conversation(
         self, operator: str, phone_number: str, limit: int = 50, offset: int = 0,
-        line_number: str | None = None,
+        line_number: str | None = None, recent: bool = False,
     ) -> list:
         """Get messages between operator and a phone number, oldest first (chat order).
 
         When ``line_number`` is None, return messages across all of our lines
         (back-compatible). When provided, scope to that one line.
+
+        Ordering uses ``(timestamp, id)`` so a same-second inbound/outbound pair
+        sorts deterministically by insertion id (inbound before its outbound
+        reply), not by SQLite's incidental row order.
+
+        ``recent``:
+          - ``False`` (default, back-compatible): return the OLDEST ``limit``
+            messages from ``offset`` (``ORDER BY timestamp, id ASC`` then
+            ``LIMIT/OFFSET``).
+          - ``True``: return the most RECENT ``limit`` messages, presented
+            oldest-first (chronological). The window is the last N — fetch
+            DESC + LIMIT then reverse — so a long thread yields the tail, not
+            the head. ``offset`` is ignored in this mode.
         """
         normalized = _normalize_phone(phone_number)
         where = "operator = ? AND phone_number = ?"
@@ -154,12 +167,26 @@ class MessageStore:
         if line_number is not None:
             where += " AND line_number = ?"
             params.append(_normalize_phone(line_number) if line_number else "")
+        if recent:
+            # Newest-N window: take the last ``limit`` rows (DESC), then reverse
+            # in Python so the caller still receives them oldest-first.
+            params.append(limit)
+            with self._lock:
+                rows = self._conn.execute(
+                    f"""SELECT * FROM messages
+                        WHERE {where}
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT ?""",
+                    params,
+                ).fetchall()
+            rows = list(reversed(rows))
+            return self._rows_to_dicts(rows)
         params.extend([limit, offset])
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT * FROM messages
                     WHERE {where}
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp, id
                     LIMIT ? OFFSET ?""",
                 params,
             ).fetchall()
