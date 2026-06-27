@@ -407,3 +407,37 @@ def test_slug_parity():
     bundle_slugs = set(mirror.BUNDLES.keys())
     picker_ids = {m["id"] for m in LOCAL_MODELS}
     assert bundle_slugs == picker_ids
+
+
+# ---------------------------------------------------------------------------
+# Task A2 — HF Hub API fetchers
+#
+# Hermetic: these monkeypatch ``mirror._http_get_json`` so no real Hugging Face
+# request ever runs (``mirror`` is the ``catalog`` module — aliased above).
+# ---------------------------------------------------------------------------
+
+def test_fetch_hf_models_shape(monkeypatch):
+    # _fetch_hf_models returns a list of {"id","gated"} for litert-community gemma repos.
+    fake = [
+        {"id": "litert-community/gemma-4-E2B-it-litert-lm", "gated": False},
+        {"id": "litert-community/gemma-4-E4B-it-litert-lm", "gated": False},
+        {"id": "litert-community/not-a-litertlm-repo", "gated": False},
+    ]
+    monkeypatch.setattr(mirror, "_http_get_json", lambda url, **kw: fake)
+    out = mirror._fetch_hf_models()
+    ids = {m["id"] for m in out}
+    assert "litert-community/gemma-4-E2B-it-litert-lm" in ids
+
+
+def test_fetch_hf_tree_shape(monkeypatch):
+    fake_tree = [
+        {"path": "gemma-4-E2B-it-web.litertlm", "size": 2008432640,
+         "lfs": {"oid": "a" * 64}},
+        {"path": "gemma-4-E2B-it.litertlm", "size": 2588147712,
+         "lfs": {"oid": "b" * 64}},
+        {"path": "README.md", "size": 100},
+    ]
+    monkeypatch.setattr(mirror, "_http_get_json", lambda url, **kw: fake_tree)
+    files = mirror._fetch_hf_tree("litert-community/gemma-4-E2B-it-litert-lm")
+    paths = {f["path"] for f in files}
+    assert "gemma-4-E2B-it.litertlm" in paths

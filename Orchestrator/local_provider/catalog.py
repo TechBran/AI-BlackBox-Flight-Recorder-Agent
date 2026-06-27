@@ -23,8 +23,11 @@ verified on-device.
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
+
+import requests  # already in venv
 
 # ---------------------------------------------------------------------------
 # On-disk mirror cache dir. MODULE attribute (not created at import) so tests
@@ -115,6 +118,48 @@ def get_bundle(slug: str) -> Optional[dict]:
     """
     bundle = BUNDLES.get(slug)
     return dict(bundle) if bundle is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Task A2 — HF Hub API fetchers (the ONLY network code in this module)
+#
+# These two functions are the only network touch. Tests monkeypatch
+# ``_http_get_json`` so no real Hugging Face request ever runs under pytest
+# (same hermetic pattern the old ``_download_bundle`` used).
+# ---------------------------------------------------------------------------
+
+_HF_BASE = "https://huggingface.co"
+_HF_AUTHOR = "litert-community"
+_HF_TIMEOUT = 20  # HF Hub API JSON calls are tiny; 20s is generous.
+
+
+def _http_get_json(url: str, **kw):
+    """GET a URL and return parsed JSON. Isolated so tests monkeypatch IT
+    (never a real HF request runs under pytest)."""
+    token = os.environ.get("HF_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    r = requests.get(url, headers=headers, timeout=_HF_TIMEOUT, **kw)
+    r.raise_for_status()
+    return r.json()
+
+
+def _fetch_hf_models() -> list[dict]:
+    """List litert-community gemma models from the HF Hub API."""
+    url = f"{_HF_BASE}/api/models?author={_HF_AUTHOR}&search=gemma"
+    data = _http_get_json(url)
+    out = []
+    for m in data:
+        mid = m.get("id", "")
+        if mid.endswith("-litert-lm") and "gemma" in mid and "-it-" in mid:
+            out.append({"id": mid, "gated": bool(m.get("gated"))})
+    return out
+
+
+def _fetch_hf_tree(repo: str) -> list[dict]:
+    """Return the repo's main-branch file tree (path/size/lfs)."""
+    url = f"{_HF_BASE}/api/models/{repo}/tree/main"
+    data = _http_get_json(url)
+    return [f for f in data if f.get("type", "file") == "file"]
 
 
 # ---------------------------------------------------------------------------
