@@ -28,7 +28,7 @@ from Orchestrator.checkpoint import app
 from Orchestrator.config import CFG
 from Orchestrator.context_builder import PROVIDER_CAPS, build_fossil_context
 from Orchestrator.local_provider import get_local_registry
-from Orchestrator.local_provider import mirror
+from Orchestrator.local_provider import catalog
 from Orchestrator.local_provider.tool_injection import build_injected_tools
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
@@ -129,7 +129,7 @@ async def local_models_catalog():
               sha256, min_ram_gb, recommended_for}, ...]}.
     """
     try:
-        return {"bundles": mirror.list_bundles()}
+        return {"bundles": catalog.list_bundles()}
     except Exception as e:
         print(f"[LOCAL PROVIDER] catalog failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
@@ -151,19 +151,19 @@ async def local_models_catalog():
 async def local_models_download(slug: str):
     """Stream a mirrored on-device model bundle, with HTTP Range/resume support.
 
-    Unknown slug → 404. Otherwise fetch-once via ``mirror.ensure_present`` and
+    Unknown slug → 404. Otherwise fetch-once via ``catalog.ensure_present`` and
     hand the path to ``FileResponse``, which streams the bytes from disk and
     handles Range natively (206 + ``Content-Range`` for a satisfiable range, 200
     + whole file otherwise, 400 for a malformed range, 416 for an un-satisfiable
     one; ``Accept-Ranges: bytes`` always set).
     """
-    if mirror.get_bundle(slug) is None:
+    if catalog.get_bundle(slug) is None:
         return JSONResponse(
             {"success": False, "error": f"unknown bundle: {slug}"}, status_code=404
         )
 
     try:
-        path = mirror.ensure_present(slug)
+        path = catalog.ensure_present(slug)
     except Exception as e:
         # A fetch failure should still 500 (not crash); the actual serving is
         # delegated to FileResponse below and streams from disk.

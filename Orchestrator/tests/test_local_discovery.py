@@ -24,7 +24,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from Orchestrator.local_provider import mirror
+from Orchestrator.local_provider import catalog as mirror
 
 
 @pytest.fixture
