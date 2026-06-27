@@ -1275,6 +1275,51 @@ BLACKBOX_MCP_TOKENS_FILE = os.getenv(
 )
 
 
+# =============================================================================
+# CHUNK 6a: OAuth 2.1 DISCOVERY METADATA + DYNAMIC CLIENT REGISTRATION
+#
+# This chunk builds ONLY the PUBLIC OAuth bootstrap surface so claude.ai /
+# Claude Desktop can DISCOVER this server and REGISTER a client. It does NOT
+# build /authorize or /token (later chunks) -- but the discovery metadata and
+# the middleware exemption ALREADY advertise + reserve those paths so the
+# later chunks are a drop-in.
+#
+#   GET /.well-known/oauth-authorization-server  -- RFC 8414 AS metadata
+#   GET /.well-known/oauth-protected-resource    -- RFC 9728 PR metadata
+#   POST /register                               -- RFC 7591 dynamic client reg
+#
+# These three (and the reserved /authorize + /token) are PUBLIC: they are the
+# auth bootstrap, so they must be reachable WITHOUT a bearer. The bearer-auth
+# middleware EXEMPTS them; only /mcp still requires a credential. Public clients
+# use PKCE (S256) with token_endpoint_auth_method=none -- NO client secret.
+#
+# The issuer/base URL is the PUBLIC Funnel origin (configurable via env
+# BLACKBOX_MCP_PUBLIC_URL) -- NOT the localhost bind -- because that is the URL
+# claude.ai actually reaches and the one that must appear in the metadata.
+# =============================================================================
+# Public origin as seen by claude.ai / Desktop (the Funnel front door). The
+# OAuth issuer + all advertised endpoints are built from this, NOT the 127.0.0.1
+# bind, because the metadata must point at the URL the remote client can reach.
+BLACKBOX_MCP_PUBLIC_URL = os.getenv(
+    "BLACKBOX_MCP_PUBLIC_URL",
+    "https://ai-black-box-fc-a620ai-wifi.tail401fb3.ts.net:8443",
+).rstrip("/")
+
+# The MCP resource URL (issuer + the MCP path) -- the `resource` value in the
+# RFC 9728 Protected Resource Metadata. Built from the public origin + the
+# configured MCP path so a non-default path stays consistent across surfaces.
+BLACKBOX_MCP_RESOURCE_URL = BLACKBOX_MCP_PUBLIC_URL + BLACKBOX_MCP_HTTP_PATH
+
+# Registered OAuth clients are persisted to a GITIGNORED store (Manifest/ is
+# gitignored, and **/*token*.json also covers anything token-shaped). The file
+# is created 0600. Public PKCE clients have NO secret, but we still keep the
+# store private (it records who registered + their redirect_uris).
+BLACKBOX_MCP_OAUTH_CLIENTS_FILE = os.getenv(
+    "BLACKBOX_MCP_OAUTH_CLIENTS_FILE",
+    str(BLACKBOX_ROOT / "Manifest" / "mcp_oauth_clients.json"),
+)
+
+
 def _load_token_map() -> Dict[str, str]:
     """Load + merge the token->operator map from env JSON and/or the secure file.
 
@@ -1398,6 +1443,17 @@ class BearerAuthMiddleware:
         rid = uuid.uuid4().hex[:12]
         _REQUEST_ID.set(rid)
 
+        # CHUNK 6a: EXEMPT the public OAuth bootstrap surface (discovery
+        # metadata, dynamic client registration, and the reserved /authorize +
+        # /token). These MUST be reachable WITHOUT a bearer -- they are how a
+        # client discovers + obtains a credential. Only /mcp still requires one.
+        # We pass straight through to the app (which routes to the OAuth handlers)
+        # WITHOUT setting _BOUND_OPERATOR/_TOKEN_ID, so these requests are never
+        # mistaken for an authenticated MCP request.
+        if _is_oauth_public_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+
         presented = _extract_bearer(scope)
         if not presented:
             logger.warning("rid=%s AUTH reject: missing/malformed bearer (%s %s)",
@@ -1435,12 +1491,213 @@ class BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+# =============================================================================
+# CHUNK 6a: OAuth client store + discovery/registration handlers
+# =============================================================================
+# Paths exempt from bearer auth -- the OAuth bootstrap surface. The middleware
+# lets these through WITHOUT a credential (they ARE how a client gets one).
+# /authorize + /token are reserved here NOW (later chunks implement them) so the
+# exemption is already in place when they land. Everything else (notably /mcp)
+# still requires a bearer.
+OAUTH_PUBLIC_PATHS = {"/register", "/authorize", "/token"}
+OAUTH_PUBLIC_PREFIXES = ("/.well-known/",)
+
+
+def _is_oauth_public_path(p: str) -> bool:
+    """True iff the request path is part of the public OAuth bootstrap surface."""
+    if p in OAUTH_PUBLIC_PATHS:
+        return True
+    return any(p.startswith(prefix) for prefix in OAUTH_PUBLIC_PREFIXES)
+
+
+def _load_oauth_clients() -> Dict[str, dict]:
+    """Load the registered-client store (client_id -> registration dict).
+
+    Returns {} if the file is missing or unreadable -- a fresh box simply has no
+    registered clients yet (registration creates the file on first POST).
+    """
+    try:
+        p = Path(BLACKBOX_MCP_OAUTH_CLIENTS_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logger.error("Failed to load OAuth client store %s: %s",
+                     BLACKBOX_MCP_OAUTH_CLIENTS_FILE, e)
+    return {}
+
+
+def _persist_oauth_client(client_id: str, record: dict) -> None:
+    """Persist one registered client to the gitignored store, 0600.
+
+    Read-modify-write the whole map (DCR is low-volume -- one record per client
+    that ever connects). The file is created with 0600 perms (owner-only); the
+    parent Manifest/ is gitignored, as is **/*token*.json, so the store is doubly
+    excluded from git and never world-readable.
+    """
+    p = Path(BLACKBOX_MCP_OAUTH_CLIENTS_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    clients = _load_oauth_clients()
+    clients[client_id] = record
+    payload = json.dumps(clients, indent=2)
+    # Create with 0600 from the start (umask-independent) so the secret-bearing
+    # store is never briefly world-readable. os.open + O_CREAT|O_TRUNC|O_WRONLY.
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    finally:
+        # Re-assert 0600 even if the file pre-existed with looser perms.
+        try:
+            os.chmod(str(p), 0o600)
+        except OSError:
+            pass
+
+
+def _oauth_as_metadata() -> dict:
+    """RFC 8414 Authorization Server Metadata for the public OAuth surface.
+
+    issuer = the public Funnel origin; all endpoints are issuer + path. We
+    advertise ONLY what this server supports: authorization_code + PKCE/S256,
+    public clients (token_endpoint_auth_method=none, no secret).
+    """
+    issuer = BLACKBOX_MCP_PUBLIC_URL
+    return {
+        "issuer": issuer,
+        "authorization_endpoint": issuer + "/authorize",
+        "token_endpoint": issuer + "/token",
+        "registration_endpoint": issuer + "/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+    }
+
+
+def _oauth_protected_resource_metadata() -> dict:
+    """RFC 9728 Protected Resource Metadata -- points the client at the AS.
+
+    resource = the MCP URL the client calls; authorization_servers = [issuer], so
+    a 401 from /mcp tells the client where to discover + run OAuth.
+    """
+    return {
+        "resource": BLACKBOX_MCP_RESOURCE_URL,
+        "authorization_servers": [BLACKBOX_MCP_PUBLIC_URL],
+        "bearer_methods_supported": ["header"],
+    }
+
+
+async def _oauth_as_metadata_handler(request):
+    """GET /.well-known/oauth-authorization-server (RFC 8414)."""
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        _oauth_as_metadata(),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+async def _oauth_pr_metadata_handler(request):
+    """GET /.well-known/oauth-protected-resource (RFC 9728)."""
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        _oauth_protected_resource_metadata(),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+async def _oauth_register_handler(request):
+    """POST /register -- RFC 7591 Dynamic Client Registration (public PKCE).
+
+    Accepts {redirect_uris, client_name, ...}. redirect_uris is REQUIRED and must
+    be a non-empty list (RFC 7591 + the auth_code flow needs at least one). We
+    mint a client_id, force token_endpoint_auth_method=none (public client, NO
+    secret), persist the registration to the gitignored 0600 store, and return
+    the RFC 7591 client information response (201).
+    """
+    from starlette.responses import JSONResponse
+    import secrets as _secrets
+    import time as _time
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": "invalid_client_metadata",
+             "error_description": "Request body must be JSON"},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "invalid_client_metadata",
+             "error_description": "Request body must be a JSON object"},
+            status_code=400,
+        )
+
+    redirect_uris = body.get("redirect_uris")
+    if (not isinstance(redirect_uris, list) or not redirect_uris
+            or not all(isinstance(u, str) and u for u in redirect_uris)):
+        return JSONResponse(
+            {"error": "invalid_redirect_uri",
+             "error_description": "redirect_uris is required and must be a "
+                                  "non-empty list of strings"},
+            status_code=400,
+        )
+
+    # Public PKCE client: NO secret. We accept (but normalize) the auth method.
+    auth_method = body.get("token_endpoint_auth_method", "none")
+    if auth_method != "none":
+        return JSONResponse(
+            {"error": "invalid_client_metadata",
+             "error_description": "Only public clients are supported "
+                                  "(token_endpoint_auth_method must be 'none')"},
+            status_code=400,
+        )
+
+    client_id = "mcp-" + uuid.uuid4().hex
+    issued_at = int(_time.time())
+    # Echo back the standard RFC 7591 metadata fields the client sent, with our
+    # enforced/derived values for the auth-method + grant/response types.
+    record = {
+        "client_id": client_id,
+        "client_id_issued_at": issued_at,
+        "redirect_uris": redirect_uris,
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+    for field in ("client_name", "client_uri", "logo_uri", "scope",
+                  "contacts", "tos_uri", "policy_uri", "software_id",
+                  "software_version"):
+        if field in body and body[field] is not None:
+            record[field] = body[field]
+
+    try:
+        _persist_oauth_client(client_id, record)
+    except Exception as e:
+        logger.error("Failed to persist OAuth client %s: %s", client_id, e)
+        return JSONResponse(
+            {"error": "invalid_client_metadata",
+             "error_description": "Failed to persist client registration"},
+            status_code=500,
+        )
+
+    logger.info("OAuth DCR: registered client_id=%s (%d redirect_uri(s), name=%r)",
+                client_id, len(redirect_uris), record.get("client_name"))
+    # RFC 7591 success: 201 Created with the client information response.
+    return JSONResponse(record, status_code=201)
+
 def build_http_app(path: str = None):
     """Build the Starlette ASGI app hosting the SAME `server` over Streamable HTTP.
 
     Returns (starlette_app, session_manager). The session manager's run() is the
     Starlette lifespan, so the manager's task group lives for the app's lifetime.
-    NO auth middleware is attached (M2 is localhost-only, no auth).
+
+    M3 wraps the /mcp endpoint in BearerAuthMiddleware. CHUNK 6a adds the PUBLIC
+    OAuth bootstrap routes (discovery metadata + dynamic client registration) as
+    SEPARATE, UN-wrapped routes -- so they are reachable WITHOUT a bearer, while
+    /mcp stays guarded. (The middleware ALSO exempts these paths as defense in
+    depth, in case a later chunk routes everything through one wrapper.)
     """
     # Imported lazily so the stdio path never depends on these (they ARE in the
     # lean MCP/venv as transitive deps of `mcp`, but the import stays scoped to
@@ -1493,10 +1750,28 @@ def build_http_app(path: str = None):
 
     guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
 
+    # CHUNK 6a: the PUBLIC OAuth bootstrap routes. These are plain function
+    # endpoints (Starlette func(request)->Response), registered SEPARATELY from
+    # the bearer-guarded /mcp endpoint -- so they are reachable WITHOUT a token.
+    # /authorize + /token are NOT built yet (later chunks); only discovery +
+    # registration ship here. The metadata advertises /authorize + /token so the
+    # client knows where they WILL be.
+    oauth_routes = [
+        Route("/.well-known/oauth-authorization-server",
+              endpoint=_oauth_as_metadata_handler, methods=["GET"]),
+        Route("/.well-known/oauth-protected-resource",
+              endpoint=_oauth_pr_metadata_handler, methods=["GET"]),
+        Route("/register",
+              endpoint=_oauth_register_handler, methods=["POST"]),
+    ]
+
     app = Starlette(
         debug=False,
-        routes=[Route(path, endpoint=guarded_endpoint,
-                      methods=["GET", "POST", "DELETE"])],
+        routes=[
+            Route(path, endpoint=guarded_endpoint,
+                  methods=["GET", "POST", "DELETE"]),
+            *oauth_routes,
+        ],
         lifespan=lifespan,
     )
     return app, session_manager
