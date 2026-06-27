@@ -1,0 +1,26 @@
+# BlackBox MCP HTTP Server -- persistent Streamable-HTTP (remote) transport.
+# Install on a fresh box:
+#   sudo cp MCP/deploy/blackbox-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now blackbox-mcp.service
+# The absolute paths below MUST match the repo's install location.
+[Unit]
+Description=BlackBox MCP HTTP Server (remote tool server, bearer/OAuth authed)
+After=network.target blackbox.service
+Wants=blackbox.service
+
+[Service]
+Type=simple
+User=ai-black-box-fc
+WorkingDirectory=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc
+Environment=BLACKBOX_MCP_TRANSPORT=http
+Environment=BLACKBOX_MCP_HTTP_HOST=127.0.0.1
+Environment=BLACKBOX_MCP_HTTP_PORT=9093
+Environment=BLACKBOX_ROOT=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc
+Environment=BLACKBOX_URL=http://localhost:9091
+Environment=BLACKBOX_MCP_TOKENS_FILE=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Manifest/mcp_tokens.json
+ExecStart=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/venv/bin/python /home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/blackbox_mcp_server.py --transport http
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,152 +1,74 @@
 # BlackBox MCP Server
 
-Model Context Protocol (MCP) server that exposes BlackBox Flight Recorder functionality to Claude Code and other MCP-compatible AI agents.
+Exposes the BlackBox Flight Recorder — snapshot memory, multimodal generation/analysis,
+Workspace, telephony, and ~74 ToolVault tools — to AI agents over the Model Context Protocol.
 
-## Overview
+The advertised tool list is **registry-derived** from the ToolVault `mcp` group
+(`Orchestrator/toolvault`), so it tracks the live catalog automatically. Most tools execute
+by proxying to the BlackBox backend (`/local/tools/execute`, `/gmail/execute`); snapshot
+byte-offset reads run in-process.
 
-This MCP server provides AI agents with full access to:
-- **Snapshot Search** - Semantic and keyword search across all memories
-- **Snapshot Retrieval** - Get specific snapshots by ID using byte offsets
-- **Memory Creation** - Mint new snapshots to remember information
-- **Context Enrichment** - Get relevant historical context for queries
-- **Manifest Access** - Read the byte-offset index for efficient traversal
+## Two transports
 
-## Installation
+| Transport | Use | Auth |
+|---|---|---|
+| **stdio** (default) | Local Claude Code on this box (subprocess) | none (local) |
+| **Streamable HTTP** (`--transport http`) | Remote apps over the network | bearer token / OAuth 2.1 |
 
-```bash
-# Create virtual environment (optional but recommended)
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  # Windows
+- Local: launched per `claude_mcp_config.example.json` (command + args).
+- Remote: a persistent service on `127.0.0.1:9093`, exposed publicly via Tailscale Funnel.
+  See [`deploy/REMOTE_SETUP.md`](deploy/REMOTE_SETUP.md).
 
-# Install dependencies
-pip install -r requirements.txt
+## Auth & isolation (HTTP transport)
+
+- **Bearer token** — `Authorization: Bearer <token>`; tokens live in the gitignored
+  `Manifest/mcp_tokens.json` as `{"<token>":"<operator>"}`.
+- **Token → operator binding** — every request acts as its token's bound operator
+  (caller-asserted operator is ignored); snapshot reads are **scoped to that operator**
+  (no cross-operator access). Validated per-request.
+- **Audit logging** — each call logs `sha256(token)[:12]` + operator + tool (never the token).
+- **OAuth 2.1** (DCR + PKCE/S256) — for Claude Desktop / claude.ai web; discovery at
+  `/.well-known/oauth-authorization-server`. (In progress.)
+- OAuth bootstrap endpoints (`/.well-known/*`, `/register`, `/authorize`, `/token`) are
+  public; only `/mcp` requires a credential.
+
+## Connecting external apps
+
+Public URL: `https://<host>.ts.net:8443/mcp`. Replace `bbmcp_YOUR_TOKEN` with your real token.
+
+**Claude Code**
+```
+claude mcp add --transport http blackbox https://<host>.ts.net:8443/mcp \
+  --header "Authorization: Bearer bbmcp_YOUR_TOKEN"
 ```
 
-## Configuration
-
-### For Claude Code
-
-Copy the example config to your Claude Code settings:
-
-```bash
-# Linux/Mac
-mkdir -p ~/.claude
-cp claude_mcp_config.example.json ~/.claude/mcp.json
-
-# Edit paths if needed
-nano ~/.claude/mcp.json
+**OpenAI Codex** (`~/.codex/config.toml`) — the experimental flag is REQUIRED:
+```toml
+experimental_use_rmcp_client = true
+[mcp_servers.blackbox]
+url = "https://<host>.ts.net:8443/mcp"
+bearer_token_env_var = "BLACKBOX_MCP_TOKEN"
 ```
 
-### Environment Variables
-
-- `BLACKBOX_URL` - BlackBox API URL (default: `http://localhost:9091`)
-- `BLACKBOX_DATA_DIR` - Path to BlackBox data directory
-
-## Available Tools
-
-### Memory & Search Tools
-
-| Tool | Description |
-|------|-------------|
-| `search_snapshots` | Search memories using semantic + keyword search |
-| `get_snapshot` | Retrieve a specific snapshot by ID |
-| `seek_snapshot_direct` | Efficient byte-offset retrieval from volume |
-| `list_recent_snapshots` | Get recent snapshots for an operator |
-| `mint_snapshot` | Create a new memory/snapshot |
-| `get_context` | Get enriched context for a query |
-| `list_operators` | List all users in the system |
-| `get_index_stats` | Get statistics about the snapshot store |
-| `browse_index` | Browse/paginate through snapshots |
-| `chat_with_context` | Send a message through BlackBox with full context |
-| `refresh_index` | Force reload the snapshot index cache |
-
-### Multimodal Generation Tools
-
-| Tool | Description |
-|------|-------------|
-| `generate_image` | Generate images from text prompts |
-| `generate_video` | Generate videos using Veo 3.1 (text-to-video or image-to-video) |
-| `extend_video` | Extend existing videos with Veo 3.1 |
-| `lyria_music` | Generate 30-second music with Google Lyria |
-| `text_to_speech` | Convert text to speech (OpenAI TTS) |
-| `speech_to_text` | Transcribe audio to text (OpenAI Whisper) |
-
-### Multimodal Analysis Tools
-
-| Tool | Description |
-|------|-------------|
-| `analyze_audio` | Analyze/transcribe audio with Gemini |
-| `analyze_image` | Describe, extract text, identify objects in images |
-| `analyze_video` | Describe and analyze video content |
-
-### Status & Utility Tools
-
-| Tool | Description |
-|------|-------------|
-| `get_task_status` | Check async generation task progress |
-| `list_tts_voices` | List available Google Cloud TTS voices |
-| `get_music_status` | Check Lyria music generation availability |
-
-## Available Resources
-
-| Resource URI | Description |
-|--------------|-------------|
-| `blackbox://manifest/stats` | Snapshot counts, sizes, operators |
-| `blackbox://manifest/index` | Byte-offset index summary |
-| `blackbox://operators` | List of all operators |
-
-## Example Usage (from Claude Code)
-
-Once configured, Claude Code can use these tools naturally:
-
-```
-User: "What did we discuss about the authentication system?"
-
-Claude: [Uses search_snapshots("authentication system", "Brandon", 5)]
-        Found relevant snapshots:
-        - SNAP-20251115-xxx: Discussion about JWT tokens...
-
-        Based on your previous conversations, you decided to...
+**Google Antigravity** — key is `serverUrl` (not `url`):
+```json
+{"mcpServers":{"blackbox":{"serverUrl":"https://<host>.ts.net:8443/mcp","headers":{"Authorization":"Bearer bbmcp_YOUR_TOKEN"}}}}
 ```
 
-## Deployment Notes
-
-When creating a system image for new customers:
-
-1. The MCP server is included in the image
-2. Paths in `~/.claude/mcp.json` should use the standard location
-3. New customers start with empty snapshot volume
-4. MCP server auto-connects to local BlackBox instance
-
-## Testing
-
-```bash
-# Test the server manually
-python blackbox_mcp_server.py
-
-# The server communicates via stdio (stdin/stdout)
-# Claude Code handles this automatically
+**Claude Desktop** — via the `mcp-remote` npx shim (or OAuth once complete):
+```json
+{"mcpServers":{"blackbox":{"command":"npx","args":["-y","mcp-remote","https://<host>.ts.net:8443/mcp","--header","Authorization: Bearer bbmcp_YOUR_TOKEN"]}}}
 ```
 
-## Architecture
+## Resources
 
-```
-┌─────────────────────┐     stdio/MCP      ┌──────────────────────┐
-│   Claude Code       │◄──────────────────►│  BlackBox MCP Server │
-│   (AI Agent)        │                    │  (This server)       │
-└─────────────────────┘                    └──────────┬───────────┘
-                                                      │ HTTP
-                                                      ▼
-                                           ┌──────────────────────┐
-                                           │  BlackBox Orchestrator│
-                                           │  localhost:9091      │
-                                           └──────────┬───────────┘
-                                                      │
-                                                      ▼
-                                           ┌──────────────────────┐
-                                           │  Snapshot Volume     │
-                                           │  + Manifest Index    │
-                                           │  + Embeddings        │
-                                           └──────────────────────┘
-```
+- `blackbox://index/stats` — snapshot index stats
+- `blackbox://index/operators` — operator roster
+- `blackbox://index/recent` — recent snapshots
+
+## Notes
+
+- Slow media tools return a `task_id` fast; poll with `get_task_status` (don't block — Claude
+  Code aborts idle tool calls after ~5 min).
+- The lean `MCP/venv` (mcp, httpx, requests, bs4, starlette, uvicorn) is deliberately separate
+  from the backend venv to avoid the starlette/fastapi version conflict.
