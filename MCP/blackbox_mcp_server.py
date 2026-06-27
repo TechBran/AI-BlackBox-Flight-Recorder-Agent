@@ -49,6 +49,36 @@ app, mounted at `/mcp`, run by uvicorn.
     middleware; it is reachable only from localhost.
   * uvicorn + starlette are already in MCP/venv (transitive deps of `mcp`); no
     new heavy dep was added (fastapi is deliberately NOT pulled in).
+
+--- M3 BEARER AUTH + TOKEN-BOUND OPERATOR + AUDIT (2026-06-27) ---------------
+The HTTP transport is now the SECURITY BOUNDARY (it becomes public in M4). M3
+adds three things to the HTTP path ONLY -- stdio is locally-launched + trusted
+and stays auth-free and behaviourally UNCHANGED:
+
+  1. BEARER AUTH (Starlette middleware, edge of the /mcp route): every HTTP
+     request must carry `Authorization: Bearer <token>`. Missing/malformed/
+     unknown -> 401 + `WWW-Authenticate: Bearer` BEFORE the MCP handlers run.
+     Validation is CONSTANT-TIME (hmac.compare_digest against every known
+     token), so a wrong token leaks no timing signal about which bytes matched.
+  2. TOKEN-BOUND OPERATOR (anti-spoof + anti-leak): tokens map token->operator
+     (loaded from a SECURE, gitignored source -- env BLACKBOX_MCP_TOKENS JSON
+     and/or Manifest/mcp_tokens.json; NEVER committed). The middleware stashes
+     the bound operator in a contextvar (mirrors the M1 request-id contextvar).
+     resolve_operator() and the read tools that span ALL operators (operator='')
+     consult that contextvar: on the HTTP path they FORCE the bound operator and
+     IGNORE any caller-asserted operator in the tool args, so a remote caller
+     can neither act as another operator nor read another operator's snapshots.
+     On stdio the contextvar is unset -> behaviour is exactly as before
+     (operator='' still spans all; caller-asserted operator still honoured).
+  3. AUDIT LOG: every HTTP request logs (at INFO) a token IDENTIFIER (a short
+     sha256 prefix -- NEVER the token value), the bound operator, the method/
+     path, and the request id. This is the audit trail for the public surface.
+
+  Token store (secure, NOT committed -- both sources are gitignored):
+    * env  BLACKBOX_MCP_TOKENS = {"<token>":"<operator>", ...}  (JSON), and/or
+    * file BLACKBOX_MCP_TOKENS_FILE (default Manifest/mcp_tokens.json), same shape.
+    Both are merged (env wins on key collision). Manifest/ is gitignored, as is
+    **/*token*.json, so the file is doubly excluded from git.
 """
 
 import argparse
@@ -102,6 +132,22 @@ logger.propagate = False
 # Per-call request id, set at the top of call_tool() and read by the loggers
 # below so every line for one invocation shares an id (no threading of args).
 _REQUEST_ID: "contextvars.ContextVar[str]" = contextvars.ContextVar("mcp_request_id", default="-")
+
+# M3: the TOKEN-BOUND operator for the current HTTP request, set by the auth
+# middleware (mirrors _REQUEST_ID). UNSET (None) on the stdio path -- which is
+# how resolve_operator()/the read tools tell HTTP (bound) from stdio (trusted).
+# A contextvar (not a global) so concurrent HTTP requests never cross operators.
+_BOUND_OPERATOR: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "mcp_bound_operator", default=None
+)
+
+# M3: the token IDENTIFIER (sha256 prefix, NEVER the value) for the current HTTP
+# request, set by the auth middleware. Threaded into the per-tool-call audit log
+# so EVERY tool invocation on the public surface carries who-called-it. None on
+# stdio (no token).
+_TOKEN_ID: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "mcp_token_id", default=None
+)
 
 
 def _log(level: int, tool: str, msg: str, operator: Optional[str] = None) -> None:
@@ -182,12 +228,39 @@ async def _fetch_operators():
 
 
 async def resolve_operator(provided):
-    """Server-side safety net: resolve the operator for a tool call. When omitted,
-    single operator -> that; multiple -> system default. (Interactive dropdown for
-    the multiple case is handled agent-side, not here.)"""
+    """Server-side safety net: resolve the operator for a tool call.
+
+    HTTP (bound) path -- M3 ANTI-SPOOF: when a token-bound operator is set
+    (_BOUND_OPERATOR contextvar), RETURN IT and IGNORE `provided` entirely, so a
+    remote caller cannot act as a different operator by asserting one in the
+    tool args. This is the single chokepoint every write/proxy tool flows
+    through (mint_snapshot, get_context, chat_with_context, _proxy_tool, ...).
+
+    stdio (trusted) path -- UNCHANGED: when omitted, single operator -> that;
+    multiple -> system default; caller-asserted operator honoured. (Interactive
+    dropdown for the multiple case is handled agent-side, not here.)
+    """
+    bound = _BOUND_OPERATOR.get()
+    if bound is not None:
+        return bound
     operators, default = await _fetch_operators()
     resolved, _needs = choose_operator(provided, operators, default)
     return resolved
+
+
+def _read_scope_operator(provided: str) -> str:
+    """Operator FILTER for read tools that span ALL operators when blank.
+
+    M3 ANTI-LEAK: on the HTTP (bound) path, FORCE the token's bound operator and
+    IGNORE `provided` -- otherwise a remote caller could read every operator's
+    snapshots via search_snapshots / browse_index by leaving operator blank.
+    On the stdio (trusted) path the contextvar is unset, so `provided` is
+    returned verbatim -- blank still means "span ALL operators on this box".
+    """
+    bound = _BOUND_OPERATOR.get()
+    if bound is not None:
+        return bound
+    return provided
 
 # Put the REPO ROOT on sys.path so the `Orchestrator` PACKAGE is importable.
 # get_mcp_tools() (below) lazily runs `from Orchestrator.toolvault import registry`
@@ -429,7 +502,17 @@ async def call_tool(name: str, arguments: dict[str, Any]):
     (isError=True) on any failure.
     """
     # Per-call request id for the audit trail (shared by every log line below).
-    _REQUEST_ID.set(uuid.uuid4().hex[:12])
+    # HTTP path: the auth middleware already set _REQUEST_ID (+ bound operator +
+    # token id) for THIS request -- reuse it so the middleware AUDIT line and the
+    # tool-call lines share one id. stdio path: no middleware ran, so mint a fresh
+    # id (the contextvar is still at its "-" default).
+    if _REQUEST_ID.get() == "-":
+        _REQUEST_ID.set(uuid.uuid4().hex[:12])
+    _tid = _TOKEN_ID.get()
+    if _tid is not None:
+        # AUDIT (M3): every tool invocation on the HTTP/public surface logs the
+        # token id (never the value) + bound operator + tool name + request id.
+        _log(logging.INFO, name, f"AUDIT tool-call tid={_tid}", operator=_BOUND_OPERATOR.get())
     _log(logging.INFO, name, "call received")
 
     try:
@@ -504,8 +587,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             return [TextContent(type="text", text=json.dumps(stats, indent=2))]
 
         elif name == "browse_index":
-            # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
-            operator = arguments.get("operator", "")
+            # Read tool: omitting operator spans ALL operators on stdio (trusted).
+            # On the HTTP/bound path _read_scope_operator FORCES the token's
+            # operator (M3 anti-leak) so a remote caller cannot read every operator.
+            operator = _read_scope_operator(arguments.get("operator", ""))
             snap_type = arguments.get("snap_type")
             limit = arguments.get("limit", 20)
             offset = arguments.get("offset", 0)
@@ -558,7 +643,13 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
         elif name == "get_current_operator":
             operators, default = await _fetch_operators()
-            resolved, needs_selection = choose_operator(None, operators, default)
+            bound = _BOUND_OPERATOR.get()
+            if bound is not None:
+                # HTTP/bound path: the operator IS the token's bound operator.
+                # No selection is ever needed remotely (identity is the credential).
+                resolved, needs_selection = bound, False
+            else:
+                resolved, needs_selection = choose_operator(None, operators, default)
             result = {
                 "resolved": resolved,
                 "operators": operators,
@@ -689,8 +780,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
             if name == "search_snapshots":
                 query = arguments["query"]
-                # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
-                operator = arguments.get("operator", "")
+                # Read tool: omitting operator spans ALL operators on stdio (trusted).
+                # On the HTTP/bound path _read_scope_operator FORCES the token's
+                # operator (M3 anti-leak) so a remote caller cannot read every operator.
+                operator = _read_scope_operator(arguments.get("operator", ""))
                 limit = arguments.get("limit", 10)
                 _log(logging.INFO, name, "GET /fossil/hybrid", operator=operator)
 
@@ -1025,6 +1118,174 @@ async def main():
 # Starlette wiring below mirrors FastMCP.streamable_http_app() (the canonical
 # mounting pattern) MINUS the auth branches (auth is M3).
 # =============================================================================
+# =============================================================================
+# M3: TOKEN STORE + BEARER AUTH MIDDLEWARE (HTTP transport ONLY)
+#
+# The token->operator map is loaded from a SECURE source that is NOT committed:
+#   * env  BLACKBOX_MCP_TOKENS       = {"<token>":"<operator>", ...} (JSON), and/or
+#   * file BLACKBOX_MCP_TOKENS_FILE  (default Manifest/mcp_tokens.json), same shape.
+# Both are merged (env wins on collision). Manifest/ is gitignored AND
+# **/*token*.json is gitignored, so the file can never be committed by accident.
+# Validation is CONSTANT-TIME (hmac.compare_digest), and the middleware runs at
+# the EDGE of the /mcp route so an unauthenticated request never reaches an MCP
+# handler. NONE of this touches the stdio path.
+# =============================================================================
+import hmac
+import hashlib
+
+BLACKBOX_MCP_TOKENS_FILE = os.getenv(
+    "BLACKBOX_MCP_TOKENS_FILE", str(BLACKBOX_ROOT / "Manifest" / "mcp_tokens.json")
+)
+
+
+def _load_token_map() -> Dict[str, str]:
+    """Load + merge the token->operator map from env JSON and/or the secure file.
+
+    Returns {} if neither source yields a valid mapping. A {} map means the HTTP
+    transport will reject EVERY request (fail closed) -- never fail open.
+    The file is gitignored (Manifest/ + **/*token*.json); the env var lives in
+    the deploy environment. Neither is in source.
+    """
+    merged: Dict[str, str] = {}
+    # File source first (env overrides it on key collision).
+    try:
+        p = Path(BLACKBOX_MCP_TOKENS_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for tok, op in data.items():
+                    if isinstance(tok, str) and tok and isinstance(op, str) and op:
+                        merged[tok] = op
+    except Exception as e:
+        logger.error("Failed to load token file %s: %s", BLACKBOX_MCP_TOKENS_FILE, e)
+    # Env source (wins on collision).
+    env_raw = os.getenv("BLACKBOX_MCP_TOKENS", "").strip()
+    if env_raw:
+        try:
+            data = json.loads(env_raw)
+            if isinstance(data, dict):
+                for tok, op in data.items():
+                    if isinstance(tok, str) and tok and isinstance(op, str) and op:
+                        merged[tok] = op
+        except Exception as e:
+            logger.error("Failed to parse BLACKBOX_MCP_TOKENS env JSON: %s", e)
+    return merged
+
+
+def _token_id(token: str) -> str:
+    """A short, non-reversible IDENTIFIER for a token (audit logs only).
+
+    sha256(token) -> first 12 hex chars. NEVER the token value -- so logs can be
+    correlated to a credential without ever recording the secret.
+    """
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def _match_token(presented: str, token_map: Dict[str, str]):
+    """Constant-time token lookup. Returns (operator, token_id) or (None, None).
+
+    hmac.compare_digest is used for EVERY known token (no early break on the
+    first non-match) so total work does not depend on which token matched --
+    no timing oracle on the secret. An empty/blank presented token never matches.
+    """
+    if not presented:
+        return None, None
+    matched_op = None
+    matched_tok = None
+    for known, operator in token_map.items():
+        if hmac.compare_digest(presented, known):
+            matched_op = operator
+            matched_tok = known
+    if matched_op is None:
+        return None, None
+    return matched_op, _token_id(matched_tok)
+
+
+def _extract_bearer(scope) -> Optional[str]:
+    """Pull the bearer token out of an ASGI scope's Authorization header.
+
+    Returns the token string for a well-formed `Authorization: Bearer <token>`
+    (case-insensitive scheme), else None (missing OR malformed -> both -> 401).
+    """
+    for k, v in scope.get("headers", []):
+        if k == b"authorization":
+            try:
+                raw = v.decode("latin-1")
+            except Exception:
+                return None
+            parts = raw.split(" ", 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                tok = parts[1].strip()
+                return tok or None
+            return None
+    return None
+
+
+class BearerAuthMiddleware:
+    """Pure-ASGI bearer-auth gate wrapping the /mcp app (HTTP transport ONLY).
+
+    Rejects any HTTP request lacking a valid `Authorization: Bearer <token>`
+    with 401 + `WWW-Authenticate: Bearer` BEFORE the request reaches the MCP
+    session manager. On success it resolves token->operator and sets BOTH the
+    request-id and bound-operator contextvars (so call_tool() and resolve_operator
+    see the bound operator), and emits one audit log line per request.
+
+    Pure ASGI (not BaseHTTPMiddleware) so it can short-circuit with a 401
+    without ever instantiating an MCP session, and so it sees the raw scope.
+    The token map is loaded ONCE at construction (server start); rotating a
+    token is a restart -- acceptable for a single long-lived deploy.
+    """
+
+    def __init__(self, app, token_map: Dict[str, str]):
+        self.app = app
+        self.token_map = token_map
+
+    async def _reject_401(self, send, detail: str) -> None:
+        body = json.dumps({"error": {"code": "unauthorized", "message": detail}}).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"www-authenticate", b"Bearer"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        # Only guard HTTP requests; lifespan/other scopes pass straight through.
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        rid = uuid.uuid4().hex[:12]
+        _REQUEST_ID.set(rid)
+
+        presented = _extract_bearer(scope)
+        if not presented:
+            logger.warning("rid=%s AUTH reject: missing/malformed bearer (%s %s)",
+                           rid, scope.get("method"), scope.get("path"))
+            await self._reject_401(send, "Missing or malformed Authorization: Bearer token")
+            return
+
+        operator, token_id = _match_token(presented, self.token_map)
+        if operator is None:
+            logger.warning("rid=%s AUTH reject: unknown token tid=%s (%s %s)",
+                           rid, _token_id(presented), scope.get("method"), scope.get("path"))
+            await self._reject_401(send, "Unknown or invalid bearer token")
+            return
+
+        # Bind the operator for the LIFETIME of this request (contextvar) so
+        # resolve_operator()/read tools FORCE this operator (anti-spoof/anti-leak).
+        # The token id is threaded the same way for the per-tool-call audit line.
+        _BOUND_OPERATOR.set(operator)
+        _TOKEN_ID.set(token_id)
+        # AUDIT (M3): token id (never the value) + bound operator + method/path + rid.
+        logger.info("rid=%s AUDIT auth-ok tid=%s operator=%s %s %s",
+                    rid, token_id, operator, scope.get("method"), scope.get("path"))
+        await self.app(scope, receive, send)
+
+
 def build_http_app(path: str = None):
     """Build the Starlette ASGI app hosting the SAME `server` over Streamable HTTP.
 
@@ -1068,9 +1329,24 @@ def build_http_app(path: str = None):
             logger.info("Streamable HTTP session manager running at path %s", path)
             yield
 
+    # M3: load the token->operator map ONCE and wrap the MCP endpoint in the
+    # bearer-auth gate. A loaded map of size 0 means the transport FAILS CLOSED
+    # (every request 401s) -- we log that loudly so a misconfigured deploy is
+    # obvious rather than silently rejecting everything.
+    token_map = _load_token_map()
+    if not token_map:
+        logger.error("M3 AUTH: token map is EMPTY -- the HTTP transport will reject "
+                     "EVERY request (fail-closed). Set BLACKBOX_MCP_TOKENS (env JSON) "
+                     "or %s.", BLACKBOX_MCP_TOKENS_FILE)
+    else:
+        logger.info("M3 AUTH: loaded %d bearer token(s) bound to operator(s): %s",
+                    len(token_map), sorted(set(token_map.values())))
+
+    guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
+
     app = Starlette(
         debug=False,
-        routes=[Route(path, endpoint=_MCPASGIApp(session_manager),
+        routes=[Route(path, endpoint=guarded_endpoint,
                       methods=["GET", "POST", "DELETE"])],
         lifespan=lifespan,
     )
@@ -1086,8 +1362,8 @@ def run_http(host: str = None, port: int = None, path: str = None):
     path = path or BLACKBOX_MCP_HTTP_PATH
 
     _log_startup_banner("streamable-http")
-    logger.info("Streamable HTTP transport binding http://%s:%d%s (localhost-only, NO auth)",
-                host, port, path)
+    logger.info("Streamable HTTP transport binding http://%s:%d%s (M3: bearer auth + "
+                "token-bound operator + audit)", host, port, path)
     if host not in ("127.0.0.1", "localhost", "::1"):
         # M2 guard-rail: we are not supposed to expose beyond localhost yet.
         logger.warning("HTTP host is %s -- M2 is localhost-only; non-localhost bind is "

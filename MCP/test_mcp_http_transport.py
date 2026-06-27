@@ -49,6 +49,15 @@ os.environ.setdefault("BLACKBOX_ROOT", str(_REPO_ROOT))
 EXPECTED_TOOL_COUNT = 74
 BACKEND_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
+# M3: the HTTP transport now REQUIRES bearer auth. This smoke runs the server with
+# a TEST token map (env BLACKBOX_MCP_TOKENS, never the real store) and connects
+# with the matching bearer header, so it exercises the SAME list/local/proxied
+# path it always did -- now through the auth gate. (Auth-rejection is covered
+# exhaustively by test_mcp_auth.py.)
+SMOKE_TOKEN = "smoke-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SMOKE_OPERATOR = "system"
+SMOKE_TOKEN_MAP = {SMOKE_TOKEN: SMOKE_OPERATOR}
+
 
 def _free_port() -> int:
     """Grab an ephemeral free port on localhost, then release it for the server."""
@@ -91,7 +100,8 @@ def _backend_up() -> bool:
 async def _drive_client(base_url: str) -> dict:
     """Connect as a real MCP client and exercise list + local + proxied tools."""
     results = {}
-    async with streamablehttp_client(base_url) as (read, write, _get_sid):
+    headers = {"Authorization": f"Bearer {SMOKE_TOKEN}"}  # M3: auth now required
+    async with streamablehttp_client(base_url, headers=headers) as (read, write, _get_sid):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
@@ -122,6 +132,10 @@ def main() -> int:
     env["BLACKBOX_ROOT"] = str(_REPO_ROOT)
     env["BLACKBOX_MCP_HTTP_PORT"] = str(port)
     env["BLACKBOX_MCP_HTTP_HOST"] = "127.0.0.1"
+    # M3: inject a TEST token map (env source only -- never the real store) so the
+    # auth gate accepts SMOKE_TOKEN. Point the file source at a non-existent path.
+    env["BLACKBOX_MCP_TOKENS"] = json.dumps(SMOKE_TOKEN_MAP)
+    env["BLACKBOX_MCP_TOKENS_FILE"] = str(_HERE / "__no_such_token_file__.json")
     # Quiet the server logs a touch; stderr is still captured for failures.
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
 
