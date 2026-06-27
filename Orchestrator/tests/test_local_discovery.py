@@ -158,6 +158,12 @@ def test_catalog_ram_ordering(client):
     assert by_slug["gemma-4-e2b"]["min_ram_gb"] < by_slug["gemma-4-e4b"]["min_ram_gb"]
 
 
+def test_download_endpoint_removed(client):
+    """The hub byte-proxy download endpoint is deleted — bytes go phone->HF direct."""
+    resp = client.get("/local/models/download/gemma-4-e2b")
+    assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # catalog.build_catalog() — HF-enriched curated floor (TTL-cached)
 #

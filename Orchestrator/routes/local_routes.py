@@ -21,7 +21,7 @@ import uuid
 from typing import Optional
 
 from fastapi import Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 
 from Orchestrator.behavioral_core import get_persona
 from Orchestrator.checkpoint import app
@@ -113,64 +113,29 @@ def build_local_models_response(operator: Optional[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# GET /local/models/catalog — server-side model MIRROR catalog (download metadata)
+# GET /local/models/catalog — downloadable on-device bundle catalog (metadata)
 #
-# The hub mirrors the Gemma LiteRT `.litertlm` bundles so phones download them
-# from the hub over Tailscale. This endpoint lists WHAT is downloadable + its
-# metadata (hf_repo/filename/size/sha/min_ram/guidance). This is DISTINCT from
-# /models/local (the picker descriptors): same slugs, different fields. The
-# actual ranged download is Task 1.2 — this is catalog only, no fetch here.
+# The hub AUTO-DISCOVERS the downloadable Gemma LiteRT bundles from the Hugging
+# Face Hub API and serves their metadata here. The hub does NOT proxy the bytes:
+# phones download the `.litertlm` bytes DIRECTLY from Hugging Face using the
+# `download_url` field on each bundle. This is DISTINCT from /models/local (the
+# picker descriptors): same slugs, different fields. Catalog only — no fetch.
 # ---------------------------------------------------------------------------
 @app.get("/local/models/catalog")
 async def local_models_catalog():
-    """List the downloadable on-device model bundles (mirror metadata).
+    """List the downloadable on-device model bundles (discovered metadata).
+
+    Bundles are auto-discovered from the Hugging Face Hub API; phones download
+    the bytes directly from Hugging Face via each bundle's ``download_url``.
 
     Returns: {"bundles": [{slug, display_name, hf_repo, filename, size_bytes,
-              sha256, min_ram_gb, recommended_for}, ...]}.
+              sha256, min_ram_gb, recommended_for, download_url, gated}, ...]}.
     """
     try:
         return {"bundles": catalog.list_bundles()}
     except Exception as e:
         print(f"[LOCAL PROVIDER] catalog failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
-
-
-# ---------------------------------------------------------------------------
-# GET /local/models/download/{slug} — fetch-once + ranged/resumable download
-#
-# The hub fetches the .litertlm bytes from Hugging Face exactly ONCE
-# (mirror.ensure_present), then phones stream them from here over Tailscale.
-# Bundles are multi-GB, so we hand the file to Starlette's FileResponse, which
-# streams it from disk (never loading the whole file into RAM — important on a
-# host with documented memory pressure) and natively handles HTTP Range/resume:
-# a Range header gets a 206 Partial Content + Content-Range, no Range header gets
-# a 200 + the whole file, malformed ranges get 400, un-satisfiable ranges get
-# 416, and Accept-Ranges: bytes is always advertised — all RFC 7233-correct.
-# ---------------------------------------------------------------------------
-@app.get("/local/models/download/{slug}")
-async def local_models_download(slug: str):
-    """Stream a mirrored on-device model bundle, with HTTP Range/resume support.
-
-    Unknown slug → 404. Otherwise fetch-once via ``catalog.ensure_present`` and
-    hand the path to ``FileResponse``, which streams the bytes from disk and
-    handles Range natively (206 + ``Content-Range`` for a satisfiable range, 200
-    + whole file otherwise, 400 for a malformed range, 416 for an un-satisfiable
-    one; ``Accept-Ranges: bytes`` always set).
-    """
-    if catalog.get_bundle(slug) is None:
-        return JSONResponse(
-            {"success": False, "error": f"unknown bundle: {slug}"}, status_code=404
-        )
-
-    try:
-        path = catalog.ensure_present(slug)
-    except Exception as e:
-        # A fetch failure should still 500 (not crash); the actual serving is
-        # delegated to FileResponse below and streams from disk.
-        print(f"[LOCAL PROVIDER] download failed: {e}")
-        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
-
-    return FileResponse(path, media_type="application/octet-stream")
 
 
 # ---------------------------------------------------------------------------
