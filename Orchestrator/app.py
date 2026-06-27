@@ -131,6 +131,9 @@ app.include_router(embeddings_router)
 from Orchestrator.routes.credentials_routes import router as credentials_router
 app.include_router(credentials_router)
 
+from Orchestrator.routes.mcp_routes import router as mcp_router
+app.include_router(mcp_router)
+
 # =============================================================================
 # First-run middleware: redirect /ui index → /onboarding/ when wizard incomplete
 # =============================================================================

@@ -25,6 +25,7 @@ os.environ.setdefault("BLACKBOX_ROOT", str(_REPO_ROOT))
 # Import with the public URL UNSET so we can assert the OAuth discovery 503 path
 # (the module reads the env at import time).
 os.environ["BLACKBOX_MCP_PUBLIC_URL"] = ""
+os.environ["BLACKBOX_MCP_RUNTIME_FILE"] = str(_HERE / "__no_such_runtime__.json")
 os.environ["BLACKBOX_MCP_ROSTER_ENFORCE"] = "1"
 sys.path.insert(0, str(_HERE))
 

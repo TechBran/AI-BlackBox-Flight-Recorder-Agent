@@ -1304,12 +1304,66 @@ BLACKBOX_MCP_TOKENS_FILE = os.getenv(
 # install's OAuth discovery at it. The deploy MUST set BLACKBOX_MCP_PUBLIC_URL to
 # THIS box's public Funnel origin; OAuth discovery fails loudly (503) until it is
 # set. Bearer-token auth does not need it.
-BLACKBOX_MCP_PUBLIC_URL = os.getenv("BLACKBOX_MCP_PUBLIC_URL", "").rstrip("/")
+# Onboarding writes the public URL to a WRITABLE Manifest/ file (no /etc edit), so
+# the box-setup flow sets it with zero sudo. Precedence: ENV (deploy-pinned) >
+# the runtime file > "" (OAuth 503). /internal/reload re-reads this at runtime.
+BLACKBOX_MCP_RUNTIME_FILE = os.getenv(
+    "BLACKBOX_MCP_RUNTIME_FILE", str(BLACKBOX_ROOT / "Manifest" / "mcp_runtime.json"))
+
+
+def _load_runtime_public_url() -> str:
+    env = os.getenv("BLACKBOX_MCP_PUBLIC_URL", "").strip()
+    if env:
+        return env.rstrip("/")
+    try:
+        p = Path(BLACKBOX_MCP_RUNTIME_FILE)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                url = data.get("public_url")
+                if isinstance(url, str) and url.strip():
+                    return url.strip().rstrip("/")
+    except Exception as e:
+        logger.error("Failed to load MCP runtime file %s: %s", BLACKBOX_MCP_RUNTIME_FILE, e)
+    return ""
+
+
+BLACKBOX_MCP_PUBLIC_URL = _load_runtime_public_url()
 
 # The MCP resource URL (issuer + the MCP path) -- the `resource` value in the
 # RFC 9728 Protected Resource Metadata. Built from the public origin + the
 # configured MCP path so a non-default path stays consistent across surfaces.
 BLACKBOX_MCP_RESOURCE_URL = BLACKBOX_MCP_PUBLIC_URL + BLACKBOX_MCP_HTTP_PATH
+
+# Module-level handle to the live auth middleware so the localhost /internal/reload
+# route can hot-swap the token map (mint/revoke) with no restart. Set in build_http_app.
+_AUTH_MIDDLEWARE = {"instance": None}
+
+
+async def _internal_reload_handler(request):
+    """POST /internal/reload (LOCALHOST-ONLY): re-read the runtime public URL + the
+    token map from disk and apply them IN PLACE, so a freshly minted token / a newly
+    set public URL goes live with no restart. The endpoint binds 127.0.0.1 (it is
+    NOT in the public route set reachable via Funnel); the host-check is
+    defense-in-depth. It only re-reads on-disk config -- it cannot set arbitrary
+    values."""
+    from starlette.responses import JSONResponse
+    client = getattr(request, "client", None)
+    if client is not None and client.host not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    global BLACKBOX_MCP_PUBLIC_URL, BLACKBOX_MCP_RESOURCE_URL
+    BLACKBOX_MCP_PUBLIC_URL = _load_runtime_public_url()
+    BLACKBOX_MCP_RESOURCE_URL = BLACKBOX_MCP_PUBLIC_URL + BLACKBOX_MCP_HTTP_PATH
+    tokens = 0
+    mw = _AUTH_MIDDLEWARE["instance"]
+    if mw is not None:
+        new_map = _validate_token_operators(_load_token_map())
+        mw.token_map.clear()        # in-place: middleware reads the dict by reference
+        mw.token_map.update(new_map)
+        tokens = len(mw.token_map)
+    logger.info("internal/reload: public_url=%r tokens=%d", BLACKBOX_MCP_PUBLIC_URL, tokens)
+    return JSONResponse({"public_url": BLACKBOX_MCP_PUBLIC_URL,
+                         "resource": BLACKBOX_MCP_RESOURCE_URL, "tokens": tokens})
 
 # Registered OAuth clients are persisted to a GITIGNORED store (Manifest/ is
 # gitignored, and **/*token*.json also covers anything token-shaped). The file
@@ -2344,6 +2398,7 @@ def build_http_app(path: str = None):
                        "origin to enable OAuth.")
 
     guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
+    _AUTH_MIDDLEWARE["instance"] = guarded_endpoint   # for localhost /internal/reload
 
     # CHUNK 6a: the PUBLIC OAuth bootstrap routes. These are plain function
     # endpoints (Starlette func(request)->Response), registered SEPARATELY from
@@ -2364,6 +2419,10 @@ def build_http_app(path: str = None):
               endpoint=_oauth_authorize_handler, methods=["GET", "POST"]),
         Route("/token",
               endpoint=_oauth_token_handler, methods=["POST"]),
+        # Localhost-only hot-reload: onboarding calls this after writing a token or
+        # the runtime public URL, so changes go live with no restart (bound 127.0.0.1).
+        Route("/internal/reload",
+              endpoint=_internal_reload_handler, methods=["POST"]),
     ]
 
     app = Starlette(
