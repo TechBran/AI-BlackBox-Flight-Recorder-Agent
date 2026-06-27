@@ -1554,12 +1554,22 @@ class BearerAuthMiddleware:
 
     async def _reject_401(self, send, detail: str) -> None:
         body = json.dumps({"error": {"code": "unauthorized", "message": detail}}).encode("utf-8")
+        # RFC 9728 / MCP auth: the 401 MUST advertise WHERE the OAuth discovery
+        # lives (resource_metadata) so a spec-compliant client (claude.ai / Claude
+        # Desktop) can find the authorization server and start the flow. Without it
+        # the client sees a bare `Bearer` 401 and reports "Couldn't connect." Read
+        # the public URL at call time so /internal/reload updates are reflected.
+        if BLACKBOX_MCP_PUBLIC_URL:
+            wa = ('Bearer resource_metadata="' + BLACKBOX_MCP_PUBLIC_URL
+                  + '/.well-known/oauth-protected-resource"').encode("utf-8")
+        else:
+            wa = b"Bearer"
         await send({
             "type": "http.response.start",
             "status": 401,
             "headers": [
                 (b"content-type", b"application/json"),
-                (b"www-authenticate", b"Bearer"),
+                (b"www-authenticate", wa),
             ],
         })
         await send({"type": "http.response.body", "body": body})
