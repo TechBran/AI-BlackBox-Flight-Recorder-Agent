@@ -1,23 +1,27 @@
-"""Tests for the on-device (local Gemma) model MIRROR catalog (Task 1.1).
+"""Tests for the on-device (local Gemma) model DISCOVERY + CURATION catalog.
 
-The BlackBox hub mirrors the Gemma 4 LiteRT ``.litertlm`` bundles so each
-user's phone downloads them from the hub over Tailscale (no per-user Hugging
-Face friction). This task is ONLY the catalog: it tells the app what is
-downloadable + its metadata. The actual fetch-once + ranged download endpoint
-is Task 1.2.
+The hub no longer moves model bytes: phones download the Gemma 4 LiteRT
+``.litertlm`` bundles DIRECTLY from the Hugging Face CDN. ``catalog.py`` is the
+discovery + curation layer — it queries the HF Hub API for ``litert-community``
+gemma repos, merges real ``size_bytes`` / ``sha256`` (from ``lfs.oid``) /
+``gated`` / ``download_url`` onto a curated config floor, and serves
+``GET /local/models/catalog``.
 
-The mirror catalog is DISTINCT from the picker catalog (``LOCAL_MODELS`` in
+The catalog is DISTINCT from the picker catalog (``LOCAL_MODELS`` in
 local_routes): the picker entries are id/name/provider descriptors for the
 model selector, whereas these carry DOWNLOAD/METADATA fields (hf_repo,
-filename, size_bytes, sha256, min_ram_gb, recommended_for). The slugs are kept
-identical across both so a downloaded bundle maps to a picker entry.
+filename, size_bytes, sha256, min_ram_gb, recommended_for, download_url, gated).
+The slugs are kept identical across both so a downloaded bundle maps to a
+picker entry.
 
-Hermetic: NO network. The mirror module is pure config + a getter; the
-endpoint just serializes it. The startup embedding-sync hook is mocked (it
-spawns a daemon thread calling sync_embeddings, which would hit the network).
+Hermetic: NO network. The two HF fetchers (``_fetch_hf_models`` /
+``_fetch_hf_tree``) are monkeypatched — the module-wide ``autouse`` fixture
+below patches both to deterministic E2B/E4B fakes (and invalidates the TTL
+cache) so EVERY test, including the ``/local/models/catalog`` endpoint tests
+that route through ``build_catalog()``, runs offline. The startup
+embedding-sync hook is mocked (it spawns a daemon thread calling
+sync_embeddings, which would hit the network).
 """
-
-import hashlib
 
 from unittest.mock import patch
 
@@ -25,6 +29,34 @@ import pytest
 from fastapi.testclient import TestClient
 
 from Orchestrator.local_provider import catalog as mirror
+
+
+# E2B/E4B fakes the autouse fixture feeds the HF fetchers (no real HF call).
+_FAKE_HF_MODELS = [
+    {"id": "litert-community/gemma-4-E2B-it-litert-lm", "gated": False},
+    {"id": "litert-community/gemma-4-E4B-it-litert-lm", "gated": False},
+]
+_FAKE_HF_TREES = {
+    "litert-community/gemma-4-E2B-it-litert-lm": [
+        {"path": "gemma-4-E2B-it.litertlm", "size": 2588147712, "lfs": {"oid": "b" * 64}},
+    ],
+    "litert-community/gemma-4-E4B-it-litert-lm": [
+        {"path": "gemma-4-E4B-it.litertlm", "size": 3659530240, "lfs": {"oid": "c" * 64}},
+    ],
+}
+
+
+@pytest.fixture(autouse=True)
+def patch_hf_fetchers(monkeypatch):
+    """Hermetic default for EVERY test in this file: patch the two HF fetchers to
+    deterministic E2B/E4B fakes and invalidate the TTL cache, so no test (incl.
+    the endpoint tests that route through ``build_catalog()``) ever hits the
+    network. Tests needing other shapes simply re-patch + ``_invalidate_cache``."""
+    monkeypatch.setattr(mirror, "_fetch_hf_models", lambda: [dict(m) for m in _FAKE_HF_MODELS])
+    monkeypatch.setattr(mirror, "_fetch_hf_tree", lambda repo: [dict(f) for f in _FAKE_HF_TREES[repo]])
+    mirror._invalidate_cache()
+    yield
+    mirror._invalidate_cache()
 
 
 @pytest.fixture
@@ -64,6 +96,8 @@ def test_catalog_entries_have_required_fields(client):
         "size_bytes", "sha256", "min_ram_gb", "recommended_for",
         # Per-model config (Task W6) -- snake_case to match the sidecar/API JSON.
         "recommended", "context_note", "max_tokens", "support_image",
+        # Direct-from-HF download fields (the phone streams from download_url).
+        "download_url", "gated",
     }
     for b in resp.json()["bundles"]:
         assert required.issubset(b.keys()), f"missing fields: {required - b.keys()}"
@@ -115,47 +149,78 @@ def test_catalog_ram_ordering(client):
     assert by_slug["gemma-4-e2b"]["min_ram_gb"] < by_slug["gemma-4-e4b"]["min_ram_gb"]
 
 
-def test_bundles_pinned_to_real_litert_community_repos():
-    """The bundles are PINNED to the real ungated litert-community repos/files
-    (Task 2.6a): uppercase E2B/E4B casing, the portable ``.litertlm`` CPU/GPU
-    build, a populated size_bytes, and sha256 still None (verify skipped until
-    the real digest is pinned in 2.6b)."""
-    e2b = mirror.BUNDLES["gemma-4-e2b"]
-    assert e2b["hf_repo"] == "litert-community/gemma-4-E2B-it-litert-lm"
-    assert e2b["filename"] == "gemma-4-E2B-it.litertlm"
-    assert isinstance(e2b["size_bytes"], int) and e2b["size_bytes"] > 0
-    assert e2b["sha256"] is None  # TODO(2.6b): pinned to the real digest
+# ---------------------------------------------------------------------------
+# catalog.build_catalog() — HF-enriched curated floor (TTL-cached)
+#
+# These tests re-patch the HF fetchers (on top of the autouse default) to drive
+# specific discovery shapes, then ``_invalidate_cache()`` to force a rebuild.
+# ---------------------------------------------------------------------------
 
-    e4b = mirror.BUNDLES["gemma-4-e4b"]
-    assert e4b["hf_repo"] == "litert-community/gemma-4-E4B-it-litert-lm"
-    assert e4b["filename"] == "gemma-4-E4B-it.litertlm"
-    assert isinstance(e4b["size_bytes"], int) and e4b["size_bytes"] > 0
-    assert e4b["sha256"] is None  # TODO(2.6b): pinned to the real digest
-
-    # The heavier E4B bundle is larger than the lighter E2B bundle.
-    assert e4b["size_bytes"] > e2b["size_bytes"]
+def _patch_hf(monkeypatch, models, trees):
+    monkeypatch.setattr(mirror, "_fetch_hf_models", lambda: models)
+    monkeypatch.setattr(mirror, "_fetch_hf_tree", lambda repo: trees[repo])
+    mirror._invalidate_cache()  # force a rebuild
 
 
-def test_list_bundles_is_isolated():
-    """``mirror.list_bundles()`` returns copies — mutating a returned dict must
-    NOT corrupt the module-level ``BUNDLES``; a second call is unaffected."""
-    first = mirror.list_bundles()
-    # Tamper with a returned dict.
-    first[0]["slug"] = "tampered"
-    first[0]["min_ram_gb"] = -999
+def test_build_catalog_enriches_curated_with_hf_facts(monkeypatch):
+    models = [{"id": "litert-community/gemma-4-E2B-it-litert-lm", "gated": False},
+              {"id": "litert-community/gemma-4-E4B-it-litert-lm", "gated": False}]
+    trees = {
+        "litert-community/gemma-4-E2B-it-litert-lm": [
+            {"path": "gemma-4-E2B-it.litertlm", "size": 2588147712, "lfs": {"oid": "b" * 64}}],
+        "litert-community/gemma-4-E4B-it-litert-lm": [
+            {"path": "gemma-4-E4B-it.litertlm", "size": 3659530240, "lfs": {"oid": "c" * 64}}],
+    }
+    _patch_hf(monkeypatch, models, trees)
+    bundles = {b["slug"]: b for b in mirror.list_bundles()}
+    e4b = bundles["gemma-4-e4b"]
+    assert e4b["size_bytes"] == 3659530240
+    assert e4b["sha256"] == "c" * 64                 # pinned from lfs.oid
+    assert e4b["gated"] is False
+    assert e4b["download_url"].endswith("/gemma-4-E4B-it.litertlm")
+    assert e4b["recommended"] is True              # curated config preserved
+    assert e4b["max_tokens"] == 16384
+    assert e4b["support_image"] is True
 
-    second = mirror.list_bundles()
-    second_slugs = {b["slug"] for b in second}
-    assert "tampered" not in second_slugs
-    assert second_slugs == {"gemma-4-e2b", "gemma-4-e4b"}
 
-    # And the module-level source dict itself is uncorrupted.
-    assert set(mirror.BUNDLES.keys()) == {"gemma-4-e2b", "gemma-4-e4b"}
-    assert all(b["min_ram_gb"] > 0 for b in mirror.BUNDLES.values())
+def test_build_catalog_adds_uncurated_repo_with_defaults(monkeypatch):
+    models = [{"id": "litert-community/gemma-4-12B-it-litert-lm", "gated": False}]
+    trees = {"litert-community/gemma-4-12B-it-litert-lm":
+             [{"path": "gemma-4-12B-it.litertlm", "size": 8_000_000_000, "lfs": {"oid": "d" * 64}}]}
+    _patch_hf(monkeypatch, models, trees)
+    bundles = {b["slug"]: b for b in mirror.list_bundles()}
+    assert "gemma-4-12b" in bundles
+    assert bundles["gemma-4-12b"]["recommended"] is False      # default
+    assert bundles["gemma-4-12b"]["min_ram_gb"] > 4.5          # inferred from 8GB size
+
+
+def test_build_catalog_falls_back_to_curated_when_hf_down(monkeypatch):
+    def _boom():
+        raise RuntimeError("HF unreachable")
+    monkeypatch.setattr(mirror, "_fetch_hf_models", _boom)
+    mirror._invalidate_cache()
+    bundles = {b["slug"]: b for b in mirror.list_bundles()}
+    # The curated floor (E2B/E4B) is still served, with constructible download_url.
+    assert {"gemma-4-e2b", "gemma-4-e4b"} <= set(bundles)
+    assert bundles["gemma-4-e2b"]["download_url"].endswith(".litertlm")
+
+
+def test_list_bundles_is_cached(monkeypatch):
+    calls = {"n": 0}
+
+    def _models():
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(mirror, "_fetch_hf_models", _models)
+    mirror._invalidate_cache()
+    mirror.list_bundles()
+    mirror.list_bundles()
+    assert calls["n"] == 1  # second call is a cache hit within TTL
 
 
 # ---------------------------------------------------------------------------
-# mirror.get_bundle(slug)
+# catalog.get_bundle(slug)
 # ---------------------------------------------------------------------------
 
 def test_get_bundle_returns_known():
@@ -167,6 +232,7 @@ def test_get_bundle_returns_known():
     required = {
         "slug", "display_name", "hf_repo", "filename",
         "size_bytes", "sha256", "min_ram_gb", "recommended_for",
+        "download_url", "gated",
     }
     assert required.issubset(bundle.keys()), f"missing fields: {required - bundle.keys()}"
 
@@ -176,235 +242,16 @@ def test_get_bundle_unknown_returns_none():
     assert mirror.get_bundle("does-not-exist") is None
 
 
-def test_get_bundle_is_isolated():
-    """``mirror.get_bundle()`` returns a copy — mutating it must NOT corrupt the
-    module-level ``BUNDLES``; a second call for the same slug is unaffected."""
-    original_filename = mirror.BUNDLES["gemma-4-e2b"]["filename"]
-
-    first = mirror.get_bundle("gemma-4-e2b")
-    # Tamper with the returned dict.
-    first["filename"] = "tampered"
-
-    second = mirror.get_bundle("gemma-4-e2b")
-    assert second["filename"] == original_filename
-    assert mirror.BUNDLES["gemma-4-e2b"]["filename"] == original_filename
-
-
-# ---------------------------------------------------------------------------
-# Task 1.2 — fetch-once + ranged download
-#
-# Hermetic: every download test monkeypatches mirror.MIRROR_DIR to a tmp dir
-# AND monkeypatches mirror._download_bundle with a fake that writes a small
-# known fixture to the dest, so NO real Hugging Face request is ever made.
-# ---------------------------------------------------------------------------
-
-# Known fixture bytes the fake _download_bundle writes (29 bytes).
-FIXTURE_BYTES = b"GEMMA-BUNDLE-BYTES-0123456789"
-
-
-@pytest.fixture
-def fake_mirror(monkeypatch, tmp_path):
-    """Point mirror.MIRROR_DIR at a tmp dir and replace the network fetch with a
-    fake that writes FIXTURE_BYTES to the destination. Returns the tmp dir."""
-    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
-
-    def _fake_download(bundle, dest_path):
-        dest_path.write_bytes(FIXTURE_BYTES)
-
-    monkeypatch.setattr(mirror, "_download_bundle", _fake_download)
-    return tmp_path
-
-
-# --- GET /local/models/download/{slug} -------------------------------------
-
-def test_download_full_returns_200_and_bytes(client, fake_mirror):
-    """GET with no Range header → 200, whole file, Accept-Ranges advertised."""
-    resp = client.get("/local/models/download/gemma-4-e2b")
-    assert resp.status_code == 200
-    assert resp.content == FIXTURE_BYTES
-    assert resp.headers.get("accept-ranges") == "bytes"
-
-
-def test_download_range_returns_206_partial(client, fake_mirror):
-    """GET with Range: bytes=0-9 → 206, first 10 bytes, correct Content-Range."""
-    resp = client.get(
-        "/local/models/download/gemma-4-e2b",
-        headers={"Range": "bytes=0-9"},
-    )
-    assert resp.status_code == 206
-    assert resp.content == FIXTURE_BYTES[0:10]
-    total = len(FIXTURE_BYTES)
-    assert resp.headers.get("content-range") == f"bytes 0-9/{total}"
-    assert resp.headers.get("accept-ranges") == "bytes"
-
-
-def test_download_range_mid_slice(client, fake_mirror):
-    """GET with Range: bytes=5-9 → 206, bytes[5:10]."""
-    resp = client.get(
-        "/local/models/download/gemma-4-e2b",
-        headers={"Range": "bytes=5-9"},
-    )
-    assert resp.status_code == 206
-    assert resp.content == FIXTURE_BYTES[5:10]
-    total = len(FIXTURE_BYTES)
-    assert resp.headers.get("content-range") == f"bytes 5-9/{total}"
-
-
-def test_download_unknown_slug_404(client, fake_mirror):
-    """GET an unknown slug → 404 with a clear error (no fetch attempted)."""
-    resp = client.get("/local/models/download/nope")
-    assert resp.status_code == 404
-    body = resp.json()
-    assert body["success"] is False
-    assert "nope" in body["error"]
-
-
-def test_download_malformed_range_400(client, fake_mirror):
-    """GET with a malformed Range (``bytes=abc``) → 400.
-
-    FileResponse delegates Range parsing to Starlette, which rejects a
-    syntactically-invalid range with 400 Bad Request (verified empirically
-    against Starlette 0.48.0). Pinned to that actual behaviour.
-    """
-    resp = client.get(
-        "/local/models/download/gemma-4-e2b",
-        headers={"Range": "bytes=abc"},
-    )
-    assert resp.status_code == 400
-
-
-def test_download_unsatisfiable_range_416(client, fake_mirror):
-    """GET with a Range past EOF (fixture is 29 bytes; ``bytes=1000-2000``) → 416.
-
-    Starlette returns 416 Range Not Satisfiable with ``Content-Range: */<size>``
-    for a syntactically-valid but out-of-bounds range (verified empirically
-    against Starlette 0.48.0).
-    """
-    resp = client.get(
-        "/local/models/download/gemma-4-e2b",
-        headers={"Range": "bytes=1000-2000"},
-    )
-    assert resp.status_code == 416
-    # RFC 7233: an unsatisfiable response carries Content-Range: */<total>.
-    assert resp.headers.get("content-range") == f"*/{len(FIXTURE_BYTES)}"
-
-
-# --- mirror.ensure_present -------------------------------------------------
-
-def test_ensure_present_fetches_once(monkeypatch, tmp_path):
-    """ensure_present downloads on the first call and is a pure cache hit on the
-    second — the network fetch runs exactly ONCE."""
-    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
-
-    calls = {"n": 0}
-
-    def _counting_download(bundle, dest_path):
-        calls["n"] += 1
-        dest_path.write_bytes(FIXTURE_BYTES)
-
-    monkeypatch.setattr(mirror, "_download_bundle", _counting_download)
-
-    path1 = mirror.ensure_present("gemma-4-e2b")
-    assert path1.exists()
-    assert path1.read_bytes() == FIXTURE_BYTES
-    assert calls["n"] == 1
-
-    path2 = mirror.ensure_present("gemma-4-e2b")
-    assert path2 == path1
-    assert path2.read_bytes() == FIXTURE_BYTES
-    assert calls["n"] == 1  # second call is a cache hit — no re-download
-
-
-def test_ensure_present_unknown_slug_raises(monkeypatch, tmp_path):
-    """ensure_present on an unknown slug raises (no silent download)."""
-    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
-    with pytest.raises((KeyError, ValueError)):
-        mirror.ensure_present("does-not-exist")
-
-
-def test_ensure_present_cleans_up_partial_on_failure(monkeypatch, tmp_path):
-    """A mid-download failure must NOT cache a truncated bundle: the final
-    target must not exist and no ``.part`` temp file may be left behind. A
-    subsequent successful fetch then works (a failed attempt didn't poison the
-    cache)."""
-    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
-
-    bundle = mirror.get_bundle("gemma-4-e2b")
-    target = tmp_path / bundle["filename"]
-
-    def _partial_then_fail(bundle, dest_path):
-        # Write partial bytes to the temp dest, then blow up mid-stream.
-        dest_path.write_bytes(b"PARTIAL")
-        raise RuntimeError("simulated network failure")
-
-    monkeypatch.setattr(mirror, "_download_bundle", _partial_then_fail)
-
-    with pytest.raises(RuntimeError):
-        mirror.ensure_present("gemma-4-e2b")
-
-    # No truncated bundle cached, and no leftover .part temp file.
-    assert not target.exists()
-    assert list(tmp_path.glob("*.part")) == []
-
-    # A clean retry succeeds — the earlier failure did not poison the cache.
-    def _working_download(bundle, dest_path):
-        dest_path.write_bytes(FIXTURE_BYTES)
-
-    monkeypatch.setattr(mirror, "_download_bundle", _working_download)
-    path = mirror.ensure_present("gemma-4-e2b")
-    assert path.exists()
-    assert path.read_bytes() == FIXTURE_BYTES
-    assert list(tmp_path.glob("*.part")) == []
-
-
-def test_ensure_present_verifies_sha256_when_set(monkeypatch, tmp_path):
-    """When the bundle carries a sha256, ensure_present verifies the downloaded
-    bytes against it: a mismatch raises ValueError and leaves NO cached target.
-    A correct sha256 succeeds."""
-    monkeypatch.setattr(mirror, "MIRROR_DIR", tmp_path)
-
-    bundle = mirror.get_bundle("gemma-4-e2b")
-    target = tmp_path / bundle["filename"]
-
-    def _working_download(bundle, dest_path):
-        dest_path.write_bytes(FIXTURE_BYTES)
-
-    monkeypatch.setattr(mirror, "_download_bundle", _working_download)
-
-    # --- wrong hash → ValueError + nothing cached ---
-    monkeypatch.setitem(mirror.BUNDLES["gemma-4-e2b"], "sha256", "deadbeef" * 8)
-    with pytest.raises(ValueError):
-        mirror.ensure_present("gemma-4-e2b")
-    assert not target.exists()
-    assert list(tmp_path.glob("*.part")) == []
-
-    # --- correct hash → success ---
-    correct = hashlib.sha256(FIXTURE_BYTES).hexdigest()
-    monkeypatch.setitem(mirror.BUNDLES["gemma-4-e2b"], "sha256", correct)
-    path = mirror.ensure_present("gemma-4-e2b")
-    assert path.exists()
-    assert path.read_bytes() == FIXTURE_BYTES
-
-
-# --- mirror.bundle_sha256 --------------------------------------------------
-
-def test_bundle_sha256(tmp_path):
-    """bundle_sha256 streams the file and matches hashlib's digest."""
-    p = tmp_path / "blob.bin"
-    p.write_bytes(FIXTURE_BYTES)
-    expected = hashlib.sha256(FIXTURE_BYTES).hexdigest()
-    assert mirror.bundle_sha256(p) == expected
-
-
 # --- slug parity (deferred from Task 1.1 review) ---------------------------
 
 def test_slug_parity():
-    """The mirror catalog (BUNDLES) and the picker catalog (LOCAL_MODELS) MUST
-    carry identical slug sets — the download path makes this coupling
-    load-bearing (a downloaded bundle must map to a picker entry)."""
+    """The discovery catalog (build_catalog) and the picker catalog
+    (LOCAL_MODELS) MUST keep their slugs coupled — a downloaded bundle must map
+    to a picker entry. Under the autouse E2B/E4B fakes the curated-floor slugs
+    equal the picker ids."""
     from Orchestrator.routes.local_routes import LOCAL_MODELS
 
-    bundle_slugs = set(mirror.BUNDLES.keys())
+    bundle_slugs = {b["slug"] for b in mirror.list_bundles()}
     picker_ids = {m["id"] for m in LOCAL_MODELS}
     assert bundle_slugs == picker_ids
 
