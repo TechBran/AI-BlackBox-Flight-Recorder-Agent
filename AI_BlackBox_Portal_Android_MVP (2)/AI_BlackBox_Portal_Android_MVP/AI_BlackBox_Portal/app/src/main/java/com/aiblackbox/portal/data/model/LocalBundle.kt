@@ -42,6 +42,12 @@ data class LocalBundle(
     @SerialName("top_k") val topK: Int? = null,
     @SerialName("top_p") val topP: Float? = null,
     val temperature: Float? = null,
+    // Direct-from-HF download (2026-06-27): the catalog now advertises the HF CDN
+    // resolve URL the phone streams bytes from (replacing the deleted hub byte-proxy),
+    // plus whether the repo is gated (needs an Authorization token). Optional/defaulted
+    // so a legacy catalog response (without them) still parses unchanged.
+    @SerialName("download_url") val downloadUrl: String = "",
+    val gated: Boolean = false,
 )
 
 /** Wrapper for GET /local/models/catalog → {"bundles": [...]}. */

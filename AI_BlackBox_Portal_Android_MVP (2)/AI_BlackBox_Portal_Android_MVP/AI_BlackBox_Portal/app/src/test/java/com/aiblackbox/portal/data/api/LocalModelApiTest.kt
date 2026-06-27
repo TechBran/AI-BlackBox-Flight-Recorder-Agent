@@ -82,7 +82,9 @@ class LocalModelApiTest {
                "hf_repo":"litert-community/gemma-4-e4b-it-litert-lm",
                "filename":"gemma-4-e4b-it.litertlm",
                "size_bytes":4294967296,"sha256":"abc123","min_ram_gb":6.0,
-               "recommended_for":"Higher quality for high-RAM phones."}
+               "recommended_for":"Higher quality for high-RAM phones.",
+               "download_url":"https://huggingface.co/litert-community/gemma-4-e4b-it-litert-lm/resolve/main/gemma-4-e4b-it.litertlm",
+               "gated":true}
             ]}
             """.trimIndent()
         )
@@ -106,6 +108,15 @@ class LocalModelApiTest {
         assertEquals(4294967296L, e4b.sizeBytes)  // > Int.MAX_VALUE → must be Long
         assertEquals("abc123", e4b.sha256)
         assertEquals(6.0, e4b.minRamGb, 0.0)
+        // Direct-from-HF fields (2026-06-27): download_url + gated parse.
+        assertEquals(
+            "https://huggingface.co/litert-community/gemma-4-e4b-it-litert-lm/resolve/main/gemma-4-e4b-it.litertlm",
+            e4b.downloadUrl,
+        )
+        assertTrue("gated must parse true", e4b.gated)
+        // E2B omits both — defaults apply (empty downloadUrl, gated false).
+        assertEquals("", e2b.downloadUrl)
+        assertFalse("gated defaults false when absent", e2b.gated)
 
         // Hit the real GET /local/models/catalog endpoint.
         assertEquals("/local/models/catalog", server.takeRequest().target)
