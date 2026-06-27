@@ -99,6 +99,8 @@ def _select_litertlm(tree: list[dict], preferred: str | None) -> dict | None:
                if "-web" not in f["path"] and f["path"].endswith("-it.litertlm")]
     if non_web:
         return _norm(non_web[0])
+    # Last resort (no curated `preferred` AND no non-web `*-it.litertlm`): the
+    # largest .litertlm -- which may itself be a `-web` build.
     return _norm(max(litertlms, key=lambda f: f.get("size") or 0))
 
 

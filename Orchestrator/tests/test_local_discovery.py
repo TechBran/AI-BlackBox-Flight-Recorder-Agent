@@ -18,9 +18,10 @@ Hermetic: NO network. The two HF fetchers (``_fetch_hf_models`` /
 ``_fetch_hf_tree``) are monkeypatched — the module-wide ``autouse`` fixture
 below patches both to deterministic E2B/E4B fakes (and invalidates the TTL
 cache) so EVERY test, including the ``/local/models/catalog`` endpoint tests
-that route through ``build_catalog()``, runs offline. The startup
-embedding-sync hook is mocked (it spawns a daemon thread calling
-sync_embeddings, which would hit the network).
+that route through ``build_catalog()``, runs offline. Tests marked
+``real_fetchers`` OPT OUT of that patch so they exercise the REAL fetchers (with
+only ``_http_get_json`` patched). The startup embedding-sync hook is mocked (it
+spawns a daemon thread calling sync_embeddings, which would hit the network).
 """
 
 from unittest.mock import patch
@@ -47,11 +48,19 @@ _FAKE_HF_TREES = {
 
 
 @pytest.fixture(autouse=True)
-def patch_hf_fetchers(monkeypatch):
+def patch_hf_fetchers(request, monkeypatch):
     """Hermetic default for EVERY test in this file: patch the two HF fetchers to
     deterministic E2B/E4B fakes and invalidate the TTL cache, so no test (incl.
     the endpoint tests that route through ``build_catalog()``) ever hits the
-    network. Tests needing other shapes simply re-patch + ``_invalidate_cache``."""
+    network. Tests needing other shapes simply re-patch + ``_invalidate_cache``.
+
+    OPT-OUT: tests marked ``real_fetchers`` skip this patch so they exercise the
+    REAL ``_fetch_hf_models``/``_fetch_hf_tree`` (with only ``_http_get_json``
+    patched). Without this opt-out those tests would call the fixture's fakes and
+    never run the real filtering logic — making them vacuous."""
+    if request.node.get_closest_marker("real_fetchers"):
+        yield
+        return
     monkeypatch.setattr(mirror, "_fetch_hf_models", lambda: [dict(m) for m in _FAKE_HF_MODELS])
     monkeypatch.setattr(mirror, "_fetch_hf_tree", lambda repo: [dict(f) for f in _FAKE_HF_TREES[repo]])
     mirror._invalidate_cache()
@@ -184,14 +193,26 @@ def test_build_catalog_enriches_curated_with_hf_facts(monkeypatch):
 
 
 def test_build_catalog_adds_uncurated_repo_with_defaults(monkeypatch):
-    models = [{"id": "litert-community/gemma-4-12B-it-litert-lm", "gated": False}]
+    models = [{"id": "litert-community/gemma-4-12B-it-litert-lm", "gated": True}]
     trees = {"litert-community/gemma-4-12B-it-litert-lm":
              [{"path": "gemma-4-12B-it.litertlm", "size": 8_000_000_000, "lfs": {"oid": "d" * 64}}]}
     _patch_hf(monkeypatch, models, trees)
     bundles = {b["slug"]: b for b in mirror.list_bundles()}
     assert "gemma-4-12b" in bundles
-    assert bundles["gemma-4-12b"]["recommended"] is False      # default
-    assert bundles["gemma-4-12b"]["min_ram_gb"] > 4.5          # inferred from 8GB size
+    entry = bundles["gemma-4-12b"]
+    assert entry["recommended"] is False      # default
+    assert entry["min_ram_gb"] > 4.5          # inferred from 8GB size
+    # An auto-discovered (uncurated) repo carries the FULL download/metadata field
+    # set, not just the curated-config defaults: the live HF facts are merged in.
+    assert entry["filename"] == "gemma-4-12B-it.litertlm"
+    assert entry["size_bytes"] == 8_000_000_000
+    assert entry["sha256"] == "d" * 64                       # from lfs.oid
+    assert entry["gated"] is True                            # live HF gated flag
+    # Constructible HF resolve URL (repo + /resolve/main/ + filename).
+    assert entry["download_url"] == (
+        "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm"
+        "/resolve/main/gemma-4-12B-it.litertlm"
+    )
 
 
 def test_build_catalog_falls_back_to_curated_when_hf_down(monkeypatch):
@@ -260,34 +281,81 @@ def test_slug_parity():
 # Task A2 — HF Hub API fetchers
 #
 # Hermetic: these monkeypatch ``mirror._http_get_json`` so no real Hugging Face
-# request ever runs (``mirror`` is the ``catalog`` module — aliased above).
+# request ever runs (``mirror`` is the ``catalog`` module — aliased above). They
+# are marked ``real_fetchers`` so the autouse fixture does NOT replace the
+# fetchers — they run the REAL ``_fetch_hf_models``/``_fetch_hf_tree`` filters.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.real_fetchers
 def test_fetch_hf_models_shape(monkeypatch):
     # _fetch_hf_models returns a list of {"id","gated"} for litert-community gemma repos.
+    # NOTE: the `real_fetchers` marker opts this test out of the hermetic autouse
+    # fixture, so it runs the REAL _fetch_hf_models (only _http_get_json patched).
+    # Without the opt-out the fixture would replace the fetcher with an E2B/E4B
+    # fake and the filter below would never execute.
     fake = [
         {"id": "litert-community/gemma-4-E2B-it-litert-lm", "gated": False},
-        {"id": "litert-community/gemma-4-E4B-it-litert-lm", "gated": False},
+        {"id": "litert-community/gemma-4-E4B-it-litert-lm", "gated": True},
         {"id": "litert-community/not-a-litertlm-repo", "gated": False},
     ]
-    monkeypatch.setattr(mirror, "_http_get_json", lambda url, **kw: fake)
+    calls = {"n": 0}
+
+    def _get(url, **kw):
+        calls["n"] += 1
+        return fake
+
+    monkeypatch.setattr(mirror, "_http_get_json", _get)
     out = mirror._fetch_hf_models()
-    ids = {m["id"] for m in out}
-    assert "litert-community/gemma-4-E2B-it-litert-lm" in ids
+    # The REAL fetcher actually hit the (patched) HTTP layer -- proves it is no
+    # longer shadowed by the fixture's fake fetcher.
+    assert calls["n"] == 1
+    by_id = {m["id"]: m for m in out}
+    # The real filter keeps only litert-community gemma *-it- *-litert-lm repos and
+    # DROPS the non-litertlm repo entirely.
+    assert set(by_id) == {
+        "litert-community/gemma-4-E2B-it-litert-lm",
+        "litert-community/gemma-4-E4B-it-litert-lm",
+    }
+    assert "litert-community/not-a-litertlm-repo" not in by_id
+    # The `gated` flag is carried through per-entry (catches a dropped/wrong-field
+    # regression).
+    assert by_id["litert-community/gemma-4-E4B-it-litert-lm"]["gated"] is True
+    assert by_id["litert-community/gemma-4-E2B-it-litert-lm"]["gated"] is False
 
 
+@pytest.mark.real_fetchers
 def test_fetch_hf_tree_shape(monkeypatch):
+    # NOTE: the `real_fetchers` marker opts this test out of the hermetic autouse
+    # fixture, so it runs the REAL _fetch_hf_tree (only _http_get_json patched).
+    # Without the opt-out the fixture would replace the fetcher with a single-file
+    # fake and the type filter below would never execute.
     fake_tree = [
         {"path": "gemma-4-E2B-it-web.litertlm", "size": 2008432640,
          "lfs": {"oid": "a" * 64}},
         {"path": "gemma-4-E2B-it.litertlm", "size": 2588147712,
          "lfs": {"oid": "b" * 64}},
         {"path": "README.md", "size": 100},
+        {"path": "subdir", "type": "directory"},  # NOT a file -- dropped by the real filter
     ]
-    monkeypatch.setattr(mirror, "_http_get_json", lambda url, **kw: fake_tree)
+    calls = {"n": 0}
+
+    def _get(url, **kw):
+        calls["n"] += 1
+        return fake_tree
+
+    monkeypatch.setattr(mirror, "_http_get_json", _get)
     files = mirror._fetch_hf_tree("litert-community/gemma-4-E2B-it-litert-lm")
+    # The REAL fetcher actually hit the (patched) HTTP layer -- proves de-shadowing.
+    assert calls["n"] == 1
     paths = {f["path"] for f in files}
+    # _fetch_hf_tree keeps every FILE entry verbatim (the -web vs -it selection
+    # happens later in _select_litertlm, not here)...
     assert "gemma-4-E2B-it.litertlm" in paths
+    assert "gemma-4-E2B-it-web.litertlm" in paths
+    assert "README.md" in paths
+    # ...but DROPS the non-file (directory) entry -- catches a regression that
+    # removes/weakens the type filter.
+    assert "subdir" not in paths
 
 
 # ---------------------------------------------------------------------------
