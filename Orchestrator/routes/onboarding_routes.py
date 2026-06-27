@@ -671,10 +671,18 @@ def _collect_status_inputs() -> dict:
 
     restart = restart_status().model_dump()
 
+    # MCP remote server -- cheap token-store presence only (no subprocess/probe
+    # here; live mcp_up/funnel/oauth refinement happens in the SSE stream).
+    try:
+        from Orchestrator.routes import mcp_routes as _mcp
+        mcp = {"tokens_present": bool(_mcp._load_tokens())}
+    except Exception:
+        mcp = {"tokens_present": False}
+
     return dict(
         env=env, state=state, embeddings=embeddings, cli=cli,
         web_search=web_search, image=image, paired=paired, operators=operators,
-        restart=restart, is_complete=_state.is_complete(),
+        restart=restart, mcp=mcp, is_complete=_state.is_complete(),
     )
 
 
@@ -727,6 +735,22 @@ async def onboarding_status_stream():
                     # the fast-read hint already classified serve-not-set.
                 except Exception:
                     logger.exception("status stream: tailscale probe failed")
+
+            elif key == "mcp":
+                try:
+                    from Orchestrator.routes import mcp_routes as _mcp
+                    live = {
+                        "tokens_present": bool(_mcp._load_tokens()),
+                        "mcp_up": await asyncio.to_thread(_mcp._mcp_up),
+                        "funnel_up": await asyncio.to_thread(_mcp._funnel_up),
+                        "oauth_ready": await asyncio.to_thread(_mcp._oauth_ready),
+                    }
+                    st, summary, _it, atts2 = status_rollup._derive_mcp(live)
+                    sec = {**sec, "state": st, "summary": summary}
+                    atts = [{"section": "mcp", "severity": a["severity"],
+                             "message": a["message"], "cta_step": "mcp"} for a in atts2]
+                except Exception:
+                    logger.exception("status stream: mcp probe failed")
 
             if sec["state"] == status_rollup.READY:
                 ready_count += 1

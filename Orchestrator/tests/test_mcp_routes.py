@@ -95,3 +95,9 @@ def test_status_signals(client, monkeypatch):
     assert s["mcp_up"] is True and s["funnel_up"] is False
     assert s["tokens_present"] is True and s["oauth_ready"] is False
     assert s["derived_public_url"] == "https://d.ts.net:8443"
+
+
+def test_funnel_up_requires_confirm(client):
+    c, _ = client
+    assert c.post("/mcp/funnel/up", json={"confirm": False}).status_code == 400
+    assert c.post("/mcp/funnel/up", json={}).status_code == 400

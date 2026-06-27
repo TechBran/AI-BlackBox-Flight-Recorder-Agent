@@ -34,6 +34,21 @@ REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl enable tailscaled
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart blackbox.service
 REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/journalctl -u blackbox.service *
 
+# ── MCP remote server one-click onboarding (M7.4) ───────────────────────
+# Funnel-up exposes the local MCP HTTP server (127.0.0.1:9093) on the PUBLIC
+# internet at :8443. Port-only `9093` (NOT http://127.0.0.1:9093) mirrors the
+# `serve` grant above and avoids an unescaped `:` in sudoers grammar. The
+# onboarding route gates funnel-up behind an explicit user confirmation.
+# These are all /etc-FREE runtime ops (tailscaled socket + PID-1 transitions);
+# the unit INSTALL+enable is installer-time (writes /etc, blocked by
+# ProtectSystem=strict in the service namespace) -- deliberately NOT granted here.
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale funnel --bg --https=8443 9093
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale funnel status --json
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/tailscale funnel reset
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl start blackbox-mcp.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl restart blackbox-mcp.service
+REAL_USER_PLACEHOLDER ALL=(root) NOPASSWD: /usr/bin/systemctl stop blackbox-mcp.service
+
 # ── Update pipeline (T5) ────────────────────────────────────────────────
 # These are the ONLY grants needed for the update pipeline. Each helper
 # script validates its arguments before doing anything destructive:

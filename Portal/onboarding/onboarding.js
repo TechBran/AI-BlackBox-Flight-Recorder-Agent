@@ -4,7 +4,7 @@
 
 const STEPS = [
     "welcome", "tailscale", "api_keys", "embeddings",
-    "optional_integrations", "transcription", "web_search", "image", "pair_phone", "cli_agents", "operator", "done",
+    "optional_integrations", "transcription", "web_search", "image", "pair_phone", "cli_agents", "mcp", "operator", "done",
 ];
 
 // IMPORTANT: if STEPS array changes, update STEP_LABELS to match.
@@ -23,6 +23,7 @@ const STEP_LABELS = {
     image: "IMAGE",
     pair_phone: "PAIR",
     cli_agents: "AGENTS",
+    mcp: "MCP SERVER",
     operator: "OPERATOR",
     done: "DONE",
 };

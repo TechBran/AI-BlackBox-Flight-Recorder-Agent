@@ -599,6 +599,41 @@ SyslogIdentifier=blackbox
 WantedBy=multi-user.target
 EOF
 
+# ── BlackBox MCP HTTP (remote tool server) unit ──
+# The MCP server can't install/enable its own unit: ProtectSystem=strict makes
+# /etc read-only in the service namespace (protectsystem_strict_blast_radius).
+# Install + enable here, ONCE, as root at bootstrap; the onboarding flow only
+# starts/restarts it and brings up the Funnel at runtime (the six MCP sudoers
+# grants are all /etc-free). The public URL is NOT pinned here -- onboarding
+# writes Manifest/mcp_runtime.json (no /etc edit; OAuth 503 until set).
+echo "[install] Installing blackbox-mcp.service..."
+sudo tee /etc/systemd/system/blackbox-mcp.service > /dev/null <<EOF
+[Unit]
+Description=BlackBox MCP HTTP Server (remote tool server, bearer/OAuth authed)
+After=network.target blackbox.service
+Wants=blackbox.service
+
+[Service]
+Type=simple
+User=$REAL_USER
+WorkingDirectory=$BLACKBOX_ROOT
+Environment=BLACKBOX_MCP_TRANSPORT=http
+Environment=BLACKBOX_MCP_HTTP_HOST=127.0.0.1
+Environment=BLACKBOX_MCP_HTTP_PORT=9093
+Environment=BLACKBOX_ROOT=$BLACKBOX_ROOT
+Environment=BLACKBOX_URL=http://localhost:9091
+Environment=BLACKBOX_MCP_TOKENS_FILE=$BLACKBOX_ROOT/Manifest/mcp_tokens.json
+ExecStart=$BLACKBOX_ROOT/MCP/venv/bin/python $BLACKBOX_ROOT/MCP/blackbox_mcp_server.py --transport http
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable blackbox-mcp.service
+sudo systemctl restart blackbox-mcp.service || echo "[install] WARN: blackbox-mcp.service did not start (is MCP/venv present?)"
+
 # ── Step 4b: override.conf scaffold (audit M3 carry-forward) ──
 sudo mkdir -p /etc/systemd/system/blackbox.service.d
 sudo tee /etc/systemd/system/blackbox.service.d/override.conf > /dev/null <<EOF

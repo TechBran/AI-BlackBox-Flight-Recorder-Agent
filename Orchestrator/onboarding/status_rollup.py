@@ -39,6 +39,7 @@ SECTIONS: list[dict] = [
     {"key": "image",                  "group": "capabilities", "label": "Image",       "required": False},
     {"key": "pair_phone",             "group": "network",      "label": "Pair Phone",  "required": False},
     {"key": "cli_agents",             "group": "capabilities", "label": "Agents",      "required": False},
+    {"key": "mcp",                    "group": "network",      "label": "MCP Server",  "required": False},
     {"key": "operator",               "group": "identity",     "label": "Operators",   "required": True},
 ]
 # step == key (the hub links ?step=<key>); set it here so callers never re-derive.
@@ -201,8 +202,24 @@ def _derive_tailscale(env, state):
     return READY, "Connected", items, []
 
 
+def _derive_mcp(mcp):
+    """MCP remote server. Fast path gets only {tokens_present}; the SSE live probe
+    adds mcp_up/funnel_up/oauth_ready. Required=False, so no-token is OPTIONAL."""
+    mcp = mcp or {}
+    up = mcp.get("mcp_up")          # None in the fast (probe-free) path
+    funnel = mcp.get("funnel_up")
+    if up is False:
+        return ATTENTION, "Server not running", [], [
+            {"severity": "warn", "message": "MCP server installed but not running"}]
+    if not mcp.get("tokens_present"):
+        return OPTIONAL, "No token yet", [], []
+    if funnel is False:
+        return READY, "Token set \u00b7 not public yet", [], []
+    return READY, "Configured", [], []
+
+
 def build_status(*, env, state, embeddings, cli, web_search, image,
-                 paired, operators, restart, is_complete=False):
+                 paired, operators, restart, mcp=None, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
     sections_out = []
     attention_out = []
@@ -225,6 +242,8 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
             st, summary, items, atts = _derive_cli_agents(cli)
         elif key == "pair_phone":
             st, summary, items, atts = _derive_pair_phone(paired)
+        elif key == "mcp":
+            st, summary, items, atts = _derive_mcp(mcp)
         else:
             st, summary, items, atts = _derive_default(section, env, state)
         sections_out.append({

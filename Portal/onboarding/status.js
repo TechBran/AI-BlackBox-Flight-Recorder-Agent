@@ -27,6 +27,7 @@ export const SECTIONS = [
     { key: "image",                  group: "capabilities", label: "Image",       required: false },
     { key: "pair_phone",             group: "network",      label: "Pair Phone",  required: false },
     { key: "cli_agents",             group: "capabilities", label: "Agents",      required: false },
+    { key: "mcp",                    group: "network",      label: "MCP Server",  required: false },
     { key: "operator",               group: "identity",     label: "Operators",   required: true  },
 ];
 

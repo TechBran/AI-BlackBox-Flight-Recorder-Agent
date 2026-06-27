@@ -27,6 +27,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from Orchestrator.config import USERS_LIST
+from Orchestrator.onboarding import mcp_actuator
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,7 @@ def status():
         "oauth_ready": _oauth_ready(),
         "public_url": public_url,
         "derived_public_url": _derive_public_url(),
+        "service": mcp_actuator.service_state(),
     }
 
 
@@ -295,3 +297,47 @@ def connection(operator: Optional[str] = None):
         "has_token": has_token,
         "per_app_configs": _per_app_configs(public_url, None),
     }
+
+
+# --------------------------------------------------------------------------- #
+# M7.4: privileged box-setup actuators (service control + Funnel-up)
+# --------------------------------------------------------------------------- #
+@router.post("/service/{action}")
+async def service_control(action: str):
+    """Start/restart the MCP service (narrow sudoers grant; no /etc write)."""
+    if action not in ("start", "restart"):
+        raise HTTPException(400, "action must be 'start' or 'restart'")
+    res = await mcp_actuator.service_action(action)
+    if not res["ok"]:
+        raise HTTPException(500, res.get("error") or "service action failed")
+    return res
+
+
+@router.get("/service-state")
+def service_state():
+    return mcp_actuator.service_state()
+
+
+class FunnelBody(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/funnel/up")
+async def funnel_up(body: FunnelBody):
+    """Expose the MCP server publicly via Tailscale Funnel. PUBLIC-INTERNET
+    EXPOSURE -- requires confirm=true. On success, derives + persists the public
+    URL and hot-reloads OAuth discovery."""
+    # NB: this confirm is a UX guardrail, not a security boundary -- an RCE as the
+    # service user could call the actuator directly. Acceptable: port 9093 is itself
+    # bearer/OAuth-gated, so public exposure != unauthenticated access.
+    if not body.confirm:
+        raise HTTPException(400, "funnel-up exposes this box to the PUBLIC internet; "
+                                 "resend with confirm=true to proceed")
+    res = await mcp_actuator.funnel_up()
+    if not res["ok"]:
+        raise HTTPException(500, res.get("error") or "funnel-up failed")
+    url = _derive_public_url()
+    if url:
+        _write_runtime_public_url(url)
+        _trigger_reload()
+    return {"ok": True, "public_url": url}
