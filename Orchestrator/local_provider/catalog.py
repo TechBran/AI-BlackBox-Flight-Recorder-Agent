@@ -163,6 +163,52 @@ def _fetch_hf_tree(repo: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Task A3 — file selection + slug derivation + download URL helpers
+# ---------------------------------------------------------------------------
+
+def _select_litertlm(tree: list[dict], preferred: str | None) -> dict | None:
+    """Pick the canonical .litertlm file from a repo tree.
+
+    A repo ships multiple .litertlm builds (e.g. ``-web`` variants). Selection:
+      1. the curated ``preferred`` filename if present;
+      2. else the non-``-web`` ``*-it.litertlm`` build;
+      3. else the largest .litertlm (last resort).
+    Returns a normalised dict {path, size_bytes, sha256} or None.
+    """
+    litertlms = [f for f in tree if str(f.get("path", "")).endswith(".litertlm")]
+    if not litertlms:
+        return None
+
+    def _norm(f):
+        return {
+            "path": f["path"],
+            "size_bytes": int(f.get("size") or (f.get("lfs") or {}).get("size") or 0),
+            "sha256": (f.get("lfs") or {}).get("oid"),  # LFS oid == content SHA-256
+        }
+
+    if preferred:
+        for f in litertlms:
+            if f.get("path") == preferred:
+                return _norm(f)
+    non_web = [f for f in litertlms
+               if "-web" not in f["path"] and f["path"].endswith("-it.litertlm")]
+    if non_web:
+        return _norm(non_web[0])
+    return _norm(max(litertlms, key=lambda f: f.get("size") or 0))
+
+
+def _slug_for_repo(repo: str) -> str:
+    """litert-community/gemma-4-E2B-it-litert-lm -> gemma-4-e2b."""
+    name = repo.split("/")[-1]
+    name = name.removesuffix("-litert-lm").removesuffix("-it")
+    return name.lower()
+
+
+def _download_url(repo: str, filename: str) -> str:
+    return f"{_HF_BASE}/{repo}/resolve/main/{filename}"
+
+
+# ---------------------------------------------------------------------------
 # Task 1.2 — fetch-once + ranged download support
 # ---------------------------------------------------------------------------
 

@@ -441,3 +441,38 @@ def test_fetch_hf_tree_shape(monkeypatch):
     files = mirror._fetch_hf_tree("litert-community/gemma-4-E2B-it-litert-lm")
     paths = {f["path"] for f in files}
     assert "gemma-4-E2B-it.litertlm" in paths
+
+
+# ---------------------------------------------------------------------------
+# Task A3 — file selection + slug derivation + download URL helpers
+# ---------------------------------------------------------------------------
+
+def test_select_litertlm_prefers_curated_filename():
+    tree = [
+        {"path": "gemma-4-E2B-it-web.litertlm", "size": 1, "lfs": {"oid": "a" * 64}},
+        {"path": "gemma-4-E2B-it.litertlm", "size": 2588147712, "lfs": {"oid": "b" * 64}},
+    ]
+    f = mirror._select_litertlm(tree, preferred="gemma-4-E2B-it.litertlm")
+    assert f["path"] == "gemma-4-E2B-it.litertlm"
+    assert f["sha256"] == "b" * 64
+    assert f["size_bytes"] == 2588147712
+
+
+def test_select_litertlm_heuristic_excludes_web():
+    tree = [
+        {"path": "gemma-4-E4B-it-web.litertlm", "size": 1, "lfs": {"oid": "a" * 64}},
+        {"path": "gemma-4-E4B-it.litertlm", "size": 5, "lfs": {"oid": "b" * 64}},
+    ]
+    f = mirror._select_litertlm(tree, preferred=None)
+    assert f["path"] == "gemma-4-E4B-it.litertlm"  # the non-web -it build
+
+
+def test_slug_for_repo():
+    assert mirror._slug_for_repo("litert-community/gemma-4-E2B-it-litert-lm") == "gemma-4-e2b"
+    assert mirror._slug_for_repo("litert-community/gemma-4-12B-it-litert-lm") == "gemma-4-12b"
+
+
+def test_download_url():
+    assert mirror._download_url("litert-community/gemma-4-E2B-it-litert-lm",
+                                "gemma-4-E2B-it.litertlm") == \
+        "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
