@@ -169,6 +169,138 @@ async def _drive_browse(base_url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# RAW JSON-RPC helpers (for #2A direct-tool gating + #2B session-hijack). The
+# MCP ClientSession won't let us reuse a session-id under a DIFFERENT token, so
+# we drive the wire directly (mirrors the reviewer's probe_direct/probe_session).
+# ---------------------------------------------------------------------------
+_ACCEPT = "application/json, text/event-stream"
+
+
+def _sse_or_json(resp: httpx.Response):
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line[5:].strip())
+                except Exception:
+                    pass
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _raw_init(client: httpx.Client, base_url: str, token: str) -> str:
+    """Open a session under `token`; return the mcp-session-id."""
+    r = client.post(base_url, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "p", "version": "0"}}},
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json", "Accept": _ACCEPT})
+    sid = r.headers.get("mcp-session-id")
+    client.post(base_url, json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                         "Accept": _ACCEPT, "mcp-session-id": sid})
+    return sid
+
+
+def _raw_call(client: httpx.Client, base_url: str, token: str, sid: str, name: str, args: dict):
+    """tools/call on `sid` under `token`. Returns (isError, parsed_body_or_text)."""
+    r = client.post(base_url, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": name, "arguments": args}},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Accept": _ACCEPT, "mcp-session-id": sid})
+    obj = _sse_or_json(r)
+    if obj and "result" in obj:
+        cont = obj["result"].get("content", [])
+        err = bool(obj["result"].get("isError"))
+        if cont:
+            try:
+                return err, json.loads(cont[0]["text"])
+            except Exception:
+                return err, cont[0].get("text")
+    return None, obj
+
+
+def _run_2a_2b(base_url: str) -> list:
+    """Run #2A (direct-tool gating) + #2B (session hijack) against the seeded
+    two-operator server. Returns a list of failure strings ([] = all pass).
+    Seeded volume content: 'ALICEDATA!' (alice's snap) + 'BOBDATA...' (bob's)."""
+    fails = []
+    c = httpx.Client(timeout=15)
+
+    # --- #2A: bob, correctly bound, tries to read ALICE's data across tools ---
+    sid_b = _raw_init(c, base_url, OTHER_TOKEN)  # bob
+    # get_snapshot for alice's snap -> not_found (NOT the content)
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_snapshot", {"snap_id": "SNAP-ALICE-1"})
+    txt = json.dumps(body)
+    if err is True and "not_found" in txt and "ALICEDATA" not in txt and "content" not in body:
+        print("[auth] PASS (g) #2A get_snapshot(alice) by bob -> not_found, no content")
+    else:
+        fails.append(f"(g) get_snapshot cross-op NOT denied: err={err} body={txt[:200]}")
+    # seek_snapshot_direct for alice's snap -> not_found
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "seek_snapshot_direct", {"snap_id": "SNAP-ALICE-1"})
+    txt = json.dumps(body)
+    if err is True and "not_found" in txt and "ALICEDATA" not in txt:
+        print("[auth] PASS (h) #2A seek_snapshot_direct(alice) by bob -> not_found, no content")
+    else:
+        fails.append(f"(h) seek_snapshot_direct cross-op NOT denied: err={err} body={txt[:200]}")
+    # bob CAN read his OWN snap (positive control)
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_snapshot", {"snap_id": "SNAP-BOB-1"})
+    if err is not True and isinstance(body, dict) and body.get("metadata", {}).get("operator") == OTHER_OPERATOR:
+        print("[auth] PASS (i) #2A bob CAN read his own snap (gate is per-operator, not deny-all)")
+    else:
+        fails.append(f"(i) bob denied his OWN snap (over-blocking): err={err} body={json.dumps(body)[:200]}")
+    # list_operators -> only bob; get_index_stats -> only bob + no FS paths
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "list_operators", {})
+    names = {o["name"] for o in body.get("operators", [])} if isinstance(body, dict) else set()
+    if names == {OTHER_OPERATOR}:
+        print("[auth] PASS (j) #2A list_operators by bob -> only bob (roster not leaked)")
+    else:
+        fails.append(f"(j) list_operators leaked roster: {names}")
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_index_stats", {})
+    ops = set((body.get("operators") or {}).keys()) if isinstance(body, dict) else set()
+    leaks_paths = isinstance(body, dict) and ("index_file" in body or "volume_file" in body)
+    if ops == {OTHER_OPERATOR} and not leaks_paths:
+        print("[auth] PASS (k) #2A get_index_stats by bob -> only bob, no FS paths")
+    else:
+        fails.append(f"(k) get_index_stats leaked: ops={ops} fs_paths={leaks_paths}")
+    # get_media with a `..` traversal url -> rejected
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_media", {"url": "/ui/../../etc/passwd"})
+    txt = json.dumps(body)
+    if err is True and ("Illegal path" in txt or "escapes" in txt or "invalid_arguments" in txt):
+        print("[auth] PASS (l) #2A get_media `..` traversal -> rejected")
+    else:
+        fails.append(f"(l) get_media traversal NOT rejected: err={err} body={txt[:200]}")
+
+    # --- #2B: token-A request riding token-B's session must run as A, not B ---
+    sid_bob = _raw_init(c, base_url, OTHER_TOKEN)  # bob opens a session
+    # alice's token reuses bob's session-id
+    err, body = _raw_call(c, base_url, VALID_TOKEN, sid_bob, "get_current_operator", {})
+    resolved = body.get("resolved") if isinstance(body, dict) else None
+    if resolved == VALID_OPERATOR:
+        print("[auth] PASS (m) #2B tokenA on tokenB's session -> runs as alice (NOT bob; hijack closed)")
+    elif resolved == OTHER_OPERATOR:
+        fails.append("(m) #2B SESSION HIJACK: tokenA on bob's session executed as bob (STALE BINDING)")
+    else:
+        fails.append(f"(m) #2B unexpected resolved={resolved!r}")
+    # and the data it sees is alice's, never bob's
+    err, body = _raw_call(c, base_url, VALID_TOKEN, sid_bob, "browse_index", {})
+    seen = {s["operator"] for s in body.get("snapshots", [])} if isinstance(body, dict) else set()
+    if seen == {VALID_OPERATOR}:
+        print("[auth] PASS (n) #2B tokenA on bob's session browse_index -> only alice's data")
+    elif seen == {OTHER_OPERATOR}:
+        fails.append("(n) #2B CROSS-OP READ: tokenA on bob's session read BOB's snapshots")
+    else:
+        fails.append(f"(n) #2B browse leaked/odd: operators={seen}")
+    c.close()
+    return fails
+
+
+# ---------------------------------------------------------------------------
 # (f): stdio path -- no auth, unchanged.
 # ---------------------------------------------------------------------------
 async def _drive_stdio() -> dict:
@@ -295,7 +427,9 @@ def main() -> int:
                        "type": "normal", "byte_start": 10, "byte_end": 30},
     }
     (tmp / "Manifest" / "snapshot_index.json").write_text(json.dumps(seed_index))
-    (tmp / "Volumes" / "SNAPSHOT_VOLUME.txt").write_text("x" * 30)
+    # Real, distinguishable content so a cross-operator read is observable:
+    # bytes [0:10)='ALICEDATA!' (alice), [10:30)='BOBDATAxxxxxxxxxxxx' (bob).
+    (tmp / "Volumes" / "SNAPSHOT_VOLUME.txt").write_text("ALICEDATA!BOBDATAxxxxxxxxxxxxxx")
 
     port2 = _free_port()
     base_url2 = f"http://127.0.0.1:{port2}/mcp"
@@ -325,6 +459,12 @@ def main() -> int:
                                         f"(expected only {{{VALID_OPERATOR!r}}})")
                 except Exception as e:
                     failures.append(f"(e) browse body not JSON ({e}): {res['e_text'][:200]}")
+            # #2A + #2B regression suite against the SAME seeded two-operator
+            # server (alice+bob snapshots, real volume content).
+            if backend_ok:
+                failures.extend(_run_2a_2b(base_url2))
+            else:
+                failures.append("(g-n) SKIPPED: backend down (get_current_operator needs it)")
     finally:
         proc2.terminate()
         try:
@@ -360,9 +500,11 @@ def main() -> int:
         print(f"\n[auth] {len(failures)} assertion(s) failed.")
         return 1
 
-    print("\n[auth] ALL 6 ASSERTIONS PASSED "
+    print("\n[auth] ALL 14 ASSERTIONS PASSED "
           "(401 no-header, 401 wrong-token, valid-token ok, operator-binding, "
-          "read-scoping, stdio-unchanged).")
+          "read-scoping, stdio-unchanged; #2A get_snapshot/seek/own-read/"
+          "list_operators/index_stats/media-traversal gated; #2B session-hijack "
+          "closed for get_current_operator + browse_index).")
     return 0
 
 

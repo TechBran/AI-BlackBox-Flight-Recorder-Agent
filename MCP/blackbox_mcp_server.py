@@ -227,20 +227,74 @@ async def _fetch_operators():
         return [], ""   # do NOT cache -- retry on next call
 
 
+def _is_http_request() -> bool:
+    """True iff we are serving an authenticated HTTP request (vs stdio).
+
+    The middleware sets _BOUND_OPERATOR for every authenticated HTTP request, so
+    a non-None value is the reliable "this is the HTTP transport" signal. (Its
+    VALUE may be session-stale for a tool call -- we never trust the value; we
+    only use its presence as a transport flag. The operator VALUE comes from
+    _current_bound_operator() below, which reads the CURRENT request.)
+    """
+    return _BOUND_OPERATOR.get() is not None
+
+
+def _current_bound_operator() -> Optional[str]:
+    """The token-bound operator of the CURRENT request (#2B Option A).
+
+    The SDK sets a fresh RequestContext (with `request` = the current Starlette
+    Request) per JSON-RPC message, INSIDE the session run-loop, right before the
+    handler runs (mcp/server/lowlevel/server.py). Our auth middleware stashes the
+    request's token-operator on `request.state.bound_operator`. Reading it HERE
+    therefore yields the operator of the TOKEN ON THIS REQUEST -- not the token
+    that opened the session. This is what kills the session-hijack / stale-binding
+    hole: a token-B request riding a token-A session executes as B.
+
+    Returns the per-request operator on the HTTP path, or None on stdio (no
+    active request context -> resolution falls back to the trusted stdio rules).
+
+    FAIL-CLOSED: if we are demonstrably on HTTP (_is_http_request()) but the
+    per-request operator cannot be read, we DENY by returning the sentinel
+    _DENY_OPERATOR (an operator no snapshot can match) rather than silently
+    widening scope -- a missing per-request identity must never span all data.
+    """
+    try:
+        req = server.request_context.request
+    except LookupError:
+        req = None
+    if req is not None:
+        op = getattr(getattr(req, "state", None), "bound_operator", None)
+        if op:
+            return op
+    # No per-request request/operator available.
+    if _is_http_request():
+        # On HTTP but identity is unreadable -> fail CLOSED (never span).
+        logger.error("HTTP request missing per-request bound operator -- denying "
+                     "(fail-closed). This should not happen; investigate.")
+        return _DENY_OPERATOR
+    return None
+
+
+# A sentinel operator that matches NO snapshot. Used to fail closed when an HTTP
+# request's per-request identity is unexpectedly unreadable.
+_DENY_OPERATOR = "\x00__deny__\x00"
+
+
 async def resolve_operator(provided):
     """Server-side safety net: resolve the operator for a tool call.
 
-    HTTP (bound) path -- M3 ANTI-SPOOF: when a token-bound operator is set
-    (_BOUND_OPERATOR contextvar), RETURN IT and IGNORE `provided` entirely, so a
-    remote caller cannot act as a different operator by asserting one in the
-    tool args. This is the single chokepoint every write/proxy tool flows
-    through (mint_snapshot, get_context, chat_with_context, _proxy_tool, ...).
+    HTTP path -- ANTI-SPOOF: return the CURRENT request's token-bound operator
+    (_current_bound_operator) and IGNORE `provided`, so a remote caller can
+    neither act as a different operator (by asserting one in the args) nor ride
+    another token's session (the operator is read per-request, not per-session).
+    This is the single chokepoint every write/proxy tool flows through
+    (mint_snapshot, get_context, chat_with_context, _proxy_tool, ...).
 
     stdio (trusted) path -- UNCHANGED: when omitted, single operator -> that;
     multiple -> system default; caller-asserted operator honoured. (Interactive
     dropdown for the multiple case is handled agent-side, not here.)
     """
-    bound = _BOUND_OPERATOR.get()
+    bound = _current_bound_operator()
     if bound is not None:
         return bound
     operators, default = await _fetch_operators()
@@ -251,16 +305,35 @@ async def resolve_operator(provided):
 def _read_scope_operator(provided: str) -> str:
     """Operator FILTER for read tools that span ALL operators when blank.
 
-    M3 ANTI-LEAK: on the HTTP (bound) path, FORCE the token's bound operator and
-    IGNORE `provided` -- otherwise a remote caller could read every operator's
+    ANTI-LEAK: on the HTTP path, FORCE the CURRENT request's token-bound operator
+    and IGNORE `provided` -- otherwise a remote caller could read every operator's
     snapshots via search_snapshots / browse_index by leaving operator blank.
-    On the stdio (trusted) path the contextvar is unset, so `provided` is
-    returned verbatim -- blank still means "span ALL operators on this box".
+    On the stdio (trusted) path no request is active, so `provided` is returned
+    verbatim -- blank still means "span ALL operators on this box".
     """
-    bound = _BOUND_OPERATOR.get()
+    bound = _current_bound_operator()
     if bound is not None:
         return bound
     return provided
+
+
+def _deny_if_not_owned(metadata) -> Optional[str]:
+    """#2A ownership gate for by-id/by-offset snapshot reads.
+
+    Returns a denial reason (str) iff we are on the HTTP/bound path AND the
+    snapshot's operator != the CURRENT request's bound operator -- i.e. a
+    cross-operator read that must be denied. Returns None when access is allowed
+    (stdio -> always allowed; HTTP -> allowed only for the caller's own operator).
+    Callers translate a non-None return into a not_found (never a 403, so the
+    existence of another operator's snapshot is never confirmed).
+    """
+    scope = _current_bound_operator()
+    if scope is None:
+        return None  # stdio / trusted -- no gating
+    owner = (metadata or {}).get("operator")
+    if owner != scope:
+        return f"cross-operator access denied (owner={owner!r} caller={scope!r})"
+    return None
 
 # Put the REPO ROOT on sys.path so the `Orchestrator` PACKAGE is importable.
 # get_mcp_tools() (below) lazily runs `from Orchestrator.toolvault import registry`
@@ -511,8 +584,9 @@ async def call_tool(name: str, arguments: dict[str, Any]):
     _tid = _TOKEN_ID.get()
     if _tid is not None:
         # AUDIT (M3): every tool invocation on the HTTP/public surface logs the
-        # token id (never the value) + bound operator + tool name + request id.
-        _log(logging.INFO, name, f"AUDIT tool-call tid={_tid}", operator=_BOUND_OPERATOR.get())
+        # token id (never the value) + the CURRENT request's operator (per-request,
+        # so a hijacked session is audited as the ACTUAL caller) + tool + rid.
+        _log(logging.INFO, name, f"AUDIT tool-call tid={_tid}", operator=_current_bound_operator())
     _log(logging.INFO, name, "call received")
 
     try:
@@ -526,6 +600,14 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 return _error("not_found", name, f"Snapshot {snap_id} not found in index")
 
             metadata = get_snapshot_metadata(snap_id)
+            # #2A: on the HTTP/bound path, a caller may only read its OWN
+            # operator's snapshots. Snapshot ids are predictable, so cross-operator
+            # reads are an enumeration vector. Return not_found (do NOT 403 --
+            # never confirm another operator's snapshot exists).
+            _gate = _deny_if_not_owned(metadata)
+            if _gate is not None:
+                return _error("not_found", name, f"Snapshot {snap_id} not found in index")
+
             result = {
                 "snap_id": snap_id,
                 "metadata": metadata,
@@ -539,6 +621,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
             metadata = get_snapshot_metadata(snap_id)
             if metadata is None:
+                return _error("not_found", name, f"Snapshot {snap_id} not found")
+
+            # #2A: cross-operator read denial (not_found, not 403) on HTTP.
+            if _deny_if_not_owned(metadata) is not None:
                 return _error("not_found", name, f"Snapshot {snap_id} not found")
 
             result = {"metadata": metadata}
@@ -558,13 +644,21 @@ async def call_tool(name: str, arguments: dict[str, Any]):
         elif name == "get_index_stats":
             index = load_snapshot_index()
 
+            # #2A: when bound (HTTP), a caller sees stats for ONLY its operator,
+            # never the whole-box roster/counts. On stdio (scope None) -> all.
+            scope = _current_bound_operator()
+
             # Calculate stats
             operators = {}
             types = {"normal": 0, "checkpoint": 0, "summary": 0}
             total_bytes = 0
+            counted = 0
 
             for snap_id, entry in index.items():
                 op = entry.get("operator", "unknown")
+                if scope is not None and op != scope:
+                    continue
+                counted += 1
                 operators[op] = operators.get(op, 0) + 1
 
                 snap_type = entry.get("type", "normal")
@@ -575,15 +669,17 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 total_bytes += size
 
             stats = {
-                "total_snapshots": len(index),
+                "total_snapshots": counted,
                 "operators": operators,
                 "types": types,
                 "total_size_bytes": total_bytes,
                 "total_size_mb": round(total_bytes / (1024 * 1024), 2),
-                "index_file": str(SNAPSHOT_INDEX),
-                "volume_file": str(VOLUME_FILE),
-                "volume_exists": VOLUME_FILE.exists()
             }
+            # #2A: never leak absolute server FS paths to a remote (bound) caller.
+            if scope is None:
+                stats["index_file"] = str(SNAPSHOT_INDEX)
+                stats["volume_file"] = str(VOLUME_FILE)
+                stats["volume_exists"] = VOLUME_FILE.exists()
             return [TextContent(type="text", text=json.dumps(stats, indent=2))]
 
         elif name == "browse_index":
@@ -629,9 +725,14 @@ async def call_tool(name: str, arguments: dict[str, Any]):
         elif name == "list_operators":
             index = load_snapshot_index()
 
+            # #2A: a bound (HTTP) caller sees ONLY its own operator row, never the
+            # full roster of who-else-is-on-this-box. stdio (scope None) -> all.
+            scope = _current_bound_operator()
             operators = {}
             for entry in index.values():
                 op = entry.get("operator", "unknown")
+                if scope is not None and op != scope:
+                    continue
                 operators[op] = operators.get(op, 0) + 1
 
             # Sort by count descending
@@ -643,10 +744,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
 
         elif name == "get_current_operator":
             operators, default = await _fetch_operators()
-            bound = _BOUND_OPERATOR.get()
+            bound = _current_bound_operator()
             if bound is not None:
-                # HTTP/bound path: the operator IS the token's bound operator.
-                # No selection is ever needed remotely (identity is the credential).
+                # HTTP path: the operator IS the CURRENT request's token operator
+                # (per-request, not session-frozen). No selection needed remotely.
                 resolved, needs_selection = bound, False
             else:
                 resolved, needs_selection = choose_operator(None, operators, default)
@@ -700,11 +801,33 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 parsed = urlparse(url)
                 url = parsed.path
 
+            # #2A: reject path traversal BEFORE the /ui/->Portal join. A `..`
+            # anywhere in the url could escape Portal/ and read arbitrary files.
+            if ".." in url:
+                return _error("invalid_arguments", name, "Illegal path component in url")
+
+            # #2A: when a task is involved, the media belongs to the task's
+            # operator -- a bound (HTTP) caller may only fetch its OWN task's media.
+            # Resolve the owning operator and deny cross-operator (not_found).
+            _scope = _current_bound_operator()
+            if _scope is not None and task_id:
+                async with httpx.AsyncClient(timeout=30) as _oclient:
+                    _tr = await _oclient.get(f"{BLACKBOX_URL}/tasks/{task_id}")
+                if _tr.status_code != 200:
+                    return _error("not_found", name, f"Task {task_id} not found")
+                _owner = (_tr.json() or {}).get("operator")
+                if _owner != _scope:
+                    return _error("not_found", name, f"Task {task_id} not found")
+
             # Resolve to file path
             # URL format: /ui/uploads/filename.ext -> Portal/uploads/filename.ext
             if url.startswith("/ui/"):
                 relative_path = url.replace("/ui/", "")
-                file_path = BLACKBOX_ROOT / "Portal" / relative_path
+                file_path = (BLACKBOX_ROOT / "Portal" / relative_path).resolve()
+                # Defense in depth: the resolved path MUST stay under Portal/.
+                _portal_root = (BLACKBOX_ROOT / "Portal").resolve()
+                if _portal_root not in file_path.parents and file_path != _portal_root:
+                    return _error("invalid_arguments", name, "Resolved path escapes Portal/")
             else:
                 return _error("invalid_arguments", name, f"Invalid URL format: {url}")
 
@@ -999,15 +1122,23 @@ async def read_resource(uri: str) -> ResourceContents:
     """Read a BlackBox resource."""
 
     try:
+        # #2A: resources run in the SAME session task and are equally reachable
+        # over HTTP -- apply the SAME bound-operator filter as the matching tools.
+        # scope is None on stdio (span all), or the CURRENT request's operator.
+        scope = _current_bound_operator()
         if uri == "blackbox://index/stats":
             index = load_snapshot_index()
 
             operators = {}
             types = {"normal": 0, "checkpoint": 0, "summary": 0}
             total_bytes = 0
+            counted = 0
 
             for entry in index.values():
                 op = entry.get("operator", "unknown")
+                if scope is not None and op != scope:
+                    continue
+                counted += 1
                 operators[op] = operators.get(op, 0) + 1
                 snap_type = entry.get("type", "normal")
                 if snap_type in types:
@@ -1015,7 +1146,7 @@ async def read_resource(uri: str) -> ResourceContents:
                 total_bytes += entry.get("byte_end", 0) - entry.get("byte_start", 0)
 
             stats = {
-                "total_snapshots": len(index),
+                "total_snapshots": counted,
                 "operators": operators,
                 "types": types,
                 "total_size_mb": round(total_bytes / (1024 * 1024), 2)
@@ -1028,6 +1159,8 @@ async def read_resource(uri: str) -> ResourceContents:
             operators = {}
             for entry in index.values():
                 op = entry.get("operator", "unknown")
+                if scope is not None and op != scope:
+                    continue
                 operators[op] = operators.get(op, 0) + 1
 
             return TextResourceContents(
@@ -1041,6 +1174,8 @@ async def read_resource(uri: str) -> ResourceContents:
 
             entries = []
             for snap_id, entry in index.items():
+                if scope is not None and entry.get("operator") != scope:
+                    continue
                 entries.append({
                     "snap_id": snap_id,
                     "operator": entry.get("operator"),
@@ -1275,9 +1410,21 @@ class BearerAuthMiddleware:
             await self._reject_401(send, "Unknown or invalid bearer token")
             return
 
-        # Bind the operator for the LIFETIME of this request (contextvar) so
-        # resolve_operator()/read tools FORCE this operator (anti-spoof/anti-leak).
-        # The token id is threaded the same way for the per-tool-call audit line.
+        # #2B (Option A): stash the operator + token id on THIS request's state.
+        # The SDK threads the current Starlette Request through to the handler
+        # (request_ctx.request, set fresh per JSON-RPC message), so handlers read
+        # the CURRENT request's operator via _current_bound_operator() -- NOT the
+        # session-frozen value. This is what defeats session hijack / stale
+        # binding: a token-B request on a token-A session executes as B.
+        # request.state writes persist in scope["state"], which the SDK's later
+        # Request(scope, receive) reads back.
+        from starlette.requests import Request as _StarletteRequest
+        _req = _StarletteRequest(scope)
+        _req.state.bound_operator = operator
+        _req.state.token_id = token_id
+        # _BOUND_OPERATOR/_TOKEN_ID remain set as the "this is HTTP" transport
+        # signal + audit context. Their VALUE is NOT trusted for per-call operator
+        # resolution (it can be session-stale); _current_bound_operator() is.
         _BOUND_OPERATOR.set(operator)
         _TOKEN_ID.set(token_id)
         # AUDIT (M3): token id (never the value) + bound operator + method/path + rid.
