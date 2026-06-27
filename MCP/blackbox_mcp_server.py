@@ -1300,10 +1300,11 @@ BLACKBOX_MCP_TOKENS_FILE = os.getenv(
 # Public origin as seen by claude.ai / Desktop (the Funnel front door). The
 # OAuth issuer + all advertised endpoints are built from this, NOT the 127.0.0.1
 # bind, because the metadata must point at the URL the remote client can reach.
-BLACKBOX_MCP_PUBLIC_URL = os.getenv(
-    "BLACKBOX_MCP_PUBLIC_URL",
-    "https://ai-black-box-fc-a620ai-wifi.tail401fb3.ts.net:8443",
-).rstrip("/")
+# NO host default: shipping a real box's hostname would point every other
+# install's OAuth discovery at it. The deploy MUST set BLACKBOX_MCP_PUBLIC_URL to
+# THIS box's public Funnel origin; OAuth discovery fails loudly (503) until it is
+# set. Bearer-token auth does not need it.
+BLACKBOX_MCP_PUBLIC_URL = os.getenv("BLACKBOX_MCP_PUBLIC_URL", "").rstrip("/")
 
 # The MCP resource URL (issuer + the MCP path) -- the `resource` value in the
 # RFC 9728 Protected Resource Metadata. Built from the public origin + the
@@ -1336,8 +1337,17 @@ def _load_token_map() -> Dict[str, str]:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 for tok, op in data.items():
-                    if isinstance(tok, str) and tok and isinstance(op, str) and op:
-                        merged[tok] = op
+                    if not (isinstance(tok, str) and tok and isinstance(op, str) and op):
+                        continue
+                    if op.strip().lower() == "system":
+                        # "system"/blank = span-ALL operators. That is a trusted
+                        # stdio/local capability, NEVER a remote bearer token --
+                        # else one token reads every operator's snapshots.
+                        logger.error("M3 AUTH: refusing token tid=%s bound to "
+                                     "operator 'system' (span-all is not a remote "
+                                     "capability).", _token_id(tok))
+                        continue
+                    merged[tok] = op
     except Exception as e:
         logger.error("Failed to load token file %s: %s", BLACKBOX_MCP_TOKENS_FILE, e)
     # Env source (wins on collision).
@@ -1347,11 +1357,77 @@ def _load_token_map() -> Dict[str, str]:
             data = json.loads(env_raw)
             if isinstance(data, dict):
                 for tok, op in data.items():
-                    if isinstance(tok, str) and tok and isinstance(op, str) and op:
-                        merged[tok] = op
+                    if not (isinstance(tok, str) and tok and isinstance(op, str) and op):
+                        continue
+                    if op.strip().lower() == "system":
+                        # "system"/blank = span-ALL operators. That is a trusted
+                        # stdio/local capability, NEVER a remote bearer token --
+                        # else one token reads every operator's snapshots.
+                        logger.error("M3 AUTH: refusing token tid=%s bound to "
+                                     "operator 'system' (span-all is not a remote "
+                                     "capability).", _token_id(tok))
+                        continue
+                    merged[tok] = op
         except Exception as e:
             logger.error("Failed to parse BLACKBOX_MCP_TOKENS env JSON: %s", e)
     return merged
+
+
+def _fetch_operators_sync():
+    """Blocking roster fetch for STARTUP-time token validation. Returns the live
+    operator list, or None when the roster is unavailable (so the caller fails
+    OPEN rather than dropping every token on a transient backend blip)."""
+    try:
+        r = httpx.get(f"{BLACKBOX_URL}/operators", timeout=10)
+        ops = r.json().get("operators")
+        return list(ops) if isinstance(ops, list) else None
+    except Exception:
+        return None
+
+
+def _roster_enforce_enabled() -> bool:
+    """BLACKBOX_MCP_ROSTER_ENFORCE (default ON). Off only for tests that bind
+    synthetic operators not present in a real box's roster."""
+    return os.getenv("BLACKBOX_MCP_ROSTER_ENFORCE", "1").strip().lower() not in (
+        "0", "false", "no", "off", "")
+
+
+def _validate_token_operators(token_map: Dict[str, str]) -> Dict[str, str]:
+    """Anti-ghost guard (the production-portability enforcement): every token must
+    bind to an operator that EXISTS in THIS box's live GET /operators roster.
+    A token bound to a non-roster operator mints snapshots under a phantom name
+    (invisible to the real team) and reads back nothing -- the silent-misrouting
+    failure mode. Nothing is hard-coded: the bound operator is checked against the
+    customer's OWN live roster.
+
+      * roster unavailable (backend down at startup) -> fail OPEN, keep all, warn;
+        a restart once the backend is reachable re-validates.
+      * roster available + enforce ON (default) -> DROP + log any non-roster token
+        (it then 401s -- fail closed).
+      * enforce OFF -> keep all, but still log the drift so it is diagnosable.
+
+    Tokens should be minted with deploy/mint_token.py, which validates the chosen
+    operator against the live roster AT MINT TIME (the primary control)."""
+    if not token_map:
+        return token_map
+    roster = _fetch_operators_sync()
+    if roster is None:
+        logger.warning("M3 AUTH: live roster unavailable at startup -- skipping "
+                       "token->operator roster validation (tokens kept as-is). "
+                       "Restart once the backend is reachable to re-validate.")
+        return token_map
+    enforce = _roster_enforce_enabled()
+    kept: Dict[str, str] = {}
+    for tok, op in token_map.items():
+        if op in roster:
+            kept[tok] = op
+        else:
+            logger.error("M3 AUTH: token tid=%s bound to operator %r NOT in this "
+                         "box's live roster %s -- %s. Re-mint with "
+                         "deploy/mint_token.py against a real operator.",
+                         _token_id(tok), op, sorted(roster),
+                         "REJECTED (fail-closed)" if enforce else "kept (enforce off)")
+    return kept if enforce else token_map
 
 
 def _token_id(token: str) -> str:
@@ -1601,9 +1677,22 @@ def _oauth_protected_resource_metadata() -> dict:
     }
 
 
+_OAUTH_UNCONFIGURED = {
+    "error": "server_not_configured",
+    "error_description": (
+        "OAuth discovery requires BLACKBOX_MCP_PUBLIC_URL to be set to this box's "
+        "public Funnel origin (e.g. https://<your-host>:8443). Bearer-token auth "
+        "still works without it."
+    ),
+}
+
+
 async def _oauth_as_metadata_handler(request):
     """GET /.well-known/oauth-authorization-server (RFC 8414)."""
     from starlette.responses import JSONResponse
+    if not BLACKBOX_MCP_PUBLIC_URL:
+        return JSONResponse(_OAUTH_UNCONFIGURED, status_code=503,
+                            headers={"Cache-Control": "no-store"})
     return JSONResponse(
         _oauth_as_metadata(),
         headers={"Cache-Control": "public, max-age=3600"},
@@ -1613,6 +1702,9 @@ async def _oauth_as_metadata_handler(request):
 async def _oauth_pr_metadata_handler(request):
     """GET /.well-known/oauth-protected-resource (RFC 9728)."""
     from starlette.responses import JSONResponse
+    if not BLACKBOX_MCP_PUBLIC_URL:
+        return JSONResponse(_OAUTH_UNCONFIGURED, status_code=503,
+                            headers={"Cache-Control": "no-store"})
     return JSONResponse(
         _oauth_protected_resource_metadata(),
         headers={"Cache-Control": "public, max-age=3600"},
@@ -1728,8 +1820,8 @@ async def _oauth_register_handler(request):
 #     6c can validate them on /mcp. The token VALUE is never logged (only the
 #     sha256[:12] id, matching the M3 _token_id pattern).
 #   * Fail-closed: any validation gap -> reject. The operator is bound at
-#     /authorize (env BLACKBOX_MCP_OAUTH_OPERATOR, default Brandon) and carried
-#     through to the access token; the remote client never chooses it.
+#     /authorize from the AUTHENTICATED bearer token's operator (the consent gate)
+#     and carried through to the access token; the remote client never chooses it.
 #
 # Codes live IN-MEMORY only (short-lived, single process). Access tokens are
 # kept in a process-local dict AND mirrored to a gitignored 0600 file
@@ -1741,10 +1833,11 @@ import secrets as _secrets
 import threading as _threading
 import time as _time
 
-# The operator every OAuth-minted access token is bound to. The remote client
-# never chooses this -- it is the box's configured OAuth operator. Default
-# "Brandon" only as the unconfigured-box seed; a real deploy sets the env.
-BLACKBOX_MCP_OAUTH_OPERATOR = os.getenv("BLACKBOX_MCP_OAUTH_OPERATOR", "Brandon")
+# The operator an OAuth-minted access token binds to is the operator of the
+# BlackBox bearer token AUTHENTICATED at the consent form (/authorize POST) -- see
+# the consent gate below. There is deliberately NO server-wide default operator:
+# a real person's name must never be a fail-open fallback (a fresh customer box
+# has no "Brandon"). A code with no bound operator is a bug -> fail closed.
 
 # Authorization codes are single-use + short-lived (seconds). Access tokens get
 # a longer (but still bounded) lifetime. Both are overridable per-deploy.
@@ -2012,8 +2105,11 @@ async def _oauth_authorize_handler(request):
                             headers={"Cache-Control": "no-store"})
     # POST -> the operator must prove their BlackBox bearer token; the issued code
     # binds to the AUTHENTICATED token's operator (not a fixed env operator).
+    # Authenticate against the SAME roster-validated map the /mcp gate uses, so a
+    # ghost-operator token (dropped at /mcp) cannot mint an OAuth token here either.
     operator, _tid = _match_token(
-        (params.get("blackbox_token") or "").strip(), _load_token_map())
+        (params.get("blackbox_token") or "").strip(),
+        _validate_token_operators(_load_token_map()))
     if not operator:
         logger.warning("OAuth authorize: rejected consent (invalid token) client=%s",
                        client_id)
@@ -2135,7 +2231,11 @@ async def _oauth_token_handler(request):
         return _err("invalid_grant", "PKCE code_verifier does not match")
 
     # ---- success: mint + store an opaque, expiring access token ----
-    operator = binding.get("operator") or BLACKBOX_MCP_OAUTH_OPERATOR
+    operator = binding.get("operator")
+    if not operator:
+        # The consent gate always binds the authenticated operator; a missing one
+        # is a server bug, not an excuse to fall back to someone's name.
+        return _err("server_error", "no operator bound to authorization code")
     access_token = "bbmcp_oat_" + _secrets.token_urlsafe(40)
     expiry = now + ACCESS_TOKEN_TTL
     with _ACCESS_TOKENS_LOCK:
@@ -2227,7 +2327,7 @@ def build_http_app(path: str = None):
     # bearer-auth gate. A loaded map of size 0 means the transport FAILS CLOSED
     # (every request 401s) -- we log that loudly so a misconfigured deploy is
     # obvious rather than silently rejecting everything.
-    token_map = _load_token_map()
+    token_map = _validate_token_operators(_load_token_map())
     if not token_map:
         logger.error("M3 AUTH: token map is EMPTY -- the HTTP transport will reject "
                      "EVERY request (fail-closed). Set BLACKBOX_MCP_TOKENS (env JSON) "
@@ -2235,6 +2335,13 @@ def build_http_app(path: str = None):
     else:
         logger.info("M3 AUTH: loaded %d bearer token(s) bound to operator(s): %s",
                     len(token_map), sorted(set(token_map.values())))
+
+    if not BLACKBOX_MCP_PUBLIC_URL:
+        logger.warning("OAuth DISABLED: BLACKBOX_MCP_PUBLIC_URL is unset -- the "
+                       "/.well-known/oauth-* endpoints return 503, so claude.ai / "
+                       "native Claude Desktop cannot connect via OAuth. Bearer-token "
+                       "clients are unaffected. Set it to this box's public Funnel "
+                       "origin to enable OAuth.")
 
     guarded_endpoint = BearerAuthMiddleware(_MCPASGIApp(session_manager), token_map)
 

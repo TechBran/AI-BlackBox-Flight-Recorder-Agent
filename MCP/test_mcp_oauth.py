@@ -117,6 +117,9 @@ def _start_http_server(port: int, clients_file: Path,
     env["BLACKBOX_MCP_OAUTH_OPERATOR"] = TEST_OAUTH_OPERATOR
     if tokens_file is not None:
         env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(tokens_file)
+    # alice/bob are synthetic test operators absent from the real box roster ->
+    # disable the startup roster guard (covered by test_mcp_operator_scoping.py).
+    env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
     return subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
@@ -357,6 +360,7 @@ def _run_oauth_isolation(failures: list) -> None:
     env["BLACKBOX_MCP_OAUTH_CLIENTS_FILE"] = str(iso_clients)
     env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(iso_tokens)
     env["BLACKBOX_MCP_PUBLIC_URL"] = origin   # redirect_uri match needs real origin
+    env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"  # bob is a synthetic test operator
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
     proc = subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],

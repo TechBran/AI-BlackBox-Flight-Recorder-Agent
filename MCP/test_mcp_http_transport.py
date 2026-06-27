@@ -55,7 +55,7 @@ BACKEND_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 # path it always did -- now through the auth gate. (Auth-rejection is covered
 # exhaustively by test_mcp_auth.py.)
 SMOKE_TOKEN = "smoke-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-SMOKE_OPERATOR = "system"
+SMOKE_OPERATOR = "smoke-op"   # NOT "system": span-all is refused on remote tokens (H-2)
 SMOKE_TOKEN_MAP = {SMOKE_TOKEN: SMOKE_OPERATOR}
 
 
@@ -136,6 +136,8 @@ def main() -> int:
     # auth gate accepts SMOKE_TOKEN. Point the file source at a non-existent path.
     env["BLACKBOX_MCP_TOKENS"] = json.dumps(SMOKE_TOKEN_MAP)
     env["BLACKBOX_MCP_TOKENS_FILE"] = str(_HERE / "__no_such_token_file__.json")
+    # smoke-op is synthetic (not in the real roster) -> skip the startup roster guard.
+    env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     # Quiet the server logs a touch; stderr is still captured for failures.
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
 

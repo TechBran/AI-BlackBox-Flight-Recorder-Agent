@@ -18,6 +18,13 @@ Environment=BLACKBOX_MCP_HTTP_PORT=9093
 Environment=BLACKBOX_ROOT=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc
 Environment=BLACKBOX_URL=http://localhost:9091
 Environment=BLACKBOX_MCP_TOKENS_FILE=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Manifest/mcp_tokens.json
+# For OAuth clients (claude.ai / native Claude Desktop), set THIS box's public
+# Funnel origin so the OAuth discovery metadata points at your host. There is no
+# default (a hard-coded host would mis-point every other install); OAuth discovery
+# returns 503 until set, and bearer-token auth is unaffected:
+# Environment=BLACKBOX_MCP_PUBLIC_URL=https://<your-host>.ts.net:8443
+# Roster enforcement (reject any token bound to a non-roster operator at startup)
+# is ON by default; set BLACKBOX_MCP_ROSTER_ENFORCE=0 only to disable it.
 ExecStart=/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/venv/bin/python /home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/MCP/blackbox_mcp_server.py --transport http
 Restart=on-failure
 RestartSec=5

@@ -105,6 +105,10 @@ def _start_http_server(port: int, extra_env: dict) -> subprocess.Popen:
     # Point the file source at a path that does NOT exist so the real store is
     # never read by the test (env is the only source).
     env["BLACKBOX_MCP_TOKENS_FILE"] = str(_HERE / "__no_such_token_file__.json")
+    # alice/bob are synthetic test operators absent from the real box roster, so
+    # disable the startup roster-validation guard for these auth-invariant tests
+    # (the guard itself is covered by test_mcp_operator_scoping.py).
+    env["BLACKBOX_MCP_ROSTER_ENFORCE"] = "0"
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
     env.update(extra_env)
     return subprocess.Popen(
