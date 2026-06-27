@@ -6,3 +6,13 @@ mcp>=1.0.0
 httpx>=0.25.0
 requests>=2.31.0          # Orchestrator/web_tools.py imports (re-used by MCP server's web search/fetch tools)
 beautifulsoup4>=4.12.0    # Orchestrator/web_tools.py imports (HTML parsing for web_fetch)
+
+# M2 (Streamable HTTP transport): the SDK's StreamableHTTPSessionManager runs in
+# a Starlette ASGI app served by uvicorn. Both are ALREADY transitive deps of
+# `mcp` (starlette via mcp, uvicorn via mcp[cli]/the streamable-http extra), so
+# `pip install mcp` already provisions them in this lean venv -- they are pinned
+# here only to make the HTTP transport's requirement EXPLICIT and reproducible on
+# a fresh box. fastapi is deliberately NOT added (that is the starlette-version
+# conflict the lean venv exists to avoid).
+starlette>=0.49          # ASGI app hosting the StreamableHTTPSessionManager (transitive via mcp)
+uvicorn>=0.30            # ASGI server for the localhost-only HTTP transport (transitive via mcp)

@@ -27,8 +27,31 @@ unchanged. M1 hardened the call path WITHOUT changing the wire format:
     leveled, with a per-call request id + resolved operator + tool name.
   * Backend proxy calls are wrapped in asyncio.wait_for timeouts so a hung
     backend cannot wedge a tool call forever.
+
+--- M2 STREAMABLE HTTP TRANSPORT (2026-06-27) -------------------------------
+A REMOTE Streamable HTTP transport now sits ALONGSIDE the stdio transport. The
+SAME `server` instance (and its @server.list_tools()/@server.call_tool()
+handlers) serves BOTH transports -- no tool logic is duplicated. The HTTP path
+hosts the official SDK's StreamableHTTPSessionManager inside a Starlette ASGI
+app, mounted at `/mcp`, run by uvicorn.
+
+  * Transport selection (stdio stays the DEFAULT so Claude Code is unaffected):
+        no args / no env  -> stdio  (unchanged behaviour)
+        --transport http | --http   -> Streamable HTTP
+        BLACKBOX_MCP_TRANSPORT=http  -> Streamable HTTP
+  * Bind: 127.0.0.1 ONLY (localhost) -- M2 is localhost-only by design.
+        Port  : BLACKBOX_MCP_HTTP_PORT (default 9093)
+        Host  : BLACKBOX_MCP_HTTP_HOST (default 127.0.0.1) -- M2 keeps this
+                localhost; do NOT set 0.0.0.0 here (public exposure is M4).
+        Path  : BLACKBOX_MCP_HTTP_PATH (default /mcp)
+  * NO AUTH at this milestone -- bearer auth + operator binding is M3, public
+    Tailscale exposure is M4. The HTTP app is mounted WITHOUT any auth
+    middleware; it is reachable only from localhost.
+  * uvicorn + starlette are already in MCP/venv (transitive deps of `mcp`); no
+    new heavy dep was added (fastapi is deliberately NOT pulled in).
 """
 
+import argparse
 import asyncio
 import contextvars
 import json
@@ -99,6 +122,13 @@ BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 # 120-180s server-side -- see note on analyze_video below). Override per-deploy
 # via BLACKBOX_MCP_PROXY_TIMEOUT.
 PROXY_TIMEOUT = float(os.getenv("BLACKBOX_MCP_PROXY_TIMEOUT", "120"))
+
+# --- M2: Streamable HTTP transport config -----------------------------------
+# Localhost-only for M2 (auth = M3, public Tailscale = M4). The HTTP runner
+# binds 127.0.0.1 by default; do NOT change the default host to 0.0.0.0 here.
+BLACKBOX_MCP_HTTP_HOST = os.getenv("BLACKBOX_MCP_HTTP_HOST", "127.0.0.1")
+BLACKBOX_MCP_HTTP_PORT = int(os.getenv("BLACKBOX_MCP_HTTP_PORT", "9093"))
+BLACKBOX_MCP_HTTP_PATH = os.getenv("BLACKBOX_MCP_HTTP_PATH", "/mcp")
 
 # The six per-provider web-search tools replaced the generic web_search tool.
 # They require real provider API keys, which the lean MCP venv lacks, so they
@@ -955,22 +985,157 @@ async def read_resource(uri: str) -> ResourceContents:
 # MAIN
 # =============================================================================
 
-async def main():
-    """Run the BlackBox MCP server."""
-    logger.info("BlackBox MCP Server starting...")
+def _log_startup_banner(transport: str) -> None:
+    """Shared startup log lines (both transports)."""
+    logger.info("BlackBox MCP Server starting (transport=%s)...", transport)
     logger.info("BlackBox Root: %s", BLACKBOX_ROOT)
     logger.info("BlackBox API: %s", BLACKBOX_URL)
     logger.info("Volume File: %s (exists: %s)", VOLUME_FILE, VOLUME_FILE.exists())
     logger.info("Index File: %s (exists: %s)", SNAPSHOT_INDEX, SNAPSHOT_INDEX.exists())
     logger.info("Proxy timeout: %.0fs", PROXY_TIMEOUT)
-
-    # Pre-load the index
+    # Pre-load the index (shared by both transports' local file tools).
     index = load_snapshot_index()
     logger.info("Loaded %d snapshots from index", len(index))
 
+
+async def main():
+    """Run the BlackBox MCP server over STDIO (the default transport).
+
+    Unchanged from M1: this is the Claude Code path. Selecting it requires no
+    flags/env, so existing stdio clients are entirely unaffected by M2.
+    """
+    _log_startup_banner("stdio")
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+# =============================================================================
+# M2: STREAMABLE HTTP TRANSPORT
+#
+# The SAME `server` instance (low-level mcp.server.Server, with its already
+# registered @server.list_tools()/@server.call_tool() handlers) is handed to the
+# SDK's StreamableHTTPSessionManager. No tool logic is duplicated: the HTTP
+# transport is purely a second way to reach the identical handlers.
+#
+# We use the LOW-LEVEL session manager (not FastMCP) on purpose: FastMCP owns a
+# different programming model (decorator-registered @mcp.tool() functions over a
+# FastMCP() object) and rebuilding the 74-tool registry-driven catalog into that
+# shape would duplicate logic. StreamableHTTPSessionManager(app=server) accepts
+# our exact low-level Server, so the catalog + dispatch are reused verbatim. The
+# Starlette wiring below mirrors FastMCP.streamable_http_app() (the canonical
+# mounting pattern) MINUS the auth branches (auth is M3).
+# =============================================================================
+def build_http_app(path: str = None):
+    """Build the Starlette ASGI app hosting the SAME `server` over Streamable HTTP.
+
+    Returns (starlette_app, session_manager). The session manager's run() is the
+    Starlette lifespan, so the manager's task group lives for the app's lifetime.
+    NO auth middleware is attached (M2 is localhost-only, no auth).
+    """
+    # Imported lazily so the stdio path never depends on these (they ARE in the
+    # lean MCP/venv as transitive deps of `mcp`, but the import stays scoped to
+    # the HTTP runner to keep the default path minimal).
+    import contextlib
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    if path is None:
+        path = BLACKBOX_MCP_HTTP_PATH
+
+    # One session manager per app (SDK contract). Stateful (default): a session
+    # id is issued on initialize and carried by the client thereafter.
+    session_manager = StreamableHTTPSessionManager(app=server)
+
+    # A RAW ASGI app (a CLASS INSTANCE with __call__(scope, receive, send)) --
+    # this is exactly what the SDK's own StreamableHTTPASGIApp is, and how
+    # FastMCP.streamable_http_app() mounts it. Starlette's Route treats a class
+    # instance (NOT a function) as a raw 3-arg ASGI app -- the contract
+    # handle_request expects. (A plain `async def` passed to Route would be
+    # mis-detected as a func(request)->response endpoint -> TypeError; a Mount
+    # would 307-redirect /mcp -> /mcp/. The class-instance-on-Route avoids both
+    # and serves the endpoint at EXACTLY `path`.)
+    class _MCPASGIApp:
+        def __init__(self, sm):
+            self._sm = sm
+
+        async def __call__(self, scope, receive, send):
+            await self._sm.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            logger.info("Streamable HTTP session manager running at path %s", path)
+            yield
+
+    app = Starlette(
+        debug=False,
+        routes=[Route(path, endpoint=_MCPASGIApp(session_manager),
+                      methods=["GET", "POST", "DELETE"])],
+        lifespan=lifespan,
+    )
+    return app, session_manager
+
+
+def run_http(host: str = None, port: int = None, path: str = None):
+    """Run the Streamable HTTP transport via uvicorn (localhost-only for M2)."""
+    import uvicorn
+
+    host = host or BLACKBOX_MCP_HTTP_HOST
+    port = port if port is not None else BLACKBOX_MCP_HTTP_PORT
+    path = path or BLACKBOX_MCP_HTTP_PATH
+
+    _log_startup_banner("streamable-http")
+    logger.info("Streamable HTTP transport binding http://%s:%d%s (localhost-only, NO auth)",
+                host, port, path)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # M2 guard-rail: we are not supposed to expose beyond localhost yet.
+        logger.warning("HTTP host is %s -- M2 is localhost-only; non-localhost bind is "
+                       "premature (auth is M3, public exposure is M4).", host)
+
+    app, _sm = build_http_app(path)
+    config = uvicorn.Config(app, host=host, port=port, log_level=LOG_LEVEL.lower())
+    uvicorn.Server(config).run()
+
+
+def _select_transport() -> str:
+    """Resolve the transport: CLI flag > env > default(stdio).
+
+    --transport {stdio,http} or --http (flag alias for http). The env var
+    BLACKBOX_MCP_TRANSPORT=http selects HTTP when no CLI flag is given. Default
+    is stdio so Claude Code (and every existing stdio client) is unaffected.
+    """
+    parser = argparse.ArgumentParser(
+        prog="blackbox_mcp_server",
+        description="BlackBox MCP server (stdio default; opt-in Streamable HTTP).",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default=None,
+        help="Transport to run. Default: stdio (env BLACKBOX_MCP_TRANSPORT also honored).",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Alias for --transport http (run the Streamable HTTP transport).",
+    )
+    args = parser.parse_args()
+
+    if args.transport:
+        return args.transport
+    if args.http:
+        return "http"
+    env = os.getenv("BLACKBOX_MCP_TRANSPORT", "").strip().lower()
+    if env in ("http", "stdio"):
+        return env
+    return "stdio"
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _transport = _select_transport()
+    if _transport == "http":
+        # uvicorn owns the event loop; run_http() is synchronous.
+        run_http()
+    else:
+        asyncio.run(main())
