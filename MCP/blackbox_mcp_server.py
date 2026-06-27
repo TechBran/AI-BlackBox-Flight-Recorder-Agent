@@ -749,6 +749,8 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 # HTTP path: the operator IS the CURRENT request's token operator
                 # (per-request, not session-frozen). No selection needed remotely.
                 resolved, needs_selection = bound, False
+                # Scope the roster to the bound operator (don't leak who else exists).
+                operators, default = [bound], bound
             else:
                 resolved, needs_selection = choose_operator(None, operators, default)
             result = {

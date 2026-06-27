@@ -261,6 +261,23 @@ def _run_2a_2b(base_url: str) -> list:
         print("[auth] PASS (j) #2A list_operators by bob -> only bob (roster not leaked)")
     else:
         fails.append(f"(j) list_operators leaked roster: {names}")
+    # get_current_operator -> roster scoped to ONLY bob (mirrors the list_operators
+    # fix; a bound HTTP caller must never see the full who-else-is-on-this-box
+    # roster). resolved=bob, operators==['bob'], count==1, alice absent.
+    err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_current_operator", {})
+    if isinstance(body, dict):
+        ops = body.get("operators")
+        if (ops == [OTHER_OPERATOR]
+                and body.get("count") == 1
+                and body.get("resolved") == OTHER_OPERATOR
+                and VALID_OPERATOR not in (ops or [])):
+            print("[auth] PASS (o) #2A get_current_operator by bob -> roster=['bob'] "
+                  "count=1 (roster not leaked)")
+        else:
+            fails.append(f"(o) get_current_operator leaked roster: operators={ops!r} "
+                         f"count={body.get('count')!r} resolved={body.get('resolved')!r}")
+    else:
+        fails.append(f"(o) get_current_operator unexpected body: {json.dumps(body)[:200]}")
     err, body = _raw_call(c, base_url, OTHER_TOKEN, sid_b, "get_index_stats", {})
     ops = set((body.get("operators") or {}).keys()) if isinstance(body, dict) else set()
     leaks_paths = isinstance(body, dict) and ("index_file" in body or "volume_file" in body)
@@ -500,11 +517,11 @@ def main() -> int:
         print(f"\n[auth] {len(failures)} assertion(s) failed.")
         return 1
 
-    print("\n[auth] ALL 14 ASSERTIONS PASSED "
+    print("\n[auth] ALL 15 ASSERTIONS PASSED "
           "(401 no-header, 401 wrong-token, valid-token ok, operator-binding, "
           "read-scoping, stdio-unchanged; #2A get_snapshot/seek/own-read/"
-          "list_operators/index_stats/media-traversal gated; #2B session-hijack "
-          "closed for get_current_operator + browse_index).")
+          "list_operators/get_current_operator/index_stats/media-traversal gated; "
+          "#2B session-hijack closed for get_current_operator + browse_index).")
     return 0
 
 
