@@ -1687,6 +1687,381 @@ async def _oauth_register_handler(request):
     # RFC 7591 success: 201 Created with the client information response.
     return JSONResponse(record, status_code=201)
 
+
+# =============================================================================
+# CHUNK 6b: OAuth 2.1 AUTHORIZATION CODE FLOW (/authorize + /token) + PKCE S256
+#
+# This chunk implements the two endpoints the discovery metadata (6a) already
+# advertises, completing the Authorization Code + PKCE flow:
+#
+#   GET  /authorize  -- consent + mint a single-use authorization CODE
+#   POST /token      -- exchange the code (with the PKCE verifier) for an
+#                       opaque ACCESS TOKEN bound to an operator
+#
+# SECURITY MODEL (the review checks all of these):
+#   * PKCE S256 is MANDATORY -- /authorize rejects a missing code_challenge or
+#     any code_challenge_method != S256; /token re-derives S256(verifier) and
+#     compares it CONSTANT-TIME against the bound challenge (hmac.compare_digest).
+#   * `state` is REQUIRED at /authorize and echoed back on the redirect.
+#   * redirect_uri must EXACTLY match one of the client's registered URIs (no
+#     open redirect, no substring/prefix match) -- else a direct 400 (never a
+#     redirect to an unvetted URI).
+#   * Authorization codes are HIGH-ENTROPY, SHORT-TTL (AUTH_CODE_TTL), and
+#     SINGLE-USE: /token consumes the code (pop) before doing anything else, so a
+#     replay finds nothing. Each code is bound to {client_id, redirect_uri,
+#     code_challenge, operator, scope}.
+#   * Access tokens are opaque, high-entropy (prefix bbmcp_oat_), EXPIRE
+#     (ACCESS_TOKEN_TTL), and are stored as token->{operator, expiry} so chunk
+#     6c can validate them on /mcp. The token VALUE is never logged (only the
+#     sha256[:12] id, matching the M3 _token_id pattern).
+#   * Fail-closed: any validation gap -> reject. The operator is bound at
+#     /authorize (env BLACKBOX_MCP_OAUTH_OPERATOR, default Brandon) and carried
+#     through to the access token; the remote client never chooses it.
+#
+# Codes live IN-MEMORY only (short-lived, single process). Access tokens are
+# kept in a process-local dict AND mirrored to a gitignored 0600 file
+# (Manifest/mcp_oauth_tokens.json) so chunk 6c can read the binding. NO token
+# value is ever written to a COMMITTED file (the store is gitignored).
+# =============================================================================
+import base64 as _b64
+import secrets as _secrets
+import threading as _threading
+import time as _time
+
+# The operator every OAuth-minted access token is bound to. The remote client
+# never chooses this -- it is the box's configured OAuth operator. Default
+# "Brandon" only as the unconfigured-box seed; a real deploy sets the env.
+BLACKBOX_MCP_OAUTH_OPERATOR = os.getenv("BLACKBOX_MCP_OAUTH_OPERATOR", "Brandon")
+
+# Authorization codes are single-use + short-lived (seconds). Access tokens get
+# a longer (but still bounded) lifetime. Both are overridable per-deploy.
+AUTH_CODE_TTL = int(os.getenv("BLACKBOX_MCP_OAUTH_CODE_TTL", "60"))          # 60s
+ACCESS_TOKEN_TTL = int(os.getenv("BLACKBOX_MCP_OAUTH_TOKEN_TTL", "3600"))    # 1h
+
+# The access-token store file -- gitignored (Manifest/ AND **/*token*.json both
+# cover it). Chunk 6c reads token->{operator, expiry} from here (and/or the
+# in-process mirror) to validate an OAuth access token on /mcp.
+BLACKBOX_MCP_OAUTH_TOKENS_FILE = os.getenv(
+    "BLACKBOX_MCP_OAUTH_TOKENS_FILE",
+    str(BLACKBOX_ROOT / "Manifest" / "mcp_oauth_tokens.json"),
+)
+
+# In-memory authorization-code store: code -> binding dict. Codes are short-TTL
+# and single-use, so they never need to survive a restart; keeping them only in
+# memory means a replay across a restart finds nothing (fail-closed). A lock
+# guards concurrent /authorize (write) vs /token (pop) across uvicorn workers in
+# one process.
+_AUTH_CODES: Dict[str, dict] = {}
+_AUTH_CODES_LOCK = _threading.Lock()
+
+# In-process access-token mirror: access_token -> {operator, expiry}. The
+# authoritative copy is also written to the gitignored file so chunk 6c can read
+# it without sharing this process's memory.
+_ACCESS_TOKENS: Dict[str, dict] = {}
+_ACCESS_TOKENS_LOCK = _threading.Lock()
+
+
+def _s256_challenge(verifier: str) -> str:
+    """Derive the PKCE S256 code_challenge from a verifier (RFC 7636 4.2).
+
+    BASE64URL( SHA256( ASCII(verifier) ) ) with '=' padding stripped -- exactly
+    the transform the SDK token handler uses, so a challenge minted by any
+    compliant client validates here.
+    """
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return _b64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _prune_expired_auth_codes(now: float) -> None:
+    """Drop expired authorization codes (called under _AUTH_CODES_LOCK)."""
+    dead = [c for c, b in _AUTH_CODES.items() if b.get("expires_at", 0) < now]
+    for c in dead:
+        _AUTH_CODES.pop(c, None)
+
+
+def _persist_access_token(token: str, operator: str, expiry: float) -> None:
+    """Mirror one access token -> {operator, expiry} to the gitignored 0600 file.
+
+    Read-modify-write the whole map (token issuance is low-volume). Expired
+    tokens are pruned on every write so the file does not grow unbounded. The
+    file is (re)created 0600 (owner-only) -- it carries live credentials, so it
+    must never be world-readable, and Manifest/ + **/*token*.json keep it out of
+    git. Chunk 6c reads this file (and/or the in-process mirror) to validate.
+    """
+    p = Path(BLACKBOX_MCP_OAUTH_TOKENS_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Load existing, prune expired, add the new one.
+    existing: Dict[str, dict] = {}
+    try:
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                existing = data
+    except Exception as e:
+        logger.error("Failed to read OAuth token store %s: %s",
+                     BLACKBOX_MCP_OAUTH_TOKENS_FILE, e)
+    now = _time.time()
+    existing = {t: b for t, b in existing.items()
+                if isinstance(b, dict) and b.get("expiry", 0) > now}
+    existing[token] = {"operator": operator, "expiry": expiry}
+    payload = json.dumps(existing, indent=2)
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    finally:
+        try:
+            os.chmod(str(p), 0o600)
+        except OSError:
+            pass
+
+
+async def _oauth_authorize_handler(request):
+    """GET /authorize -- OAuth 2.1 Authorization Code flow (PKCE S256 mandatory).
+
+    Validates response_type=code, a registered client_id, an EXACT-match
+    redirect_uri, a REQUIRED state, and a MANDATORY PKCE S256 code_challenge.
+    Auto-approves (binding the box's OAuth operator) and 302-redirects to
+    redirect_uri?code=<single-use code>&state=<state>.
+
+    redirect_uri / client_id failures return a DIRECT 400 (never a redirect to
+    an unvetted URI -- no open redirect). Other failures, once the redirect_uri
+    is vetted, redirect the error back per RFC 6749 4.1.2.1 with state echoed.
+    """
+    from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+    from urllib.parse import urlencode
+
+    params = request.query_params
+    response_type = params.get("response_type")
+    client_id = params.get("client_id")
+    redirect_uri = params.get("redirect_uri")
+    state = params.get("state")
+    code_challenge = params.get("code_challenge")
+    code_challenge_method = params.get("code_challenge_method")
+    scope = params.get("scope") or ""
+
+    def _direct_error(error: str, desc: str, status: int = 400):
+        # Used when we CANNOT safely redirect (bad/unknown client or redirect_uri).
+        return JSONResponse(
+            {"error": error, "error_description": desc},
+            status_code=status,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    def _redirect_error(error: str, desc: str):
+        # Used once redirect_uri is VETTED -- bounce the error back to the client.
+        q = {"error": error, "error_description": desc}
+        if state is not None:
+            q["state"] = state
+        sep = "&" if ("?" in redirect_uri) else "?"
+        return RedirectResponse(
+            url=f"{redirect_uri}{sep}{urlencode(q)}",
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # 1) client_id must reference a registered client.
+    if not client_id:
+        return _direct_error("invalid_request", "client_id is required")
+    clients = _load_oauth_clients()
+    client = clients.get(client_id)
+    if not client:
+        return _direct_error("invalid_request",
+                             f"Client ID {client_id!r} not found")
+
+    # 2) redirect_uri must be present AND EXACTLY match a registered URI.
+    #    EXACT match only -- no substring/prefix -- so there is no open redirect.
+    #    This is validated BEFORE we ever redirect, and a failure is a DIRECT
+    #    400 (we will not bounce to an unvetted URI).
+    registered = client.get("redirect_uris") or []
+    if not redirect_uri:
+        return _direct_error("invalid_request", "redirect_uri is required")
+    if redirect_uri not in registered:
+        return _direct_error(
+            "invalid_request",
+            "redirect_uri does not exactly match a registered redirect URI")
+
+    # ---- from here, redirect_uri is VETTED: errors bounce back to the client ----
+
+    # 3) response_type must be 'code'.
+    if response_type != "code":
+        return _redirect_error("unsupported_response_type",
+                               "response_type must be 'code'")
+
+    # 4) state is REQUIRED (CSRF defense; echoed back).
+    if not state:
+        return _redirect_error("invalid_request", "state is required")
+
+    # 5) PKCE is MANDATORY: a code_challenge MUST be present and the method MUST
+    #    be S256 (we do not accept 'plain'). Reject otherwise.
+    if not code_challenge:
+        return _redirect_error("invalid_request",
+                               "code_challenge is required (PKCE is mandatory)")
+    if code_challenge_method != "S256":
+        return _redirect_error(
+            "invalid_request",
+            "code_challenge_method must be 'S256' (PKCE S256 is mandatory)")
+
+    # ---- consent + approval ----
+    # The operator binding happens HERE (the box's configured OAuth operator).
+    # A remote client never chooses it. We auto-approve (acceptable first cut)
+    # but STILL render the consent context, and crucially STILL bind the operator.
+    operator = BLACKBOX_MCP_OAUTH_OPERATOR
+    client_name = client.get("client_name") or client_id
+
+    # Mint a single-use, short-TTL authorization code bound to EVERYTHING.
+    code = "bbmcp_code_" + _secrets.token_urlsafe(32)
+    now = _time.time()
+    binding = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "operator": operator,
+        "scope": scope,
+        "expires_at": now + AUTH_CODE_TTL,
+    }
+    with _AUTH_CODES_LOCK:
+        _prune_expired_auth_codes(now)
+        _AUTH_CODES[code] = binding
+
+    logger.info("OAuth authorize: issued code id=%s client=%s operator=%s "
+                "(consent auto-approved)",
+                _token_id(code), client_id, operator)
+
+    # Redirect back to the (vetted) redirect_uri with code + state.
+    q = {"code": code, "state": state}
+    sep = "&" if ("?" in redirect_uri) else "?"
+    return RedirectResponse(
+        url=f"{redirect_uri}{sep}{urlencode(q)}",
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _oauth_token_handler(request):
+    """POST /token -- exchange an authorization code (grant_type=authorization_code)
+    for an opaque access token, verifying PKCE S256.
+
+    Validates: grant_type, code exists + unexpired + SINGLE-USE (consumed up
+    front), client_id matches the code, redirect_uri matches the code, and the
+    PKCE code_verifier S256-hashes to the bound code_challenge (CONSTANT-TIME).
+    On success: mint an opaque high-entropy access token (prefix bbmcp_oat_),
+    store token->{operator, expiry} (in-process + gitignored 0600 file for
+    chunk 6c), and return the RFC 6749 token response.
+    """
+    from starlette.responses import JSONResponse
+
+    def _err(error: str, desc: str, status: int = 400):
+        return JSONResponse(
+            {"error": error, "error_description": desc},
+            status_code=status,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+
+    # Accept form-encoded (RFC 6749) and tolerate JSON bodies.
+    try:
+        form = await request.form()
+        body = {k: v for k, v in form.items()}
+    except Exception:
+        body = {}
+    if not body:
+        try:
+            j = await request.json()
+            if isinstance(j, dict):
+                body = j
+        except Exception:
+            body = {}
+
+    grant_type = body.get("grant_type")
+    if grant_type != "authorization_code":
+        return _err("unsupported_grant_type",
+                    "Only grant_type=authorization_code is supported")
+
+    code = body.get("code")
+    client_id = body.get("client_id")
+    redirect_uri = body.get("redirect_uri")
+    code_verifier = body.get("code_verifier")
+
+    if not code:
+        return _err("invalid_request", "code is required")
+    if not client_id:
+        return _err("invalid_request", "client_id is required")
+    if not code_verifier:
+        return _err("invalid_request",
+                    "code_verifier is required (PKCE is mandatory)")
+
+    # SINGLE-USE: consume (pop) the code up front under the lock. A second
+    # exchange with the same code finds nothing -> invalid_grant. Expired codes
+    # are also pruned here, so an expired code reads as non-existent.
+    now = _time.time()
+    with _AUTH_CODES_LOCK:
+        _prune_expired_auth_codes(now)
+        binding = _AUTH_CODES.pop(code, None)
+    if binding is None:
+        return _err("invalid_grant",
+                    "authorization code is invalid, expired, or already used")
+
+    # Defensive expiry recheck (pop happened under lock; this is belt-and-braces).
+    if binding.get("expires_at", 0) < now:
+        return _err("invalid_grant", "authorization code has expired")
+
+    # client_id bound to the code must match.
+    if binding.get("client_id") != client_id:
+        return _err("invalid_grant",
+                    "authorization code was not issued to this client")
+
+    # redirect_uri must match the one bound at /authorize (RFC 6749 10.6).
+    if (redirect_uri or None) != (binding.get("redirect_uri") or None):
+        return _err("invalid_grant",
+                    "redirect_uri does not match the one used at /authorize")
+
+    # PKCE VERIFY: S256(verifier) must equal the bound challenge -- CONSTANT-TIME.
+    expected = binding.get("code_challenge") or ""
+    derived = _s256_challenge(code_verifier)
+    if not hmac.compare_digest(derived, expected):
+        return _err("invalid_grant", "PKCE code_verifier does not match")
+
+    # ---- success: mint + store an opaque, expiring access token ----
+    operator = binding.get("operator") or BLACKBOX_MCP_OAUTH_OPERATOR
+    access_token = "bbmcp_oat_" + _secrets.token_urlsafe(40)
+    expiry = now + ACCESS_TOKEN_TTL
+    with _ACCESS_TOKENS_LOCK:
+        # Prune expired in-process entries too, then add the new one.
+        for t in [t for t, b in _ACCESS_TOKENS.items() if b.get("expiry", 0) <= now]:
+            _ACCESS_TOKENS.pop(t, None)
+        _ACCESS_TOKENS[access_token] = {"operator": operator, "expiry": expiry}
+    try:
+        _persist_access_token(access_token, operator, expiry)
+    except Exception as e:
+        # If we cannot persist the binding, fail CLOSED -- an access token chunk
+        # 6c cannot validate is worse than no token.
+        with _ACCESS_TOKENS_LOCK:
+            _ACCESS_TOKENS.pop(access_token, None)
+        logger.error("OAuth token: failed to persist access token id=%s: %s",
+                     _token_id(access_token), e)
+        return _err("server_error", "failed to persist issued token", status=500)
+
+    logger.info("OAuth token: issued access token id=%s client=%s operator=%s "
+                "expires_in=%ds (code id=%s consumed)",
+                _token_id(access_token), client_id, operator,
+                ACCESS_TOKEN_TTL, _token_id(code))
+
+    # RFC 6749 5.1 success token response (no refresh token -- the public PKCE
+    # MCP clients re-run the short auth_code flow; a refresh token would be one
+    # more long-lived secret to store with no current consumer).
+    return JSONResponse(
+        {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": ACCESS_TOKEN_TTL,
+            "scope": binding.get("scope") or "",
+        },
+        status_code=200,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+
 def build_http_app(path: str = None):
     """Build the Starlette ASGI app hosting the SAME `server` over Streamable HTTP.
 
@@ -1763,6 +2138,12 @@ def build_http_app(path: str = None):
               endpoint=_oauth_pr_metadata_handler, methods=["GET"]),
         Route("/register",
               endpoint=_oauth_register_handler, methods=["POST"]),
+        # CHUNK 6b: the Authorization Code flow endpoints (PKCE S256).
+        # Public (no bearer) -- they ARE how a client obtains a credential.
+        Route("/authorize",
+              endpoint=_oauth_authorize_handler, methods=["GET"]),
+        Route("/token",
+              endpoint=_oauth_token_handler, methods=["POST"]),
     ]
 
     app = Starlette(

@@ -36,6 +36,8 @@ RUN (lean MCP/venv -- no pytest needed):
     MCP/venv/bin/python MCP/test_mcp_oauth.py
 """
 
+import base64
+import hashlib
 import json
 import os
 import socket
@@ -44,6 +46,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 
@@ -88,7 +91,14 @@ def _wait_for_http(url: str, timeout: float = 25.0) -> bool:
     return False
 
 
-def _start_http_server(port: int, clients_file: Path) -> subprocess.Popen:
+# CHUNK 6b: the operator every OAuth-minted access token must bind to (the
+# server reads BLACKBOX_MCP_OAUTH_OPERATOR; we pin it so the binding is
+# deterministic and the access-token store assertion is exact).
+TEST_OAUTH_OPERATOR = "oauth-op"
+
+
+def _start_http_server(port: int, clients_file: Path,
+                       tokens_file: Path = None) -> subprocess.Popen:
     env = dict(os.environ)
     env["BLACKBOX_ROOT"] = str(_REPO_ROOT)
     env["BLACKBOX_MCP_HTTP_PORT"] = str(port)
@@ -99,6 +109,11 @@ def _start_http_server(port: int, clients_file: Path) -> subprocess.Popen:
     # Never write the real OAuth client store; deterministic public URL.
     env["BLACKBOX_MCP_OAUTH_CLIENTS_FILE"] = str(clients_file)
     env["BLACKBOX_MCP_PUBLIC_URL"] = TEST_PUBLIC_URL
+    # CHUNK 6b: pin the OAuth operator + point the access-token store at a TEMP
+    # file so the test never writes the real Manifest/mcp_oauth_tokens.json.
+    env["BLACKBOX_MCP_OAUTH_OPERATOR"] = TEST_OAUTH_OPERATOR
+    if tokens_file is not None:
+        env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(tokens_file)
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
     return subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
@@ -125,9 +140,13 @@ def main() -> int:
     port = _free_port()
     origin = f"http://127.0.0.1:{port}"
     mcp_url = f"{origin}/mcp"
-    clients_file = Path(tempfile.mkdtemp(prefix="bbmcp_oauth_")) / "mcp_oauth_clients.json"
+    _tmpdir = Path(tempfile.mkdtemp(prefix="bbmcp_oauth_"))
+    clients_file = _tmpdir / "mcp_oauth_clients.json"
+    # CHUNK 6b: a TEMP access-token store so the test never writes the real
+    # Manifest/mcp_oauth_tokens.json. Chunk 6c will read this binding shape.
+    tokens_file = _tmpdir / "mcp_oauth_tokens.json"
 
-    proc = _start_http_server(port, clients_file)
+    proc = _start_http_server(port, clients_file, tokens_file)
     try:
         if not _wait_for_http(mcp_url):
             try:
@@ -258,6 +277,186 @@ def main() -> int:
             else:
                 failures.append(f"(f) client store file not created: {clients_file}")
 
+        # =====================================================================
+        # CHUNK 6b: the Authorization Code + PKCE flow (/authorize + /token).
+        # These reuse the client registered in (b) above (registered_id +
+        # reg_body["redirect_uris"][0]).
+        # =====================================================================
+        cb_redirect = reg_body["redirect_uris"][0]
+
+        def _pkce_pair():
+            """Return (verifier, S256 challenge) -- a fresh PKCE pair."""
+            verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
+            digest = hashlib.sha256(verifier.encode("ascii")).digest()
+            challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+            return verifier, challenge
+
+        def _authorize(client_id, redirect_uri, challenge, method="S256",
+                       state="xyz-state-123", with_challenge=True):
+            """GET /authorize (no redirect-follow) -> the httpx.Response."""
+            q = {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "scope": "mcp",
+            }
+            if with_challenge:
+                q["code_challenge"] = challenge
+                q["code_challenge_method"] = method
+            return httpx.get(f"{origin}/authorize", params=q,
+                             follow_redirects=False, timeout=10.0)
+
+        def _code_from_redirect(resp):
+            """Pull ?code & ?state out of a 302 Location, or (None, None)."""
+            loc = resp.headers.get("location", "")
+            qs = parse_qs(urlparse(loc).query)
+            return (qs.get("code", [None])[0], qs.get("state", [None])[0])
+
+        # ---- (6b-e) FULL code flow: authorize -> code -> token -> access_token ----
+        access_token = None
+        if registered_id:
+            verifier, challenge = _pkce_pair()
+            r = _authorize(registered_id, cb_redirect, challenge, state="state-e")
+            code, echoed = _code_from_redirect(r)
+            if r.status_code == 302 and code:
+                tr = httpx.post(f"{origin}/token", data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": registered_id,
+                    "redirect_uri": cb_redirect,
+                    "code_verifier": verifier,
+                }, timeout=10.0)
+                if tr.status_code == 200:
+                    tb = tr.json()
+                    access_token = tb.get("access_token")
+                    if (access_token
+                            and access_token.startswith("bbmcp_oat_")
+                            and tb.get("token_type") == "Bearer"
+                            and isinstance(tb.get("expires_in"), int)
+                            and tb.get("expires_in") > 0):
+                        print("[oauth] PASS (6b-e) FULL code flow: /authorize -> code -> "
+                              f"/token -> access_token (type=Bearer, expires_in={tb.get('expires_in')})")
+                    else:
+                        failures.append(f"(6b-e) token response wrong: {json.dumps(tb)[:300]}")
+                else:
+                    failures.append(f"(6b-e) /token expected 200, got {tr.status_code}: {tr.text[:200]}")
+            else:
+                failures.append(f"(6b-e) /authorize expected 302 + code, got {r.status_code} "
+                                f"loc={r.headers.get('location')!r}")
+        else:
+            failures.append("(6b-e) no registered client to run the code flow")
+
+        # ---- (6b-j) state is echoed back on the authorize redirect ----
+        if registered_id:
+            _v, _c = _pkce_pair()
+            r = _authorize(registered_id, cb_redirect, _c, state="unique-state-J-42")
+            _code, echoed = _code_from_redirect(r)
+            if r.status_code == 302 and echoed == "unique-state-J-42":
+                print("[oauth] PASS (6b-j) state echoed back unchanged on the authorize redirect")
+            else:
+                failures.append(f"(6b-j) state not echoed: status={r.status_code} echoed={echoed!r}")
+
+        # ---- (6b-f) PKCE missing -> rejected; method != S256 -> rejected ----
+        if registered_id:
+            _v, _c = _pkce_pair()
+            # missing code_challenge entirely
+            r1 = _authorize(registered_id, cb_redirect, _c, with_challenge=False)
+            c1, _ = _code_from_redirect(r1)
+            # present but wrong method
+            r2 = _authorize(registered_id, cb_redirect, _c, method="plain")
+            c2, _ = _code_from_redirect(r2)
+            # Rejected = NO code issued. (Either a redirected error or a 400.)
+            if c1 is None and c2 is None:
+                print("[oauth] PASS (6b-f) /authorize rejects missing PKCE challenge AND "
+                      "method!=S256 (no code issued)")
+            else:
+                failures.append(f"(6b-f) PKCE not enforced: missing->code={c1!r} plain->code={c2!r}")
+
+        # ---- (6b-h) redirect_uri NOT matching the registered client -> rejected ----
+        if registered_id:
+            _v, _c = _pkce_pair()
+            r = _authorize(registered_id, "https://evil.example.com/steal", _c)
+            # Must be a DIRECT error (NOT a 302 to the unregistered URI -> no open redirect).
+            if r.status_code == 400 and r.headers.get("location") is None:
+                print("[oauth] PASS (6b-h) /authorize rejects an unregistered redirect_uri "
+                      "with a direct 400 (no open redirect)")
+            else:
+                failures.append(f"(6b-h) bad redirect_uri not rejected safely: status={r.status_code} "
+                                f"loc={r.headers.get('location')!r}")
+
+        # ---- (6b-g) /token with a WRONG code_verifier -> rejected ----
+        if registered_id:
+            verifier, challenge = _pkce_pair()
+            r = _authorize(registered_id, cb_redirect, challenge, state="state-g")
+            code, _ = _code_from_redirect(r)
+            if r.status_code == 302 and code:
+                tr = httpx.post(f"{origin}/token", data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": registered_id,
+                    "redirect_uri": cb_redirect,
+                    "code_verifier": verifier + "TAMPERED",  # wrong verifier
+                }, timeout=10.0)
+                if tr.status_code == 400 and tr.json().get("error") == "invalid_grant":
+                    print("[oauth] PASS (6b-g) /token with a WRONG code_verifier -> "
+                          "400 invalid_grant (PKCE verified)")
+                else:
+                    failures.append(f"(6b-g) wrong verifier not rejected: status={tr.status_code} "
+                                    f"body={tr.text[:200]}")
+            else:
+                failures.append(f"(6b-g) setup authorize failed: status={r.status_code}")
+
+        # ---- (6b-i) code is SINGLE-USE: a 2nd /token with the same code -> rejected ----
+        if registered_id:
+            verifier, challenge = _pkce_pair()
+            r = _authorize(registered_id, cb_redirect, challenge, state="state-i")
+            code, _ = _code_from_redirect(r)
+            if r.status_code == 302 and code:
+                common = {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": registered_id,
+                    "redirect_uri": cb_redirect,
+                    "code_verifier": verifier,
+                }
+                t1 = httpx.post(f"{origin}/token", data=common, timeout=10.0)
+                t2 = httpx.post(f"{origin}/token", data=common, timeout=10.0)
+                if (t1.status_code == 200
+                        and t2.status_code == 400
+                        and t2.json().get("error") == "invalid_grant"):
+                    print("[oauth] PASS (6b-i) authorization code is SINGLE-USE "
+                          "(1st /token 200, 2nd same code -> 400 invalid_grant)")
+                else:
+                    failures.append(f"(6b-i) code not single-use: t1={t1.status_code} t2={t2.status_code} "
+                                    f"t2body={t2.text[:150]}")
+            else:
+                failures.append(f"(6b-i) setup authorize failed: status={r.status_code}")
+
+        # ---- (6b-store) access token persisted to the gitignored 0600 store,
+        #      bound to the pinned OAuth operator (chunk 6c reads this shape) ----
+        if access_token:
+            if tokens_file.exists():
+                tmode = oct(tokens_file.stat().st_mode & 0o777)
+                try:
+                    tstore = json.loads(tokens_file.read_text())
+                except Exception as ex:
+                    tstore = {}
+                    failures.append(f"(6b-store) token store not readable JSON: {ex}")
+                binding = tstore.get(access_token) or {}
+                if (access_token in tstore
+                        and binding.get("operator") == TEST_OAUTH_OPERATOR
+                        and isinstance(binding.get("expiry"), (int, float))
+                        and tmode == "0o600"):
+                    print(f"[oauth] PASS (6b-store) access token persisted to gitignored "
+                          f"store perms={tmode}, bound operator={TEST_OAUTH_OPERATOR!r} "
+                          "(chunk 6c can validate)")
+                else:
+                    failures.append(f"(6b-store) token store wrong: present={access_token in tstore} "
+                                    f"operator={binding.get('operator')!r} perms={tmode}")
+            else:
+                failures.append(f"(6b-store) access-token store file not created: {tokens_file}")
+
     finally:
         proc.terminate()
         try:
@@ -277,7 +476,11 @@ def main() -> int:
     print("\n[oauth] ALL ASSERTIONS PASSED "
           "(a: both .well-known 200 + valid metadata; b: /register 201 + client_id; "
           "c: public WITHOUT bearer; d: /mcp without token STILL 401, with token not 401; "
-          "e: missing redirect_uris 400; f: client persisted 0600 to gitignored store).")
+          "e: missing redirect_uris 400; f: client persisted 0600 to gitignored store; "
+          "6b-e: full code flow -> access_token; 6b-f: PKCE missing/!=S256 rejected; "
+          "6b-g: wrong verifier rejected; 6b-h: bad redirect_uri direct-400 no-open-redirect; "
+          "6b-i: code single-use; 6b-j: state echoed; "
+          "6b-store: access token persisted 0600 + operator-bound).")
     return 0
 
 
