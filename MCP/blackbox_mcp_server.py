@@ -1886,6 +1886,33 @@ def _match_oauth_access_token(presented: str):
     return operator, _token_id(presented)
 
 
+def _consent_form_html(client_name, fields, error=None):
+    """Render the /authorize consent form. The operator must enter their token."""
+    import html as _html
+    err = f'<p style="color:#c0392b">{_html.escape(error)}</p>' if error else ""
+    hidden = "".join(
+        f'<input type="hidden" name="{_html.escape(k)}" value="{_html.escape(v)}">'
+        for k, v in fields.items() if v is not None
+    )
+    cn = _html.escape(client_name)
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<title>Authorize BlackBox MCP</title></head>'
+        '<body style="font-family:system-ui,sans-serif;max-width:460px;'
+        'margin:64px auto;padding:0 16px">'
+        f'<h2>Authorize {cn}</h2>{err}'
+        f'<p>Enter your BlackBox token to authorize <b>{cn}</b> to access the '
+        'BlackBox MCP server as your operator.</p>'
+        '<form method="POST" action="/authorize">'
+        f'{hidden}'
+        '<input type="password" name="blackbox_token" placeholder="bbmcp_..." '
+        'autocomplete="off" autofocus required '
+        'style="width:100%;padding:10px;box-sizing:border-box;font-family:monospace">'
+        '<button type="submit" style="margin-top:14px;padding:10px 20px">'
+        'Authorize</button></form></body></html>'
+    )
+
+
 async def _oauth_authorize_handler(request):
     """GET /authorize -- OAuth 2.1 Authorization Code flow (PKCE S256 mandatory).
 
@@ -1901,7 +1928,8 @@ async def _oauth_authorize_handler(request):
     from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
     from urllib.parse import urlencode
 
-    params = request.query_params
+    is_post = request.method == "POST"
+    params = (await request.form()) if is_post else request.query_params
     response_type = params.get("response_type")
     client_id = params.get("client_id")
     redirect_uri = params.get("redirect_uri")
@@ -1972,12 +2000,27 @@ async def _oauth_authorize_handler(request):
             "invalid_request",
             "code_challenge_method must be 'S256' (PKCE S256 is mandatory)")
 
-    # ---- consent + approval ----
-    # The operator binding happens HERE (the box's configured OAuth operator).
-    # A remote client never chooses it. We auto-approve (acceptable first cut)
-    # but STILL render the consent context, and crucially STILL bind the operator.
-    operator = BLACKBOX_MCP_OAUTH_OPERATOR
+    # ---- consent + AUTHENTICATION (closes the public auto-approve bypass) ----
     client_name = client.get("client_name") or client_id
+    _fields = {"response_type": response_type, "client_id": client_id,
+               "redirect_uri": redirect_uri, "state": state,
+               "code_challenge": code_challenge,
+               "code_challenge_method": code_challenge_method, "scope": scope}
+    if not is_post:
+        # GET -> render the consent form; NO code is issued without authentication.
+        return HTMLResponse(_consent_form_html(client_name, _fields),
+                            headers={"Cache-Control": "no-store"})
+    # POST -> the operator must prove their BlackBox bearer token; the issued code
+    # binds to the AUTHENTICATED token's operator (not a fixed env operator).
+    operator, _tid = _match_token(
+        (params.get("blackbox_token") or "").strip(), _load_token_map())
+    if not operator:
+        logger.warning("OAuth authorize: rejected consent (invalid token) client=%s",
+                       client_id)
+        return HTMLResponse(
+            _consent_form_html(client_name, _fields,
+                               error="Invalid token. Enter a valid BlackBox token."),
+            status_code=401, headers={"Cache-Control": "no-store"})
 
     # Mint a single-use, short-TTL authorization code bound to EVERYTHING.
     code = "bbmcp_code_" + _secrets.token_urlsafe(32)
@@ -2211,7 +2254,7 @@ def build_http_app(path: str = None):
         # CHUNK 6b: the Authorization Code flow endpoints (PKCE S256).
         # Public (no bearer) -- they ARE how a client obtains a credential.
         Route("/authorize",
-              endpoint=_oauth_authorize_handler, methods=["GET"]),
+              endpoint=_oauth_authorize_handler, methods=["GET", "POST"]),
         Route("/token",
               endpoint=_oauth_token_handler, methods=["POST"]),
     ]

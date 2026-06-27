@@ -91,10 +91,13 @@ def _wait_for_http(url: str, timeout: float = 25.0) -> bool:
     return False
 
 
-# CHUNK 6b: the operator every OAuth-minted access token must bind to (the
-# server reads BLACKBOX_MCP_OAUTH_OPERATOR; we pin it so the binding is
-# deterministic and the access-token store assertion is exact).
-TEST_OAUTH_OPERATOR = "oauth-op"
+# CONSENT FLOW: /authorize no longer auto-approves. The operator must submit a
+# VALID BlackBox token at the consent form, and the issued code/access token
+# binds to THAT token's operator -- NOT a fixed env operator. So the default
+# server's OAuth bindings resolve to the token map's operator (VALID_OPERATOR =
+# "alice"), which the (6b-store)/(k) assertions key on. (The legacy env knob
+# BLACKBOX_MCP_OAUTH_OPERATOR no longer drives the binding on the consent path.)
+TEST_OAUTH_OPERATOR = VALID_OPERATOR
 
 
 def _start_http_server(port: int, clients_file: Path,
@@ -155,6 +158,10 @@ BACKEND_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 # token is denied alice's data and sees only bob in the roster.
 ISO_OAUTH_OPERATOR = "bob"     # the OAuth token binds to this operator
 ISO_OTHER_OPERATOR = "alice"   # the OTHER operator whose data must stay hidden
+# A BlackBox token bound to "bob" -- the operator submits THIS at the consent
+# form, so the issued OAuth code/token binds to bob (the AUTHENTICATED operator).
+ISO_BOB_TOKEN = "test-token-iso-bob-bbbbbbbbbbbbbbbbbbbbbbbb"
+ISO_TOKEN_MAP = {ISO_BOB_TOKEN: ISO_OAUTH_OPERATOR}
 
 
 def _backend_up() -> bool:
@@ -225,17 +232,41 @@ def _raw_call(client: httpx.Client, base_url: str, token: str, sid: str, name: s
     return None, obj
 
 
-def _mint_access_token(origin: str, registered_id: str, redirect_uri: str):
-    """Run the full OAuth flow (authorize -> code -> token) and return the
-    minted access_token (or None on any failure). Reused by tests (k) + (l)."""
+def _authorize_get_post(origin: str, params: dict, token: str,
+                        follow_redirects: bool = False):
+    """Drive the two-step consent /authorize flow with a given token.
+
+    Step 1: GET /authorize (the OAuth params) -> the consent HTML form (no code).
+    Step 2: POST /authorize (the same OAuth params + blackbox_token) -> a 302
+            with ?code on a VALID token, or a 401 form re-render on an invalid
+            one. Returns the POST httpx.Response (callers inspect status + code).
+
+    `params` is the OAuth query dict (response_type/client_id/redirect_uri/state/
+    scope/code_challenge/code_challenge_method). The GET is issued first (so the
+    test still exercises the form-render path), then the POST submits the same
+    params as form fields plus the operator's `blackbox_token`.
+    """
+    httpx.get(f"{origin}/authorize", params=params,
+              follow_redirects=False, timeout=10.0)
+    data = dict(params)
+    data["blackbox_token"] = token
+    return httpx.post(f"{origin}/authorize", data=data,
+                      follow_redirects=follow_redirects, timeout=10.0)
+
+
+def _mint_access_token(origin: str, registered_id: str, redirect_uri: str,
+                       token: str):
+    """Run the full OAuth flow (GET form -> POST consent -> code -> token) and
+    return the minted access_token (or None on any failure). The code/token bind
+    to the AUTHENTICATED `token`'s operator. Reused by tests (k) + (l)."""
     verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode("ascii")).digest()).decode().rstrip("=")
-    r = httpx.get(f"{origin}/authorize", params={
+    r = _authorize_get_post(origin, {
         "response_type": "code", "client_id": registered_id,
         "redirect_uri": redirect_uri, "state": "iso-state", "scope": "mcp",
         "code_challenge": challenge, "code_challenge_method": "S256",
-    }, follow_redirects=False, timeout=10.0)
+    }, token)
     if r.status_code != 302:
         return None
     code = parse_qs(urlparse(r.headers.get("location", "")).query).get("code", [None])[0]
@@ -319,12 +350,13 @@ def _run_oauth_isolation(failures: list) -> None:
     env["BLACKBOX_ROOT"] = str(tmp)
     env["BLACKBOX_MCP_HTTP_PORT"] = str(port)
     env["BLACKBOX_MCP_HTTP_HOST"] = "127.0.0.1"
-    env["BLACKBOX_MCP_TOKENS"] = json.dumps(TEST_TOKEN_MAP)
+    # Seed a bob-bound BlackBox token: the consent form authenticates THIS token,
+    # so the OAuth code/access token binds to bob (the authenticated operator).
+    env["BLACKBOX_MCP_TOKENS"] = json.dumps(ISO_TOKEN_MAP)
     env["BLACKBOX_MCP_TOKENS_FILE"] = str(_HERE / "__no_such_token_file__.json")
     env["BLACKBOX_MCP_OAUTH_CLIENTS_FILE"] = str(iso_clients)
     env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(iso_tokens)
     env["BLACKBOX_MCP_PUBLIC_URL"] = origin   # redirect_uri match needs real origin
-    env["BLACKBOX_MCP_OAUTH_OPERATOR"] = ISO_OAUTH_OPERATOR   # bind OAuth token -> bob
     env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
     proc = subprocess.Popen(
         [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
@@ -342,7 +374,7 @@ def _run_oauth_isolation(failures: list) -> None:
         if not client_id:
             failures.append("(l) could not register OAuth client on seeded server")
             return
-        access_token = _mint_access_token(origin, client_id, cb)
+        access_token = _mint_access_token(origin, client_id, cb, ISO_BOB_TOKEN)
         if not access_token or not access_token.startswith("bbmcp_oat_"):
             failures.append(f"(l) could not mint OAuth access token: {access_token!r}")
             return
@@ -569,9 +601,9 @@ def main() -> int:
             challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
             return verifier, challenge
 
-        def _authorize(client_id, redirect_uri, challenge, method="S256",
-                       state="xyz-state-123", with_challenge=True):
-            """GET /authorize (no redirect-follow) -> the httpx.Response."""
+        def _authorize_params(client_id, redirect_uri, challenge, method="S256",
+                              state="xyz-state-123", with_challenge=True):
+            """Build the OAuth /authorize param dict."""
             q = {
                 "response_type": "code",
                 "client_id": client_id,
@@ -582,14 +614,149 @@ def main() -> int:
             if with_challenge:
                 q["code_challenge"] = challenge
                 q["code_challenge_method"] = method
-            return httpx.get(f"{origin}/authorize", params=q,
-                             follow_redirects=False, timeout=10.0)
+            return q
+
+        def _authorize_get(client_id, redirect_uri, challenge, method="S256",
+                           state="xyz-state-123", with_challenge=True):
+            """GET /authorize (no redirect-follow) -> the httpx.Response. With
+            VALID params this is now the 200 consent FORM (no code); with bad
+            params it is the pre-form validation error (302/400, no code)."""
+            return httpx.get(
+                f"{origin}/authorize",
+                params=_authorize_params(client_id, redirect_uri, challenge,
+                                         method, state, with_challenge),
+                follow_redirects=False, timeout=10.0)
+
+        def _authorize(client_id, redirect_uri, challenge, method="S256",
+                       state="xyz-state-123", with_challenge=True,
+                       token=VALID_TOKEN):
+            """Full consent flow: GET the form, then POST the OAuth params +
+            `token` -> the POST httpx.Response. With a VALID token + valid params
+            this is a 302 with ?code (bound to the token's operator)."""
+            return _authorize_get_post(
+                origin,
+                _authorize_params(client_id, redirect_uri, challenge,
+                                  method, state, with_challenge),
+                token)
 
         def _code_from_redirect(resp):
             """Pull ?code & ?state out of a 302 Location, or (None, None)."""
             loc = resp.headers.get("location", "")
             qs = parse_qs(urlparse(loc).query)
             return (qs.get("code", [None])[0], qs.get("state", [None])[0])
+
+        # =====================================================================
+        # CONSENT-AUTH regression (closes the public auto-approve bypass): the
+        # /authorize endpoint no longer mints a code on GET. It renders a consent
+        # form; a code is issued ONLY when the operator POSTs a VALID BlackBox
+        # token, and binds to THAT token's operator. These prove:
+        #   (consent-1) GET /authorize (valid params) -> 200 HTML form, NO code.
+        #   (consent-2) POST /authorize (valid token) -> 302 + code.
+        #   (consent-3) POST /authorize (WRONG/MISSING token) -> 401, NO code,
+        #               form re-rendered (no bypass).
+        #   (consent-5) PKCE/redirect/state validation STILL rejects on the POST
+        #               path too (not only on GET).
+        # (consent-4, "issued token acts as the token's operator", is asserted
+        #  end-to-end by the seeded isolation test (l) via ISO_BOB_TOKEN.)
+        # =====================================================================
+        if registered_id:
+            _v, _c = _pkce_pair()
+            _q = _authorize_params(registered_id, cb_redirect, _c, state="consent-1")
+
+            # (consent-1) GET with VALID params -> 200 consent form, NO code,
+            # NO redirect. The form must carry a password input named
+            # 'blackbox_token' + the OAuth params as hidden fields.
+            g = httpx.get(f"{origin}/authorize", params=_q,
+                          follow_redirects=False, timeout=10.0)
+            body_l = g.text.lower()
+            if (g.status_code == 200
+                    and g.headers.get("location") is None
+                    and "code=" not in g.headers.get("location", "")
+                    and 'name="blackbox_token"' in body_l
+                    and 'type="password"' in body_l
+                    and "<form" in body_l):
+                print("[oauth] PASS (consent-1) GET /authorize (valid params) -> "
+                      "200 HTML consent form (password blackbox_token), NO code issued")
+            else:
+                failures.append(f"(consent-1) GET should render the consent form w/o a code: "
+                                f"status={g.status_code} loc={g.headers.get('location')!r} "
+                                f"has_token_field={'name=\"blackbox_token\"' in body_l} "
+                                f"body={g.text[:160]!r}")
+
+            # (consent-2) POST with a VALID token -> 302 + code (bound to alice).
+            p = httpx.post(f"{origin}/authorize",
+                           data={**_q, "blackbox_token": VALID_TOKEN},
+                           follow_redirects=False, timeout=10.0)
+            pc, ps = _code_from_redirect(p)
+            if p.status_code == 302 and pc and ps == "consent-1":
+                print("[oauth] PASS (consent-2) POST /authorize (VALID token) -> 302 + code "
+                      "(consent authenticated; code minted)")
+            else:
+                failures.append(f"(consent-2) POST w/ valid token should 302+code: "
+                                f"status={p.status_code} code={pc!r} state={ps!r}")
+
+            # (consent-3a) POST with a WRONG token -> 401, NO code, form re-rendered.
+            pw = httpx.post(f"{origin}/authorize",
+                            data={**_q, "blackbox_token": "totally-wrong-token-zzzz"},
+                            follow_redirects=False, timeout=10.0)
+            pwc, _ = _code_from_redirect(pw)
+            pw_l = pw.text.lower()
+            if (pw.status_code == 401 and pwc is None
+                    and pw.headers.get("location") is None
+                    and 'name="blackbox_token"' in pw_l):
+                print("[oauth] PASS (consent-3a) POST /authorize (WRONG token) -> 401, NO code, "
+                      "consent form re-rendered (auto-approve bypass closed)")
+            else:
+                failures.append(f"(consent-3a) wrong token should 401+form, no code: "
+                                f"status={pw.status_code} code={pwc!r} "
+                                f"has_form={'name=\"blackbox_token\"' in pw_l}")
+
+            # (consent-3b) POST with a MISSING token -> 401, NO code (same bypass-close).
+            pm = httpx.post(f"{origin}/authorize", data=_q,
+                            follow_redirects=False, timeout=10.0)
+            pmc, _ = _code_from_redirect(pm)
+            if pm.status_code == 401 and pmc is None:
+                print("[oauth] PASS (consent-3b) POST /authorize (MISSING token) -> 401, NO code")
+            else:
+                failures.append(f"(consent-3b) missing token should 401, no code: "
+                                f"status={pm.status_code} code={pmc!r}")
+
+            # (consent-5) the param validation STILL fires on the POST path, even
+            # with a VALID token -- a valid token does NOT let a malformed request
+            # through. PKCE-missing -> no code; bad state -> no code; unregistered
+            # redirect_uri -> direct 400 (no open redirect) + no code.
+            # PKCE missing on POST:
+            _qn = _authorize_params(registered_id, cb_redirect, _c,
+                                    state="consent-5", with_challenge=False)
+            r5a = httpx.post(f"{origin}/authorize",
+                             data={**_qn, "blackbox_token": VALID_TOKEN},
+                             follow_redirects=False, timeout=10.0)
+            c5a, _ = _code_from_redirect(r5a)
+            # missing state on POST (delete state from a valid param set):
+            _qs = _authorize_params(registered_id, cb_redirect, _c, state="consent-5")
+            _qs.pop("state")
+            r5b = httpx.post(f"{origin}/authorize",
+                             data={**_qs, "blackbox_token": VALID_TOKEN},
+                             follow_redirects=False, timeout=10.0)
+            c5b, _ = _code_from_redirect(r5b)
+            # unregistered redirect_uri on POST -> direct 400, no open redirect:
+            _qe = _authorize_params(registered_id, "https://evil.example.com/steal",
+                                    _c, state="consent-5")
+            r5c = httpx.post(f"{origin}/authorize",
+                             data={**_qe, "blackbox_token": VALID_TOKEN},
+                             follow_redirects=False, timeout=10.0)
+            c5c, _ = _code_from_redirect(r5c)
+            if (c5a is None and c5b is None and c5c is None
+                    and r5c.status_code == 400 and r5c.headers.get("location") is None):
+                print("[oauth] PASS (consent-5) POST path STILL enforces PKCE + state + "
+                      "exact redirect_uri (valid token does NOT bypass validation; "
+                      "bad redirect_uri -> direct 400, no open redirect)")
+            else:
+                failures.append(f"(consent-5) POST-path validation leaked: pkce_code={c5a!r} "
+                                f"state_code={c5b!r} evil_code={c5c!r} "
+                                f"evil_status={r5c.status_code} evil_loc={r5c.headers.get('location')!r}")
+        else:
+            failures.append("(consent-*) no registered client to run consent-auth checks")
 
         # ---- (6b-e) FULL code flow: authorize -> code -> token -> access_token ----
         access_token = None
@@ -805,7 +972,8 @@ def main() -> int:
                 # expired) is accepted -> proves it's the expiry, not the store.
                 ecid = _register_client(exp_origin, "https://claude.ai/api/mcp/auth_callback")
                 fresh = _mint_access_token(exp_origin, ecid,
-                                           "https://claude.ai/api/mcp/auth_callback") if ecid else None
+                                           "https://claude.ai/api/mcp/auth_callback",
+                                           VALID_TOKEN) if ecid else None
                 if fresh:
                     r2 = _raw_mcp_init_post(exp_mcp, headers={"Authorization": f"Bearer {fresh}"})
                     if r2.status_code != 401:
@@ -858,6 +1026,9 @@ def main() -> int:
           "(a: both .well-known 200 + valid metadata; b: /register 201 + client_id; "
           "c: public WITHOUT bearer; d: /mcp without token STILL 401, with token not 401; "
           "e: missing redirect_uris 400; f: client persisted 0600 to gitignored store; "
+          "consent-1: GET -> 200 form no code; consent-2: POST valid token -> 302+code; "
+          "consent-3: POST wrong/missing token -> 401 no code (bypass closed); "
+          "consent-5: POST path still enforces PKCE/state/exact-redirect; "
           "6b-e: full code flow -> access_token; 6b-f: PKCE missing/!=S256 rejected; "
           "6b-g: wrong verifier rejected; 6b-h: bad redirect_uri direct-400 no-open-redirect; "
           "6b-i: code single-use; 6b-j: state echoed; "
