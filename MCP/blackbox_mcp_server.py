@@ -11,12 +11,31 @@ This MCP server provides tools and resources for AI agents to:
 
 Run with: python blackbox_mcp_server.py
 Configure in Claude Code: ~/.claude/mcp.json
+
+--- M1 HARDENING (2026-06-26) -----------------------------------------------
+This is still a STDIO-only server on the official `mcp` SDK; the transport is
+unchanged. M1 hardened the call path WITHOUT changing the wire format:
+  * call_tool() dispatch is now a small set of explicit LOCAL/SPECIAL branches
+    plus ONE uniform proxy dispatcher (_proxy_tool) for every remaining
+    registry tool -> POST /local/tools/execute (or /gmail/execute for gmail_*).
+    The valid tool-name set is computed ONCE (cached) instead of per call.
+  * mint_snapshot POSTs to /chat/save (direct auto-mint persistence) and returns
+    the authoritative snap_id -- no /chat round-trip, no sleep, no id guessing.
+  * Errors return a structured envelope (CallToolResult isError=True + a JSON
+    body carrying a machine code, the tool name, and a human message).
+  * Logging uses the `logging` module to STDERR (stdout is the MCP channel),
+    leveled, with a per-call request id + resolved operator + tool name.
+  * Backend proxy calls are wrapped in asyncio.wait_for timeouts so a hung
+    backend cannot wedge a tool call forever.
 """
 
 import asyncio
+import contextvars
 import json
+import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 import httpx
@@ -28,6 +47,7 @@ try:
     from mcp.types import (
         Tool,
         TextContent,
+        CallToolResult,
         Resource,
         ResourceContents,
         TextResourceContents,
@@ -36,14 +56,55 @@ except ImportError:
     print("MCP SDK not installed. Run: pip install mcp", file=sys.stderr)
     sys.exit(1)
 
+# =============================================================================
+# LOGGING (M1) -- structured, leveled, STDERR-ONLY.
+#
+# stdout is the MCP JSON-RPC channel; ANY write to stdout corrupts the protocol
+# frame. So the logging handler is pinned to sys.stderr. A per-call request id +
+# the resolved operator + the tool name are attached to each invocation log so
+# the stderr stream is a usable audit trail.
+# =============================================================================
+LOG_LEVEL = os.getenv("BLACKBOX_MCP_LOG_LEVEL", "INFO").upper()
+logger = logging.getLogger("blackbox-mcp")
+if not logger.handlers:
+    _h = logging.StreamHandler(stream=sys.stderr)
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s [blackbox-mcp] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    logger.addHandler(_h)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.propagate = False
+
+# Per-call request id, set at the top of call_tool() and read by the loggers
+# below so every line for one invocation shares an id (no threading of args).
+_REQUEST_ID: "contextvars.ContextVar[str]" = contextvars.ContextVar("mcp_request_id", default="-")
+
+
+def _log(level: int, tool: str, msg: str, operator: Optional[str] = None) -> None:
+    """Emit a structured per-call log line (stderr-only via `logger`)."""
+    rid = _REQUEST_ID.get()
+    op = operator if operator is not None else "-"
+    logger.log(level, "rid=%s tool=%s operator=%s | %s", rid, tool, op, msg)
+
+
 # Configuration - paths relative to blackbox root
 BLACKBOX_ROOT = Path(os.getenv("BLACKBOX_ROOT") or Path(__file__).resolve().parent.parent)
 BLACKBOX_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
 
+# Backend-proxy timeout (seconds). Media/generation tools return a task_id FAST
+# (they do not block on the actual generation -- that runs async and is polled
+# via get_task_status), so a 120s cap comfortably covers every kept/proxied tool
+# including the multimodal /chat analysis paths (analyze_image/video, capped at
+# 120-180s server-side -- see note on analyze_video below). Override per-deploy
+# via BLACKBOX_MCP_PROXY_TIMEOUT.
+PROXY_TIMEOUT = float(os.getenv("BLACKBOX_MCP_PROXY_TIMEOUT", "120"))
+
 # The six per-provider web-search tools replaced the generic web_search tool.
 # They require real provider API keys, which the lean MCP venv lacks, so they
-# CANNOT run in-process here. Route them through the generic backend executor
-# (POST /local/tools/execute) which runs on the FULL backend with real keys.
+# CANNOT run in-process here. They route through the generic backend executor
+# (POST /local/tools/execute) which runs on the FULL backend with real keys --
+# i.e. they take the UNIFORM proxy path (no dedicated branch needed anymore).
 WEB_SEARCH_TOOL_NAMES = {
     "perplexity_web_search",
     "openai_web_search",
@@ -52,6 +113,11 @@ WEB_SEARCH_TOOL_NAMES = {
     "grok_x_search",
     "duckduckgo_web_search",
 }
+
+# gmail_* tools route to the dedicated /gmail/execute whitelist endpoint (NOT
+# the generic /local/tools/execute). The uniform dispatcher keys off this set to
+# pick the route; the request/response shape is identical to /local/tools/execute.
+GMAIL_TOOL_NAMES = {"gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"}
 
 # Operator resolution (pure decision logic lives in operator_resolution.py).
 # Same-dir import: when this server runs as a bare script
@@ -67,7 +133,7 @@ async def _fetch_operators():
     """Fetch + cache the install's operators from GET /operators.
 
     Cached only on SUCCESS (per-process, lifetime = one MCP session). A failed
-    fetch returns an empty result WITHOUT caching, so the next call retries —
+    fetch returns an empty result WITHOUT caching, so the next call retries --
     a transient API blip self-heals instead of degrading the whole session.
     """
     if _OPERATOR_CACHE["operators"] is not None:
@@ -82,7 +148,7 @@ async def _fetch_operators():
         _OPERATOR_CACHE["default"] = default
         return operators, default
     except Exception:
-        return [], ""   # do NOT cache — retry on next call
+        return [], ""   # do NOT cache -- retry on next call
 
 
 async def resolve_operator(provided):
@@ -95,10 +161,10 @@ async def resolve_operator(provided):
 
 # Put the REPO ROOT on sys.path so the `Orchestrator` PACKAGE is importable.
 # get_mcp_tools() (below) lazily runs `from Orchestrator.toolvault import registry`
-# and `from Orchestrator.toolvault.resolvers import resolve_schema` — those resolve
+# and `from Orchestrator.toolvault.resolvers import resolve_schema` -- those resolve
 # the `Orchestrator` package, whose parent is the repo root. .mcp.json passes
 # BLACKBOX_ROOT (env) but NOT PYTHONPATH, so without this the spawned MCP process
-# fails every list_tools with "No module named 'Orchestrator'" → client gets zero
+# fails every list_tools with "No module named 'Orchestrator'" -> client gets zero
 # tools. Self-contained here so it works regardless of how the server is launched.
 sys.path.insert(0, str(BLACKBOX_ROOT))
 
@@ -107,12 +173,12 @@ sys.path.insert(0, str(BLACKBOX_ROOT / "Orchestrator"))
 from web_tools import perform_web_fetch
 
 # E21 (2026-05-17): load tool_registry.py as a STANDALONE module to bypass
-# Orchestrator/tools/__init__.py, which re-exports blackbox_tools — and
+# Orchestrator/tools/__init__.py, which re-exports blackbox_tools -- and
 # blackbox_tools transitively pulls in aiohttp, Orchestrator.contacts, and
 # the rest of the FastAPI request/response stack. The MCP server only needs
 # get_mcp_tools (metadata generation, returns tool schemas); it never CALLS
 # them locally (execution always hops through HTTP back to the BlackBox API).
-# Loading the file directly via importlib lets MCP/venv stay lean — no
+# Loading the file directly via importlib lets MCP/venv stay lean -- no
 # aiohttp/fastapi/starlette needed, which sidesteps the mcp-vs-fastapi
 # starlette version conflict that would otherwise force a heavier venv.
 import importlib.util as _ilu
@@ -121,6 +187,22 @@ _tr_spec = _ilu.spec_from_file_location("blackbox_tool_registry", str(_tr_path))
 _tr_module = _ilu.module_from_spec(_tr_spec)
 _tr_spec.loader.exec_module(_tr_module)
 get_mcp_tools = _tr_module.get_mcp_tools
+
+# Memoized valid-tool-name set (M1): the old catch-all rebuilt the entire tool
+# list (get_mcp_tools()) on EVERY unmatched call just to membership-test the name.
+# Compute it ONCE, lazily, and reuse. list_tools() still calls get_mcp_tools()
+# live (registry-driven, mtime-cached inside the registry) so the advertised
+# catalog stays fresh; this cache is only the dispatcher's name-validity gate and
+# is stable for the process lifetime (the catalog is fixed per server start).
+_VALID_TOOL_NAMES: Optional[set] = None
+
+
+def _valid_tool_names() -> set:
+    """Return (and memoize) the set of valid MCP tool names from the registry."""
+    global _VALID_TOOL_NAMES
+    if _VALID_TOOL_NAMES is None:
+        _VALID_TOOL_NAMES = {t.name for t in get_mcp_tools()}
+    return _VALID_TOOL_NAMES
 
 # Direct file paths for efficient byte-offset access
 VOLUME_FILE = BLACKBOX_ROOT / "Volumes" / "SNAPSHOT_VOLUME.txt"
@@ -135,6 +217,28 @@ _index_cache: Optional[Dict] = None
 _index_cache_mtime: float = 0
 
 
+# =============================================================================
+# ERROR ENVELOPE (M1)
+#
+# A consistent, machine-readable error result. Uses the SDK's CallToolResult
+# with isError=True (proper MCP error semantics) and a JSON body carrying:
+#   { "error": { "code": <machine code>, "tool": <name>, "message": <human> } }
+# so a backend 500, a bad argument, and a timeout are distinguishable to the
+# client. Wire format is preserved (content is still TextContent).
+#
+# Codes: invalid_arguments | not_found | backend_error | timeout |
+#        tool_error | unknown_tool | internal_error
+# =============================================================================
+def _error(code: str, tool: str, message: str) -> CallToolResult:
+    """Build a structured MCP error result (isError=True)."""
+    _log(logging.WARNING, tool, f"error code={code}: {message}")
+    body = {"error": {"code": code, "tool": tool, "message": message}}
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(body, indent=2))],
+        isError=True,
+    )
+
+
 def load_snapshot_index(force_refresh: bool = False) -> Dict:
     """Load snapshot index with caching for performance."""
     global _index_cache, _index_cache_mtime
@@ -147,7 +251,7 @@ def load_snapshot_index(force_refresh: bool = False) -> Dict:
         with open(SNAPSHOT_INDEX, 'r') as f:
             _index_cache = json.load(f)
         _index_cache_mtime = current_mtime
-        print(f"[MCP] Loaded snapshot index: {len(_index_cache)} entries", file=sys.stderr)
+        logger.info("Loaded snapshot index: %d entries", len(_index_cache))
 
     return _index_cache
 
@@ -219,28 +323,94 @@ def list_snapshots_by_operator(operator: str, limit: int = 50) -> List[Dict]:
 
 
 # =============================================================================
+# UNIFORM PROXY DISPATCHER (M1)
+#
+# Every non-local, non-special tool routes through here. gmail_* go to the
+# dedicated /gmail/execute whitelist; everything else to /local/tools/execute
+# (the on-device tool bridge that runs the canonical ToolVault executor on the
+# FULL backend with real provider keys). Both endpoints share the request shape
+# {"tool", "params", "operator"} and the response shape
+# {"success": bool, "result"|"error": ...}, so one helper handles both.
+#
+# The whole proxy is wrapped in asyncio.wait_for(PROXY_TIMEOUT) so a hung
+# backend cannot wedge the tool call forever. Returns a list[TextContent] on
+# success, or a CallToolResult error envelope on any failure.
+# =============================================================================
+async def _proxy_tool(name: str, arguments: dict, client: httpx.AsyncClient):
+    """Proxy a tool call to the backend executor (gmail or generic) -- uniform path."""
+    operator = await resolve_operator(arguments.get("operator"))
+    params = {k: v for k, v in arguments.items() if k != "operator"}
+
+    if name in GMAIL_TOOL_NAMES:
+        endpoint = f"{BLACKBOX_URL}/gmail/execute"
+        kind = "gmail"
+    else:
+        endpoint = f"{BLACKBOX_URL}/local/tools/execute"
+        kind = "tool"
+
+    _log(logging.INFO, name, f"proxy -> {endpoint}", operator=operator)
+    try:
+        resp = await asyncio.wait_for(
+            client.post(endpoint, json={"tool": name, "params": params, "operator": operator}),
+            timeout=PROXY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return _error("timeout", name, f"backend did not respond within {PROXY_TIMEOUT:.0f}s")
+    except httpx.HTTPError as e:
+        return _error("backend_error", name, f"HTTP error reaching backend: {e}")
+
+    if resp.status_code >= 500:
+        return _error("backend_error", name, f"backend returned {resp.status_code}")
+    try:
+        data = resp.json()
+    except Exception as e:
+        return _error("backend_error", name, f"backend returned non-JSON ({resp.status_code}): {e}")
+
+    if data.get("success"):
+        return [TextContent(type="text", text=str(data.get("result", "")))]
+    # Executor-level failure (e.g. bad params, provider error) -- surface it.
+    return _error("tool_error", name, str(data.get("error") or data.get("result") or "unknown error"))
+
+
+# =============================================================================
 # TOOLS - Actions the agent can take
 # =============================================================================
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    """List all available BlackBox tools — generated from tool_registry.py."""
+    """List all available BlackBox tools -- generated from tool_registry.py."""
     return get_mcp_tools()
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Execute a BlackBox tool."""
+async def call_tool(name: str, arguments: dict[str, Any]):
+    """Execute a BlackBox tool.
+
+    Dispatch order (M1):
+      1. LOCAL tools  -- read the index/volume by byte offset or hit local
+         in-process helpers; NEVER proxy. (seek/get/list/browse/stats/operators/
+         current_operator/refresh + web_fetch + get_media + list_devices.)
+      2. SPECIAL HTTP tools -- genuine logic the generic proxy does NOT replicate
+         (search/get_context -> /fossil/hybrid; chat_with_context -> /chat poll;
+         mint_snapshot -> /chat/save; speech_to_text -> multipart upload).
+      3. UNIFORM PROXY -- every other registry tool -> _proxy_tool (gmail/generic).
+
+    Returns a list[TextContent] on success, or a structured CallToolResult
+    (isError=True) on any failure.
+    """
+    # Per-call request id for the audit trail (shared by every log line below).
+    _REQUEST_ID.set(uuid.uuid4().hex[:12])
+    _log(logging.INFO, name, "call received")
 
     try:
-        # === LOCAL TOOLS (Direct file access - faster) ===
+        # === LOCAL TOOLS (Direct file access - faster, no proxy) ===
 
         if name == "seek_snapshot_direct":
             snap_id = arguments["snap_id"]
             content = seek_snapshot_by_offset(snap_id)
 
             if content is None:
-                return [TextContent(type="text", text=f"Snapshot {snap_id} not found in index")]
+                return _error("not_found", name, f"Snapshot {snap_id} not found in index")
 
             metadata = get_snapshot_metadata(snap_id)
             result = {
@@ -256,7 +426,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             metadata = get_snapshot_metadata(snap_id)
             if metadata is None:
-                return [TextContent(type="text", text=f"Snapshot {snap_id} not found")]
+                return _error("not_found", name, f"Snapshot {snap_id} not found")
 
             result = {"metadata": metadata}
             if include_content:
@@ -267,6 +437,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "list_recent_snapshots":
             operator = await resolve_operator(arguments.get("operator"))
             count = arguments.get("count", 10)
+            _log(logging.INFO, name, "local index read", operator=operator)
 
             snapshots = list_snapshots_by_operator(operator, count)
             return [TextContent(type="text", text=json.dumps(snapshots, indent=2))]
@@ -395,12 +566,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         task_data = task_response.json()
                         url = task_data.get("result_url")
                         if not url:
-                            return [TextContent(type="text", text=f"Error: Task {task_id} has no result_url")]
+                            return _error("not_found", name, f"Task {task_id} has no result_url")
                     else:
-                        return [TextContent(type="text", text=f"Error: Task {task_id} not found")]
+                        return _error("not_found", name, f"Task {task_id} not found")
 
             if not url:
-                return [TextContent(type="text", text="Error: No URL or task_id provided")]
+                return _error("invalid_arguments", name, "No URL or task_id provided")
 
             # Clean URL - remove host prefix if present
             if url.startswith("http://") or url.startswith("https://"):
@@ -414,10 +585,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 relative_path = url.replace("/ui/", "")
                 file_path = BLACKBOX_ROOT / "Portal" / relative_path
             else:
-                return [TextContent(type="text", text=f"Error: Invalid URL format: {url}")]
+                return _error("invalid_arguments", name, f"Invalid URL format: {url}")
 
             if not file_path.exists():
-                return [TextContent(type="text", text=f"Error: File not found: {file_path}")]
+                return _error("not_found", name, f"File not found: {file_path}")
 
             # Detect media type
             suffix = file_path.suffix.lower()
@@ -446,7 +617,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 if result["file_size_bytes"] < 10_000_000:
                     with open(file_path, "rb") as f:
                         result["base64"] = base64.b64encode(f.read()).decode()
-                    print(f"[MCP] get_media: Included base64 for {file_path.name} ({result['file_size_bytes']} bytes)", file=sys.stderr)
+                    _log(logging.INFO, name, f"included base64 for {file_path.name} ({result['file_size_bytes']} bytes)")
                 else:
                     result["base64_skipped"] = "File too large (>10MB)"
 
@@ -469,63 +640,81 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-        # === API TOOLS (Use BlackBox HTTP API) ===
+        elif name == "list_devices":
+            # In-process device registry read -- NOT an HTTP proxy. The registry
+            # is a local singleton, so this stays a dedicated branch.
+            from Orchestrator.device_registry import get_registry, DeviceType
+            registry = get_registry()
+            dtype = arguments.get("device_type")
+            if dtype:
+                devices = registry.get_devices_by_type(DeviceType(dtype))
+            else:
+                devices = registry.get_all_devices()
+            device_list = [d.to_dict() for d in devices]
+            return [TextContent(type="text", text=json.dumps({"devices": device_list}, indent=2))]
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        # === SPECIAL HTTP TOOLS (genuine logic the generic proxy does NOT replicate) ===
+
+        async with httpx.AsyncClient(timeout=PROXY_TIMEOUT) as client:
 
             if name == "search_snapshots":
                 query = arguments["query"]
                 # Read tool: omitting operator means ALL operators on this box (do NOT force-resolve).
                 operator = arguments.get("operator", "")
                 limit = arguments.get("limit", 10)
+                _log(logging.INFO, name, "GET /fossil/hybrid", operator=operator)
 
-                response = await client.get(
+                response = await asyncio.wait_for(client.get(
                     f"{BLACKBOX_URL}/fossil/hybrid",
                     params={"q": query, "operator": operator, "limit": limit}
-                )
+                ), timeout=PROXY_TIMEOUT)
                 response.raise_for_status()
                 return [TextContent(type="text", text=json.dumps(response.json(), indent=2))]
 
             elif name == "mint_snapshot":
+                # M1 FIX: POST to /chat/save (direct auto-mint persistence) -- NOT
+                # /chat (a full LLM round-trip). /chat/save fires perform_mint()
+                # inline and returns the AUTHORITATIVE snap_id in the body, so we
+                # no longer sleep, guess the id from the index, or force-reload.
                 content = arguments["content"]
                 operator = await resolve_operator(arguments.get("operator"))
-                snap_type = arguments.get("snapshot_type", "normal")
+                _log(logging.INFO, name, "POST /chat/save", operator=operator)
 
-                # Route through /chat for AI processing, auto-mint will capture the result
-                # This produces higher quality snapshots with proper headers and synthesis
-                chat_response = await client.post(
-                    f"{BLACKBOX_URL}/chat",
+                save_response = await asyncio.wait_for(client.post(
+                    f"{BLACKBOX_URL}/chat/save",
                     json={
                         "operator": operator,
-                        "messages": [{"role": "user", "content": content}],
-                        "provider": "google",
-                        "model": "gemini-2.5-pro",
-                        "streaming": False
+                        "user_message": "Memory minted via BlackBox MCP (mint_snapshot)",
+                        "assistant_response": content,
+                        "model": "blackbox-mcp",
+                        "tokens": {"prompt": 0, "completion": 0},
                     },
-                    timeout=60.0
-                )
-                chat_response.raise_for_status()
-                chat_result = chat_response.json()
+                ), timeout=PROXY_TIMEOUT)
+                if save_response.status_code >= 400:
+                    return _error("backend_error", name,
+                                  f"/chat/save returned {save_response.status_code}: {save_response.text[:300]}")
+                save_result = save_response.json()
+                snap_id = save_result.get("snap_id")
+                minted = bool(save_result.get("minted"))
 
-                # Refresh index after auto-mint captures the snapshot
-                await asyncio.sleep(0.5)  # Brief wait for auto-mint to complete
-                load_snapshot_index(force_refresh=True)
-
-                # Get the latest snapshot ID for this operator
-                recent = list_snapshots_by_operator(operator, 1)
-                snap_id = recent[0]["snap_id"] if recent else "auto-minted"
-
-                return [TextContent(type="text", text=f"Snapshot created via AI processing: {snap_id}\nAI acknowledged the content and auto-mint captured the conversation.")]
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "minted" if minted else "saved",
+                    "snap_id": snap_id,
+                    "operator": operator,
+                    "minted": minted,
+                    "message": (f"Snapshot {snap_id} minted." if snap_id
+                                else "Turn saved; auto-mint did not fire this turn (debounce/threshold)."),
+                }, indent=2))]
 
             elif name == "get_context":
                 query = arguments["query"]
                 operator = await resolve_operator(arguments.get("operator"))
 
                 # Get hybrid search results
-                search_response = await client.get(
+                search_response = await asyncio.wait_for(client.get(
                     f"{BLACKBOX_URL}/fossil/hybrid",
                     params={"q": query, "operator": operator, "limit": 5}
-                )
+                ), timeout=PROXY_TIMEOUT)
                 search_response.raise_for_status()
                 relevant = search_response.json()
 
@@ -577,196 +766,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                             return [TextContent(type="text", text=response_text)]
                         elif task_data.get("status") == "failed":
                             error_msg = task_data.get("error_message") or task_data.get("error") or "Unknown error"
-                            return [TextContent(type="text", text=f"Chat failed: {error_msg}")]
-                    return [TextContent(type="text", text="Chat request timed out")]
+                            return _error("tool_error", name, f"Chat failed: {error_msg}")
+                    return _error("timeout", name, "Chat request timed out")
 
                 return [TextContent(type="text", text=result.get("response", json.dumps(result)))]
 
-            # ===========================================
-            # MULTIMODAL TOOLS - Generation & Analysis
-            # ===========================================
-
-            elif name == "generate_image":
-                prompt = arguments["prompt"]
-                operator = await resolve_operator(arguments.get("operator"))
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/generate/image",
-                    json={"prompt": prompt, "operator": operator},
-                    timeout=120
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                if "task_id" in result:
-                    return [TextContent(type="text", text=json.dumps({
-                        "status": "generating",
-                        "task_id": result["task_id"],
-                        "message": "Image generation started. Use get_task_status to check progress."
-                    }, indent=2))]
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name == "generate_video":
-                prompt = arguments["prompt"]
-                operator = await resolve_operator(arguments.get("operator"))
-                video_url = arguments.get("video_url")
-                image_url = arguments.get("image_url")
-                image_base64 = arguments.get("image_base64")
-                image_mime_type = arguments.get("image_mime_type")
-
-                # VIDEO EXTENSION: If video_url is provided, use /extend/video endpoint
-                if video_url:
-                    print(f"[MCP] generate_video: VIDEO EXTENSION mode with video_url={video_url}", file=sys.stderr)
-                    response = await client.post(
-                        f"{BLACKBOX_URL}/extend/video",
-                        json={"video_url": video_url, "prompt": prompt, "operator": operator},
-                        timeout=60
-                    )
-                    response.raise_for_status()
-                    result = response.json()
-
-                    return [TextContent(type="text", text=json.dumps({
-                        "status": "generating",
-                        "task_id": result.get("task_id"),
-                        "message": "Video EXTENSION started (5-20 minutes). Use get_task_status to check progress.",
-                        "mode": "video_extension",
-                        "source_video": video_url,
-                        "details": result
-                    }, indent=2))]
-
-                # IMAGE-TO-VIDEO or TEXT-TO-VIDEO
-                payload = {"prompt": prompt, "operator": operator}
-
-                # Option 1: Pass image_url directly to REST endpoint (preferred - server handles conversion)
-                if image_url:
-                    payload["image_url"] = image_url
-                    print(f"[MCP] generate_video: IMAGE-TO-VIDEO mode with image_url={image_url}", file=sys.stderr)
-
-                # Option 2: Pass base64 image data in the expected format
-                elif image_base64:
-                    payload["image"] = {
-                        "data": image_base64,
-                        "mime_type": image_mime_type or "image/jpeg"
-                    }
-                    print(f"[MCP] generate_video: IMAGE-TO-VIDEO mode with base64 ({len(image_base64)} chars)", file=sys.stderr)
-                else:
-                    print(f"[MCP] generate_video: TEXT-TO-VIDEO mode", file=sys.stderr)
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/generate/video",
-                    json=payload,
-                    timeout=60
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "generating",
-                    "task_id": result.get("task_id"),
-                    "message": "Video generation started (5-20 minutes). Use get_task_status to check progress.",
-                    "mode": "image_to_video" if image_url or image_base64 else "text_to_video",
-                    "source_image": image_url if image_url else None,
-                    "details": result
-                }, indent=2))]
-
-            elif name == "extend_video":
-                video_url = arguments["video_url"]
-                operator = await resolve_operator(arguments.get("operator"))
-                prompt = arguments.get("prompt", "")
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/extend/video",
-                    json={"video_url": video_url, "prompt": prompt, "operator": operator},
-                    timeout=60
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "extending",
-                    "task_id": result.get("task_id"),
-                    "message": "Video extension started (5-20 minutes). Use get_task_status to check progress.",
-                    "details": result
-                }, indent=2))]
-
-            elif name == "lyria_music":
-                prompt = arguments["prompt"]
-                operator = await resolve_operator(arguments.get("operator"))
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/generate/lyria_music",
-                    json={"prompt": prompt, "operator": operator},
-                    timeout=120
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                if "task_id" in result:
-                    return [TextContent(type="text", text=json.dumps({
-                        "status": "generating",
-                        "task_id": result["task_id"],
-                        "message": "Music generation started. Use get_music_status or get_task_status to check progress."
-                    }, indent=2))]
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name == "text_to_speech":
-                text = arguments["text"]
-                voice = arguments.get("voice", "onyx")
-                model = arguments.get("model", "tts-1-hd")
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/tts",
-                    json={"text": text, "voice": voice, "model": model, "return_json": True},
-                    timeout=60
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "success",
-                    "audio_url": result.get("audio_url"),
-                    "voice": voice,
-                    "model": model,
-                    "message": "Audio generated successfully. Access the audio_url to play."
-                }, indent=2))]
-
-            elif name == "gemini_pro_tts":
-                text = arguments["text"]
-                voice = arguments.get("voice", "Charon")
-                operator = await resolve_operator(arguments.get("operator"))
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/generate/gemini_tts",
-                    json={
-                        "text": text,
-                        "voice_name": voice,
-                        "operator": operator,
-                        "multi_speaker": False,
-                        "model": "gemini-2.5-pro-tts"
-                    },
-                    timeout=120  # Gemini Pro TTS takes longer
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "generating",
-                    "task_id": result.get("task_id"),
-                    "voice": voice,
-                    "model": "gemini-pro-tts",
-                    "message": "Gemini Pro TTS generation started. Use get_task_status to check progress and get audio_url."
-                }, indent=2))]
-
             elif name == "speech_to_text":
+                # SPECIAL: multipart file upload to /stt. The generic
+                # /local/tools/execute proxy passes JSON params only -- it cannot
+                # stream a local audio file -- so this stays a dedicated branch.
                 audio_path = arguments["audio_path"]
 
-                # Read the audio file and upload as multipart form data
                 audio_file_path = Path(audio_path)
                 if not audio_file_path.exists():
-                    return [TextContent(type="text", text=json.dumps({
-                        "status": "error",
-                        "error": f"Audio file not found: {audio_path}"
-                    }, indent=2))]
+                    return _error("not_found", name, f"Audio file not found: {audio_path}")
 
                 # Determine content type from extension
                 ext = audio_file_path.suffix.lower()
@@ -796,218 +809,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     "details": result
                 }, indent=2))]
 
-            elif name == "analyze_audio":
-                file_path = arguments["file_path"]
-                prompt = arguments.get("prompt", "Transcribe and describe this audio")
-                operator = await resolve_operator(arguments.get("operator"))
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/analyze/audio",
-                    json={"file_path": file_path, "prompt": prompt, "operator": operator},
-                    timeout=120
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "success",
-                    "analysis": result.get("response", result.get("analysis", "")),
-                    "details": result
-                }, indent=2))]
-
-            elif name == "analyze_image":
-                image_url = arguments["image_url"]
-                prompt = arguments.get("prompt", "Describe this image in detail")
-                operator = await resolve_operator(arguments.get("operator"))
-                provider = arguments.get("provider", "gemini")
-
-                # Use chat endpoint with image content for multimodal analysis
-                response = await client.post(
-                    f"{BLACKBOX_URL}/chat",
-                    json={
-                        "operator": operator,
-                        "provider": provider,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": image_url}}
-                            ]
-                        }]
-                    },
-                    timeout=120
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "success",
-                    "analysis": result.get("response", ""),
-                    "provider": provider,
-                    "details": result
-                }, indent=2))]
-
-            elif name == "analyze_video":
-                video_url = arguments["video_url"]
-                prompt = arguments.get("prompt", "Describe what happens in this video")
-                operator = await resolve_operator(arguments.get("operator"))
-
-                # Use Gemini for video analysis (best multimodal video support)
-                response = await client.post(
-                    f"{BLACKBOX_URL}/chat",
-                    json={
-                        "operator": operator,
-                        "provider": "gemini",
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "video_url", "video_url": {"url": video_url}}
-                            ]
-                        }]
-                    },
-                    timeout=180
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "success",
-                    "analysis": result.get("response", ""),
-                    "details": result
-                }, indent=2))]
-
-            elif name == "use_computer":
-                prompt = arguments["prompt"]
-                operator = await resolve_operator(arguments.get("operator"))
-                url = arguments.get("url")
-                device_id = arguments.get("device_id", "blackbox")
-
-                payload = {"prompt": prompt, "operator": operator, "device_id": device_id}
-                if url:
-                    payload["url"] = url
-
-                response = await client.post(
-                    f"{BLACKBOX_URL}/browser/run",
-                    json=payload,
-                    timeout=60
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps({
-                    "status": "started",
-                    "task_id": result.get("task_id"),
-                    "message": "Sovereign Browser task started. Use get_task_status to check progress and see screenshots when complete."
-                }, indent=2))]
-
-            elif name == "list_devices":
-                from Orchestrator.device_registry import get_registry, DeviceType
-                registry = get_registry()
-                dtype = arguments.get("device_type")
-                if dtype:
-                    devices = registry.get_devices_by_type(DeviceType(dtype))
-                else:
-                    devices = registry.get_all_devices()
-                device_list = [d.to_dict() for d in devices]
-                return [TextContent(type="text", text=json.dumps({"devices": device_list}, indent=2))]
-
-            elif name == "control_android_device":
-                operator = await resolve_operator(arguments.get("operator"))
-                response = await client.post(
-                    f"{BLACKBOX_URL}/gemini-cu/run",
-                    json={
-                        "prompt": arguments["prompt"],
-                        "device_id": arguments["device_id"],
-                        "operator": operator
-                    },
-                    timeout=30
-                )
-                result = response.json()
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name == "get_task_status":
-                task_id = arguments["task_id"]
-
-                response = await client.get(
-                    f"{BLACKBOX_URL}/tasks/{task_id}",
-                    timeout=30
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name == "list_tts_voices":
-                response = await client.get(
-                    f"{BLACKBOX_URL}/tts/google/voices",
-                    timeout=30
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name == "get_music_status":
-                response = await client.get(
-                    f"{BLACKBOX_URL}/music/status",
-                    timeout=30
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            elif name in ("gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
-                operator = await resolve_operator(arguments.get("operator"))
-                params = {k: v for k, v in arguments.items() if k != "operator"}
-                resp = await client.post(
-                    f"{BLACKBOX_URL}/gmail/execute",
-                    json={"tool": name, "params": params, "operator": operator},
-                )
-                data_g = resp.json()
-                if data_g.get("success"):
-                    return [TextContent(type="text", text=str(data_g.get("result", "")))]
-                return [TextContent(type="text", text=f"Gmail error: {data_g.get('error') or data_g.get('result') or 'unknown'}")]
-
-            elif name in WEB_SEARCH_TOOL_NAMES:
-                operator = await resolve_operator(arguments.get("operator"))
-                params = {k: v for k, v in arguments.items() if k != "operator"}
-                resp = await client.post(
-                    f"{BLACKBOX_URL}/local/tools/execute",
-                    json={"tool": name, "params": params, "operator": operator},
-                )
-                data_ws = resp.json()
-                if data_ws.get("success"):
-                    return [TextContent(type="text", text=str(data_ws.get("result", "")))]
-                return [TextContent(type="text", text=f"Web search error: {data_ws.get('error') or data_ws.get('result') or 'unknown'}")]
-
-            elif name in {t.name for t in get_mcp_tools()}:
-                # Generic catch-all: any real ToolVault tool not handled above
-                # (Google Workspace + any future tool) routes to the full backend
-                # executor, which has the real provider keys/creds. No per-tool
-                # MCP edits needed. Body shape matches the web_search branch.
-                # NOTE: ordering is load-bearing -- get_mcp_tools() includes the
-                # gmail_*/web_fetch/web_search names too, so any future dedicated
-                # branch MUST be added ABOVE this catch-all or it gets swallowed here.
-                operator = await resolve_operator(arguments.get("operator"))
-                params = {k: v for k, v in arguments.items() if k != "operator"}
-                resp = await client.post(
-                    f"{BLACKBOX_URL}/local/tools/execute",
-                    json={"tool": name, "params": params, "operator": operator},
-                )
-                data_tv = resp.json()
-                if data_tv.get("success"):
-                    return [TextContent(type="text", text=str(data_tv.get("result", "")))]
-                return [TextContent(type="text", text=f"Tool error: {data_tv.get('error') or data_tv.get('result') or 'unknown'}")]
+            # === UNIFORM PROXY DISPATCHER ===
+            # Every other registry tool (multimodal generation/analysis, Workspace,
+            # web search, gmail_*, status/util, roll_dice, toolvault, control_*,
+            # use_computer, ...) routes through the single proxy path. The valid
+            # name set is memoized (computed ONCE), not rebuilt per call.
+            elif name in _valid_tool_names():
+                return await _proxy_tool(name, arguments, client)
 
             else:
-                return [TextContent(type="text", text=f"Unknown tool: {name}")]
+                return _error("unknown_tool", name, f"Unknown tool: {name}")
 
+    except KeyError as e:
+        return _error("invalid_arguments", name, f"missing required argument: {e}")
+    except httpx.TimeoutException as e:
+        return _error("timeout", name, f"backend request timed out: {e}")
+    except asyncio.TimeoutError:
+        return _error("timeout", name, f"backend did not respond within {PROXY_TIMEOUT:.0f}s")
+    except httpx.HTTPStatusError as e:
+        return _error("backend_error", name,
+                      f"backend returned {e.response.status_code}: {str(e)[:300]}")
     except httpx.HTTPError as e:
-        return [TextContent(type="text", text=f"HTTP Error: {str(e)}")]
+        return _error("backend_error", name, f"HTTP error: {e}")
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        logger.exception("rid=%s tool=%s | unhandled exception", _REQUEST_ID.get(), name)
+        return _error("internal_error", name, str(e))
 
 
 # =============================================================================
@@ -1131,15 +957,16 @@ async def read_resource(uri: str) -> ResourceContents:
 
 async def main():
     """Run the BlackBox MCP server."""
-    print(f"BlackBox MCP Server starting...", file=sys.stderr)
-    print(f"BlackBox Root: {BLACKBOX_ROOT}", file=sys.stderr)
-    print(f"BlackBox API: {BLACKBOX_URL}", file=sys.stderr)
-    print(f"Volume File: {VOLUME_FILE} (exists: {VOLUME_FILE.exists()})", file=sys.stderr)
-    print(f"Index File: {SNAPSHOT_INDEX} (exists: {SNAPSHOT_INDEX.exists()})", file=sys.stderr)
+    logger.info("BlackBox MCP Server starting...")
+    logger.info("BlackBox Root: %s", BLACKBOX_ROOT)
+    logger.info("BlackBox API: %s", BLACKBOX_URL)
+    logger.info("Volume File: %s (exists: %s)", VOLUME_FILE, VOLUME_FILE.exists())
+    logger.info("Index File: %s (exists: %s)", SNAPSHOT_INDEX, SNAPSHOT_INDEX.exists())
+    logger.info("Proxy timeout: %.0fs", PROXY_TIMEOUT)
 
     # Pre-load the index
     index = load_snapshot_index()
-    print(f"Loaded {len(index)} snapshots from index", file=sys.stderr)
+    logger.info("Loaded %d snapshots from index", len(index))
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
