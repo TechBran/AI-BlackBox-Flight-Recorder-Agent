@@ -1461,7 +1461,20 @@ class BearerAuthMiddleware:
             await self._reject_401(send, "Missing or malformed Authorization: Bearer token")
             return
 
+        # Credential check, in order:
+        #   (a) STATIC bearer map (M3) -- UNCHANGED. A hit binds the static
+        #       map's operator.
+        #   (b) ELSE a VALID (present + UNEXPIRED) OAuth access token (chunk
+        #       6c) -- binds the OAuth store's operator. Routed to the SAME
+        #       request.state.bound_operator + token_id below, so the M3
+        #       operator-isolation applies IDENTICALLY -- an OAuth token is
+        #       NEVER a bypass of the per-operator scoping.
+        #   (c) ELSE 401 (expired/bogus OAuth token falls here -> invalid).
         operator, token_id = _match_token(presented, self.token_map)
+        auth_kind = "static"
+        if operator is None:
+            operator, token_id = _match_oauth_access_token(presented)
+            auth_kind = "oauth"
         if operator is None:
             logger.warning("rid=%s AUTH reject: unknown token tid=%s (%s %s)",
                            rid, _token_id(presented), scope.get("method"), scope.get("path"))
@@ -1486,8 +1499,8 @@ class BearerAuthMiddleware:
         _BOUND_OPERATOR.set(operator)
         _TOKEN_ID.set(token_id)
         # AUDIT (M3): token id (never the value) + bound operator + method/path + rid.
-        logger.info("rid=%s AUDIT auth-ok tid=%s operator=%s %s %s",
-                    rid, token_id, operator, scope.get("method"), scope.get("path"))
+        logger.info("rid=%s AUDIT auth-ok kind=%s tid=%s operator=%s %s %s",
+                    rid, auth_kind, token_id, operator, scope.get("method"), scope.get("path"))
         await self.app(scope, receive, send)
 
 
@@ -1814,6 +1827,63 @@ def _persist_access_token(token: str, operator: str, expiry: float) -> None:
             os.chmod(str(p), 0o600)
         except OSError:
             pass
+
+
+def _match_oauth_access_token(presented: str):
+    """Validate an OAuth access token (chunk 6c). Returns (operator, token_id)
+    for a PRESENT + UNEXPIRED token, else (None, None).
+
+    Mirrors the M3 static-bearer contract (_match_token): a hit yields the
+    bound operator + the SAME sha256[:12] `_token_id`, so the OAuth branch
+    feeds request.state.bound_operator on the IDENTICAL path -- OAuth tokens
+    are subject to the same per-operator isolation, never a bypass.
+
+    Expiry is enforced STRICTLY (expiry <= now -> treated as invalid -> the
+    caller 401s). The in-process `_ACCESS_TOKENS` mirror is authoritative for
+    this process; we fall back to the gitignored file store so a token issued
+    by another worker/process still validates. Expired entries are pruned/
+    ignored. The token VALUE is never logged (only its `_token_id`).
+    """
+    if not presented:
+        return None, None
+    now = _time.time()
+    # 1) In-process mirror (authoritative for this process). Constant-ish work
+    #    is unnecessary here: the token is a high-entropy opaque secret looked
+    #    up by exact key, and a miss falls through to the file store.
+    binding = None
+    with _ACCESS_TOKENS_LOCK:
+        b = _ACCESS_TOKENS.get(presented)
+        if isinstance(b, dict):
+            if b.get("expiry", 0) > now:
+                binding = b
+            else:
+                # Expired -> prune the dead entry, treat as invalid.
+                _ACCESS_TOKENS.pop(presented, None)
+    # 2) File-store fallback (token issued by another worker/process).
+    if binding is None:
+        try:
+            p = Path(BLACKBOX_MCP_OAUTH_TOKENS_FILE)
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    fb = data.get(presented)
+                    if isinstance(fb, dict) and fb.get("expiry", 0) > now:
+                        binding = fb
+                        # Warm the in-process mirror for subsequent requests.
+                        with _ACCESS_TOKENS_LOCK:
+                            _ACCESS_TOKENS[presented] = {
+                                "operator": fb.get("operator"),
+                                "expiry": fb.get("expiry"),
+                            }
+        except Exception as e:
+            logger.error("OAuth token validation: failed to read token store %s: %s",
+                         BLACKBOX_MCP_OAUTH_TOKENS_FILE, e)
+    if binding is None:
+        return None, None
+    operator = binding.get("operator")
+    if not operator:
+        return None, None
+    return operator, _token_id(presented)
 
 
 async def _oauth_authorize_handler(request):

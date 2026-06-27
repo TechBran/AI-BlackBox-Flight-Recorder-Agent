@@ -135,6 +135,284 @@ def _raw_mcp_init_post(base_url: str, headers: dict) -> httpx.Response:
     return httpx.post(base_url, json=init_body, headers=h, timeout=10.0)
 
 
+# =============================================================================
+# CHUNK 6c: validate OAuth access tokens on /mcp through the SAME M3 operator-
+# isolation path as a static bearer. The tests below (k-n) drive the full OAuth
+# flow to mint a real access token, then use it AS the /mcp bearer and assert:
+#   (k) end-to-end: initialize + list_tools -> 74 tools (gate opens for OAuth).
+#   (l) operator-isolation: an OAuth token bound to operator X cannot read
+#       ANOTHER operator's snap (get_snapshot/seek_snapshot_direct -> not_found)
+#       and list_operators/get_current_operator return ONLY X (mirrors M3 #2A,
+#       but via an OAuth token -- proving OAuth is NOT a bypass).
+#   (m) an EXPIRED or bogus OAuth access token on /mcp -> 401.
+#   (n) the static-bearer path STILL works on /mcp (regression).
+# =============================================================================
+_ACCEPT = "application/json, text/event-stream"
+BACKEND_URL = os.getenv("BLACKBOX_URL", "http://localhost:9091")
+
+# For the isolation test (l): a seeded two-operator index where the OAuth
+# operator equals one of the seeded operators ("bob"), so a bob-bound OAuth
+# token is denied alice's data and sees only bob in the roster.
+ISO_OAUTH_OPERATOR = "bob"     # the OAuth token binds to this operator
+ISO_OTHER_OPERATOR = "alice"   # the OTHER operator whose data must stay hidden
+
+
+def _backend_up() -> bool:
+    try:
+        return httpx.get(f"{BACKEND_URL}/operators", timeout=3.0).status_code == 200
+    except Exception:
+        return False
+
+
+def _sse_or_json(resp: httpx.Response):
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    return json.loads(line[5:].strip())
+                except Exception:
+                    pass
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _raw_init(client: httpx.Client, base_url: str, token: str) -> str:
+    """Open an MCP session on /mcp under `token`; return the mcp-session-id."""
+    r = client.post(base_url, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "p", "version": "0"}}},
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json", "Accept": _ACCEPT})
+    sid = r.headers.get("mcp-session-id")
+    client.post(base_url, json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                         "Accept": _ACCEPT, "mcp-session-id": sid})
+    return sid
+
+
+def _raw_list_tools(client: httpx.Client, base_url: str, token: str, sid: str):
+    """tools/list on `sid` under `token`. Returns the list of tool dicts (or [])."""
+    r = client.post(base_url, json={
+        "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Accept": _ACCEPT, "mcp-session-id": sid})
+    obj = _sse_or_json(r)
+    if obj and "result" in obj:
+        return obj["result"].get("tools", [])
+    return []
+
+
+def _raw_call(client: httpx.Client, base_url: str, token: str, sid: str, name: str, args: dict):
+    """tools/call on `sid` under `token`. Returns (isError, parsed_body_or_text)."""
+    r = client.post(base_url, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": name, "arguments": args}},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Accept": _ACCEPT, "mcp-session-id": sid})
+    obj = _sse_or_json(r)
+    if obj and "result" in obj:
+        cont = obj["result"].get("content", [])
+        err = bool(obj["result"].get("isError"))
+        if cont:
+            try:
+                return err, json.loads(cont[0]["text"])
+            except Exception:
+                return err, cont[0].get("text")
+    return None, obj
+
+
+def _mint_access_token(origin: str, registered_id: str, redirect_uri: str):
+    """Run the full OAuth flow (authorize -> code -> token) and return the
+    minted access_token (or None on any failure). Reused by tests (k) + (l)."""
+    verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()).decode().rstrip("=")
+    r = httpx.get(f"{origin}/authorize", params={
+        "response_type": "code", "client_id": registered_id,
+        "redirect_uri": redirect_uri, "state": "iso-state", "scope": "mcp",
+        "code_challenge": challenge, "code_challenge_method": "S256",
+    }, follow_redirects=False, timeout=10.0)
+    if r.status_code != 302:
+        return None
+    code = parse_qs(urlparse(r.headers.get("location", "")).query).get("code", [None])[0]
+    if not code:
+        return None
+    tr = httpx.post(f"{origin}/token", data={
+        "grant_type": "authorization_code", "code": code,
+        "client_id": registered_id, "redirect_uri": redirect_uri,
+        "code_verifier": verifier,
+    }, timeout=10.0)
+    if tr.status_code != 200:
+        return None
+    return tr.json().get("access_token")
+
+
+def _register_client(origin: str, redirect_uri: str):
+    """DCR a public client on `origin`; return its client_id (or None)."""
+    r = httpx.post(f"{origin}/register", json={
+        "redirect_uris": [redirect_uri],
+        "client_name": "Iso Test Client",
+        "token_endpoint_auth_method": "none",
+    }, timeout=10.0)
+    if r.status_code in (200, 201):
+        return r.json().get("client_id")
+    return None
+
+
+def _run_oauth_isolation(failures: list) -> None:
+    """Test (l): stand up a SEEDED two-operator server whose OAuth operator is
+    `bob`, mint a bob-bound OAuth access token, and prove it is subject to the
+    SAME M3 #2A isolation as a static bearer -- cannot read alice's data, CAN
+    read its own, and the roster is scoped to bob only. This proves an OAuth
+    token is routed to request.state.bound_operator on the IDENTICAL path and
+    is NEVER a bypass of per-operator scoping. (The init+74-tools e2e is asserted
+    separately as (k) on the default-index server.)
+
+    Needs the backend (get_current_operator/list_operators do a real /operators
+    round-trip); skipped with a recorded failure if it is down (mirrors
+    test_mcp_auth.py's (g-n))."""
+    if not _backend_up():
+        failures.append("(l) SKIPPED: backend down (get_current_operator/list_operators "
+                        "need a real /operators round-trip)")
+        return
+
+    # A temp BLACKBOX_ROOT overlay with a real two-operator index + volume (same
+    # technique as test_mcp_auth.py's (e)/(g-n) seeded server).
+    tmp = Path(tempfile.mkdtemp(prefix="bbmcp_oauth_iso_"))
+    (tmp / "Manifest").mkdir()
+    (tmp / "Volumes").mkdir()
+    (tmp / "Orchestrator").symlink_to(_REPO_ROOT / "Orchestrator")
+    seed_index = {
+        "SNAP-ALICE-1": {"operator": ISO_OTHER_OPERATOR, "timestamp": "2026-01-02",
+                         "type": "normal", "byte_start": 0, "byte_end": 10},
+        "SNAP-BOB-1": {"operator": ISO_OAUTH_OPERATOR, "timestamp": "2026-01-03",
+                       "type": "normal", "byte_start": 10, "byte_end": 30},
+    }
+    (tmp / "Manifest" / "snapshot_index.json").write_text(json.dumps(seed_index))
+    # bytes [0:10)='ALICEDATA!' (alice), [10:30)='BOBDATAxxxxxxxxxxxx' (bob).
+    (tmp / "Volumes" / "SNAPSHOT_VOLUME.txt").write_text("ALICEDATA!BOBDATAxxxxxxxxxxxxxx")
+
+    iso_tmpdir = Path(tempfile.mkdtemp(prefix="bbmcp_oauth_iso_store_"))
+    iso_clients = iso_tmpdir / "mcp_oauth_clients.json"
+    iso_tokens = iso_tmpdir / "mcp_oauth_tokens.json"
+
+    port = _free_port()
+    origin = f"http://127.0.0.1:{port}"
+    mcp_url = f"{origin}/mcp"
+    # Start the seeded server with the OAuth operator pinned to "bob" and its OWN
+    # public URL (origin) so /authorize's exact redirect_uri match works.
+    proc = _start_http_server(port, iso_clients, iso_tokens)
+    # _start_http_server pins BLACKBOX_MCP_OAUTH_OPERATOR=oauth-op + a fixed
+    # public URL; override BOTH plus BLACKBOX_ROOT for this seeded/isolated run.
+    # (We relaunch with a tailored env rather than thread params through.)
+    proc.terminate()
+    try:
+        proc.communicate(timeout=5)
+    except Exception:
+        proc.kill()
+
+    env = dict(os.environ)
+    env["BLACKBOX_ROOT"] = str(tmp)
+    env["BLACKBOX_MCP_HTTP_PORT"] = str(port)
+    env["BLACKBOX_MCP_HTTP_HOST"] = "127.0.0.1"
+    env["BLACKBOX_MCP_TOKENS"] = json.dumps(TEST_TOKEN_MAP)
+    env["BLACKBOX_MCP_TOKENS_FILE"] = str(_HERE / "__no_such_token_file__.json")
+    env["BLACKBOX_MCP_OAUTH_CLIENTS_FILE"] = str(iso_clients)
+    env["BLACKBOX_MCP_OAUTH_TOKENS_FILE"] = str(iso_tokens)
+    env["BLACKBOX_MCP_PUBLIC_URL"] = origin   # redirect_uri match needs real origin
+    env["BLACKBOX_MCP_OAUTH_OPERATOR"] = ISO_OAUTH_OPERATOR   # bind OAuth token -> bob
+    env.setdefault("BLACKBOX_MCP_LOG_LEVEL", "WARNING")
+    proc = subprocess.Popen(
+        [sys.executable, str(_HERE / "blackbox_mcp_server.py"), "--transport", "http"],
+        cwd=str(_HERE), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    tail = ""
+    try:
+        if not _wait_for_http(mcp_url):
+            failures.append("(l) seeded OAuth server did not come up")
+            return
+
+        cb = "https://claude.ai/api/mcp/auth_callback"
+        client_id = _register_client(origin, cb)
+        if not client_id:
+            failures.append("(l) could not register OAuth client on seeded server")
+            return
+        access_token = _mint_access_token(origin, client_id, cb)
+        if not access_token or not access_token.startswith("bbmcp_oat_"):
+            failures.append(f"(l) could not mint OAuth access token: {access_token!r}")
+            return
+
+        c = httpx.Client(timeout=15)
+        # Open an /mcp session under the bob-bound OAuth token (the gate must
+        # accept it; (k) asserts the full init+74-tools count on the default-index
+        # server where ToolVault/ is present -- this seeded overlay lacks the
+        # root ToolVault/ dir, so its tool count is intentionally not asserted).
+        sid = _raw_init(c, mcp_url, access_token)
+        if not sid:
+            failures.append("(l) OAuth token did not open an /mcp session on the seeded server")
+            c.close()
+            return
+
+        # ---- (l) operator-isolation via the OAuth token (mirror M3 #2A) ----
+        # bob's OAuth token must NOT read alice's snap (get_snapshot) ...
+        err, body = _raw_call(c, mcp_url, access_token, sid, "get_snapshot", {"snap_id": "SNAP-ALICE-1"})
+        txt = json.dumps(body)
+        if err is True and "not_found" in txt and "ALICEDATA" not in txt and "content" not in body:
+            print("[oauth] PASS (l-1) OAuth(bob) get_snapshot(alice) -> not_found, no content "
+                  "(OAuth token subject to M3 #2A isolation)")
+        else:
+            failures.append(f"(l-1) OAuth cross-op get_snapshot NOT denied: err={err} body={txt[:200]}")
+        # ... nor via seek_snapshot_direct ...
+        err, body = _raw_call(c, mcp_url, access_token, sid, "seek_snapshot_direct", {"snap_id": "SNAP-ALICE-1"})
+        txt = json.dumps(body)
+        if err is True and "not_found" in txt and "ALICEDATA" not in txt:
+            print("[oauth] PASS (l-2) OAuth(bob) seek_snapshot_direct(alice) -> not_found, no content")
+        else:
+            failures.append(f"(l-2) OAuth cross-op seek_snapshot_direct NOT denied: err={err} body={txt[:200]}")
+        # ... but CAN read its OWN (bob's) snap (gate is per-operator, not deny-all) ...
+        err, body = _raw_call(c, mcp_url, access_token, sid, "get_snapshot", {"snap_id": "SNAP-BOB-1"})
+        if err is not True and isinstance(body, dict) and body.get("metadata", {}).get("operator") == ISO_OAUTH_OPERATOR:
+            print("[oauth] PASS (l-3) OAuth(bob) CAN read its OWN snap (per-operator gate, not deny-all)")
+        else:
+            failures.append(f"(l-3) OAuth token denied its OWN snap (over-blocking): err={err} body={json.dumps(body)[:200]}")
+        # ... list_operators -> only bob (roster not leaked over the OAuth token) ...
+        err, body = _raw_call(c, mcp_url, access_token, sid, "list_operators", {})
+        names = {o["name"] for o in body.get("operators", [])} if isinstance(body, dict) else set()
+        if names == {ISO_OAUTH_OPERATOR}:
+            print("[oauth] PASS (l-4) OAuth(bob) list_operators -> only bob (roster not leaked)")
+        else:
+            failures.append(f"(l-4) OAuth list_operators leaked roster: {names}")
+        # ... get_current_operator -> resolved=bob, roster=['bob'], alice absent.
+        err, body = _raw_call(c, mcp_url, access_token, sid, "get_current_operator", {})
+        if isinstance(body, dict):
+            ops = body.get("operators")
+            if (ops == [ISO_OAUTH_OPERATOR] and body.get("count") == 1
+                    and body.get("resolved") == ISO_OAUTH_OPERATOR
+                    and ISO_OTHER_OPERATOR not in (ops or [])):
+                print("[oauth] PASS (l-5) OAuth(bob) get_current_operator -> resolved=bob, "
+                      "roster=['bob'] count=1 (binding via OAuth == binding via static bearer)")
+            else:
+                failures.append(f"(l-5) OAuth get_current_operator leaked/wrong: operators={ops!r} "
+                                f"count={body.get('count')!r} resolved={body.get('resolved')!r}")
+        else:
+            failures.append(f"(l-5) OAuth get_current_operator unexpected body: {json.dumps(body)[:200]}")
+        c.close()
+    finally:
+        proc.terminate()
+        try:
+            tail = proc.communicate(timeout=5)[0]
+        except Exception:
+            proc.kill(); tail = ""
+        if any(f.startswith(("(k)", "(l")) for f in failures) and tail:
+            print("\n[oauth] ---- seeded OAuth server output (tail) ----")
+            print("\n".join(tail.splitlines()[-25:]))
+
+
 def main() -> int:
     failures = []
     port = _free_port()
@@ -457,12 +735,115 @@ def main() -> int:
             else:
                 failures.append(f"(6b-store) access-token store file not created: {tokens_file}")
 
+        # =====================================================================
+        # CHUNK 6c (against this default server -- full repo root, so ToolVault/
+        # is present and the canonical 74-tool count holds; no backend needed):
+        #   (k) end-to-end: the OAuth access token minted in 6b-e opens /mcp ->
+        #       initialize + list_tools = 74 (gate accepts a REAL OAuth credential
+        #       and routes it through the SAME path as a static bearer).
+        #   (m) an EXPIRED or BOGUS OAuth access token on /mcp -> 401.
+        #   (n) the STATIC-bearer path STILL works on /mcp (regression).
+        # =====================================================================
+        # ---- (k) OAuth token (from 6b-e) opens /mcp -> initialize + 74 tools ----
+        if access_token:
+            ck = httpx.Client(timeout=15)
+            sid_oauth = _raw_init(ck, mcp_url, access_token)
+            tools_oauth = _raw_list_tools(ck, mcp_url, access_token, sid_oauth)
+            if sid_oauth and len(tools_oauth) == 74:
+                print(f"[oauth] PASS (k) OAuth access token on /mcp -> initialize + "
+                      f"list_tools = {len(tools_oauth)} tools (gate opens for a REAL OAuth "
+                      "credential, same path as a static bearer)")
+            else:
+                failures.append(f"(k) OAuth e2e: sid={sid_oauth!r} tools={len(tools_oauth)} "
+                                "(expected a session + 74 tools)")
+            ck.close()
+        else:
+            failures.append("(k) no OAuth access token minted in 6b-e to run the e2e check")
+
+        # ---- (m1) a BOGUS bbmcp_oat_ token (never issued) -> 401 ----
+        r = _raw_mcp_init_post(mcp_url, headers={
+            "Authorization": "Bearer bbmcp_oat_never_issued_bogus_token_zzzzzzzzzzzz"})
+        if r.status_code == 401 and "bearer" in r.headers.get("www-authenticate", "").lower():
+            print("[oauth] PASS (m1) BOGUS OAuth access token on /mcp -> 401 + "
+                  "WWW-Authenticate: Bearer (never-issued token rejected)")
+        else:
+            failures.append(f"(m1) bogus OAuth token should 401, got {r.status_code} / "
+                            f"{r.headers.get('www-authenticate')!r}")
+
+        # ---- (m2) an EXPIRED OAuth access token on /mcp -> 401 (REAL probe). We
+        #      stand up a DEDICATED server whose token store is PRE-SEEDED with an
+        #      already-expired token. The server boots with an EMPTY in-process
+        #      mirror (it only fills on in-process /token issuance), so validating
+        #      this token forces the file-store fallback, whose STRICT `expiry <=
+        #      now` check must reject it -> the middleware 401s. This probes the
+        #      real /mcp gate, not just the store shape. (No backend needed: a 401
+        #      short-circuits before any tool work.) ----
+        exp_tmpdir = Path(tempfile.mkdtemp(prefix="bbmcp_oauth_exp_"))
+        exp_clients = exp_tmpdir / "mcp_oauth_clients.json"
+        exp_tokens = exp_tmpdir / "mcp_oauth_tokens.json"
+        expired_token = "bbmcp_oat_expired_seeded_token_yyyyyyyyyyyyyyyyyyyy"
+        exp_tokens.write_text(json.dumps({
+            expired_token: {"operator": TEST_OAUTH_OPERATOR, "expiry": time.time() - 3600},
+        }))
+        os.chmod(str(exp_tokens), 0o600)
+        exp_port = _free_port()
+        exp_origin = f"http://127.0.0.1:{exp_port}"
+        exp_mcp = f"{exp_origin}/mcp"
+        exp_proc = _start_http_server(exp_port, exp_clients, exp_tokens)
+        try:
+            if not _wait_for_http(exp_mcp):
+                failures.append("(m2) expired-token probe server did not come up")
+            else:
+                r = _raw_mcp_init_post(exp_mcp, headers={"Authorization": f"Bearer {expired_token}"})
+                if r.status_code == 401 and "bearer" in r.headers.get("www-authenticate", "").lower():
+                    print("[oauth] PASS (m2) EXPIRED OAuth access token on /mcp -> 401 + "
+                          "WWW-Authenticate: Bearer (strict expiry enforced; expired == invalid)")
+                else:
+                    failures.append(f"(m2) expired OAuth token should 401, got {r.status_code} / "
+                                    f"{r.headers.get('www-authenticate')!r}")
+                # positive control on the SAME server: a FRESHLY minted token (not
+                # expired) is accepted -> proves it's the expiry, not the store.
+                ecid = _register_client(exp_origin, "https://claude.ai/api/mcp/auth_callback")
+                fresh = _mint_access_token(exp_origin, ecid,
+                                           "https://claude.ai/api/mcp/auth_callback") if ecid else None
+                if fresh:
+                    r2 = _raw_mcp_init_post(exp_mcp, headers={"Authorization": f"Bearer {fresh}"})
+                    if r2.status_code != 401:
+                        print(f"[oauth] PASS (m2') control: a FRESH (unexpired) OAuth token on the "
+                              f"SAME server -> {r2.status_code} (not 401; expiry is the discriminator)")
+                    else:
+                        failures.append("(m2') fresh unexpired OAuth token unexpectedly 401")
+                else:
+                    failures.append("(m2') could not mint a fresh control token")
+        finally:
+            exp_proc.terminate()
+            try:
+                exp_proc.communicate(timeout=5)
+            except Exception:
+                exp_proc.kill()
+
+        # ---- (n) the STATIC-bearer path STILL works on /mcp (regression) ----
+        c = httpx.Client(timeout=15)
+        sid_static = _raw_init(c, mcp_url, VALID_TOKEN)
+        tools_static = _raw_list_tools(c, mcp_url, VALID_TOKEN, sid_static)
+        if sid_static and len(tools_static) == 74:
+            print(f"[oauth] PASS (n) STATIC bearer on /mcp STILL works -> initialize + "
+                  f"list_tools = {len(tools_static)} tools (no regression from the OAuth branch)")
+        else:
+            failures.append(f"(n) static-bearer regression: sid={sid_static!r} "
+                            f"tools={len(tools_static)} (expected 74)")
+        c.close()
+
     finally:
         proc.terminate()
         try:
             tail = proc.communicate(timeout=5)[0]
         except Exception:
             proc.kill(); tail = ""
+
+    # ---- (l): OAuth operator-isolation (mirror M3 #2A via an OAuth token)
+    #      on a SEEDED two-operator server (OAuth operator = bob). ----
+    _run_oauth_isolation(failures)
 
     if failures:
         print("\n[oauth] ---- HTTP server output (tail) ----")
@@ -480,7 +861,11 @@ def main() -> int:
           "6b-e: full code flow -> access_token; 6b-f: PKCE missing/!=S256 rejected; "
           "6b-g: wrong verifier rejected; 6b-h: bad redirect_uri direct-400 no-open-redirect; "
           "6b-i: code single-use; 6b-j: state echoed; "
-          "6b-store: access token persisted 0600 + operator-bound).")
+          "6b-store: access token persisted 0600 + operator-bound; "
+          "6c-k: OAuth token opens /mcp -> init + 74 tools; "
+          "6c-l: OAuth token subject to M3 #2A isolation (cross-op not_found, "
+          "own-read ok, roster scoped); 6c-m: bogus + EXPIRED OAuth token -> 401 "
+          "(strict expiry); 6c-n: static-bearer path STILL works).")
     return 0
 
 
