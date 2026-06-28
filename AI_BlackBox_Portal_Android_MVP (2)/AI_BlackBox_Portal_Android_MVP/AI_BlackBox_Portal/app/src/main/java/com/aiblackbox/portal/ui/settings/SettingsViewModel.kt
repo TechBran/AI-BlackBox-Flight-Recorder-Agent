@@ -185,6 +185,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { store.setStreamingEnabled(enabled) }
     }
 
+    fun setEmberMode(value: String) { viewModelScope.launch { store.setEmberMode(value) } }
+
     fun setOperatorVoice(operator: String, voiceValue: String) {
         viewModelScope.launch { store.setOperatorVoice(operator, voiceValue) }
     }

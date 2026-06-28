@@ -39,6 +39,10 @@ val Neutral1000 = Color(0xFFE0E0E0)
 // Semantic Colors
 // =============================================================================
 val BubbleAssistant = BbxBlack      // --bubble
+// Assistant bubble while the ember backdrop is active: translucent so embers glow
+// THROUGH the generated text. Over the pure-black screen it reads identical to solid
+// black when no embers are present (idle), so there's no visual regression. ~68% black.
+val BubbleAssistantTranslucent = Color(0xAD000000)
 val BubbleUser      = Neutral250    // --bubble-user
 val TextPrimary     = BbxWhite      // --text
 val TextMuted       = BbxDim        // --muted

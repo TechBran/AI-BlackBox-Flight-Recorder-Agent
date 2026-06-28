@@ -154,6 +154,7 @@ class EmberSimulation {
 // Canvas renderer + DOM-driven controller (browser-only).
 // =============================================================================
 const REASONS = new Set();   // active generation reasons (dom, media, manual…)
+let mode = 'always';         // 'off' | 'generating' | 'always' — persisted; default = always
 let host = null;             // <section class="chat">
 let canvas = null;
 let ctx = null;
@@ -284,6 +285,25 @@ function markGenerating(reason, on) {
     applyState();
 }
 
+// ---- Mode: off | generating | always (persisted in localStorage) -----------
+function loadMode() {
+    try {
+        const m = localStorage.getItem('bb_ember_mode');
+        if (m === 'off' || m === 'generating' || m === 'always') mode = m;
+    } catch (e) { /* private mode / disabled storage */ }
+}
+function setMode(m) {
+    if (m !== 'off' && m !== 'generating' && m !== 'always') return;
+    mode = m;
+    try { localStorage.setItem('bb_ember_mode', m); } catch (e) {}
+    if (m === 'always') {
+        markGenerating('always', true);          // permanent reason → always drifting
+    } else {
+        markGenerating('always', false);         // drop the permanent reason…
+        recompute();                             // …and re-sync from the DOM (off → never)
+    }
+}
+
 // ---- Generation detection from the DOM --------------------------------------
 const GEN_SELECTOR = '.streaming-bubble, .bubble.thinking, .generating-image, .generating-video, .generating-music';
 function isGeneratingNow() {
@@ -294,7 +314,9 @@ function isGeneratingNow() {
 }
 function recompute() {
     recomputeQueued = false;
-    markGenerating('dom', isGeneratingNow());
+    // 'off' suppresses the generation-driven reason entirely; 'always' keeps its
+    // own permanent reason so this only governs the 'generating' mode.
+    markGenerating('dom', mode !== 'off' && isGeneratingNow());
 }
 function queueRecompute() {
     if (recomputeQueued) return;
@@ -313,8 +335,16 @@ function onVisibility() {
 export function initEmberFX() {
     if (inited) return;                        // idempotent: never double-attach observers
     inited = true;
+    loadMode();
     if (prefersReduced) {
-        window.EmberFX = { markGenerating: () => {}, isActive: () => false, _reduced: true };
+        // Still expose setMode/getMode so the settings control persists the choice.
+        window.EmberFX = {
+            markGenerating: () => {},
+            setMode: (m) => { if (m === 'off' || m === 'generating' || m === 'always') { mode = m; try { localStorage.setItem('bb_ember_mode', m); } catch (e) {} } },
+            getMode: () => mode,
+            isActive: () => false,
+            _reduced: true
+        };
         console.log('[EmberFX] prefers-reduced-motion — ember effect disabled');
         return;
     }
@@ -333,12 +363,35 @@ export function initEmberFX() {
     document.addEventListener('visibilitychange', onVisibility);
     window.EmberFX = {
         markGenerating,
+        setMode,
+        getMode: () => mode,
         isActive: () => active,
         _config: CONFIG,
         _sim: () => sim
     };
-    recompute(); // catch a generation already in flight (e.g. restored pending)
-    console.log('[EmberFX] Generation ember effect initialized (website-matched palette)');
+    // Apply the persisted mode: 'always' forces-on; 'off'/'generating' sync from the DOM.
+    if (mode === 'always') markGenerating('always', true);
+    else recompute();
+    console.log('[EmberFX] Generation ember effect initialized (mode=' + mode + ')');
+}
+
+// Reflect the persisted ember mode into the settings radio group + drive setMode on change.
+export function initEmberModeControl() {
+    const radios = document.querySelectorAll('input[name="emberMode"]');
+    if (!radios.length) return;
+    const cur = (window.EmberFX && window.EmberFX.getMode) ? window.EmberFX.getMode() : mode;
+    const sync = () => radios.forEach((r) => {
+        const label = r.closest('.ember-mode-opt');
+        if (label) label.classList.toggle('selected', r.checked);
+    });
+    radios.forEach((r) => {
+        r.checked = (r.value === cur);
+        r.addEventListener('change', () => {
+            sync();
+            if (r.checked && window.EmberFX && window.EmberFX.setMode) window.EmberFX.setMode(r.value);
+        });
+    });
+    sync(); // reflect the initial selection (works even without :has() support)
 }
 
 // Exposed for unit tests / external drivers.

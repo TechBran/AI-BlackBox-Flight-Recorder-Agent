@@ -34,6 +34,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -129,6 +132,7 @@ fun SettingsSheet(
     val currentModel by viewModel.store.model.collectAsState(initial = "")
     val operator by viewModel.store.operator.collectAsState(initial = "Brandon")
     val streaming by viewModel.store.streamingEnabled.collectAsState(initial = true)
+    val emberMode by viewModel.store.emberMode.collectAsState(initial = "always")
 
     val perProviderModel by viewModel.store.getString("model_$provider", "")
         .collectAsState(initial = "")
@@ -810,6 +814,42 @@ fun SettingsSheet(
                 checked = streaming,
                 onCheckedChange = { viewModel.setStreamingEnabled(it) },
                 checkedColor = BbxAccent
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // Ember Backdrop — off / while generating / always (default always)
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Ember Backdrop", BbxAccent)
+            val emberOptions = listOf(
+                "off" to "Off",
+                "generating" to "While generating",
+                "always" to "Always on",
+            )
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                emberOptions.forEachIndexed { index, (value, label) ->
+                    SegmentedButton(
+                        selected = emberMode == value,
+                        onClick = { viewModel.setEmberMode(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = emberOptions.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = BbxAccent.copy(alpha = 0.15f),
+                            activeContentColor = BbxAccent,
+                            activeBorderColor = BbxAccent.copy(alpha = 0.4f),
+                            inactiveContainerColor = Neutral100,
+                            inactiveContentColor = Neutral700,
+                            inactiveBorderColor = Neutral300,
+                        ),
+                        label = { Text(label, style = MaterialTheme.typography.bodyMedium) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Warm ember particles in the background.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
             )
 
             Spacer(Modifier.height(8.dp))

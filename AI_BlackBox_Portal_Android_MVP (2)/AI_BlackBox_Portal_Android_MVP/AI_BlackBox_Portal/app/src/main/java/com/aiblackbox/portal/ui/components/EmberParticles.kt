@@ -56,21 +56,35 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+// =============================================================================
+// EmberMode — the 3 persisted backdrop modes + the CompositionLocal that carries
+// the active mode down to EmberOverlay. Provided ONCE at the activity root from
+// the persisted setting (default ALWAYS); EmberOverlay reads it to derive the
+// effective-active from the screen's "is generating" flag:
+//   OFF        → never show (drain + stop)
+//   GENERATING → follow the passed `active` flag
+//   ALWAYS     → always show
+// =============================================================================
+object EmberMode { const val OFF = "off"; const val GENERATING = "generating"; const val ALWAYS = "always" }
+
+// Provided once at the activity root from the persisted setting; read by EmberOverlay.
+val LocalEmberMode = androidx.compose.runtime.staticCompositionLocalOf { EmberMode.ALWAYS }
+
 // -----------------------------------------------------------------------------
-// Tunables — mirror the website `configs.embers` exactly. NOTE: these are the
-// website's CSS pixels but are used here as PHYSICAL canvas pixels, so on a
-// high-DPI phone embers render smaller/faster than on the site. Left unscaled for
-// now (decision: match the website's numbers); scaling sizes+velocities by
-// LocalDensity is the tunable for Brandon's on-device visual sign-off.
+// Tunables — based on the website `configs.embers`, with the particle COUNT
+// DOUBLED and sizes/glow BUMPED for visibility on a high-DPI phone (the website's
+// CSS px are used here as physical px, so unscaled embers read small). These are
+// the dials for Brandon's on-device tuning; further LocalDensity scaling of
+// sizes+velocities is the remaining knob if they should be bigger still.
 // -----------------------------------------------------------------------------
-private val LAYER_COUNT = intArrayOf(40, 50, 30)            // far, mid, foreground
+private val LAYER_COUNT = intArrayOf(80, 100, 60)          // far, mid, foreground (2x website)
 private val LAYER_SPEED = floatArrayOf(0.3f, 0.5f, 0.8f)
-private val SIZE_MIN = floatArrayOf(0.5f, 1f, 1.5f)
-private val SIZE_MAX = floatArrayOf(1f, 2f, 3f)
+private val SIZE_MIN = floatArrayOf(0.8f, 1.5f, 2.2f)      // ~1.5x website for high-DPI visibility
+private val SIZE_MAX = floatArrayOf(1.6f, 3f, 4.5f)
 private val LAYER_OPACITY = floatArrayOf(0.25f, 0.4f, 0.7f)
 private val COLOR_WEIGHTS = doubleArrayOf(0.3, 0.3, 0.2, 0.15, 0.05)
-private const val TOTAL_PARTICLES = 120                     // 40 + 50 + 30
-private const val GLOW_INTENSITY = 10f                      // glow radius = size * 10
+private const val TOTAL_PARTICLES = 240                     // 80 + 100 + 60 (doubled)
+private const val GLOW_INTENSITY = 14f                      // glow radius = size * 14 (bumped)
 private const val TURBULENCE = 0.6
 private const val RISE_SPEED = 0.8
 private const val FLICKER_SPEED = 0.015
@@ -342,6 +356,15 @@ private val EMBER_BLEND =
 // =============================================================================
 @Composable
 fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
+    // Apply the persisted backdrop mode: OFF forces off, ALWAYS forces on, and
+    // GENERATING follows the screen's `active` flag. Everything below drives off
+    // effectiveActive so the boolean call sites keep meaning "is generating".
+    val mode = LocalEmberMode.current
+    val effectiveActive = when (mode) {
+        EmberMode.OFF -> false
+        EmberMode.ALWAYS -> true
+        else -> active            // "generating": follow the screen's flag
+    }
     val sim = remember { EmberSimulation() }
     val density = LocalDensity.current
     // Pre-bake the 5 glow sprites ONCE (one per palette color).
@@ -352,11 +375,11 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     // Battery-safe frame loop. `active` is read via rememberUpdatedState so the
     // loop (keyed on `running`, not `active`) sees the CURRENT value — otherwise it
     // would capture active=true at launch and never drain or stop (silent 60fps leak).
-    val currentActive by rememberUpdatedState(active)
+    val currentActive by rememberUpdatedState(effectiveActive)
     var running by remember { mutableStateOf(false) }
     val frame = remember { mutableLongStateOf(0L) }
     val drainStart = remember { longArrayOf(0L) } // frame nanos the drain began (0 = not draining)
-    LaunchedEffect(active) { if (active) { sim.rearm(); running = true } }
+    LaunchedEffect(effectiveActive) { if (effectiveActive) { sim.rearm(); running = true } }
     LaunchedEffect(running) {
         while (running) {
             withFrameNanos { t ->
@@ -377,7 +400,7 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
 
     // Soft fade in/out so embers don't pop on/off.
     val alpha by animateFloatAsState(
-        targetValue = if (active) 1f else 0f,
+        targetValue = if (effectiveActive) 1f else 0f,
         animationSpec = tween(DurationSlow),
         label = "emberAlpha",
     )

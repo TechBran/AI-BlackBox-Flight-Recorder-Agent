@@ -21,12 +21,12 @@ class EmberSimulationTest {
         val sim = EmberSimulation()
         sim.resize(width, height)
 
-        assertEquals("total particle count", 120, sim.particles.size)
+        assertEquals("total particle count", 240, sim.particles.size)
 
         val byLayer = sim.particles.groupingBy { it.layerIndex }.eachCount()
-        assertEquals("far layer count", 40, byLayer[0])
-        assertEquals("mid layer count", 50, byLayer[1])
-        assertEquals("foreground layer count", 30, byLayer[2])
+        assertEquals("far layer count", 80, byLayer[0])
+        assertEquals("mid layer count", 100, byLayer[1])
+        assertEquals("foreground layer count", 60, byLayer[2])
     }
 
     @Test fun `all particles rise (upward velocity)`() {
@@ -89,7 +89,7 @@ class EmberSimulationTest {
         sim.rearm() // fresh activation after a drain
 
         assertFalse("rearm must revive the field", sim.isDrained())
-        assertEquals("still 120 particles", 120, sim.particles.size)
+        assertEquals("still 240 particles", 240, sim.particles.size)
         assertTrue("velocities still upward", sim.particles.all { it.vy < 0f })
         // Re-staggered across ~1.5x height rather than all bunched at the bottom.
         assertTrue(

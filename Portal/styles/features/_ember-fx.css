@@ -37,6 +37,13 @@
     background: transparent;
 }
 
+/* Home/empty screen (#helpHints): transparent so the ember backdrop shows through
+   it in "always" mode — without this its opaque black bg (--bg) hides the embers on
+   the logo/empty screen. Idle look is unchanged: .chat behind is the same pure black. */
+#helpHints.home-screen {
+    background: transparent;
+}
+
 /* Note: #helpHints (empty-state home screen) keeps its existing z-index:10 and
    is display:none during generation — intentionally left untouched. */
 
@@ -44,4 +51,40 @@
     /* The effect is motion; the JS skips it entirely. Keep the canvas hidden in
        case markup was injected before the JS bailed. */
     #emberCanvas { display: none; }
+}
+
+/* ── Settings: ember backdrop mode (Off / While generating / Always on) ──────── */
+.ember-section {
+    border-top: 1px solid var(--neutral-300);
+    padding-top: 12px;
+}
+.ember-section h4 { margin: 0 0 8px; }
+.ember-mode-row { display: flex; gap: 6px; }
+.ember-mode-opt {
+    flex: 1;
+    text-align: center;
+    padding: 8px 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 12.5px;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color .15s ease, color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.ember-mode-opt:hover { border-color: var(--accent); color: var(--text); }
+.ember-mode-opt input { position: absolute; opacity: 0; pointer-events: none; }
+/* .selected is set by initEmberModeControl as a fallback for browsers without :has() */
+.ember-mode-opt.selected,
+.ember-mode-opt:has(input:checked) {
+    border-color: var(--accent);
+    color: var(--text);
+    background: rgba(255, 74, 74, 0.12);
+    box-shadow: 0 0 12px rgba(255, 74, 74, 0.25);
+}
+.ember-mode-hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
 }

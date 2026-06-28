@@ -173,6 +173,9 @@ class NativeMainActivity : ComponentActivity() {
                 // mechanism.
                 var cliAgentInTerminal by remember { mutableStateOf(false) }
                 val autoTtsEnabled by store.autoTtsEnabled.collectAsState(initial = false)
+                // Ember Backdrop mode (off / generating / always) — provided to the
+                // tree below via LocalEmberMode so EmberOverlay can honor it.
+                val emberMode by store.emberMode.collectAsState(initial = "always")
 
                 // Legacy audio recorder — still used by onRecordAudio (Gemini) and
                 // the CLI WhisperMicButton. onWhisper no longer drives it.
@@ -363,6 +366,11 @@ class NativeMainActivity : ComponentActivity() {
 
                 // Full-screen overlay layout — no Scaffold, no black bars
                 // TopBar and Composer float over content with transparent backgrounds
+                // Ember backdrop mode provided once here from the persisted setting;
+                // read by EmberOverlay deep in the tree (call sites still pass "is generating").
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode
+                ) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -832,6 +840,7 @@ class NativeMainActivity : ComponentActivity() {
                         )
                     }
                 }
+                } // end CompositionLocalProvider(LocalEmberMode)
 
                 // Settings sheet
                 if (showSettings) {

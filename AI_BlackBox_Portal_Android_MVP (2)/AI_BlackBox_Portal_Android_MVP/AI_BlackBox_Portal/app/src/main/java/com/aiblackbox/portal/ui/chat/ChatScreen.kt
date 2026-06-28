@@ -98,15 +98,18 @@ fun ChatScreen(
         }
     }
 
-    if (messages.isEmpty()) {
-        HomeScreen(modifier = modifier)
-    } else {
-        Box(modifier = modifier.fillMaxSize()) {
-            // Ember glow behind the messages while the AI is thinking/streaming.
-            // The chat screen is transparent over the activity's BbxBlack root and
-            // bubbles carry their own backgrounds, so embers show through the gaps.
-            EmberOverlay(active = isStreaming, modifier = Modifier.matchParentSize())
+    // One ember backdrop behind BOTH the empty/home state and the messages, so
+    // "Always on" shows embers everywhere — including the BlackBox-logo home screen.
+    // LocalEmberMode (read inside EmberOverlay) decides: Always = on; While
+    // generating = only while streaming; Off = never. The home screen + chat content
+    // are transparent over the activity's BbxBlack root, so embers show through;
+    // bubbles carry their own backgrounds and stay readable.
+    Box(modifier = modifier.fillMaxSize()) {
+        EmberOverlay(active = isStreaming, modifier = Modifier.matchParentSize())
 
+        if (messages.isEmpty()) {
+            HomeScreen(modifier = Modifier.fillMaxSize())
+        } else {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
