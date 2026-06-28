@@ -127,6 +127,8 @@ class LocalModelViewModelTest {
             DownloadProgressBus.update(
                 DownloadProgressBus.State(bundle.slug, 0f, DownloadProgressBus.Status.RUNNING),
             )
+            // NOTE: this whole-percent throttle is a faithful copy of the one in
+            // ModelDownloadService's worker — keep the two in sync.
             var lastPct = -1
             val result = installer.install(bundle, operator, "cpu") { soFar, total ->
                 val frac = if (total > 0) (soFar.toFloat() / total).coerceIn(0f, 1f) else -1f
@@ -137,6 +139,43 @@ class LocalModelViewModelTest {
                         DownloadProgressBus.State(bundle.slug, frac, DownloadProgressBus.Status.RUNNING),
                     )
                 }
+            }
+            DownloadProgressBus.update(
+                if (result.isSuccess) {
+                    DownloadProgressBus.State(bundle.slug, 1f, DownloadProgressBus.Status.SUCCESS)
+                } else {
+                    DownloadProgressBus.State(
+                        bundle.slug,
+                        0f,
+                        DownloadProgressBus.Status.FAILED,
+                        result.exceptionOrNull()?.message ?: "download failed",
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Simulates [com.aiblackbox.portal.ModelDownloadService] when `install()` THROWS
+     * rather than returning a [Result.failure] — the I1 case: `verify()` reads the
+     * downloaded file and can throw an IOException AFTER a successful transfer (and
+     * `writeSidecar()`/`mkdirs()` can throw on a storage error). This seam MIRRORS the
+     * production worker's try/catch: ANY throw is converted into a retryable FAILED bus
+     * event, so the foreground tear-down + busy-clear always happen. Runs on the
+     * independent [serviceScope], exactly like [serviceSeam].
+     */
+    private fun throwingServiceSeam(
+        installer: LocalModelInstaller,
+        operator: String = "Brandon",
+    ): (LocalBundle) -> Unit = { bundle ->
+        serviceScope.launch {
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(bundle.slug, 0f, DownloadProgressBus.Status.RUNNING),
+            )
+            val result: Result<*> = try {
+                installer.install(bundle, operator, "cpu") { _, _ -> }
+            } catch (e: Throwable) {
+                Result.failure<Any>(e)
             }
             DownloadProgressBus.update(
                 if (result.isSuccess) {
@@ -433,6 +472,65 @@ class LocalModelViewModelTest {
         vm.download(e4b)
         advanceUntilIdle()
         assertEquals("retry must re-invoke install", 2, failing.installCount)
+    }
+
+    // ── I1: a THROWN install() un-sticks the UI (retryable FAILED) ───────────
+    //
+    // LocalModelManager.install() is NOT fully throw-safe — verify() can throw an
+    // IOException AFTER a successful transfer. The production ModelDownloadService now
+    // wraps install() in try/catch so ANY throw becomes a retryable FAILED bus event
+    // (foreground always torn down, busy always cleared). [throwingServiceSeam] mirrors
+    // that try/catch; an installer whose install() THROWS drives it. This locks the bus
+    // FAILED contract that un-sticks the ViewModel (the service glue itself is untested).
+
+    @Test
+    fun `a thrown install becomes a retryable FAILED and un-sticks the UI (I1)`() = runTest(dispatcher) {
+        var installCalls = 0
+        val throwing = object : LocalModelInstaller {
+            val store = mutableListOf<InstalledModel>()
+            override suspend fun installedModels() = store.toList()
+            override suspend fun recommendForDevice(bundles: List<LocalBundle>) = e4b
+            override suspend fun install(
+                bundle: LocalBundle,
+                operator: String,
+                delegate: String,
+                onProgress: (Long, Long) -> Unit,
+            ): Result<InstalledModel> {
+                installCalls++
+                // Transfer "succeeds" (progress reaches 100%), then verify() THROWS —
+                // the exact I1 shape (a throw AFTER a successful transfer), not a
+                // Result.failure.
+                onProgress(bundle.sizeBytes ?: 1L, bundle.sizeBytes ?: 1L)
+                throw IOException("verify failed after transfer")
+            }
+            override suspend fun delete(slug: String): Boolean = store.removeAll { it.slug == slug }
+        }
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm = vm(throwing, catalog, startDownload = throwingServiceSeam(throwing))
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        // The thrown install() landed as a retryable FAILED, exactly as a Result.failure would.
+        assertTrue("slug recorded as failed", s.failedSlugs.contains("gemma-4-e4b"))
+        assertFalse(
+            "no stale progress entry -> row isn't stuck on a spinner",
+            s.downloadProgress.containsKey("gemma-4-e4b"),
+        )
+        assertNull("busySlug cleared (the wedge the leak caused)", s.busySlug)
+        assertNotNull("error surfaced for the user", s.error)
+        assertFalse("not installed after the throw", s.installed.any { it.slug == "gemma-4-e4b" })
+        // The terminal FAILED was consumed off the bus.
+        assertNull(DownloadProgressBus.flow.value["gemma-4-e4b"])
+
+        // The crux of I1: because busySlug was cleared, download() must NOT early-return
+        // — the user can retry without killing the app.
+        vm.download(e4b)
+        advanceUntilIdle()
+        assertEquals("retry allowed after a thrown install (busy was cleared)", 2, installCalls)
     }
 
     // ── setAutonomy ─────────────────────────────────────────────────────────

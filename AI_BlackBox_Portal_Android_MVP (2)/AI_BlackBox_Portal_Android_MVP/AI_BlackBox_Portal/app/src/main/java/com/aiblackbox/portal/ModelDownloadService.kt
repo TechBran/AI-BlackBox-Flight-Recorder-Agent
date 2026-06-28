@@ -92,25 +92,41 @@ class ModelDownloadService : Service() {
         )
 
         scope.launch {
-            val manager = LocalModelManager.fromContext(
-                applicationContext,
-                LocalModelApi(BlackBoxApi(origin)),
-                deviceId,
-            )
-            // Throttle: the real download fires onProgress on every ~64KB chunk
-            // (thousands per multi-GB bundle). Publish to the bus + update the
-            // notification only when the whole-percent value changes.
-            var lastPct = -1
-            val result = manager.install(bundle, operator, delegate) { soFar, total ->
-                val frac = if (total > 0) (soFar.toFloat() / total).coerceIn(0f, 1f) else -1f
-                val pct = if (frac < 0) 0 else (frac * 100).toInt()
-                if (pct != lastPct) {
-                    lastPct = pct
-                    DownloadProgressBus.update(
-                        DownloadProgressBus.State(bundle.slug, frac, DownloadProgressBus.Status.RUNNING),
-                    )
-                    updateNotification(buildNotification(bundle.displayName, pct, indeterminate = frac < 0))
+            // install() is NOT fully throw-safe: verify() reads the downloaded file and
+            // can throw an IOException AFTER a successful transfer, and writeSidecar()/
+            // mkdirs() can throw on a storage error. Wrap it so ANY throw becomes a
+            // retryable FAILED — otherwise an uncaught throw would skip the terminal bus
+            // update (stuck at RUNNING), skip stopForeground/stopSelf (leaked foreground
+            // notification + a service that never stops), and leave the ViewModel's
+            // busySlug set (the Model Manager row wedged on a spinner the user can't
+            // retry). Mirrors LocalModelService's warm try/catch (graceful stop). The
+            // terminal publish + stopForeground + stopSelf below run on BOTH paths.
+            val result: Result<*> = try {
+                val manager = LocalModelManager.fromContext(
+                    applicationContext,
+                    LocalModelApi(BlackBoxApi(origin)),
+                    deviceId,
+                )
+                // Throttle: the real download fires onProgress on every ~64KB chunk
+                // (thousands per multi-GB bundle). Publish to the bus + update the
+                // notification only when the whole-percent value changes.
+                // NOTE: this whole-percent throttle is duplicated in
+                // LocalModelViewModelTest's `serviceSeam` (a faithful copy that must stay
+                // in sync with this block).
+                var lastPct = -1
+                manager.install(bundle, operator, delegate) { soFar, total ->
+                    val frac = if (total > 0) (soFar.toFloat() / total).coerceIn(0f, 1f) else -1f
+                    val pct = if (frac < 0) 0 else (frac * 100).toInt()
+                    if (pct != lastPct) {
+                        lastPct = pct
+                        DownloadProgressBus.update(
+                            DownloadProgressBus.State(bundle.slug, frac, DownloadProgressBus.Status.RUNNING),
+                        )
+                        updateNotification(buildNotification(bundle.displayName, pct, indeterminate = frac < 0))
+                    }
                 }
+            } catch (e: Throwable) {
+                Result.failure<Any>(e)
             }
 
             DownloadProgressBus.update(

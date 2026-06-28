@@ -397,9 +397,10 @@ class LocalModelViewModel(
             val deviceId = com.aiblackbox.portal.util.DeviceId.stable(context)
             val localApi = LocalModelApi(api)
             val manager = LocalModelManager.fromContext(context, localApi, deviceId)
-            // GPU/CPU delegate the installed model is configured for. The download
-            // itself is delegate-agnostic (bytes only); it is forwarded to the Service
-            // so it builds the same manager/config the ViewModel would.
+            // The delegate is currently HARDCODED to "cpu". The download itself is
+            // delegate-agnostic (bytes only); this value is only carried through to
+            // attest. It is forwarded to the Service so it builds the same manager/config
+            // the ViewModel would.
             val delegate = "cpu"
             val appContext = context.applicationContext
             val origin = api.getBaseUrl()
