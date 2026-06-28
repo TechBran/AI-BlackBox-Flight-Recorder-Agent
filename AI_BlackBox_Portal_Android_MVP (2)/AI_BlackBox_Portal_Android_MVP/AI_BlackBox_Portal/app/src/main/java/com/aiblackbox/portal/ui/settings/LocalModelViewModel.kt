@@ -5,6 +5,7 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.LocalModelApi
 import com.aiblackbox.portal.data.api.LocalModelCatalogClient
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.local.DownloadProgressBus
 import com.aiblackbox.portal.data.local.InstalledModel
 import com.aiblackbox.portal.data.local.LocalModelInstaller
 import com.aiblackbox.portal.data.local.LocalModelManager
@@ -85,16 +86,20 @@ const val AUTONOMY_YOLO = "yolo"
  * **Plain class, not AndroidViewModel** — matches this project's testable
  * holder convention (`CliAgentScreenState`): all Android-framework facts come in
  * through constructor seams ([installer], [catalog], [operatorProvider],
- * [deviceId], [onModelSelected], [ioDispatcher]) so the whole thing unit-tests
- * with plain JUnit + `runTest` and in-memory fakes — no Context, disk, or
- * network. The Composable builds the production wiring via [fromContext].
+ * [deviceId], [onModelSelected], [startDownload], [ioDispatcher]) so the whole
+ * thing unit-tests with plain JUnit + `runTest` and in-memory fakes — no Context,
+ * disk, or network. The Composable builds the production wiring via [fromContext].
  *
- * **Progress throttling.** The real download fires [onProgress] on every ~64KB
- * chunk (thousands of callbacks for a multi-GB bundle). Pushing each to Compose
- * state would thrash recomposition. We coalesce: a progress callback only
- * updates state when the fraction advances by ≥ [PROGRESS_STEP] (1%) or hits
- * 1.0, and the [download] action marshals the update onto [scope] so Compose
- * state is touched on the holder's dispatcher, never the IO callback thread.
+ * **Durable downloads (Phase C).** The multi-GB transfer no longer runs inside
+ * this holder's [scope] — `dispose()` cancels that scope on screen-leave, which
+ * used to kill an in-flight download. [download] now hands the bundle to the
+ * [startDownload] seam (production: a foreground
+ * [com.aiblackbox.portal.ModelDownloadService] that OUTLIVES this holder), and the
+ * Service publishes live progress to the process-wide [DownloadProgressBus]. This
+ * holder OBSERVES that bus ([onBus]); because the bus is a StateFlow, a freshly
+ * recreated holder's [init] collector immediately replays the latest state and
+ * re-attaches to a download that is still running. Progress is throttled to
+ * whole-percent ticks by the Service (the producer), so the bus is not chatty.
  */
 class LocalModelViewModel(
     private val installer: LocalModelInstaller,
@@ -102,8 +107,15 @@ class LocalModelViewModel(
     private val operatorProvider: () -> String,
     private val deviceId: String,
     private val onModelSelected: (String) -> Unit,
+    /**
+     * Start the durable download for a bundle (Phase C). Production ([fromContext])
+     * wires this to [com.aiblackbox.portal.ModelDownloadService.start], which runs
+     * the transfer in a foreground Service that survives [dispose]; tests inject a
+     * fake that drives [DownloadProgressBus] directly. This holder reacts ONLY via
+     * the bus, never by awaiting the download itself.
+     */
+    private val startDownload: (LocalBundle) -> Unit,
     ioDispatcher: CoroutineDispatcher = Dispatchers.Main,
-    private val delegate: String = "cpu",
     /**
      * Mirror a successfully-changed autonomy mode into LOCAL persistence
      * (Task 4.6) so the on-device phone-control agent can read it WITHOUT a
@@ -117,6 +129,15 @@ class LocalModelViewModel(
 
     private val _state = MutableStateFlow(LocalModelUiState())
     val state: StateFlow<LocalModelUiState> = _state.asStateFlow()
+
+    init {
+        // Observe the durable-download bus. A StateFlow replays its latest value on
+        // subscription, so a holder created AFTER a download started (e.g. the user
+        // navigated away + back, recreating this VM) immediately re-attaches to the
+        // in-flight (or already-terminal) state — the download itself runs in the
+        // Service, independent of this scope.
+        scope.launch { DownloadProgressBus.flow.collect { onBus(it) } }
+    }
 
     /**
      * Load everything the section renders: the downloadable catalog, the
@@ -168,12 +189,16 @@ class LocalModelViewModel(
     }
 
     /**
-     * Download + verify + attest [bundle]. Resumable: a re-tap after a failed
-     * attempt resumes the partial `.part` (LocalModelApi.download), so we do NOT
-     * permanently lock the slug — only one in-flight action at a time per slug
-     * (guarded by [LocalModelUiState.busySlug]).
+     * Start a durable download of [bundle] (Phase C). Seeds the busy/progress UI
+     * state, then hands the transfer to the [startDownload] seam — the foreground
+     * [com.aiblackbox.portal.ModelDownloadService], which OUTLIVES this holder, so
+     * leaving the screen ([dispose]) no longer cancels the download. The actual
+     * progress + the terminal install/verify/attest result flow back through
+     * [DownloadProgressBus] into [onBus]; this method never awaits the download.
      *
-     * Progress is throttled (see class kdoc) and marshalled onto [scope].
+     * Resumable: a re-tap after a failed attempt resumes the partial `.part`
+     * (LocalModelApi.download), so we do NOT permanently lock the slug — one
+     * in-flight action at a time per slug (guarded by [LocalModelUiState.busySlug]).
      */
     fun download(bundle: LocalBundle) {
         if (_state.value.busySlug == bundle.slug) return
@@ -186,70 +211,60 @@ class LocalModelViewModel(
                 downloadProgress = it.downloadProgress + (bundle.slug to 0f),
             )
         }
-        scope.launch {
-            // Throttle: only push a state update when progress advances ≥ 1%
-            // (or hits 100%). lastEmitted starts below 0 so the first tick lands.
-            var lastEmitted = -1f
-            val onProgress: (Long, Long) -> Unit = { soFar, total ->
-                val fraction = when {
-                    total <= 0L -> PROGRESS_INDETERMINATE
-                    else -> (soFar.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+        // The Service throttles progress + runs install/verify/attest and publishes
+        // RUNNING/SUCCESS/FAILED to DownloadProgressBus, which this VM observes (onBus).
+        startDownload(bundle)
+    }
+
+    /**
+     * React to the durable-download [DownloadProgressBus]. Runs in this holder's
+     * [scope]; a freshly recreated holder re-attaches automatically because the bus
+     * is a StateFlow (the [init] collector replays the latest value). Per slug:
+     *  - RUNNING -> reflect fractional progress; adopt it as [busySlug] if nothing
+     *    else is busy (so a re-attached holder shows the in-flight row correctly).
+     *  - SUCCESS -> re-scan installed, clear this slug's progress/failed/busy, drop
+     *    the error, then [DownloadProgressBus.clear] the consumed terminal state.
+     *  - FAILED  -> mark the slug failed, clear its progress/busy, surface the error,
+     *    then clear the consumed terminal state from the bus.
+     */
+    private suspend fun onBus(map: Map<String, DownloadProgressBus.State>) {
+        for ((slug, st) in map) {
+            when (st.status) {
+                DownloadProgressBus.Status.RUNNING -> _state.update {
+                    it.copy(
+                        downloadProgress = it.downloadProgress + (slug to st.fraction),
+                        // Adopt busy only when free, so we don't clobber another row's
+                        // in-flight action; covers the fresh-VM re-attach (busySlug null).
+                        busySlug = it.busySlug ?: slug,
+                    )
                 }
-                val advancedEnough = fraction == PROGRESS_INDETERMINATE ||
-                    fraction >= 1f ||
-                    fraction - lastEmitted >= PROGRESS_STEP
-                if (advancedEnough && fraction != lastEmitted) {
-                    lastEmitted = fraction
-                    // Marshal onto the holder's dispatcher: download() runs the
-                    // callback on an IO thread, so never touch state inline.
-                    scope.launch {
-                        _state.update { s ->
-                            // Terminal-wins guard: on a multi-threaded dispatcher a
-                            // late progress launch can run AFTER the success/failure
-                            // update has removed this slug from downloadProgress and
-                            // cleared busySlug. Without this guard it would re-insert
-                            // the slug, leaving the row stuck on a progress bar for an
-                            // already-installed model. busySlug == this slug for the
-                            // whole download and is cleared at both terminal paths, so
-                            // it is the authoritative "still in flight" signal.
-                            if (s.busySlug != bundle.slug) s
-                            else s.copy(downloadProgress = s.downloadProgress + (bundle.slug to fraction))
-                        }
+                DownloadProgressBus.Status.SUCCESS -> {
+                    val installedList = runCatching { installer.installedModels() }
+                        .getOrDefault(_state.value.installed)
+                    _state.update {
+                        it.copy(
+                            installed = installedList,
+                            busySlug = if (it.busySlug == slug) null else it.busySlug,
+                            downloadProgress = it.downloadProgress - slug,
+                            failedSlugs = it.failedSlugs - slug,
+                            error = null,
+                        )
                     }
+                    // Consume the terminal state so a re-subscribing VM doesn't replay it.
+                    DownloadProgressBus.clear(slug)
                 }
-            }
-
-            val result = installer.install(
-                bundle = bundle,
-                operator = operatorProvider(),
-                delegate = delegate,
-                onProgress = onProgress,
-            )
-
-            if (result.isSuccess) {
-                val installedList = runCatching { installer.installedModels() }
-                    .getOrDefault(_state.value.installed)
-                _state.update {
-                    it.copy(
-                        installed = installedList,
-                        busySlug = null,
-                        // Clear the progress entry + any FAILED flag on success.
-                        downloadProgress = it.downloadProgress - bundle.slug,
-                        failedSlugs = it.failedSlugs - bundle.slug,
-                        error = null,
-                    )
-                }
-            } else {
-                _state.update {
-                    it.copy(
-                        busySlug = null,
-                        downloadProgress = it.downloadProgress - bundle.slug,
-                        // Mark this slug FAILED so the row shows a Retry affordance
-                        // (Task W5.1). The underlying download is resumable, so a
-                        // retry resumes the partial .part rather than restarting.
-                        failedSlugs = it.failedSlugs + bundle.slug,
-                        error = "Download failed: ${result.exceptionOrNull()?.message ?: "unknown error"}",
-                    )
+                DownloadProgressBus.Status.FAILED -> {
+                    _state.update {
+                        it.copy(
+                            busySlug = if (it.busySlug == slug) null else it.busySlug,
+                            downloadProgress = it.downloadProgress - slug,
+                            // Mark FAILED so the row shows a Retry affordance (Task W5.1);
+                            // the .part lets a retry resume rather than restart.
+                            failedSlugs = it.failedSlugs + slug,
+                            error = "Download failed: ${st.error ?: "unknown error"}",
+                        )
+                    }
+                    DownloadProgressBus.clear(slug)
                 }
             }
         }
@@ -359,9 +374,6 @@ class LocalModelViewModel(
     }
 
     companion object {
-        /** Minimum fractional advance (1%) before a progress tick updates state. */
-        const val PROGRESS_STEP = 0.01f
-
 
         /**
          * Production wiring. Builds the real [LocalModelApi] + [LocalModelManager]
@@ -369,6 +381,11 @@ class LocalModelViewModel(
          * ANDROID_ID (matching how the manager factory keeps all framework access
          * out of the testable core). The active-model selection is recorded via
          * [onModelSelected] — 1.6 hands in a setter into the model store.
+         *
+         * The [startDownload] seam is wired to [com.aiblackbox.portal.ModelDownloadService]
+         * (a foreground Service) so the multi-GB transfer survives this holder's
+         * [dispose]; it is handed the same `origin` + `deviceId` this factory resolved
+         * so the Service constructs the identical [LocalModelManager].
          */
         fun fromContext(
             context: Context,
@@ -380,6 +397,12 @@ class LocalModelViewModel(
             val deviceId = com.aiblackbox.portal.util.DeviceId.stable(context)
             val localApi = LocalModelApi(api)
             val manager = LocalModelManager.fromContext(context, localApi, deviceId)
+            // GPU/CPU delegate the installed model is configured for. The download
+            // itself is delegate-agnostic (bytes only); it is forwarded to the Service
+            // so it builds the same manager/config the ViewModel would.
+            val delegate = "cpu"
+            val appContext = context.applicationContext
+            val origin = api.getBaseUrl()
             // Local mirror of the autonomy posture for the on-device phone-control
             // gate (Task 4.6): the toggle writes here so the agent reads it with no
             // network hop and fails SAFE (PERMISSION) when unset.
@@ -390,6 +413,11 @@ class LocalModelViewModel(
                 operatorProvider = operatorProvider,
                 deviceId = deviceId,
                 onModelSelected = onModelSelected,
+                startDownload = { b ->
+                    com.aiblackbox.portal.ModelDownloadService.start(
+                        appContext, b, operatorProvider(), delegate, origin, deviceId,
+                    )
+                },
                 ioDispatcher = ioDispatcher,
                 onAutonomyPersisted = { wire ->
                     autonomyStore.save(com.aiblackbox.portal.data.local.AutonomyStore.parse(wire))

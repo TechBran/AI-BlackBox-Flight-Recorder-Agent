@@ -1,13 +1,17 @@
 package com.aiblackbox.portal.ui.settings
 
 import com.aiblackbox.portal.data.api.LocalModelCatalogClient
+import com.aiblackbox.portal.data.local.DownloadProgressBus
 import com.aiblackbox.portal.data.local.InstalledModel
 import com.aiblackbox.portal.data.local.LocalModelInstaller
 import com.aiblackbox.portal.data.model.AttestRequest
 import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.model.LocalDeviceRecord
 import com.aiblackbox.portal.data.model.LocalStatus
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -34,24 +38,27 @@ import java.io.IOException
  * injected via the test constructor, so [advanceUntilIdle] deterministically
  * drains them.
  *
- * Coverage per the Task 1.5 brief:
+ * Coverage per the Task 1.5 brief (+ Phase C durable downloads):
  *   - refresh populates catalog / installed / recommended / autonomy.
- *   - download happy path flips state downloading → installed, progress ≈ 1f.
- *   - download failure surfaces `error` and is retryable.
+ *   - download hands the bundle to the [startDownload] seam (the foreground
+ *     ModelDownloadService) and reacts ONLY to DownloadProgressBus: a SUCCESS
+ *     event flips state downloading → installed; a FAILED event surfaces `error`
+ *     and is retryable; a RUNNING event reflects fractional progress.
+ *   - dispose() cancels only this holder's scope — an in-flight Service download
+ *     keeps running and a freshly recreated holder re-attaches via the bus.
  *   - setAutonomy updates `autonomyMode`.
- *   - progress THROTTLING — feeding many rapid onProgress callbacks does NOT
- *     emit a state update per callback (bounded count) while still landing on
- *     ≈ 1f.
+ *   - the bus pipeline does NOT thrash state (bounded emissions) while still
+ *     landing installed.
  *   - switchModel records the selected slug.
  *
- * NOTE (stale-progress race): the terminal-wins guard in [download] (a late
- * progress launch must not re-insert a slug already removed by the terminal
- * success/failure update) is a multi-threaded-dispatcher hazard. The test
- * dispatcher here serializes coroutines FIFO, so the true race is NOT
- * reproducible; the guard is verified structurally (busySlug is the
- * authoritative in-flight signal, cleared at both terminal paths) and the
- * terminal-wins contract is locked by
- * [download leaves no stale progress entry once complete].
+ * **Phase C test model.** The transfer now runs in [com.aiblackbox.portal.ModelDownloadService],
+ * not the VM. Tests simulate the Service with a [serviceSeam] that runs the fake
+ * installer's `install()` on an INDEPENDENT [serviceScope] (NOT the VM scope) and
+ * translates progress + the terminal Result into [DownloadProgressBus] events,
+ * exactly as the real Service does. The VM observes only the bus. Because
+ * [DownloadProgressBus] is a process-global object, [reset] clears it per-test and
+ * [tearDown] disposes every created VM (cancelling its bus collector) + the
+ * serviceScope, so there is no cross-test bleed.
  *
  * NOTE (Composable render coverage): [LocalModelSection]'s render branches
  * (downloading spinner vs %, installed Switch/Delete vs Download, recommended
@@ -83,12 +90,67 @@ class LocalModelViewModelTest {
         recommended = true,
     )
 
+    // Stands in for ModelDownloadService's OWN scope: independent of any VM scope, so
+    // vm.dispose() can't cancel an in-flight "service" download. Cancelled in tearDown.
+    private val serviceScope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    // Every VM built via [vm] is registered here so tearDown disposes it — cancelling
+    // its (infinite) DownloadProgressBus collector so it can't bleed into the next test.
+    private val createdVms = mutableListOf<LocalModelViewModel>()
+
     @Before fun setUp() {
         kotlinx.coroutines.Dispatchers.setMain(dispatcher)
+        // DownloadProgressBus is a process-global object — reset it so no slug state
+        // survives from a prior test.
+        DownloadProgressBus.clearAll()
     }
 
     @After fun tearDown() {
+        createdVms.forEach { it.dispose() }
+        serviceScope.cancel()
+        DownloadProgressBus.clearAll()
         kotlinx.coroutines.Dispatchers.resetMain()
+    }
+
+    /**
+     * Simulates [com.aiblackbox.portal.ModelDownloadService]: runs the installer's
+     * `install()` (which the Service now owns) on the INDEPENDENT [serviceScope], and
+     * publishes RUNNING (whole-percent throttled) → SUCCESS/FAILED to
+     * [DownloadProgressBus] exactly as the real Service does. The VM reacts only to the
+     * bus, so this is the production-equivalent download path under test.
+     */
+    private fun serviceSeam(
+        installer: LocalModelInstaller,
+        operator: String = "Brandon",
+    ): (LocalBundle) -> Unit = { bundle ->
+        serviceScope.launch {
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(bundle.slug, 0f, DownloadProgressBus.Status.RUNNING),
+            )
+            var lastPct = -1
+            val result = installer.install(bundle, operator, "cpu") { soFar, total ->
+                val frac = if (total > 0) (soFar.toFloat() / total).coerceIn(0f, 1f) else -1f
+                val pct = if (frac < 0) 0 else (frac * 100).toInt()
+                if (pct != lastPct) {
+                    lastPct = pct
+                    DownloadProgressBus.update(
+                        DownloadProgressBus.State(bundle.slug, frac, DownloadProgressBus.Status.RUNNING),
+                    )
+                }
+            }
+            DownloadProgressBus.update(
+                if (result.isSuccess) {
+                    DownloadProgressBus.State(bundle.slug, 1f, DownloadProgressBus.Status.SUCCESS)
+                } else {
+                    DownloadProgressBus.State(
+                        bundle.slug,
+                        0f,
+                        DownloadProgressBus.Status.FAILED,
+                        result.exceptionOrNull()?.message ?: "download failed",
+                    )
+                },
+            )
+        }
     }
 
     // ── Fakes ────────────────────────────────────────────────────────────
@@ -201,15 +263,19 @@ class LocalModelViewModelTest {
         deviceId: String = "pixel-9",
         onSwitch: (String) -> Unit = {},
         onPersist: (String) -> Unit = {},
+        // Defaults to the production-equivalent Service simulation; tests that want to
+        // drive the bus directly inject their own seam.
+        startDownload: ((LocalBundle) -> Unit)? = null,
     ) = LocalModelViewModel(
         installer = installer,
         catalog = catalog,
         operatorProvider = { operator },
         deviceId = deviceId,
         onModelSelected = onSwitch,
+        startDownload = startDownload ?: serviceSeam(installer, operator),
         ioDispatcher = dispatcher,
         onAutonomyPersisted = onPersist,
-    )
+    ).also { createdVms += it }
 
     // ── refresh ───────────────────────────────────────────────────────────
 
@@ -322,11 +388,9 @@ class LocalModelViewModelTest {
 
     @Test
     fun `download leaves no stale progress entry once complete`() = runTest(dispatcher) {
-        // Locks the terminal-wins contract that the guard protects: once the
-        // download's terminal success update has run, the slug must be GONE from
-        // downloadProgress and busySlug must be null. (The true late-tick race is
-        // dispatcher-dependent and not reproducible on the FIFO test dispatcher —
-        // see the class kdoc; this asserts the invariant the guard preserves.)
+        // Once the bus delivers the terminal SUCCESS, the VM's onBus must drop the slug
+        // from downloadProgress and clear busySlug — no stale progress bar lingers on an
+        // already-installed model.
         val installer = FakeInstaller(recommended = e4b, progressTicks = 50)
         val catalog = FakeCatalog(listOf(e2b, e4b))
         val vm = vm(installer, catalog)
@@ -515,11 +579,13 @@ class LocalModelViewModelTest {
         assertEquals("gemma-4-e4b", vm.state.value.activeSlug)
     }
 
-    // ── progress THROTTLING ──────────────────────────────────────────────────
+    // ── bus pipeline does not thrash state ───────────────────────────────────
 
     @Test
-    fun `download throttles progress updates rather than emitting per callback`() = runTest(dispatcher) {
-        // 1000 rapid ticks (mimicking the real download's per-64KB callback).
+    fun `download via bus does not thrash state per progress callback`() = runTest(dispatcher) {
+        // 1000 rapid ticks (mimicking the real download's per-64KB callback). The
+        // Service (serviceSeam) throttles to whole-percent, and the bus StateFlow
+        // conflates, so the VM must NOT emit ~1000 state updates.
         val chatty = FakeInstaller(recommended = e4b, progressTicks = 1000)
         val catalog = FakeCatalog(listOf(e2b, e4b))
         val vm = vm(chatty, catalog)
@@ -534,10 +600,7 @@ class LocalModelViewModelTest {
         vm.download(e4b)
         advanceUntilIdle()
 
-        // Hard upper bound: throttling to ~1% or ~250ms means well under one
-        // emission per tick. 1000 ticks must NOT yield ~1000 state updates.
-        // Allow generous headroom (refresh + install start/end + ≤100 progress
-        // steps) but firmly below the unthrottled count.
+        // Hard upper bound: 1000 progress ticks must NOT yield ~1000 state updates.
         assertTrue(
             "throttled: ${emissions.size} emissions for 1000 progress ticks must be << 1000",
             emissions.size < 200,
@@ -646,5 +709,91 @@ class LocalModelViewModelTest {
         assertTrue((e4bRow.state as ModelRowState.Installed).active)
         // e2b is downloadable.
         assertEquals(ModelRowState.Downloadable, rows.first { it.slug == "gemma-4-e2b" }.state)
+    }
+
+    // ── Phase C: durable downloads via the Service + DownloadProgressBus ──────
+
+    @Test
+    fun `download starts via seam and bus SUCCESS refreshes installed`() = runTest(dispatcher) {
+        val installer = FakeInstaller(recommended = e4b)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val started = mutableListOf<String>()
+        // A seam standing in for the Service: it records the start, marks the model
+        // installed (as the Service's install() would), then publishes the terminal
+        // SUCCESS the VM observes via the bus.
+        val vm = vm(installer, catalog, startDownload = { b ->
+            started += b.slug
+            installer.installed.add(InstalledModel(b.slug, File("/tmp/${b.filename}"), b.sizeBytes ?: 1L))
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(b.slug, 1f, DownloadProgressBus.Status.SUCCESS),
+            )
+        })
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+
+        assertEquals("download went through the seam, not an in-scope install", listOf("gemma-4-e4b"), started)
+        assertTrue("bus SUCCESS refreshed installed", vm.state.value.isInstalled("gemma-4-e4b"))
+        assertNull("busy cleared on terminal SUCCESS", vm.state.value.busySlug)
+        assertNull(vm.state.value.error)
+        // The VM consumed + cleared the terminal state from the bus.
+        assertNull(DownloadProgressBus.flow.value["gemma-4-e4b"])
+    }
+
+    @Test
+    fun `bus RUNNING reflects fractional progress and adopts busy`() = runTest(dispatcher) {
+        val installer = FakeInstaller(recommended = e4b)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        // A seam emitting only a mid-flight RUNNING tick (the Service is still downloading).
+        val vm = vm(installer, catalog, startDownload = { b ->
+            DownloadProgressBus.update(
+                DownloadProgressBus.State(b.slug, 0.42f, DownloadProgressBus.Status.RUNNING),
+            )
+        })
+        vm.refresh()
+        advanceUntilIdle()
+
+        vm.download(e4b)
+        advanceUntilIdle()
+
+        val s = vm.state.value
+        assertEquals("progress reflected from the bus", 0.42f, s.downloadProgress["gemma-4-e4b"]!!, 0.0001f)
+        assertEquals("the in-flight slug is busy", "gemma-4-e4b", s.busySlug)
+        assertFalse("not installed mid-flight", s.installed.any { it.slug == "gemma-4-e4b" })
+    }
+
+    @Test
+    fun `dispose does not cancel an in-flight service download`() = runTest(dispatcher) {
+        // The download runs in the (simulated) Service on serviceScope — NOT the VM
+        // scope — so leaving the screen (dispose) must not cancel it; a fresh VM then
+        // re-attaches to the terminal state via the bus.
+        val installer = FakeInstaller(recommended = e4b, progressTicks = 4)
+        val catalog = FakeCatalog(listOf(e2b, e4b))
+        val vm1 = vm(installer, catalog) // default serviceSeam launches install() on serviceScope
+        vm1.refresh()
+        advanceUntilIdle()
+
+        vm1.download(e4b)
+        assertEquals("download marked busy synchronously", "gemma-4-e4b", vm1.state.value.busySlug)
+
+        // Leave the screen mid-download: cancels ONLY vm1's scope (its bus collector).
+        vm1.dispose()
+        advanceUntilIdle()
+
+        // The Service's install() ran to completion despite dispose(), and the bus holds
+        // the terminal SUCCESS (vm1's dead collector never consumed/cleared it).
+        assertEquals("install finished despite dispose()", 1, installer.installCount)
+        assertEquals(
+            DownloadProgressBus.Status.SUCCESS,
+            DownloadProgressBus.flow.value["gemma-4-e4b"]?.status,
+        )
+
+        // A freshly recreated VM re-attaches to the bus's latest value and reflects it.
+        val vm2 = vm(installer, catalog)
+        advanceUntilIdle()
+        assertTrue("fresh VM re-attached and shows installed", vm2.state.value.isInstalled("gemma-4-e4b"))
+        assertNull("fresh VM is not busy", vm2.state.value.busySlug)
     }
 }
