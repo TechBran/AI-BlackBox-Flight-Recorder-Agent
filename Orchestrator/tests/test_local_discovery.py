@@ -114,7 +114,7 @@ def test_catalog_entries_have_required_fields(client):
 
 def test_catalog_per_model_config_e4b_recommended(client):
     """Task W6: E4B is the recommended default -- carries recommended True, a
-    "Recommended" context note, a real 16K max_tokens window, and is multimodal
+    "Recommended" context note, a 6144-token (GPU-safe) max_tokens window, and is multimodal
     (support_image True)."""
     resp = client.get("/local/models/catalog")
     assert resp.status_code == 200
@@ -122,21 +122,21 @@ def test_catalog_per_model_config_e4b_recommended(client):
     e4b = by_slug["gemma-4-e4b"]
     assert e4b["recommended"] is True
     assert "Recommended" in e4b["context_note"]
-    assert e4b["max_tokens"] == 16384
+    assert e4b["max_tokens"] == 6144
     assert e4b["support_image"] is True
 
 
 def test_catalog_per_model_config_e2b_experimental(client):
     """Task W6: E2B is labeled experimental/weaker at multi-step agent loops --
-    recommended False with an "Experimental" context note. Still a real 16K
-    window + multimodal."""
+    recommended False with an "Experimental" context note. Still a 6144-token
+    (GPU-safe) window + multimodal."""
     resp = client.get("/local/models/catalog")
     assert resp.status_code == 200
     by_slug = {b["slug"]: b for b in resp.json()["bundles"]}
     e2b = by_slug["gemma-4-e2b"]
     assert e2b["recommended"] is False
     assert "Experimental" in e2b["context_note"]
-    assert e2b["max_tokens"] == 16384
+    assert e2b["max_tokens"] == 6144
     assert e2b["support_image"] is True
 
 
@@ -194,7 +194,7 @@ def test_build_catalog_enriches_curated_with_hf_facts(monkeypatch):
     assert e4b["gated"] is False
     assert e4b["download_url"].endswith("/gemma-4-E4B-it.litertlm")
     assert e4b["recommended"] is True              # curated config preserved
-    assert e4b["max_tokens"] == 16384
+    assert e4b["max_tokens"] == 6144
     assert e4b["support_image"] is True
 
 

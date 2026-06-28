@@ -133,7 +133,7 @@ CURATED: dict[str, dict] = {
         "recommended_for": "Lighter, faster on-device model for phones with less RAM.",
         "recommended": False,
         "context_note": "Experimental — weaker at multi-step agent loops",
-        "max_tokens": 16384,
+        "max_tokens": 6144,  # GPU-safe default (= LiteRtEngine.DEFAULT_MAX_TOKENS); user-raisable toward 16384 on a higher-RAM phone
         "support_image": True,
     },
     "gemma-4-e4b": {
@@ -145,7 +145,7 @@ CURATED: dict[str, dict] = {
         "recommended_for": "Heavier, higher-quality on-device model for high-RAM phones.",
         "recommended": True,
         "context_note": "Recommended — best on-device agent reliability",
-        "max_tokens": 16384,
+        "max_tokens": 6144,  # GPU-safe default (= LiteRtEngine.DEFAULT_MAX_TOKENS); user-raisable toward 16384 on a higher-RAM phone
         "support_image": True,
     },
 }
@@ -176,7 +176,7 @@ def _default_entry(slug: str, repo: str, gated: bool, f: dict) -> dict:
         "recommended_for": "Auto-discovered on-device model.",
         "recommended": False,
         "context_note": "Auto-discovered",
-        "max_tokens": 16384,
+        "max_tokens": 6144,  # GPU-safe default (= LiteRtEngine.DEFAULT_MAX_TOKENS); user-raisable toward 16384 on a higher-RAM phone
         "support_image": True,
         "download_url": _download_url(repo, f["path"]),
         "gated": gated,
