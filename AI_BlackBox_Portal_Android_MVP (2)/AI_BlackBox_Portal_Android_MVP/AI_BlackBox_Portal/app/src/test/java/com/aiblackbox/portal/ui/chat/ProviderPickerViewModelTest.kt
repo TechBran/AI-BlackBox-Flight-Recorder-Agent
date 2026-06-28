@@ -69,7 +69,7 @@ class ProviderPickerViewModelTest {
     private class FakeAttester(private val ok: Boolean = true) : LocalModelDownloader {
         val attested = mutableListOf<AttestRequest>()
         override suspend fun download(
-            slug: String,
+            bundle: LocalBundle,
             destFile: File,
             onProgress: (Long, Long) -> Unit,
         ): Result<File> = Result.failure(UnsupportedOperationException("not used"))

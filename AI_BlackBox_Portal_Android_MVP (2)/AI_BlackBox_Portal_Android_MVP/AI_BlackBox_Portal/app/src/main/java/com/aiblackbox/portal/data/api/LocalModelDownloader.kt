@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.api
 
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.model.LocalBundle
 import java.io.File
 
 /**
@@ -16,9 +17,9 @@ import java.io.File
  */
 interface LocalModelDownloader {
 
-    /** Stream the bundle for [slug] to [destFile] (resumable). See LocalModelApi.download. */
+    /** Stream [bundle] to [destFile] (resumable, direct from HF). See LocalModelApi.download. */
     suspend fun download(
-        slug: String,
+        bundle: LocalBundle,
         destFile: File,
         onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
     ): Result<File>

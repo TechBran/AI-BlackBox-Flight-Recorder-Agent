@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.api
 
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.model.LocalBundle
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -123,11 +124,11 @@ class LocalModelApiTest {
     }
 
     // -------------------------------------------------------------------------
-    // 2. download() — fresh download writes bytes + reports progress.
+    // 2. download() — streams from bundle.downloadUrl (HF), no hub header.
     // -------------------------------------------------------------------------
 
     @Test
-    fun `download writes served bytes to destFile and reports progress`() = runTest {
+    fun `download streams from bundle download_url with no hub header`() = runTest {
         val content = ByteArray(2048) { (it % 251).toByte() }
         server.enqueue(
             MockResponse.Builder()
@@ -138,11 +139,16 @@ class LocalModelApiTest {
         )
 
         val dest = File(tmpDir, "gemma.litertlm")
+        // MockWebServer stands in for the HF CDN; the bundle carries the resolve URL.
+        val hfPath = "/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+        val url = server.url(hfPath).toString()
+        val bundle = LocalBundle(slug = "gemma-4-e2b", filename = "gemma.litertlm", downloadUrl = url)
+
         var lastSoFar = 0L
         var lastTotal = -1L
         var sawProgress = false
 
-        val result = api.download("gemma-4-e2b", dest) { soFar, total ->
+        val result = api.download(bundle, dest) { soFar, total ->
             sawProgress = true
             lastSoFar = soFar
             lastTotal = total
@@ -160,10 +166,12 @@ class LocalModelApiTest {
         // No leftover .part temp file once the rename succeeded.
         assertFalse(".part temp must be gone after success", File(tmpDir, "gemma.litertlm.part").exists())
 
-        // Hit the real GET /local/models/download/{slug} endpoint, no Range on a
-        // fresh download.
+        // The request must target the HF resolve path (not the deleted hub proxy),
+        // carry NO X-BlackBox-Client header (this goes to HF, not the hub), and no
+        // Range on a fresh download.
         val recorded = server.takeRequest()
-        assertEquals("/local/models/download/gemma-4-e2b", recorded.target)
+        assertEquals(hfPath, recorded.target)
+        assertNull("must NOT send the hub client header to HF", recorded.headers["X-BlackBox-Client"])
         assertNull("fresh download must NOT send a Range header", recorded.headers["Range"])
     }
 
@@ -172,7 +180,7 @@ class LocalModelApiTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `download resumes from a partial part file via a Range request`() = runTest {
+    fun `download resumes from a part file via Range against download_url`() = runTest {
         val full = ByteArray(4096) { (it % 251).toByte() }
         val prefixLen = 1500
         val prefix = full.copyOfRange(0, prefixLen)
@@ -199,9 +207,13 @@ class LocalModelApiTest {
                 .build()
         )
 
+        val hfPath = "/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm"
+        val url = server.url(hfPath).toString()
+        val bundle = LocalBundle(slug = "gemma-4-e4b", filename = "gemma-resume.litertlm", downloadUrl = url)
+
         var lastSoFar = 0L
         var lastTotal = -1L
-        val result = api.download("gemma-4-e4b", dest) { soFar, total ->
+        val result = api.download(bundle, dest) { soFar, total ->
             lastSoFar = soFar
             lastTotal = total
         }
@@ -213,10 +225,11 @@ class LocalModelApiTest {
         assertEquals(full.size.toLong(), lastSoFar)
         assertEquals(full.size.toLong(), lastTotal)
 
-        // The request MUST carry an open-ended Range header from the existing
-        // byte count.
+        // The request targets the HF resolve path, carries no hub header, and MUST
+        // carry an open-ended Range header from the existing byte count.
         val recorded = server.takeRequest()
-        assertEquals("/local/models/download/gemma-4-e4b", recorded.target)
+        assertEquals(hfPath, recorded.target)
+        assertNull("must NOT send the hub client header to HF", recorded.headers["X-BlackBox-Client"])
         assertEquals("bytes=$prefixLen-", recorded.headers["Range"])
 
         assertFalse(".part must be renamed away on success", part.exists())

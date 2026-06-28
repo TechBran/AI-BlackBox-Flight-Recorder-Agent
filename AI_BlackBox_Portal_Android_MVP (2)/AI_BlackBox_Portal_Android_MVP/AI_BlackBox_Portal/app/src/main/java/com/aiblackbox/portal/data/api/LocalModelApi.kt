@@ -25,11 +25,14 @@ import kotlin.coroutines.resumeWithException
 /**
  * Android client for the hub's `local` provider (on-device Gemma) endpoints.
  *
- * Talks to the four backend routes (Orchestrator/routes/local_routes.py):
+ * Talks to the backend routes (Orchestrator/routes/local_routes.py):
  *   - GET  /local/models/catalog            → [catalog]
- *   - GET  /local/models/download/{slug}    → [download] (resumable, Range)
  *   - POST /local/device/attest             → [attest]
  *   - GET  /local/device/status?operator=   → [status]
+ *
+ * [download] no longer hits the hub: bytes stream DIRECTLY from the Hugging Face
+ * CDN ([com.aiblackbox.portal.data.model.LocalBundle.downloadUrl]) after the hub
+ * byte-proxy was deleted (2026-06-27).
  *
  * Reuses [BlackBoxApi]'s base URL (`getBaseUrl()`) and lenient
  * kotlinx.serialization `json` so the orchestrator host is never hardcoded — it
@@ -37,14 +40,27 @@ import kotlin.coroutines.resumeWithException
  *
  * The non-download calls delegate to BlackBoxApi's get/post helpers. download()
  * needs streaming (multi-GB bundles must never load into RAM) plus a Range
- * header for resume, so it drives an OkHttpClient directly — specifically the
- * shared no-read-timeout [BlackBoxApi.streamClient], so a slow link can't trip
- * the standard 120s read timeout mid-download.
+ * header for resume, so it drives an OkHttpClient directly — a 90s-read-timeout
+ * client derived from [BlackBoxApi.streamClient] so a real stall surfaces as a
+ * retryable failure instead of an eternal 0%.
  */
-class LocalModelApi(private val api: BlackBoxApi) :
-    LocalModelDownloader, LocalModelCatalogClient, PersonaSource {
+class LocalModelApi(
+    private val api: BlackBoxApi,
+    // BYOK seam for future gated repos: returns the HF token (or null). Defaulted so
+    // existing callers (LocalModelApi(api) / LocalModelApi(BlackBoxApi(baseUrl))) are
+    // unaffected; only used when bundle.gated is true. YAGNI stub returns null today.
+    private val hfToken: () -> String? = { null },
+) : LocalModelDownloader, LocalModelCatalogClient, PersonaSource {
 
     private val json get() = api.json
+
+    // 90s read timeout: bytes now stream direct from the HF CDN (a steady link), so a
+    // real stall must surface as a retryable failure instead of an eternal 0%. Built
+    // from the shared streamClient (which has readTimeout 0); connect/write timeouts
+    // and the rest of the client config are inherited.
+    private val downloadClient = api.streamClient.newBuilder()
+        .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
 
     /** GET /local/models/catalog → the list of downloadable bundles. */
     override suspend fun catalog(): List<LocalBundle> {
@@ -53,8 +69,14 @@ class LocalModelApi(private val api: BlackBoxApi) :
     }
 
     /**
-     * GET /local/models/download/{slug} — stream the bundle to [destFile],
-     * resuming from a prior partial download if one exists.
+     * Stream [bundle] to [destFile] DIRECTLY from the Hugging Face CDN
+     * ([bundle.downloadUrl]), resuming from a prior partial download if one exists.
+     *
+     * The bytes no longer flow through the hub byte-proxy (deleted 2026-06-27) — the
+     * URL is the bundle's HF `resolve` URL, with a defensive fallback constructed from
+     * `hfRepo`/`filename`. Because the request goes to HF (not the hub), the
+     * `X-BlackBox-Client` header is NOT sent; a gated repo attaches
+     * `Authorization: Bearer <token>` only when the [hfToken] seam returns non-null.
      *
      * Writes to a sibling `<destFile>.part` temp; if that `.part` already holds
      * N bytes, sends `Range: bytes=N-` and APPENDS the 206 remainder, otherwise
@@ -73,29 +95,33 @@ class LocalModelApi(private val api: BlackBoxApi) :
      * HTTP error (the `.part` is left in place so a later call can resume).
      */
     override suspend fun download(
-        slug: String,
+        bundle: LocalBundle,
         destFile: File,
         onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
     ): Result<File> = withContext(Dispatchers.IO) {
         val partFile = File(destFile.parentFile, destFile.name + ".part")
         val existing = if (partFile.exists()) partFile.length() else 0L
 
-        val urlPath = "/local/models/download/$slug"
+        val url = bundle.downloadUrl.ifBlank {
+            // Defensive fallback: construct the HF resolve URL from coordinates.
+            "https://huggingface.co/${bundle.hfRepo}/resolve/main/${bundle.filename}"
+        }
         val requestBuilder = Request.Builder()
-            .url("${api.getBaseUrl()}$urlPath")
-            .header("X-BlackBox-Client", "native-android/1.0")
+            .url(url)
             .get()
         if (existing > 0L) {
             // Open-ended range: resume from the byte after what we already have.
             requestBuilder.header("Range", "bytes=$existing-")
         }
+        // Gated repos need an HF token; attach only when the BYOK seam provides one.
+        // NOTE: no X-BlackBox-Client header — this request goes to HF, not the hub.
+        if (bundle.gated) hfToken()?.let { requestBuilder.header("Authorization", "Bearer $it") }
 
         try {
-            // Use the no-read-timeout client: a multi-GB bundle streamed over
-            // Tailscale/cellular can legitimately stall >120s between reads, and
-            // the shared client's 120s readTimeout would abort it. connect/write
-            // timeouts still apply.
-            api.streamClient.newCall(requestBuilder.build()).await().use { response ->
+            // 90s-read-timeout client: a steady CDN stream lets a real stall surface
+            // as a retryable failure instead of an eternal 0% (streamClient had
+            // readTimeout 0). connect/write timeouts still apply.
+            downloadClient.newCall(requestBuilder.build()).await().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
                         IOException("HTTP ${response.code}: ${response.message}")

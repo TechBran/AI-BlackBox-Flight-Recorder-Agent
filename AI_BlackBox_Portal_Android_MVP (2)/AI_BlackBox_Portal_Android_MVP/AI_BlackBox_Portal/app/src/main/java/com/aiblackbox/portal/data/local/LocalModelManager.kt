@@ -250,7 +250,7 @@ class LocalModelManager(
     /**
      * Full install flow: download → verify → attest.
      *
-     *  1. `api.download(slug, modelsDir/filename, onProgress)`.
+     *  1. `api.download(bundle, modelsDir/filename, onProgress)` (direct from HF).
      *  2. [verify] the bytes against `bundle.sha256` (no-op when sha is unknown).
      *     On mismatch the bad file is deleted and the call fails — so a corrupt
      *     download never lingers to be picked up by [installedModels].
@@ -280,7 +280,7 @@ class LocalModelManager(
         modelsDir.mkdirs()
         val destFile = File(modelsDir, bundle.filename)
 
-        val downloaded = api.download(bundle.slug, destFile, onProgress)
+        val downloaded = api.download(bundle, destFile, onProgress)
         if (downloaded.isFailure) {
             return@withContext Result.failure(
                 downloaded.exceptionOrNull()

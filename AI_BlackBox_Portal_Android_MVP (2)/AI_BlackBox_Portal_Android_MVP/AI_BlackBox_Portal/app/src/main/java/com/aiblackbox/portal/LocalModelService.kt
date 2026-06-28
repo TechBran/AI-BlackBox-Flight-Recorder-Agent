@@ -21,6 +21,7 @@ import com.aiblackbox.portal.data.local.SamplerSettings
 import com.aiblackbox.portal.data.local.WarmInflightStore
 import com.aiblackbox.portal.data.local.shouldWarm
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.store.BlackBoxStore
@@ -372,7 +373,7 @@ class LocalModelService : Service() {
      */
     private object NoopDownloader : LocalModelDownloader {
         override suspend fun download(
-            slug: String,
+            bundle: LocalBundle,
             destFile: File,
             onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
         ): Result<File> = Result.failure(UnsupportedOperationException("download not supported in LocalModelService"))

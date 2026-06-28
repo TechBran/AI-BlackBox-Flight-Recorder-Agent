@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.aiblackbox.portal.data.api.LocalModelDownloader
 import com.aiblackbox.portal.data.model.AttestRequest
+import com.aiblackbox.portal.data.model.LocalBundle
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -13,7 +14,7 @@ import java.io.File
 /** No-op downloader for the disk-only installed-models scan (never hits the network). */
 private object WarmNoopDownloader : LocalModelDownloader {
     override suspend fun download(
-        slug: String,
+        bundle: LocalBundle,
         destFile: File,
         onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit,
     ): Result<File> = Result.failure(UnsupportedOperationException("disk scan only"))

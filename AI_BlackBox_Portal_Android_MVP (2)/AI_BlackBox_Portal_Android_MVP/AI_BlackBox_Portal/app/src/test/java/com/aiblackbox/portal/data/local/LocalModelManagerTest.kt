@@ -106,11 +106,11 @@ class LocalModelManagerTest {
         var downloadCalledFor: String? = null
 
         override suspend fun download(
-            slug: String,
+            bundle: LocalBundle,
             destFile: File,
             onProgress: (Long, Long) -> Unit,
         ): Result<File> {
-            downloadCalledFor = slug
+            downloadCalledFor = bundle.slug
             if (!downloadOk) return Result.failure(java.io.IOException("download failed"))
             destFile.parentFile?.mkdirs()
             onProgress(0L, content.size.toLong())
