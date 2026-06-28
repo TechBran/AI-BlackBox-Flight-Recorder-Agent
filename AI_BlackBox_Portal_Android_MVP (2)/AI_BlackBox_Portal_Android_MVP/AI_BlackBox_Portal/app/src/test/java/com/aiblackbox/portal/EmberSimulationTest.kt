@@ -80,6 +80,19 @@ class EmberSimulationTest {
         assertTrue("killAll must drain the field immediately", sim.isDrained())
     }
 
+    @Test fun `scale multiplies size and velocity (DPI-correct sizing)`() {
+        val base = EmberSimulation().apply { resize(width, height) }               // scale 1.0
+        val scaled = EmberSimulation().apply { scale = 2f; resize(width, height) } // scale 2.0
+
+        val baseSize = base.particles.map { it.baseSize }.average()
+        val scaledSize = scaled.particles.map { it.baseSize }.average()
+        assertTrue("2x scale should ~double avg size ($baseSize -> $scaledSize)", scaledSize > baseSize * 1.6)
+
+        val baseSpeed = base.particles.map { -it.vy }.average()       // upward magnitude
+        val scaledSpeed = scaled.particles.map { -it.vy }.average()
+        assertTrue("2x scale should ~double rise speed ($baseSpeed -> $scaledSpeed)", scaledSpeed > baseSpeed * 1.6)
+    }
+
     @Test fun `rearm re-staggers the field after a full drain`() {
         val sim = EmberSimulation()
         sim.resize(width, height)

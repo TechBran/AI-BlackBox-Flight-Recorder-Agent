@@ -91,6 +91,12 @@ private const val FLICKER_SPEED = 0.015
 private const val TRAIL_LENGTH = 2
 private const val DRAIN_MAX_MS = 650.0   // cap the post-generation drain (battery parity with web)
 
+// All spatial values (size, glow, velocity, spawn, turbulence) are multiplied by
+// density / EMBER_REFERENCE_DENSITY so embers render at the SAME apparent size on any
+// phone regardless of DPI. The reference is the density the look was tuned + approved
+// on (Fold 6, effective density 496/160 = 3.1) → scale = 1.0 there.
+private const val EMBER_REFERENCE_DENSITY = 3.1f
+
 // =============================================================================
 // Particle — one ember. Plain Kotlin (no Compose), mirrors the website's
 // Particle class (constructor → reset, update(time), and the field set the
@@ -124,24 +130,25 @@ class Particle(val layerIndex: Int) {
     var trailLen = 0
         private set
 
-    /** Spawn at the bottom with fresh random properties (website Particle.reset). */
-    fun reset(width: Float, height: Float) {
+    /** Spawn at the bottom with fresh random properties (website Particle.reset).
+     *  [scale] (= density / reference) keeps apparent size + speed constant across DPIs. */
+    fun reset(width: Float, height: Float, scale: Float) {
         x = (Math.random() * width).toFloat()
-        y = (height + Math.random() * 100).toFloat()
+        y = (height + Math.random() * 100 * scale).toFloat()
         val sMin = SIZE_MIN[layerIndex]
         val sMax = SIZE_MAX[layerIndex]
-        size = (sMin + Math.random() * (sMax - sMin)).toFloat()
+        size = ((sMin + Math.random() * (sMax - sMin)) * scale).toFloat()
         baseSize = size
         colorIndex = pickColorIndex()
 
         val speed = LAYER_SPEED[layerIndex]
-        vx = ((Math.random() - 0.5) * 2.0 * speed).toFloat()
-        vy = (-(0.5 + Math.random() * 0.5) * RISE_SPEED * speed).toFloat()
+        vx = ((Math.random() - 0.5) * 2.0 * speed * scale).toFloat()
+        vy = (-(0.5 + Math.random() * 0.5) * RISE_SPEED * speed * scale).toFloat()
         baseVy = vy
 
         oscillationOffset = Math.random() * Math.PI * 2
         oscillationSpeed = 0.005 + Math.random() * 0.008
-        oscillationAmplitude = 5 + Math.random() * 10
+        oscillationAmplitude = (5 + Math.random() * 10) * scale
 
         flickerOffset = Math.random() * Math.PI * 2
         flickerSpeedJitter = FLICKER_SPEED * (0.8 + Math.random() * 0.4)
@@ -158,15 +165,15 @@ class Particle(val layerIndex: Int) {
      * performance.now()). When the ember leaves the field: if [active] it
      * respawns at the bottom; otherwise it is marked [dead] (drain to a stop).
      */
-    fun update(timeMs: Double, width: Float, height: Float, active: Boolean) {
+    fun update(timeMs: Double, width: Float, height: Float, active: Boolean, scale: Float) {
         // Revive drained embers when generation restarts; stay parked otherwise.
         if (dead) {
-            if (active) reset(width, height) else return
+            if (active) reset(width, height, scale) else return
         }
 
-        // Very gentle turbulence / wind (multi-sine, no repeat).
-        val turbX = (sin(timeMs * 0.0003 + oscillationOffset) * TURBULENCE * 0.3).toFloat()
-        val turbY = (cos(timeMs * 0.0004 + oscillationOffset) * TURBULENCE * 0.15).toFloat()
+        // Very gentle turbulence / wind (multi-sine, no repeat) — scaled for DPI.
+        val turbX = (sin(timeMs * 0.0003 + oscillationOffset) * TURBULENCE * 0.3 * scale).toFloat()
+        val turbY = (cos(timeMs * 0.0004 + oscillationOffset) * TURBULENCE * 0.15 * scale).toFloat()
         val oscillation =
             (sin(timeMs * oscillationSpeed + oscillationOffset) * oscillationAmplitude * 0.002).toFloat()
 
@@ -195,9 +202,9 @@ class Particle(val layerIndex: Int) {
             opacity *= life
         }
 
-        // Off-screen: recycle while active, else die.
-        if (y < -50f || x < -50f || x > width + 50f) {
-            if (active) reset(width, height) else dead = true
+        // Off-screen: recycle while active, else die (margins scaled with the glow).
+        if (y < -50f * scale || x < -50f * scale || x > width + 50f * scale) {
+            if (active) reset(width, height, scale) else dead = true
         }
     }
 
@@ -238,6 +245,9 @@ class Particle(val layerIndex: Int) {
 class EmberSimulation {
     private var width = 0f
     private var height = 0f
+    /** density / EMBER_REFERENCE_DENSITY — set before the first resize so the first
+     *  spawn picks it up; keeps apparent ember size constant across DPIs. */
+    var scale: Float = 1f
     private val _particles = ArrayList<Particle>(TOTAL_PARTICLES)
 
     /** Read-only view for the renderer and tests. */
@@ -261,7 +271,7 @@ class EmberSimulation {
         for (layer in LAYER_COUNT.indices) {
             repeat(LAYER_COUNT[layer]) {
                 val p = Particle(layer)
-                p.reset(width, height)
+                p.reset(width, height, scale)
                 // Stagger initial Y across 1.5× the field height.
                 p.y = (Math.random() * height * 1.5).toFloat()
                 _particles.add(p)
@@ -273,7 +283,7 @@ class EmberSimulation {
     fun update(timeNanos: Long, active: Boolean) {
         if (width <= 0f || height <= 0f) return
         val timeMs = timeNanos / 1_000_000.0
-        for (p in _particles) p.update(timeMs, width, height, active)
+        for (p in _particles) p.update(timeMs, width, height, active, scale)
     }
 
     /** True once no live (non-dead) particles remain — the loop can stop. */
@@ -300,7 +310,7 @@ class EmberSimulation {
         if (width <= 0f || height <= 0f || _particles.isEmpty()) return
         if (!isDrained()) return
         for (p in _particles) {
-            p.reset(width, height)
+            p.reset(width, height, scale)
             p.y = (Math.random() * height * 1.5).toFloat()
         }
     }
@@ -367,6 +377,9 @@ fun EmberOverlay(active: Boolean, modifier: Modifier = Modifier) {
     }
     val sim = remember { EmberSimulation() }
     val density = LocalDensity.current
+    // DPI-correct sizing: scale all spatial values so embers look the same apparent
+    // size on any phone (1.0 on the reference device the look was tuned on).
+    sim.scale = density.density / EMBER_REFERENCE_DENSITY
     // Pre-bake the 5 glow sprites ONCE (one per palette color).
     val sprites = remember(density) {
         EmberColors.map { buildGlowSprite(it, GLOW_SPRITE_PX, density) }
