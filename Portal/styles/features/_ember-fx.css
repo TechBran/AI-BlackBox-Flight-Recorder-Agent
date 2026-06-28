@@ -1,0 +1,47 @@
+/* =============================================================================
+   Generation Ember FX
+   Backdrop ember particles shown WHILE the AI is generating (text or media).
+   Engine + DOM-driven controller: Portal/modules/ember-fx.js
+   Ported from the landing page: Apps/landing-page/app.js:191-518
+   ============================================================================= */
+
+/* The ember canvas is the first child of <section class="chat">, sized to .chat
+   by a ResizeObserver. It sits BEHIND the (raised, transparent) message list so
+   embers glow in the gaps between bubbles while the bubbles stay readable.
+   It fades in via .on and fades out (then the JS clears + halts the rAF). */
+#emberCanvas {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 420ms ease;
+}
+#emberCanvas.on {
+    opacity: 1;
+    will-change: opacity;   /* promote a compositor layer only while visible/fading */
+}
+
+/* Embers are z-index:0 and #history below is z-index:1, so the explicit z-order
+   already keeps embers behind readable content. We deliberately do NOT make .chat
+   a stacking context (isolation/z-index): that would re-scope the z-index of its
+   sibling chrome — task-monitor (z1100), scroll-to-bottom (z200), composer (z100) —
+   and let external high-z elements (banners, app-registry) paint over them. */
+
+/* Raise the scrolling message list above the ember canvas and make its
+   background transparent so the embers show through the gaps. The idle look is
+   pixel-identical: .chat behind it is the same pure black (--bg). */
+.chat > .history {
+    position: relative;
+    z-index: 1;
+    background: transparent;
+}
+
+/* Note: #helpHints (empty-state home screen) keeps its existing z-index:10 and
+   is display:none during generation — intentionally left untouched. */
+
+@media (prefers-reduced-motion: reduce) {
+    /* The effect is motion; the JS skips it entirely. Keep the canvas hidden in
+       case markup was injected before the JS bailed. */
+    #emberCanvas { display: none; }
+}

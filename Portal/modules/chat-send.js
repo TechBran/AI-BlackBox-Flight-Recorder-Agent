@@ -1452,10 +1452,18 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                     }
                 }
 
-                reader.read().then(processChunk).catch(reject);
+                reader.read().then(processChunk).catch(onStreamError);
             }
 
-            reader.read().then(processChunk).catch(reject);
+            // On a mid-stream read error, clear the streaming marker before rejecting —
+            // otherwise the orphaned `.streaming-bubble` lingers and pins the generation
+            // ember backdrop on (the outer fetch .catch below only runs for pre-stream errors).
+            function onStreamError(err) {
+                bubble.classList.remove('streaming-bubble');
+                reject(err);
+            }
+
+            reader.read().then(processChunk).catch(onStreamError);
 
         }).catch(error => {
             console.error('[STREAM] Fetch error:', error);

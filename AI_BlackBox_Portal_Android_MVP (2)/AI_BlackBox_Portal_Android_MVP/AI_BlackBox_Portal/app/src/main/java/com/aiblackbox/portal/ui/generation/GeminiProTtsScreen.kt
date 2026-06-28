@@ -62,6 +62,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.ui.components.AudioPlayerBar
+import com.aiblackbox.portal.ui.components.EmberBackdrop
 import com.aiblackbox.portal.ui.components.GlassCard
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -272,8 +273,11 @@ fun GeminiProTtsScreen(
 
     LaunchedEffect(origin) { viewModel.initialize(origin) }
 
+    // Ember backdrop behind the (scrolling) content while generating. The
+    // overlay is a SIBLING of the scroll, so it stays fixed full-screen.
+    EmberBackdrop(active = isGenerating, modifier = modifier) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 100.dp)
@@ -756,6 +760,7 @@ fun GeminiProTtsScreen(
 
         // Bottom padding to clear the Composer overlay
         Spacer(Modifier.height(180.dp))
+    }
     }
 }
 

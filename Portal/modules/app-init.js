@@ -101,6 +101,9 @@ import {
 import { initChatSend, send, createBubbleWithThinking, checkCUBackgroundStatus } from './chat-send.js';
 import { initCUDrawer } from './cu-drawer.js';
 
+// Generation ember backdrop (fades embers in while the AI is generating)
+import { initEmberFX } from './ember-fx.js';
+
 // Phase 6: GPT-4o Realtime
 import { initRealtimeUI, connect as realtimeConnect, disconnect as realtimeDisconnect, checkRealtimeAvailable } from './gpt-realtime.js';
 
@@ -700,6 +703,11 @@ async function initApp() {
     // Initialize history last (after all components ready)
     console.log('[Portal] Initializing history...');
     initHistory();
+
+    // Generation ember backdrop — fades the website's ember particles in while
+    // the AI is generating (text or media), then drains them on completion.
+    // Reads generation state from existing DOM markers; no edits to send paths.
+    initEmberFX();
 
     // Check for existing agent session
     await checkExistingAgentSession();

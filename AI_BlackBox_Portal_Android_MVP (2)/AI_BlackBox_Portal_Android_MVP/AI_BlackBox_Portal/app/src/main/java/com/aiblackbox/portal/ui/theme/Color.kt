@@ -68,6 +68,17 @@ val GlowBlue   = Color(0x404A9EFF)  // --shadow-glow-blue @ 25% alpha
 val GlowGreen  = Color(0x4027D980)  // --shadow-glow-green @ 25% alpha
 val SolidGreen  = Color(0xFF27D980)
 
+// Ember palette — the 5 cinematic-particle colors from the website ember system
+// (Apps/landing-page/app.js initCinematicParticles('embers')). RGB → hex:
+//   255,74,74 / 255,120,50 / 255,180,50 / 255,220,100 / 255,250,200
+val EmberRed         = Color(0xFFFF4A4A)  // 255,74,74  (== BbxAccent)
+val EmberOrange      = Color(0xFFFF7832)  // 255,120,50
+val EmberYellowOrange = Color(0xFFFFB432) // 255,180,50
+val EmberYellow      = Color(0xFFFFDC64)  // 255,220,100
+val EmberWhiteHot    = Color(0xFFFFFAC8)  // 255,250,200
+// Ordered palette for the weighted picker / per-color glow sprites (colorIndex 0..4).
+val EmberColors: List<Color> = listOf(EmberRed, EmberOrange, EmberYellowOrange, EmberYellow, EmberWhiteHot)
+
 // =============================================================================
 // Computer Use — CU accent + status tokens, ported from Portal's
 // #6c3bd1 / #8b5cf6 purple and _browser.css status colors.

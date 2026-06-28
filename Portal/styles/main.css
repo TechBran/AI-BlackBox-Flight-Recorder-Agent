@@ -40,6 +40,7 @@
 @import url('./features/_updates.css');
 @import url('./features/_collapsibles.css');
 @import url('./features/_system_controls.css');
+@import url('./features/_ember-fx.css?v=genui295');
 
 /* === GENERATION === */
 @import url('./generation/_base.css');

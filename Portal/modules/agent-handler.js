@@ -475,6 +475,7 @@ export class AgentChatHandler {
                 this.attemptReconnect();
             } else {
                 this.isStreaming = false;
+                $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
                 this.updateBannerStatus('Disconnected');
                 if (this.currentBubble) {
                     this.currentBubble.classList.remove('agent-streaming');
@@ -488,6 +489,7 @@ export class AgentChatHandler {
             this.updateBannerStatus('Error');
             toast('Agent connection error - check console');
             this.isStreaming = false;
+            $('thinkingIndicator')?.classList.add('hide'); // don't leave embers pinned on
             statusLine.endSession();
         };
     }
@@ -1148,6 +1150,12 @@ export class AgentChatHandler {
     finalizeOutput() {
         // Stop reasoning animation
         this.stopReasoningCycle();
+
+        // Hide the thinking-budget indicator on turn completion. updateThinkingIndicator
+        // only re-shows it while actively thinking, but nothing re-hid it — so it (and
+        // the generation ember backdrop, which keys off #thinkingIndicator:not(.hide))
+        // would otherwise linger for the rest of the session.
+        $('thinkingIndicator')?.classList.add('hide');
 
         // Hide tool indicator
         this.hideToolIndicator();

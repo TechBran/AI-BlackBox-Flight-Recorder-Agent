@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.ui.components.ChatBubble
+import com.aiblackbox.portal.ui.components.EmberOverlay
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -101,6 +102,11 @@ fun ChatScreen(
         HomeScreen(modifier = modifier)
     } else {
         Box(modifier = modifier.fillMaxSize()) {
+            // Ember glow behind the messages while the AI is thinking/streaming.
+            // The chat screen is transparent over the activity's BbxBlack root and
+            // bubbles carry their own backgrounds, so embers show through the gaps.
+            EmberOverlay(active = isStreaming, modifier = Modifier.matchParentSize())
+
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),

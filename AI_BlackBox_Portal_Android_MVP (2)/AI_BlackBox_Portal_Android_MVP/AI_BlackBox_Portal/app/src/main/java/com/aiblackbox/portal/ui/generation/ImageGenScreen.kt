@@ -57,6 +57,7 @@ import coil.compose.AsyncImage
 import com.aiblackbox.portal.data.repository.ImageCatalogProvider
 import com.aiblackbox.portal.data.repository.ImageCatalogRepository
 import com.aiblackbox.portal.data.repository.ImageParamSpec
+import com.aiblackbox.portal.ui.components.EmberBackdrop
 import com.aiblackbox.portal.ui.components.GlassCard
 import com.aiblackbox.portal.ui.voice.LabeledDropdown
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -105,8 +106,14 @@ fun ImageGenScreen(
     val currentEntry: ImageCatalogProvider? =
         providers.firstOrNull { it.provider == selectedProvider }
 
+    // Ember backdrop behind the (scrolling) content while generating. The
+    // overlay is a SIBLING of the scroll, so it stays fixed full-screen.
+    EmberBackdrop(
+        active = state == GenState.SUBMITTING || state == GenState.POLLING,
+        modifier = modifier,
+    ) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 100.dp)
@@ -386,6 +393,7 @@ fun ImageGenScreen(
         }
 
         Spacer(Modifier.height(180.dp))
+    }
     }
 }
 
