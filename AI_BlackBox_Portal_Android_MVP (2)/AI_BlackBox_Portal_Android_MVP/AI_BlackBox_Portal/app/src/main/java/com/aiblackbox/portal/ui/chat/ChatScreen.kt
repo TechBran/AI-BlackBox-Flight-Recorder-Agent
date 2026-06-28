@@ -73,19 +73,27 @@ fun ChatScreen(
         com.aiblackbox.portal.ui.components.setChatBaseUrl(origin)
     }
 
-    // Detect if user is scrolled away from the bottom
+    // Detect whether the END of the conversation is visible. EDGE-based (is the last
+    // item's BOTTOM within the viewport), not index-based: a single streaming message
+    // can grow taller than the screen, so an index check would always read "at bottom"
+    // and the auto-follow would keep yanking the user back when they try to scroll up.
     val isAtBottom by remember {
         derivedStateOf {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val totalItems = listState.layoutInfo.totalItemsCount
-            totalItems == 0 || lastVisible >= totalItems - 2
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null ||
+                (last.index >= info.totalItemsCount - 1 &&
+                    last.offset + last.size <= info.viewportEndOffset)
         }
     }
 
-    // Auto-scroll: snap instantly when new messages arrive (no jiggle animation)
+    // Auto-scroll: snap instantly when new messages arrive (no jiggle animation).
+    // Int.MAX_VALUE offset sticks to the BOTTOM of the last item (Compose clamps to the
+    // true end, respecting the bottom content padding), so a last message taller than
+    // the screen still shows its newest end rather than top-pinning to its start.
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.size - 1)
+            listState.scrollToItem(messages.size - 1, Int.MAX_VALUE)
         }
     }
 
@@ -94,7 +102,10 @@ fun ChatScreen(
     val lastContentLength = messages.lastOrNull()?.content?.length ?: 0
     LaunchedEffect(lastContentLength) {
         if (isStreaming && isAtBottom && messages.isNotEmpty()) {
-            listState.scrollToItem(messages.size - 1)
+            // Stick to the BOTTOM of the growing last message so the newest text keeps
+            // following the screen even after the message exceeds the viewport height
+            // (plain scrollToItem(index) top-pins it → the view appeared to "freeze").
+            listState.scrollToItem(messages.size - 1, Int.MAX_VALUE)
         }
     }
 
@@ -144,7 +155,9 @@ fun ChatScreen(
                         .background(BbxAccent)
                         .clickFeedback {
                             scope.launch {
-                                listState.animateScrollToItem(messages.size - 1)
+                                // MAX offset → animate to the true bottom (handles a
+                                // last message taller than the screen, like the auto-follow)
+                                listState.animateScrollToItem(messages.size - 1, Int.MAX_VALUE)
                             }
                         },
                     contentAlignment = Alignment.Center
