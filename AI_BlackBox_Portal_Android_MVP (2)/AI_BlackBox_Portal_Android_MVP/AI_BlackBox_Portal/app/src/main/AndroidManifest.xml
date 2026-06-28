@@ -87,6 +87,17 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <!-- Phase C: durable on-device model DOWNLOAD. Runs the multi-GB HF transfer in
+             a started foreground service so leaving the Model Manager screen (which
+             disposes the ViewModel scope) does NOT cancel the download; progress is
+             published to DownloadProgressBus, which the ViewModel observes. dataSync
+             matches the transfer nature (FOREGROUND_SERVICE_DATA_SYNC + POST_NOTIFICATIONS
+             perms already declared above). -->
+        <service
+            android:name=".ModelDownloadService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <!-- Pins the on-device Gemma engine in RAM (Task R2-C) so it loads ONCE and
              stays warm/resident across ViewModel/process recycles. dataSync matches
              the other long-running foreground services. Additive + graceful: if this
