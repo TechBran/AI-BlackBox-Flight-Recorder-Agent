@@ -50,7 +50,7 @@ import com.aiblackbox.portal.util.SpeakableText
 import com.aiblackbox.portal.ui.theme.AssistantBubbleShape
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
-import com.aiblackbox.portal.ui.theme.BubbleAssistantTranslucent
+import com.aiblackbox.portal.ui.theme.BubbleAssistantBg
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.GlassBorder
@@ -122,9 +122,9 @@ fun ChatBubble(
                 // Use background(shape) instead of clip+background — applies visual rounding
                 // WITHOUT clipping the touch area of child composables
                 .background(
-                    // Assistant bubble is translucent so the generation ember backdrop
-                    // glows THROUGH the text (identical to solid black when idle).
-                    color = if (isUser) Neutral250 else BubbleAssistantTranslucent,
+                    // Assistant bubble is transparent so the generation ember backdrop
+                    // glows THROUGH the text (matches web; identical to black when idle).
+                    color = if (isUser) Neutral250 else BubbleAssistantBg,
                     shape = if (isUser) UserBubbleShape else AssistantBubbleShape
                 )
                 // Matches Portal: padding 12px 16px
