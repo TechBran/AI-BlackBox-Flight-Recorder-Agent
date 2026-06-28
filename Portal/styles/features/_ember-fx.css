@@ -44,6 +44,16 @@
     background: transparent;
 }
 
+/* Assistant message bubbles are transparent so the ember backdrop shows THROUGH the
+   AI's words — the layering: black .chat at the bottom, embers above it, words on
+   top with a clear background. The user bubble keeps its grey (--bubble-user); the
+   .thinking placeholder keeps its own gradient; code blocks/media inside keep their
+   own backgrounds for readability. */
+.bubble.assistant:not(.thinking) {
+    background: transparent;
+    box-shadow: none;
+}
+
 /* Note: #helpHints (empty-state home screen) keeps its existing z-index:10 and
    is display:none during generation — intentionally left untouched. */
 
