@@ -70,6 +70,11 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     private var connectionJob: Job? = null
     private var captureJob: Job? = null
 
+    // Monotonic id per start(); used to drop late events and skip teardown from a
+    // previous session once a new one has begun (prevents cross-press bleed).
+    @Volatile private var sessionEpoch = 0
+    private var graceJob: Job? = null
+
     @Volatile
     private var audioRecord: AudioRecord? = null
 
@@ -87,7 +92,14 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
      * No-op if already streaming.
      */
     fun start(provider: String = "", lang: String = "en", target: String = "prompt") {
-        if (_isStreaming.value) return
+        // Preempt any pending stop()-grace and fully tear down a prior session so its
+        // socket/scope/late-events can't bleed into this one.
+        graceJob?.cancel()
+        graceJob = null
+        if (_isStreaming.value || connectionJob != null) {
+            shutdown()
+        }
+        val epoch = ++sessionEpoch
         _isStreaming.value = true
         _amplitude.value = 0f
 
@@ -113,14 +125,14 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                             android.util.Log.d(TAG, "Sent stt_start (provider='$provider', lang='$lang', target='$target')")
                             startCapture(newScope)
                         }
-                        is WsMessage.Text -> parseMessage(msg.text)
+                        is WsMessage.Text -> parseMessage(msg.text, epoch)
                         is WsMessage.Closing -> {
                             android.util.Log.w(TAG, "Server closing: ${msg.code} ${msg.reason}")
                             cleanup()
                         }
                         is WsMessage.Error -> {
                             android.util.Log.e(TAG, "WS error: ${msg.error.message}")
-                            _events.emit(SttEvent.Error(msg.error.message ?: "Connection error"))
+                            if (epoch == sessionEpoch) _events.emit(SttEvent.Error(msg.error.message ?: "Connection error"))
                             cleanup()
                         }
                         is WsMessage.Disconnected -> {
@@ -131,7 +143,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                 }
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Connection loop error: ${e.message}", e)
-                _events.emit(SttEvent.Error(e.message ?: "Connection error"))
+                if (epoch == sessionEpoch) _events.emit(SttEvent.Error(e.message ?: "Connection error"))
                 cleanup()
             }
         }
@@ -152,13 +164,14 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
 
         val s = scope
         if (s != null) {
-            s.launch {
+            val epoch = sessionEpoch
+            graceJob = s.launch {
                 try {
                     wsClient.send(buildJsonObject { put("type", "stt_stop") }.toString())
                     android.util.Log.d(TAG, "Sent stt_stop")
                 } catch (_: Exception) {}
                 delay(STOP_GRACE_MS)
-                shutdown()
+                if (epoch == sessionEpoch) shutdown()   // skip if a new session already began
             }
         } else {
             shutdown()
@@ -243,7 +256,8 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         }
     }
 
-    private suspend fun parseMessage(raw: String) {
+    private suspend fun parseMessage(raw: String, epoch: Int) {
+        if (epoch != sessionEpoch) return   // a newer session started — drop late events
         try {
             val obj = json.parseToJsonElement(raw).jsonObject
             val type = obj["type"]?.jsonPrimitive?.content ?: return
