@@ -42,7 +42,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,9 +57,6 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.voice.SttEvent
 import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.ui.components.MicIcon
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /**
  * Mic-button state for the WhisperMicButton state machine.
@@ -71,9 +67,6 @@ import kotlinx.coroutines.launch
  */
 private enum class MicState { Idle, Recording, Transcribing }
 
-private const val MAX_RECORDING_MS = 60_000L
-private const val WARNING_AT_MS = 50_000L
-
 @Composable
 fun WhisperMicButton(
     onTranscript: (String) -> Unit,
@@ -82,7 +75,6 @@ fun WhisperMicButton(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     // Unified streaming-STT client; survives recompositions, rebuilt only if api changes.
     val sttClient = remember(api) {
@@ -93,36 +85,16 @@ fun WhisperMicButton(
     }
 
     var state by remember { mutableStateOf(MicState.Idle) }
-    // Tracks the auto-stop / warning coroutine so cancel can interrupt it.
-    var timerJob by remember { mutableStateOf<Job?>(null) }
     // Set true by long-press / cap-during-cancel: the next Final is discarded.
     var cancelRequested by remember { mutableStateOf(false) }
 
     // Keep the latest callback without restarting the events collector.
     val currentOnTranscript by rememberUpdatedState(onTranscript)
 
-    // Start the 60s cap + 50s warning timer. Caller has already set Recording.
-    fun startCapTimer() {
-        timerJob?.cancel()
-        timerJob = scope.launch {
-            delay(WARNING_AT_MS)
-            if (state == MicState.Recording) {
-                Toast.makeText(context, "Recording limit approaching", Toast.LENGTH_SHORT).show()
-            }
-            delay(MAX_RECORDING_MS - WARNING_AT_MS)
-            if (state == MicState.Recording) {
-                // Hard cap: stop. The trailing Final still flushes via events.
-                state = MicState.Transcribing
-                sttClient.stop()
-            }
-        }
-    }
-
     fun beginStreaming() {
         cancelRequested = false
         state = MicState.Recording
         sttClient.start()
-        startCapTimer()
     }
 
     // Permission launcher. On grant → start streaming. On deny → toast + idle.
@@ -146,8 +118,6 @@ fun WhisperMicButton(
         sttClient.events.collect { event ->
             when (event) {
                 is SttEvent.Final -> {
-                    timerJob?.cancel()
-                    timerJob = null
                     if (cancelRequested) {
                         // Discarded by long-press/cancel — do NOT paste.
                         cancelRequested = false
@@ -157,8 +127,6 @@ fun WhisperMicButton(
                     state = MicState.Idle
                 }
                 is SttEvent.Error -> {
-                    timerJob?.cancel()
-                    timerJob = null
                     cancelRequested = false
                     Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
                     state = MicState.Idle
@@ -190,7 +158,6 @@ fun WhisperMicButton(
     // Stop the stream + release mic/WS if the Composable leaves composition.
     DisposableEffect(sttClient) {
         onDispose {
-            timerJob?.cancel()
             sttClient.stop()
         }
     }
@@ -231,8 +198,6 @@ fun WhisperMicButton(
                                 }
                             }
                             MicState.Recording -> {
-                                timerJob?.cancel()
-                                timerJob = null
                                 // Stop streaming; the trailing Final drives → Idle (paste).
                                 state = MicState.Transcribing
                                 sttClient.stop()
@@ -245,8 +210,6 @@ fun WhisperMicButton(
                     onLongPress = {
                         if (state == MicState.Recording) {
                             // Discard: suppress the next Final, stop, return to idle.
-                            timerJob?.cancel()
-                            timerJob = null
                             cancelRequested = true
                             sttClient.stop()
                             state = MicState.Idle
