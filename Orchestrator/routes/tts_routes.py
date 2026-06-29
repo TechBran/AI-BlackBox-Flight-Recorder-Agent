@@ -109,28 +109,6 @@ def restart_service():
         import traceback
         return {"status": "error", "error": str(e), "trace": traceback.format_exc()}
 
-def _elevenlabs_synth_chunked(text: str, voice: str, model_id: str | None,
-                              voice_settings: dict | None) -> bytes:
-    """Synthesize ElevenLabs speech, chunking by the model's live char cap.
-
-    One ``synthesize`` call when ``text`` fits the cap; otherwise split via the
-    shared ``chunk_text_for_tts`` helper and concatenate the per-chunk MP3 bytes
-    (browsers play concatenated MP3 frames fine for streaming playback). The
-    ``elevenlabs:`` prefix on ``voice`` is tolerated by ``synthesize`` itself.
-    """
-    from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
-    from Orchestrator.elevenlabs import tts as el_tts
-
-    cap = el_tts.max_chars_for(model_id or ELEVENLABS_TTS_MODEL_DEFAULT)
-    if len(text) <= cap:
-        return el_tts.synthesize(text, voice, model_id=model_id, voice_settings=voice_settings)
-    parts = [
-        el_tts.synthesize(chunk, voice, model_id=model_id, voice_settings=voice_settings)
-        for chunk in chunk_text_for_tts(text, max_chars=cap)
-    ]
-    return b"".join(parts)
-
-
 def _elevenlabs_stream_chunked(text: str, voice: str, model_id: str | None,
                                voice_settings: dict | None):
     """Yield ElevenLabs audio for `text`, splitting by the model's live char cap
@@ -163,10 +141,21 @@ def tts_openai(body: dict = Body(...)):
         voice = (body.get("voice") or "").strip()
         model_id = (body.get("model") or "").strip() or None  # None -> synthesize defaults to eleven_v3
         voice_settings = body.get("voice_settings")
-        # Browser path: true passthrough stream (audio starts as ElevenLabs generates).
+        # Browser path: prime the first chunk so an IMMEDIATE failure (bad voice /
+        # auth / un-downgradable plan rejection) still returns the structured
+        # fallback, then stream the rest. Only a true MID-stream stall truncates.
         if not body.get("return_json"):
+            import itertools
+            gen = _elevenlabs_stream_chunked(text, voice, model_id, voice_settings)
+            try:
+                first = next(gen)
+            except StopIteration:
+                return {"status": "fallback", "detail": "ElevenLabs returned no audio"}
+            except Exception as e:
+                print(f"[ELEVENLABS] /tts synthesis failed: {e}")
+                return {"status": "fallback", "detail": str(e)}
             return StreamingResponse(
-                _elevenlabs_stream_chunked(text, voice, model_id, voice_settings),
+                itertools.chain([first], gen),
                 media_type="audio/mpeg",
             )
 
@@ -189,6 +178,12 @@ def tts_openai(body: dict = Body(...)):
             except Exception:
                 pass
             return {"status": "fallback", "detail": str(e)}
+        if size == 0:
+            try:
+                save_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return {"status": "fallback", "detail": "ElevenLabs returned no audio"}
         return {
             "status": "success",
             "audio_url": f"/ui/uploads/{filename}",
