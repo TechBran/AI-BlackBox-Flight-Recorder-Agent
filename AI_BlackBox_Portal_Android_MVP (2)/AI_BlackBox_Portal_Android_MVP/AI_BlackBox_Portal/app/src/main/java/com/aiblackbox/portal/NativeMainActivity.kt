@@ -178,7 +178,7 @@ class NativeMainActivity : ComponentActivity() {
                 val emberMode by store.emberMode.collectAsState(initial = "always")
 
                 // Legacy audio recorder — still used by onRecordAudio (Gemini) and
-                // the CLI WhisperMicButton. onWhisper no longer drives it.
+                // the CLI CliMicButton. onWhisper no longer drives it.
                 val audioRecorder = remember { AudioRecorderManager(applicationContext) }
                 var isWhisperRecording by remember { mutableStateOf(false) }
 

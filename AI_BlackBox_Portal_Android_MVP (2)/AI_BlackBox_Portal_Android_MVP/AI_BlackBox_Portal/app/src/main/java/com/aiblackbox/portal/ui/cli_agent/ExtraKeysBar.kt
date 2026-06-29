@@ -12,7 +12,7 @@ package com.aiblackbox.portal.ui.cli_agent
 // Public API:
 //   ExtraKeysBar(
 //     onKeyBytes: (ByteArray) -> Unit,           // forwarded to ws.sendBytes(...)
-//     micSlot: @Composable () -> Unit = {},      // WhisperMicButton (Task 6.2)
+//     micSlot: @Composable () -> Unit = {},      // CliMicButton (Task 6.2)
 //     modifier: Modifier = Modifier,
 //   )
 
@@ -312,7 +312,7 @@ fun ExtraKeysBar(
                     fireKey(KeySpec("@", byteArrayOf('@'.code.toByte())))
                 }
             }
-            // --- Mic slot (WhisperMicButton from Task 6.2) ---
+            // --- Mic slot (CliMicButton from Task 6.2) ---
             item {
                 Box(
                     modifier = Modifier

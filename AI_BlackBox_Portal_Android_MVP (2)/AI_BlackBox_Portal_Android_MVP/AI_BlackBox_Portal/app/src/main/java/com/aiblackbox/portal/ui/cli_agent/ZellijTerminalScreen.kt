@@ -13,7 +13,7 @@ package com.aiblackbox.portal.ui.cli_agent
 //     keep working unchanged per the T22 brief. Cleanest isolation = two
 //     siblings, both consuming the same Termux PTY-bridge trick.
 //
-// What's reused: ExtraKeysBar, WhisperMicButton, the Termux TerminalView +
+// What's reused: ExtraKeysBar, CliMicButton, the Termux TerminalView +
 // TerminalSession bridging trick (local sleep child, append bytes to the
 // emulator directly), the ZellijBannerKind/ReconnectBanner visual contract.
 //
@@ -89,7 +89,7 @@ private const val TRANSCRIPT_ROWS = 2000
 /**
  * Zellij-backed terminal Composable. Hosts a Termux [TerminalView] inside
  * [AndroidView], proxies bytes between the emulator and a freshly-minted
- * [ZellijWebSocketClient], and shows an [ExtraKeysBar] + [WhisperMicButton]
+ * [ZellijWebSocketClient], and shows an [ExtraKeysBar] + [CliMicButton]
  * at the bottom.
  *
  * Lifecycle (Phase 1, 2026-06-22): the [ZellijWebSocketClient] is owned by
@@ -624,7 +624,7 @@ fun ZellijTerminalScreen(
                 }
             },
             micSlot = {
-                WhisperMicButton(
+                CliMicButton(
                     onTranscript = { transcript ->
                         terminalView?.setTopRow(0)
                         // Zellij has no separate paste control frame — wrap

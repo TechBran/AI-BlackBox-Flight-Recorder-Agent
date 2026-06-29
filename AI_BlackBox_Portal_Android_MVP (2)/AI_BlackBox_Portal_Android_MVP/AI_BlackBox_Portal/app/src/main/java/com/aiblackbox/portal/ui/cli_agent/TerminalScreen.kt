@@ -74,7 +74,7 @@ private const val TRANSCRIPT_ROWS = 2000
 /**
  * The CLI Agent terminal Composable. Hosts a Termux [TerminalView] inside
  * [AndroidView], proxies bytes between the emulator and a
- * [CliAgentWebSocket], and shows an [ExtraKeysBar] + [WhisperMicButton] at
+ * [CliAgentWebSocket], and shows an [ExtraKeysBar] + [CliMicButton] at
  * the bottom.
  *
  * Back behavior: detach only — the tmux session survives in the
@@ -604,7 +604,7 @@ fun TerminalScreen(
                 }
             },
             micSlot = {
-                WhisperMicButton(
+                CliMicButton(
                     onTranscript = { transcript ->
                         terminalView?.setTopRow(0)
                         // Transcripts ship as bracketed-paste text frames

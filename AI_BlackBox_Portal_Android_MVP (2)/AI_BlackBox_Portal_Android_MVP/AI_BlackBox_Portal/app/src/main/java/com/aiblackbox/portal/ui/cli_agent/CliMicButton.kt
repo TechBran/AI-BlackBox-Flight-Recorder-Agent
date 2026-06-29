@@ -1,6 +1,6 @@
 package com.aiblackbox.portal.ui.cli_agent
 
-// WhisperMicButton — tap-to-record state machine for the CLI-agent terminal.
+// CliMicButton — tap-to-record state machine for the CLI-agent terminal.
 // It streams live speech-to-text and pastes the FINAL transcript into the
 // active terminal session as one bracketed paste.
 //
@@ -80,7 +80,7 @@ import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.ui.components.MicIcon
 
 /**
- * Mic-button state for the WhisperMicButton state machine.
+ * Mic-button state for the CliMicButton state machine.
  *
  *   Idle         — tap to begin streaming capture.
  *   Recording    — red icon w/ pulse; tap to stop, long-press to cancel.
@@ -97,7 +97,7 @@ internal fun previewTail(text: String, max: Int = 160): String =
     if (text.length > max) "…" + text.takeLast(max) else text
 
 @Composable
-fun WhisperMicButton(
+fun CliMicButton(
     onTranscript: (String) -> Unit,
     api: BlackBoxApi,
     @Suppress("UNUSED_PARAMETER") operator: String,

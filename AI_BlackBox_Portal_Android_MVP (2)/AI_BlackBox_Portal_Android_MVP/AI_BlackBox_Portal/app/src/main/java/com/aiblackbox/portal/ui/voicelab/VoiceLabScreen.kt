@@ -231,7 +231,7 @@ private fun CloneZone(
     val cloningEnabled = status?.instantVoiceCloning == true
     val isRecording = recordState == RecordState.RECORDING
 
-    // RECORD_AUDIO permission gate (same approach as WhisperMicButton).
+    // RECORD_AUDIO permission gate (same approach as CliMicButton).
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> if (granted) viewModel.startRecording() }
