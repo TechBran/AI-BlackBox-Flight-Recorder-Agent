@@ -542,6 +542,14 @@ def build_tts_catalog() -> list:
 # at mp3_44100_128 and PRINTS a visible downgrade notice (see elevenlabs/tts.py).
 ELEVENLABS_TTS_MODEL_DEFAULT = os.getenv("ELEVENLABS_TTS_MODEL_DEFAULT", "eleven_v3")
 ELEVENLABS_TTS_FORMAT_DEFAULT = os.getenv("ELEVENLABS_TTS_FORMAT_DEFAULT", "mp3_44100_192")
+# ElevenLabs TTS streaming: abort a generation only after this many seconds with
+# NO audio bytes received (a true stall) — NOT a total wall-clock cap. As long as
+# ElevenLabs keeps streaming audio, generation continues regardless of length.
+ELEVENLABS_TTS_STREAM_IDLE_S = int(os.getenv("ELEVENLABS_TTS_STREAM_IDLE_S", "30"))
+# Generous backstop on the whole MCP /tts tool call (the server self-bounds via the
+# idle timeout above; this only prevents an indefinite client hang). Not the binding
+# constraint for legitimate long generations.
+TTS_TOOL_BACKSTOP_S = int(os.getenv("TTS_TOOL_BACKSTOP_S", "900"))
 
 # ElevenLabs Music (POST /v1/music). Songs run long (up to 5 min) so 128 is the
 # sensible default — it avoids the 192-tier-gate downgrade round-trip and the
