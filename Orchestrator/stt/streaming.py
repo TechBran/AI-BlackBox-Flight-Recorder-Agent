@@ -8,6 +8,18 @@ _OPENAI_DELTA = "conversation.item.input_audio_transcription.delta"
 _OPENAI_FINAL = "conversation.item.input_audio_transcription.completed"
 
 
+def join_transcript_segments(prefix: str, text: str) -> str:
+    """Concatenate a carried-over transcript prefix with the current cumulative
+    text, with exactly one separating space. Used to keep the transcript
+    continuous across an STT provider session rotation (reconnect-and-resume)."""
+    if not prefix:
+        return text
+    if not text:
+        return prefix
+    sep = "" if prefix.endswith((" ", "\n")) else " "
+    return f"{prefix}{sep}{text}"
+
+
 def map_openai_event(event: dict):
     """Map an OpenAI realtime transcription event to a uniform STT event.
     Returns {"type":"stt_delta"|"stt_final","text":...} or None for events we ignore."""
