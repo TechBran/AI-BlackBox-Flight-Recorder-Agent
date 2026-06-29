@@ -56,6 +56,62 @@ def _post(text: str, voice_id: str, model_id: str, output_format: str,
     )
 
 
+def _post_stream(text: str, voice_id: str, model_id: str, output_format: str,
+                 voice_settings: dict | None) -> requests.Response:
+    """One STREAMING TTS POST to the /stream endpoint. The (connect, read) timeout
+    makes `read` a per-chunk IDLE timeout: it fires only after that many seconds
+    with NO bytes — not a total cap — so long-but-progressing generations succeed."""
+    body: dict = {"text": text, "model_id": model_id}
+    if voice_settings is not None:
+        body["voice_settings"] = voice_settings
+    return requests.post(
+        f"{client.BASE_URL}/v1/text-to-speech/{voice_id}/stream",
+        headers=client.auth_headers(),
+        params={"output_format": output_format},
+        json=body,
+        stream=True,
+        timeout=(10, config.ELEVENLABS_TTS_STREAM_IDLE_S),
+    )
+
+
+def synthesize_stream(
+    text: str,
+    voice_id: str,
+    *,
+    model_id: str | None = None,
+    output_format: str | None = None,
+    voice_settings: dict | None = None,
+):
+    """Yield audio chunks from ElevenLabs' streaming TTS endpoint.
+
+    Same quality-first defaults + one-time plan-tier format downgrade as
+    ``synthesize``, but streamed so each chunk is proof of progress and the only
+    failure is a true stall (idle timeout in ``_post_stream``)."""
+    model_id = model_id or config.ELEVENLABS_TTS_MODEL_DEFAULT
+    output_format = output_format or config.ELEVENLABS_TTS_FORMAT_DEFAULT
+    raw_voice_id = voice_id.split("elevenlabs:")[-1]
+
+    resp = _post_stream(text, raw_voice_id, model_id, output_format, voice_settings)
+    if not (200 <= resp.status_code < 300):
+        if resp.status_code in _FORMAT_GATE_STATUSES and output_format != _FALLBACK_FORMAT:
+            print(f"[ELEVENLABS] TTS(stream) output format downgraded to {_FALLBACK_FORMAT} (plan tier)")
+            try: resp.close()
+            except Exception: pass
+            resp = _post_stream(text, raw_voice_id, model_id, _FALLBACK_FORMAT, voice_settings)
+        if not (200 <= resp.status_code < 300):
+            err = client.map_error(resp.status_code, _parse_body(resp))
+            try: resp.close()
+            except Exception: pass
+            raise RuntimeError(err)
+    try:
+        for chunk in resp.iter_content(chunk_size=4096):
+            if chunk:
+                yield chunk
+    finally:
+        try: resp.close()
+        except Exception: pass
+
+
 def synthesize(
     text: str,
     voice_id: str,
