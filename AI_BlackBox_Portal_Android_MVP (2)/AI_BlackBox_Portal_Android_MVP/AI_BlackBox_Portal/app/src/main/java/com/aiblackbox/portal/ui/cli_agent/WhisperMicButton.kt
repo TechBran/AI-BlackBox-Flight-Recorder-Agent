@@ -1,18 +1,22 @@
 package com.aiblackbox.portal.ui.cli_agent
 
-// WhisperMicButton — tap-to-record state machine that injects streaming-STT
-// transcripts as a single bracketed paste into the active terminal session.
+// WhisperMicButton — tap-to-record state machine for the CLI-agent terminal.
+// It streams live speech-to-text and pastes the FINAL transcript into the
+// active terminal session as one bracketed paste.
 //
 // State machine: idle 🎤 → recording 🔴 → transcribing ⏳ → idle 🎤
 // Long-press during recording cancels (discards transcript).
 //
-// Recording: SttStreamClient — the unified live-transcription client over the
-// backend's /ws/stt WebSocket (PCM16 @24kHz). This shares ONE transcription
-// path with the chat composer's live dictation. Because the CLI terminal has
-// no editable buffer (the transcript is pasted into the PTY as one
-// bracketed-paste), interim deltas are IGNORED — only the FINAL transcript is
-// pasted via onTranscript: (String) -> Unit. The caller wraps that in a
-// {"type":"paste","text":transcript} text frame.
+// Transport: SttStreamClient — the unified, PROVIDER-AGNOSTIC live-transcription
+// client over the backend's /ws/stt WebSocket (PCM16 @24kHz). It sends
+// provider:"" so the backend uses whatever STT provider the box is configured
+// for (OpenAI realtime / ElevenLabs Scribe / Google) — this is NOT Whisper-locked.
+// This shares ONE transcription path with the chat composer's live dictation.
+//
+// The terminal PTY has no editable buffer, so the cumulative interim `stt_delta`s
+// are shown live in a floating preview chip above the mic, and the FINAL
+// transcript is pasted via onTranscript: (String) -> Unit (the caller wraps it in
+// a {"type":"paste","text":transcript} text frame).
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -26,16 +30,24 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +63,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.voice.SttEvent
@@ -93,14 +114,18 @@ fun WhisperMicButton(
     }
 
     var state by remember { mutableStateOf(MicState.Idle) }
-    // Set true by long-press / cap-during-cancel: the next Final is discarded.
+    // Set true by long-press cancel: the next Final is discarded (not pasted).
     var cancelRequested by remember { mutableStateOf(false) }
+
+    // Latest CUMULATIVE interim transcript from stt_delta; shown live in the chip.
+    var interimText by remember { mutableStateOf("") }
 
     // Keep the latest callback without restarting the events collector.
     val currentOnTranscript by rememberUpdatedState(onTranscript)
 
     fun beginStreaming() {
         cancelRequested = false
+        interimText = ""
         state = MicState.Recording
         sttClient.start()
     }
@@ -121,7 +146,7 @@ fun WhisperMicButton(
         }
     }
 
-    // Collect transcript events. Final → one-shot paste; Error → toast; Delta → ignore.
+    // Collect transcript events. Final → one-shot paste; Error → toast; Delta → live chip.
     LaunchedEffect(sttClient) {
         sttClient.events.collect { event ->
             when (event) {
@@ -132,15 +157,18 @@ fun WhisperMicButton(
                     } else if (event.text.isNotBlank()) {
                         currentOnTranscript(event.text)
                     }
+                    interimText = ""
                     state = MicState.Idle
                 }
                 is SttEvent.Error -> {
                     cancelRequested = false
                     Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
+                    interimText = ""
                     state = MicState.Idle
                 }
                 is SttEvent.Delta -> {
-                    // Cumulative interim — IGNORED. PTY paste is one-shot on Final.
+                    // Cumulative interim — show it live in the preview chip.
+                    interimText = event.text
                 }
             }
         }
@@ -173,6 +201,26 @@ fun WhisperMicButton(
     val shape = RoundedCornerShape(6.dp)
     val isRecording = state == MicState.Recording
     val isTranscribing = state == MicState.Transcribing
+
+    // Anchors the preview chip centered above the mic button (Popup floats over
+    // the terminal — no editable buffer needed, no layout disturbance).
+    val density = LocalDensity.current
+    val gapPx = with(density) { 6.dp.roundToPx() }
+    val chipPositionProvider = remember(gapPx) {
+        object : PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: IntRect,
+                windowSize: IntSize,
+                layoutDirection: LayoutDirection,
+                popupContentSize: IntSize,
+            ): IntOffset {
+                val x = anchorBounds.left + (anchorBounds.width - popupContentSize.width) / 2
+                val y = anchorBounds.top - popupContentSize.height - gapPx
+                val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+                return IntOffset(x.coerceIn(0, maxX), y.coerceAtLeast(0))
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -220,6 +268,7 @@ fun WhisperMicButton(
                             // Discard: suppress the next Final, stop, return to idle.
                             cancelRequested = true
                             sttClient.stop()
+                            interimText = ""
                             state = MicState.Idle
                             Toast.makeText(
                                 context,
@@ -232,6 +281,16 @@ fun WhisperMicButton(
             },
         contentAlignment = Alignment.Center,
     ) {
+        // Live transcription preview — floats above the mic while recording /
+        // finalizing. The Popup occupies no layout space in the button Box.
+        if ((isRecording || isTranscribing) && interimText.isNotBlank()) {
+            Popup(
+                popupPositionProvider = chipPositionProvider,
+                properties = PopupProperties(focusable = false),
+            ) {
+                TranscriptPreviewChip(text = interimText)
+            }
+        }
         when {
             isTranscribing -> {
                 CircularProgressIndicator(
@@ -255,6 +314,36 @@ fun WhisperMicButton(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun TranscriptPreviewChip(text: String) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 3.dp,
+        shadowElevation = 6.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.widthIn(max = 280.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            MicIcon(
+                modifier = Modifier.size(14.dp),
+                color = MaterialTheme.colorScheme.error,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = previewTail(text),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -23,4 +23,9 @@ class PreviewTailTest {
         val text = "a".repeat(100) + tail
         assertEquals("…$tail", previewTail(text, max = tail.length))
     }
+
+    @Test
+    fun empty_text_returns_empty() {
+        assertEquals("", previewTail("", max = 160))
+    }
 }
