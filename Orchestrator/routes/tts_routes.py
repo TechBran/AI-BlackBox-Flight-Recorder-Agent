@@ -131,6 +131,18 @@ def _elevenlabs_synth_chunked(text: str, voice: str, model_id: str | None,
     return b"".join(parts)
 
 
+def _elevenlabs_stream_chunked(text: str, voice: str, model_id: str | None,
+                               voice_settings: dict | None):
+    """Yield ElevenLabs audio for `text`, splitting by the model's live char cap
+    and streaming each chunk's audio (each chunk has its own idle timeout)."""
+    from Orchestrator.config import ELEVENLABS_TTS_MODEL_DEFAULT
+    from Orchestrator.elevenlabs import tts as el_tts
+    cap = el_tts.max_chars_for(model_id or ELEVENLABS_TTS_MODEL_DEFAULT)
+    pieces = [text] if len(text) <= cap else chunk_text_for_tts(text, max_chars=cap)
+    for piece in pieces:
+        yield from el_tts.synthesize_stream(piece, voice, model_id=model_id, voice_settings=voice_settings)
+
+
 @app.post("/tts")
 def tts_openai(body: dict = Body(...)):
     """Text-to-speech using OpenAI TTS API (default) or ElevenLabs.
@@ -151,26 +163,39 @@ def tts_openai(body: dict = Body(...)):
         voice = (body.get("voice") or "").strip()
         model_id = (body.get("model") or "").strip() or None  # None -> synthesize defaults to eleven_v3
         voice_settings = body.get("voice_settings")
-        try:
-            audio = _elevenlabs_synth_chunked(text, voice, model_id, voice_settings)
-        except Exception as e:
-            print(f"[ELEVENLABS] /tts synthesis failed: {e}")
-            return {"status": "fallback", "detail": str(e)}
-
+        # Browser path: true passthrough stream (audio starts as ElevenLabs generates).
         if not body.get("return_json"):
-            return StreamingResponse(iter([audio]), media_type="audio/mpeg")
+            return StreamingResponse(
+                _elevenlabs_stream_chunked(text, voice, model_id, voice_settings),
+                media_type="audio/mpeg",
+            )
 
+        # MCP/API path: write chunks to the file AS THEY ARRIVE, then return the URL.
+        # The provider's per-chunk idle timeout (synthesize_stream) bounds this — no
+        # total cap — so a long-but-progressing generation completes instead of being
+        # cut at 60s.
         filename = f"{uuid.uuid4()}_tts.mp3"
         save_path = UPLOADS_DIR / filename
-        with open(save_path, "wb") as f:
-            f.write(audio)
+        size = 0
+        try:
+            with open(save_path, "wb") as f:
+                for chunk in _elevenlabs_stream_chunked(text, voice, model_id, voice_settings):
+                    f.write(chunk)
+                    size += len(chunk)
+        except Exception as e:
+            print(f"[ELEVENLABS] /tts synthesis failed: {e}")
+            try:
+                save_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return {"status": "fallback", "detail": str(e)}
         return {
             "status": "success",
             "audio_url": f"/ui/uploads/{filename}",
             "voice": voice,
             "model": model_id or "eleven_v3",
             "format": "mp3",
-            "size_bytes": len(audio),
+            "size_bytes": size,
         }
 
     if AUDIO_ENGINE == "browser": return {"status": "fallback"}
