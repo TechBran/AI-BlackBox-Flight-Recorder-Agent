@@ -67,6 +67,14 @@ import com.aiblackbox.portal.ui.components.MicIcon
  */
 private enum class MicState { Idle, Recording, Transcribing }
 
+/**
+ * Returns the most-recent [max] characters of [text] (prefixed with an ellipsis
+ * when truncated) so the live preview chip always shows the latest words as a
+ * cumulative transcript grows.
+ */
+internal fun previewTail(text: String, max: Int = 160): String =
+    if (text.length > max) "…" + text.takeLast(max) else text
+
 @Composable
 fun WhisperMicButton(
     onTranscript: (String) -> Unit,
