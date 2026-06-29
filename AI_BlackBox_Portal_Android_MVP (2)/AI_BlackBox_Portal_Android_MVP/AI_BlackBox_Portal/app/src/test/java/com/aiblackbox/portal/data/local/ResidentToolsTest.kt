@@ -9,31 +9,31 @@ import org.junit.Test
 
 /**
  * Unit tests for [ResidentTools] — the on-device tool schema source of truth. Task
- * IA-3 adds the 16 INTENT ACTIONS ([ResidentTools.INTENT_ACTIONS] /
+ * IA-3 adds the INTENT ACTIONS ([ResidentTools.INTENT_ACTIONS] /
  * [ResidentTools.intentActions]) and the [ResidentTools.LOCAL_PHONE_TOOLS] union
  * that [FcLoop] routes locally. These are pure (no Android framework), so they run
  * on the JVM with no device.
  */
 class ResidentToolsTest {
 
-    /** The 16 required-by-spec intent-action names. */
+    /** The 15 required-by-spec intent-action names (web_search moved to CLOUD_TOOLS). */
     private val expectedIntentActions = setOf(
         "flashlight_on", "flashlight_off", "create_contact", "send_email", "show_map",
         "open_wifi_settings", "create_calendar_event", "open_url", "dial", "send_sms",
         "set_alarm", "set_timer", "share_text", "open_settings_panel", "take_photo",
-        "web_search",
     )
 
     @Test
-    fun `INTENT_ACTIONS holds exactly the 16 spec names`() {
-        assertEquals("INTENT_ACTIONS must be the 16 spec names", expectedIntentActions, ResidentTools.INTENT_ACTIONS)
-        assertEquals("INTENT_ACTIONS has 16 entries", 16, ResidentTools.INTENT_ACTIONS.size)
+    fun `INTENT_ACTIONS holds exactly the 15 spec names`() {
+        assertEquals("INTENT_ACTIONS must be the 15 spec names", expectedIntentActions, ResidentTools.INTENT_ACTIONS)
+        assertEquals("INTENT_ACTIONS has 15 entries", 15, ResidentTools.INTENT_ACTIONS.size)
+        assertTrue("web_search is no longer a phone intent action", "web_search" !in ResidentTools.INTENT_ACTIONS)
     }
 
     @Test
-    fun `intentActions schema names equal INTENT_ACTIONS with no dupes and count 16`() {
+    fun `intentActions schema names equal INTENT_ACTIONS with no dupes and count 15`() {
         val schemas = ResidentTools.intentActions()
-        assertEquals("intentActions() returns 16 schemas", 16, schemas.size)
+        assertEquals("intentActions() returns 15 schemas", 15, schemas.size)
         val names = schemas.map { it.name }
         assertEquals("no duplicate intent-action schema names", names.size, names.toSet().size)
         assertEquals(
@@ -122,7 +122,6 @@ class ResidentToolsTest {
         "set_alarm" to setOf("hour", "minutes"),
         "set_timer" to setOf("seconds"),
         "share_text" to setOf("text"),
-        "web_search" to setOf("query"),
     )
 
     @Test
@@ -186,21 +185,25 @@ class ResidentToolsTest {
         ResidentTools.cloudTools().first { it.name == name }.description
 
     @Test
-    fun `CLOUD_TOOLS holds exactly find_blackbox_tool and run_blackbox_tool`() {
+    fun `CLOUD_TOOLS holds find_blackbox_tool, run_blackbox_tool and web_search`() {
         assertEquals(
-            "CLOUD_TOOLS == {find_blackbox_tool, run_blackbox_tool}",
-            setOf("find_blackbox_tool", "run_blackbox_tool"),
+            "CLOUD_TOOLS == {find_blackbox_tool, run_blackbox_tool, web_search}",
+            setOf("find_blackbox_tool", "run_blackbox_tool", "web_search"),
             ResidentTools.CLOUD_TOOLS,
         )
         assertEquals("FIND_BLACKBOX_TOOL constant value", "find_blackbox_tool", ResidentTools.FIND_BLACKBOX_TOOL)
         assertEquals("RUN_BLACKBOX_TOOL constant value", "run_blackbox_tool", ResidentTools.RUN_BLACKBOX_TOOL)
+        assertEquals("WEB_SEARCH constant value", "web_search", ResidentTools.WEB_SEARCH)
+        // web_search is a CLOUD/bridge tool, NOT a phone intent action.
+        assertTrue("web_search is in the cloud bridge group", "web_search" in ResidentTools.CLOUD_TOOLS)
+        assertTrue("web_search is NOT a local phone tool", "web_search" !in ResidentTools.LOCAL_PHONE_TOOLS)
     }
 
     @Test
     fun `cloudTools schema names equal CLOUD_TOOLS`() {
         val names = ResidentTools.cloudTools().map { it.name }.toSet()
         assertEquals("cloudTools() names == CLOUD_TOOLS", ResidentTools.CLOUD_TOOLS, names)
-        assertEquals("cloudTools() returns 2 schemas", 2, ResidentTools.cloudTools().size)
+        assertEquals("cloudTools() returns 3 schemas", 3, ResidentTools.cloudTools().size)
     }
 
     @Test
@@ -225,10 +228,19 @@ class ResidentToolsTest {
     }
 
     @Test
-    fun `web_search description steers away from finding own tools toward find_blackbox_tool`() {
-        val d = ResidentTools.intentActions().first { it.name == "web_search" }.description
-        assertTrue("web_search says it opens a WEB search", d.contains("WEB search"))
+    fun `web_search is a cloud bridge tool with a networked results-come-back description`() {
+        // web_search now lives in the cloud/bridge group (HEADLESS: results come back),
+        // NOT in the phone intent actions.
+        assertTrue("web_search is in CLOUD_TOOLS", ResidentTools.WEB_SEARCH in ResidentTools.CLOUD_TOOLS)
+        assertTrue(
+            "web_search is no longer a phone intent action",
+            ResidentTools.intentActions().none { it.name == "web_search" },
+        )
+        val d = ResidentTools.cloudTools().first { it.name == "web_search" }.description
+        assertTrue("web_search says you get the results back", d.contains("get the results back"))
         assertTrue("web_search forbids using it to find own tools", d.contains("Do NOT use this"))
         assertTrue("web_search redirects to find_blackbox_tool", d.contains("find_blackbox_tool"))
+        // params: query required, search_recency_filter optional.
+        assertEquals("web_search requires query", setOf("query"), cloudRequiredOf("web_search"))
     }
 }

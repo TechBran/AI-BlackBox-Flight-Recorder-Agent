@@ -157,6 +157,8 @@ class ChatViewModelNativeToolTest {
             ResidentTools.SEARCH_TOOLS !in offered)
         assertTrue("find_blackbox_tool IS offered", ResidentTools.FIND_BLACKBOX_TOOL in offered)
         assertTrue("run_blackbox_tool IS offered", ResidentTools.RUN_BLACKBOX_TOOL in offered)
+        // web_search is now a HEADLESS cloud bridge tool offered alongside find/run.
+        assertTrue("web_search IS offered as a cloud bridge tool", ResidentTools.WEB_SEARCH in offered)
     }
 
     // ---- Task 10 (snapshot ledger): server-injected DIRECT tools in the native loop ----
@@ -268,7 +270,7 @@ class ChatViewModelNativeToolTest {
 
         val offered = engine.seenTools.map { it.schema.name }.toSet()
         assertEquals(
-            "no injectedTools -> exactly phone actuators + intent actions + cloud find/run",
+            "no injectedTools -> exactly phone actuators + intent actions + cloud find/run/web_search",
             ResidentTools.PHONE_ACTUATORS + ResidentTools.INTENT_ACTIONS + ResidentTools.CLOUD_TOOLS,
             offered,
         )
@@ -300,6 +302,8 @@ class ChatViewModelNativeToolTest {
         )
         assertTrue("no cloud tools without a bridge",
             ResidentTools.CLOUD_TOOLS.none { it in offered })
+        assertTrue("web_search NOT offered without a bridge (it needs the network)",
+            ResidentTools.WEB_SEARCH !in offered)
     }
 
     @Test
@@ -327,6 +331,46 @@ class ChatViewModelNativeToolTest {
         assertEquals(listOf("show_map"), phone.dispatched.map { it.first })
         assertTrue("intent actions must NOT reach the cloud bridge", bridge.executeCalls.isEmpty())
         assertTrue("intent actions must NOT search the cloud bridge", bridge.searchCalls.isEmpty())
+    }
+
+    @Test
+    fun `native path routes a web_search call to the cloud bridge, never the phone`() = runTest {
+        // web_search is now HEADLESS: a call routes to bridge.execute("web_search") so the
+        // RESULTS come back into the turn -- it must NEVER reach the PhoneController (which
+        // would fire a browser intent, background the app, and evict the on-device model).
+        val engine = FakeNativeToolCallingLlm(
+            calls = listOf("web_search" to """{"query":"weather today"}"""),
+            finalText = "Here's the weather",
+        )
+        val phone = FakePhoneController() // must stay UNTOUCHED
+        val bridge = FakeToolBridge(
+            executeFn = { _, _ -> ToolResult(success = true, result = JsonPrimitive("sunny, 75F")) },
+        )
+
+        ChatViewModel.streamLocalNativeAgentTurn(
+            engine = engine,
+            phone = phone,
+            phoneTools = phoneTools,
+            bridge = bridge,
+            prompt = "p",
+            operator = "system",
+            model = null,
+            text = "what's the weather?",
+            sink = { _, _ -> },
+            saveSink = { _, _ -> },
+        )
+
+        // web_search reached the cloud bridge BY NAME (operator-scoped), with the model's args.
+        assertEquals(listOf("web_search"), bridge.executeCalls.map { it.first })
+        assertEquals(
+            "web_search executed with the model's query",
+            "weather today",
+            bridge.executeCalls.single().second["query"]?.let { (it as JsonPrimitive).contentOrNull },
+        )
+        assertEquals("system", bridge.executeOperators.single())
+        // SECURITY/UX: never the phone, never a catalog search.
+        assertTrue("web_search must NOT reach the phone controller", phone.dispatched.isEmpty())
+        assertTrue("web_search must NOT search the catalog", bridge.searchCalls.isEmpty())
     }
 
     // ---- Task W3 follow-up: cloud-vault NativeTools (engine-driven) -------------

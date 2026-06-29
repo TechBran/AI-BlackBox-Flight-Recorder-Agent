@@ -1,6 +1,5 @@
 package com.aiblackbox.portal.overlay
 
-import android.app.SearchManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -272,15 +271,10 @@ class IntentActuator(
                 "take_photo" ->
                     fire(ctx, name, Intent(MediaStore.ACTION_IMAGE_CAPTURE), "camera opened")
 
-                // 15. web_search — query REQUIRED.
-                "web_search" -> {
-                    val query = str(args, "query") ?: return ActuatorResult(false, "query required")
-                    val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
-                        putExtra(SearchManager.QUERY, query)
-                    }
-                    fire(ctx, name, intent, "web search opened")
-                }
-
+                // web_search is intentionally NOT an intent action: the on-device model's
+                // web search is HEADLESS (routed through the cloud ToolBridge so it never
+                // backgrounds the app). See ResidentTools.webSearchSchema / ChatViewModel
+                // .buildCloudNativeTools. Do not re-add an ACTION_WEB_SEARCH branch here.
                 else -> ActuatorResult(false, "unknown intent action: $name")
             }
         } catch (e: Exception) {

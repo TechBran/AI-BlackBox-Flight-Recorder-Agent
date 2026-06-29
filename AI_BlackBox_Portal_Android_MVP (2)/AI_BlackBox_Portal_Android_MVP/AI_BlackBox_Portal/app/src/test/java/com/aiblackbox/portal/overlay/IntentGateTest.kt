@@ -40,7 +40,7 @@ class IntentGateTest {
     fun `benign intents are not high-consequence`() {
         val benign = listOf(
             "flashlight_on", "flashlight_off", "show_map", "open_url",
-            "dial", "create_calendar_event", "open_settings", "web_search",
+            "dial", "create_calendar_event", "open_settings",
             "set_timer", "set_alarm",
         )
         for (name in benign) {

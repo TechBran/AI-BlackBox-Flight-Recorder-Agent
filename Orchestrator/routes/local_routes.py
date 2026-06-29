@@ -48,8 +48,12 @@ _AUTONOMY_MODES = ("yolo", "permission")
 # cloud/voice site; only this local /local/turn/prepare path swaps it for the
 # minimal instruction below.
 LOCAL_TOOL_CALLER_SYSTEM_PROMPT = (
-    "You are an on-device phone assistant. Use the available tools to carry "
-    "out the user's request. Keep replies brief."
+    "You are a helpful on-device phone assistant. Answer directly from your own "
+    "knowledge whenever you can — most questions need no tools at all. Use a tool "
+    "ONLY when you genuinely need information you don't have (current events, the "
+    "web, the user's own data or memory) or to perform an action on the phone. "
+    "When you do search the web, you get the results back to read and answer from. "
+    "Keep replies brief."
 )
 
 # ---------------------------------------------------------------------------
@@ -198,6 +202,16 @@ async def local_tools_execute(request: Request):
     tool = body.get("tool")
     if not isinstance(tool, str) or not tool.strip():
         return JSONResponse({"success": False, "error": "tool required"}, status_code=400)
+
+    # On-device HEADLESS web-search alias. The phone model calls one stable
+    # `web_search` (advertised on-device, executed via this endpoint); resolve it to
+    # the operator's default provider tool HERE rather than registering a `web_search`
+    # catalog tool — a catalog tool would leak a generic `web_search` into every
+    # cloud/voice/MCP surface's (group-blind) semantic discovery, breaking the
+    # provider-explicit-naming rule. Keyless DuckDuckGo floor guarantees it runs.
+    if tool == "web_search":
+        from Orchestrator.toolvault import availability
+        tool = availability.default_provider_tool("web_search")
 
     operator = body.get("operator") or "system"
     params = body.get("params")

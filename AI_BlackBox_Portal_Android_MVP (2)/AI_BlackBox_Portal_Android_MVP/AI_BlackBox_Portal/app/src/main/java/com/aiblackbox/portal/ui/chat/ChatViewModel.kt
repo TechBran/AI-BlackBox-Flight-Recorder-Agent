@@ -3477,7 +3477,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val injected = if (bridge != null) buildInjectedNativeTools(injectedTools, bridge, operator) else emptyList()
             val cloudNativeTools = if (bridge != null) buildCloudNativeTools(bridge, operator) else emptyList()
             // Order: phone actuators, then the injected DIRECT tools, then the find/run fallback.
-            val nativeTools = phoneNativeTools + injected + cloudNativeTools
+            // distinctBy{name} (phone > injected > cloud precedence) so a name appearing in
+            // more than one source — e.g. a server-injected tool that also exists as a cloud
+            // tool — is offered to the engine only ONCE (duplicate function declarations can
+            // fault litertlm's constrained decoding). Mirrors FcLoop's de-dup.
+            val nativeTools = (phoneNativeTools + injected + cloudNativeTools).distinctBy { it.schema.name }
             val acc = StringBuilder()
             var faulted = false
             // Runaway bounds on this native loop: the litertlm engine's OWN internal
@@ -3523,10 +3527,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         /**
-         * Build the TWO cloud-vault [NativeTool]s (Task W3 follow-up) the native engine
-         * loop drives ALONGSIDE the phone/intent tools. Both execute bodies reach the
+         * Build the cloud-vault [NativeTool]s (Task W3 follow-up) the native engine
+         * loop drives ALONGSIDE the phone/intent tools. Every execute body reaches the
          * cloud [bridge] ONLY -- structurally NEVER the [PhoneController] (the W3
-         * separation guarantee) -- and pass only the model's args + the [operator] (no
+         * separation guarantee) -- and passes only the model's args + the [operator] (no
          * screen/phone content; the bridge is operator-scoped, as the manual path was):
          *
          *  - find_blackbox_tool: runBlocking the suspend [ToolBridge.searchTools]
@@ -3536,12 +3540,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *  - run_blackbox_tool: parse name + args, runBlocking [ToolBridge.execute]
          *    (operator-scoped), and return its [ToolResult] as the Gallery-shaped JSON.
          *    A missing/blank name is a failed result (the engine loop continues).
+         *  - web_search: HEADLESS direct call -- runBlocking [ToolBridge.execute]
+         *    ("web_search") with the model's args so the search RESULTS come BACK into
+         *    the turn (NEVER an Android browser intent that would background the app +
+         *    evict the on-device model). Mirrors [buildInjectedNativeTools].
          *
          * Internal so it is unit-testable against a fake [ToolBridge].
          */
         internal fun buildCloudNativeTools(bridge: ToolBridge, operator: String): List<NativeTool> =
             ResidentTools.cloudTools().map { schema ->
                 when (schema.name) {
+                    ResidentTools.WEB_SEARCH -> NativeTool(
+                        schema = schema,
+                        execute = { argsJson ->
+                            runBlocking(Dispatchers.IO) {
+                                bridge.execute(schema.name, parseNativeArgs(argsJson), operator)
+                            }.toResultJsonString()
+                        },
+                    )
                     ResidentTools.FIND_BLACKBOX_TOOL -> NativeTool(
                         schema = schema,
                         execute = { argsJson ->

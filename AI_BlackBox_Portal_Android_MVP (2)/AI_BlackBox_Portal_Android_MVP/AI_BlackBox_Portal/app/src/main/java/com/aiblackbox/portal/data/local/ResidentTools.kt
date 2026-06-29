@@ -47,11 +47,23 @@ object ResidentTools {
     const val RUN_BLACKBOX_TOOL = "run_blackbox_tool"
 
     /**
-     * The names of the native cloud-vault tools whose execute bodies route to the
-     * cloud [ToolBridge] (NEVER the [PhoneController]). Kept disjoint from
-     * [LOCAL_PHONE_TOOLS] by construction.
+     * HEADLESS web-search tool. Unlike the find/run META-tools above, this is a
+     * DIRECT cloud capability: its execute body calls the cloud [ToolBridge]'s
+     * `web_search` tool (over HTTP) and the search RESULTS come back into the
+     * conversation. It is HEADLESS by design — it must NOT fire an Android browser
+     * intent (which backgrounds the app and gets the on-device model evicted), so it
+     * lives in the cloud/bridge group, NOT in [INTENT_ACTIONS] / [LOCAL_PHONE_TOOLS].
      */
-    val CLOUD_TOOLS: Set<String> = setOf(FIND_BLACKBOX_TOOL, RUN_BLACKBOX_TOOL)
+    const val WEB_SEARCH = "web_search"
+
+    /**
+     * The names of the native cloud tools whose execute bodies route to the cloud
+     * [ToolBridge] (NEVER the [PhoneController]): the two discovery/invocation
+     * META-tools ([FIND_BLACKBOX_TOOL] / [RUN_BLACKBOX_TOOL]) plus the DIRECT
+     * headless [WEB_SEARCH] capability. All are advertised ONLY when a cloud bridge
+     * is wired and are kept disjoint from [LOCAL_PHONE_TOOLS] by construction.
+     */
+    val CLOUD_TOOLS: Set<String> = setOf(FIND_BLACKBOX_TOOL, RUN_BLACKBOX_TOOL, WEB_SEARCH)
 
     /** The one function resident in every turn. Phase 4 appends the phone actuators. */
     val searchToolsSchema = ToolSchema(
@@ -102,7 +114,6 @@ object ResidentTools {
         "flashlight_on", "flashlight_off", "create_contact", "send_email", "show_map",
         "open_wifi_settings", "create_calendar_event", "open_url", "dial", "send_sms",
         "set_alarm", "set_timer", "share_text", "open_settings_panel", "take_photo",
-        "web_search",
     )
 
     /**
@@ -457,32 +468,49 @@ object ResidentTools {
             description = "Open the camera. Direct action — no read_screen/tap.",
             parameters = noParams(),
         ),
-        ToolSchema(
-            name = "web_search",
-            description = "Open a WEB search in the browser for the user's query. Do NOT use this to find your own tools/capabilities \u2014 use find_blackbox_tool for that.",
-            parameters = buildJsonObject {
-                put("type", JsonPrimitive("object"))
-                putJsonObject("properties") {
-                    putJsonObject("query") {
-                        put("type", JsonPrimitive("string"))
-                        put("description", JsonPrimitive("Search query."))
-                    }
-                }
-                put("required", buildJsonArray { add(JsonPrimitive("query")) })
-            },
-        ),
     )
 
     // ---- Task W3 follow-up: native cloud-vault tool schemas -----------------
 
     /**
-     * The TWO native cloud-vault tool schemas (names == [FIND_BLACKBOX_TOOL] /
-     * [RUN_BLACKBOX_TOOL]). [ChatViewModel.streamLocalNativeAgentTurn] turns each into
-     * a [NativeTool] whose execute calls the cloud [ToolBridge] (search / execute),
-     * and offers them to the native engine loop ALONGSIDE the phone/intent tools.
+     * The HEADLESS web-search schema (name == [WEB_SEARCH]). Advertised in the
+     * cloud/bridge group ONLY when a cloud bridge is wired: on the native engine
+     * path via [cloudTools] (-> ChatViewModel.buildCloudNativeTools), and in the
+     * manual [FcLoop] loop's advertised set. Its dispatch routes to
+     * [ToolBridge.execute] ("web_search") so the RESULTS come back into the turn --
+     * NEVER an Android browser intent. Params: `query` (required) +
+     * `search_recency_filter` (optional).
+     */
+    val webSearchSchema = ToolSchema(
+        name = WEB_SEARCH,
+        description = "Search the web and read the results to answer the user \u2014 you get the results back. Do NOT use this to find your own tools/capabilities \u2014 use find_blackbox_tool for that.",
+        parameters = buildJsonObject {
+            put("type", JsonPrimitive("object"))
+            putJsonObject("properties") {
+                putJsonObject("query") {
+                    put("type", JsonPrimitive("string"))
+                    put("description", JsonPrimitive("What to search the web for."))
+                }
+                putJsonObject("search_recency_filter") {
+                    put("type", JsonPrimitive("string"))
+                    put("description", JsonPrimitive("Optional recency window for results (e.g. day, week, month, year)."))
+                }
+            }
+            put("required", buildJsonArray { add(JsonPrimitive("query")) })
+        },
+    )
+
+    /**
+     * The native cloud tool schemas offered to the native engine loop when a cloud
+     * bridge is wired: the two discovery/invocation META-tools
+     * ([FIND_BLACKBOX_TOOL] / [RUN_BLACKBOX_TOOL]) plus the DIRECT headless
+     * [webSearchSchema]. [ChatViewModel.streamLocalNativeAgentTurn] turns each into
+     * a [NativeTool] whose execute calls the cloud [ToolBridge], and offers them to
+     * the native engine loop ALONGSIDE the phone/intent tools.
      *
      * Descriptions are deliberately TERSE and model-steering (small on-device
-     * model): search FIRST to find a capability, then call it by the chosen name.
+     * model): search FIRST to find a capability, then call it by the chosen name;
+     * web_search reads the web and returns the results.
      */
     fun cloudTools(): List<ToolSchema> = listOf(
         ToolSchema(
@@ -517,5 +545,6 @@ object ResidentTools {
                 put("required", buildJsonArray { add(JsonPrimitive("name")) })
             },
         ),
+        webSearchSchema,
     )
 }

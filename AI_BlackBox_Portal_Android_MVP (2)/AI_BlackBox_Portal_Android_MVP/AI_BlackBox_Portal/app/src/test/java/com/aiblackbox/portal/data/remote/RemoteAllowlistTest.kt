@@ -11,7 +11,6 @@ class RemoteAllowlistTest {
             "read_screen", "tap", "swipe", "scroll", "open_app", "back", "home",
             "show_map", "flashlight_on", "flashlight_off", "open_url",
             "open_wifi_settings", "open_settings_panel", "take_photo", "set_timer",
-            "web_search",
         )) {
             assertTrue("expected '$name' allowed", RemoteAllowlist.isAllowedRemote(name))
         }
@@ -35,6 +34,9 @@ class RemoteAllowlistTest {
         assertFalse(RemoteAllowlist.isAllowedRemote("find_blackbox_tool"))
         assertFalse(RemoteAllowlist.isAllowedRemote("run_blackbox_tool"))
         assertFalse(RemoteAllowlist.isAllowedRemote("search_tools"))
+        // web_search is now a HEADLESS cloud bridge tool (not a device action) -> refused
+        // for device-only remote control.
+        assertFalse(RemoteAllowlist.isAllowedRemote("web_search"))
     }
 
     @Test fun unknown_tool_is_default_denied() {

@@ -187,14 +187,24 @@ class FcLoop(
         val phoneTools =
             if (phone != null) ResidentTools.phoneActuators() + ResidentTools.intentActions()
             else emptyList()
+        // A cloud bridge is REQUIRED by runAgent (requireNotNull above), so the
+        // cloud-only resident tools (e.g. the HEADLESS web_search) are advertised here
+        // whenever a bridge exists. They route to bridge.execute (the else-branch
+        // below) — NEVER the phone — so the model gets search RESULTS back in-turn
+        // instead of firing a browser intent that would background the app + evict the
+        // on-device model. Constant for the whole run.
+        val bridgeTools =
+            if (bridge != null) listOf(ResidentTools.webSearchSchema)
+            else emptyList()
 
         repeat(maxIterations) {
             val prompt = buildAgentPrompt(persona, working)
-            // bounded: resident + phone actuators (fixed small set) + injected (already <= MAX).
+            // bounded: resident + phone actuators + bridge tools (fixed small sets) +
+            // injected (already <= MAX).
             // ORDER IS LOAD-BEARING: phoneTools MUST precede injected so distinctBy
             // keeps the PHONE schema for any name in both sets — matching the dispatch
             // precedence (the phone branch is checked first). Don't reorder.
-            val available = (resident + phoneTools + injected).distinctBy { it.name }
+            val available = (resident + phoneTools + bridgeTools + injected).distinctBy { it.name }
 
             val assistantText = StringBuilder()
             val pendingCalls = mutableListOf<LlmEvent.ToolCall>()

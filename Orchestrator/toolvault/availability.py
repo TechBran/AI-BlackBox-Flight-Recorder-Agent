@@ -191,3 +191,37 @@ def default_web_search_hint(tool_names) -> str:
     Kept so existing callers + tests using this name (and the byte-identical web
     hint output) continue to work unchanged."""
     return default_provider_hint(tool_names, "web_search")
+
+
+def default_provider_tool(feature: str = "web_search") -> str:
+    """Resolve a RUNNABLE provider tool name for ``feature``.
+
+    The configured default (``<FEATURE>_DEFAULT``) wins IF its key is present;
+    else the first keyed synthesized-answer provider; else the keyless floor tool.
+    ALWAYS returns a tool whose key requirement is satisfied (web_search ->
+    duckduckgo_web_search at worst), so an explicit ``<FEATURE>_ENABLED`` override
+    that names a key-less provider can't yield an unrunnable tool. Used by the
+    on-device /local/tools/execute `web_search` alias so the phone model's headless
+    search resolves to the operator's default without a catalog `web_search` tool
+    (which would leak a generic alias into every surface's discovery). Stdlib-only."""
+    spec = FEATURES[feature]
+    env = _read_env()
+    provider_tool = spec["provider_tool"]
+    provider_env = spec["provider_env"]
+
+    def _keyed(prov: str) -> bool:
+        key = provider_env.get(prov)
+        return key is None or bool(env.get(key))  # key is None => keyless provider
+
+    default = (env.get(spec["default_pref"]) or "").strip()
+    if default in provider_tool and _keyed(default):
+        return provider_tool[default]
+    # Prefer a concise synthesized-answer provider that is keyed (best for a small
+    # on-device context window) over a raw-snippet provider.
+    for prov in ("perplexity", "gemini", "openai", "grok"):
+        if prov in provider_tool and _keyed(prov):
+            return provider_tool[prov]
+    for prov in spec["keyless_floor"]:
+        if prov in provider_tool:
+            return provider_tool[prov]
+    return next(iter(provider_tool.values()))

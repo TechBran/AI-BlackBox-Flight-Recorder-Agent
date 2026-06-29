@@ -277,16 +277,17 @@ class FcLoopTest {
 
         loop.runAgent("persona", emptyList(), "make me a cat picture").toList()
 
-        // Turn 0 sees ONLY the resident search_tools.
+        // Turn 0 sees the resident search_tools PLUS the HEADLESS web_search (a cloud
+        // bridge tool, advertised whenever a bridge is wired — it is here).
         assertEquals(
-            "turn 0 has exactly the resident tools",
-            listOf(ResidentTools.SEARCH_TOOLS),
+            "turn 0 has the resident search_tools + the cloud web_search",
+            listOf(ResidentTools.SEARCH_TOOLS, ResidentTools.WEB_SEARCH),
             fakeLlm.toolsPerTurn[0].map { it.name },
         )
-        // Turn 1 sees the resident search_tools PLUS the discovered generate_image.
+        // Turn 1 sees the resident tools PLUS the discovered generate_image.
         assertEquals(
-            "turn 1 has search_tools and the discovered tool",
-            setOf(ResidentTools.SEARCH_TOOLS, "generate_image"),
+            "turn 1 has search_tools, web_search and the discovered tool",
+            setOf(ResidentTools.SEARCH_TOOLS, ResidentTools.WEB_SEARCH, "generate_image"),
             fakeLlm.toolsPerTurn[1].map { it.name }.toSet(),
         )
         // No turn ever exceeds resident + cap.
@@ -313,7 +314,7 @@ class FcLoopTest {
         loop.runAgent("persona", emptyList(), "go").toList()
 
         val injectedOnTurn1 = fakeLlm.toolsPerTurn[1].map { it.name }
-            .filter { it != ResidentTools.SEARCH_TOOLS }
+            .filter { it != ResidentTools.SEARCH_TOOLS && it != ResidentTools.WEB_SEARCH }
         assertEquals(
             "only MAX_INJECTED_SCHEMAS discovered schemas are injected",
             ResidentTools.MAX_INJECTED_SCHEMAS,
@@ -603,18 +604,21 @@ class FcLoopTest {
 
     @Test
     fun `runAgent routes phone to PhoneController, search to searchTools, and other tools to bridge execute`() = runTest {
-        // One run that exercises all three routes: a phone actuator (tap), a
-        // search_tools discovery, and a discovered CLOUD tool (execute). The cloud
-        // tool must be a name NOT in LOCAL_PHONE_TOOLS (IA-3 made send_sms a LOCAL
-        // intent action, so generate_image is used here as the genuine cloud tool).
+        // One run that exercises every route: a phone actuator (tap), a search_tools
+        // discovery, a discovered CLOUD tool (generate_image, execute), and the
+        // resident HEADLESS web_search (execute). The cloud tools must be names NOT in
+        // LOCAL_PHONE_TOOLS (IA-3 made send_sms a LOCAL intent action; web_search is no
+        // longer a phone intent -> it falls through to bridge.execute, never the phone).
         val tapArgs = buildJsonObject { put("node_id", JsonPrimitive(3)) }
         val searchArgs = buildJsonObject { put("query", JsonPrimitive("make a picture")) }
         val genArgs = buildJsonObject { put("prompt", JsonPrimitive("a cat")) }
+        val webArgs = buildJsonObject { put("query", JsonPrimitive("weather today")) }
         val fakeLlm = FakeToolCallingLlm(
             script = listOf(
                 listOf(toolCall("tap", tapArgs)),
                 listOf(toolCall(ResidentTools.SEARCH_TOOLS, searchArgs)),
                 listOf(toolCall("generate_image", genArgs)),
+                listOf(toolCall(ResidentTools.WEB_SEARCH, webArgs)),
                 listOf(text("done")),
             ),
         )
@@ -631,10 +635,10 @@ class FcLoopTest {
         assertEquals(listOf("tap"), phone.dispatched.map { it.first })
         // search_tools -> bridge.searchTools.
         assertEquals(listOf("make a picture"), bridge.searchCalls)
-        // generate_image (a non-local discovered tool) -> bridge.execute (only); NOT the phone.
-        assertEquals(1, bridge.executeCalls.size)
-        assertEquals("generate_image", bridge.executeCalls[0].first)
+        // generate_image AND web_search (non-local tools) -> bridge.execute, in order; NOT the phone.
+        assertEquals(listOf("generate_image", "web_search"), bridge.executeCalls.map { it.first })
         assertTrue("generate_image must not be dispatched to the phone", phone.dispatched.none { it.first == "generate_image" })
+        assertTrue("web_search must not be dispatched to the phone", phone.dispatched.none { it.first == "web_search" })
     }
 
     @Test
@@ -647,8 +651,8 @@ class FcLoopTest {
         loop.runAgent("persona", emptyList(), "hello").toList()
 
         val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
-        assertEquals("with no phone controller, turn 0 advertises only search_tools",
-            setOf(ResidentTools.SEARCH_TOOLS), turn0Tools)
+        assertEquals("with no phone controller, turn 0 advertises only search_tools + the cloud web_search",
+            setOf(ResidentTools.SEARCH_TOOLS, ResidentTools.WEB_SEARCH), turn0Tools)
         // Explicitly assert the phone actuators are NOT advertised.
         assertTrue("tap must not be advertised without a phone controller", "tap" !in turn0Tools)
         assertTrue("read_screen must not be advertised without a phone controller", "read_screen" !in turn0Tools)
@@ -686,8 +690,8 @@ class FcLoopTest {
 
         val turn0Tools = fakeLlm.toolsPerTurn[0].map { it.name }.toSet()
         assertEquals(
-            "turn 0 advertises search_tools + every phone actuator + every intent action",
-            ResidentTools.PHONE_ACTUATORS + ResidentTools.INTENT_ACTIONS + ResidentTools.SEARCH_TOOLS,
+            "turn 0 advertises search_tools + every phone actuator + every intent action + web_search (bridge wired)",
+            ResidentTools.PHONE_ACTUATORS + ResidentTools.INTENT_ACTIONS + ResidentTools.SEARCH_TOOLS + ResidentTools.WEB_SEARCH,
             turn0Tools,
         )
     }
@@ -751,6 +755,16 @@ class FcLoopTest {
         assertTrue(
             "every intent action is advertised when a phone controller is wired",
             ResidentTools.INTENT_ACTIONS.all { it in turn0Tools },
+        )
+        // web_search left the intent actions and is now advertised as a cloud bridge
+        // tool whenever a bridge is wired (it is here).
+        assertTrue(
+            "web_search is advertised as a cloud bridge tool when a bridge is wired",
+            ResidentTools.WEB_SEARCH in turn0Tools,
+        )
+        assertTrue(
+            "web_search is no longer advertised as a phone intent action",
+            ResidentTools.WEB_SEARCH !in ResidentTools.INTENT_ACTIONS,
         )
     }
 

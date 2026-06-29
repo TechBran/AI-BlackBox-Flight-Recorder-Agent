@@ -27,10 +27,12 @@ object RemoteAllowlist {
         // Navigation / inspection actuators. NOTE: `type` is deliberately EXCLUDED —
         // composing arbitrary text is the riskiest actuator.
         "read_screen", "tap", "swipe", "scroll", "open_app", "back", "home",
-        // Parameterized, non-destructive intent actions.
+        // Parameterized, non-destructive intent actions. NOTE: `web_search` is NO
+        // LONGER here — it became a HEADLESS cloud bridge tool (results return into the
+        // conversation), not a device intent, so it is omitted from device-only remote
+        // control (cloud tools are deliberately omitted, like find/run_blackbox_tool).
         "show_map", "flashlight_on", "flashlight_off", "open_url",
         "open_wifi_settings", "open_settings_panel", "take_photo", "set_timer",
-        "web_search",
     )
 
     /** True iff [toolName] is safe to run under remote control. Default-deny. */
