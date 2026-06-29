@@ -1,4 +1,5 @@
 """Executor for text_to_speech (migrated from blackbox_tools._execute_text_to_speech)."""
+from Orchestrator import config
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
 
@@ -23,7 +24,10 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
             async with session.post(
                 f"{ctx.base_url}/tts",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=60)
+                # Generous backstop only: the server self-bounds long ElevenLabs
+                # generations via a per-chunk stream idle timeout, so this no longer
+                # guillotines a still-progressing synth at 60s.
+                timeout=aiohttp.ClientTimeout(total=config.TTS_TOOL_BACKSTOP_S, sock_connect=15)
             ) as resp:
                 result = await resp.json()
                 audio_url = result.get("audio_url", "")
