@@ -275,7 +275,11 @@ def _el_audio_msg(pcm_b64: str, sample_rate: int, commit: bool = False) -> str:
     })
 
 
-_EL_MAX_ROTATIONS = 30  # absolute backstop on consecutive session rotations (storm guard)
+# Absolute backstop on consecutive session rotations (storm guard). Only
+# PROGRESSING sessions count toward it (a no-progress instant rotate bails early),
+# so the real ceiling on continuous dictation is ~30 x Scribe's per-session limit
+# (minutes each) — comfortably beyond any realistic single utterance. Tunable.
+_EL_MAX_ROTATIONS = 30
 
 
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):
