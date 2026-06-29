@@ -54,7 +54,9 @@ import okhttp3.OkHttpClient
  */
 class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: String) {
 
-    private val wsClient = WebSocketClient(client)
+    // Per-session socket client: each start() gets its OWN instance so an old
+    // session's socket lifecycle can never touch a newer session's (closes I2).
+    private var wsClient: WebSocketClient = WebSocketClient(client)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val _events = MutableSharedFlow<SttEvent>(extraBufferCapacity = 64)
@@ -73,7 +75,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     // Monotonic id per start(); used to drop late events and skip teardown from a
     // previous session once a new one has begun (prevents cross-press bleed).
     @Volatile private var sessionEpoch = 0
-    private var graceJob: Job? = null
+    @Volatile private var graceJob: Job? = null
 
     @Volatile
     private var audioRecord: AudioRecord? = null
@@ -105,13 +107,15 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
 
         val newScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = newScope
+        val sessionWs = WebSocketClient(client)
+        wsClient = sessionWs
 
         val url = baseWsUrl + Constants.WS_STT
         android.util.Log.d(TAG, "Connecting to: $url")
 
         connectionJob = newScope.launch {
             try {
-                wsClient.connect(url).collect { msg ->
+                sessionWs.connect(url).collect { msg ->
                     when (msg) {
                         is WsMessage.Connected -> {
                             val startMsg = buildJsonObject {
@@ -121,9 +125,9 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                                 put("lang", lang)
                                 put("sample_rate", SAMPLE_RATE)
                             }
-                            wsClient.send(startMsg.toString())
+                            sessionWs.send(startMsg.toString())
                             android.util.Log.d(TAG, "Sent stt_start (provider='$provider', lang='$lang', target='$target')")
-                            startCapture(newScope)
+                            startCapture(newScope, sessionWs)
                         }
                         is WsMessage.Text -> parseMessage(msg.text, epoch)
                         is WsMessage.Closing -> {
@@ -163,15 +167,18 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         _amplitude.value = 0f
 
         val s = scope
+        val sWs = wsClient
+        val sConn = connectionJob
+        val sCap = captureJob
         if (s != null) {
             val epoch = sessionEpoch
             graceJob = s.launch {
                 try {
-                    wsClient.send(buildJsonObject { put("type", "stt_stop") }.toString())
+                    sWs.send(buildJsonObject { put("type", "stt_stop") }.toString())
                     android.util.Log.d(TAG, "Sent stt_stop")
                 } catch (_: Exception) {}
                 delay(STOP_GRACE_MS)
-                if (epoch == sessionEpoch) shutdown()   // skip if a new session already began
+                teardownSession(epoch, s, sConn, sCap, sWs)
             }
         } else {
             shutdown()
@@ -181,7 +188,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     // -------------------------------------------------------------------------
     // Mic capture — AudioRecord @24kHz -> base64 PCM16 -> WebSocket
     // -------------------------------------------------------------------------
-    private fun startCapture(s: CoroutineScope) {
+    private fun startCapture(s: CoroutineScope, ws: WebSocketClient) {
         captureJob?.cancel()
         val bufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -241,7 +248,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                             put("type", "stt_audio")
                             put("pcm", b64)
                         }
-                        if (!wsClient.send(audioMsg.toString())) {
+                        if (!ws.send(audioMsg.toString())) {
                             android.util.Log.w(TAG, "stt_audio send failed — connection dead")
                             break
                         }
@@ -301,6 +308,32 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         _isStreaming.value = false
         scope?.cancel()
         scope = null
+    }
+
+    /**
+     * Tear down ONE session's own captured resources. Safe to run even after a
+     * newer session has started: it only cancels/closes the captured objects, and
+     * it clears the shared fields/state only if this is still the active session
+     * (identity-guarded), so it can never tear down a newer session (closes I1).
+     */
+    private fun teardownSession(
+        epoch: Int,
+        sScope: CoroutineScope,
+        sConn: Job?,
+        sCap: Job?,
+        sWs: WebSocketClient,
+    ) {
+        sCap?.cancel()
+        sConn?.cancel()
+        try { sWs.close() } catch (_: Exception) {}
+        sScope.cancel()
+        if (epoch == sessionEpoch) {
+            if (captureJob === sCap) captureJob = null
+            if (connectionJob === sConn) connectionJob = null
+            if (scope === sScope) scope = null
+            _isStreaming.value = false
+            _amplitude.value = 0f
+        }
     }
 
     /** Cleanup on unexpected WS termination (error/closing/disconnected). */
