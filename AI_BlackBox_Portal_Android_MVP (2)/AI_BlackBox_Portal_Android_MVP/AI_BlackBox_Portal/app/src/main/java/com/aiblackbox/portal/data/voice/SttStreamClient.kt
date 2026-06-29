@@ -330,9 +330,15 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         if (epoch == sessionEpoch) {
             if (captureJob === sCap) captureJob = null
             if (connectionJob === sConn) connectionJob = null
-            if (scope === sScope) scope = null
-            _isStreaming.value = false
-            _amplitude.value = 0f
+            // Nest the StateFlow resets under the same identity guard: in the fast
+            // re-press race a stale grace must NOT flip a newer session's flags —
+            // the capture loop gates on `while (_isStreaming.value)`, so clobbering
+            // it to false would silently kill the new mic.
+            if (scope === sScope) {
+                scope = null
+                _isStreaming.value = false
+                _amplitude.value = 0f
+            }
         }
     }
 
