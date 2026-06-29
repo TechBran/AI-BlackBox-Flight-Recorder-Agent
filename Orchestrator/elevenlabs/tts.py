@@ -92,21 +92,25 @@ def synthesize_stream(
     raw_voice_id = voice_id.split("elevenlabs:")[-1]
 
     resp = _post_stream(text, raw_voice_id, model_id, output_format, voice_settings)
-    if not (200 <= resp.status_code < 300):
-        if resp.status_code in _FORMAT_GATE_STATUSES and output_format != _FALLBACK_FORMAT:
-            print(f"[ELEVENLABS] TTS(stream) output format downgraded to {_FALLBACK_FORMAT} (plan tier)")
-            try: resp.close()
-            except Exception: pass
-            resp = _post_stream(text, raw_voice_id, model_id, _FALLBACK_FORMAT, voice_settings)
-        if not (200 <= resp.status_code < 300):
-            err = client.map_error(resp.status_code, _parse_body(resp))
-            try: resp.close()
-            except Exception: pass
-            raise RuntimeError(err)
+    if not (200 <= resp.status_code < 300) and \
+       resp.status_code in _FORMAT_GATE_STATUSES and output_format != _FALLBACK_FORMAT:
+        print(f"[ELEVENLABS] TTS(stream) output format downgraded to {_FALLBACK_FORMAT} (plan tier)")
+        try: resp.close()
+        except Exception: pass
+        resp = _post_stream(text, raw_voice_id, model_id, _FALLBACK_FORMAT, voice_settings)
+    # One try/finally guarantees the response is closed on EVERY exit (bad status,
+    # mid-stream stall, early generator abandon, or normal completion).
     try:
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(client.map_error(resp.status_code, _parse_body(resp)))
         for chunk in resp.iter_content(chunk_size=4096):
             if chunk:
                 yield chunk
+    except requests.exceptions.RequestException as e:
+        # A mid-stream stall/disconnect (the idle read timeout, a dropped
+        # connection, chunked-encoding error) surfaces here — normalize to the
+        # same RuntimeError contract callers already handle for bad statuses.
+        raise RuntimeError(f"ElevenLabs TTS stream error: {e}") from e
     finally:
         try: resp.close()
         except Exception: pass
