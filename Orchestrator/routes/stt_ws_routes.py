@@ -275,16 +275,21 @@ def _el_audio_msg(pcm_b64: str, sample_rate: int, commit: bool = False) -> str:
     })
 
 
+_EL_MAX_ROTATIONS = 30  # absolute backstop on consecutive session rotations (storm guard)
+
+
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     """Bridge client PCM -> ElevenLabs Scribe realtime -> client deltas/finals,
     with TRANSPARENT reconnect-and-resume on Scribe's session_time_limit_exceeded.
 
-    A single client_pump runs for the whole logical session, feeding an
-    asyncio.Queue (audio survives a reconnect). An upstream-manager loop opens a
-    Scribe session and relays it; when Scribe hits its session cap it closes, and
-    the manager opens a FRESH session and resumes WITHOUT telling the client (no
-    stt_final, socket stays open). A carried-over `prefix` keeps the cumulative
-    transcript continuous. A normal stt_stop commits + drains the single final.
+    A single client_pump drains the client socket into an asyncio.Queue (audio
+    survives a reconnect) and ALWAYS sets disconnect_evt on exit so an abrupt
+    client drop is observed. An upstream-manager loop opens a Scribe session per
+    epoch; on the session cap it opens a fresh session and resumes WITHOUT telling
+    the client (no stt_final, client socket stays open), stitching a carried
+    `prefix` for transcript continuity. Reconnect is bounded (progress-guard +
+    _EL_MAX_ROTATIONS + small backoff) so a flapping provider or a dead client
+    can't storm. A normal stt_stop commits + drains the single stt_final.
     """
     key = resolve_api_key()
     if not key:
@@ -301,33 +306,43 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
 
     audio_q: asyncio.Queue = asyncio.Queue()
     stop_evt = asyncio.Event()
-    prefix = ""  # transcript delivered before any rotation (continuity across reconnects)
+    disconnect_evt = asyncio.Event()  # set when the CLIENT socket drops/ends
+    prefix = ""
 
     async def client_pump():
-        """Runs ONCE for the whole logical session: client -> queue."""
-        while True:
-            msg = await websocket.receive_json()
-            mtype = msg.get("type")
-            if mtype == "stt_audio":
-                pcm = msg.get("pcm", "")
-                if pcm:
-                    await audio_q.put(("audio", pcm))
-            elif mtype == "stt_stop":
-                await audio_q.put(("stop", None))
-                stop_evt.set()
-                return
+        """Runs ONCE for the whole logical session: client -> queue. ALWAYS sets
+        disconnect_evt on exit so the manager wakes even on an abrupt client drop."""
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                mtype = msg.get("type")
+                if mtype == "stt_audio":
+                    pcm = msg.get("pcm", "")
+                    if pcm:
+                        await audio_q.put(("audio", pcm))
+                elif mtype == "stt_stop":
+                    await audio_q.put(("stop", None))
+                    stop_evt.set()
+                    return
+        except WebSocketDisconnect:
+            pass
+        finally:
+            disconnect_evt.set()
 
     async def run_epoch(el_ws) -> str:
-        """Relay ONE Scribe connection. Returns 'rotate' (cap hit -> reconnect) or
-        'done' (stop final delivered / fatal error already surfaced)."""
+        """Relay ONE Scribe connection. Returns 'rotate' (cap hit AND the epoch made
+        progress -> reconnect) or 'done' (stop final delivered / client gone / fatal
+        error / a no-progress rotate that must not be retried)."""
         nonlocal prefix
         acc = InterimAccumulator()
         last_interim = {"text": ""}
         rotate = {"v": False}
+        progressed = {"v": False}  # consumed >=1 audio chunk OR delivered >=1 transcript
 
         async def feeder():
             while True:
                 kind, pcm = await audio_q.get()
+                progressed["v"] = True
                 if kind == "audio":
                     await el_ws.send(_el_audio_msg(pcm, sample_rate, commit=False))
                 else:  # stop
@@ -353,6 +368,7 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                     continue
                 if m["type"] == "stt_final" and is_whisper_hallucination(m.get("text", "")):
                     continue
+                progressed["v"] = True
                 if m["type"] == "stt_delta":
                     last_interim["text"] = m["text"]
                     m = {"type": "stt_delta", "text": join_transcript_segments(prefix, m["text"])}
@@ -365,60 +381,99 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
 
         feeder_task = asyncio.ensure_future(feeder())
         reader_task = asyncio.ensure_future(reader())
+        disc_wait = asyncio.ensure_future(disconnect_evt.wait())
+        tasks = (feeder_task, reader_task, disc_wait)
         try:
-            done, _ = await asyncio.wait({feeder_task, reader_task}, return_when=asyncio.FIRST_COMPLETED)
-            if feeder_task in done and reader_task not in done and not rotate["v"]:
+            await asyncio.wait(set(tasks), return_when=asyncio.FIRST_COMPLETED)
+            # Abrupt client drop (NO stt_stop) -> terminal, never reconnect against a
+            # dead client. NOTE: client_pump ALWAYS sets disconnect_evt on exit, incl.
+            # a clean stt_stop, so gate on stop_evt — a normal stop must fall through
+            # to drain the single committed final below (else the last utterance's
+            # stt_final is dropped while the reader still awaits it from the network).
+            if disconnect_evt.is_set() and not stop_evt.is_set():
+                return "done"
+            if feeder_task.done() and not reader_task.done() and not rotate["v"]:
+                # client committed (stop): drain for the single final, 5s backstop.
                 try:
-                    await asyncio.wait_for(reader_task, timeout=5.0)
+                    await asyncio.wait_for(asyncio.shield(reader_task), timeout=5.0)
                 except asyncio.TimeoutError:
-                    reader_task.cancel()
-                    try: await reader_task
-                    except (asyncio.CancelledError, WebSocketDisconnect): pass
-                    except Exception: pass
-            else:
-                feeder_task.cancel()
-                try: await feeder_task
-                except (asyncio.CancelledError, WebSocketDisconnect): pass
-                except Exception: pass
+                    pass
             for t in (feeder_task, reader_task):
                 if t.done() and not t.cancelled():
                     exc = t.exception()
                     if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
                         raise exc
         finally:
-            for t in (feeder_task, reader_task):
+            for t in tasks:
                 if not t.done():
                     t.cancel()
+            for t in tasks:
+                try:
+                    await t
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
+                except Exception:
+                    pass
 
-        if rotate["v"] and not stop_evt.is_set():
+        if rotate["v"] and not stop_evt.is_set() and not disconnect_evt.is_set():
+            # A session that connected and instantly claimed the time limit WITHOUT
+            # transcribing or consuming anything is pathological -> do not spin on it.
+            if not progressed["v"]:
+                return "done"
+            # resume-not-replay: audio already sent to the dying session but not yet
+            # returned as a partial is not re-fed; continuity is carried by the last
+            # delivered partial (prefix). A small boundary sliver may be dropped.
             prefix = join_transcript_segments(prefix, last_interim["text"])
             return "rotate"
         return "done"
 
     pump_task = asyncio.ensure_future(client_pump())
+    rotations = 0
     try:
-        while not stop_evt.is_set():
-            el_ws = await websockets.connect(
-                url, additional_headers=auth_headers(key),
-                open_timeout=10, ping_interval=20, ping_timeout=30, close_timeout=10,
-            )
+        while not stop_evt.is_set() and not disconnect_evt.is_set():
+            try:
+                el_ws = await websockets.connect(
+                    url, additional_headers=auth_headers(key),
+                    open_timeout=10, ping_interval=20, ping_timeout=30, close_timeout=10,
+                )
+            except Exception as e:
+                print(f"[STT/WS] elevenlabs connect failed: {e}")
+                try:
+                    await websocket.send_json({"type": "stt_error", "message": f"STT connection failed: {e}"})
+                except Exception:
+                    pass
+                break
             print(f"[STT/WS] elevenlabs connected model={config.ELEVENLABS_STT_STREAM_MODEL} "
                   f"rate={sample_rate} commit_strategy=manual")
             try:
                 result = await run_epoch(el_ws)
             finally:
-                try: await el_ws.close()
-                except Exception: pass
-            if result == "rotate" and not stop_evt.is_set():
-                print("[STT/WS] elevenlabs session_time_limit_exceeded — reconnecting & resuming")
+                try:
+                    await el_ws.close()
+                except Exception:
+                    pass
+            if result == "rotate" and not stop_evt.is_set() and not disconnect_evt.is_set():
+                rotations += 1
+                if rotations > _EL_MAX_ROTATIONS:
+                    print(f"[STT/WS] elevenlabs rotation cap ({_EL_MAX_ROTATIONS}) exceeded — ending session")
+                    try:
+                        await websocket.send_json({"type": "stt_error", "message": "STT session could not be sustained"})
+                    except Exception:
+                        pass
+                    break
+                print(f"[STT/WS] elevenlabs session_time_limit_exceeded — reconnecting & resuming (attempt {rotations})")
+                await asyncio.sleep(min(0.2 * rotations, 1.0))  # small backoff against a flapping provider
                 continue
             break
     finally:
         if not pump_task.done():
             pump_task.cancel()
-            try: await pump_task
-            except (asyncio.CancelledError, WebSocketDisconnect): pass
-            except Exception: pass
+        try:
+            await pump_task
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            pass
+        except Exception:
+            pass
 
 
 # =============================================================================
