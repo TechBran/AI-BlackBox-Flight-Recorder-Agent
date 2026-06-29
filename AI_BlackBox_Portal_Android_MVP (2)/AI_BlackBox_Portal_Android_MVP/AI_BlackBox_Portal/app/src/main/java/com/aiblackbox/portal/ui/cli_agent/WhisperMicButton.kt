@@ -318,6 +318,12 @@ fun WhisperMicButton(
     }
 }
 
+// Max characters of the live transcript kept in the preview chip. Sized so the
+// retained tail fits the chip's maxLines=3 at widthIn(max = 280.dp) — keeping the
+// NEWEST words fully visible instead of letting Text's end-ellipsis clip them.
+// Tuned on-device; lower this if long dictations clip the most-recent words.
+private const val PREVIEW_CHIP_MAX_CHARS = 120
+
 @Composable
 private fun TranscriptPreviewChip(text: String) {
     Surface(
@@ -339,7 +345,7 @@ private fun TranscriptPreviewChip(text: String) {
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = previewTail(text),
+                text = previewTail(text, max = PREVIEW_CHIP_MAX_CHARS),
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
