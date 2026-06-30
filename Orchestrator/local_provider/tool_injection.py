@@ -24,6 +24,20 @@ monkeypatch ``tool_injection.meta_tool.execute`` on this module.
 from Orchestrator.toolvault import meta_tool
 
 
+# Tools the on-device (local Gemma) model must NEVER be offered or discover: each
+# DELEGATES device control to a (cloud or on-device) agent that targets THIS phone,
+# so calling one from the on-device loop is a no-op recursion — control_phone
+# literally wakes the on-device model itself. The model already has DIRECT phone
+# actuators (open_app/tap/type/swipe/flashlight_on/...). Filtered out of BOTH
+# /local/tools/search discovery AND /local/turn/prepare injection, since both flow
+# through build_injected_tools.
+ON_DEVICE_EXCLUDED_TOOLS = frozenset({
+    "control_phone",
+    "control_android_device",
+    "use_computer",
+})
+
+
 def build_injected_tools(query: str, k: int = 5) -> list[dict]:
     """Semantic-search ToolVault for ``query`` and return up to ``k`` callable
     tool specs.
@@ -46,6 +60,9 @@ def build_injected_tools(query: str, k: int = 5) -> list[dict]:
     try:
         search = meta_tool.execute("search", query=query)
         matches = (search.data or {}).get("matches", []) if search.success else []
+        # Drop the self-delegating device-control tools (recursion hazard) BEFORE the
+        # top-k slice so they never crowd out usable tools. See ON_DEVICE_EXCLUDED_TOOLS.
+        matches = [m for m in matches if m.get("name") not in ON_DEVICE_EXCLUDED_TOOLS]
 
         tools: list[dict] = []
         for m in matches[:k]:

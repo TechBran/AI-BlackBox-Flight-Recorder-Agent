@@ -106,3 +106,31 @@ def test_skips_unreadable_tool():
 
     assert len(tools) == 1
     assert tools[0]["name"] == "good_tool"
+
+
+def test_excludes_self_delegating_device_control_tools():
+    """The on-device model must never be offered control_phone /
+    control_android_device / use_computer (they delegate device control back to this
+    phone -> recursion). They're dropped even if search ranks them first, WITHOUT
+    consuming a top-k slot (filtered before the slice), so usable tools survive."""
+
+    def fake_execute(action, **params):
+        if action == "search":
+            return _result(True, {"matches": [
+                {"name": "control_phone"},
+                {"name": "control_android_device"},
+                {"name": "use_computer"},
+                {"name": "open_app"},
+            ]})
+        if action == "read":
+            name = params.get("tool_name")
+            return _result(True, {"description": _desc(name), "schema": {"type": "object"}})
+        return _result(False, None)
+
+    with mock.patch.object(ti.meta_tool, "execute", side_effect=fake_execute):
+        tools = ti.build_injected_tools("control the phone", k=2)
+
+    names = {t["name"] for t in tools}
+    assert names.isdisjoint({"control_phone", "control_android_device", "use_computer"})
+    # open_app survived: the excluded hits did NOT eat the k=2 slots (filter-before-slice).
+    assert "open_app" in names

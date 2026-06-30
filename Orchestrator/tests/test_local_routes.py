@@ -85,6 +85,61 @@ def test_tools_execute_requires_tool(client):
     assert "error" in body
 
 
+def test_tools_execute_blocks_self_delegating_device_control(client, monkeypatch):
+    """The on-device execute endpoint REFUSES the self-delegating device-control tools
+    (control_phone / control_android_device / use_computer): running one would delegate
+    the task back to THIS phone and loop with no progress. The guard short-circuits
+    BEFORE execute_tool (which must never run) and returns a 200 with success False and
+    a model-readable nudge naming the blocked tool."""
+
+    async def spy_execute_tool(tool, params, operator):
+        raise AssertionError(f"execute_tool must NOT run for blocked tool {tool!r}")
+
+    monkeypatch.setattr(local_routes, "execute_tool", spy_execute_tool)
+
+    for blocked in ("control_phone", "control_android_device", "use_computer"):
+        resp = client.post(
+            "/local/tools/execute",
+            json={"tool": blocked, "params": {"task": "do stuff"}, "operator": "Brandon"},
+        )
+        # 200 (not 4xx) so the bridge surfaces the text to the model as a tool result.
+        assert resp.status_code == 200, blocked
+        body = resp.json()
+        assert body["success"] is False, blocked
+        # nudge rides in `result` (the field the Android ToolResult model reads), NOT
+        # `error` (which that model drops) — so the on-device model actually sees it.
+        assert blocked in body["result"], blocked
+
+
+def test_tools_execute_allows_device_control_for_mcp_gateway(client, monkeypatch):
+    """The block is CALLER-SCOPED (fail-closed): the MCP remote gateway REUSES this
+    endpoint to run the FULL catalog, where a frontier model legitimately drives the
+    phone via control_phone. A request bearing the X-BlackBox-Caller: mcp-gateway header
+    is EXEMPT and reaches execute_tool normally — preserving the locked MCP production
+    decision while the (unmarked) on-device bridge stays restricted."""
+
+    ran = {"tool": None}
+
+    class _Ok:
+        success = True
+        result = {"ok": True}
+
+    async def fake_execute_tool(tool, params, operator):
+        ran["tool"] = tool
+        return _Ok()
+
+    monkeypatch.setattr(local_routes, "execute_tool", fake_execute_tool)
+
+    resp = client.post(
+        "/local/tools/execute",
+        json={"tool": "control_phone", "params": {"task": "x"}, "operator": "Brandon"},
+        headers={"X-BlackBox-Caller": "mcp-gateway"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert ran["tool"] == "control_phone"  # the gateway reached execution, not blocked
+
+
 # ---------------------------------------------------------------------------
 # /local/tools/search
 # ---------------------------------------------------------------------------

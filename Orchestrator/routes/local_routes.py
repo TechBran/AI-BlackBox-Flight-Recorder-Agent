@@ -29,9 +29,20 @@ from Orchestrator.config import CFG
 from Orchestrator.context_builder import PROVIDER_CAPS, build_fossil_context
 from Orchestrator.local_provider import get_local_registry
 from Orchestrator.local_provider import catalog
-from Orchestrator.local_provider.tool_injection import build_injected_tools
+from Orchestrator.local_provider.tool_injection import (
+    build_injected_tools,
+    ON_DEVICE_EXCLUDED_TOOLS,
+)
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
+
+# The MCP remote gateway (MCP/blackbox_mcp_server.py) REUSES POST /local/tools/execute
+# to run the FULL ToolVault catalog for frontier models (locked decision,
+# docs/plans/2026-06-26-mcp-server-remote-production.md). It declares itself with this
+# X-BlackBox-Caller value so it is EXEMPT from the on-device device-control restriction
+# enforced in local_tools_execute. The on-device Android bridge sends NO such header, so
+# it stays restricted (fail-closed). Keep this string in sync with the MCP proxy header.
+_FULL_CATALOG_CALLER = "mcp-gateway"
 
 # Valid autonomy modes for the on-device agent loop (YOLO = act without asking,
 # permission = ask before each actuator call).
@@ -202,6 +213,33 @@ async def local_tools_execute(request: Request):
     tool = body.get("tool")
     if not isinstance(tool, str) or not tool.strip():
         return JSONResponse({"success": False, "error": "tool required"}, status_code=400)
+
+    # Programmatic recursion guard, defense-in-depth with the discovery filter
+    # (ON_DEVICE_EXCLUDED_TOOLS, the single source). The ON-DEVICE Gemma model must
+    # never EXECUTE a device-control tool that delegates the task BACK to this phone:
+    # control_phone wakes this very model, and control_android_device / use_computer
+    # drive THIS device, so running one loops with no progress. The on-device model
+    # already cannot DISCOVER these (the filter hides them from /local/tools/search and
+    # /local/turn/prepare), but a small model can still emit such a name from its own
+    # priors, so EXECUTION is blocked here too.
+    #
+    # CALLER-SCOPED, fail-closed: this endpoint is SHARED — the MCP remote gateway
+    # reuses it to run the full catalog, where a frontier model legitimately drives the
+    # phone via control_phone. So the block applies by DEFAULT (the on-device bridge
+    # sends no marker -> restricted) and EXEMPTS only the MCP gateway, which declares
+    # itself via X-BlackBox-Caller. The nudge goes in `result` (the field Android's
+    # ToolResult model reads) at HTTP 200, so the on-device model receives it as a
+    # normal tool result and self-corrects to its direct actuators (a 4xx would be
+    # swallowed by the bridge as a transport error and never reach the model).
+    caller = request.headers.get("x-blackbox-caller", "")
+    if caller != _FULL_CATALOG_CALLER and tool in ON_DEVICE_EXCLUDED_TOOLS:
+        return {
+            "success": False,
+            "result": (
+                f"{tool} is not available on-device — you ARE the phone; use your "
+                "direct actions (open_app, flashlight_on, tap, type, swipe)."
+            ),
+        }
 
     # On-device HEADLESS web-search alias. The phone model calls one stable
     # `web_search` (advertised on-device, executed via this endpoint); resolve it to

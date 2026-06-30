@@ -527,7 +527,7 @@ async def _proxy_tool(name: str, arguments: dict, client: httpx.AsyncClient):
     _log(logging.INFO, name, f"proxy -> {endpoint}", operator=operator)
     try:
         resp = await asyncio.wait_for(
-            client.post(endpoint, json={"tool": name, "params": params, "operator": operator}),
+            client.post(endpoint, json={"tool": name, "params": params, "operator": operator}, headers={"X-BlackBox-Caller": "mcp-gateway"}),
             timeout=PROXY_TIMEOUT,
         )
     except asyncio.TimeoutError:
