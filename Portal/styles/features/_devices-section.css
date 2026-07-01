@@ -1,0 +1,195 @@
+/* _devices-section.css
+ * System-Menu "Devices" section (M3 3.7) — tailnet device management.
+ * Lists all Tailscale-net devices with owner / primary / default-provider
+ * controls. Mirrors the ember/updates settings-section look & feel.
+ */
+
+.devices-section {
+    border-top: 1px solid var(--neutral-300);
+    padding-top: 12px;
+}
+
+.devices-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.devices-section-head h4 { margin: 0; }
+
+.devices-section-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.devices-filter-select {
+    background: var(--neutral-150);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 12.5px;
+    max-width: 150px;
+    cursor: pointer;
+}
+.devices-filter-select:hover { border-color: var(--accent); }
+
+.btn-icon-refresh {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--muted);
+    padding: 4px 8px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease, transform .15s ease;
+}
+.btn-icon-refresh:hover { border-color: var(--accent); color: var(--text); }
+.btn-icon-refresh:active { transform: rotate(180deg); }
+
+/* ── Device list ─────────────────────────────────────────────────────────── */
+.devices-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 340px;
+    overflow-y: auto;
+}
+
+.devices-empty {
+    margin: 4px 0;
+    font-size: 12.5px;
+    color: var(--muted);
+    text-align: center;
+    padding: 12px 8px;
+}
+.devices-error { color: var(--accent); }
+
+.devices-hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+}
+
+/* ── Device card ─────────────────────────────────────────────────────────── */
+.device-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--neutral-100);
+    padding: 10px 12px;
+    transition: border-color .15s ease, background .15s ease;
+}
+.device-card:hover { border-color: var(--neutral-400); }
+.device-card.offline { opacity: 0.72; }
+
+.device-card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.device-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--neutral-500);
+}
+.device-dot.online {
+    background: #27d980;
+    box-shadow: 0 0 8px rgba(39, 217, 128, 0.55);
+}
+.device-dot.offline { background: var(--neutral-500); }
+
+.device-name {
+    font-weight: var(--font-semibold);
+    color: var(--text);
+    font-size: 13.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.device-type {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: capitalize;
+}
+
+.device-primary {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 3px 9px;
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.device-primary:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.device-primary.is-primary {
+    border-color: var(--accent);
+    color: #ffd54a;
+    background: rgba(255, 74, 74, 0.12);
+    cursor: default;
+}
+
+.device-tailnet {
+    margin: 6px 0 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.device-card-controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.device-ctl {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1 1 130px;
+    min-width: 0;
+}
+.device-ctl-label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--neutral-700);
+}
+.device-owner-select,
+.device-provider-select {
+    background: var(--neutral-150);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+    width: 100%;
+}
+.device-owner-select:hover:not(:disabled),
+.device-provider-select:hover:not(:disabled) { border-color: var(--accent); }
+.device-owner-select:disabled,
+.device-provider-select:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Narrow screens — stack the owner/provider controls. */
+@media (max-width: 480px) {
+    .device-card-controls { flex-direction: column; gap: 8px; }
+    .device-ctl { flex: 1 1 auto; }
+    .devices-filter-select { max-width: 120px; }
+}

@@ -33,6 +33,15 @@ class ToolResult:
 
 @dataclass
 class ToolContext:
-    """Per-call execution context passed to module executors."""
+    """Per-call execution context passed to module executors.
+
+    ``origin_device_id`` (M3) is the tailnet identity of the device the request
+    ORIGINATED from — a hostname, MagicDNS name, or tailnet IPv4. It is threaded
+    through so origin-aware device-control routing (``mesh.resolve_device``) can
+    default the control target to the originating device. It is None for
+    non-device surfaces (the box/Portal and remote MCP), which then resolve to the
+    operator's PRIMARY device. Back-compat default None; JSON-serializable.
+    """
     operator: str = "system"
     base_url: str = "http://localhost:9091"
+    origin_device_id: Optional[str] = None

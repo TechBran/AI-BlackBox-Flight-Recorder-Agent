@@ -30,7 +30,12 @@ data class StreamRequest(
     val model: String? = null,
     @SerialName("session_id") val sessionId: String? = null,
     @SerialName("device_id") val deviceId: String? = null,
-    val camera: String? = null
+    val camera: String? = null,
+    // M3 (task 3.6): this phone's OWN tailnet identity (its 100.64/10 IPv4), so a
+    // device-control tool triggered by THIS chat defaults to targeting THIS phone.
+    // Null for surfaces that can't self-identify → backend falls back to the
+    // operator's primary device (unchanged behavior).
+    @SerialName("origin_device_id") val originDeviceId: String? = null
 )
 
 @Serializable

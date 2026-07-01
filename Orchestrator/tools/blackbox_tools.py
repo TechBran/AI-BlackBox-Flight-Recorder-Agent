@@ -129,9 +129,15 @@ class BlackBoxToolExecutor:
         result = await executor.execute("send_sms", {"phone_number": "+1555...", "message": "Hello"})
     """
 
-    def __init__(self, operator: str = "system", base_url: str = "http://localhost:9091"):
+    def __init__(self, operator: str = "system", base_url: str = "http://localhost:9091",
+                 origin_device_id: Optional[str] = None):
         self.operator = operator
         self.base_url = base_url
+        # M3: the tailnet identity of the ORIGINATING device (for origin-aware
+        # device-control routing). None for the box/Portal + remote MCP (→ the
+        # operator's primary device); the Android app stamps its own tailnet id here
+        # (3.6 Android half) so a device task defaults back to that device.
+        self.origin_device_id = origin_device_id
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Execute a tool and return the result.
@@ -158,7 +164,8 @@ class BlackBoxToolExecutor:
         try:
             return await ex(
                 tool_input,
-                ToolContext(operator=self.operator, base_url=self.base_url),
+                ToolContext(operator=self.operator, base_url=self.base_url,
+                            origin_device_id=self.origin_device_id),
             )
         except Exception as e:
             import traceback
@@ -197,13 +204,19 @@ def get_tools_for_backend(backend: str, group: str = "phone") -> List[Dict]:
 async def execute_tool(
     tool_name: str,
     tool_input: Dict[str, Any],
-    operator: str = "system"
+    operator: str = "system",
+    origin_device_id: Optional[str] = None,
 ) -> ToolResult:
     """
     Convenience function to execute a tool.
 
+    ``origin_device_id`` (M3) threads the originating device's tailnet identity for
+    origin-aware device-control routing. Default None → the box/Portal + remote MCP
+    path (resolves to the operator's primary device); the Android-originated surface
+    passes its own tailnet id (3.6 Android half).
+
     Usage:
         result = await execute_tool("send_sms", {"phone_number": "+1555...", "message": "Hello"}, "Brandon")
     """
-    executor = BlackBoxToolExecutor(operator=operator)
+    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=origin_device_id)
     return await executor.execute(tool_name, tool_input)

@@ -178,52 +178,69 @@ fun DeviceManagerScreen(
             }
             Spacer(Modifier.height(12.dp))
 
-            // Search + Type Filter bar (matching Portal .dm-top-bar)
-            DeviceSearchFilterBar(
-                searchQuery = searchQuery,
-                onSearchChange = { viewModel.setSearchQuery(it) },
-                typeFilter = typeFilter,
-                onFilterChange = {
-                    viewModel.setTypeFilter(it)
-                }
-            )
-            Spacer(Modifier.height(12.dp))
+            // One shared scroll: the tailnet MESH (M3 task 3.8 — owner/primary/provider
+            // assignment) sits on top, then the pre-existing ADB/VNC direct-connection
+            // registry below. The mesh is always visible even when the registry is empty.
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // ── Tailnet Mesh (GET /devices/mesh) ──
+                item { MeshDevicesSection(origin = origin) }
 
-            // Loading indicator
-            AnimatedVisibility(visible = isLoading) {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        color = BbxAccent,
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp
+                // ── Direct Connections (ADB/VNC registry) ──
+                item {
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        "Direct Connections",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = BbxDim
                     )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "ADB / VNC registry entries",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Neutral500
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    DeviceSearchFilterBar(
+                        searchQuery = searchQuery,
+                        onSearchChange = { viewModel.setSearchQuery(it) },
+                        typeFilter = typeFilter,
+                        onFilterChange = { viewModel.setTypeFilter(it) }
+                    )
+                    AnimatedVisibility(visible = isLoading) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(top = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = BbxAccent,
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
                 }
-            }
 
-            // Device list or empty state
-            if (devices.isEmpty() && !isLoading) {
-                DeviceEmptyState()
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
+                if (devices.isEmpty() && !isLoading) {
+                    item {
+                        Text(
+                            "No direct connections. Use \"Sync Tailscale\" to discover devices.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Neutral500,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    }
+                } else {
                     items(devices, key = { it.id }) { device ->
                         DeviceCard(
                             device = device,
                             isAdbConnected = viewModel.isAdbConnected(device),
-                            onConnect = {
-                                viewModel.adbConnect(device.id)
-                            },
-                            onDisconnect = {
-                                viewModel.adbDisconnect(device.id)
-                            },
-                            onHealth = {
-                                viewModel.checkHealth(device.id)
-                            },
-                            onRemove = {
-                                viewModel.requestRemove(device.id)
-                            }
+                            onConnect = { viewModel.adbConnect(device.id) },
+                            onDisconnect = { viewModel.adbDisconnect(device.id) },
+                            onHealth = { viewModel.checkHealth(device.id) },
+                            onRemove = { viewModel.requestRemove(device.id) }
                         )
                     }
                 }

@@ -11,7 +11,9 @@ can take a minute. Only SAFE device actions run remotely; the phone enforces an
 allowlist.
 
 Structured errors (data["error_kind"]) let the frontier model decide to retry or
-stop: no_device / wake_failed / bad_response / lost_contact / remote_error / timeout.
+stop. Resolution (mesh.resolve_device): invalid_target / origin_mismatch /
+no_primary_device / no_device. Execution: refused / wake_failed / bad_response /
+lost_contact / remote_error / timeout.
 """
 import asyncio
 import time
@@ -102,15 +104,22 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     if not task:
         return ToolResult(False, "task is required (what to do on the phone).")
 
-    node = mesh.resolve_origin(ctx.operator)
-    if node is None:
-        return ToolResult(
-            False,
-            "No reachable on-device Gemma for this operator — the phone may be "
-            "offline, off the tailnet, or has not attested a model. Cannot run "
-            "the task remotely.",
-            data={"error_kind": "no_device"},
+    # M3 origin-aware routing. control_phone drives the operator's OWN phone, so it
+    # normally has no explicit target; resolve_device defaults to the origin device
+    # (ctx.origin_device_id, once the Android app stamps it — 3.6 Android half) and,
+    # when the origin is a non-device surface with no primary set, falls back to the
+    # legacy single-attested-device path (resolve_origin) it always used. The optional
+    # `device` param (if ever supplied) still targets any tailnet node.
+    try:
+        node = mesh.resolve_device(
+            operator=ctx.operator,
+            origin_device_id=ctx.origin_device_id,
+            target_device_id=(params.get("device") or "").strip() or None,
         )
+    except mesh.DeviceResolutionError as e:
+        data = {"error_kind": e.kind}
+        data.update(e.detail)
+        return ToolResult(False, e.message, data=data)
 
     base_url = _phone_base_url(node)
     device = node.dns_name or node.ip

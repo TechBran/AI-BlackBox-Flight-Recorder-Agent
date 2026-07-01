@@ -1877,12 +1877,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val erCamera = if (currentProvider == "robotics") _erCamera.value else null
 
             try {
+                // M3 (task 3.6): stamp this phone's OWN tailnet identity on the request so a
+                // device-control tool this turn triggers defaults to targeting THIS device.
+                // Interface enumeration runs off the main thread; null when not on the tailnet
+                // (backend then falls back to the operator's primary device).
+                val originDeviceId = withContext(Dispatchers.IO) {
+                    com.aiblackbox.portal.data.remote.TailnetAddress.localTailnetIpv4()
+                }
                 val flow = if (imageUrls.isEmpty()) {
                     repo.sendStream(text, history, currentOperator, currentProvider, currentModel.ifBlank { null },
-                        sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera)
+                        sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
+                        originDeviceId = originDeviceId)
                 } else {
                     repo.sendStreamMultimodal(text, imageUrls, history, currentOperator, currentProvider, currentModel.ifBlank { null },
-                        sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera)
+                        sessionId = cuSessionId, deviceId = cuDeviceId, camera = erCamera,
+                        originDeviceId = originDeviceId)
                 }
 
                 flow.collect { event ->

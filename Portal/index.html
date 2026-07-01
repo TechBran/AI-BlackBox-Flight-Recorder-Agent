@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui298"/> <!-- v294: cron cards border-only accent + live next-run preview -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui299"/> <!-- v299: M3 3.7 System-Menu Devices section (tailnet device management) -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui298"></script> <!-- v294: cron cards border-only accent + live next-run preview -->
+  <script type="module" src="/ui/app-modular.js?v=genui299"></script> <!-- v299: M3 3.7 System-Menu Devices section (tailnet device management) -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -450,6 +450,23 @@
               <button id="btnGmail" class="btn">📧 Google Workspace</button>
             </div>
           </div>
+        </div>
+
+        <!-- Devices Section (M3 3.7 — tailnet device management) -->
+        <div class="menu-group devices-section">
+          <div class="devices-section-head">
+            <h4>📡 Devices</h4>
+            <div class="devices-section-controls">
+              <select id="devicesOperatorFilter" class="devices-filter-select" title="Filter devices by operator" aria-label="Filter devices by operator">
+                <option value="">All operators</option>
+              </select>
+              <button id="btnRefreshDevices" class="btn-icon-refresh" title="Refresh device list" type="button" aria-label="Refresh device list">🔄</button>
+            </div>
+          </div>
+          <div id="devicesList" class="devices-list" aria-live="polite">
+            <p class="devices-empty">Loading devices…</p>
+          </div>
+          <p class="devices-hint">Every device on your Tailscale network. Assign an owner to claim a device, mark one primary device per operator, and pick its default AI provider.</p>
         </div>
 
         <!-- Android Overlay Section (Only visible on Android app) -->

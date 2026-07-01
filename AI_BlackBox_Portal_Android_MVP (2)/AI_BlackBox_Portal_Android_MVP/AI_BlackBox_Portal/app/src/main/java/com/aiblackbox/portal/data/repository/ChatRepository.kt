@@ -30,7 +30,8 @@ class ChatRepository(private val api: BlackBoxApi) {
         model: String? = null,
         sessionId: String? = null,
         deviceId: String? = null,
-        camera: String? = null
+        camera: String? = null,
+        originDeviceId: String? = null
     ): Flow<SSEEvent> {
         val messages = history + ChatMessage(
             role = "user",
@@ -43,7 +44,8 @@ class ChatRepository(private val api: BlackBoxApi) {
             model = model,
             sessionId = sessionId,
             deviceId = deviceId,
-            camera = camera
+            camera = camera,
+            originDeviceId = originDeviceId
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
         return sseClient.stream("/chat/stream", body)
@@ -61,7 +63,8 @@ class ChatRepository(private val api: BlackBoxApi) {
         model: String? = null,
         sessionId: String? = null,
         deviceId: String? = null,
-        camera: String? = null
+        camera: String? = null,
+        originDeviceId: String? = null
     ): Flow<SSEEvent> {
         val contentArray = buildJsonArray {
             add(buildJsonObject {
@@ -85,7 +88,8 @@ class ChatRepository(private val api: BlackBoxApi) {
             model = model,
             sessionId = sessionId,
             deviceId = deviceId,
-            camera = camera
+            camera = camera,
+            originDeviceId = originDeviceId
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
         return sseClient.stream("/chat/stream", body)

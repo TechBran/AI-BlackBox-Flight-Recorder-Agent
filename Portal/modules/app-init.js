@@ -80,6 +80,7 @@ import {
 import { initMediaManager } from './media-manager.js';
 import { initCronManager } from './cron-manager.js';
 import { initDeviceManager } from './device-manager.js';
+import { initDevicesSection } from './devices-section.js';
 import { initTelephonyManager } from './telephony-manager.js';
 import { initTelephonyWizard } from './telephony-wizard.js';
 import { initCellularManager } from './cellular-manager.js';
@@ -634,6 +635,7 @@ async function initApp() {
     initGenerationModals();
     initCronManager();
     initDeviceManager();
+    initDevicesSection();   // M3 3.7 — System-Menu tailnet device management
     initTelephonyManager();
     initTelephonyWizard();
     initCellularManager();

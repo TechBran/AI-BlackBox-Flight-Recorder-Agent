@@ -8,6 +8,7 @@ chat_routes.py - Chat streaming, LLM providers, context building
 # Standard library imports
 import asyncio
 import base64
+import contextvars
 import json
 import re
 import time
@@ -56,6 +57,30 @@ from Orchestrator.tools.tool_registry import (
 )
 from Orchestrator.config import TOOLVAULT_ENABLED
 from Orchestrator.config import ANTHROPIC_THINKING_MODELS, ANTHROPIC_EFFORT_MAP, ANTHROPIC_NO_SAMPLING_MODELS, ANTHROPIC_THINKING_DISPLAY_MODELS
+
+# -----------------------------------------------------------------------------
+# M3 origin-aware routing (frontier device control).
+#
+# The tailnet identity of the device that ORIGINATED the current chat request
+# (the Android app self-reports its 100.64/10 tailnet IPv4; Portal/MCP leave it
+# unset and fall back to the operator's primary device). It is request-scoped via
+# a ContextVar so it threads into EVERY BlackBoxToolExecutor built during the turn
+# without changing 60+ call sites' signatures — device-control tools
+# (control_phone/control_device) read ctx.origin_device_id to default their target
+# to the originating device. Absent -> None -> mesh primary-device fallback
+# (unchanged behavior; fully back-compat).
+# -----------------------------------------------------------------------------
+_ORIGIN_DEVICE_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "origin_device_id", default=None)
+
+
+def _set_origin_device_id(value: Optional[str]) -> None:
+    """Stamp the current request's originating tailnet device id (or clear it).
+    Normalizes blank/whitespace to None so back-compat callers stay on the
+    primary-device fallback path."""
+    v = (value or "").strip()
+    _ORIGIN_DEVICE_ID.set(v or None)
+
 
 # Pre-built tool lists for each provider (static fallback)
 CHAT_TOOLS_ANTHROPIC = get_anthropic_tools("chat")
@@ -342,7 +367,7 @@ def call_openai(messages: List[Dict], model: str, operator: str = "Brandon"):
                     # search tools and dynamically-injected ToolVault tools) through
                     # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
@@ -845,7 +870,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     phone_number = tool_input.get("phone_number", "")
                     message = tool_input.get("message", "")
                     print(f"[ANTHROPIC] Executing send_sms to {phone_number}: {message[:50]}...")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("send_sms", {"phone_number": phone_number, "message": message})
@@ -866,7 +891,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     role = tool_input.get("role", "")
                     backend = tool_input.get("backend", "openai_realtime")
                     print(f"[ANTHROPIC] Executing make_phone_call to {phone_number}")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_phone_call", {
@@ -891,7 +916,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     message = tool_input.get("message", "")
                     voice = tool_input.get("voice", "onyx")
                     print(f"[ANTHROPIC] Executing make_voice_call to {phone_number}: {message[:50]}...")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_voice_call", {
@@ -910,7 +935,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name == "search_contacts":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_contacts", tool_input)
@@ -924,7 +949,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name == "save_contact":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("save_contact", tool_input)
@@ -938,7 +963,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name == "create_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("create_cron_job", tool_input)
@@ -952,7 +977,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name == "edit_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("edit_cron_job", tool_input)
@@ -966,7 +991,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name == "search_cron_jobs":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_cron_jobs", tool_input)
@@ -1000,7 +1025,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                                    "speech_to_text", "text_to_speech", "list_tts_voices",
                                    "gemini_pro_tts", "extend_video"):
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute(tool_name, tool_input)
@@ -1014,7 +1039,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     })
                 elif tool_name in ("list_devices", "control_android_device"):
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, tool_input))
                     result_message = tool_result.result
@@ -1027,7 +1052,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                 else:
                     # Catch-all: route ANY tool through BlackBoxToolExecutor
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, tool_input))
                     result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
@@ -1446,7 +1471,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     phone_number = func_args.get("phone_number", "")
                     message = func_args.get("message", "")
                     print(f"[GEMINI] Executing send_sms to {phone_number}: {message[:50]}...")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("send_sms", {"phone_number": phone_number, "message": message})
@@ -1461,7 +1486,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     role = func_args.get("role", "")
                     backend = func_args.get("backend", "openai_realtime")
                     print(f"[GEMINI] Executing make_phone_call to {phone_number}")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_phone_call", {
@@ -1480,7 +1505,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     message = func_args.get("message", "")
                     voice = func_args.get("voice", "onyx")
                     print(f"[GEMINI] Executing make_voice_call to {phone_number}: {message[:50]}...")
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("make_voice_call", {
@@ -1493,7 +1518,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Voice call result: {result}")
                 elif func_name == "search_contacts":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_contacts", func_args)
@@ -1502,7 +1527,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Contact search: {result[:100]}")
                 elif func_name == "save_contact":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("save_contact", func_args)
@@ -1511,7 +1536,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Save contact: {result}")
                 elif func_name == "create_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("create_cron_job", func_args)
@@ -1520,7 +1545,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Create cron job: {result}")
                 elif func_name == "edit_cron_job":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("edit_cron_job", func_args)
@@ -1529,7 +1554,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Edit cron job: {result}")
                 elif func_name == "search_cron_jobs":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(
                         executor.execute("search_cron_jobs", func_args)
@@ -1538,14 +1563,14 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     print(f"[GEMINI] Search cron jobs: {result}")
                 elif func_name == "use_computer":
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute("use_computer", func_args))
                     result = tool_result.result
                     print(f"[GEMINI] use_computer: {result[:100]}")
                 elif func_name in ("list_devices", "control_android_device"):
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(func_name, func_args))
                     result = tool_result.result
@@ -1560,7 +1585,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     # search tools and dynamically-injected ToolVault tools) through
                     # BlackBoxToolExecutor instead of reporting "Unknown function".
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(func_name, func_args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
@@ -1796,7 +1821,7 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
                     # search tools and dynamically-injected ToolVault tools) through
                     # BlackBoxToolExecutor instead of reporting "Unknown tool".
                     from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
                     tool_result = asyncio.run(executor.execute(tool_name, args))
                     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
@@ -2231,7 +2256,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 phone_number = func_args.get("phone_number", "")
                                 message = func_args.get("message", "")
                                 print(f"[OPENAI-STREAM] Executing send_sms to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 sms_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
                                 tool_result = sms_result.result
                                 print(f"[OPENAI-STREAM] SMS result: {tool_result}")
@@ -2245,7 +2270,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 role = func_args.get("role", "")
                                 backend = func_args.get("backend", "openai_realtime")
                                 print(f"[OPENAI-STREAM] Executing make_phone_call to {phone_number}")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 call_result = await executor.execute("make_phone_call", {
                                     "phone_number": phone_number,
                                     "greeting": greeting,
@@ -2263,7 +2288,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 message = func_args.get("message", "")
                                 voice = func_args.get("voice", "onyx")
                                 print(f"[OPENAI-STREAM] Executing make_voice_call to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 voice_result = await executor.execute("make_voice_call", {
                                     "phone_number": phone_number,
                                     "message": message,
@@ -2275,35 +2300,35 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
 
                             elif func_name == "search_contacts":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 search_result = await executor.execute("search_contacts", func_args)
                                 tool_result = search_result.result
                                 print(f"[OPENAI-STREAM] Contact search: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": "Contact search completed"}
                             elif func_name == "save_contact":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 save_result = await executor.execute("save_contact", func_args)
                                 tool_result = save_result.result
                                 print(f"[OPENAI-STREAM] Save contact: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Contact: {tool_result[:100]}"}
                             elif func_name == "create_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("create_cron_job", func_args)
                                 tool_result = cron_result.result
                                 print(f"[OPENAI-STREAM] Create cron job: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
                             elif func_name == "edit_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("edit_cron_job", func_args)
                                 tool_result = cron_result.result
                                 print(f"[OPENAI-STREAM] Edit cron job: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
                             elif func_name == "search_cron_jobs":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("search_cron_jobs", func_args)
                                 tool_result = cron_result.result
                                 print(f"[OPENAI-STREAM] Search cron jobs: {tool_result}")
@@ -2311,7 +2336,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
 
                             elif func_name == "use_computer":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cu_result = await executor.execute("use_computer", func_args)
                                 tool_result = cu_result.result
                                 print(f"[OPENAI-STREAM] use_computer: {tool_result[:100]}")
@@ -2320,7 +2345,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                             elif func_name in ("list_devices", "control_android_device",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 tool_result = tool_exec_result.result
                                 print(f"[OPENAI-STREAM] {func_name}: {tool_result[:100]}")
@@ -2332,7 +2357,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 # the model "Tool executed successfully" WITHOUT running it (silent
                                 # false success). Mirrors the Anthropic/Gemini catch-all.
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[OPENAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
@@ -2977,7 +3002,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 phone_number = tool_input.get("phone_number", "")
                                 message = tool_input.get("message", "")
                                 print(f"[ANTHROPIC-STREAM] Executing send_sms to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] SMS result: {result_message}")
@@ -2996,7 +3021,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 role = tool_input.get("role", "")
                                 backend = tool_input.get("backend", "openai_realtime")
                                 print(f"[ANTHROPIC-STREAM] Executing make_phone_call to {phone_number}")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 call_result = await executor.execute("make_phone_call", {
                                     "phone_number": phone_number,
                                     "greeting": greeting,
@@ -3019,7 +3044,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 message = tool_input.get("message", "")
                                 voice = tool_input.get("voice", "onyx")
                                 print(f"[ANTHROPIC-STREAM] Executing make_voice_call to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("make_voice_call", {
                                     "phone_number": phone_number,
                                     "message": message,
@@ -3036,7 +3061,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": f"Voice call: {result_message[:100]}"}
                             elif tool_name == "search_contacts":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("search_contacts", tool_input)
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] Contact search: {result_message[:100]}")
@@ -3048,7 +3073,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": "Contact search completed"}
                             elif tool_name == "save_contact":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("save_contact", tool_input)
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] Save contact: {result_message}")
@@ -3060,7 +3085,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": f"Contact: {result_message[:100]}"}
                             elif tool_name == "create_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("create_cron_job", tool_input)
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] Create cron job: {result_message}")
@@ -3072,7 +3097,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": f"Cron job: {result_message[:100]}"}
                             elif tool_name == "edit_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("edit_cron_job", tool_input)
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] Edit cron job: {result_message}")
@@ -3084,7 +3109,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": f"Cron job: {result_message[:100]}"}
                             elif tool_name == "search_cron_jobs":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("search_cron_jobs", tool_input)
                                 result_message = tool_result.result
                                 print(f"[ANTHROPIC-STREAM] Search cron jobs: {result_message}")
@@ -3119,7 +3144,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                                "gemini_pro_tts", "extend_video",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute(tool_name, tool_input)
                                 result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                                 print(f"[ANTHROPIC-STREAM] {tool_name}: {result_message[:100]}")
@@ -3131,7 +3156,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 yield {"type": "tool_result", "data": f"{tool_name}: {result_message[:80]}"}
                             elif tool_name in ("list_devices", "control_android_device"):
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute(tool_name, tool_input)
                                 result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                                 print(f"[ANTHROPIC-STREAM] {tool_name}: {result_message[:100]}")
@@ -3146,7 +3171,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 # This handles dynamically-injected ToolVault tools (toolvault,
                                 # list_media, search_media, etc.) without needing explicit elif branches
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute(tool_name, tool_input)
                                 result_message = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
                                 if not result_message:
@@ -4879,7 +4904,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 phone_number = func_args.get("phone_number", "")
                                 message = func_args.get("message", "")
                                 print(f"[GEMINI-STREAM] Executing send_sms to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("send_sms", {"phone_number": phone_number, "message": message})
                                 result_message = tool_result.result
                                 print(f"[GEMINI-STREAM] SMS result: {result_message}")
@@ -4900,7 +4925,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 role = func_args.get("role", "")
                                 backend = func_args.get("backend", "openai_realtime")
                                 print(f"[GEMINI-STREAM] Executing make_phone_call to {phone_number}")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 call_result_obj = await executor.execute("make_phone_call", {
                                     "phone_number": phone_number,
                                     "greeting": greeting,
@@ -4925,7 +4950,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 message = func_args.get("message", "")
                                 voice = func_args.get("voice", "onyx")
                                 print(f"[GEMINI-STREAM] Executing make_voice_call to {phone_number}: {message[:50]}...")
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_result = await executor.execute("make_voice_call", {
                                     "phone_number": phone_number,
                                     "message": message,
@@ -4943,7 +4968,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": f"Voice call: {result_message[:100]}"}
                             elif func_name == "search_contacts":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 search_result = await executor.execute("search_contacts", func_args)
                                 result_message = search_result.result
                                 print(f"[GEMINI-STREAM] Contact search: {result_message[:100]}")
@@ -4956,7 +4981,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": "Contact search completed"}
                             elif func_name == "save_contact":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 save_result = await executor.execute("save_contact", func_args)
                                 result_message = save_result.result
                                 print(f"[GEMINI-STREAM] Save contact: {result_message}")
@@ -4969,7 +4994,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": f"Contact: {result_message[:100]}"}
                             elif func_name == "create_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("create_cron_job", func_args)
                                 result_message = cron_result.result
                                 print(f"[GEMINI-STREAM] Create cron job: {result_message}")
@@ -4982,7 +5007,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": f"Cron job: {result_message[:100]}"}
                             elif func_name == "edit_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("edit_cron_job", func_args)
                                 result_message = cron_result.result
                                 print(f"[GEMINI-STREAM] Edit cron job: {result_message}")
@@ -4995,7 +5020,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": f"Cron job: {result_message[:100]}"}
                             elif func_name == "search_cron_jobs":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("search_cron_jobs", func_args)
                                 result_message = cron_result.result
                                 print(f"[GEMINI-STREAM] Search cron jobs: {result_message}")
@@ -5008,7 +5033,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 yield {"type": "tool_result", "data": f"Cron jobs: {result_message[:100]}"}
                             elif func_name == "use_computer":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cu_result = await executor.execute("use_computer", func_args)
                                 result_message = cu_result.result
                                 print(f"[GEMINI-STREAM] use_computer: {result_message[:100]}")
@@ -5027,7 +5052,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                                "gemini_pro_tts", "extend_video",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 result_message = tool_exec_result.result
                                 print(f"[GEMINI-STREAM] {func_name}: {result_message[:100]}", flush=True)
@@ -5047,7 +5072,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 # ("walked away") and the tool never executed. Mirrors the Anthropic
                                 # streaming catch-all (this provider was simply missing it).
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 result_message = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 if not result_message:
@@ -5534,35 +5559,35 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
 
                             elif func_name == "search_contacts":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 search_result = await executor.execute("search_contacts", func_args)
                                 tool_result = search_result.result
                                 print(f"[XAI-STREAM] Contact search: {tool_result[:100]}")
                                 yield {"type": "tool_result", "data": "Contact search completed"}
                             elif func_name == "save_contact":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 save_result = await executor.execute("save_contact", func_args)
                                 tool_result = save_result.result
                                 print(f"[XAI-STREAM] Save contact: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Contact: {tool_result[:100]}"}
                             elif func_name == "create_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("create_cron_job", func_args)
                                 tool_result = cron_result.result
                                 print(f"[XAI-STREAM] Create cron job: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
                             elif func_name == "edit_cron_job":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("edit_cron_job", func_args)
                                 tool_result = cron_result.result
                                 print(f"[XAI-STREAM] Edit cron job: {tool_result}")
                                 yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
                             elif func_name == "search_cron_jobs":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cron_result = await executor.execute("search_cron_jobs", func_args)
                                 tool_result = cron_result.result
                                 print(f"[XAI-STREAM] Search cron jobs: {tool_result}")
@@ -5570,7 +5595,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
 
                             elif func_name == "use_computer":
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cu_result = await executor.execute("use_computer", func_args)
                                 tool_result = cu_result.result
                                 print(f"[XAI-STREAM] use_computer: {tool_result[:100]}")
@@ -5579,7 +5604,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                             elif func_name in ("list_devices", "control_android_device",
                                                "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 tool_result = tool_exec_result.result
                                 print(f"[XAI-STREAM] {func_name}: {tool_result[:100]}")
@@ -5591,7 +5616,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 # the model "Tool executed successfully" WITHOUT running it (silent
                                 # false success). Mirrors the Anthropic/Gemini catch-all.
                                 from Orchestrator.tools import BlackBoxToolExecutor
-                                executor = BlackBoxToolExecutor(operator=operator)
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 tool_exec_result = await executor.execute(func_name, func_args)
                                 tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
                                 print(f"[XAI-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
@@ -5945,6 +5970,9 @@ async def chat_stream(request: Request):
         provider = request.query_params.get("provider", "gemini")
         model = request.query_params.get("model")
         operator = request.query_params.get("operator", USERS_DEFAULT)
+        # M3: originating device (self-reported by the Android app; Portal EventSource
+        # leaves it unset → primary-device fallback). Request-scoped for the whole turn.
+        _set_origin_device_id(request.query_params.get("origin_device_id"))
 
         if not messages_json:
             return JSONResponse(status_code=400, content={"error": "messages parameter required"})
@@ -6036,6 +6064,10 @@ async def chat_stream_post(request: Request):
         operator = body.get("operator", USERS_DEFAULT)
         cu_session_id = body.get("session_id")  # CU session ID for reconnection/queuing
         cu_device_id = body.get("device_id", "blackbox")  # CU target device on Tailscale mesh
+        # M3: originating device (Android app self-reports its tailnet IPv4). Absent for
+        # Portal/MCP → None → operator's primary-device fallback. Request-scoped so it
+        # threads into every tool executor built during this turn.
+        _set_origin_device_id(body.get("origin_device_id"))
 
         if not messages:
             return JSONResponse(status_code=400, content={"error": "messages required"})

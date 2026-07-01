@@ -41,6 +41,7 @@
 @import url('./features/_collapsibles.css');
 @import url('./features/_system_controls.css');
 @import url('./features/_ember-fx.css?v=genui298');
+@import url('./features/_devices-section.css?v=genui299');
 
 /* === GENERATION === */
 @import url('./generation/_base.css');

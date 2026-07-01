@@ -1,5 +1,5 @@
 """Device registry data models."""
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from enum import Enum
 from typing import Optional, Dict, Any
 import json
@@ -9,6 +9,11 @@ log = logging.getLogger(__name__)
 
 _PORT_DEFAULTS = {"adb_port": 5555, "vnc_port": 5900, "rdp_port": 3389}
 
+# Valid default-provider choices for a device's frontier device-control brain (M3).
+# None = "no per-device preference" (fall back to the box/config default). Kept as a
+# plain set (not an Enum) so config/onboarding can pass strings without a coupling.
+VALID_DEFAULT_PROVIDERS = frozenset({"gemma", "gemini", "claude", "openai"})
+
 
 def _sanitize_port(value: int, field_name: str) -> int:
     """Clamp port to valid range 1-65535, reset to default if out of range."""
@@ -17,6 +22,27 @@ def _sanitize_port(value: int, field_name: str) -> int:
     default = _PORT_DEFAULTS.get(field_name, 5555)
     log.warning(f"[DeviceRegistry] Invalid {field_name}={value} — resetting to {default}")
     return default
+
+
+def sanitize_default_provider(value) -> Optional[str]:
+    """Normalize a default_provider to a valid lowercase choice or None.
+
+    Blank/None/unknown values collapse to None (no per-device preference) rather
+    than raising — migration-safe for hand-edited or legacy stores. Callers that
+    want to REJECT an invalid provider (e.g. the API setter) validate separately.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        log.warning(f"[DeviceRegistry] Invalid default_provider={value!r} — resetting to None")
+        return None
+    v = value.strip().lower()
+    if not v:
+        return None
+    if v not in VALID_DEFAULT_PROVIDERS:
+        log.warning(f"[DeviceRegistry] Unknown default_provider={value!r} — resetting to None")
+        return None
+    return v
 
 
 class DeviceType(str, Enum):
@@ -55,6 +81,8 @@ class Device:
     rdp_port: int = 3389                 # RDP port (Windows only)
     status: DeviceStatus = DeviceStatus.UNKNOWN
     last_seen: Optional[str] = None      # ISO timestamp
+    is_primary: bool = False             # the owner's default control target (M3)
+    default_provider: Optional[str] = None  # gemma|gemini|claude|openai|None (M3)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def connection_string(self) -> str:
@@ -86,4 +114,14 @@ class Device:
         for port_field in ("adb_port", "vnc_port", "rdp_port"):
             if port_field in data:
                 data[port_field] = _sanitize_port(data[port_field], port_field)
+        # M3 migration-safe: coerce is_primary + validate default_provider. Absent in
+        # legacy devices.json → dataclass defaults (False / None) apply below.
+        if "is_primary" in data:
+            data["is_primary"] = bool(data["is_primary"])
+        if "default_provider" in data:
+            data["default_provider"] = sanitize_default_provider(data["default_provider"])
+        # Forward/back-compat: drop any keys not on the dataclass so an OLDER Device
+        # never crashes on a NEWER field, and a partial legacy row just gets defaults.
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in data.items() if k in known}
         return cls(**data)

@@ -6,15 +6,18 @@ server-side Gemini ReAct loop (Orchestrator.frontier_agent_loop.run_frontier_loo
 the phone's M1 endpoints (GET /stream observations + POST /action) with hybrid tree+screenshot
 grounding — the phone is only the hands. No on-device inference, so it starts fast.
 
-Device resolution reuses control_phone's mesh resolution for M2 (resolve_origin, plus a
-best-effort match when an explicit `device` is given). M3 replaces this with origin-aware
-mesh.resolve_device + the device registry. Safety gates live ON THE PHONE (M1/M4).
+Device resolution is origin-aware (M3): mesh.resolve_device(operator, origin_device_id,
+target_device_id) implements the firm routing rule — an explicit `device` targets ANY tailnet
+node; else the ORIGIN device (ctx.origin_device_id) it came from — but only if that device
+belongs to this operator (never silently retarget); else the operator's PRIMARY device from the
+registry; else an error. Safety gates live ON THE PHONE (M1/M4).
 
 Structured errors (data["error_kind"]) let the frontier model decide to retry or stop:
-no_device / stopped / accessibility_off / lost_contact / timeout / model_error / config_error /
-invalid_argument / invalid_target / max_steps / loop_error. The loop SHORT-CIRCUITS on the
-terminal device states (stopped = the user hit STOP; accessibility_off = the a11y service is
-off; no_device from a not_wired result) instead of burning model calls re-planning (F2).
+no_device / no_primary_device / invalid_target / origin_mismatch / stopped / accessibility_off /
+lost_contact / timeout / model_error / config_error / invalid_argument / max_steps / loop_error.
+The loop SHORT-CIRCUITS on terminal device states (stopped = the user hit STOP;
+accessibility_off = the a11y service is off; no_device from a not_wired result) instead of
+burning model calls re-planning (F2).
 """
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 from Orchestrator.local_provider import mesh
@@ -38,25 +41,6 @@ def _phone_base_url(node: mesh.Node) -> str:
     return f"http://{host}:{_control_port()}"
 
 
-def _resolve_device_node(operator: str, device: str):
-    """Resolve the target tailnet node (M2 — reuses control_phone's mesh resolution).
-
-    Explicit `device` → best-effort name match among the operator's reachable devices
-    (None if it doesn't match a reachable node → an honest invalid_target). No `device` →
-    the originating operator's reachable device (resolve_origin). M3 replaces this with the
-    origin-aware mesh.resolve_device + registry (explicit → origin → primary → error).
-    """
-    device = (device or "").strip()
-    if device:
-        for rec in mesh.reachable_devices(operator=operator):
-            node = mesh.Node(**rec["node"])
-            if mesh._name_matches(device, node):
-                return node, None
-        return None, "invalid_target"
-    node = mesh.resolve_origin(operator)
-    return node, (None if node else "no_device")
-
-
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     task = (params.get("task") or "").strip()
     if not task:
@@ -64,20 +48,18 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
                           data={"error_kind": "invalid_argument"})
 
     device = (params.get("device") or "").strip()
-    node, err = _resolve_device_node(ctx.operator, device)
-    if node is None:
-        if err == "invalid_target":
-            return ToolResult(
-                False,
-                f"No reachable device named '{device}' for this operator. It may be offline, "
-                "off the tailnet, or not attested. Check the name or omit it to use the "
-                "originating device.",
-                data={"error_kind": "invalid_target", "requested": device})
-        return ToolResult(
-            False,
-            "No reachable device for this operator — the phone may be offline, off the "
-            "tailnet, or has not attested. Cannot drive it remotely.",
-            data={"error_kind": "no_device"})
+    # M3 origin-aware routing: explicit device → any tailnet node; else the origin
+    # device (must belong to this operator — never silent retarget); else primary.
+    try:
+        node = mesh.resolve_device(
+            operator=ctx.operator,
+            origin_device_id=ctx.origin_device_id,
+            target_device_id=device or None,
+        )
+    except mesh.DeviceResolutionError as e:
+        data = {"error_kind": e.kind}
+        data.update(e.detail)
+        return ToolResult(False, e.message, data=data)
 
     base_url = _phone_base_url(node)
     device_name = node.dns_name or node.ip

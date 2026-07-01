@@ -9,10 +9,16 @@ Usage:
 """
 import json
 import asyncio
+import os
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Dict
-from .models import Device, DeviceType, DeviceProtocol, DeviceStatus
+from .models import (
+    Device, DeviceType, DeviceProtocol, DeviceStatus,
+    VALID_DEFAULT_PROVIDERS, sanitize_default_provider,
+)
 
 DEVICES_FILE = Path(__file__).parent / "devices.json"
 
@@ -22,23 +28,94 @@ class DeviceRegistry:
 
     def __init__(self):
         self._devices: Dict[str, Device] = {}
+        # Guards the in-memory map + the file write against concurrent mutation
+        # (set_primary_device clears-then-sets across devices — must be atomic).
+        # Reentrant so a method may nest a helper that also takes the lock.
+        self._lock = threading.RLock()
         self._load_from_file()
+        self._dedupe_primaries()
 
     def _load_from_file(self):
-        """Load devices from devices.json."""
+        """Load devices from devices.json.
+
+        Each row is parsed in isolation: a malformed / unknown-enum row (e.g. a future
+        ``device_type: "tv"`` this build doesn't know) is SKIPPED + logged rather than
+        aborting the whole registry load, so one bad row can't strand every device.
+        """
         if DEVICES_FILE.exists():
             with open(DEVICES_FILE) as f:
                 data = json.load(f)
-            for d in data.get("devices", []):
-                device = Device.from_dict(d)
+            for row in data.get("devices", []):
+                try:
+                    device = Device.from_dict(row)
+                except Exception as e:
+                    rid = row.get("id", "?") if isinstance(row, dict) else "?"
+                    print(f"[DEVICE REGISTRY] Skipping malformed/unknown device row "
+                          f"{rid!r}: {e}")
+                    continue
                 self._devices[device.id] = device
         print(f"[DEVICE REGISTRY] Loaded {len(self._devices)} devices")
 
+    def _dedupe_primaries(self):
+        """Defensive: enforce the at-most-one-primary-per-owner invariant on load.
+
+        A hand-edited devices.json could mark two devices of one owner primary;
+        keep the first seen, clear the rest. Persists only if it had to fix
+        something (avoids a needless write on every boot).
+        """
+        seen_primary_owners = set()
+        changed = False
+        for d in self._devices.values():
+            if not d.is_primary:
+                continue
+            key = d.owner.lower()
+            if key in seen_primary_owners:
+                d.is_primary = False
+                changed = True
+            else:
+                seen_primary_owners.add(key)
+        if changed:
+            self._save_to_file()
+
     def _save_to_file(self):
-        """Persist devices to devices.json."""
-        data = {"devices": [d.to_dict() for d in self._devices.values()]}
-        with open(DEVICES_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        """Persist devices to devices.json atomically (unique tmp write + os.replace).
+
+        os.replace is atomic on POSIX, so a crash mid-write can never leave a
+        truncated/corrupt registry — readers see either the old or the new file.
+        The tmp file is created with ``tempfile.mkstemp`` in the SAME directory
+        (unique name → multi-process/writer safe, no fixed ``.tmp`` collision) and the
+        directory itself is fsync'd after the rename so the swap is crash-durable.
+        Serialized by ``self._lock`` so a concurrent set_primary can't interleave.
+        """
+        with self._lock:
+            data = {"devices": [d.to_dict() for d in self._devices.values()]}
+            dir_path = DEVICES_FILE.parent
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(dir_path), prefix=".devices-", suffix=".json.tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, DEVICES_FILE)
+                # fsync the directory so the rename (not just the file bytes) survives
+                # a crash. Best-effort — some filesystems reject a dir fsync.
+                try:
+                    dir_fd = os.open(str(dir_path), os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+            except Exception:
+                # Never leave an orphaned tmp file behind on a failed write.
+                try:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
 
     def get_device(self, device_id: str) -> Optional[Device]:
         return self._devices.get(device_id)
@@ -84,6 +161,68 @@ class DeviceRegistry:
         for key, value in kwargs.items():
             if hasattr(device, key):
                 setattr(device, key, value)
+        self._save_to_file()
+        return device
+
+    # ── M3: primary-device + default-provider (origin-aware routing support) ──
+
+    def get_primary_device(self, owner: str) -> Optional[Device]:
+        """The owner's designated primary (default control target), or None.
+
+        Matching is case-insensitive on owner. If (defensively) more than one is
+        flagged, the first is returned deterministically — but the setter + the
+        load-time dedupe keep it to exactly one.
+        """
+        if not owner:
+            return None
+        key = owner.lower()
+        for d in self._devices.values():
+            if d.owner.lower() == key and d.is_primary:
+                return d
+        return None
+
+    def set_primary_device(self, owner: str, device_id: str) -> Optional[Device]:
+        """Designate ``device_id`` the owner's primary, atomically clearing any
+        prior primary of that owner, then persist. Returns the new primary, or
+        None if the device does not exist or is not owned by ``owner``
+        (operator-isolation: you cannot make another operator's device your
+        primary). The clear-then-set + write happen under the lock so a racing
+        writer can never observe (or persist) two primaries.
+        """
+        with self._lock:
+            target = self._devices.get(device_id)
+            if not target or target.owner.lower() != (owner or "").lower():
+                return None
+            for d in self._devices.values():
+                if d.owner.lower() == owner.lower():
+                    d.is_primary = (d.id == device_id)
+            self._save_to_file()
+            print(f"[DEVICE REGISTRY] Primary for {owner} -> {device_id}")
+            return target
+
+    def get_default_provider(self, device_id: str) -> Optional[str]:
+        """The device's per-device default frontier provider, or None."""
+        device = self._devices.get(device_id)
+        return device.default_provider if device else None
+
+    def set_default_provider(self, device_id: str, provider: Optional[str]) -> Optional[Device]:
+        """Set a device's default provider (gemma|gemini|claude|openai) or clear it
+        (None/""). Persists. Returns the device, or None if it does not exist.
+        Raises ValueError on a non-empty but INVALID provider so the API surfaces a
+        422 rather than silently swallowing a typo.
+        """
+        device = self._devices.get(device_id)
+        if not device:
+            return None
+        if provider is None or (isinstance(provider, str) and not provider.strip()):
+            device.default_provider = None
+        else:
+            normalized = sanitize_default_provider(provider)
+            if normalized is None:
+                raise ValueError(
+                    f"invalid default_provider {provider!r}; must be one of "
+                    f"{sorted(VALID_DEFAULT_PROVIDERS)} or null")
+            device.default_provider = normalized
         self._save_to_file()
         return device
 
