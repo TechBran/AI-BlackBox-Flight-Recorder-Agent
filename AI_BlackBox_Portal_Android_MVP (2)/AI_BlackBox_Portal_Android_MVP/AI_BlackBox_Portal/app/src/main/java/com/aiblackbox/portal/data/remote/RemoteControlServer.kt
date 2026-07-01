@@ -427,6 +427,20 @@ fun streamMethodGate(method: String): RemoteResponse? =
     else RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
 /**
+ * (F2 / I3) PURE kill gate for the observation stream. A task the user STOPPED must NOT be
+ * served a fresh `observation` frame — serving one would re-raise the consent banner AND keep
+ * feeding the cloud loop screen state for a session the user ended. Returns a 409 [RemoteResponse]
+ * to REFUSE a killed task, or null to proceed to the SSE pump. Kept pure + separate from the
+ * NanoHTTPD SSE body so the gate is JVM-unit-testable (mirrors [streamMethodGate]); the "stopped
+ * by user" body is the same stable phrase the killed `/action` result carries, so the loop keys
+ * on one signal. Completes the I3 kill-switch: a STOP promptly ends BOTH the `/action` and
+ * `/stream` halves of the server loop.
+ */
+fun streamKillGate(taskId: String, killed: Boolean): RemoteResponse? =
+    if (killed) RemoteResponse(409, JSON.encodeToString(ErrorBody("remote control stopped by user")))
+    else null
+
+/**
  * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [authorize] gates
  * every request to tailnet-source callers (Tailscale/WireGuard encrypts the
  * transport), scopes POST /task to the device's bound operator, and scopes POST
@@ -523,11 +537,15 @@ class RemoteControlServer(
         streamMethodGate(method)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
-        // Opening the observation stream is the start of a control session → banner on.
-        // (Skipped for a killed task so a stale re-open can't resurrect a stopped session.)
-        if (!RemoteSessionBus.isKilled(taskId)) {
-            RemoteSessionBus.start(taskId, operator)
+        // (F2 / I3) REFUSE a stopped task: never serve it a fresh observation frame (which would
+        // resurrect the consent banner + keep the loop driving a session the user ended). This
+        // completes the I3 kill-switch on the /stream half — a STOP promptly ends the server loop.
+        streamKillGate(taskId, RemoteSessionBus.isKilled(taskId))?.let { denied ->
+            return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
+        // Opening the observation stream is the start of a control session → banner on. (The kill
+        // gate above already refused a stopped task, so start() here only runs for a live task.)
+        RemoteSessionBus.start(taskId, operator)
         val provider = observationProvider
         val frame: String = if (provider != null) {
             // One real observation frame under the tree-first cadence, then close (M1).

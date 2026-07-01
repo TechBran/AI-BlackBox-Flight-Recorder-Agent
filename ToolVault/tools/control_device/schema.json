@@ -1,0 +1,24 @@
+{
+  "name": "control_device",
+  "description": "Make the user's own phone (or tablet/XR device) perform a task, driven by a CLOUD frontier model — the AI BlackBox itself watches the device screen over Tailscale and actuates it step by step by DRIVING THE ON-SCREEN UI (open apps, read the screen, tap, type, scroll, submit fields). It works the app the way a person would — so 'set a timer', 'look up a place on a map', or 'check a setting' happen by navigating that app's UI, not via a fixed one-shot command. THIS is the tool for 'do X on my phone', 'use my phone to ...', 'have my device open/show/check ...'. It differs from control_phone (which delegates to the SLOWER on-device Gemma): control_device keeps the smart model in the cloud and uses the phone only as hands, so it starts fast (no ~75s model cold-load). YOU MUST ACTUALLY CALL THIS TOOL AND WAIT FOR ITS RESULT before replying — it BLOCKS while the loop drives the device to completion. Recommended: tell the user 'Driving your phone now — I'll report back', then wait for the tool result. High-consequence actions (send SMS/email, payments, deletions) and passwords are gated ON THE DEVICE (the user confirms/enters them). Returns a natural-language summary of what was done, or a structured error (device offline / stopped on the device / accessibility off / lost contact / timed out) so you can retry or stop.",
+  "category": "computer_control",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "The natural-language task to perform on the device, e.g. 'open Google Maps and search for coffee near me' or 'what's on my screen right now?'."
+      },
+      "device": {
+        "type": "string",
+        "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to target the originating operator's reachable device (M2 default). Origin-aware routing + a primary-device default land in M3."
+      }
+    },
+    "required": ["task"]
+  },
+  "returns": "A natural-language summary of what the frontier loop did on the device, or a structured error (error_kind: no_device / stopped / accessibility_off / lost_contact / timeout / model_error / config_error / invalid_argument / invalid_target / max_steps / loop_error), plus data.steps and data.device.",
+  "example": "control_device(task=\"open the camera app and take a photo\")",
+  "notes": "M2 (the MVP) of the frontier-driven device-control rewire: a server-side Gemini ReAct loop (Orchestrator/frontier_agent_loop.py) drives the phone's M1 endpoints (GET /stream observations + POST /action) over Tailscale with hybrid tree+screenshot grounding. Reuses control_phone's mesh device resolution for now; M3 adds origin-aware routing + a device registry. Model is config-knobbed ([computer_use] frontier_provider / frontier_model). See docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M2)."
+}

@@ -154,6 +154,17 @@ GOOGLE_TTS_VOICES_URL     = CFG.get("models", "google_tts_voices", fallback="htt
 CU_MODEL_DEFAULT        = CFG.get("computer_use", "model_default", fallback="claude-opus-4-6").strip()
 CU_GEMINI_MODEL_DEFAULT = CFG.get("computer_use", "gemini_model_default",
                                   fallback="gemini-2.5-computer-use-preview-10-2025").strip()
+# Frontier-driven device control (M2 — the cloud "brain" that drives a phone's M1
+# hands over Tailscale). Provider + model are config-knobbed, never hardcoded, so the
+# real Gemini mobile model (or M7's Claude/OpenAI) drops in without a code change.
+# NOTE (M2 substitution): the plan targets Gemini 3.5 Flash environment='mobile', but
+# that environment is absent from the installed google-genai SDK and the only CU model
+# reachable with the box's key is gemini-2.5-computer-use-preview-10-2025 — so the model
+# default is CU_GEMINI_MODEL_DEFAULT (the available Gemini CU model). Override in
+# config.ini [computer_use] frontier_model when the mobile model becomes reachable.
+CU_FRONTIER_PROVIDER    = CFG.get("computer_use", "frontier_provider", fallback="gemini").strip()
+CU_FRONTIER_MODEL       = CFG.get("computer_use", "frontier_model",
+                                  fallback=CU_GEMINI_MODEL_DEFAULT).strip()
 CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
 CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
 CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=100)

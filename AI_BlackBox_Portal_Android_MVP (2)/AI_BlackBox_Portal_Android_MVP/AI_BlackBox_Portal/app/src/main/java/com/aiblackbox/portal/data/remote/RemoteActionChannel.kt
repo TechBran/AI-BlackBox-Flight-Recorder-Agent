@@ -35,10 +35,15 @@ import kotlinx.serialization.json.put
  * | `intent` | *(the intent name)* | `IntentActuator.perform(name, params)` — called generically |
  * | `open_app` | `open_app` | `Actuators.openApp(package)` |
  * | `scroll` | `scroll` | `Actuators.scroll(direction)` |
+ * | `press_key` enter/back/home/recents/tab/delete **(new M2)** | `press_key` | `Actuators.pressKey(key)` (enter→ACTION_IME_ENTER; back/home/recents→performGlobalAction) |
  */
 
 /** A parsed action's category, used for capability-gating (coordinate actions on XR). */
-enum class ActionKind { ELEMENT, COORDINATE, GLOBAL, INTENT, OPEN_APP, SCROLL }
+enum class ActionKind { ELEMENT, COORDINATE, GLOBAL, INTENT, OPEN_APP, SCROLL, KEY }
+
+/** (M2 / F1) The valid `press_key` keys — mirrors docs/schema/action.json press_key.key and
+ *  the loop-side PRESS_KEYS. A key outside this set is rejected at parse (`invalid_argument`). */
+private val PRESS_KEYS = setOf("enter", "back", "home", "recents", "tab", "delete")
 
 /** The pure parse outcome of one action frame: a dispatch plan or a rejection. */
 sealed interface ActionParse {
@@ -177,6 +182,19 @@ fun parseAction(frame: JsonObject): ActionParse {
                 buildJsonObject { put("direction", direction) },
                 ActionKind.SCROLL,
             )
+        }
+
+        "press_key" -> {
+            // (M2 / F1) The coordinate-free key action. Validate `key` against the schema enum
+            // (an unknown key is a caller-input error → invalid_argument, never actuated). KEY
+            // kind is NEVER coordinate-gated — press_key uses no coordinates, so it is safe on
+            // every form factor incl. XR (enter→IME / back/home/recents→performGlobalAction).
+            val key = strField(frame, "key")?.trim()?.lowercase()
+                ?: return ActionParse.Reject("invalid_argument", "key required")
+            if (key !in PRESS_KEYS) {
+                return ActionParse.Reject("invalid_argument", "unknown key: $key")
+            }
+            ActionParse.Plan("press_key", buildJsonObject { put("key", key) }, ActionKind.KEY)
         }
 
         else -> ActionParse.Reject("unknown_action", "unknown action type: $type")

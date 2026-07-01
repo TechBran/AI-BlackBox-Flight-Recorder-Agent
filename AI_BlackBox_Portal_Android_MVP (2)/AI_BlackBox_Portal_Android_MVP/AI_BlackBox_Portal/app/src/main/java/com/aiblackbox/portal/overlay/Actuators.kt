@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
@@ -376,6 +377,50 @@ class Actuators(
      */
     fun recents(): ActuatorResult = globalAction("recents")
 
+    /**
+     * (M2 / F1) Press a semantic KEY — the coordinate-free `press_key` action. Routed by
+     * [pressKeyPlan]:
+     *  - `enter` → submit the currently-focused editable field via
+     *    [AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER] (API 30+). This is how a
+     *    "type → submit" flow (a search box, a chat input) completes WITHOUT a coordinate.
+     *    Graceful when there is no focused field (`no focused field to submit`) or the API is
+     *    too old (`enter key not supported on this Android version`).
+     *  - `back` / `home` / `recents` → [performGlobalAction] (reuses [globalActionFor]).
+     *  - anything else (`tab` / `delete` / unknown) → best-effort `unsupported key: <k>` (M2).
+     *
+     * CAPABILITY-SAFE: uses NO coordinates, so it is meaningful on every form factor incl. XR
+     * (the remote dispatcher never coordinate-gates it). Never throws; a disabled service →
+     * `accessibility service not enabled`.
+     */
+    fun pressKey(key: String): ActuatorResult {
+        val svc = service() ?: return notEnabled()
+        return try {
+            when (val plan = pressKeyPlan(key)) {
+                is PressKeyPlan.Global -> {
+                    val ok = svc.performGlobalAction(plan.action)
+                    logGesture("press_key($key)", ok)
+                    ActuatorResult(ok, if (ok) "pressed $key" else "$key key rejected")
+                }
+                PressKeyPlan.ImeEnter -> {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                        return ActuatorResult(false, "enter key not supported on this Android version")
+                    }
+                    val focus = svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        ?: return ActuatorResult(false, "no focused field to submit")
+                    val ok = focus.performAction(
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                    logGesture("press_key(enter)", ok)
+                    ActuatorResult(ok, if (ok) "pressed enter" else "enter key rejected")
+                }
+                PressKeyPlan.Unsupported ->
+                    ActuatorResult(false, "unsupported key: ${key.trim().lowercase()}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "pressKey failed (${e.javaClass.simpleName})")
+            ActuatorResult(false, "press_key failed (${e.javaClass.simpleName})")
+        }
+    }
+
     // ---- internals --------------------------------------------------------
 
     /**
@@ -606,4 +651,36 @@ fun globalActionFor(name: String): Int? = when (name.trim().lowercase()) {
     // contract exposes (was absent — globalActionFor mapped only back/home).
     "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
     else -> null
+}
+
+/**
+ * (M2 / F1) How a `press_key` key actuates — the PURE decision behind [Actuators.pressKey],
+ * split out so the routing (enter→IME, back/home/recents→global, else→unsupported) is
+ * JVM-unit-testable without the framework.
+ */
+sealed interface PressKeyPlan {
+    /** `enter` → submit the focused editable field via `ACTION_IME_ENTER` (API 30+). */
+    object ImeEnter : PressKeyPlan
+
+    /** `back`/`home`/`recents` → `performGlobalAction([action])` (reuses [globalActionFor]). */
+    data class Global(val action: Int) : PressKeyPlan
+
+    /** `tab`/`delete`/unknown → no reliable equivalent → best-effort unsupported (M2). */
+    object Unsupported : PressKeyPlan
+}
+
+/**
+ * PURE: map a `press_key` [key] to its [PressKeyPlan]. `enter` → [PressKeyPlan.ImeEnter];
+ * `back`/`home`/`recents` → [PressKeyPlan.Global] (reusing [globalActionFor], so the same
+ * `performGlobalAction` path serves both the `global_action` and `press_key` variants);
+ * everything else (incl. `tab`/`delete`) → [PressKeyPlan.Unsupported]. Case-insensitive +
+ * trimmed. The remote wire-parser ([com.aiblackbox.portal.data.remote.parseAction]) already
+ * rejects a key outside the schema enum, so a device-side unknown is only reachable off the
+ * on-device path — handled here as a graceful unsupported rather than a throw.
+ */
+fun pressKeyPlan(key: String): PressKeyPlan {
+    val k = key.trim().lowercase()
+    if (k == "enter") return PressKeyPlan.ImeEnter
+    globalActionFor(k)?.let { return PressKeyPlan.Global(it) }   // back / home / recents
+    return PressKeyPlan.Unsupported                              // tab / delete / unknown
 }

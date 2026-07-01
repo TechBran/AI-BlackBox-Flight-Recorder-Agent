@@ -65,6 +65,28 @@ class AndroidPhoneControllerActionTest {
         assertEquals("accessibility service not enabled", detail(controller().dispatch("home", JsonObject(emptyMap()))))
     }
 
+    // ---- (M2 / F1) press_key: enter (IME submit) + back/home/recents (global) reach the actuator
+
+    @Test fun `press_key enter reaches the actuator`() = runBlocking {
+        // enter → Actuators.pressKey("enter") → ImeEnter path; null service short-circuits to the
+        // graceful not-enabled BEFORE touching findFocus/ACTION_IME_ENTER (Stub! throws otherwise),
+        // proving the dispatch branch exists + routes (the real IME submit is device-verified).
+        val r = controller().dispatch("press_key", buildJsonObject { put("key", "enter") })
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", detail(r))
+    }
+
+    @Test fun `press_key back reaches the actuator (global path)`() = runBlocking {
+        val r = controller().dispatch("press_key", buildJsonObject { put("key", "back") })
+        assertEquals("accessibility service not enabled", detail(r))
+    }
+
+    @Test fun `press_key missing key is a clear argument error`() = runBlocking {
+        val r = controller().dispatch("press_key", JsonObject(emptyMap()))
+        assertFalse(r.success)
+        assertEquals("key required", detail(r))
+    }
+
     @Test fun `a truly unknown action is still rejected as unknown`() = runBlocking {
         val r = controller().dispatch("levitate", JsonObject(emptyMap()))
         assertFalse(r.success)

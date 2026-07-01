@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.aiblackbox.dev/android-control/v1/action.json",
   "title": "Action",
-  "description": "The brain→device message: one actuation the cloud frontier loop wants performed on the target device, sent DOWN over the Tailscale 8765 channel. A discriminated union keyed on the ACTION-VARIANT discriminator `type` (element_click / element_set_text / coordinate_tap / coordinate_swipe / global_action / intent / open_app / scroll); each variant maps to a REAL entry point in the existing Android actuation layer (Actuators / IntentActuator, dispatched by AndroidPhoneController.dispatch). The MESSAGE-KIND discriminator is the SEPARATE key `msg` (const 'action' here) so it never collides with the variant `type` (I2). Coordinates on the wire are already in DEVICE SCREEN PIXELS — any provider-space denormalization (e.g. Gemini 0-999 → px) happens server-side in the M7 coordinate adapter before this message is emitted.",
+  "description": "The brain→device message: one actuation the cloud frontier loop wants performed on the target device, sent DOWN over the Tailscale 8765 channel. A discriminated union keyed on the ACTION-VARIANT discriminator `type` (element_click / element_set_text / coordinate_tap / coordinate_swipe / global_action / intent / open_app / scroll / press_key); each variant maps to a REAL entry point in the existing Android actuation layer (Actuators / IntentActuator, dispatched by AndroidPhoneController.dispatch). The MESSAGE-KIND discriminator is the SEPARATE key `msg` (const 'action' here) so it never collides with the variant `type` (I2). Coordinates on the wire are already in DEVICE SCREEN PIXELS — any provider-space denormalization (e.g. Gemini 0-999 → px) happens server-side in the M7 coordinate adapter before this message is emitted. TRANSPORT ENVELOPE (M2): on the wire a POST /action body is this action.json payload PLUS the sibling transport keys `task_id` + `operator` (the correlation id + the operator scope). A strict validator should validate the action VARIANT against this schema after stripping those two framing keys (see docs/schema/README.md → Transport envelope).",
   "type": "object",
   "required": ["msg", "type"],
   "oneOf": [
@@ -13,7 +13,8 @@
     { "$ref": "#/$defs/global_action" },
     { "$ref": "#/$defs/intent" },
     { "$ref": "#/$defs/open_app" },
-    { "$ref": "#/$defs/scroll" }
+    { "$ref": "#/$defs/scroll" },
+    { "$ref": "#/$defs/press_key" }
   ],
   "$defs": {
     "msg": {
@@ -202,6 +203,22 @@
         }
       },
       "required": ["msg", "type", "direction"],
+      "additionalProperties": false
+    },
+    "press_key": {
+      "title": "press_key",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"press_key\") → args[\"key\"] → Actuators.pressKey(key). `enter` submits the currently-focused editable field via AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER (API 30+; graceful 'no focused field'/'not supported' otherwise) — this is how a 'type → submit' flow (a search box, a chat input) completes without a coordinate. `back`/`home`/`recents` reuse the performGlobalAction path (globalActionFor) — same effect as the global_action variant, exposed here as a 'key' so a model that thinks in keystrokes lands correctly. `tab`/`delete` are best-effort (no reliable global/IME equivalent) → `success=false, 'unsupported key: <k>'` in M2. CAPABILITY-SAFE: press_key uses NO coordinates, so it is meaningful on every form factor incl. XR (never coordinate-gated). WIRE-SAFETY: RemoteActionChannel.parseAction validates `key` against this enum and rejects anything else with 'invalid_argument'.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "press_key" },
+        "key": {
+          "type": "string",
+          "enum": ["enter", "back", "home", "recents", "tab", "delete"],
+          "description": "The key to press. `enter` → ACTION_IME_ENTER on the focused editable node (submit); `back`/`home`/`recents` → performGlobalAction; `tab`/`delete` → best-effort (unsupported in M2). Matched case-insensitively on-device; anything outside this enum is rejected as invalid_argument."
+        }
+      },
+      "required": ["msg", "type", "key"],
       "additionalProperties": false
     }
   }

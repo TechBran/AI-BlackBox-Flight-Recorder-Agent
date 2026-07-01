@@ -331,6 +331,37 @@ class RemoteControlServerTest {
         assertEquals(405, streamMethodGate("PUT")?.status)
     }
 
+    // ── F2 / I3: the observation stream REFUSES a killed task (completes the kill-switch) ──
+
+    @Test fun stream_kill_gate_refuses_a_killed_task() {
+        // A live task proceeds to the SSE pump (null); a STOPPED task is refused (409) so the
+        // server never serves it a fresh observation frame (which would resurrect the banner +
+        // keep the loop driving a session the user ended).
+        assertNull(streamKillGate("t1", killed = false))
+        val denied = streamKillGate("t1", killed = true)
+        assertEquals(409, denied?.status)
+        // Same stable phrase the killed /action result carries → the loop keys on one signal.
+        assertTrue(denied!!.json, denied.json.contains("stopped by user"))
+    }
+
+    // ── F2: the killed /action result carries a machine-detectable "stopped" signal ──
+
+    @Test fun killed_action_result_carries_a_stable_stopped_signal_the_loop_keys_on() = runBlocking {
+        // The dispatcher refuses a stopped task with a stable detail (no error code — it is a
+        // user-initiated stop, not a failure). The M2 loop's terminal-state detection keys on the
+        // "stopped by user" phrase to short-circuit with error_kind=stopped.
+        val killed = ActionResultEnvelope(success = false, detail = "remote control stopped by user")
+        val d = object : RemoteActionDispatcher {
+            override suspend fun dispatch(body: String, taskId: String, operator: String) = killed
+        }
+        val r = handleActionRequest("POST",
+            """{"msg":"action","task_id":"t1","operator":"Brandon","type":"element_click","resource_id":"x"}""",
+            d)
+        assertEquals(200, r.status)
+        assertTrue(r.json, r.json.contains("stopped by user"))   // stable, machine-detectable
+        assertFalse(r.json, r.json.contains("\"error\""))        // no error code for a user stop
+    }
+
     // ── M0: RemoteTaskHandlerHolder seam — frontier ↔ Gemma swap (no socket rebind) ──
 
     @Test fun handler_holder_swaps_frontier_and_fake_last_set_wins() {

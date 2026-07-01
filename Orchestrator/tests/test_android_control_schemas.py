@@ -80,7 +80,7 @@ CAP_PHONE = {"formFactor": "phone", "hasScreenshot": True, "supportsCoordinateGe
 CAP_XR = {"formFactor": "xr_headset", "hasScreenshot": False, "supportsCoordinateGesture": False, "displayId": 0}
 
 OBS_OK = {
-    "msg": "observation", "schema_version": "1.1",
+    "msg": "observation", "schema_version": "1.2",
     "ui_tree": [NODE_OK], "device_capability": CAP_PHONE, "timestamp": 1234567890,
 }
 
@@ -111,6 +111,8 @@ ACTIONS_OK = {
     },
     "open_app": {"msg": "action", "type": "open_app", "package": "com.google.android.apps.maps"},
     "scroll": {"msg": "action", "type": "scroll", "direction": "down"},
+    # M2 / v1.2: the press_key action variant (enter submits the focused field via IME_ENTER).
+    "press_key": {"msg": "action", "type": "press_key", "key": "enter"},
 }
 
 RESULTS_OK = {
@@ -137,6 +139,9 @@ NEG_INTENT_READ_SCREEN = {"msg": "action", "type": "intent", "name": "read_scree
 NEG_OPEN_APP_PACKAGE_NAME = {"msg": "action", "type": "open_app", "package_name": "com.x"}
 NEG_UNKNOWN_TYPE = {"msg": "action", "type": "frobnicate"}
 NEG_UNKNOWN_GLOBAL = {"msg": "action", "type": "global_action", "action": "sideways"}
+# M2 / v1.2: a press_key with a key outside the enum must reject (the on-device parser
+# rejects it too with invalid_argument).
+NEG_PRESS_KEY_UNKNOWN = {"msg": "action", "type": "press_key", "key": "f13"}
 NEG_MISSING_MSG = {"type": "element_click", "resource_id": "com.app:id/ok"}  # no msg
 NEG_BLANK_MSG = {"msg": "", "type": "element_click", "resource_id": "com.app:id/ok"}  # msg not const
 
@@ -233,10 +238,26 @@ def test_intent_name_enum_matches_the_26_intent_actions():
         assert gesture not in enum, gesture
 
 
-def test_schema_version_bumped_to_1_1_minor():
-    # I2: additive minor bump (15 -> 26 intents) — const on observation, no /v2/ path change.
-    assert SCHEMAS["observation.json"]["properties"]["schema_version"]["const"] == "1.1"
+def test_schema_version_bumped_to_1_2_minor():
+    # Additive minor bumps (const on observation, no /v2/ path change): 1.1 = 15->26 intents;
+    # 1.2 = the new press_key action variant.
+    assert SCHEMAS["observation.json"]["properties"]["schema_version"]["const"] == "1.2"
     assert "/v1/" in SCHEMAS["observation.json"]["$id"]  # major path unchanged
+
+
+def test_press_key_variant_present_and_grounded():
+    # M2 / v1.2: the coordinate-free press_key variant — enter submits the focused field.
+    defs = SCHEMAS["action.json"]["$defs"]
+    assert defs["press_key"]["properties"]["type"]["const"] == "press_key"
+    assert "key" in defs["press_key"]["required"]
+    assert defs["press_key"]["properties"]["key"]["enum"] == \
+        ["enter", "back", "home", "recents", "tab", "delete"]
+    assert defs["press_key"]["additionalProperties"] is False
+    # wired into the oneOf union.
+    refs = {r["$ref"] for r in SCHEMAS["action.json"]["oneOf"]}
+    assert "#/$defs/press_key" in refs
+    # press_key is a top-level action variant, NOT an intent name (like open_app).
+    assert "press_key" not in SCHEMAS["action.json"]["$defs"]["intent"]["properties"]["name"]["enum"]
 
 
 def test_open_app_wire_key_is_exactly_package():
@@ -334,6 +355,13 @@ def test_negative_unknown_action_type_rejects():
 @_needs_validator
 def test_negative_unknown_global_action_rejects():
     assert not _valid("action.json", NEG_UNKNOWN_GLOBAL)
+
+
+@_needs_validator
+def test_press_key_sample_validates_and_unknown_key_rejects():
+    # M2 / v1.2: the press_key sample validates; a key outside the enum rejects.
+    assert _valid("action.json", ACTIONS_OK["press_key"])
+    assert not _valid("action.json", NEG_PRESS_KEY_UNKNOWN)
 
 
 @_needs_validator

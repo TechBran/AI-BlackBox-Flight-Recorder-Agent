@@ -160,7 +160,7 @@ class RemoteActionChannelTest {
         // The INTENT_ACTIONS-membership gate is only sound if the intent set is disjoint from
         // every gesture/global/coordinate dispatch name — verify that invariant here.
         val gestureGlobalCoord = com.aiblackbox.portal.data.local.ResidentTools.PHONE_ACTUATORS +
-            setOf("coordinate_tap", "coordinate_swipe", "recents")
+            setOf("coordinate_tap", "coordinate_swipe", "recents", "press_key")
         val overlap = com.aiblackbox.portal.data.local.ResidentTools.INTENT_ACTIONS.intersect(gestureGlobalCoord)
         assertTrue("intent names collide with dispatch names: $overlap", overlap.isEmpty())
     }
@@ -194,6 +194,32 @@ class RemoteActionChannelTest {
         val p = parseAction(frame("""{"type":"scroll","direction":"down"}""")) as ActionParse.Plan
         assertEquals("scroll", p.dispatchName)
         assertEquals("down", p.args["direction"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    // ---- (M2 / F1) press_key parse: valid enum → Plan(KEY); unknown/missing → invalid_argument
+
+    @Test fun `press_key valid keys route to press_key with a normalized key`() {
+        for (k in listOf("enter", "back", "home", "recents", "tab", "delete")) {
+            val p = parseAction(frame("""{"type":"press_key","key":"$k"}""")) as ActionParse.Plan
+            assertEquals("press_key", p.dispatchName)
+            assertEquals(ActionKind.KEY, p.kind)          // never coordinate-gated
+            assertEquals(k, p.args["key"]?.jsonPrimitive?.contentOrNull)
+        }
+    }
+
+    @Test fun `press_key normalizes case and trims`() {
+        val p = parseAction(frame("""{"type":"press_key","key":" Enter "}""")) as ActionParse.Plan
+        assertEquals("enter", p.args["key"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test fun `press_key unknown key is invalid_argument`() {
+        val r = parseAction(frame("""{"type":"press_key","key":"f13"}""")) as ActionParse.Reject
+        assertEquals("invalid_argument", r.error)
+    }
+
+    @Test fun `press_key missing key is invalid_argument`() {
+        val r = parseAction(frame("""{"type":"press_key"}""")) as ActionParse.Reject
+        assertEquals("invalid_argument", r.error)
     }
 
     @Test fun `unknown type is unknown_action`() {
@@ -241,6 +267,21 @@ class RemoteActionChannelTest {
         val c = FakePhoneController()
         dispatcher(c).dispatch(body("""{"type":"global_action","action":"recents"}"""), "t1", "Brandon")
         assertEquals("recents", c.dispatched[0].first)
+    }
+
+    @Test fun `dispatch press_key reaches controller press_key with the key`() = runBlocking {
+        val c = FakePhoneController()
+        dispatcher(c).dispatch(body("""{"type":"press_key","key":"enter"}"""), "t1", "Brandon")
+        assertEquals("press_key", c.dispatched[0].first)
+        assertEquals("enter", c.dispatched[0].second["key"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test fun `press_key is not coordinate-gated on XR (coordinate-free)`() = runBlocking {
+        // press_key uses no coordinates → it must pass through on a coordinate-less device (XR),
+        // unlike coordinate_tap/swipe. enter→IME / back/home/recents→performGlobalAction all work.
+        val c = FakePhoneController()
+        dispatcher(c, cap = xrCap).dispatch(body("""{"type":"press_key","key":"enter"}"""), "t1", "Brandon")
+        assertEquals("press_key", c.dispatched[0].first)   // reached the controller on XR
     }
 
     @Test fun `dispatch intent reaches controller by intent name`() = runBlocking {

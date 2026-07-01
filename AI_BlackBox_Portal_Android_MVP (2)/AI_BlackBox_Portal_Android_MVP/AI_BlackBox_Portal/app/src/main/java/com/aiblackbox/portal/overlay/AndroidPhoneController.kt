@@ -116,6 +116,16 @@ class AndroidPhoneController(
                 // routes to the new Actuators.recents() → GLOBAL_ACTION_RECENTS.
                 "recents" -> actuators.recents().toToolResult()
 
+                // (M2 / F1) press_key — the coordinate-free key action. `enter` submits the
+                // focused field (ACTION_IME_ENTER) enabling a "type → submit" flow;
+                // back/home/recents reuse performGlobalAction. Key is validated against the
+                // schema enum by the remote parser; pressKey degrades gracefully regardless.
+                "press_key" -> {
+                    val key = args["key"]?.jsonPrimitive?.contentOrNull
+                        ?: return ToolResult(false, JsonPrimitive("key required"))
+                    actuators.pressKey(key).toToolResult()
+                }
+
                 // (M1.3) coordinate_tap — expose the coordinate tap path (the frontier
                 // `coordinate_tap` action). Coordinates are absolute screen pixels; the
                 // frontier dispatcher already gated coordinate support (skips on XR).

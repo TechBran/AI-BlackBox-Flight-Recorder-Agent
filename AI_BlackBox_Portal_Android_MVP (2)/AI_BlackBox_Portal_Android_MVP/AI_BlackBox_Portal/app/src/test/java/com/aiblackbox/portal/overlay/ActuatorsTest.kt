@@ -168,6 +168,43 @@ class ActuatorsTest {
         assertFalse(actuators.swipe(0, 0, 100, 100, 500L).success)
     }
 
+    // ---- (M2 / F1) pressKeyPlan: the PURE key → plan routing --------------
+
+    @Test
+    fun `pressKeyPlan routes enter to ImeEnter`() {
+        assertTrue(pressKeyPlan("enter") is PressKeyPlan.ImeEnter)
+        assertTrue(pressKeyPlan("  Enter ") is PressKeyPlan.ImeEnter)   // case-insensitive + trimmed
+    }
+
+    @Test
+    fun `pressKeyPlan routes back home recents to the right global actions`() {
+        assertEquals(
+            AccessibilityService.GLOBAL_ACTION_BACK,
+            (pressKeyPlan("back") as PressKeyPlan.Global).action)
+        assertEquals(
+            AccessibilityService.GLOBAL_ACTION_HOME,
+            (pressKeyPlan("home") as PressKeyPlan.Global).action)
+        assertEquals(
+            AccessibilityService.GLOBAL_ACTION_RECENTS,
+            (pressKeyPlan("recents") as PressKeyPlan.Global).action)
+    }
+
+    @Test
+    fun `pressKeyPlan routes tab delete and unknown to Unsupported`() {
+        assertTrue(pressKeyPlan("tab") is PressKeyPlan.Unsupported)
+        assertTrue(pressKeyPlan("delete") is PressKeyPlan.Unsupported)
+        assertTrue(pressKeyPlan("f13") is PressKeyPlan.Unsupported)
+        assertTrue(pressKeyPlan("") is PressKeyPlan.Unsupported)
+    }
+
+    @Test
+    fun `pressKey with no service returns not-enabled gracefully`() {
+        val actuators = Actuators({ null })
+        val r = actuators.pressKey("enter")
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", r.detail)
+    }
+
     // ---- helpers ----------------------------------------------------------
 
     private data class Quad(val a: Int, val b: Int, val c: Int, val d: Int)
