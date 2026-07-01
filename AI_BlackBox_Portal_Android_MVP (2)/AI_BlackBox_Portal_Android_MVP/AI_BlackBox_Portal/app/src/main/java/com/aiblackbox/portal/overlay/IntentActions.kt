@@ -114,42 +114,117 @@ fun calendarMillis(datetime: String, nowMs: Long): Long =
 fun calendarEndMillis(beginMs: Long): Long = beginMs + 3_600_000L
 
 /**
- * PURE: map a settings-panel name [which] to its `Settings.ACTION_*` activity
- * action String. NEVER returns null.
+ * PURE: the COMPREHENSIVE settings-panel catalog — a normalized key → its
+ * `Settings.ACTION_*` activity-action String (decision 9, `open_settings(panel)`).
  *
- * Matching is case-insensitive + trimmed. An unknown, blank, or null [which]
- * falls back to the top-level [Settings.ACTION_SETTINGS] — always landing the
- * user *somewhere* useful rather than failing. (These are inlined String
- * constants, so this resolves on the host JVM with no `android.jar`.)
+ * This is the single source of truth for the full "open any settings panel" surface
+ * the frontier model reaches via the fast intent path. Keys are the lower-cased,
+ * trimmed names the model supplies; values are Android's inlined
+ * `public static final String` action constants (so this whole map resolves on the
+ * host JVM with no `android.jar` — the same trick the whole [IntentActions] file
+ * relies on). Aliases (e.g. `cellular`/`data`/`data_roaming`) map to the same
+ * action so the model doesn't have to guess the exact spelling.
  *
- * Mapping:
- *  - `wifi` → [Settings.ACTION_WIFI_SETTINGS]
- *  - `bluetooth` → [Settings.ACTION_BLUETOOTH_SETTINGS]
- *  - `location` → [Settings.ACTION_LOCATION_SOURCE_SETTINGS]
- *  - `sound` → [Settings.ACTION_SOUND_SETTINGS]
- *  - `display` → [Settings.ACTION_DISPLAY_SETTINGS]
- *  - `battery` → [Settings.ACTION_BATTERY_SAVER_SETTINGS]
- *  - `nfc` → [Settings.ACTION_NFC_SETTINGS]
- *  - `airplane` → [Settings.ACTION_AIRPLANE_MODE_SETTINGS]
- *  - `data` / `cellular` → [Settings.ACTION_DATA_ROAMING_SETTINGS]
- *  - `storage` → [Settings.ACTION_INTERNAL_STORAGE_SETTINGS]
- *  - `apps` → [Settings.ACTION_APPLICATION_SETTINGS]
- *  - anything else (incl. null/blank) → [Settings.ACTION_SETTINGS]
+ * HONESTY: only panels that resolve WITHOUT extra data (no `package:` URI / no
+ * required extras) are listed here, so `open_settings(panel)` — which takes only a
+ * panel key — always lands on a real screen. `hotspot`/`tethering` have no public
+ * dedicated action, so they map to the nearest public umbrella
+ * ([Settings.ACTION_WIRELESS_SETTINGS]); a SPECIFIC app's detail / write-settings /
+ * app-notification panel needs a `package:` URI and is reached through the guarded
+ * generic `send_intent` escape-hatch instead, not here.
+ *
+ * Ordering is stable (LinkedHashMap) so [settingsPanelKeys] reads sensibly in the
+ * "unknown panel" error the actuator returns.
  */
-fun settingsPanelAction(which: String?): String = when (which?.trim()?.lowercase()) {
-    "wifi" -> Settings.ACTION_WIFI_SETTINGS
-    "bluetooth" -> Settings.ACTION_BLUETOOTH_SETTINGS
-    "location" -> Settings.ACTION_LOCATION_SOURCE_SETTINGS
-    "sound" -> Settings.ACTION_SOUND_SETTINGS
-    "display" -> Settings.ACTION_DISPLAY_SETTINGS
-    "battery" -> Settings.ACTION_BATTERY_SAVER_SETTINGS
-    "nfc" -> Settings.ACTION_NFC_SETTINGS
-    "airplane" -> Settings.ACTION_AIRPLANE_MODE_SETTINGS
-    "data", "cellular" -> Settings.ACTION_DATA_ROAMING_SETTINGS
-    "storage" -> Settings.ACTION_INTERNAL_STORAGE_SETTINGS
-    "apps" -> Settings.ACTION_APPLICATION_SETTINGS
-    else -> Settings.ACTION_SETTINGS
-}
+val SETTINGS_PANELS: Map<String, String> = linkedMapOf(
+    // Connectivity / radios
+    "wifi" to Settings.ACTION_WIFI_SETTINGS,
+    "bluetooth" to Settings.ACTION_BLUETOOTH_SETTINGS,
+    "wireless" to Settings.ACTION_WIRELESS_SETTINGS,
+    "hotspot" to Settings.ACTION_WIRELESS_SETTINGS, // no public hotspot action → nearest umbrella
+    "tethering" to Settings.ACTION_WIRELESS_SETTINGS,
+    "airplane" to Settings.ACTION_AIRPLANE_MODE_SETTINGS,
+    "nfc" to Settings.ACTION_NFC_SETTINGS,
+    "nfc_sharing" to Settings.ACTION_NFCSHARING_SETTINGS,
+    "data" to Settings.ACTION_DATA_ROAMING_SETTINGS, // back-compat alias (roaming)
+    "cellular" to Settings.ACTION_DATA_ROAMING_SETTINGS,
+    "data_roaming" to Settings.ACTION_DATA_ROAMING_SETTINGS,
+    "data_usage" to Settings.ACTION_DATA_USAGE_SETTINGS,
+    "apn" to Settings.ACTION_APN_SETTINGS,
+    "cast" to Settings.ACTION_CAST_SETTINGS,
+    // Display / sound
+    "display" to Settings.ACTION_DISPLAY_SETTINGS,
+    "sound" to Settings.ACTION_SOUND_SETTINGS,
+    "screensaver" to Settings.ACTION_DREAM_SETTINGS,
+    "captioning" to Settings.ACTION_CAPTIONING_SETTINGS,
+    // Location / privacy / security
+    "location" to Settings.ACTION_LOCATION_SOURCE_SETTINGS,
+    "security" to Settings.ACTION_SECURITY_SETTINGS,
+    "privacy" to Settings.ACTION_PRIVACY_SETTINGS,
+    "accessibility" to Settings.ACTION_ACCESSIBILITY_SETTINGS,
+    "usage_access" to Settings.ACTION_USAGE_ACCESS_SETTINGS,
+    "notifications" to Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS,
+    "notification_listener" to Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS,
+    "overlay" to Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+    "unknown_sources" to Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+    // Power / storage
+    "battery" to Settings.ACTION_BATTERY_SAVER_SETTINGS,
+    "battery_optimization" to Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS,
+    "storage" to Settings.ACTION_INTERNAL_STORAGE_SETTINGS,
+    "memory_card" to Settings.ACTION_MEMORY_CARD_SETTINGS,
+    // Date / language / input
+    "date" to Settings.ACTION_DATE_SETTINGS,
+    "time" to Settings.ACTION_DATE_SETTINGS,
+    "language" to Settings.ACTION_LOCALE_SETTINGS,
+    "locale" to Settings.ACTION_LOCALE_SETTINGS,
+    "input_method" to Settings.ACTION_INPUT_METHOD_SETTINGS,
+    "keyboard" to Settings.ACTION_HARD_KEYBOARD_SETTINGS,
+    "dictionary" to Settings.ACTION_USER_DICTIONARY_SETTINGS,
+    "voice_input" to Settings.ACTION_VOICE_INPUT_SETTINGS,
+    // Accounts / apps / device
+    "sync" to Settings.ACTION_SYNC_SETTINGS,
+    "add_account" to Settings.ACTION_ADD_ACCOUNT,
+    "apps" to Settings.ACTION_APPLICATION_SETTINGS,
+    "manage_apps" to Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS,
+    "all_apps" to Settings.ACTION_MANAGE_ALL_APPLICATIONS_SETTINGS,
+    "default_apps" to Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS,
+    "developer" to Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS,
+    "device_info" to Settings.ACTION_DEVICE_INFO_SETTINGS,
+    "about" to Settings.ACTION_DEVICE_INFO_SETTINGS,
+    "home" to Settings.ACTION_HOME_SETTINGS,
+    // Top-level
+    "settings" to Settings.ACTION_SETTINGS,
+)
+
+/**
+ * PURE: the sorted list of valid [SETTINGS_PANELS] keys — surfaced in the graceful
+ * "unknown settings panel" error the actuator returns so the model can self-correct.
+ * All keys are fixed constants (never user data), so listing them leaks nothing.
+ */
+fun settingsPanelKeys(): List<String> = SETTINGS_PANELS.keys.sorted()
+
+/**
+ * PURE: map a settings-panel name [which] to its `Settings.ACTION_*` action, or
+ * `null` if [which] is unknown/blank/null. Case-insensitive + trimmed lookup into
+ * [SETTINGS_PANELS]. Used by the comprehensive `open_settings(panel)` intent, which
+ * returns a graceful error (listing [settingsPanelKeys]) on `null` rather than
+ * silently landing somewhere.
+ */
+fun settingsPanelActionOrNull(which: String?): String? =
+    which?.trim()?.lowercase()?.let { SETTINGS_PANELS[it] }
+
+/**
+ * PURE: map a settings-panel name [which] to its `Settings.ACTION_*` activity
+ * action String. NEVER returns null — an unknown/blank/null [which] falls back to
+ * the top-level [Settings.ACTION_SETTINGS].
+ *
+ * This is the LENIENT resolver behind the legacy `open_settings_panel` intent
+ * (always lands the user *somewhere* useful). The comprehensive `open_settings`
+ * intent uses the STRICT [settingsPanelActionOrNull] instead (unknown → error).
+ * Both read the single [SETTINGS_PANELS] catalog, so they never drift.
+ */
+fun settingsPanelAction(which: String?): String =
+    settingsPanelActionOrNull(which) ?: Settings.ACTION_SETTINGS
 
 /** PURE: clamp an alarm/event [hour] into the valid 0..23 range. */
 fun clampHour(hour: Int): Int = hour.coerceIn(0, 23)
@@ -159,3 +234,131 @@ fun clampMinutes(minutes: Int): Int = minutes.coerceIn(0, 59)
 
 /** PURE: clamp a timer length [seconds] into 1s..24h (1..86_400). */
 fun clampTimerSeconds(seconds: Int): Int = seconds.coerceIn(1, 86_400)
+
+// =============================================================================
+// Decision-9 additions: broad deep-link open_url · navigation · the guarded
+// generic send_intent escape-hatch (all PURE / host-JVM-testable)
+// =============================================================================
+
+/**
+ * URI schemes that must NEVER be launched via a generic ACTION_VIEW / `send_intent`
+ * on the user's behalf — the file-exposure / implicit-grant / intent-smuggling
+ * vectors:
+ *  - `file` — `FileUriExposedException` risk + reads a raw filesystem path.
+ *  - `content` — could smuggle an implicit URI-permission GRANT to a private provider.
+ *  - `android_resource` — reaches another app's private resources.
+ *  - `intent` — the classic deep-link SMUGGLING vector: `intent://…#Intent;…;end`
+ *    is parsed by the target into a FULL intent (arbitrary action/extras/flags),
+ *    exactly the "dangerous/implicit-grant flags" bypass we must reject.
+ *  - `javascript` / `data` — script / inline-payload execution surfaces.
+ *
+ * Everything else (http/https AND app deep-link schemes like `tel`/`geo`/`mailto`/
+ * `sms`/`spotify`/`myapp`/…) is a legitimate, user-visible VIEW target.
+ */
+val UNSAFE_URI_SCHEMES: Set<String> =
+    setOf("file", "content", "android_resource", "intent", "javascript", "data")
+
+/** PURE: the lower-cased scheme of [uri] (text before the first `:`), or "" if none. */
+private fun schemeOf(uri: String): String =
+    uri.trim().substringBefore(":", "").lowercase()
+
+/**
+ * PURE: is [uri] safe to hand to a generic ACTION_VIEW (the broadened
+ * `open_url(uri)` — decision 9: "any http/https OR app deep-link URI, one
+ * primitive covering all deep links")?
+ *
+ * Accepts any URI that HAS a scheme, a non-blank scheme-specific part, and a scheme
+ * NOT in [UNSAFE_URI_SCHEMES]. So `https://…`, `http://…`, `tel:…`, `geo:…`,
+ * `mailto:…`, `sms:…`, and arbitrary app deep links (`spotify:…`, `myapp://…`)
+ * all pass, while `file:`/`content:`/`intent:`/`javascript:`/`data:` and a
+ * scheme-less bare string are REJECTED. Broader than the web-only [isWebUrl]
+ * (which is retained for callers that must stay web-only).
+ */
+fun isSafeViewUri(uri: String): Boolean {
+    val u = uri.trim()
+    if (u.isEmpty()) return false
+    val scheme = schemeOf(u)
+    if (scheme.isEmpty()) return false
+    if (scheme in UNSAFE_URI_SCHEMES) return false
+    return u.substringAfter(":", "").isNotBlank()
+}
+
+/**
+ * PURE: the `google.navigation:` turn-by-turn URI for a free-text [destination].
+ *
+ * `google.navigation:q=<url-encoded destination>` is the canonical "start
+ * turn-by-turn navigation to this place" deep link (Google Maps consumes it). The
+ * destination is form-encoded via [URLEncoder] exactly like [geoQueryUri], so it
+ * can never break out of the query string.
+ */
+fun navigationUri(destination: String): String =
+    "google.navigation:q=" + URLEncoder.encode(destination, StandardCharsets.UTF_8.toString())
+
+/**
+ * Intent ACTIONS that must NEVER be reachable through the guarded generic
+ * `send_intent` escape-hatch — the ones that fire a HIGH-CONSEQUENCE, often
+ * SILENT, side effect with no user-facing confirmation UI of their own:
+ *  - `CALL` / `CALL_PRIVILEGED` / `CALL_EMERGENCY` — place a call with no dialer
+ *    confirm (would also need `CALL_PHONE`); the safe path is `dial` (pre-fill only).
+ *  - `(UN)INSTALL_PACKAGE` / `REQUEST_INSTALL_PACKAGES` / `DELETE` — install/remove
+ *    software or delete data.
+ *  - `MASTER_CLEAR` / `FACTORY_RESET` — wipe the device.
+ *  - `REBOOT` / `*SHUTDOWN` — power state.
+ *  - `REQUEST_PERMISSIONS` — silently escalate granted permissions.
+ *
+ * Compared case-insensitively (a model may vary the casing of the action string).
+ */
+val DANGEROUS_SEND_INTENT_ACTIONS: Set<String> = setOf(
+    "android.intent.action.call",
+    "android.intent.action.call_privileged",
+    "android.intent.action.call_emergency",
+    "android.intent.action.install_package",
+    "android.intent.action.uninstall_package",
+    "android.intent.action.request_install_packages",
+    "android.intent.action.delete",
+    "android.content.pm.action.request_permissions",
+    "android.intent.action.master_clear",
+    "android.intent.action.factory_reset",
+    "android.intent.action.reboot",
+    "android.intent.action.action_request_shutdown",
+    "android.intent.action.action_shutdown",
+    "com.android.internal.intent.action.request_shutdown",
+)
+
+/**
+ * PURE: the SAFETY ENVELOPE for the guarded generic `send_intent(action, uri?,
+ * extras?, mime?, package?)` escape-hatch. Returns a graceful, NON-leaking
+ * rejection reason (a fixed phrase — never any argument content), or `null` when
+ * the request is allowed to proceed to the confirm-gate + launch.
+ *
+ * Rules (all decided here so they are exhaustively unit-testable):
+ *  1. [action] must be present and non-blank.
+ *  2. [action] must NOT be in [DANGEROUS_SEND_INTENT_ACTIONS] (silent
+ *     call/install/delete/wipe/power/permission-escalation).
+ *  3. If [uri] is present it must carry a scheme, and that scheme must NOT be in
+ *     [UNSAFE_URI_SCHEMES] (file/content/android_resource/intent/javascript/data —
+ *     the file-exposure / implicit-grant / intent-smuggling vectors).
+ *
+ * The actuator additionally (a) routes `send_intent` through the high-consequence
+ * confirm-gate ([shouldConfirmIntent]) and (b) sets ONLY `FLAG_ACTIVITY_NEW_TASK`
+ * (never a `FLAG_GRANT_*_URI_PERMISSION` / new-document flag) and coerces extras to
+ * plain Strings — so no dangerous flag can be smuggled in through this function's
+ * callers either. Credential handoff is never bypassed: a fire-and-forget intent
+ * cannot type into a field, and the safe actions here never carry secrets.
+ */
+fun sendIntentRejectionReason(
+    action: String?,
+    uri: String?,
+    @Suppress("UNUSED_PARAMETER") mime: String?,
+    @Suppress("UNUSED_PARAMETER") pkg: String?,
+): String? {
+    val act = action?.trim().orEmpty()
+    if (act.isEmpty()) return "action required"
+    if (act.lowercase() in DANGEROUS_SEND_INTENT_ACTIONS) return "action not permitted via send_intent"
+    if (uri != null) {
+        val scheme = schemeOf(uri)
+        if (scheme.isEmpty()) return "uri scheme required"
+        if (scheme in UNSAFE_URI_SCHEMES) return "unsafe uri scheme"
+    }
+    return null
+}

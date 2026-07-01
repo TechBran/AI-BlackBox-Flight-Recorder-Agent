@@ -58,6 +58,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.aiblackbox.portal.PairingActivity
 import com.aiblackbox.portal.R
+import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -359,7 +360,95 @@ class OverlayService : Service() {
             OverlayBridge.registerCommandListener(XrCommandHandler())
         }
 
+        // (M1.4) Observe the remote-control session bus so the "AI is controlling this
+        // device" consent banner + kill switch show whenever a session is active.
+        RemoteSessionBus.addListener(controlSessionListener)
+
         Log.d(TAG, "OverlayService created (isXrDevice=$isXrDevice)")
+    }
+
+    // ---- (M1.4) Remote-control consent banner + kill switch -----------------
+
+    /** The persistent "AI is controlling this device" banner overlay, or null when idle. */
+    private var controlBannerView: View? = null
+
+    /**
+     * Bus listener: show the banner while a session is active, hide it when it ends/is
+     * killed. Marshalled onto the main thread ([handler]) because it may fire from the
+     * server's worker thread. Never throws (windowManager churn is wrapped).
+     */
+    private val controlSessionListener = RemoteSessionBus.Listener { session ->
+        handler.post {
+            if (session != null) showControlBanner() else hideControlBanner()
+        }
+    }
+
+    /**
+     * Add the top-of-screen consent banner (a "🔴 AI is controlling this device" label +
+     * a STOP button that fires [RemoteSessionBus.stop]). Built programmatically (no XML) so
+     * it adds no layout resource. Phone/tablet path only — XR renders its own in-headset
+     * panel (M6.3), and the always-on notification banner ([NotificationListenerFgs]) is the
+     * universal fail-safe. Idempotent + best-effort.
+     */
+    private fun showControlBanner() {
+        if (isXrDevice) return
+        if (controlBannerView != null) return
+        runCatching {
+            val density = resources.displayMetrics.density
+            fun dp(v: Int) = (v * density).toInt()
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                setBackgroundColor(0xEEB00020.toInt()) // strong red, mostly opaque
+            }
+            val label = TextView(this).apply {
+                text = "🔴  AI is controlling this device"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 14f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val stop = TextView(this).apply {
+                text = "STOP"
+                setTextColor(0xFFB00020.toInt())
+                textSize = 14f
+                setPadding(dp(18), dp(8), dp(18), dp(8))
+                setBackgroundColor(0xFFFFFFFF.toInt())
+                setOnClickListener { RemoteSessionBus.stop() }
+            }
+            row.addView(label)
+            row.addView(stop)
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                // Not focusable so it never steals input from the app being driven; the STOP
+                // button still receives touches (FLAG_NOT_FOCUSABLE keeps key focus away only).
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            }
+            windowManager.addView(row, params)
+            controlBannerView = row
+            Log.i(TAG, "control consent banner shown")
+        }.onFailure {
+            Log.w(TAG, "control banner add failed (${it.javaClass.simpleName})")
+        }
+    }
+
+    /** Remove the consent banner. Best-effort; never throws. */
+    private fun hideControlBanner() {
+        val view = controlBannerView ?: return
+        controlBannerView = null
+        runCatching { windowManager.removeView(view) }
+        Log.i(TAG, "control consent banner hidden")
     }
 
     /**
@@ -560,6 +649,10 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+
+        // (M1.4) Stop observing the session bus + remove the consent banner if present.
+        RemoteSessionBus.removeListener(controlSessionListener)
+        hideControlBanner()
 
         // Cleanup XR bridge — signal activity to finish, then reset
         if (isXrDevice) {

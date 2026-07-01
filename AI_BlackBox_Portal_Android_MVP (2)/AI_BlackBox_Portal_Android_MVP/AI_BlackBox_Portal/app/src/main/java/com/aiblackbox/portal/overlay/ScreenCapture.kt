@@ -120,3 +120,64 @@ class OverlayScreenCapture(
         }
     }
 }
+
+/**
+ * (M1.2) The SILENT [ScreenCapture] — the frontier observation's PREFERRED vision path.
+ * Uses [BlackBoxA11yService.takeScreenshotPng] (`AccessibilityService.takeScreenshot`,
+ * API 30+): NO MediaProjection consent dialog, no per-session system prompt, reusing the
+ * accessibility grant the user already made. Preferred over [OverlayScreenCapture]
+ * because it needs no running overlay / projection and survives lock/background.
+ *
+ * The SAME password-refusal gate applies FIRST ([shouldRefuseCapture] over
+ * [passwordFocused]) — a credential screen is never captured, closing the leak the
+ * accessibility-text redaction would otherwise miss. Every framework fact is a
+ * constructor seam so the gate ordering unit-tests with plain JUnit.
+ *
+ * @param passwordFocused whether a password field is focused; production reads the live
+ *   tree via [UiTreeReader.isPasswordFieldFocused].
+ * @param a11yCapture the silent capture hop; production delegates to the connected
+ *   [BlackBoxA11yService] (null bytes when no service is connected → Unavailable).
+ */
+class A11yScreenCapture(
+    private val passwordFocused: () -> Boolean = { UiTreeReader.fromService().isPasswordFieldFocused() },
+    private val a11yCapture: ((ByteArray?) -> Unit) -> Unit = { cb ->
+        val svc = BlackBoxA11yService.instance
+        if (svc == null) cb(null) else svc.takeScreenshotPng(cb)
+    },
+) : ScreenCapture {
+    override suspend fun capture(): ScreenCaptureResult {
+        // 1. REDACTION GATE FIRST — never capture a frame of a password entry.
+        if (shouldRefuseCapture(passwordFocused())) {
+            return ScreenCaptureResult.RefusedPassword
+        }
+        // 2. Silent capture via the accessibility service (callback -> suspend).
+        val bytes = suspendCancellableCoroutine<ByteArray?> { cont ->
+            a11yCapture { result -> if (cont.isActive) cont.resume(result) }
+        }
+        return if (bytes != null && bytes.isNotEmpty()) {
+            ScreenCaptureResult.Success(bytes)
+        } else {
+            ScreenCaptureResult.Unavailable(CAPTURE_UNAVAILABLE_NO_FRAME)
+        }
+    }
+}
+
+/**
+ * (M1.2) Prefers the SILENT [A11yScreenCapture]; only if it can't produce a frame
+ * (pre-API-30, service off, no frame) falls back to the MediaProjection
+ * [OverlayScreenCapture]. A password refusal from the silent path is a HARD stop — it
+ * is NOT retried on the overlay path (the same gate would refuse it, and we never want
+ * a credential screen captured by either route).
+ */
+class PreferredScreenCapture(
+    private val silent: ScreenCapture = A11yScreenCapture(),
+    private val fallback: ScreenCapture = OverlayScreenCapture(),
+) : ScreenCapture {
+    override suspend fun capture(): ScreenCaptureResult {
+        val first = silent.capture()
+        if (first is ScreenCaptureResult.Success || first is ScreenCaptureResult.RefusedPassword) {
+            return first
+        }
+        return fallback.capture()
+    }
+}

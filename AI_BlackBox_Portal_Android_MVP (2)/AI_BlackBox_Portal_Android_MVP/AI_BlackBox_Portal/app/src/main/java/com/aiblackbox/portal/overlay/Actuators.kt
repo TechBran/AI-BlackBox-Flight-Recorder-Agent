@@ -145,6 +145,31 @@ class Actuators(
     suspend fun tap(nodeId: Int): ActuatorResult = tap(NodeRef.ByIndex(nodeId))
 
     /**
+     * (M1.3) COORDINATE tap at absolute screen pixel ([x], [y]) via [dispatchGesture] —
+     * the public entry point for the frontier `coordinate_tap` action. It exposes the
+     * previously-private [dispatchTap] (which existed only as the internal fallback inside
+     * [tap] `(NodeRef)`).
+     *
+     * There is NO resolved node here, so there is no semantic ACTION_CLICK and no
+     * autonomy label to gate on (coordinate taps are the tree-blind fallback; the
+     * high-consequence confirm-gate wires onto the remote path in M4). Coordinate
+     * capability itself is gated UPSTREAM (the frontier dispatcher skips coordinate
+     * actions when `supportsCoordinateGesture=false`, e.g. XR). Never throws; a
+     * disabled service → `accessibility service not enabled`.
+     */
+    fun tap(x: Int, y: Int): ActuatorResult {
+        val svc = service() ?: return notEnabled()
+        return try {
+            val ok = dispatchTap(svc, x, y)
+            logGesture("tap(coord)", ok)
+            ActuatorResult(ok, if (ok) "tapped ($x,$y)" else "tap gesture dispatch failed at ($x,$y)")
+        } catch (e: Exception) {
+            Log.w(TAG, "coordinate tap failed (${e.javaClass.simpleName})")
+            ActuatorResult(false, "tap failed (${e.javaClass.simpleName})")
+        }
+    }
+
+    /**
      * Return [node] if it is itself clickable, else its nearest clickable ANCESTOR
      * (walking up `parent`, bounded by [maxDepth] hops so we never climb to the
      * whole window/root). Returns null if nothing in the chain is clickable.
@@ -275,10 +300,18 @@ class Actuators(
      * [dispatchGesture]. Coordinate overload used directly by [swipe] above and
      * available to the agent for precise drags.
      */
-    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int): ActuatorResult {
+    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int): ActuatorResult =
+        swipe(startX, startY, endX, endY, SWIPE_DURATION_MS)
+
+    /**
+     * (M1.3) Swipe along an explicit start→end segment over [durationMs] — the coordinate
+     * overload the frontier `coordinate_swipe` action drives (its `duration_ms` maps here;
+     * the no-duration overload defaults to [SWIPE_DURATION_MS] = 250ms). Never throws.
+     */
+    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long): ActuatorResult {
         val svc = service() ?: return notEnabled()
         return try {
-            val ok = dispatchSwipe(svc, startX, startY, endX, endY, SWIPE_DURATION_MS)
+            val ok = dispatchSwipe(svc, startX, startY, endX, endY, durationMs)
             logGesture("swipe", ok)
             ActuatorResult(ok, if (ok) "swiped" else "swipe gesture dispatch failed")
         } catch (e: Exception) {
@@ -334,6 +367,14 @@ class Actuators(
 
     /** Go to the system Home screen via [AccessibilityService.performGlobalAction]. */
     fun home(): ActuatorResult = globalAction("home")
+
+    /**
+     * (M1.3) Open the Recents / overview screen via
+     * [AccessibilityService.performGlobalAction] (`GLOBAL_ACTION_RECENTS`) — the third
+     * `global_action` the frontier contract exposes (back/home already existed). Never
+     * throws; a disabled service → `accessibility service not enabled`.
+     */
+    fun recents(): ActuatorResult = globalAction("recents")
 
     // ---- internals --------------------------------------------------------
 
@@ -561,5 +602,8 @@ fun swipeCoords(direction: String, width: Int, height: Int): IntArray? {
 fun globalActionFor(name: String): Int? = when (name.trim().lowercase()) {
     "back" -> AccessibilityService.GLOBAL_ACTION_BACK
     "home" -> AccessibilityService.GLOBAL_ACTION_HOME
+    // (M1.3) recents → the overview screen; the third global action the frontier
+    // contract exposes (was absent — globalActionFor mapped only back/home).
+    "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
     else -> null
 }

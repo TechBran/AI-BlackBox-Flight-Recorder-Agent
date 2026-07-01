@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.overlay
 
+import android.app.SearchManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -93,12 +94,14 @@ class IntentActuator(
      * Build + fire the intent action [name] with Gemma's JSON [args].
      *
      * Resolves the Application [Context]; on `null` returns
-     * `"app context unavailable"`. Dispatches over the 15 known actions;
-     * an unknown [name] → `"unknown intent action: <name>"`. EVERY branch is
-     * wrapped so nothing throws — a launch failure ([ActivityNotFoundException] or
-     * anything else) becomes `"<name> failed (<ExceptionClass>)"`. The two
-     * `send_*` actions consult the autonomy gate ([shouldConfirmIntent]) BEFORE
-     * firing and abort with `"user declined"` if denied.
+     * `"app context unavailable"`. Dispatches over the comprehensive intent catalog
+     * (the full common-intents set + `open_url`/`open_settings`/`send_intent` —
+     * decision 9); an unknown [name] → `"unknown intent action: <name>"`. EVERY
+     * branch is wrapped so nothing throws — a launch failure
+     * ([ActivityNotFoundException] or anything else) becomes
+     * `"<name> failed (<ExceptionClass>)"`. The high-consequence actions
+     * (`send_email`/`send_sms`/`send_intent`) consult the autonomy gate
+     * ([shouldConfirmIntent]) BEFORE firing and abort with `"user declined"` if denied.
      */
     suspend fun perform(name: String, args: JsonObject): ActuatorResult {
         val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
@@ -181,11 +184,16 @@ class IntentActuator(
                     fire(ctx, name, intent, "calendar editor opened")
                 }
 
-                // 7. open_url — url REQUIRED; REJECT non-web schemes (isWebUrl).
+                // 7. open_url — uri REQUIRED. Decision 9: ONE primitive covering ALL
+                // deep links — ACTION_VIEW on any http/https OR app deep-link URI.
+                // [isSafeViewUri] rejects only the file/content/intent/javascript/data
+                // smuggling schemes; every real web URL + app deep link passes.
+                // (Accepts legacy `url` as an alias for `uri`.)
                 "open_url" -> {
-                    val url = str(args, "url") ?: return ActuatorResult(false, "url required")
-                    if (!isWebUrl(url)) return ActuatorResult(false, "invalid url")
-                    val intent = Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(url) }
+                    val uri = str(args, "uri") ?: str(args, "url")
+                        ?: return ActuatorResult(false, "uri required")
+                    if (!isSafeViewUri(uri)) return ActuatorResult(false, "unsafe or invalid uri")
+                    val intent = Intent(Intent.ACTION_VIEW).apply { data = Uri.parse(uri) }
                     fire(ctx, name, intent, "opened link")
                 }
 
@@ -271,6 +279,112 @@ class IntentActuator(
                 "take_photo" ->
                     fire(ctx, name, Intent(MediaStore.ACTION_IMAGE_CAPTURE), "camera opened")
 
+                // ---- Decision-9 comprehensive catalog (15+) ---------------------
+
+                // 15. capture_video — open the camera in video mode.
+                "capture_video" ->
+                    fire(ctx, name, Intent(MediaStore.ACTION_VIDEO_CAPTURE), "camera opened")
+
+                // 16. show_alarms — open the clock app's alarm list.
+                "show_alarms" ->
+                    fire(ctx, name, Intent(AlarmClock.ACTION_SHOW_ALARMS), "opened alarms")
+
+                // 17. view_calendar — open the calendar (optionally at a datetime).
+                "view_calendar" -> {
+                    val datetime = str(args, "datetime")
+                    val data = if (datetime != null) {
+                        val millis = calendarMillis(datetime, System.currentTimeMillis())
+                        CalendarContract.CONTENT_URI.buildUpon()
+                            .appendPath("time").appendPath(millis.toString()).build()
+                    } else {
+                        CalendarContract.CONTENT_URI
+                    }
+                    fire(ctx, name, Intent(Intent.ACTION_VIEW).apply { setData(data) }, "opened calendar")
+                }
+
+                // 18. pick_contact — the system contact PICKER (user selects one).
+                "pick_contact" ->
+                    fire(
+                        ctx, name,
+                        Intent(Intent.ACTION_PICK).apply { setData(ContactsContract.Contacts.CONTENT_URI) },
+                        "opened contact picker",
+                    )
+
+                // 19. view_contacts — open the contacts list.
+                "view_contacts" ->
+                    fire(
+                        ctx, name,
+                        Intent(Intent.ACTION_VIEW).apply { setData(ContactsContract.Contacts.CONTENT_URI) },
+                        "opened contacts",
+                    )
+
+                // 20. pick_file — the system document PICKER (SAF). mime optional (default */*).
+                "pick_file" -> {
+                    val mime = str(args, "mime") ?: "*/*"
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = mime
+                    }
+                    fire(ctx, name, intent, "opened file picker")
+                }
+
+                // 21. create_document — the system "create/save file" picker (SAF).
+                "create_document" -> {
+                    val mime = str(args, "mime") ?: "application/octet-stream"
+                    val filename = str(args, "filename")
+                    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = mime
+                        if (filename != null) putExtra(Intent.EXTRA_TITLE, filename)
+                    }
+                    fire(ctx, name, intent, "opened file creator")
+                }
+
+                // 22. navigate — start turn-by-turn navigation to a destination
+                // (navigationUri form-encodes it into a google.navigation: deep link).
+                "navigate" -> {
+                    val destination = str(args, "destination")
+                        ?: return ActuatorResult(false, "destination required")
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        data = Uri.parse(navigationUri(destination))
+                    }
+                    fire(ctx, name, intent, "started navigation")
+                }
+
+                // 23. play_media — play-from-search (music app resolves the query).
+                "play_media" -> {
+                    val query = str(args, "query") ?: return ActuatorResult(false, "query required")
+                    val intent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                        putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
+                        putExtra(SearchManager.QUERY, query)
+                    }
+                    fire(ctx, name, intent, "started media playback")
+                }
+
+                // 24. open_settings — the COMPREHENSIVE settings-panel catalog. panel
+                // REQUIRED; an unknown key returns a graceful error listing valid keys
+                // (never lands the user somewhere surprising). Supersedes/extends the
+                // legacy lenient open_settings_panel.
+                "open_settings" -> {
+                    val panel = str(args, "panel") ?: return ActuatorResult(false, "panel required")
+                    val action = settingsPanelActionOrNull(panel)
+                        ?: return ActuatorResult(
+                            false,
+                            "unknown settings panel — valid: " + settingsPanelKeys().joinToString(", "),
+                        )
+                    fire(ctx, name, Intent(action), "opened settings")
+                }
+
+                // 25. send_intent — the GUARDED GENERIC escape-hatch for the long tail
+                // (decision 9). Its safety envelope: (a) a pure denylist/unsafe-URI
+                // reject ([sendIntentRejectionReason]) BEFORE anything is built,
+                // (b) the high-consequence confirm-gate (send_intent is in
+                // HIGH_CONSEQUENCE_INTENTS) in Permission mode, and (c) ONLY the benign
+                // FLAG_ACTIVITY_NEW_TASK is ever set (extras are String-coerced; no
+                // FLAG_GRANT_* / new-document flag can be smuggled). Credential handoff
+                // is never bypassed — a fire-and-forget intent cannot type a secret.
+                "send_intent" -> sendIntent(ctx, args)
+
                 // web_search is intentionally NOT an intent action: the on-device model's
                 // web search is HEADLESS (routed through the cloud ToolBridge so it never
                 // backgrounds the app). See ResidentTools.webSearchSchema / ChatViewModel
@@ -307,6 +421,54 @@ class IntentActuator(
             logFired(action, false)
             ActuatorResult(false, "$action failed (${e.javaClass.simpleName})")
         }
+    }
+
+    /**
+     * Build + fire the GUARDED GENERIC `send_intent` escape-hatch (decision 9).
+     *
+     * The safety envelope (documented on the `send_intent` dispatch branch):
+     *  (a) [sendIntentRejectionReason] rejects a blank/dangerous action or an
+     *      unsafe-scheme URI BEFORE anything is built (graceful, no arg content);
+     *  (b) the high-consequence confirm-gate ([shouldConfirmIntent] —
+     *      `send_intent` ∈ HIGH_CONSEQUENCE_INTENTS) asks the user in Permission mode;
+     *  (c) ONLY the benign `FLAG_ACTIVITY_NEW_TASK` is ever set (via [fire]); extras
+     *      are coerced to plain Strings, so no `FLAG_GRANT_*` / new-document flag /
+     *      parcelable can be smuggled in through this hatch. Credential handoff is
+     *      never bypassed (a fire-and-forget intent cannot type into a field).
+     *
+     * NEVER throws (the branch runs inside [perform]'s try/catch and [fire] is
+     * itself wrapped) and NEVER logs/returns any argument content.
+     */
+    private suspend fun sendIntent(ctx: Context, args: JsonObject): ActuatorResult {
+        val action = str(args, "action") ?: return ActuatorResult(false, "action required")
+        val uri = str(args, "uri")
+        val mime = str(args, "mime")
+        val pkg = str(args, "package")
+        // (a) pure safety-envelope reject BEFORE building/gating.
+        sendIntentRejectionReason(action, uri, mime, pkg)?.let { return ActuatorResult(false, it) }
+        // (b) high-consequence confirm-gate — ask BEFORE building/firing.
+        if (shouldConfirmIntent(mode(), "send_intent")) {
+            if (!confirm.confirm(describeIntent("send_intent", action))) {
+                return ActuatorResult(false, "user declined")
+            }
+        }
+        val intent = Intent(action).apply {
+            // data + type: setDataAndType is the documented combined setter (setData
+            // alone clears an existing type; setType alone clears data).
+            val parsed = uri?.let { Uri.parse(it) }
+            when {
+                parsed != null && mime != null -> setDataAndType(parsed, mime)
+                parsed != null -> data = parsed
+                mime != null -> type = mime
+            }
+            if (pkg != null) setPackage(pkg)
+            // Extras coerced to plain Strings — no flag/parcelable smuggling.
+            (args["extras"] as? JsonObject)?.forEach { (k, v) ->
+                (v as? JsonPrimitive)?.contentOrNull?.let { putExtra(k, it) }
+            }
+        }
+        // (c) [fire] sets ONLY FLAG_ACTIVITY_NEW_TASK.
+        return fire(ctx, "send_intent", intent, "action dispatched")
     }
 
     /**

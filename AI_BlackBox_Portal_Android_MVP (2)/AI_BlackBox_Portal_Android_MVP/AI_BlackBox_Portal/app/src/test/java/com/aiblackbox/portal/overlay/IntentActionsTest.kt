@@ -3,6 +3,8 @@ package com.aiblackbox.portal.overlay
 import android.provider.Settings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDateTime
@@ -188,5 +190,162 @@ class IntentActionsTest {
         assertEquals(1, clampTimerSeconds(-100))
         assertEquals(86_400, clampTimerSeconds(100_000))
         assertEquals(600, clampTimerSeconds(600))
+    }
+
+    // =====================================================================
+    // Decision-9: comprehensive open_settings catalog
+    // =====================================================================
+
+    @Test
+    fun `SETTINGS_PANELS maps every original key to the same Settings constant (back-compat)`() {
+        // The comprehensive catalog is a SUPERSET of the original open_settings_panel
+        // keys — every original mapping must still hold (mirrors settingsPanelAction).
+        assertEquals(Settings.ACTION_WIFI_SETTINGS, SETTINGS_PANELS["wifi"])
+        assertEquals(Settings.ACTION_BLUETOOTH_SETTINGS, SETTINGS_PANELS["bluetooth"])
+        assertEquals(Settings.ACTION_LOCATION_SOURCE_SETTINGS, SETTINGS_PANELS["location"])
+        assertEquals(Settings.ACTION_SOUND_SETTINGS, SETTINGS_PANELS["sound"])
+        assertEquals(Settings.ACTION_DISPLAY_SETTINGS, SETTINGS_PANELS["display"])
+        assertEquals(Settings.ACTION_BATTERY_SAVER_SETTINGS, SETTINGS_PANELS["battery"])
+        assertEquals(Settings.ACTION_NFC_SETTINGS, SETTINGS_PANELS["nfc"])
+        assertEquals(Settings.ACTION_AIRPLANE_MODE_SETTINGS, SETTINGS_PANELS["airplane"])
+        assertEquals(Settings.ACTION_DATA_ROAMING_SETTINGS, SETTINGS_PANELS["data"])
+        assertEquals(Settings.ACTION_DATA_ROAMING_SETTINGS, SETTINGS_PANELS["cellular"])
+        assertEquals(Settings.ACTION_INTERNAL_STORAGE_SETTINGS, SETTINGS_PANELS["storage"])
+        assertEquals(Settings.ACTION_APPLICATION_SETTINGS, SETTINGS_PANELS["apps"])
+    }
+
+    @Test
+    fun `SETTINGS_PANELS covers the decision-9 catalog beyond the original dozen`() {
+        assertEquals(Settings.ACTION_ACCESSIBILITY_SETTINGS, SETTINGS_PANELS["accessibility"])
+        assertEquals(Settings.ACTION_SECURITY_SETTINGS, SETTINGS_PANELS["security"])
+        assertEquals(Settings.ACTION_DATE_SETTINGS, SETTINGS_PANELS["date"])
+        assertEquals(Settings.ACTION_LOCALE_SETTINGS, SETTINGS_PANELS["language"])
+        assertEquals(Settings.ACTION_WIRELESS_SETTINGS, SETTINGS_PANELS["wireless"])
+        assertEquals(Settings.ACTION_DATA_USAGE_SETTINGS, SETTINGS_PANELS["data_usage"])
+        assertEquals(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS, SETTINGS_PANELS["manage_apps"])
+        // hotspot/tethering honestly map to the nearest public umbrella (wireless).
+        assertEquals(Settings.ACTION_WIRELESS_SETTINGS, SETTINGS_PANELS["hotspot"])
+        // The catalog is comprehensive — well beyond the original dozen.
+        assertTrue("catalog should have many panels", SETTINGS_PANELS.size >= 30)
+    }
+
+    @Test
+    fun `settingsPanelActionOrNull maps a known key and returns null for unknown`() {
+        assertEquals(Settings.ACTION_WIFI_SETTINGS, settingsPanelActionOrNull("wifi"))
+        assertEquals(Settings.ACTION_WIFI_SETTINGS, settingsPanelActionOrNull("  WiFi  ")) // case + trim
+        assertNull(settingsPanelActionOrNull("teleport"))
+        assertNull(settingsPanelActionOrNull(""))
+        assertNull(settingsPanelActionOrNull("   "))
+        assertNull(settingsPanelActionOrNull(null))
+    }
+
+    @Test
+    fun `settingsPanelKeys is sorted, non-empty, and every key resolves`() {
+        val keys = settingsPanelKeys()
+        assertTrue("keys not empty", keys.isNotEmpty())
+        assertEquals("keys are sorted", keys.sorted(), keys)
+        for (k in keys) assertNotNull("key '$k' must resolve", settingsPanelActionOrNull(k))
+    }
+
+    @Test
+    fun `settingsPanelAction stays lenient (unknown falls back to ACTION_SETTINGS)`() {
+        // The legacy open_settings_panel path must keep its never-null fallback.
+        assertEquals(Settings.ACTION_WIFI_SETTINGS, settingsPanelAction("wifi"))
+        assertEquals(Settings.ACTION_SETTINGS, settingsPanelAction("teleport"))
+        assertEquals(Settings.ACTION_SETTINGS, settingsPanelAction(null))
+    }
+
+    // =====================================================================
+    // Decision-9: broadened open_url (isSafeViewUri) + navigation
+    // =====================================================================
+
+    @Test
+    fun `isSafeViewUri accepts http https AND app deep links`() {
+        assertTrue(isSafeViewUri("https://example.com/x?q=1"))
+        assertTrue(isSafeViewUri("http://example.com"))
+        assertTrue(isSafeViewUri("  HTTPS://Example.com  ")) // trimmed, case-insensitive scheme
+        assertTrue(isSafeViewUri("tel:18005551234"))
+        assertTrue(isSafeViewUri("geo:0,0?q=coffee"))
+        assertTrue(isSafeViewUri("mailto:a@b.com"))
+        assertTrue(isSafeViewUri("sms:5551234"))
+        assertTrue(isSafeViewUri("spotify:track:abc"))
+        assertTrue(isSafeViewUri("myapp://open/thing"))
+    }
+
+    @Test
+    fun `isSafeViewUri rejects file content intent javascript data and scheme-less`() {
+        assertFalse(isSafeViewUri("file:///sdcard/secret.txt"))
+        assertFalse(isSafeViewUri("content://com.other/private/1"))
+        assertFalse(isSafeViewUri("intent://x#Intent;action=a;end")) // intent smuggling
+        assertFalse(isSafeViewUri("javascript:alert(1)"))
+        assertFalse(isSafeViewUri("data:text/html,hi"))
+        assertFalse(isSafeViewUri("android_resource://com.other/1"))
+        assertFalse(isSafeViewUri("example.com")) // no scheme
+        assertFalse(isSafeViewUri(""))
+        assertFalse(isSafeViewUri("   "))
+        assertFalse(isSafeViewUri("https:")) // scheme but no scheme-specific part
+    }
+
+    @Test
+    fun `navigationUri form-encodes the destination into a google navigation deep link`() {
+        assertEquals("google.navigation:q=coffee+shop", navigationUri("coffee shop"))
+        assertEquals("google.navigation:q=1600+Amphitheatre+Pkwy", navigationUri("1600 Amphitheatre Pkwy"))
+        assertEquals("google.navigation:q=tea+%26+coffee", navigationUri("tea & coffee"))
+    }
+
+    // =====================================================================
+    // Decision-9: guarded generic send_intent safety envelope
+    // =====================================================================
+
+    @Test
+    fun `sendIntentRejectionReason allows a benign action with a safe or absent uri`() {
+        assertNull(sendIntentRejectionReason("android.intent.action.VIEW", "https://example.com", null, null))
+        assertNull(sendIntentRejectionReason("android.settings.SETTINGS", null, null, null))
+        assertNull(sendIntentRejectionReason("com.example.CUSTOM", "myapp://x", "text/plain", "com.example"))
+    }
+
+    @Test
+    fun `sendIntentRejectionReason requires a non-blank action`() {
+        assertEquals("action required", sendIntentRejectionReason(null, null, null, null))
+        assertEquals("action required", sendIntentRejectionReason("   ", null, null, null))
+    }
+
+    @Test
+    fun `sendIntentRejectionReason rejects dangerous actions (case-insensitive)`() {
+        assertEquals(
+            "action not permitted via send_intent",
+            sendIntentRejectionReason("android.intent.action.CALL", "tel:911", null, null),
+        )
+        assertEquals(
+            "action not permitted via send_intent",
+            sendIntentRejectionReason("ANDROID.INTENT.ACTION.CALL", "tel:911", null, null),
+        )
+        for (a in DANGEROUS_SEND_INTENT_ACTIONS) {
+            assertEquals(
+                "$a must be rejected",
+                "action not permitted via send_intent",
+                sendIntentRejectionReason(a, null, null, null),
+            )
+        }
+    }
+
+    @Test
+    fun `sendIntentRejectionReason rejects unsafe uri schemes and scheme-less uris`() {
+        assertEquals(
+            "unsafe uri scheme",
+            sendIntentRejectionReason("android.intent.action.VIEW", "file:///x", null, null),
+        )
+        assertEquals(
+            "unsafe uri scheme",
+            sendIntentRejectionReason("android.intent.action.VIEW", "content://x/1", null, null),
+        )
+        assertEquals(
+            "unsafe uri scheme",
+            sendIntentRejectionReason("android.intent.action.VIEW", "intent://x#Intent;end", null, null),
+        )
+        assertEquals(
+            "uri scheme required",
+            sendIntentRejectionReason("android.intent.action.VIEW", "example.com", null, null),
+        )
     }
 }

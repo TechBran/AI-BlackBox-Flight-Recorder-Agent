@@ -2,6 +2,7 @@ package com.aiblackbox.portal.overlay
 
 import android.accessibilityservice.AccessibilityService
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -114,9 +115,12 @@ class ActuatorsTest {
     // ---- globalActionFor: name → GLOBAL_ACTION_* (pure) --------------------
 
     @Test
-    fun `globalActionFor maps back and home to the right constants`() {
+    fun `globalActionFor maps back home and recents to the right constants`() {
         assertEquals(AccessibilityService.GLOBAL_ACTION_BACK, globalActionFor("back"))
         assertEquals(AccessibilityService.GLOBAL_ACTION_HOME, globalActionFor("home"))
+        // (M1.3) recents is now mapped (was previously null — the M0 gap).
+        assertEquals(AccessibilityService.GLOBAL_ACTION_RECENTS, globalActionFor("recents"))
+        assertEquals(AccessibilityService.GLOBAL_ACTION_RECENTS, globalActionFor("  Recents "))
     }
 
     @Test
@@ -128,9 +132,40 @@ class ActuatorsTest {
 
     @Test
     fun `globalActionFor returns null for unknown names`() {
-        assertNull(globalActionFor("recents"))
         assertNull(globalActionFor(""))
         assertNull(globalActionFor("backk"))
+        assertNull(globalActionFor("overview"))
+    }
+
+    // ---- (M1.3) new actuator methods degrade gracefully with no service ----
+    //
+    // The coordinate tap / recents entry points exist and short-circuit to the
+    // "not enabled" result BEFORE touching any framework (Path/GestureDescription/
+    // performGlobalAction are Stub! throws in the unit-test android.jar), so a
+    // null-service Actuators can exercise the graceful path here. The actual
+    // dispatchGesture / performGlobalAction are device-verified.
+
+    @Test
+    fun `coordinate tap with no service returns not-enabled gracefully`() {
+        val actuators = Actuators({ null })
+        val r = actuators.tap(100, 200)
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", r.detail)
+    }
+
+    @Test
+    fun `recents with no service returns not-enabled gracefully`() {
+        val actuators = Actuators({ null })
+        val r = actuators.recents()
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", r.detail)
+    }
+
+    @Test
+    fun `coordinate swipe with no service returns not-enabled gracefully`() {
+        val actuators = Actuators({ null })
+        assertFalse(actuators.swipe(0, 0, 100, 100).success)
+        assertFalse(actuators.swipe(0, 0, 100, 100, 500L).success)
     }
 
     // ---- helpers ----------------------------------------------------------

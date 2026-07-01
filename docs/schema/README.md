@@ -81,9 +81,9 @@ gesture names in `ResidentTools.PHONE_ACTUATORS` (`read_screen`, `tap`, `type`,
 `swipe`, `scroll`, `open_app`, `back`, `home`) to `Actuators`; and any `name in
 ResidentTools.INTENT_ACTIONS` to `IntentActuator`.
 
-### `intent.name` — the 15 `INTENT_ACTIONS` and their `params`
+### `intent.name` — the 26 `INTENT_ACTIONS` and their `params`
 
-From `ResidentTools.INTENT_ACTIONS` (`ResidentTools.kt:113`) / `IntentActuator.perform`:
+From `ResidentTools.INTENT_ACTIONS` (`ResidentTools.kt:123`) / `IntentActuator.perform`:
 
 | `name` | Required `params` | Optional `params` | Gate |
 |---|---|---|---|
@@ -93,23 +93,35 @@ From `ResidentTools.INTENT_ACTIONS` (`ResidentTools.kt:113`) / `IntentActuator.p
 | `show_map` | `query` | — | — |
 | `open_wifi_settings` | — | — | — |
 | `create_calendar_event` | `datetime` | `title` | — |
-| `open_url` | `url` (web scheme only; non-web rejected) | — | — |
+| `open_url` | `uri` (http/https OR app deep-link scheme; `file`/`content`/`intent`/`javascript`/`data` rejected) | `url` (legacy alias) | — |
 | `dial` | `number` | — | — |
 | `send_sms` | `number` | `body` | **high-consequence** |
 | `set_alarm` | `hour`, `minutes` | `label` | — |
 | `set_timer` | `seconds` | `label` | — |
 | `share_text` | `text` | — | — |
-| `open_settings_panel` | — | `which` (any `Settings.ACTION_*` panel) | — |
+| `open_settings_panel` | — | `which` (any `Settings.ACTION_*` panel) | — (LEGACY — kept for back-compat; superseded by `open_settings`) |
 | `take_photo` | — | — | — |
+| `capture_video` | — | — | — |
+| `show_alarms` | — | — | — |
+| `view_calendar` | — | `datetime` | — |
+| `pick_contact` | — | — | — |
+| `view_contacts` | — | — | — |
+| `pick_file` | — | `mime` | — |
+| `create_document` | — | `mime`, `filename` | — |
+| `navigate` | `destination` | — | — |
+| `play_media` | `query` | — | — |
+| `open_settings` | `panel` (ANY `Settings.ACTION_*` panel by key; unknown → valid list) | — | — (SUPERSEDES `open_settings_panel`) |
+| `send_intent` | `action` (intent action string) | `uri`, `mime`, `package`, `extras` | **high-consequence** (guarded generic escape-hatch: dangerous-action denylist + unsafe-URI reject + confirm-gate) |
 
-> **Scope note (M1.5 / decision 9):** `open_app(package)` has ALREADY landed as its own
-> `open_app` action variant (a `PHONE_ACTUATOR` → `Actuators.openApp`, NOT an intent —
-> correctly absent from `intent.name`). Decision-9's FURTHER intent-layer expansion — the
-> full Android common-intents catalog, `open_settings(...)`, and a generic `send_intent(...)`
-> — still lands **additively in M1.5** (`open_url` already exists in the enum today). This v1
-> schema enumerates the **15 intents that exist in the code today**; new intent names are an
-> additive change (see Versioning) — extend the `intent.name` enum + the per-name `params`
-> table as `IntentActuator` grows.
+> **Scope note (M1.5 / decision 9 — LANDED):** `open_app(package)` is its own `open_app`
+> action variant (a `PHONE_ACTUATOR` → `Actuators.openApp`, NOT an intent — correctly absent
+> from `intent.name`). Decision-9's intent-layer expansion has now landed **additively**: the
+> full common-intents catalog, `open_settings(panel)` (which supersedes the legacy
+> `open_settings_panel`, kept for back-compat), and the guarded generic `send_intent(...)`.
+> This grew `intent.name` from 15 to **26** — an additive minor bump (`schema_version` 1.0 →
+> 1.1; see Versioning). **Wire-safety (I1):** `RemoteActionChannel.parseAction` rejects any
+> `intent.name` not in `INTENT_ACTIONS` (`unknown_action`), so a gesture / global / coordinate
+> dispatch name can never be smuggled through the intent branch.
 
 ## Gaps flagged for M1 (where this contract runs ahead of the current code)
 
@@ -146,9 +158,11 @@ Two design questions the M0 scaffold deliberately leaves for M1/M2 to resolve:
 - **Path-encoded major:** every `$id` carries `/v1/`. A breaking change bumps to
   `/v2/` (a parallel directory) and the `observation`/`action` `schema_version`
   major.
-- **`schema_version`** (optional string on `observation`, `const "1.0"`) lets the
+- **`schema_version`** (optional string on `observation`, `const "1.1"`) lets the
   device and loop negotiate; additive minor changes (new `intent.name`, new
   optional field, new `error` enum value) bump the minor and stay compatible.
+  **1.1** grew `intent.name` from 15 → 26 (decision-9 comprehensive intents +
+  `open_settings` + the guarded `send_intent`) — additive, back-compatible.
 - **Additive by default:** new fields land as optional; enums grow, never shrink,
   within a major. A field rename or a required-field addition is breaking → new
   major.

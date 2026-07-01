@@ -102,18 +102,33 @@ object ResidentTools {
     )
 
     /**
-     * The names of the on-device INTENT ACTIONS (Task IA-3). A tool call whose name
-     * is in this set is dispatched LOCALLY through the [PhoneController] to the
+     * The names of the on-device INTENT ACTIONS. A tool call whose name is in this
+     * set is dispatched LOCALLY through the [PhoneController] to the
      * [com.aiblackbox.portal.overlay.IntentActuator] — NEVER through the cloud
      * [ToolBridge]. Unlike the gesture [PHONE_ACTUATORS] (which need a read_screen →
      * tap/type loop), each of these is a DETERMINISTIC, SINGLE-SHOT stock-Android OS
      * intent (show a map, dial, draft an SMS/email, set an alarm/timer, etc.) that
      * fully satisfies the request in one call.
+     *
+     * COMPREHENSIVE (decision 9 / M1.5): expanded from the original 15 to the phone's
+     * FULL capability via the fast intent path — the complete common-intents catalog
+     * (alarms/timers, calendar view, camera still+video, contacts pick/view, file
+     * pickers, maps + turn-by-turn navigation, media play-from-search, dial, SMS,
+     * email, sharing) plus `open_url` (ANY http/deep-link URI), `open_settings` (ANY
+     * `Settings.ACTION_*` panel), and the guarded generic `send_intent` for the long
+     * tail. The legacy `open_settings_panel` is kept for back-compat. The
+     * decision-4 safety gates apply: `send_email`/`send_sms`/`send_intent` are
+     * high-consequence (confirm in Permission mode); credential handoff still holds.
      */
     val INTENT_ACTIONS: Set<String> = setOf(
+        // --- original common-intents catalog ---
         "flashlight_on", "flashlight_off", "create_contact", "send_email", "show_map",
         "open_wifi_settings", "create_calendar_event", "open_url", "dial", "send_sms",
         "set_alarm", "set_timer", "share_text", "open_settings_panel", "take_photo",
+        // --- decision-9 comprehensive additions ---
+        "capture_video", "show_alarms", "view_calendar", "pick_contact", "view_contacts",
+        "pick_file", "create_document", "navigate", "play_media", "open_settings",
+        "send_intent",
     )
 
     /**
@@ -344,16 +359,16 @@ object ResidentTools {
         ),
         ToolSchema(
             name = "open_url",
-            description = "Open a web URL (http/https). Direct action — no read_screen/tap.",
+            description = "Open a URL or app deep link (http/https or any app scheme like geo:, tel:, spotify:). One primitive for all links. Direct action — no read_screen/tap.",
             parameters = buildJsonObject {
                 put("type", JsonPrimitive("object"))
                 putJsonObject("properties") {
-                    putJsonObject("url") {
+                    putJsonObject("uri") {
                         put("type", JsonPrimitive("string"))
-                        put("description", JsonPrimitive("The http/https URL to open."))
+                        put("description", JsonPrimitive("The URL or deep-link URI to open (http/https or an app scheme)."))
                     }
                 }
-                put("required", buildJsonArray { add(JsonPrimitive("url")) })
+                put("required", buildJsonArray { add(JsonPrimitive("uri")) })
             },
         ),
         ToolSchema(
@@ -467,6 +482,144 @@ object ResidentTools {
             name = "take_photo",
             description = "Open the camera. Direct action — no read_screen/tap.",
             parameters = noParams(),
+        ),
+
+        // ---- Decision-9 comprehensive additions -----------------------------
+
+        ToolSchema(
+            name = "capture_video",
+            description = "Open the camera in video mode. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "show_alarms",
+            description = "Open the clock app's list of alarms. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "view_calendar",
+            description = "Open the calendar, optionally at a given time. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("datetime") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional time to open at, format YYYY-MM-DDTHH:MM:SS."))
+                    }
+                }
+            },
+        ),
+        ToolSchema(
+            name = "pick_contact",
+            description = "Open the contact picker for the user to choose a contact. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "view_contacts",
+            description = "Open the contacts list. Direct action — no read_screen/tap.",
+            parameters = noParams(),
+        ),
+        ToolSchema(
+            name = "pick_file",
+            description = "Open the system file picker for the user to choose a file. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("mime") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional MIME type filter (e.g. image/*, application/pdf). Defaults to */*."))
+                    }
+                }
+            },
+        ),
+        ToolSchema(
+            name = "create_document",
+            description = "Open the system 'save new file' picker. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("mime") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional MIME type for the new file (e.g. text/plain). Defaults to application/octet-stream."))
+                    }
+                    putJsonObject("filename") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional suggested file name."))
+                    }
+                }
+            },
+        ),
+        ToolSchema(
+            name = "navigate",
+            description = "Start turn-by-turn navigation to a place/address. destination=where to. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("destination") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Place or address to navigate to."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("destination")) })
+            },
+        ),
+        ToolSchema(
+            name = "play_media",
+            description = "Play music/media matching a search query. query=what to play. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("query") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("What to play (artist, song, album, genre, or 'any')."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("query")) })
+            },
+        ),
+        ToolSchema(
+            name = "open_settings",
+            description = "Open ANY system settings panel by key (e.g. wifi, bluetooth, location, display, sound, airplane, data_usage, apps, security, accessibility, battery, storage, date, language, nfc, hotspot, wireless). panel=which one. Unknown keys return the valid list. Direct action — no read_screen/tap.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("panel") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Which settings panel to open (e.g. wifi, bluetooth, location, battery, accessibility)."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("panel")) })
+            },
+        ),
+        ToolSchema(
+            name = "send_intent",
+            description = "Advanced escape-hatch: fire a custom Android intent for something no other tool covers. action=the intent action (e.g. android.intent.action.VIEW). Optional uri, mime, package, extras. Dangerous actions (silent call/install/delete/wipe) are rejected; high-consequence use is confirmed. Prefer a specific tool when one exists.",
+            parameters = buildJsonObject {
+                put("type", JsonPrimitive("object"))
+                putJsonObject("properties") {
+                    putJsonObject("action") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("The Android intent action string (e.g. android.intent.action.VIEW)."))
+                    }
+                    putJsonObject("uri") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional data URI. file:/content:/intent:/javascript:/data: schemes are rejected."))
+                    }
+                    putJsonObject("mime") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional MIME type for the intent's data."))
+                    }
+                    putJsonObject("package") {
+                        put("type", JsonPrimitive("string"))
+                        put("description", JsonPrimitive("Optional target package name to restrict which app handles it."))
+                    }
+                    putJsonObject("extras") {
+                        put("type", JsonPrimitive("object"))
+                        put("description", JsonPrimitive("Optional string extras as a flat {key: value} object (values are sent as strings)."))
+                    }
+                }
+                put("required", buildJsonArray { add(JsonPrimitive("action")) })
+            },
         ),
     )
 

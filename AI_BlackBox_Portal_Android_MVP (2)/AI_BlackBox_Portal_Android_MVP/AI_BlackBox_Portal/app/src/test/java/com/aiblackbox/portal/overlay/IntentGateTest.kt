@@ -31,6 +31,13 @@ class IntentGateTest {
     }
 
     @Test
+    fun `send_intent is high-consequence by default (decision 9)`() {
+        // The guarded generic escape-hatch must go through the confirm-gate.
+        assertTrue(isHighConsequenceIntent("send_intent"))
+        assertTrue(isHighConsequenceIntent("  Send_Intent  "))
+    }
+
+    @Test
     fun `isHighConsequenceIntent is case-insensitive and trimmed`() {
         assertTrue(isHighConsequenceIntent("Send_Email"))
         assertTrue(isHighConsequenceIntent("  SEND_SMS  "))
@@ -60,6 +67,12 @@ class IntentGateTest {
     fun `YOLO mode never confirms even a high-consequence intent`() {
         assertFalse(shouldConfirmIntent(AutonomyMode.YOLO, "send_email"))
         assertFalse(shouldConfirmIntent(AutonomyMode.YOLO, "send_sms"))
+    }
+
+    @Test
+    fun `send_intent gates in PERMISSION mode but not YOLO`() {
+        assertTrue(shouldConfirmIntent(AutonomyMode.PERMISSION, "send_intent"))
+        assertFalse(shouldConfirmIntent(AutonomyMode.YOLO, "send_intent"))
     }
 
     @Test
@@ -99,6 +112,16 @@ class IntentGateTest {
     fun `describeIntent for send_sms with no number is still generic and safe`() {
         assertEquals("Send a text message", describeIntent("send_sms", null))
         assertEquals("Send a text message", describeIntent("send_sms", ""))
+    }
+
+    @Test
+    fun `describeIntent for send_intent names the (non-sensitive) action`() {
+        assertEquals(
+            "Run the app action \"android.intent.action.VIEW\"",
+            describeIntent("send_intent", "android.intent.action.VIEW"),
+        )
+        assertEquals("Run a custom app action", describeIntent("send_intent", null))
+        assertEquals("Run a custom app action", describeIntent("send_intent", "  "))
     }
 
     @Test

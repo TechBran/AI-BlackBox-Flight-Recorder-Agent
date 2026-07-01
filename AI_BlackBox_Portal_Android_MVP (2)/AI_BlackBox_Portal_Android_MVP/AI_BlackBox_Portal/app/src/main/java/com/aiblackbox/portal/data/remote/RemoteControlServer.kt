@@ -112,12 +112,15 @@ data class ActionEnvelope(
 )
 
 /**
- * (M0 scaffold) The `action_result` frame returned UP for a dispatched action. Conforms to
+ * The `action_result` frame returned UP for a dispatched action. Conforms to
  * docs/schema/action_result.json: `{msg:"action_result", success, error?, detail?, observation?}`.
- * For the M0 scaffold this is `success=false, error="not_wired"` (the actuator dispatch lands in
- * M1/M2); once wired [success]/[error]/[detail] carry the real outcome and the follow-on
- * `observation` rides here or streams over `/stream`. `observation` is omitted at M0 (no Kotlin
- * Observation type until M1); it is an optional field in the schema, so omitting it still conforms.
+ * [success]/[error]/[detail] carry the real actuator outcome (M1.3); the optional follow-on
+ * [observation] rides here when the dispatcher embeds fresh screen state (else the loop pulls the
+ * next observation over `/stream`). `error` is present only for a genuine failure (a user decline
+ * / credential handoff is `success=false` with a benign [detail] and NO error). The listener that
+ * has NO actuator dispatcher wired still returns `success=false, error="not_wired"` — the honest
+ * handler-less state (M0 README decision 1). Serialized with the wire encoder
+ * (explicitNulls=false) so null [error]/[detail]/[observation] are omitted and it stays conforming.
  */
 @Serializable
 data class ActionResultEnvelope(
@@ -125,6 +128,7 @@ data class ActionResultEnvelope(
     val success: Boolean = false,
     val error: String? = null,
     val detail: String? = null,
+    val observation: Observation? = null,
 )
 
 /** What the listener delegates real work to — implemented by the runner (Task 6). */
@@ -207,11 +211,13 @@ private val WIRE_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; 
  *   POST /task         -> {"task_id": ...}    (400 if task missing/blank/bad JSON)
  *   GET  /status/{id}  -> RemoteStatus json   (404 if unknown id)
  *   POST /notify       -> {"ok": true}        (MN.4; 400 bad JSON, 503 if no notifier)
- *   POST /action       -> ActionResultEnvelope (M0 frontier action↓ channel scaffold;
- *                         400 bad JSON / missing task_id). The GET /stream/{id}
- *                         observation↑ half is a chunked SSE response handled directly in
- *                         [RemoteControlServer.serve] (it can't be a pure RemoteResponse).
  * Known path + wrong method -> 405; anything else -> 404.
+ *
+ * NOTE: POST /action (the frontier action↓ channel) is NOT routed here — it dispatches
+ * through the live actuators (a suspend, controller-backed hop), so it is handled by the
+ * suspend [handleActionRequest] and invoked from [RemoteControlServer.serve] (like the
+ * GET /stream/{id} observation↑ SSE half). Neither can be a pure fixed-length
+ * [RemoteResponse] from this synchronous router.
  *
  * [notifier] is the MODEL-FREE notification poster (MN.4). It is defaulted to null so
  * the existing 4-arg callers/tests are unaffected; a null notifier makes `/notify`
@@ -267,35 +273,67 @@ fun routeRequest(method: String, path: String, body: String,
             else RemoteResponse(200, JSON.encodeToString(st))
         }
 
-        // (M0 scaffold) The action↓ half of the frontier streaming control channel
-        // (decision #8). Accepts an `action` the cloud brain decided; returns a
-        // well-formed `action_result`. TODO(M1/M2): dispatch the action to the frontier
-        // handler / on-device actuators (AndroidPhoneController → Actuators /
-        // IntentActuator, wired in M1) and stream the resulting `observation` back over
-        // GET /stream/{taskId}. For M0 this is a "not_wired" acknowledgment so the channel
-        // scaffold compiles and the handler holder can hold a frontier brain.
-        path == "/action" && m == "POST" -> {
-            val req = try {
-                JSON.decodeFromString<ActionEnvelope>(body.ifBlank { "{}" })
-            } catch (e: Exception) {
-                return RemoteResponse(400, JSON.encodeToString(ErrorBody("invalid JSON body")))
-            }
-            if (req.taskId.isBlank())
-                RemoteResponse(400, JSON.encodeToString(ErrorBody("task_id required")))
-            else
-                RemoteResponse(200, WIRE_JSON.encodeToString(ActionResultEnvelope(
-                    success = false,
-                    error = "not_wired",
-                    detail = "action channel scaffold (M0); actuator dispatch wired in M1/M2",
-                )))
-        }
-
-        path == "/healthz" || path == "/task" || path == "/notify" || path == "/action" ||
+        path == "/healthz" || path == "/task" || path == "/notify" ||
             path.startsWith("/status/") ->
             RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
         else -> RemoteResponse(404, JSON.encodeToString(ErrorBody("not found")))
     }
+}
+
+/**
+ * (M1.3) Handle POST /action: dispatch the frontier `action` frame in [body] through the
+ * live actuators (via [dispatcher]) and return a schema-conforming `action_result`. This
+ * is a SUSPEND, controller-backed hop (real dispatch → the accessibility service), so it
+ * lives outside the pure synchronous [routeRequest] and is invoked (under `runBlocking`)
+ * from [RemoteControlServer.serve].
+ *
+ * Transport framing (M0 semantics preserved):
+ *  - non-POST → 405;
+ *  - malformed JSON → 400;
+ *  - blank/absent `task_id` → 400 (the correlation id the loop polls);
+ *  - no [dispatcher] wired (a handler-less device) → 200 with `action_result{success:false,
+ *    error:"not_wired"}` — the honest handler-less state (M0 README decision 1);
+ *  - otherwise → 200 with the dispatched `action_result` (a malformed action VARIANT is a
+ *    conforming `success:false` result, not a transport error — more useful to the loop).
+ *
+ * The `dispatcher` is JVM-unit-tested via [PhoneActionDispatcher] over a fake controller;
+ * this shell adds only the framing above (tested via a fake [RemoteActionDispatcher]).
+ * Operator-scope is enforced UPSTREAM in [authorize] (unchanged); this never re-checks it.
+ */
+suspend fun handleActionRequest(
+    method: String,
+    body: String,
+    dispatcher: RemoteActionDispatcher?,
+): RemoteResponse {
+    if (method.uppercase() != "POST") {
+        return RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
+    }
+    // The transport envelope carries the correlation task_id (+ operator, already
+    // auth-checked). The action VARIANT (type + fields) is parsed inside the dispatcher.
+    val env = try {
+        JSON.decodeFromString<ActionEnvelope>(body.ifBlank { "{}" })
+    } catch (e: Exception) {
+        return RemoteResponse(400, JSON.encodeToString(ErrorBody("invalid JSON body")))
+    }
+    if (env.taskId.isBlank()) {
+        return RemoteResponse(400, JSON.encodeToString(ErrorBody("task_id required")))
+    }
+    if (dispatcher == null) {
+        // No actuator seam registered → honest handler-less state (not a scaffold ack).
+        return RemoteResponse(
+            200,
+            WIRE_JSON.encodeToString(
+                ActionResultEnvelope(
+                    success = false,
+                    error = "not_wired",
+                    detail = "no action dispatcher registered on this device",
+                ),
+            ),
+        )
+    }
+    val result = dispatcher.dispatch(body, env.taskId, env.operator)
+    return RemoteResponse(200, WIRE_JSON.encodeToString(result))
 }
 
 /**
@@ -409,6 +447,12 @@ fun streamMethodGate(method: String): RemoteResponse? =
  * @param notifier the model-free notification poster for `/notify`.
  * @param subscriptionPredicate device-local allow-list re-check for `/notify` (true =
  *   accept). Defaults to accept-all (tailnet-only posture).
+ * @param actionDispatcherProvider (M1.3) read PER REQUEST — the actuator seam POST /action
+ *   dispatches through ([PhoneActionDispatcher] over the live [com.aiblackbox.portal.overlay.AndroidPhoneController]).
+ *   Defaults to null (no dispatcher → `/action` returns the honest `not_wired` state).
+ * @param observationProvider (M1.2) optional device-side `buildObservation()` source. When
+ *   wired, GET /stream/{id} emits one real `observation` frame and the `/action` follow-on
+ *   can embed fresh screen state. Null keeps the M0 scaffold stream comment.
  */
 class RemoteControlServer(
     port: Int,
@@ -416,6 +460,8 @@ class RemoteControlServer(
     private val notifier: Notifier? = null,
     private val operatorProvider: () -> String = { "" },
     private val subscriptionPredicate: (operator: String) -> Boolean = { true },
+    private val actionDispatcherProvider: () -> RemoteActionDispatcher? = { null },
+    private val observationProvider: (suspend () -> Observation?)? = null,
 ) : NanoHTTPD(port) {
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
@@ -442,7 +488,16 @@ class RemoteControlServer(
         // The action↓ half is POST /action, routed below. /task+/status+/healthz+/notify
         // stay untouched for Gemma back-compat.
         if (path.startsWith("/stream/")) {
-            return serveObservationStream(method, path.removePrefix("/stream/"))
+            return serveObservationStream(method, path.removePrefix("/stream/"), requestOperator)
+        }
+        // (M1.3) The action↓ half dispatches through the live actuators — a suspend hop, so
+        // it is served here (under runBlocking on the NanoHTTPD worker thread) rather than
+        // via the pure synchronous routeRequest. Operator-scope was already enforced above.
+        if (path == "/action") {
+            val routed = kotlinx.coroutines.runBlocking {
+                handleActionRequest(method, body, actionDispatcherProvider())
+            }
+            return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
         }
         val routed = routeRequest(method, path, body, handlerProvider(), notifier)
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
@@ -457,22 +512,42 @@ class RemoteControlServer(
      * half, exactly the fallback the plan specifies (M0.3). One `observation` frame is a
      * `data:`-prefixed JSON line per SSE framing.
      *
-     * TODO(M1/M2): pump real `observation` frames here — [com.aiblackbox.portal.overlay.UiTreeReader]
-     * tree (password-redacted) + a `DeviceCapabilities` descriptor + an optional silent
-     * `AccessibilityService.takeScreenshot()` (M1) — driven by the frontier loop (M2),
-     * keeping the socket open for the session. For M0 it emits a single scaffold comment
-     * frame and closes, so the endpoint is wired + reachable without the observation
-     * source (M1) or the cloud brain (M2).
+     * (M1.2) When an [observationProvider] is wired it emits ONE real `observation` frame
+     * (`data: <json>`) — the device's redacted `ui_tree` + `DeviceCapabilities` + optional
+     * silent screenshot — then closes. The CONTINUOUS pump driven by the cloud brain is M2;
+     * opening the stream also marks the remote-control session active ([RemoteSessionBus])
+     * so the consent banner shows. With no provider wired it falls back to the M0 scaffold
+     * comment frame so the endpoint stays reachable.
      */
-    private fun serveObservationStream(method: String, taskId: String): Response {
+    private fun serveObservationStream(method: String, taskId: String, operator: String): Response {
         streamMethodGate(method)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
-        // A well-formed SSE comment frame (lines starting `:` are comments the client
-        // ignores) noting the scaffold state, then the stream closes.
-        val frame = ": observation stream scaffold (M0) for task '$taskId' — " +
-            "observation pump wired in M1/M2 (types: " +
-            "${WireMessageType.OBSERVATION}/${WireMessageType.ACTION_RESULT})\n\n"
+        // Opening the observation stream is the start of a control session → banner on.
+        // (Skipped for a killed task so a stale re-open can't resurrect a stopped session.)
+        if (!RemoteSessionBus.isKilled(taskId)) {
+            RemoteSessionBus.start(taskId, operator)
+        }
+        val provider = observationProvider
+        val frame: String = if (provider != null) {
+            // One real observation frame under the tree-first cadence, then close (M1).
+            try {
+                val obs = kotlinx.coroutines.runBlocking { provider() }
+                if (obs != null) {
+                    "data: ${WIRE_JSON.encodeToString(obs)}\n\n"
+                } else {
+                    ": observation unavailable for task '$taskId' (no device state)\n\n"
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "observation build failed (${e.javaClass.simpleName})")
+                ": observation build failed (${e.javaClass.simpleName})\n\n"
+            }
+        } else {
+            // No observation source wired → M0 scaffold comment (lines starting `:` are
+            // comments the SSE client ignores).
+            ": observation stream scaffold for task '$taskId' — no observation source wired " +
+                "(types: ${WireMessageType.OBSERVATION}/${WireMessageType.ACTION_RESULT})\n\n"
+        }
         val body = ByteArrayInputStream(frame.toByteArray(Charsets.UTF_8))
         return newChunkedResponse(Response.Status.OK, "text/event-stream", body).apply {
             addHeader("Cache-Control", "no-cache")

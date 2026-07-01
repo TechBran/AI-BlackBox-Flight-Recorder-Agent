@@ -12,8 +12,8 @@
     },
     "schema_version": {
       "type": "string",
-      "const": "1.0",
-      "description": "Wire-contract version. Also encoded in the /v1/ path of every $id. Additive changes bump the minor; a breaking change bumps the /vN/ path + this major."
+      "const": "1.1",
+      "description": "Wire-contract version. Also encoded in the /v1/ path of every $id. Additive changes bump the minor; a breaking change bumps the /vN/ path + this major. 1.1 (additive, back-compatible): the intent.name enum grew from 15 to 26 (decision-9 comprehensive intents + open_settings + the guarded send_intent escape-hatch)."
     },
     "ui_tree": {
       "type": "array",

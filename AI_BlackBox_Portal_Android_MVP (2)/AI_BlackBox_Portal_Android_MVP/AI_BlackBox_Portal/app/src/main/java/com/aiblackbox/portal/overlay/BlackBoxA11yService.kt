@@ -1,8 +1,12 @@
 package com.aiblackbox.portal.overlay
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Bitmap
+import android.os.Build
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import java.io.ByteArrayOutputStream
 
 /**
  * The consented on-device phone-control AccessibilityService (Phase 4).
@@ -46,6 +50,69 @@ class BlackBoxA11yService : AccessibilityService() {
 
     override fun onInterrupt() {
         // No-op.
+    }
+
+    /**
+     * (M1.2) SILENT screenshot via [AccessibilityService.takeScreenshot] — the frontier
+     * observation's optional vision channel. Unlike the MediaProjection path
+     * ([OverlayService.captureScreenPng]) this needs NO per-capture system dialog and NO
+     * projection consent: it uses the accessibility grant the user already made (requires
+     * `android:canTakeScreenshot` in the service config, added in M0.5, and API 30+).
+     *
+     * Delivers PNG bytes to [callback], or null when unavailable (pre-API-30, or the
+     * framework refused / returned no frame). NEVER throws. The caller
+     * ([A11yScreenCapture]) applies the password-refusal gate BEFORE calling this, and
+     * the loop only asks for it under the tree-first cadence — so a credential screen is
+     * never captured.
+     */
+    fun takeScreenshotPng(callback: (ByteArray?) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            callback(null)
+            return
+        }
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                        val bytes = try {
+                            val buffer = screenshot.hardwareBuffer
+                            val bitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                            val out = try {
+                                if (bitmap == null) {
+                                    null
+                                } else {
+                                    ByteArrayOutputStream().use { stream ->
+                                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                                        stream.toByteArray()
+                                    }
+                                }
+                            } finally {
+                                // Release the graphics buffer regardless of compress outcome.
+                                @Suppress("DEPRECATION")
+                                try { buffer.close() } catch (_: Exception) {}
+                                bitmap?.recycle()
+                            }
+                            out
+                        } catch (e: Exception) {
+                            // Never leak content into logs; class name only.
+                            Log.w(TAG, "takeScreenshot decode failed (${e.javaClass.simpleName})")
+                            null
+                        }
+                        callback(bytes)
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.w(TAG, "takeScreenshot failed (code=$errorCode)")
+                        callback(null)
+                    }
+                },
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "takeScreenshot threw (${e.javaClass.simpleName})")
+            callback(null)
+        }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {

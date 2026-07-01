@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.data.remote
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -232,34 +233,62 @@ class RemoteControlServerTest {
             isSubscribed = { it == "Brandon" }))
     }
 
-    // ── M0: frontier action↓ channel (POST /action) ──
+    // ── M1.3: frontier action↓ channel (POST /action) — handleActionRequest ──
+    //
+    // /action now dispatches through the live actuators (a suspend, controller-backed
+    // hop), so it is served by handleActionRequest, not the pure routeRequest.
 
-    @Test fun post_action_requires_task_id() {
-        // Blank/absent task_id -> 400 (mirrors /task's required-field gate).
-        assertEquals(400, routeRequest("POST", "/action", """{"operator":"Brandon"}""", FakeHandler()).status)
-        assertEquals(400, routeRequest("POST", "/action", "", FakeHandler()).status)  // empty -> "{}" -> blank
+    /** Records the dispatched frame + returns a canned action_result. */
+    private class FakeActionDispatcher(
+        private val result: ActionResultEnvelope = ActionResultEnvelope(success = true, detail = "ok"),
+    ) : RemoteActionDispatcher {
+        var lastBody: String? = null
+        var lastTaskId: String? = null
+        var lastOperator: String? = null
+        override suspend fun dispatch(body: String, taskId: String, operator: String): ActionResultEnvelope {
+            lastBody = body; lastTaskId = taskId; lastOperator = operator; return result
+        }
     }
 
-    @Test fun post_action_with_task_id_returns_conforming_not_wired_result() {
-        val r = routeRequest("POST", "/action",
-            """{"msg":"action","task_id":"t1","operator":"Brandon","kind":"element_click"}""", FakeHandler())
+    @Test fun handle_action_requires_task_id() = runBlocking {
+        // Blank/absent task_id -> 400 (mirrors /task's required-field gate).
+        assertEquals(400, handleActionRequest("POST", """{"operator":"Brandon"}""", FakeActionDispatcher()).status)
+        assertEquals(400, handleActionRequest("POST", "", FakeActionDispatcher()).status)  // "" -> "{}" -> blank
+    }
+
+    @Test fun handle_action_with_no_dispatcher_is_honest_not_wired() = runBlocking {
+        // No actuator seam wired -> the honest handler-less state (M0 README decision 1).
+        val r = handleActionRequest("POST",
+            """{"msg":"action","task_id":"t1","operator":"Brandon","type":"element_click","resource_id":"x"}""",
+            dispatcher = null)
         assertEquals(200, r.status)
-        // Conforms to action_result.json: {msg:"action_result", success:false, error:"not_wired", detail}.
         assertTrue(r.json, r.json.contains("\"msg\":\"action_result\""))
         assertTrue(r.json, r.json.contains("\"success\":false"))
         assertTrue(r.json, r.json.contains("\"error\":\"not_wired\""))
-        // No non-conforming `status` field leaks onto the wire.
-        assertFalse(r.json, r.json.contains("\"status\""))
+        assertFalse(r.json, r.json.contains("\"status\""))  // no non-conforming field leaks
     }
 
-    @Test fun post_action_malformed_json_is_400() {
-        val r = routeRequest("POST", "/action", "not json", FakeHandler())
+    @Test fun handle_action_dispatches_and_returns_result() = runBlocking {
+        val d = FakeActionDispatcher(ActionResultEnvelope(success = true, detail = "tapped node[foo]"))
+        val body = """{"msg":"action","task_id":"t1","operator":"Brandon","type":"element_click","resource_id":"foo"}"""
+        val r = handleActionRequest("POST", body, d)
+        assertEquals(200, r.status)
+        assertEquals("t1", d.lastTaskId)          // transport task_id threaded through
+        assertEquals("Brandon", d.lastOperator)   // operator threaded through
+        assertEquals(body, d.lastBody)            // full frame handed to the dispatcher
+        assertTrue(r.json, r.json.contains("\"success\":true"))
+        assertTrue(r.json, r.json.contains("tapped node[foo]"))
+    }
+
+    @Test fun handle_action_malformed_json_is_400() = runBlocking {
+        val r = handleActionRequest("POST", "not json", FakeActionDispatcher())
         assertEquals(400, r.status)
         assertTrue(r.json, r.json.contains("invalid JSON"))
     }
 
-    @Test fun wrong_method_on_action_is_405() {
-        assertEquals(405, routeRequest("GET", "/action", "", FakeHandler()).status)
+    @Test fun wrong_method_on_action_is_405() = runBlocking {
+        assertEquals(405, handleActionRequest("GET", "", FakeActionDispatcher()).status)
+        assertEquals(405, handleActionRequest("PUT", "", FakeActionDispatcher()).status)
     }
 
     @Test fun action_is_operator_scoped_like_task() {

@@ -126,7 +126,7 @@
     },
     "intent": {
       "title": "intent",
-      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(name) → (name in ResidentTools.INTENT_ACTIONS) → IntentActuator.perform(name, params). Each fires a deterministic single-shot stock-Android OS intent (or the flashlight torch). send_email / send_sms are autonomy-gated (high-consequence) inside IntentActuator. Per-name required params: send_email{to, subject?, body?}; send_sms{number, body?}; show_map{query}; open_url{url (web scheme only)}; dial{number}; set_alarm{hour, minutes, label?}; set_timer{seconds, label?}; share_text{text}; create_contact{first_name?, last_name?, phone_number?, email?}; create_calendar_event{datetime, title?}; open_settings_panel{which?}; open_wifi_settings{}; take_photo{}; flashlight_on{}; flashlight_off{}. NOTE: open_app is NOT an intent — it is the separate open_app PHONE_ACTUATOR variant (routes to Actuators.openApp), so it is deliberately absent from this enum.",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(name) → (name in ResidentTools.INTENT_ACTIONS) → IntentActuator.perform(name, params). Each fires a deterministic single-shot stock-Android OS intent (or the flashlight torch / the guarded send_intent escape-hatch). send_email / send_sms / send_intent are autonomy-gated (HIGH-CONSEQUENCE — confirm-gated in Permission mode) inside IntentActuator. NOTE (I1, wire-safety): the on-device parser (RemoteActionChannel.parseAction) REJECTS any `name` not in ResidentTools.INTENT_ACTIONS with error 'unknown_action', so a gesture/global/coordinate dispatch name (read_screen, coordinate_tap, tap, back, …) can NOT be smuggled through the intent branch (type-confusion) to bypass the coordinate capability-gate or leak screen text. Per-name params: send_email{to, subject?, body?}; send_sms{number, body?}; show_map{query}; open_url{uri (http/https OR app deep-link scheme — file/content/intent/javascript/data are rejected), url alias}; dial{number}; set_alarm{hour, minutes, label?}; set_timer{seconds, label?}; share_text{text}; create_contact{first_name?, last_name?, phone_number?, email?}; create_calendar_event{datetime, title?}; open_settings_panel{which?} (LEGACY — kept for back-compat; superseded by open_settings); open_wifi_settings{}; take_photo{}; flashlight_on{}; flashlight_off{}; capture_video{}; show_alarms{}; view_calendar{datetime?}; pick_contact{}; view_contacts{}; pick_file{mime?}; create_document{mime?, filename?}; navigate{destination}; play_media{query}; open_settings{panel} (SUPERSEDES open_settings_panel — opens ANY Settings.ACTION_* panel by key); send_intent{action, uri?, mime?, package?, extras?} (GUARDED generic escape-hatch: dangerous-action denylist + unsafe-URI-scheme reject + high-consequence confirm-gate). NOTE: open_app is NOT an intent — it is the separate open_app PHONE_ACTUATOR variant (routes to Actuators.openApp), so it is deliberately absent from this enum.",
       "type": "object",
       "properties": {
         "msg": { "$ref": "#/$defs/msg" },
@@ -148,9 +148,20 @@
             "set_timer",
             "share_text",
             "open_settings_panel",
-            "take_photo"
+            "take_photo",
+            "capture_video",
+            "show_alarms",
+            "view_calendar",
+            "pick_contact",
+            "view_contacts",
+            "pick_file",
+            "create_document",
+            "navigate",
+            "play_media",
+            "open_settings",
+            "send_intent"
           ],
-          "description": "Intent action name — MUST be one of ResidentTools.INTENT_ACTIONS (overlay routing rejects anything else with 'unknown phone action')."
+          "description": "Intent action name — MUST be one of ResidentTools.INTENT_ACTIONS (both the on-device parser and the overlay routing reject anything else — parser: 'unknown_action'; overlay: 'unknown intent action')."
         },
         "params": {
           "type": "object",
@@ -163,7 +174,7 @@
     },
     "open_app": {
       "title": "open_app",
-      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"open_app\") → args[\"package\"] (\"package_name\" also accepted) → Actuators.openApp(packageName) — overlay/Actuators.kt:317. Fires the package's launch Intent (FLAG_ACTIVITY_NEW_TASK); an uninstalled package returns success=false 'app not installed: <pkg>'. This is a PHONE_ACTUATOR (ResidentTools.PHONE_ACTUATORS), NOT an intent action, so it is a top-level action variant and NOT in intent.name.",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"open_app\") → args[\"package\"] → Actuators.openApp(packageName) — overlay/Actuators.kt:317. Fires the package's launch Intent (FLAG_ACTIVITY_NEW_TASK); an uninstalled package returns success=false 'app not installed: <pkg>'. This is a PHONE_ACTUATOR (ResidentTools.PHONE_ACTUATORS), NOT an intent action, so it is a top-level action variant and NOT in intent.name. WIRE (I2): the remote frame key is EXACTLY `package` (additionalProperties:false) — the parser no longer accepts a `package_name` alias on the wire.",
       "type": "object",
       "properties": {
         "msg": { "$ref": "#/$defs/msg" },
@@ -171,7 +182,7 @@
         "package": {
           "type": "string",
           "minLength": 1,
-          "description": "Android application package id to launch, e.g. 'com.google.android.apps.maps'. → Actuators.openApp(packageName) → packageManager.getLaunchIntentForPackage. (The dispatch also accepts the legacy alias key 'package_name'.)"
+          "description": "Android application package id to launch, e.g. 'com.google.android.apps.maps'. → Actuators.openApp(packageName) → packageManager.getLaunchIntentForPackage."
         }
       },
       "required": ["msg", "type", "package"],

@@ -38,26 +38,60 @@
     <!-- Alarm clock access for the set_alarm/set_timer on-device intent actions -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
 
-    <!-- Package-visibility (Android 11+) for the implicit intents fired by the
-         on-device intent actuator (IntentActuator). Declared at top level so any
-         future resolveActivity()/queryIntentActivities() can see these targets.
-         Settings intents (e.g. ACTION_WIFI_SETTINGS) need no entry — they resolve
-         to the always-visible system settings package. -->
+    <!-- Package-visibility (Android 11+). Decision 9 / M1.5: the frontier model must
+         be able to RESOLVE and LAUNCH arbitrary installed apps + deep links via the
+         intent path (and the gesture layer's open_app, which uses
+         getLaunchIntentForPackage — gated by this visibility). We deliberately choose
+         a BROAD-BUT-HONEST <queries> over QUERY_ALL_PACKAGES: the LAUNCHER filter
+         makes every launchable app visible and the BROWSABLE http/https filters make
+         every web/deep-link handler visible, which covers the need WITHOUT the
+         Play-flagged sensitive QUERY_ALL_PACKAGES permission. (It also stays scoped to
+         *launchable* apps rather than truly ALL packages, and the app ships
+         sideload/enterprise-only, never via Play — see M8.5.) The specific scheme /
+         action entries below keep resolveActivity()/queryIntentActivities() working
+         for each concrete intent the IntentActuator fires. Settings intents (e.g.
+         ACTION_WIFI_SETTINGS / open_settings) need no entry — they resolve to the
+         always-visible system settings package. -->
     <queries>
-        <!-- Implicit intents fired by the on-device intent actuator (IntentActuator) -->
+        <!-- BROAD: see + launch any installed app, and any web/deep-link handler. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
+
+        <!-- Concrete implicit intents fired by the on-device intent actuator (IntentActuator) -->
         <intent><action android:name="android.intent.action.DIAL" /><data android:scheme="tel" /></intent>
         <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="geo" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="google.navigation" /></intent>
         <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="https" /></intent>
         <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="http" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="content" /></intent>
         <intent><action android:name="android.intent.action.SENDTO" /><data android:scheme="smsto" /></intent>
         <intent><action android:name="android.intent.action.SENDTO" /><data android:scheme="mailto" /></intent>
         <intent><action android:name="android.intent.action.SEND" /><data android:mimeType="text/plain" /></intent>
         <intent><action android:name="android.intent.action.INSERT" /><data android:mimeType="vnd.android.cursor.dir/event" /></intent>
         <intent><action android:name="android.intent.action.INSERT" /><data android:mimeType="vnd.android.cursor.dir/raw_contact" /></intent>
+        <intent><action android:name="android.intent.action.PICK" /></intent>
+        <intent><action android:name="android.intent.action.OPEN_DOCUMENT" /><data android:mimeType="*/*" /></intent>
+        <intent><action android:name="android.intent.action.GET_CONTENT" /><data android:mimeType="*/*" /></intent>
+        <intent><action android:name="android.intent.action.CREATE_DOCUMENT" /><data android:mimeType="*/*" /></intent>
         <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+        <intent><action android:name="android.media.action.VIDEO_CAPTURE" /></intent>
+        <intent><action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" /></intent>
         <intent><action android:name="android.intent.action.WEB_SEARCH" /></intent>
         <intent><action android:name="android.intent.action.SET_ALARM" /></intent>
         <intent><action android:name="android.intent.action.SET_TIMER" /></intent>
+        <intent><action android:name="android.intent.action.SHOW_ALARMS" /></intent>
     </queries>
 
     <application

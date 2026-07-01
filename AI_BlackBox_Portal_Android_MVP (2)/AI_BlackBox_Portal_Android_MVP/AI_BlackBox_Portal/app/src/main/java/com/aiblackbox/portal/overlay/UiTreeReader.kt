@@ -50,10 +50,21 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
      * materialized into the node list. No node text/content is logged — only
      * counts/roles, which are not a leak vector.
      */
-    fun readScreen(): String {
+    fun readScreen(): String = nodesToJson(readNodes())
+
+    /**
+     * (M1.2) The same DFS walk as [readScreen] but returning the TYPED, already-redacted
+     * [UiNode] list instead of its JSON string. This is the single source both the
+     * `read_screen` tool text ([readScreen], which just serializes this) and the frontier
+     * `observation` (`ui_tree`, via `ObservationBuilder`) draw from — so the
+     * password-redaction gate ([nodeText]) is applied in exactly ONE place regardless of
+     * consumer. Returns an empty list when the service isn't connected (null root);
+     * never throws (a malformed tree yields the partial list collected so far).
+     */
+    fun readNodes(): List<UiNode> {
         val root = rootProvider() ?: run {
             Log.i(TAG, "read_screen: service not connected (null root) -> []")
-            return nodesToJson(emptyList())
+            return emptyList()
         }
 
         val nodes = ArrayList<UiNode>(MAX_NODES)
@@ -100,7 +111,7 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
             Log.w(TAG, "read_screen: tree walk aborted (${e.javaClass.simpleName}); returning partial")
         }
         Log.i(TAG, "read_screen: emitted ${nodes.size} actionable node(s)")
-        return nodesToJson(nodes)
+        return nodes
     }
 
     /**

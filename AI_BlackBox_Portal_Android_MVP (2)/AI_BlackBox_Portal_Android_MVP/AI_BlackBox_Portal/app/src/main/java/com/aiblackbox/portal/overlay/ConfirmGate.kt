@@ -55,6 +55,29 @@ interface ConfirmUi {
 }
 
 /**
+ * A FAIL-SAFE-DENY [ConfirmUi]: [confirm] always returns `false` (DENY), with NO UI.
+ *
+ * The counterpart to [AutoApproveConfirmUi]. It is the SAFE seam for a surface that must
+ * NEVER auto-approve a high-consequence action but has no real user-facing confirm UI yet.
+ *
+ * ## Why it exists (M1, the boot-survivable remote `/action` path)
+ * The remote-control dispatcher ([com.aiblackbox.portal.data.remote.PhoneActionDispatcher],
+ * wired in [com.aiblackbox.portal.NotificationListenerFgs]) can fire high-consequence
+ * actions (send_email / send_sms / send_intent; send/pay/delete/post/confirm taps) with the
+ * app backgrounded or after a reboot — but M1 has NO overlay confirm UI on that path yet.
+ * Pairing this with [AutonomyMode.PERMISSION] makes every high-consequence confirmation
+ * resolve to DENY, so those actions are REFUSED until M4 wires the real [OverlayConfirmUi]
+ * + per-device autonomy. Benign navigation/typing/open_app/scroll never reach [confirm]
+ * ([shouldConfirm]/[shouldConfirmIntent] are already false for them), so they still work.
+ *
+ * TODO(M4): the remote path replaces this with the real [OverlayConfirmUi] + an
+ * AutonomyStore-backed per-device mode reader.
+ */
+internal object FailSafeDenyConfirmUi : ConfirmUi {
+    override suspend fun confirm(description: String): Boolean = false
+}
+
+/**
  * Keywords that, when they appear in a TAP target's label, mark the tap as
  * high-consequence: it commits, sends, spends, destroys, installs, or grants.
  *
@@ -243,22 +266,28 @@ const val CREDENTIAL_FIELD_DESCRIPTION: String = "the password field"
  * The named intent actions that are HIGH-CONSEQUENCE: in [AutonomyMode.PERMISSION]
  * the actuator must get the user's explicit OK BEFORE firing them.
  *
- * Only `send_email` and `send_sms` gate, and the reason is precise: these are the
- * only intents that FIRE A PREFILLED OUTBOUND MESSAGE to a RECIPIENT. Every other
- * intent action is either:
- *  - **benign** (flashlight, open a settings panel, set a timer, show a map, run a
- *    web search) — nothing leaves the device on the user's behalf; or
+ * Three intents gate, for two distinct reasons:
+ *  - `send_email` / `send_sms` FIRE A PREFILLED OUTBOUND MESSAGE to a RECIPIENT.
+ *  - `send_intent` is the GUARDED GENERIC escape-hatch (decision 9): it can fire an
+ *    arbitrary (pre-validated, non-dangerous) OS intent, so it is treated as
+ *    high-consequence BY DEFAULT — in Permission mode the user OKs it before it
+ *    fires. (Its argument safety-envelope — the dangerous-action denylist + unsafe-
+ *    URI-scheme reject — lives in [sendIntentRejectionReason]; this gate is the
+ *    second layer.)
+ *
+ * Every OTHER intent action is either:
+ *  - **benign** (flashlight, open a settings panel, set a timer, show a map, take a
+ *    photo, pick a file/contact) — nothing leaves the device on the user's behalf; or
  *  - **finalized by the user inside the launched UI** (`dial` pre-fills the dialer
  *    but the user still taps Call; `create_calendar_event` opens the editor; an
  *    `open_url` just opens the browser) — so a separate confirm here would be
  *    redundant over-gating, which trains the user to rubber-stamp.
  *
- * Kept deliberately conservative (only the genuinely "sends on your behalf" pair)
- * and extensible: any future fire-and-forget outbound intent (e.g. a one-shot
- * "post" intent) should be added HERE so it inherits the Permission-mode confirm.
- * Compared case-insensitively against the trimmed intent name.
+ * Kept deliberately conservative and extensible: any future fire-and-forget outbound
+ * intent (e.g. a one-shot "post" intent) should be added HERE so it inherits the
+ * Permission-mode confirm. Compared case-insensitively against the trimmed name.
  */
-private val HIGH_CONSEQUENCE_INTENTS: Set<String> = setOf("send_email", "send_sms")
+private val HIGH_CONSEQUENCE_INTENTS: Set<String> = setOf("send_email", "send_sms", "send_intent")
 
 /**
  * PURE: is the intent [name] high-consequence (needs confirmation in Permission
@@ -285,19 +314,22 @@ fun shouldConfirmIntent(mode: AutonomyMode, name: String): Boolean =
  *   `Send an email to "<to>"`, or `Send an email` if [primaryArg] is null/blank.
  * - `send_sms` → [primaryArg] is the phone NUMBER:
  *   `Send a text to "<number>"`, or `Send a text message` if null/blank.
+ * - `send_intent` → [primaryArg] is the (non-sensitive) intent ACTION string:
+ *   `Run the app action "<action>"`, or `Run a custom app action` if null/blank.
  * - any other [name] → a generic `Run <name>`.
  *
- * SECURITY: [primaryArg] is ONLY ever the recipient / number — never the message
- * BODY. The body is supplied separately to the actuator (IA-2) and never reaches
- * this function, so it can never appear in a confirm prompt. The entire output is
- * a fixed function of (`name`, `primaryArg`); there is no path for any other text
- * to leak in.
+ * SECURITY: [primaryArg] is ONLY ever the recipient / number / action constant —
+ * never a message BODY or field content. Bodies/extras are supplied separately to
+ * the actuator (IA-2) and never reach this function, so they can never appear in a
+ * confirm prompt. The entire output is a fixed function of (`name`, `primaryArg`);
+ * there is no path for any other text to leak in.
  */
 fun describeIntent(name: String, primaryArg: String?): String {
     val arg = primaryArg?.trim()?.takeIf { it.isNotBlank() }
     return when (name.trim().lowercase()) {
         "send_email" -> if (arg != null) "Send an email to \"$arg\"" else "Send an email"
         "send_sms" -> if (arg != null) "Send a text to \"$arg\"" else "Send a text message"
+        "send_intent" -> if (arg != null) "Run the app action \"$arg\"" else "Run a custom app action"
         else -> "Run $name"
     }
 }
