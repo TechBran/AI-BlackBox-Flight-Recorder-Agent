@@ -30,8 +30,8 @@ import kotlinx.serialization.json.jsonPrimitive
  *
  * An *intent action* is a benign, well-bounded request the agent satisfies by
  * handing off to a stock app: show a place on a map, dial a number, draft an
- * SMS/email, open a settings panel, set a timer/alarm, run a web search, take a
- * photo, share text, create a contact/calendar event. The argument sanitization
+ * SMS/email, open a settings panel, set a timer/alarm, take a photo, share text,
+ * create a contact/calendar event. The argument sanitization
  * (the actual safety surface — `tel:` smuggling, non-web `open_url`, `geo:` query
  * break-out, hour/minute/second clamps) all lives in the host-JVM-tested IA-1
  * helpers; THIS class only assembles + launches, so it is framework code,
@@ -93,7 +93,7 @@ class IntentActuator(
      * Build + fire the intent action [name] with Gemma's JSON [args].
      *
      * Resolves the Application [Context]; on `null` returns
-     * `"app context unavailable"`. Dispatches over the 16 known actions;
+     * `"app context unavailable"`. Dispatches over the 15 known actions;
      * an unknown [name] → `"unknown intent action: <name>"`. EVERY branch is
      * wrapped so nothing throws — a launch failure ([ActivityNotFoundException] or
      * anything else) becomes `"<name> failed (<ExceptionClass>)"`. The two

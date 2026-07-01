@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aiblackbox.dev/android-control/v1/ui_node.json",
+  "title": "UiNode",
+  "description": "One actionable accessibility node emitted by the Android UiTreeReader.readScreen() DFS walk. Fields mirror the on-device @Serializable `UiNode` data class EXACTLY (overlay/UiTreeReader.kt) — the JSON keys are the @SerialName values. A node is emitted only if it is clickable, editable, or carries non-blank visible text/contentDescription (UiTreeReader.isActionable). The tree is capped at UiTreeReader.MAX_NODES (80) in pre-order DFS.",
+  "type": "object",
+  "properties": {
+    "node_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Dense DFS index over ACTIONABLE nodes (NOT a durable handle). It is the node's position in the same pre-order actionable walk both the reader and the actuators replay, so it can DRIFT if the tree changes between read and act. Prefer resource_id when present. Resolved back to a live node via UiTreeReader.findActionableNode(root, node_id)."
+    },
+    "role": {
+      "type": "string",
+      "description": "Short role derived from the last '.'-segment of the node's className (roleOf), e.g. 'Button', 'EditText', 'TextView'; 'View' when the class name is null/blank."
+    },
+    "text": {
+      "type": "string",
+      "description": "The node's visible text (or contentDescription fallback). ALREADY REDACTED at the device boundary: for an is_password node this is the fixed PASSWORD_PLACEHOLDER and the raw text is dropped on the floor (UiTreeReader.nodeText). '' when the node has no text/description.",
+      "$comment": "INVARIANT: when is_password is true, text MUST equal the PASSWORD_PLACEHOLDER '·····' (five U+00B7 MIDDLE DOT). The raw credential never crosses the device boundary. Enforced by the schema in observation.json via an if/then on each ui_tree element."
+    },
+    "resource_id": {
+      "type": "string",
+      "default": "",
+      "description": "The STABLE dev-assigned viewIdResourceName, e.g. 'com.android.settings:id/title'. Does NOT drift when the screen changes, so it is the PREFERRED tap/type handle. '' when the view has no id (common for Compose / custom / WebView nodes). Resolved via UiTreeReader.findNodeByResourceId(root, resource_id). Not a secret; never in the redaction path."
+    },
+    "bounds": {
+      "type": "string",
+      "pattern": "^-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+$",
+      "description": "On-screen bounds as the compact string 'left,top,right,bottom' in device screen pixels (boundsString from Rect getBoundsInScreen). Off-screen edges may be negative."
+    },
+    "clickable": {
+      "type": "boolean",
+      "description": "AccessibilityNodeInfo.isClickable. When true, Actuators.tap prefers a semantic ACTION_CLICK on this node (or its nearest clickable ancestor) over a coordinate gesture."
+    },
+    "editable": {
+      "type": "boolean",
+      "description": "AccessibilityNodeInfo.isEditable. A text target for element_set_text (ACTION_SET_TEXT)."
+    },
+    "is_password": {
+      "type": "boolean",
+      "description": "True when the node is a password field per isPasswordField (node.isPassword OR a password inputType variation). Drives the text-redaction gate above AND the credential-handoff on element_set_text."
+    }
+  },
+  "required": ["node_id", "role", "text", "resource_id", "bounds", "clickable", "editable", "is_password"],
+  "additionalProperties": false
+}

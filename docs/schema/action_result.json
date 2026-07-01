@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aiblackbox.dev/android-control/v1/action_result.json",
+  "title": "ActionResult",
+  "description": "The device→brain result of dispatching one Action, sent back UP over the 8765 channel. Mirrors the Android ActuatorResult{success, detail} (overlay/Actuators.kt) plus an optional error kind and an optional fresh observation so the loop can act on the post-action screen state without a separate round-trip. `detail` carries ONLY the actuator's own non-sensitive phrase (e.g. 'tapped node[...]', 'opened maps', 'user declined credential entry') — never node screen text or typed text.",
+  "type": "object",
+  "properties": {
+    "msg": {
+      "$comment": "MESSAGE-KIND discriminator (I2). Const 'action_result' for every result frame — the SEPARATE key from any action-variant `type`, so the message kind and the action variant never collide on the wire.",
+      "const": "action_result",
+      "description": "Message kind — always 'action_result' for a device→brain result frame (vs 'observation' / 'action')."
+    },
+    "success": {
+      "type": "boolean",
+      "description": "ActuatorResult.success — whether the action was performed. A declined confirm-gate or credential handoff returns success=false with a benign detail (not an error)."
+    },
+    "detail": {
+      "type": "string",
+      "description": "ActuatorResult.detail — a fixed, non-sensitive human/model-readable phrase. Success e.g. 'tapped node[id]', 'set text on node[id]', 'opened maps', 'user entered their credential'. Non-error failure e.g. 'user declined', 'user declined credential entry'."
+    },
+    "error": {
+      "type": "string",
+      "enum": [
+        "not_enabled",
+        "node_not_found",
+        "unknown_action",
+        "invalid_argument",
+        "dispatch_failed",
+        "no_device",
+        "lost_contact",
+        "timeout",
+        "not_wired"
+      ],
+      "description": "OPTIONAL structured error kind (present only when success=false for a genuine failure, not a user decline). Maps the device-side failure ('accessibility service not enabled' → not_enabled, 'node N not found' → node_not_found, 'unknown phone action' → unknown_action, '<key> required'/'invalid url' → invalid_argument, gesture/intent launch failure → dispatch_failed) plus the loop-level transport errors (no_device / lost_contact / timeout from the M2 adaptive-timeout layer). `not_wired` is the M0 SCAFFOLD state: the /action endpoint acknowledges a well-formed action but the actuator dispatch (M1) / cloud loop (M2) is not yet bound — it is removed once real dispatch lands."
+    },
+    "observation": {
+      "$ref": "https://schemas.aiblackbox.dev/android-control/v1/observation.json",
+      "description": "OPTIONAL post-action observation (fresh screen state), so the frontier loop can re-observe without a separate request. Omitted when the caller will pull the next observation independently."
+    }
+  },
+  "required": ["msg", "success"],
+  "additionalProperties": false
+}

@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayInputStream
 
 /**
  * Inbound remote-control listener for the `control_phone` feature (the BlackBox →
@@ -73,6 +74,59 @@ data class RemoteStatus(
     val step: Int? = null,        // optional progress hint while working
 )
 
+/**
+ * The MESSAGE-KIND discriminator values (`msg`) for the M0 bidirectional streaming control
+ * channel (research §5.5 decision #8). The frontier-driven loop carries three message kinds
+ * on the wire: `observation` (device state UP: a11y tree + capability + optional screenshot),
+ * `action` (frontier decision DOWN) and `action_result` (outcome UP).
+ *
+ * IMPORTANT (I2): `msg` (the MESSAGE kind) is a DIFFERENT key from an action's `type`. Inside
+ * an `action` frame, `type` is the ACTION-VARIANT discriminator (element_click / element_set_text
+ * / coordinate_tap / coordinate_swipe / global_action / intent / open_app / scroll — see
+ * `docs/schema/action.json`). The two never collide: the message frame carries `msg:"action"`
+ * while its nested action payload keeps its own `type`. These constants are the `msg` values and
+ * are kept in lock-step with the `msg` const in the `docs/schema` JSON schemas.
+ */
+object WireMessageType {
+    const val OBSERVATION = "observation"
+    const val ACTION = "action"
+    const val ACTION_RESULT = "action_result"
+}
+
+/**
+ * (M0 scaffold) The `action` frame pushed DOWN over `POST /action` — the frontier model's
+ * decision for a task. The MESSAGE-KIND discriminator is [msg] (const "action", I2), a
+ * DIFFERENT key from the nested action payload's `type` (element_click / … — see
+ * docs/schema/action.json), so the two never collide. `kind` is the M0 placeholder for that
+ * nested action-variant `type`; the concrete params are intentionally left opaque at M0 (the
+ * real action.json payload + actuator binding land in M1). `operator` scopes the action to
+ * the device's bound operator via [authorize], mirroring `/task`; `task_id` correlates it to
+ * a submitted task.
+ */
+@Serializable
+data class ActionEnvelope(
+    val msg: String = WireMessageType.ACTION,
+    @SerialName("task_id") val taskId: String = "",
+    val operator: String = "",
+    val kind: String = "",
+)
+
+/**
+ * (M0 scaffold) The `action_result` frame returned UP for a dispatched action. Conforms to
+ * docs/schema/action_result.json: `{msg:"action_result", success, error?, detail?, observation?}`.
+ * For the M0 scaffold this is `success=false, error="not_wired"` (the actuator dispatch lands in
+ * M1/M2); once wired [success]/[error]/[detail] carry the real outcome and the follow-on
+ * `observation` rides here or streams over `/stream`. `observation` is omitted at M0 (no Kotlin
+ * Observation type until M1); it is an optional field in the schema, so omitting it still conforms.
+ */
+@Serializable
+data class ActionResultEnvelope(
+    val msg: String = WireMessageType.ACTION_RESULT,
+    val success: Boolean = false,
+    val error: String? = null,
+    val detail: String? = null,
+)
+
 /** What the listener delegates real work to — implemented by the runner (Task 6). */
 interface RemoteTaskHandler {
     /** Accept a task; return an opaque task id to poll. Must be non-blocking. */
@@ -121,6 +175,12 @@ data class RemoteResponse(val status: Int, val json: String)
 // on the wire (cleaner; the backend reads phase/result/error tolerantly).
 private val JSON = Json { ignoreUnknownKeys = true }
 
+// Wire-envelope encoder for the M0 streaming channel (observation/action/action_result):
+// encodeDefaults=true so the `type` discriminator is ALWAYS emitted (it equals its
+// default) — the discriminator is the point of the schema alignment; explicitNulls=false
+// still drops an absent optional (e.g. a null `detail`).
+private val WIRE_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
+
 @Serializable private data class TaskRequest(val task: String = "", val operator: String = "")
 @Serializable private data class TaskAccepted(@SerialName("task_id") val taskId: String)
 @Serializable private data class ErrorBody(val error: String)
@@ -147,6 +207,10 @@ private val JSON = Json { ignoreUnknownKeys = true }
  *   POST /task         -> {"task_id": ...}    (400 if task missing/blank/bad JSON)
  *   GET  /status/{id}  -> RemoteStatus json   (404 if unknown id)
  *   POST /notify       -> {"ok": true}        (MN.4; 400 bad JSON, 503 if no notifier)
+ *   POST /action       -> ActionResultEnvelope (M0 frontier action↓ channel scaffold;
+ *                         400 bad JSON / missing task_id). The GET /stream/{id}
+ *                         observation↑ half is a chunked SSE response handled directly in
+ *                         [RemoteControlServer.serve] (it can't be a pure RemoteResponse).
  * Known path + wrong method -> 405; anything else -> 404.
  *
  * [notifier] is the MODEL-FREE notification poster (MN.4). It is defaulted to null so
@@ -203,7 +267,31 @@ fun routeRequest(method: String, path: String, body: String,
             else RemoteResponse(200, JSON.encodeToString(st))
         }
 
-        path == "/healthz" || path == "/task" || path == "/notify" || path.startsWith("/status/") ->
+        // (M0 scaffold) The action↓ half of the frontier streaming control channel
+        // (decision #8). Accepts an `action` the cloud brain decided; returns a
+        // well-formed `action_result`. TODO(M1/M2): dispatch the action to the frontier
+        // handler / on-device actuators (AndroidPhoneController → Actuators /
+        // IntentActuator, wired in M1) and stream the resulting `observation` back over
+        // GET /stream/{taskId}. For M0 this is a "not_wired" acknowledgment so the channel
+        // scaffold compiles and the handler holder can hold a frontier brain.
+        path == "/action" && m == "POST" -> {
+            val req = try {
+                JSON.decodeFromString<ActionEnvelope>(body.ifBlank { "{}" })
+            } catch (e: Exception) {
+                return RemoteResponse(400, JSON.encodeToString(ErrorBody("invalid JSON body")))
+            }
+            if (req.taskId.isBlank())
+                RemoteResponse(400, JSON.encodeToString(ErrorBody("task_id required")))
+            else
+                RemoteResponse(200, WIRE_JSON.encodeToString(ActionResultEnvelope(
+                    success = false,
+                    error = "not_wired",
+                    detail = "action channel scaffold (M0); actuator dispatch wired in M1/M2",
+                )))
+        }
+
+        path == "/healthz" || path == "/task" || path == "/notify" || path == "/action" ||
+            path.startsWith("/status/") ->
             RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
         else -> RemoteResponse(404, JSON.encodeToString(ErrorBody("not found")))
@@ -220,6 +308,12 @@ fun routeRequest(method: String, path: String, body: String,
  *  - POST /task additionally: the request's `operator` must match the device's bound
  *    operator (a different operator's hub cannot drive this device). Fail-closed: a
  *    blank bound operator rejects.
+ *  - POST /action additionally: same operator-scope as /task (it actuates the device).
+ *  - GET /stream/{id} additionally (I1): the observation stream will carry SCREEN CONTENTS
+ *    in M1, so it must be operator-scoped too. A GET has no body, so the operator arrives as
+ *    the `?operator=` query param (extracted in [RemoteControlServer.serve]) and must equal
+ *    the bound operator. Fail-closed: a blank bound operator OR a blank/mismatched query
+ *    operator rejects, so the channel is never cross-operator readable.
  *  - POST /notify additionally (MN.4, defense in depth): the request's `operator` must
  *    be one THIS device subscribed to. The check is delegated to [isSubscribed]
  *    (device-local DataStore allow-list at the call site). Default [isSubscribed]
@@ -235,6 +329,21 @@ fun authorize(method: String, path: String, remoteIp: String,
         return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
     val m = method.uppercase()
     if (path == "/task" && m == "POST") {
+        if (boundOperator.isBlank() || requestOperator != boundOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
+    // (M0) The frontier action↓ channel is a control channel like /task — scope it to the
+    // device's bound operator so a different operator's hub cannot actuate this device.
+    if (path == "/action" && m == "POST") {
+        if (boundOperator.isBlank() || requestOperator != boundOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
+    // (I1) The observation↑ stream will carry SCREEN CONTENTS in M1 — scope GET /stream/{id}
+    // to the bound operator so it is never cross-operator readable. The operator arrives as
+    // the ?operator= query param (a GET has no body), extracted in serve() as requestOperator.
+    // Fail-closed: blank bound operator OR blank/mismatched query operator → 403. (A non-GET
+    // /stream is NOT operator-gated here so it can fall through to the 405 method gate.)
+    if (path.startsWith("/stream/") && m == "GET") {
         if (boundOperator.isBlank() || requestOperator != boundOperator)
             return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
     }
@@ -267,6 +376,17 @@ fun isTailnetSource(ip: String): Boolean {
  *  ignoreUnknownKeys) serves both. */
 internal fun extractOperator(body: String): String =
     try { JSON.decodeFromString<TaskRequest>(body.ifBlank { "{}" }).operator } catch (e: Exception) { "" }
+
+/**
+ * (I1) PURE method gate for the observation stream (`/stream/{id}`). The stream is GET-only —
+ * it carries an SSE `observation` feed UP — so any other method is 405. Kept pure + separate
+ * from the NanoHTTPD SSE body so the gate is JVM-unit-testable. Returns a 405 [RemoteResponse]
+ * to REJECT, or null to proceed to the SSE pump. (Operator-scope for the GET is enforced
+ * upstream in [authorize]; this only rejects the wrong METHOD.)
+ */
+fun streamMethodGate(method: String): RemoteResponse? =
+    if (method.uppercase() == "GET") null
+    else RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
 /**
  * Embedded HTTP listener (NanoHTTPD). Binds to all interfaces, but [authorize] gates
@@ -306,13 +426,58 @@ class RemoteControlServer(
         val path = session.uri ?: "/"
         val body = if (method.equals("POST", ignoreCase = true)) readBody(session) else ""
         val remoteIp = session.remoteIpAddress ?: ""
-        // Both /task and /notify carry a top-level `operator`; everything else needs none.
-        val requestOperator = if (path == "/task" || path == "/notify") extractOperator(body) else ""
+        // /task, /notify and (M0) /action carry a top-level `operator` in the body; (I1)
+        // GET /stream/{id} — a body-less GET — carries it as the ?operator= query param.
+        val requestOperator = when {
+            path == "/task" || path == "/notify" || path == "/action" -> extractOperator(body)
+            path.startsWith("/stream/") -> session.parameters?.get("operator")?.firstOrNull()?.trim() ?: ""
+            else -> ""
+        }
         authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
+        // (M0 scaffold) The observation↑ half of the frontier streaming control channel
+        // (decision #8): a chunked SSE response, so it is served here rather than through
+        // the pure [routeRequest] (which only yields fixed-length RemoteResponse values).
+        // The action↓ half is POST /action, routed below. /task+/status+/healthz+/notify
+        // stay untouched for Gemma back-compat.
+        if (path.startsWith("/stream/")) {
+            return serveObservationStream(method, path.removePrefix("/stream/"))
+        }
         val routed = routeRequest(method, path, body, handlerProvider(), notifier)
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
+    }
+
+    /**
+     * (M0 scaffold) The observation↑ half of the bidirectional frontier control channel
+     * (research §5.5 decision #8). This NanoHTTPD build depends only on the core
+     * `org.nanohttpd:nanohttpd` artifact — the WebSocket module (`nanohttpd-websocket`,
+     * which supplies `NanoWSD`) is NOT on the classpath — so the streaming transport is
+     * **SSE (chunked `text/event-stream`) + a companion `POST /action`** for the action↓
+     * half, exactly the fallback the plan specifies (M0.3). One `observation` frame is a
+     * `data:`-prefixed JSON line per SSE framing.
+     *
+     * TODO(M1/M2): pump real `observation` frames here — [com.aiblackbox.portal.overlay.UiTreeReader]
+     * tree (password-redacted) + a `DeviceCapabilities` descriptor + an optional silent
+     * `AccessibilityService.takeScreenshot()` (M1) — driven by the frontier loop (M2),
+     * keeping the socket open for the session. For M0 it emits a single scaffold comment
+     * frame and closes, so the endpoint is wired + reachable without the observation
+     * source (M1) or the cloud brain (M2).
+     */
+    private fun serveObservationStream(method: String, taskId: String): Response {
+        streamMethodGate(method)?.let { denied ->
+            return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
+        }
+        // A well-formed SSE comment frame (lines starting `:` are comments the client
+        // ignores) noting the scaffold state, then the stream closes.
+        val frame = ": observation stream scaffold (M0) for task '$taskId' — " +
+            "observation pump wired in M1/M2 (types: " +
+            "${WireMessageType.OBSERVATION}/${WireMessageType.ACTION_RESULT})\n\n"
+        val body = ByteArrayInputStream(frame.toByteArray(Charsets.UTF_8))
+        return newChunkedResponse(Response.Status.OK, "text/event-stream", body).apply {
+            addHeader("Cache-Control", "no-cache")
+            addHeader("Connection", "keep-alive")
+        }
     }
 
     private fun readBody(session: IHTTPSession): String {

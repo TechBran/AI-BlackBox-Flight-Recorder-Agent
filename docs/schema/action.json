@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aiblackbox.dev/android-control/v1/action.json",
+  "title": "Action",
+  "description": "The brain→device message: one actuation the cloud frontier loop wants performed on the target device, sent DOWN over the Tailscale 8765 channel. A discriminated union keyed on the ACTION-VARIANT discriminator `type` (element_click / element_set_text / coordinate_tap / coordinate_swipe / global_action / intent / open_app / scroll); each variant maps to a REAL entry point in the existing Android actuation layer (Actuators / IntentActuator, dispatched by AndroidPhoneController.dispatch). The MESSAGE-KIND discriminator is the SEPARATE key `msg` (const 'action' here) so it never collides with the variant `type` (I2). Coordinates on the wire are already in DEVICE SCREEN PIXELS — any provider-space denormalization (e.g. Gemini 0-999 → px) happens server-side in the M7 coordinate adapter before this message is emitted.",
+  "type": "object",
+  "required": ["msg", "type"],
+  "oneOf": [
+    { "$ref": "#/$defs/element_click" },
+    { "$ref": "#/$defs/element_set_text" },
+    { "$ref": "#/$defs/coordinate_tap" },
+    { "$ref": "#/$defs/coordinate_swipe" },
+    { "$ref": "#/$defs/global_action" },
+    { "$ref": "#/$defs/intent" },
+    { "$ref": "#/$defs/open_app" },
+    { "$ref": "#/$defs/scroll" }
+  ],
+  "$defs": {
+    "msg": {
+      "$comment": "MESSAGE-KIND discriminator (I2). Const 'action' for every action frame. DISTINCT from each variant's own `type` (the ACTION-VARIANT discriminator, element_click / …) so the two discriminators never collide on the wire.",
+      "const": "action",
+      "description": "Message kind — always 'action' for a brain→device action frame (vs 'observation' / 'action_result')."
+    },
+    "element_ref": {
+      "$comment": "Shared element addressing: resource_id (preferred, stable) OR node_id (positional fallback). parseNodeRef() prefers resource_id when both are given.",
+      "anyOf": [
+        { "required": ["resource_id"] },
+        { "required": ["node_id"] }
+      ]
+    },
+    "element_click": {
+      "title": "element_click",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"tap\") → parseNodeRef(args) → Actuators.tap(NodeRef). Performs a semantic ACTION_CLICK on the resolved node (or nearest clickable ancestor); coordinate-gesture center-tap only if nothing in the ancestor chain is clickable. High-consequence taps are autonomy-gated inside Actuators.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "element_click" },
+        "resource_id": {
+          "type": "string",
+          "description": "Stable viewIdResourceName from the observation (PREFERRED). → NodeRef.ById → UiTreeReader.findNodeByResourceId."
+        },
+        "node_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Positional DFS index fallback (for nodes with no resource_id). → NodeRef.ByIndex → UiTreeReader.findActionableNode."
+        }
+      },
+      "required": ["msg", "type"],
+      "allOf": [{ "$ref": "#/$defs/element_ref" }],
+      "additionalProperties": false
+    },
+    "element_set_text": {
+      "title": "element_set_text",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"type\") → parseNodeRef(args) + text → Actuators.type(NodeRef, text) → ACTION_SET_TEXT. CREDENTIAL-HANDOFF GATED: if the resolved node is a password field, `text` is DISCARDED and the USER is asked to type the secret directly — the model's text is never entered, logged, or forwarded.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "element_set_text" },
+        "resource_id": {
+          "type": "string",
+          "description": "Stable viewIdResourceName (PREFERRED). → NodeRef.ById."
+        },
+        "node_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Positional DFS index fallback. → NodeRef.ByIndex."
+        },
+        "text": {
+          "type": "string",
+          "description": "Text to set on the editable node. On a password field this is discarded (credential handoff) — never send a real secret here; the model must not know it."
+        }
+      },
+      "required": ["msg", "type", "text"],
+      "allOf": [{ "$ref": "#/$defs/element_ref" }],
+      "additionalProperties": false
+    },
+    "coordinate_tap": {
+      "title": "coordinate_tap",
+      "$comment": "ROUTES TO: dispatchGesture single-tap at (x,y). NOTE (M0/M1 gap): the existing Actuators.dispatchTap(svc,x,y) is PRIVATE and only reachable as the internal fallback inside Actuators.tap(NodeRef); there is NO public coordinate-tap entry point yet, and AndroidPhoneController has no \"coordinate_tap\" branch. M1 (Task 1.3) must expose a public Actuators.tap(x,y) + add the dispatch branch. This schema defines the CONTRACT the wiring builds against.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "coordinate_tap" },
+        "x": { "type": "integer", "description": "X in device screen pixels." },
+        "y": { "type": "integer", "description": "Y in device screen pixels." }
+      },
+      "required": ["msg", "type", "x", "y"],
+      "additionalProperties": false
+    },
+    "coordinate_swipe": {
+      "title": "coordinate_swipe",
+      "$comment": "ROUTES TO: Actuators.swipe(startX,startY,endX,endY) (public, overlay/Actuators.kt:278) → dispatchSwipe → dispatchGesture. NOTE (M0/M1 gap): AndroidPhoneController.dispatch(\"swipe\") today takes only a `direction` string, not coordinates — M1 must add a coordinate branch that calls the existing public swipe(x,y,x2,y2). duration_ms maps to the stroke duration (default SWIPE_DURATION_MS=250).",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "coordinate_swipe" },
+        "x": { "type": "integer", "description": "Start X in device screen pixels." },
+        "y": { "type": "integer", "description": "Start Y in device screen pixels." },
+        "x2": { "type": "integer", "description": "End X in device screen pixels." },
+        "y2": { "type": "integer", "description": "End Y in device screen pixels." },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 250,
+          "description": "Swipe stroke duration in ms (StrokeDescription duration). Defaults to Actuators.SWIPE_DURATION_MS = 250."
+        }
+      },
+      "required": ["msg", "type", "x", "y", "x2", "y2"],
+      "additionalProperties": false
+    },
+    "global_action": {
+      "title": "global_action",
+      "$comment": "ROUTES TO: performGlobalAction. back → AndroidPhoneController.dispatch(\"back\") → Actuators.back() → GLOBAL_ACTION_BACK; home → dispatch(\"home\") → Actuators.home() → GLOBAL_ACTION_HOME. NOTE (M0/M1 gap): `recents` is in this contract enum but is NOT wired today — globalActionFor() maps ONLY \"back\"/\"home\" (overlay/Actuators.kt:561) and AndroidPhoneController has no \"recents\" branch. M1 must add recents → GLOBAL_ACTION_RECENTS.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "global_action" },
+        "action": {
+          "type": "string",
+          "enum": ["back", "home", "recents"],
+          "description": "System navigation action performed via AccessibilityService.performGlobalAction."
+        }
+      },
+      "required": ["msg", "type", "action"],
+      "additionalProperties": false
+    },
+    "intent": {
+      "title": "intent",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(name) → (name in ResidentTools.INTENT_ACTIONS) → IntentActuator.perform(name, params). Each fires a deterministic single-shot stock-Android OS intent (or the flashlight torch). send_email / send_sms are autonomy-gated (high-consequence) inside IntentActuator. Per-name required params: send_email{to, subject?, body?}; send_sms{number, body?}; show_map{query}; open_url{url (web scheme only)}; dial{number}; set_alarm{hour, minutes, label?}; set_timer{seconds, label?}; share_text{text}; create_contact{first_name?, last_name?, phone_number?, email?}; create_calendar_event{datetime, title?}; open_settings_panel{which?}; open_wifi_settings{}; take_photo{}; flashlight_on{}; flashlight_off{}. NOTE: open_app is NOT an intent — it is the separate open_app PHONE_ACTUATOR variant (routes to Actuators.openApp), so it is deliberately absent from this enum.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "intent" },
+        "name": {
+          "type": "string",
+          "enum": [
+            "flashlight_on",
+            "flashlight_off",
+            "create_contact",
+            "send_email",
+            "show_map",
+            "open_wifi_settings",
+            "create_calendar_event",
+            "open_url",
+            "dial",
+            "send_sms",
+            "set_alarm",
+            "set_timer",
+            "share_text",
+            "open_settings_panel",
+            "take_photo"
+          ],
+          "description": "Intent action name — MUST be one of ResidentTools.INTENT_ACTIONS (overlay routing rejects anything else with 'unknown phone action')."
+        },
+        "params": {
+          "type": "object",
+          "description": "The intent's arguments, passed verbatim as the JsonObject args to IntentActuator.perform. Keys are per-name (see $comment). IntentActuator validates required args at runtime and returns a structured '<key> required' error if missing.",
+          "additionalProperties": true
+        }
+      },
+      "required": ["msg", "type", "name"],
+      "additionalProperties": false
+    },
+    "open_app": {
+      "title": "open_app",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"open_app\") → args[\"package\"] (\"package_name\" also accepted) → Actuators.openApp(packageName) — overlay/Actuators.kt:317. Fires the package's launch Intent (FLAG_ACTIVITY_NEW_TASK); an uninstalled package returns success=false 'app not installed: <pkg>'. This is a PHONE_ACTUATOR (ResidentTools.PHONE_ACTUATORS), NOT an intent action, so it is a top-level action variant and NOT in intent.name.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "open_app" },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Android application package id to launch, e.g. 'com.google.android.apps.maps'. → Actuators.openApp(packageName) → packageManager.getLaunchIntentForPackage. (The dispatch also accepts the legacy alias key 'package_name'.)"
+        }
+      },
+      "required": ["msg", "type", "package"],
+      "additionalProperties": false
+    },
+    "scroll": {
+      "title": "scroll",
+      "$comment": "ROUTES TO: AndroidPhoneController.dispatch(\"scroll\") → args[\"direction\"] → Actuators.scroll(direction) — overlay/Actuators.kt:297 → swipeCoords(direction) centered-swipe via dispatchGesture. Direction-based (NOT coordinate-based) so it stays XR-portable — it needs no flat framebuffer coordinate space, only a cardinal direction. Unknown direction returns success=false 'unknown scroll direction: <dir>'.",
+      "type": "object",
+      "properties": {
+        "msg": { "$ref": "#/$defs/msg" },
+        "type": { "const": "scroll" },
+        "direction": {
+          "type": "string",
+          "enum": ["up", "down", "left", "right"],
+          "description": "Cardinal scroll direction (== finger drag direction; a 'up' scroll drags from lower-center to upper-center). Matched case-insensitively by swipeCoords; anything outside this enum is rejected on-device."
+        }
+      },
+      "required": ["msg", "type", "direction"],
+      "additionalProperties": false
+    }
+  }
+}

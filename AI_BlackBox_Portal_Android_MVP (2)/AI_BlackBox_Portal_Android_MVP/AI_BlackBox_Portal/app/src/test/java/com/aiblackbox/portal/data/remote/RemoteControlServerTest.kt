@@ -231,4 +231,100 @@ class RemoteControlServerTest {
         assertNull(authorize("POST", "/notify", "100.88.0.7", "Brandon", "Brandon",
             isSubscribed = { it == "Brandon" }))
     }
+
+    // ── M0: frontier action↓ channel (POST /action) ──
+
+    @Test fun post_action_requires_task_id() {
+        // Blank/absent task_id -> 400 (mirrors /task's required-field gate).
+        assertEquals(400, routeRequest("POST", "/action", """{"operator":"Brandon"}""", FakeHandler()).status)
+        assertEquals(400, routeRequest("POST", "/action", "", FakeHandler()).status)  // empty -> "{}" -> blank
+    }
+
+    @Test fun post_action_with_task_id_returns_conforming_not_wired_result() {
+        val r = routeRequest("POST", "/action",
+            """{"msg":"action","task_id":"t1","operator":"Brandon","kind":"element_click"}""", FakeHandler())
+        assertEquals(200, r.status)
+        // Conforms to action_result.json: {msg:"action_result", success:false, error:"not_wired", detail}.
+        assertTrue(r.json, r.json.contains("\"msg\":\"action_result\""))
+        assertTrue(r.json, r.json.contains("\"success\":false"))
+        assertTrue(r.json, r.json.contains("\"error\":\"not_wired\""))
+        // No non-conforming `status` field leaks onto the wire.
+        assertFalse(r.json, r.json.contains("\"status\""))
+    }
+
+    @Test fun post_action_malformed_json_is_400() {
+        val r = routeRequest("POST", "/action", "not json", FakeHandler())
+        assertEquals(400, r.status)
+        assertTrue(r.json, r.json.contains("invalid JSON"))
+    }
+
+    @Test fun wrong_method_on_action_is_405() {
+        assertEquals(405, routeRequest("GET", "/action", "", FakeHandler()).status)
+    }
+
+    @Test fun action_is_operator_scoped_like_task() {
+        // Foreign operator -> 403; matching -> allow; blank bound operator fails closed.
+        assertEquals(403, authorize("POST", "/action", "100.88.0.7", "Mallory", "Brandon")?.status)
+        assertNull(authorize("POST", "/action", "100.88.0.7", "Brandon", "Brandon"))
+        assertEquals(403, authorize("POST", "/action", "100.88.0.7", "Brandon", "")?.status)
+        // Off-tailnet is rejected regardless of operator.
+        assertEquals(403, authorize("POST", "/action", "8.8.8.8", "Brandon", "Brandon")?.status)
+    }
+
+    // ── I1: observation↑ stream (GET /stream/{id}) is operator-scoped; only GET ──
+
+    @Test fun get_stream_blank_operator_is_rejected() {
+        // A GET carries the operator as the ?operator= query param (extracted in serve());
+        // blank/absent operator -> 403 (fail closed — the stream carries screen contents in M1).
+        assertEquals(403, authorize("GET", "/stream/t1", "100.88.0.7", "", "Brandon")?.status)
+    }
+
+    @Test fun get_stream_foreign_operator_is_rejected() {
+        assertEquals(403, authorize("GET", "/stream/t1", "100.88.0.7", "Mallory", "Brandon")?.status)
+    }
+
+    @Test fun get_stream_matching_operator_is_allowed() {
+        assertNull(authorize("GET", "/stream/t1", "100.88.0.7", "Brandon", "Brandon"))
+    }
+
+    @Test fun get_stream_blank_bound_operator_fails_closed() {
+        assertEquals(403, authorize("GET", "/stream/t1", "100.88.0.7", "Brandon", "")?.status)
+    }
+
+    @Test fun get_stream_off_tailnet_is_rejected() {
+        assertEquals(403, authorize("GET", "/stream/t1", "192.168.1.5", "Brandon", "Brandon")?.status)
+    }
+
+    @Test fun stream_is_get_only_post_is_405() {
+        // The pure method gate: GET proceeds (null), anything else -> 405.
+        assertNull(streamMethodGate("GET"))
+        assertEquals(405, streamMethodGate("POST")?.status)
+        assertEquals(405, streamMethodGate("PUT")?.status)
+    }
+
+    // ── M0: RemoteTaskHandlerHolder seam — frontier ↔ Gemma swap (no socket rebind) ──
+
+    @Test fun handler_holder_swaps_frontier_and_fake_last_set_wins() {
+        try {
+            // Default (nothing published) -> the model-free no-op handler.
+            RemoteTaskHandlerHolder.clear()
+            assertTrue(RemoteTaskHandlerHolder.current() === NoopRemoteTaskHandler)
+
+            // A fake (stand-in for the Gemma RemoteTaskRunner) is settable + read back.
+            val fake = FakeHandler()
+            RemoteTaskHandlerHolder.set(fake)
+            assertTrue(RemoteTaskHandlerHolder.current() === fake)
+
+            // The frontier handler swaps in over the SAME seam — last set wins, no rebind.
+            val frontier = FrontierRemoteTaskHandler("")  // JVM-safe: String ctor, no Android
+            RemoteTaskHandlerHolder.set(frontier)
+            assertTrue(RemoteTaskHandlerHolder.current() === frontier)
+
+            // Swap back to the fake (Gemma) — again the last set wins.
+            RemoteTaskHandlerHolder.set(fake)
+            assertTrue(RemoteTaskHandlerHolder.current() === fake)
+        } finally {
+            RemoteTaskHandlerHolder.clear()  // restore global seam for other tests
+        }
+    }
 }

@@ -5,6 +5,16 @@
     are required by tasks 4.2 (UI-tree reader) and 4.3 (gesture actuators); 4.1
     only declares them. The service stays inert beyond connectivity logging until
     those tasks land.
+
+    canTakeScreenshot (M0.5, frontier device-control rewire) enables the SILENT
+    AccessibilityService.takeScreenshot() (API 30+) — a capture with NO
+    MediaProjection consent dialog and no per-session system prompt, ~3fps,
+    surviving backgrounding/lock. This is the vision source for the cloud frontier
+    ReAct loop (the observation's optional `screenshot`); it is always paired with
+    the in-app "AI is controlling this device" consent banner + kill switch, and
+    password-field regions stay redaction-gated. See
+    docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M0.5) +
+    docs/schema/observation.json.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeAllMask"
@@ -12,5 +22,6 @@
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="100"
     android:description="@string/a11y_service_description" />

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aiblackbox.dev/android-control/v1/device_capability.json",
+  "title": "DeviceCapability",
+  "description": "What the target device can do, advertised on every observation so the cloud frontier loop degrades gracefully (e.g. an XR headset reports supportsCoordinateGesture=false + hasScreenshot=false, so the loop runs tree+intent only). Populated on the phone side by the M1 DeviceCapabilities.detect(); this schema is the wire shape (M0 contract).",
+  "type": "object",
+  "properties": {
+    "formFactor": {
+      "type": "string",
+      "enum": ["phone", "tablet", "foldable", "xr_headset", "glasses"],
+      "description": "Physical class of the device. Drives capability expectations: phone/tablet/foldable → all paths; xr_headset → node+intent only (no coordinate gesture, capture unconfirmed); glasses → drive the paired phone (compute lives on the phone via Jetpack Projected)."
+    },
+    "hasScreenshot": {
+      "type": "boolean",
+      "description": "Whether the device can supply a screenshot in the observation (silent AccessibilityService.takeScreenshot(), API 30+, requires android:canTakeScreenshot). False on XR (headset-view capture unconfirmed) → the loop runs tree-only, never requesting a screenshot."
+    },
+    "supportsCoordinateGesture": {
+      "type": "boolean",
+      "description": "Whether dispatchGesture-based coordinate_tap / coordinate_swipe actuation is meaningful on this device. False on XR (per-panel 3D compositor, no flat framebuffer) → the loop uses element_click (ACTION_CLICK) + intents only; coordinate actions are skipped/logged."
+    },
+    "displayId": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Target display for capture + gesture. 0 = Display.DEFAULT_DISPLAY. Non-zero for DeX / external / multi-display; used by GestureDescription.Builder.setDisplayId() and takeScreenshot(displayId) in the M5 large-screen work."
+    }
+  },
+  "required": ["formFactor", "hasScreenshot", "supportsCoordinateGesture", "displayId"],
+  "additionalProperties": false
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aiblackbox.dev/android-control/v1/observation.json",
+  "title": "Observation",
+  "description": "The device→brain message: one snapshot of the target device's screen state, sent UP over the Tailscale 8765 channel for the cloud frontier ReAct loop to reason over. Tree-first cadence: ui_tree is always present; screenshot is included only when hasScreenshot is true AND the tree is blind or the model requested it (cuts cloud data + latency).",
+  "type": "object",
+  "properties": {
+    "msg": {
+      "$comment": "MESSAGE-KIND discriminator (I2). Const 'observation' for every device→brain screen-snapshot frame — the SEPARATE key from an action's variant `type`, so message kind and action variant never collide on the wire.",
+      "const": "observation",
+      "description": "Message kind — always 'observation' for a device→brain screen-state frame (vs 'action' / 'action_result')."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Wire-contract version. Also encoded in the /v1/ path of every $id. Additive changes bump the minor; a breaking change bumps the /vN/ path + this major."
+    },
+    "ui_tree": {
+      "type": "array",
+      "description": "The actionable accessibility nodes from UiTreeReader.readScreen(), in pre-order DFS, capped at 80. Password fields are redacted at the boundary (see the invariant below).",
+      "items": {
+        "allOf": [
+          { "$ref": "https://schemas.aiblackbox.dev/android-control/v1/ui_node.json" },
+          {
+            "$comment": "PASSWORD-REDACTION INVARIANT (the whole point of the redaction gate): an is_password node's `text` MUST be the PASSWORD_PLACEHOLDER '·····' (five U+00B7 MIDDLE DOT), never the raw credential. This makes it a hard schema violation for a password node to carry real text on the wire.",
+            "if": {
+              "properties": { "is_password": { "const": true } },
+              "required": ["is_password"]
+            },
+            "then": {
+              "properties": { "text": { "const": "·····" } }
+            }
+          }
+        ]
+      }
+    },
+    "device_capability": {
+      "$ref": "https://schemas.aiblackbox.dev/android-control/v1/device_capability.json"
+    },
+    "screenshot": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "contentMediaType": "image/png",
+      "description": "OPTIONAL base64-encoded PNG from the silent AccessibilityService.takeScreenshot(). Present only when device_capability.hasScreenshot is true and the step needs vision (tree-blind surface or model-requested). Password regions are redaction-gated on the device before capture. Ephemeral — never persisted server-side beyond the loop step."
+    },
+    "timestamp": {
+      "type": ["integer", "string"],
+      "description": "When this observation was captured. Integer = epoch milliseconds (Android System.currentTimeMillis, the native form); string = RFC 3339 date-time. Used for staleness / re-observe decisions."
+    }
+  },
+  "required": ["msg", "ui_tree", "device_capability", "timestamp"],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "$comment": "A device that advertises hasScreenshot=false (e.g. XR) MUST NOT put a screenshot on the wire — the loop is tree-only there.",
+      "if": {
+        "properties": { "device_capability": { "properties": { "hasScreenshot": { "const": false } } } }
+      },
+      "then": {
+        "not": { "required": ["screenshot"] }
+      }
+    }
+  ]
+}
