@@ -7,18 +7,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * (C1) Proves the FAIL-SAFE autonomy posture the boot-survivable REMOTE `/action` path is
- * wired with — [AndroidPhoneController.M1_REMOTE_AUTONOMY_MODE] +
- * [AndroidPhoneController.M1_REMOTE_CONFIRM] — DENIES high-consequence actions while leaving
- * benign navigation/typing/open_app/scroll and non-high-consequence intents working.
+ * (C1) Proves the FAIL-SAFE autonomy PRIMITIVES — [AndroidPhoneController.M1_REMOTE_AUTONOMY_MODE]
+ * (PERMISSION) + [AndroidPhoneController.M1_REMOTE_CONFIRM] ([FailSafeDenyConfirmUi]) — DENY
+ * high-consequence actions while leaving benign navigation/typing/open_app/scroll and
+ * non-high-consequence intents working.
  *
- * These are the exact values [com.aiblackbox.portal.NotificationListenerFgs] constructs its
- * controller with (a single source of truth, so this test guards the wiring rather than a
- * re-declared constant). The actuator's gate is `if (shouldConfirm*(mode, …)) { if
- * (!confirm.confirm(…)) DENY }`; this test composes the real gate decisions with the real
- * remote confirm to prove the net outcome — the actuator firing itself is device-verified.
- *
- * TODO(M4): the real OverlayConfirmUi + per-device AutonomyStore replace this posture.
+ * As of **M4** the live `/action` wiring no longer uses these constants — it wires the real
+ * [com.aiblackbox.portal.overlay.OverlayConfirmUi] + per-device
+ * [com.aiblackbox.portal.data.local.AutonomyStore] (see `RemoteFrontierAutonomyWiringTest`). These
+ * remain the named fail-safe primitives (the correct SAFE fallback for any surface with no real
+ * confirm UI), and this test guards that they still behave as the SAFE deny-by-default posture.
+ * The actuator's gate is `if (shouldConfirm*(mode, …)) { if (!confirm.confirm(…)) DENY }`; this
+ * test composes the real gate decisions with the primitive to prove the net outcome.
  */
 class RemotePhoneControllerAutonomyTest {
 

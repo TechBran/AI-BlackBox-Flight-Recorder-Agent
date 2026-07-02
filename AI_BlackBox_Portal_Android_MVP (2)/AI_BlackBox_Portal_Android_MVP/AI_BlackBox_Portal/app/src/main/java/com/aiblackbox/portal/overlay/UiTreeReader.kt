@@ -260,6 +260,53 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
         }
 
         /**
+         * (C1, M4) Hit-test a COORDINATE `(x,y)` against the live tree and recover a
+         * redaction-safe LABEL for the autonomy gate — the label-recovery half of the
+         * coordinate-tap fail-safe ([com.aiblackbox.portal.overlay.Actuators.tap] `(x,y)`).
+         *
+         * DFS-walks the SAME actionable filter + [MAX_NODES] cap the reader/resolvers use,
+         * and returns the SMALLEST-area actionable node whose on-screen bounds CONTAIN the
+         * point (the most specific control under the finger — a "Delete" button nested in a
+         * clickable row wins over the row). The recovered label is the node's
+         * text-or-contentDescription, EXCEPT a password node contributes a `null` label (its
+         * text is never read — mirrors the redaction the reader/actuator enforce elsewhere).
+         *
+         * Returns [CoordinateHit.None] when [root] is null OR no actionable node within the
+         * cap contains the point (tree-blind / unlabeled space / beyond the cap) — the
+         * fail-safe the gate treats as high-consequence. Never throws (a malformed tree
+         * degrades to whatever was resolved so far, else None). The LABEL is copied out
+         * during the walk (never a live node reference), so [walkActionable]'s recycling of
+         * traversed nodes is safe.
+         */
+        internal fun labelAtPoint(root: AccessibilityNodeInfo?, x: Int, y: Int): CoordinateHit {
+            if (root == null) return CoordinateHit.None
+            var found = false
+            var bestArea = Long.MAX_VALUE
+            var bestLabel: String? = null
+            val counter = intArrayOf(0)
+            try {
+                walkActionable(root, counter) { node, _ ->
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    if (rect.contains(x, y)) {
+                        val area = rect.width().toLong() * rect.height().toLong()
+                        if (!found || area < bestArea) {
+                            found = true
+                            bestArea = area
+                            // Redaction: never read a password node's text into the label.
+                            val pw = isPasswordField(node.isPassword, node.inputType)
+                            bestLabel = if (pw) null else (node.text ?: node.contentDescription)?.toString()
+                        }
+                    }
+                    false // scan every actionable node; do not short-circuit
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "labelAtPoint: hit-test aborted (${e.javaClass.simpleName})")
+            }
+            return if (found) CoordinateHit.Node(bestLabel) else CoordinateHit.None
+        }
+
+        /**
          * THE one shared pre-order DFS over *actionable* nodes. Both
          * [readScreen] (collects every node) and [findActionableNode] (stops at
          * one) drive their behavior through this so the dense actionable index

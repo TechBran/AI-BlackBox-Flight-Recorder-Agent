@@ -16,6 +16,8 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 /**
@@ -49,8 +51,10 @@ import kotlin.coroutines.resume
  *
  * ## Fail SAFE
  * If the overlay permission isn't granted, the WindowManager is unavailable, the
- * window can't be added, or the coroutine is cancelled, [requestUserEntry] returns
- * `false` (declined) — a credential entry is NEVER silently treated as done.
+ * window can't be added, the coroutine is cancelled, or (I1, M4) the user does not
+ * finish within [DEFAULT_CONFIRM_TIMEOUT_MS] — the overlay is torn down and
+ * [requestUserEntry] returns `false` (declined). A credential entry is NEVER silently
+ * treated as done, and the handoff can never block its dispatch worker thread forever.
  *
  * ## Verification
  * Framework/device code (WindowManager, real views) — NOT unit-tested. Its
@@ -74,41 +78,58 @@ class OverlayCredentialHandoff(context: Context) : CredentialHandoff {
             Log.w(TAG, "overlay permission not granted -> declining credential handoff")
             return false
         }
-        return suspendCancellableCoroutine { cont ->
-            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            if (wm == null) {
-                cont.resume(false)
-                return@suspendCancellableCoroutine
-            }
+        val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: return false
 
-            // Built + added + removed on the main thread (View/WindowManager rule).
-            main.post {
-                var view: View? = null
-                // Guard so we resume exactly once and always tear the view down.
-                val finished = booleanArrayOf(false)
-                fun finish(entered: Boolean) {
-                    if (finished[0]) return
-                    finished[0] = true
-                    view?.let { v -> runCatching { wm.removeView(v) } }
-                    Log.i(TAG, "credential handoff: ${if (entered) "entered" else "cancelled"}")
-                    if (cont.isActive) cont.resume(entered)
+        // Hoisted to method scope so the Done/Cancel callbacks AND the I1 timeout teardown
+        // share ONE single-shot guard (resume-once + remove-view-once).
+        val finished = AtomicBoolean(false)
+        val viewRef = AtomicReference<View?>(null)
+        fun removeOverlay() {
+            main.post { viewRef.getAndSet(null)?.let { v -> runCatching { wm.removeView(v) } } }
+        }
+
+        // I1 (M4): a credential handoff blocks a worker thread EXACTLY like the confirm gate
+        // (Actuators.type on the remote path is driven via runBlocking on the dispatch worker),
+        // so it gets the same fail-safe timeout: if the user never finishes within
+        // DEFAULT_CONFIRM_TIMEOUT_MS, tear the overlay down and DECLINE (never silently entered).
+        return awaitConfirmOrDeny(
+            timeoutMs = DEFAULT_CONFIRM_TIMEOUT_MS,
+            onTimeout = {
+                if (finished.compareAndSet(false, true)) {
+                    Log.w(TAG, "credential handoff timed out -> declining")
+                    removeOverlay()
                 }
+            },
+        ) {
+            suspendCancellableCoroutine { cont ->
+                // Built + added + removed on the main thread (View/WindowManager rule).
+                main.post {
+                    fun finish(entered: Boolean) {
+                        if (!finished.compareAndSet(false, true)) return
+                        viewRef.getAndSet(null)?.let { v -> runCatching { wm.removeView(v) } }
+                        Log.i(TAG, "credential handoff: ${if (entered) "entered" else "cancelled"}")
+                        if (cont.isActive) cont.resume(entered)
+                    }
 
-                try {
-                    view = buildView(
-                        fieldDescription,
-                        onDone = { finish(true) },
-                        onCancel = { finish(false) },
-                    )
-                    wm.addView(view, layoutParams())
-                } catch (e: Exception) {
-                    Log.w(TAG, "failed to show credential overlay (${e.javaClass.simpleName}) -> declining")
-                    finish(false) // fail safe
-                    return@post
+                    try {
+                        val v = buildView(
+                            fieldDescription,
+                            onDone = { finish(true) },
+                            onCancel = { finish(false) },
+                        )
+                        viewRef.set(v)
+                        wm.addView(v, layoutParams())
+                    } catch (e: Exception) {
+                        Log.w(TAG, "failed to show credential overlay (${e.javaClass.simpleName}) -> declining")
+                        finish(false) // fail safe
+                        return@post
+                    }
+
+                    // If the coroutine is cancelled (turn stopped OR the I1 timeout), tear
+                    // down + DECLINE. Guarded by `finished`, so it never double-removes.
+                    cont.invokeOnCancellation { main.post { finish(false) } }
                 }
-
-                // If the coroutine is cancelled (turn stopped), tear down + DECLINE.
-                cont.invokeOnCancellation { main.post { finish(false) } }
             }
         }
     }

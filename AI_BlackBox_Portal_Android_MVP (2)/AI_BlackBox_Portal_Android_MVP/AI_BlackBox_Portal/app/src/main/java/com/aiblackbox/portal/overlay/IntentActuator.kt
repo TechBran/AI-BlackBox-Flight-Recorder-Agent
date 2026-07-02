@@ -56,14 +56,16 @@ import kotlinx.serialization.json.jsonPrimitive
  * `success=false, "unknown intent action: <name>"`; a missing required arg →
  * `success=false, "<key> required"`.
  *
- * ## Autonomy gate (IA-1) — applied to the only two "sends on your behalf" intents
- * `send_email` and `send_sms` are the sole [HIGH_CONSEQUENCE_INTENTS]. In
- * [AutonomyMode.PERMISSION] this actuator asks [confirm] (the user) BEFORE building
- * /firing them, via the pure [shouldConfirmIntent] + [describeIntent] decision; a
- * decline returns `"user declined"` without launching anything. In
- * [AutonomyMode.YOLO] nothing gates. Every other intent is either benign or
- * finalized by the user inside the launched UI (the dialer's Call button, the
- * calendar editor), so a separate confirm would be redundant over-gating.
+ * ## Autonomy gate (IA-1) — applied to the "acts on your behalf" intents
+ * THREE intents are [HIGH_CONSEQUENCE_INTENTS]: `send_email` and `send_sms` (they
+ * fire a prefilled outbound message to a recipient) plus `send_intent` (the guarded
+ * generic escape-hatch, high-consequence by default). In [AutonomyMode.PERMISSION]
+ * this actuator asks [confirm] (the user) BEFORE building/firing them, via the pure
+ * [shouldConfirmIntent] + [describeIntent] decision; a decline returns
+ * `"user declined"` without launching anything. In [AutonomyMode.YOLO] nothing gates.
+ * Every other intent is either benign or finalized by the user inside the launched UI
+ * (the dialer's Call button, the calendar editor), so a separate confirm would be
+ * redundant over-gating.
  *
  * ## Leak discipline (HARD — shared with [Actuators]/[ConfirmGate])
  * NOTHING sensitive is ever logged or placed into an [ActuatorResult.detail]: not

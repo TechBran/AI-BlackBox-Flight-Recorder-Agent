@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.overlay
 
 import android.accessibilityservice.AccessibilityService
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -146,10 +147,86 @@ class ActuatorsTest {
     // dispatchGesture / performGlobalAction are device-verified.
 
     @Test
-    fun `coordinate tap with no service returns not-enabled gracefully`() {
+    fun `coordinate tap with no service returns not-enabled gracefully`() = runBlocking {
+        // Default mode is YOLO, so the C1 coordinate gate does not fire; the labeler
+        // (default, null service) yields None but YOLO never confirms → proceeds to the
+        // service check → graceful not-enabled.
         val actuators = Actuators({ null })
         val r = actuators.tap(100, 200)
         assertFalse(r.success)
+        assertEquals("accessibility service not enabled", r.detail)
+    }
+
+    // ---- (C1, M4) coordinate-tap autonomy gate through the REAL tap(x,y) ---
+    //
+    // The gate runs BEFORE the service check, so a null-service Actuators with an
+    // INJECTED coordinateLabeler exercises the full gate: a denied high-consequence
+    // coordinate returns "user declined"; an allowed one passes the gate and then hits
+    // the graceful not-enabled (no service). This proves a coordinate_tap can NEVER
+    // bypass the confirm-gate (the compose-then-send bypass C1 closes).
+
+    /** Records whether the confirm seam was consulted + returns a fixed answer. */
+    private class RecordingConfirm(private val answer: Boolean) : ConfirmUi {
+        var calls = 0
+        var lastDescription: String? = null
+        override suspend fun confirm(description: String): Boolean {
+            calls++; lastDescription = description; return answer
+        }
+    }
+
+    private fun gatedActuators(
+        mode: AutonomyMode,
+        confirm: ConfirmUi,
+        hit: CoordinateHit,
+    ) = Actuators(
+        service = { null },
+        mode = { mode },
+        confirm = confirm,
+        coordinateLabeler = { _, _ -> hit },
+    )
+
+    @Test
+    fun `PERMISSION unresolved coordinate tap consults confirm and deny refuses`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false)
+        val r = gatedActuators(AutonomyMode.PERMISSION, confirm, CoordinateHit.None).tap(10, 20)
+        assertFalse(r.success)
+        assertEquals("a denied coordinate tap returns a clean user-declined", "user declined", r.detail)
+        assertEquals("confirm must be consulted for a tree-blind coordinate", 1, confirm.calls)
+        assertEquals("Tap this control", confirm.lastDescription)
+    }
+
+    @Test
+    fun `PERMISSION unresolved coordinate tap allow passes the gate`() = runBlocking {
+        val confirm = RecordingConfirm(answer = true)
+        val r = gatedActuators(AutonomyMode.PERMISSION, confirm, CoordinateHit.None).tap(10, 20)
+        assertEquals("confirm consulted", 1, confirm.calls)
+        // Allowed → past the gate → then the (null) service check → graceful not-enabled.
+        assertEquals("an allowed coordinate tap is NOT declined", "accessibility service not enabled", r.detail)
+    }
+
+    @Test
+    fun `PERMISSION dangerous-label coordinate tap consults confirm and deny refuses`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false)
+        val r = gatedActuators(AutonomyMode.PERMISSION, confirm, CoordinateHit.Node("Send")).tap(10, 20)
+        assertFalse(r.success)
+        assertEquals("user declined", r.detail)
+        assertEquals(1, confirm.calls)
+        assertEquals("Tap \"Send\"", confirm.lastDescription)
+    }
+
+    @Test
+    fun `PERMISSION benign-label coordinate tap does not consult confirm`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false) // would refuse IF consulted
+        val r = gatedActuators(AutonomyMode.PERMISSION, confirm, CoordinateHit.Node("Settings")).tap(10, 20)
+        assertEquals("a benign labeled coordinate must not gate", 0, confirm.calls)
+        assertEquals("accessibility service not enabled", r.detail) // passed gate, no service
+    }
+
+    @Test
+    fun `YOLO coordinate tap never consults confirm even when unresolved`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false) // would refuse IF consulted
+        val r = gatedActuators(AutonomyMode.YOLO, confirm, CoordinateHit.None).tap(10, 20)
+        assertEquals("YOLO fires a tree-blind coordinate unattended", 0, confirm.calls)
         assertEquals("accessibility service not enabled", r.detail)
     }
 

@@ -16,6 +16,8 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 /**
@@ -30,7 +32,7 @@ import kotlin.coroutines.resume
  * (SYSTEM_ALERT_WINDOW — already declared in the manifest), the same window type
  * the existing assistant bubble uses.
  *
- * ## Suspends until the user answers
+ * ## Suspends until the user answers — with an I1 fail-safe TIMEOUT
  * [confirm] adds the overlay, then suspends via [suspendCancellableCoroutine]
  * until a button is tapped (Allow → true, Deny → false), removing the view on the
  * main thread either way. If coroutine is cancelled, the view is torn down and the
@@ -38,6 +40,12 @@ import kotlin.coroutines.resume
  * the overlay permission isn't granted or the window can't be added, it also
  * fails SAFE by returning DENY (the actuator then reports "user declined" rather
  * than firing an un-confirmed high-consequence action).
+ *
+ * **(I1, M4) Timeout.** The suspend is wrapped in [awaitConfirmOrDeny] at
+ * [DEFAULT_CONFIRM_TIMEOUT_MS]: a PERMISSION prompt raised while NOBODY is at the
+ * device cannot block indefinitely (which would pin the NanoHTTPD worker thread that
+ * ran the remote dispatch and hang the cloud loop). On timeout it tears the overlay
+ * view down (no leak) and returns DENY.
  *
  * ## Leak discipline
  * [description] is built by [describeAction] and NEVER contains a typed secret or
@@ -65,37 +73,55 @@ class OverlayConfirmUi(context: Context) : ConfirmUi {
             Log.w(TAG, "overlay permission not granted -> denying high-consequence action")
             return false
         }
-        return suspendCancellableCoroutine { cont ->
-            val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            if (wm == null) {
-                cont.resume(false)
-                return@suspendCancellableCoroutine
-            }
+        val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: return false
 
-            // Built + added + removed on the main thread (View/WindowManager rule).
-            main.post {
-                var view: View? = null
-                // Guard so we resume exactly once and always tear the view down.
-                val finished = booleanArrayOf(false)
-                fun finish(allowed: Boolean) {
-                    if (finished[0]) return
-                    finished[0] = true
-                    view?.let { v -> runCatching { wm.removeView(v) } }
-                    Log.i(TAG, "autonomy confirm: ${if (allowed) "allowed" else "denied"}")
-                    if (cont.isActive) cont.resume(allowed)
+        // Hoisted to method scope so BOTH the button/cancel callbacks AND the I1 fail-safe
+        // timeout teardown share ONE single-shot guard (resume-once + remove-view-once).
+        val finished = AtomicBoolean(false)
+        val viewRef = AtomicReference<View?>(null)
+        fun removeOverlay() {
+            main.post { viewRef.getAndSet(null)?.let { v -> runCatching { wm.removeView(v) } } }
+        }
+
+        // I1 (M4): a PERMISSION confirm with nobody at the device must NOT block forever
+        // (it would pin the NanoHTTPD worker thread that ran the dispatch + hang the cloud
+        // loop). awaitConfirmOrDeny caps the wait at DEFAULT_CONFIRM_TIMEOUT_MS → on timeout
+        // it tears the overlay down (onTimeout) and DENIES. The existing missing-overlay /
+        // exception / cancel DENY paths are preserved.
+        return awaitConfirmOrDeny(
+            timeoutMs = DEFAULT_CONFIRM_TIMEOUT_MS,
+            onTimeout = {
+                if (finished.compareAndSet(false, true)) {
+                    Log.w(TAG, "autonomy confirm timed out -> denying high-consequence action")
+                    removeOverlay()
                 }
+            },
+        ) {
+            suspendCancellableCoroutine { cont ->
+                // Built + added + removed on the main thread (View/WindowManager rule).
+                main.post {
+                    fun finish(allowed: Boolean) {
+                        if (!finished.compareAndSet(false, true)) return
+                        viewRef.getAndSet(null)?.let { v -> runCatching { wm.removeView(v) } }
+                        Log.i(TAG, "autonomy confirm: ${if (allowed) "allowed" else "denied"}")
+                        if (cont.isActive) cont.resume(allowed)
+                    }
 
-                try {
-                    view = buildView(description, onAllow = { finish(true) }, onDeny = { finish(false) })
-                    wm.addView(view, layoutParams())
-                } catch (e: Exception) {
-                    Log.w(TAG, "failed to show confirm overlay (${e.javaClass.simpleName}) -> denying")
-                    finish(false) // fail safe
-                    return@post
+                    try {
+                        val v = buildView(description, onAllow = { finish(true) }, onDeny = { finish(false) })
+                        viewRef.set(v)
+                        wm.addView(v, layoutParams())
+                    } catch (e: Exception) {
+                        Log.w(TAG, "failed to show confirm overlay (${e.javaClass.simpleName}) -> denying")
+                        finish(false) // fail safe
+                        return@post
+                    }
+
+                    // If the coroutine is cancelled (turn stopped OR the I1 timeout), tear
+                    // down + DENY. Guarded by `finished`, so it never double-removes.
+                    cont.invokeOnCancellation { main.post { finish(false) } }
                 }
-
-                // If the coroutine is cancelled (turn stopped), tear down + DENY.
-                cont.invokeOnCancellation { main.post { finish(false) } }
             }
         }
     }

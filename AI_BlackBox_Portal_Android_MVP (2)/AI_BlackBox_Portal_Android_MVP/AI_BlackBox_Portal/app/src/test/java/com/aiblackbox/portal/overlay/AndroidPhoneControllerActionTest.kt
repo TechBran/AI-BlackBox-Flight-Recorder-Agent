@@ -54,6 +54,61 @@ class AndroidPhoneControllerActionTest {
         assertEquals("accessibility service not enabled", detail(b))
     }
 
+    // ---- (C1, M4) coordinate taps + degenerate swipes route through the GATE ----
+
+    /** Records whether the confirm seam was consulted; returns a fixed answer. */
+    private class RecordingConfirm(private val answer: Boolean) : ConfirmUi {
+        var calls = 0
+        override suspend fun confirm(description: String): Boolean { calls++; return answer }
+    }
+
+    /** A controller whose gesture actuators carry a PERMISSION posture + an injected hit-test. */
+    private fun gatedController(
+        confirm: ConfirmUi,
+        hit: CoordinateHit,
+        mode: AutonomyMode = AutonomyMode.PERMISSION,
+    ) = AndroidPhoneController(
+        UiTreeReader { null },
+        Actuators(service = { null }, mode = { mode }, confirm = confirm, coordinateLabeler = { _, _ -> hit }),
+        IntentActuator({ null }),
+    )
+
+    @Test fun `coordinate_tap in PERMISSION consults the confirm gate — deny refuses`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false)
+        val r = gatedController(confirm, CoordinateHit.None)
+            .dispatch("coordinate_tap", buildJsonObject { put("x", 100); put("y", 200) })
+        assertFalse(r.success)
+        assertEquals("user declined", detail(r))
+        assertEquals("a coordinate_tap must be gated (no compose-then-send bypass)", 1, confirm.calls)
+    }
+
+    @Test fun `a degenerate coordinate_swipe routes through the gated coordinate tap`() = runBlocking {
+        // start == end is a tap-equivalent, not a drag → it must go through the GATED tap.
+        val confirm = RecordingConfirm(answer = false)
+        val r = gatedController(confirm, CoordinateHit.None)
+            .dispatch("coordinate_swipe", buildJsonObject { put("x", 5); put("y", 5); put("x2", 5); put("y2", 5) })
+        assertFalse(r.success)
+        assertEquals("user declined", detail(r))
+        assertEquals("a degenerate swipe must not bypass the tap gate", 1, confirm.calls)
+    }
+
+    @Test fun `a genuine drag coordinate_swipe does NOT gate`() = runBlocking {
+        // start != end → a real scroll/pan → low-risk → ungated (reaches the swipe, no service).
+        val confirm = RecordingConfirm(answer = false)
+        val r = gatedController(confirm, CoordinateHit.None)
+            .dispatch("coordinate_swipe", buildJsonObject { put("x", 1); put("y", 2); put("x2", 9); put("y2", 9) })
+        assertEquals("accessibility service not enabled", detail(r))
+        assertEquals("a genuine drag must not gate", 0, confirm.calls)
+    }
+
+    @Test fun `YOLO coordinate_tap does not gate`() = runBlocking {
+        val confirm = RecordingConfirm(answer = false) // would refuse IF consulted
+        val r = gatedController(confirm, CoordinateHit.None, AutonomyMode.YOLO)
+            .dispatch("coordinate_tap", buildJsonObject { put("x", 100); put("y", 200) })
+        assertEquals("accessibility service not enabled", detail(r))
+        assertEquals("YOLO must fire a coordinate tap unattended", 0, confirm.calls)
+    }
+
     @Test fun `recents reaches the actuator`() = runBlocking {
         val r = controller().dispatch("recents", JsonObject(emptyMap()))
         assertFalse(r.success)

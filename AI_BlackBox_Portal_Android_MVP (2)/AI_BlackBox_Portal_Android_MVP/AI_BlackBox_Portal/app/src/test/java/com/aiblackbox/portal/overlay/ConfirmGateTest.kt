@@ -117,6 +117,122 @@ class ConfirmGateTest {
         assertFalse(isHighConsequence("type", null, isPasswordTarget = false))
     }
 
+    // ---- (C1, M4) non-English high-consequence keywords -------------------
+
+    @Test
+    fun `tap on common non-English send pay delete buy labels is high-consequence`() {
+        // I2 partial mitigation: a handful of localized verbs are covered (substring,
+        // case-insensitive) so a Spanish/French/German/Italian commit button still gates.
+        val labels = listOf(
+            "Enviar", "Envoyer", "Senden", "Invia",          // send
+            "Pagar", "Payer", "Bezahlen", "Pagare",          // pay (pagare ⊃ pagar)
+            "Eliminar", "Borrar", "Supprimer", "Löschen",    // delete
+            "Comprar", "Acheter", "Kaufen",                  // buy
+            "Confirmar", "Confirmer", "Bestätigen",          // confirm (romance ⊃ "confirm")
+        )
+        for (label in labels) {
+            assertTrue(
+                "tap \"$label\" should be high-consequence (localized keyword)",
+                isHighConsequence("tap", label, isPasswordTarget = false),
+            )
+        }
+    }
+
+    @Test
+    fun `documented residual — an uncovered-locale label can still slip the keyword gate`() {
+        // KNOWN GAP (I2): the localized set is partial, so e.g. Japanese "送信" (send) or
+        // Polish "Wyślij" (send) are NOT caught — a LABELED element tap in an uncovered
+        // locale under-gates. This asserts the documented limitation (not a bug) so the
+        // gap is visible; the C1 coordinate fail-safe covers the tree-blind path instead.
+        assertFalse(isHighConsequence("tap", "送信", isPasswordTarget = false))
+        assertFalse(isHighConsequence("tap", "Wyślij", isPasswordTarget = false))
+    }
+
+    // ---- (C1, M4) isHighConsequenceCoordinateTap: the coordinate fail-safe ----
+
+    @Test
+    fun `an unresolved coordinate is high-consequence (fail-safe)`() {
+        // Tree-blind: (x,y) resolved to NO node → confirm by default.
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.None))
+    }
+
+    @Test
+    fun `a resolved-but-unlabeled coordinate is high-consequence (fail-safe)`() {
+        // Icon-only / password / blank-label node → still confirm by default.
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node(null)))
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("")))
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("   ")))
+    }
+
+    @Test
+    fun `a coordinate resolving to a dangerous label is high-consequence`() {
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("Send")))
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("Pay $42.00")))
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("Delete account")))
+        assertTrue(isHighConsequenceCoordinateTap(CoordinateHit.Node("Enviar"))) // localized too
+    }
+
+    @Test
+    fun `a coordinate resolving to a clearly-benign label is not high-consequence`() {
+        // The ONLY case a coordinate tap may skip the confirm: it hit-tested to a benign
+        // labeled element.
+        for (label in listOf("Settings", "Back", "Cancel", "John Smith", "Search")) {
+            assertFalse(
+                "coordinate tap on benign \"$label\" should not gate",
+                isHighConsequenceCoordinateTap(CoordinateHit.Node(label)),
+            )
+        }
+    }
+
+    // ---- (C1, M4) the coordinate GATE composition (mirrors Actuators.coordinateGate) ----
+
+    /** The exact coordinate gate the actuator runs, expressed against the pure fns + seam. */
+    private suspend fun coordinateGateAllows(mode: AutonomyMode, hit: CoordinateHit, ui: ConfirmUi): Boolean {
+        val hc = isHighConsequenceCoordinateTap(hit)
+        if (shouldConfirm(mode, hc)) {
+            return ui.confirm(describeAction("tap", (hit as? CoordinateHit.Node)?.label))
+        }
+        return true
+    }
+
+    @Test
+    fun `PERMISSION + unresolved coordinate consults confirm — deny refuses`() = runBlocking {
+        val ui = FakeConfirmUi(answer = false)
+        val allowed = coordinateGateAllows(AutonomyMode.PERMISSION, CoordinateHit.None, ui)
+        assertFalse("a denied unresolved coordinate tap must be refused", allowed)
+        assertEquals("confirm must be consulted for a tree-blind coordinate", 1, ui.calls)
+        assertEquals("Tap this control", ui.lastDescription)
+    }
+
+    @Test
+    fun `PERMISSION + unresolved coordinate consults confirm — allow fires`() = runBlocking {
+        val ui = FakeConfirmUi(answer = true)
+        assertTrue(coordinateGateAllows(AutonomyMode.PERMISSION, CoordinateHit.None, ui))
+        assertEquals(1, ui.calls)
+    }
+
+    @Test
+    fun `PERMISSION + dangerous coordinate label surfaces the label in the confirm`() = runBlocking {
+        val ui = FakeConfirmUi(answer = false)
+        assertFalse(coordinateGateAllows(AutonomyMode.PERMISSION, CoordinateHit.Node("Send"), ui))
+        assertEquals(1, ui.calls)
+        assertEquals("Tap \"Send\"", ui.lastDescription)
+    }
+
+    @Test
+    fun `PERMISSION + benign coordinate label never consults confirm`() = runBlocking {
+        val ui = FakeConfirmUi(answer = false) // would refuse IF consulted
+        assertTrue(coordinateGateAllows(AutonomyMode.PERMISSION, CoordinateHit.Node("Settings"), ui))
+        assertEquals("a benign labeled coordinate must not gate", 0, ui.calls)
+    }
+
+    @Test
+    fun `YOLO + unresolved coordinate never consults confirm`() = runBlocking {
+        val ui = FakeConfirmUi(answer = false) // would refuse IF consulted
+        assertTrue(coordinateGateAllows(AutonomyMode.YOLO, CoordinateHit.None, ui))
+        assertEquals("YOLO fires even a tree-blind coordinate unattended", 0, ui.calls)
+    }
+
     // ---- shouldConfirm: the mode gate -------------------------------------
 
     @Test

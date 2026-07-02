@@ -68,12 +68,19 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   into the field when the model targets a password field (Task 4.7; prod:
  *   [OverlayCredentialHandoff]). Default [AutoDeclineCredentialHandoff] auto-declines,
  *   so an un-wired call-site fails SAFE (password entry never silently proceeds).
+ * @param coordinateLabeler (C1, M4) recovers a redaction-safe LABEL for a COORDINATE
+ *   tap by hit-testing `(x,y)` against the live a11y tree (prod default:
+ *   [UiTreeReader.labelAtPoint] over [service]). Returns [CoordinateHit.None] when the
+ *   coordinate resolves to no node — the FAIL-SAFE the coordinate gate treats as
+ *   high-consequence (confirm-by-default in PERMISSION). Injected as a fake in unit
+ *   tests to exercise the resolved-benign / resolved-dangerous / unresolved paths.
  */
 class Actuators(
     private val service: () -> BlackBoxA11yService?,
     private val mode: () -> AutonomyMode = { AutonomyMode.YOLO },
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
     private val credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
+    private val coordinateLabeler: (Int, Int) -> CoordinateHit = defaultCoordinateLabeler(service),
 ) {
 
     /**
@@ -151,14 +158,26 @@ class Actuators(
      * previously-private [dispatchTap] (which existed only as the internal fallback inside
      * [tap] `(NodeRef)`).
      *
-     * There is NO resolved node here, so there is no semantic ACTION_CLICK and no
-     * autonomy label to gate on (coordinate taps are the tree-blind fallback; the
-     * high-consequence confirm-gate wires onto the remote path in M4). Coordinate
-     * capability itself is gated UPSTREAM (the frontier dispatcher skips coordinate
-     * actions when `supportsCoordinateGesture=false`, e.g. XR). Never throws; a
-     * disabled service → `accessibility service not enabled`.
+     * **Autonomy gate (C1, M4) — a coordinate tap CANNOT bypass the confirm-gate.** Unlike
+     * an element tap there is no resolved node handed in, so first we RECOVER a label by
+     * hit-testing `(x,y)` against the live a11y tree ([coordinateLabeler] →
+     * [UiTreeReader.labelAtPoint]). The pure [isHighConsequenceCoordinateTap] then decides:
+     * a coordinate that resolves to a clearly-benign labeled element may skip the confirm,
+     * but an UNRESOLVED / unlabeled / dangerous coordinate is high-consequence and CONFIRMS
+     * in [AutonomyMode.PERMISSION] (fires unattended in YOLO — the same [shouldConfirm] mode
+     * rule as every gate). A DENIED tap returns a clean `success=false, "user declined"` and
+     * never actuates.
+     *
+     * Coordinate capability itself is ALSO gated UPSTREAM (the frontier dispatcher skips
+     * coordinate actions when `supportsCoordinateGesture=false`, e.g. XR) — that XR gate is
+     * unchanged and independent of this autonomy gate. Never throws; a disabled service →
+     * `accessibility service not enabled`.
      */
-    fun tap(x: Int, y: Int): ActuatorResult {
+    suspend fun tap(x: Int, y: Int): ActuatorResult {
+        // C1: recover a label + gate BEFORE the service check, so the confirm-gate is
+        // consulted even for an unresolved/tree-blind coordinate (fail-safe high-consequence).
+        coordinateGate(coordinateLabeler(x, y))?.let { return it }
+
         val svc = service() ?: return notEnabled()
         return try {
             val ok = dispatchTap(svc, x, y)
@@ -451,6 +470,34 @@ class Actuators(
         return ActuatorResult(false, "user declined")
     }
 
+    /**
+     * (C1, M4) The COORDINATE-tap autonomy gate. Given the [hit] recovered from
+     * hit-testing `(x,y)`, decides via the pure [isHighConsequenceCoordinateTap] +
+     * [shouldConfirm] whether to ask the user.
+     *
+     * Returns:
+     *  - `null` → proceed (benign labeled coordinate, or YOLO, or the user allowed it).
+     *  - a non-null [ActuatorResult] (`success=false, "user declined"`) → ABORT; the caller
+     *    returns it without actuating.
+     *
+     * The confirm message is [describeAction] `("tap", label)`: for an unresolved/unlabeled
+     * coordinate the label is null → generic "Tap this control"; a recovered dangerous label
+     * surfaces `Tap "<label>"`. A password node contributes a null label upstream
+     * ([UiTreeReader.labelAtPoint]), so no secret can reach the message.
+     */
+    private suspend fun coordinateGate(hit: CoordinateHit): ActuatorResult? {
+        val hc = isHighConsequenceCoordinateTap(hit)
+        if (!shouldConfirm(mode(), hc)) return null
+        val label = (hit as? CoordinateHit.Node)?.label
+        val allowed = confirm.confirm(describeAction("tap", label))
+        if (allowed) {
+            Log.i(TAG, "autonomy: coordinate tap allowed by user")
+            return null
+        }
+        Log.i(TAG, "autonomy: coordinate tap declined by user")
+        return ActuatorResult(false, "user declined")
+    }
+
     private fun globalAction(name: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
         val action = globalActionFor(name) ?: return ActuatorResult(false, "unknown global action: $name")
@@ -551,6 +598,22 @@ class Actuators(
 
 /** A small outcome the agent loop (4.5) feeds back to the model. */
 data class ActuatorResult(val success: Boolean, val detail: String)
+
+/**
+ * (C1, M4) The production coordinate LABELER: hit-tests `(x,y)` against the live a11y
+ * tree via [UiTreeReader.labelAtPoint] to recover a redaction-safe label for the
+ * coordinate-tap gate. A null [service] (accessibility off) → [CoordinateHit.None], which
+ * the gate treats as high-consequence — so a coordinate tap with the service disabled still
+ * fails SAFE (confirm-by-default in PERMISSION) rather than skipping the gate. Top-level +
+ * private so the [Actuators] constructor's default can reference the `service` seam; unit
+ * tests inject their own labeler instead.
+ */
+private fun defaultCoordinateLabeler(
+    service: () -> BlackBoxA11yService?,
+): (Int, Int) -> CoordinateHit = { x, y ->
+    val svc = service()
+    if (svc == null) CoordinateHit.None else UiTreeReader.labelAtPoint(svc.rootInActiveWindow, x, y)
+}
 
 /**
  * How a tap/type target is ADDRESSED. The model gives us either the stable

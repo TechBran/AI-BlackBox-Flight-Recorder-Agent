@@ -22,10 +22,13 @@ import com.aiblackbox.portal.data.remote.RemoteActionDispatcher
 import com.aiblackbox.portal.data.remote.RemoteControlServer
 import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
+import com.aiblackbox.portal.data.local.AutonomyStore
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.NotificationSubscriptionStore
 import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.DeviceCapabilities
+import com.aiblackbox.portal.overlay.OverlayConfirmUi
+import com.aiblackbox.portal.overlay.OverlayCredentialHandoff
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
@@ -84,22 +87,30 @@ class NotificationListenerFgs : Service() {
      * so it is safe to always wire) with the live [DeviceCapabilities] for the coordinate
      * gate.
      *
-     * (C1) FAIL-SAFE autonomy on the boot-survivable REMOTE path: it is constructed with
-     * [AndroidPhoneController.M1_REMOTE_AUTONOMY_MODE] ([AutonomyMode.PERMISSION]) +
-     * [AndroidPhoneController.M1_REMOTE_CONFIRM] ([com.aiblackbox.portal.overlay.FailSafeDenyConfirmUi]),
-     * NOT the un-wired `{ YOLO }` + auto-approve defaults — so high-consequence actions
-     * (send_email/send_sms/send_intent; send/pay/delete/post/confirm taps) are DENIED here,
-     * while safe navigation/typing/open_app/scroll/read + benign intents still work. Credential
-     * handoff stays fail-safe (the `fromService` [AutoDeclineCredentialHandoff] default).
-     * TODO(M4): replace with the real OverlayConfirmUi + per-device AutonomyStore.
+     * (M4) SAFETY & AUTONOMY on the boot-survivable REMOTE `/action` path: the controller is
+     * wired with the REAL smart gates rather than the M1 blanket-deny stopgap. Autonomy comes
+     * from the target device's per-device [AutonomyStore] (default [AutonomyMode.PERMISSION] —
+     * SAFE; read fresh per dispatch so the latest user setting applies). A high-consequence
+     * action (send/pay/delete/post; send_email/send_sms/send_intent) surfaces the real
+     * [OverlayConfirmUi] — a SYSTEM-overlay Allow/Deny prompt ON THIS device — which fails-safe
+     * to DENY on timeout OR when the overlay permission is missing (never silently allows). A
+     * password/payment field routes to [OverlayCredentialHandoff] (the user types the secret
+     * directly; the model's text is discarded). Benign navigation/typing/open_app/scroll never
+     * gate. In YOLO mode the owner has opted into unattended high-consequence actions.
+     *
+     * Built lazily so it exists only when the listener actually binds; [AndroidPhoneController]
+     * degrades gracefully to "accessibility service not enabled" when a11y is off, so it is
+     * safe to always wire.
      */
     private val actionDispatcher: RemoteActionDispatcher by lazy {
         val appContext = applicationContext
+        val autonomy = AutonomyStore.fromContext(appContext)
         PhoneActionDispatcher(
             controller = AndroidPhoneController.fromService(
                 appContext,
-                mode = AndroidPhoneController.M1_REMOTE_AUTONOMY_MODE,
-                confirm = AndroidPhoneController.M1_REMOTE_CONFIRM,
+                mode = { autonomy.load() },
+                confirm = OverlayConfirmUi(appContext),
+                credentialHandoff = OverlayCredentialHandoff(appContext),
             ),
             capability = { DeviceCapabilities.detect(appContext) },
             // observationProvider intentionally null on the /action follow-on: /stream is the

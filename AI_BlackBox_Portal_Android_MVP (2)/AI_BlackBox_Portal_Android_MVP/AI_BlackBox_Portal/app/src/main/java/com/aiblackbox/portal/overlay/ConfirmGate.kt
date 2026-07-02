@@ -1,5 +1,7 @@
 package com.aiblackbox.portal.overlay
 
+import kotlinx.coroutines.withTimeoutOrNull
+
 /**
  * The AUTONOMY CONFIRM-GATE (Phase 4, Task 4.6) — the core SAFETY control for the
  * on-device phone-control agent.
@@ -78,6 +80,41 @@ internal object FailSafeDenyConfirmUi : ConfirmUi {
 }
 
 /**
+ * (I1, M4) The default fail-safe TIMEOUT for a blocking user confirmation / credential
+ * handoff — the window a PERMISSION prompt may wait for an answer before it DENIES and
+ * dismisses itself.
+ */
+const val DEFAULT_CONFIRM_TIMEOUT_MS: Long = 30_000L
+
+/**
+ * (I1, M4) The fail-safe TIMEOUT primitive shared by [OverlayConfirmUi] +
+ * [OverlayCredentialHandoff].
+ *
+ * Awaits [awaitAnswer] (which suspends until the user taps Allow/Deny or Done/Cancel), but
+ * if no answer arrives within [timeoutMs], DENIES (returns `false`) and invokes [onTimeout]
+ * to tear the overlay down. Without this, a PERMISSION prompt raised while nobody is at the
+ * device would block forever — pinning the NanoHTTPD worker thread that ran the remote
+ * dispatch and hanging the cloud loop indefinitely — and would leak the overlay view.
+ *
+ * [onTimeout] is invoked EXACTLY once and ONLY on the timeout path (the normal answer path
+ * dismisses its own overlay); it must be idempotent/safe. On timeout [withTimeoutOrNull]
+ * cancels [awaitAnswer], so a [kotlinx.coroutines.suspendCancellableCoroutine]-based
+ * `awaitAnswer` ALSO gets its `invokeOnCancellation` teardown — [onTimeout] is the explicit,
+ * testable belt-and-suspenders (both guarded single-shot). Extracted top-level so the
+ * deny-on-timeout + teardown-once contract is JVM-unit-testable without WindowManager/Looper.
+ */
+suspend fun awaitConfirmOrDeny(
+    timeoutMs: Long,
+    onTimeout: () -> Unit,
+    awaitAnswer: suspend () -> Boolean,
+): Boolean {
+    val answer = withTimeoutOrNull(timeoutMs) { awaitAnswer() }
+    if (answer != null) return answer
+    onTimeout()   // fail-safe: tear the overlay down; no leak.
+    return false  // DENY — nobody answered in time.
+}
+
+/**
  * Keywords that, when they appear in a TAP target's label, mark the tap as
  * high-consequence: it commits, sends, spends, destroys, installs, or grants.
  *
@@ -88,12 +125,42 @@ internal object FailSafeDenyConfirmUi : ConfirmUi {
  * navigation ("Back", "Settings", a contact name) gates (over-gating trains the
  * user to rubber-stamp). "OK" is intentionally absent: a bare acknowledgement
  * does not commit; genuinely committing buttons are labeled Confirm/Submit/Pay.
+ *
+ * ## KNOWN RESIDUAL RISK — the LOCALIZATION / ICON gap (I2, M4 security review)
+ * This classification is KEYWORD- and LABEL-based, and the keyword set is only
+ * partially localized. Two under-gating surfaces remain for a LABELED ELEMENT tap
+ * (`isHighConsequence`) in [AutonomyMode.PERMISSION]:
+ *  1. a high-consequence button whose caption is in a locale/word NOT covered by
+ *     the list below (this is only a partial, best-effort set — it is NOT a
+ *     substitute for real NLP), and
+ *  2. an ICON-ONLY button with no text/contentDescription label at all.
+ * In both cases the keyword gate can MISS and the tap fires unconfirmed in
+ * PERMISSION mode. This is a DOCUMENTED, accepted v1 limitation — a full
+ * multilingual/semantic classifier is out of scope; we mitigate cheaply by
+ * carrying a handful of common non-English verbs below.
+ *
+ * IMPORTANT: this gap is materially NARROWED (not for element taps, but for the
+ * tree-blind path) by the C1 coordinate fail-safe: a COORDINATE / unlabeled /
+ * unresolved tap does NOT rely on this keyword set — it confirms BY DEFAULT in
+ * PERMISSION (see [isHighConsequenceCoordinateTap]). So the residual exposure is
+ * specifically a *labeled* element tap whose (possibly non-English) caption dodges
+ * these keywords.
  */
 private val HIGH_CONSEQUENCE_TAP_KEYWORDS: List<String> = listOf(
+    // English.
     "send", "post", "pay", "buy", "purchase", "order", "delete", "remove",
     "uninstall", "install", "confirm", "submit", "transfer", "allow", "grant",
     "accept", "agree", "sign in", "signin", "log in", "login", "checkout",
     "place order",
+    // Common non-English send/pay/delete/buy/confirm verbs (I2 — partial, best-effort
+    // mitigation; substring-matched like the English set). Romance "confirmar"/
+    // "confirmer" are already caught by "confirm". NOT exhaustive — see the
+    // localization-gap note above.
+    "enviar", "envoyer", "senden", "invia",             // send  (es/pt, fr, de, it)
+    "pagar", "payer", "bezahlen",                        // pay   (es/pt/it, fr, de)
+    "eliminar", "borrar", "supprimer", "löschen",        // delete (es, es, fr, de)
+    "comprar", "acheter", "kaufen",                      // buy   (es/pt, fr, de)
+    "bestätigen",                                        // confirm (de)
 )
 
 /**
@@ -126,6 +193,54 @@ fun isHighConsequence(action: String, targetLabel: String?, isPasswordTarget: Bo
     }
     // read_screen / back / home / swipe / scroll / open_app — never gate.
     return false
+}
+
+/**
+ * The outcome of hit-testing a COORDINATE `(x,y)` against the live accessibility tree,
+ * for the C1 coordinate-tap gate. Produced by
+ * [com.aiblackbox.portal.overlay.UiTreeReader.labelAtPoint] and consumed by
+ * [isHighConsequenceCoordinateTap].
+ */
+sealed interface CoordinateHit {
+    /**
+     * `(x,y)` hit-tested to a live actionable node carrying this NON-password [label]
+     * (the same text-or-contentDescription label an element tap gates on; `null`/blank
+     * when the resolved node is a password field or has no readable label). A password
+     * node's text is NEVER placed here — the recovery mirrors the actuator's redaction.
+     */
+    data class Node(val label: String?) : CoordinateHit
+
+    /**
+     * `(x,y)` resolved to NO actionable node — the coordinate is tree-blind / lands on
+     * unlabeled space / falls beyond the read cap. FAIL-SAFE: treated as high-consequence.
+     */
+    data object None : CoordinateHit
+}
+
+/**
+ * PURE (C1, M4): is this COORDINATE tap high-consequence (→ confirm in PERMISSION)?
+ *
+ * A coordinate tap is the tree-blind actuation path, so its fail-safe default INVERTS the
+ * element-tap rule ([isHighConsequence], where an unlabeled tap is treated as benign to
+ * avoid over-gating a control the model addressed by a resolved node). Here we cannot know
+ * what a raw pixel commits, so:
+ *  - [CoordinateHit.None] (unresolved / tree-blind) → **true** (confirm by default).
+ *  - [CoordinateHit.Node] with a null/blank label (resolved but unlabeled, e.g. an
+ *    icon-only or password node) → **true** (still confirm by default).
+ *  - [CoordinateHit.Node] with a label that trips [HIGH_CONSEQUENCE_TAP_KEYWORDS] → **true**.
+ *  - [CoordinateHit.Node] with a clearly-BENIGN label → **false** (may skip the confirm).
+ *
+ * Net effect: a benign coordinate tap on a clearly-benign labeled element may fire without a
+ * prompt, but an unlabeled / tree-blind / dangerous coordinate ALWAYS confirms in PERMISSION
+ * (and, like every gate, still fires unattended in YOLO — [shouldConfirm] handles the mode).
+ */
+fun isHighConsequenceCoordinateTap(hit: CoordinateHit): Boolean = when (hit) {
+    is CoordinateHit.None -> true
+    is CoordinateHit.Node -> {
+        val label = hit.label?.trim()?.lowercase()
+        if (label.isNullOrBlank()) true
+        else HIGH_CONSEQUENCE_TAP_KEYWORDS.any { keyword -> label.contains(keyword) }
+    }
 }
 
 /**

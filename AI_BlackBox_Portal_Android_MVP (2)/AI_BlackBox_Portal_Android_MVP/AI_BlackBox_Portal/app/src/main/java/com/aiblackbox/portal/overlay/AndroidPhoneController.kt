@@ -129,6 +129,9 @@ class AndroidPhoneController(
                 // (M1.3) coordinate_tap — expose the coordinate tap path (the frontier
                 // `coordinate_tap` action). Coordinates are absolute screen pixels; the
                 // frontier dispatcher already gated coordinate support (skips on XR).
+                // (C1, M4) actuators.tap(x,y) is now the GATED coordinate tap: it recovers a
+                // label by hit-testing (x,y) and confirms-by-default on an unlabeled/tree-
+                // blind/dangerous coordinate in PERMISSION — no compose-then-send bypass.
                 "coordinate_tap" -> {
                     val x = intArg(args, "x")
                         ?: return ToolResult(false, JsonPrimitive("x required"))
@@ -149,11 +152,19 @@ class AndroidPhoneController(
                         ?: return ToolResult(false, JsonPrimitive("x2 required"))
                     val y2 = intArg(args, "y2")
                         ?: return ToolResult(false, JsonPrimitive("y2 required"))
-                    val duration = intArg(args, "duration_ms")
-                    if (duration != null) {
-                        actuators.swipe(x, y, x2, y2, duration.toLong()).toToolResult()
+                    // (C1, M4) A DEGENERATE swipe (start == end) is a coordinate TAP-equivalent,
+                    // not a drag — route it through the GATED coordinate tap so it can't be used
+                    // to fire an unconfirmed high-consequence tap disguised as a swipe. A genuine
+                    // drag (start != end) is a low-risk scroll/pan and stays ungated.
+                    if (x == x2 && y == y2) {
+                        actuators.tap(x, y).toToolResult()
                     } else {
-                        actuators.swipe(x, y, x2, y2).toToolResult()
+                        val duration = intArg(args, "duration_ms")
+                        if (duration != null) {
+                            actuators.swipe(x, y, x2, y2, duration.toLong()).toToolResult()
+                        } else {
+                            actuators.swipe(x, y, x2, y2).toToolResult()
+                        }
                     }
                 }
 
@@ -181,26 +192,21 @@ class AndroidPhoneController(
     companion object {
 
         /**
-         * (M1 / C1) The FAIL-SAFE autonomy posture for the boot-survivable REMOTE `/action`
-         * path ([com.aiblackbox.portal.data.remote.PhoneActionDispatcher], wired in
-         * [com.aiblackbox.portal.NotificationListenerFgs]). It is the SAFE default the remote
-         * dispatcher MUST construct its controller with — NOT the un-wired [fromService]
-         * defaults (`{ YOLO }` + [AutoApproveConfirmUi]), which would fire high-consequence
-         * actions with no confirmation.
+         * (M1 / C1 — SUPERSEDED by M4) The fail-safe autonomy posture the boot-survivable REMOTE
+         * `/action` path used as a STOPGAP before the real gates were wired: PERMISSION mode +
+         * [FailSafeDenyConfirmUi] (every high-consequence confirmation resolves to DENY).
          *
-         * [M1_REMOTE_AUTONOMY_MODE] is [AutonomyMode.PERMISSION] (so high-consequence actions
-         * gate) and [M1_REMOTE_CONFIRM] is [FailSafeDenyConfirmUi] (so every gated confirmation
-         * resolves to DENY). Net effect: safe navigation/typing/open_app/scroll/read + benign
-         * intents WORK (the M2 loop can drive), while send_email/send_sms/send_intent and
-         * send/pay/delete/post/confirm taps are REFUSED. Credential handoff is separately
-         * fail-safe ([AutoDeclineCredentialHandoff], the [fromService] default).
-         *
-         * TODO(M4): replace both with the real [OverlayConfirmUi] + an AutonomyStore-backed
-         * per-device mode reader (real per-device autonomy + on-screen confirm).
+         * As of **M4**, [com.aiblackbox.portal.NotificationListenerFgs] no longer uses these —
+         * it wires the REAL [OverlayConfirmUi] (on-device Allow/Deny, fail-safe DENY) + the
+         * per-device [com.aiblackbox.portal.data.local.AutonomyStore] reader + [OverlayCredentialHandoff],
+         * so high-consequence actions now surface a real confirm instead of blanket-denying.
+         * These constants are RETAINED as the named fail-safe primitives (still the correct SAFE
+         * fallback for any surface without a real confirm UI) and are guarded by
+         * `RemotePhoneControllerAutonomyTest`.
          */
         val M1_REMOTE_AUTONOMY_MODE: () -> AutonomyMode = { AutonomyMode.PERMISSION }
 
-        /** (M1 / C1) See [M1_REMOTE_AUTONOMY_MODE] — the fail-safe-deny confirm for the remote path. */
+        /** (M1 / C1 — SUPERSEDED by M4) See [M1_REMOTE_AUTONOMY_MODE] — the fail-safe-deny confirm primitive. */
         val M1_REMOTE_CONFIRM: ConfirmUi = FailSafeDenyConfirmUi
 
         /**

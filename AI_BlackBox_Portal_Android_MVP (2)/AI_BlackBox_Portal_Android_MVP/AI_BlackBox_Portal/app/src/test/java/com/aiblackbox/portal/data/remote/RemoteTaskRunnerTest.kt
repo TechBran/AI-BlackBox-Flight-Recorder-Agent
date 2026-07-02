@@ -4,6 +4,7 @@ import com.aiblackbox.portal.data.local.LlmEvent
 import com.aiblackbox.portal.data.local.NativeTool
 import com.aiblackbox.portal.data.local.NativeToolCallingLlm
 import com.aiblackbox.portal.data.local.PhoneController
+import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.model.ToolResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -38,9 +40,9 @@ private class FakeEngine(private val flow: Flow<LlmEvent> = emptyFlow()) : Nativ
 
 class RemoteTaskRunnerTest {
 
-    // ── the allowlist filter (the security-critical seam) ──
+    // ── M4: no allowlist — the confirm-gate (device-side) is the safety boundary ──
 
-    @Test fun allowlisted_tool_dispatches_through_controller() {
+    @Test fun a_gesture_tool_dispatches_through_the_controller() {
         val phone = FakePhone()
         val tap = RemoteTaskRunner.buildRemoteDeviceTools(phone).first { it.schema.name == "tap" }
         val out = tap.execute("""{"node_id":3}""")
@@ -48,18 +50,39 @@ class RemoteTaskRunnerTest {
         assertEquals(listOf("tap"), phone.dispatched)
     }
 
-    @Test fun refused_tool_does_not_dispatch_and_returns_refusal() {
-        val phone = FakePhone()
-        val sms = RemoteTaskRunner.buildRemoteDeviceTools(phone).first { it.schema.name == "send_sms" }
-        val out = sms.execute("""{"to":"x"}""")
-        assertTrue(out, out.contains("refused"))
-        assertTrue("controller must NOT run for a refused tool", phone.dispatched.isEmpty())
+    @Test fun formerly_allowlisted_intents_now_dispatch_without_refusal() {
+        // (M4.1) The static allowlist is GONE. These intents are no longer blanket-"refused"
+        // before dispatch — they reach the controller, where the safety decision is made.
+        //   - send_sms / send_email are HIGH-CONSEQUENCE: the device-side OverlayConfirmUi gate
+        //     (inside the controller) decides in PERMISSION mode.
+        //   - dial is BENIGN pre-fill (NOT in HIGH_CONSEQUENCE_INTENTS): it only opens the
+        //     dialer prefilled; the user still taps Call, so it dispatches without a gate.
+        // Either way, no tool is pre-refused by an allowlist and all reach the controller.
+        val highConsequence = listOf("send_sms", "send_email")
+        val benignPrefill = listOf("dial")
+        for (name in highConsequence + benignPrefill) {
+            val phone = FakePhone()
+            val tool = RemoteTaskRunner.buildRemoteDeviceTools(phone).firstOrNull { it.schema.name == name }
+            assertNotNull("$name must be exposed as a remote tool", tool)
+            val out = tool!!.execute("{}")
+            assertFalse("$name must NOT be pre-refused by an allowlist: $out", out.contains("refused"))
+            assertTrue("$name must reach the controller: $out", out.contains("did $name"))
+            assertEquals(listOf(name), phone.dispatched)
+        }
     }
 
-    @Test fun exactly_the_allowlisted_tools_reach_the_controller() {
+    @Test fun every_phone_and_intent_tool_reaches_the_controller() {
+        // (M4.1) With the allowlist gone, ALL actuators + intents dispatch — no tool is
+        // refused before reaching the PhoneController. The full exposed set == every
+        // phone-actuator + intent-action name.
         val phone = FakePhone()
-        RemoteTaskRunner.buildRemoteDeviceTools(phone).forEach { it.execute("{}") }
-        assertEquals(RemoteAllowlist.SAFE_REMOTE, phone.dispatched.toSet())
+        val tools = RemoteTaskRunner.buildRemoteDeviceTools(phone)
+        tools.forEach { it.execute("{}") }
+        val exposed = (ResidentTools.phoneActuators() + ResidentTools.intentActions())
+            .map { it.name }.toSet()
+        assertEquals(exposed, phone.dispatched.toSet())
+        // The formerly-refused high-consequence names are now all present.
+        assertTrue(phone.dispatched.containsAll(listOf("send_sms", "send_email", "dial", "type", "send_intent")))
     }
 
     @Test fun parseArgs_tolerates_blank_and_malformed() {
