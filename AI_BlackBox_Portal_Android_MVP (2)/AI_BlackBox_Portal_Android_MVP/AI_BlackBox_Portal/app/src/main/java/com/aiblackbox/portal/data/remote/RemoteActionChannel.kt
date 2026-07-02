@@ -32,9 +32,10 @@ import kotlinx.serialization.json.put
  * | `element_set_text` | `type` | `Actuators.type(NodeRef, text)` (credential-handoff preserved) |
  * | `coordinate_tap` | `coordinate_tap` **(new)** | `Actuators.tap(x, y)` (exposed dispatchTap) |
  * | `coordinate_swipe` | `coordinate_swipe` **(new coord branch)** | `Actuators.swipe(x,y,x2,y2[,dur])` |
- * | `global_action` back / home / recents (recents is new) | `back` / `home` / `recents` | `performGlobalAction` |
+ * | `global_action` back / recents (recents is new) | `back` / `recents` | `performGlobalAction` (a11y) |
+ * | `global_action` home | `home` | `IntentActuator.goHome()` — Application Context, NO a11y |
  * | `intent` | *(the intent name)* | `IntentActuator.perform(name, params)` — called generically |
- * | `open_app` | `open_app` | `Actuators.openApp(package)` |
+ * | `open_app` | `open_app` | `IntentActuator.openApp(package)` — Application Context, NO a11y |
  * | `scroll` | `scroll` | `Actuators.scroll(direction)` |
  * | `press_key` enter/back/home/recents/tab/delete **(new M2)** | `press_key` | `Actuators.pressKey(key)` (enter→ACTION_IME_ENTER; back/home/recents→performGlobalAction) |
  */

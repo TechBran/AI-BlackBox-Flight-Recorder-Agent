@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -180,9 +181,12 @@ class AndroidPhoneControllerActionTest {
         assertEquals("accessibility service not enabled", detail(r))
     }
 
-    @Test fun `existing back and home still route`() = runBlocking {
+    @Test fun `back stays a11y while home now routes to the intent layer`() = runBlocking {
+        // back has no reliable intent equivalent → stays a11y (null service → not enabled).
         assertEquals("accessibility service not enabled", detail(controller().dispatch("back", JsonObject(emptyMap()))))
-        assertEquals("accessibility service not enabled", detail(controller().dispatch("home", JsonObject(emptyMap()))))
+        // home now fires via ACTION_MAIN+CATEGORY_HOME through the Application Context (no a11y):
+        // it reaches the null-context IntentActuator ("app context unavailable"), NOT the a11y path.
+        assertEquals("app context unavailable", detail(controller().dispatch("home", JsonObject(emptyMap()))))
     }
 
     // ---- (M2 / F1) press_key: enter (IME submit) + back/home/recents (global) reach the actuator
@@ -231,9 +235,12 @@ class AndroidPhoneControllerActionTest {
         assertTrue(detail(r)!!, detail(r)!!.contains("show_map"))
     }
 
-    @Test fun `tap type swipe scroll all degrade to intent_only_mode when a11y is off`() = runBlocking {
+    @Test fun `a11y-dependent actions degrade to intent_only_mode when a11y is off`() = runBlocking {
+        // open_app + home are NO LONGER here — they route through the Application-Context
+        // IntentActuator (no a11y) and are covered by their own tests below. Everything left
+        // genuinely needs the a11y service (screen inspection / fine-grained UI / back+recents).
         val c = controllerA11yOff()
-        for (name in listOf("tap", "type", "swipe", "scroll", "open_app", "back", "home",
+        for (name in listOf("tap", "type", "swipe", "scroll", "back",
                 "recents", "press_key", "coordinate_tap", "coordinate_swipe")) {
             val r = c.dispatch(name, buildJsonObject {
                 put("resource_id", "x"); put("text", "y"); put("direction", "down")
@@ -268,6 +275,54 @@ class AndroidPhoneControllerActionTest {
         // The default direct-constructor controller (no a11yEnabled wired) behaves as a11y-on.
         val r = controller().dispatch("tap", buildJsonObject { put("resource_id", "x") })
         assertEquals("accessibility service not enabled", detail(r))
+    }
+
+    // ---- (intent-layer, XR) open_app + home fire via the Application Context, NO a11y ----
+    //
+    // open_app + home are removed from A11Y_DEPENDENT_ACTIONS: they route to the (Application-
+    // Context) IntentActuator regardless of a11y state, NOT the intent_only_mode fallback. With a
+    // null-context IntentActuator the routed call reaches "app context unavailable" — the point is
+    // it is NOT intent_only_mode (it dispatched to the intent layer). The real launch is
+    // device-verified (M6 on-device: intents fired with ZERO a11y on Samsung Galaxy XR).
+
+    @Test fun `open_app launches via the intent layer with a11y OFF (not intent_only_mode)`() = runBlocking {
+        val r = controllerA11yOff().dispatch("open_app", buildJsonObject { put("package", "com.android.settings") })
+        assertFalse(r.success)
+        assertFalse("open_app must NOT be gated to intent_only_mode when a11y is off",
+            detail(r)!!.startsWith("intent_only_mode"))
+        assertEquals("reached the Application-Context IntentActuator", "app context unavailable", detail(r))
+    }
+
+    @Test fun `open_app launches via the intent layer with a11y ON (uniform behavior)`() = runBlocking {
+        val r = controller().dispatch("open_app", buildJsonObject { put("package", "com.android.settings") })
+        assertFalse(detail(r)!!.startsWith("intent_only_mode"))
+        assertEquals("app context unavailable", detail(r))   // same intent path whether a11y on/off
+    }
+
+    @Test fun `home goes home via the intent layer with a11y OFF (not intent_only_mode)`() = runBlocking {
+        val r = controllerA11yOff().dispatch("home", JsonObject(emptyMap()))
+        assertFalse(r.success)
+        assertFalse("home must NOT be gated to intent_only_mode when a11y is off",
+            detail(r)!!.startsWith("intent_only_mode"))
+        assertEquals("app context unavailable", detail(r))
+    }
+
+    @Test fun `home goes home via the intent layer with a11y ON (uniform behavior)`() = runBlocking {
+        val r = controller().dispatch("home", JsonObject(emptyMap()))
+        assertFalse(detail(r)!!.startsWith("intent_only_mode"))
+        assertEquals("app context unavailable", detail(r))
+    }
+
+    @Test fun `open_app on a missing package is a clear not-found error (not intent_only_mode)`() {
+        // PURE decision: a package with no launcher intent → a concrete, actionable error, never a
+        // crash and never the generic intent_only_mode. (The launch itself is device-verified.)
+        val r = openAppNotFound(launchable = false, packageName = "com.does.not.exist")!!
+        assertFalse(r.success)
+        assertEquals("app not found or not launchable: com.does.not.exist", r.detail)
+        assertFalse("a genuinely-missing app is NOT intent_only_mode",
+            r.detail.startsWith("intent_only_mode"))
+        // a launchable package proceeds (null → no rejection → the launch runs).
+        assertNull(openAppNotFound(launchable = true, packageName = "com.android.settings"))
     }
 
     // ---- the tolerant intArg helper (pure) ----

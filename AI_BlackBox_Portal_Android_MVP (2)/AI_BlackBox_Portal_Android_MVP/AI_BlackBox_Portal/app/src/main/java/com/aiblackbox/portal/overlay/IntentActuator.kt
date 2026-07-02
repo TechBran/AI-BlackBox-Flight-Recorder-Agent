@@ -401,6 +401,67 @@ class IntentActuator(
         }
     }
 
+    // ---- intent-layer launches that DON'T go through perform() ------------
+    //
+    // open_app + home keep their dedicated dispatch names / wire variants (open_app is its own
+    // `open_app` action; home is a `global_action`) rather than joining INTENT_ACTIONS — see
+    // ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS / RemoteActionChannel I1. AndroidPhoneController
+    // routes those two dispatch names here so they launch via the Application Context (no a11y).
+
+    /**
+     * (Intent-layer, NO accessibility) Launch the app [packageName] via its LAUNCHER intent
+     * ([android.content.pm.PackageManager.getLaunchIntentForPackage]) through the process-wide
+     * **Application** [Context] — NOT the accessibility-service Context. So it works with the
+     * [BlackBoxA11yService] DISABLED / ABSENT / administratively blocked (the Samsung Galaxy XR
+     * case, where platform policy forbids enabling a sideloaded a11y service at all).
+     *
+     * A null Application Context → `"app context unavailable"`. A null launch intent — the package
+     * is not installed, or not visible under the Android-11 `<queries>` LAUNCHER filter — yields a
+     * CLEAR `"app not found or not launchable: <pkg>"` (NOT a crash, NOT the generic
+     * intent_only_mode for a genuinely-missing app). Only the package NAME (a dev identifier, not
+     * user data) is ever logged. Never throws. Package visibility is already granted by the
+     * `<queries>` MAIN/LAUNCHER filter in AndroidManifest.xml (M1.5) — no manifest change needed.
+     */
+    fun openApp(packageName: String): ActuatorResult {
+        val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
+        return try {
+            val launch = ctx.packageManager?.getLaunchIntentForPackage(packageName)
+            // `launch == null` → the not-found result (pure, unit-tested); otherwise proceed.
+            openAppNotFound(launchable = launch != null, packageName = packageName)?.let { return it }
+            // Safe !! — openAppNotFound returned non-null (and we returned) whenever launch was null.
+            ctx.startActivity(launch!!.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            logFired("open_app", true)
+            ActuatorResult(true, "launched $packageName")
+        } catch (e: Exception) {
+            logFired("open_app", false)
+            ActuatorResult(false, "open app failed: $packageName (${e.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * (Intent-layer, NO accessibility) Go to the HOME screen via `ACTION_MAIN` + `CATEGORY_HOME`
+     * launched through the **Application** [Context] — the intent equivalent of
+     * `GLOBAL_ACTION_HOME` that needs NO accessibility, so Home works on an a11y-blocked device
+     * (Samsung Galaxy XR). `CATEGORY_HOME` resolves to the always-present system launcher, so it
+     * needs no `<queries>` entry. A null Application Context → `"app context unavailable"`. Never
+     * throws.
+     */
+    fun goHome(): ActuatorResult {
+        val ctx = context()?.applicationContext ?: return ActuatorResult(false, "app context unavailable")
+        return try {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(intent)
+            logFired("home", true)
+            ActuatorResult(true, "home")
+        } catch (e: Exception) {
+            logFired("home", false)
+            ActuatorResult(false, "home failed (${e.javaClass.simpleName})")
+        }
+    }
+
     // ---- internals --------------------------------------------------------
 
     /**
@@ -549,3 +610,13 @@ class IntentActuator(
         ): IntentActuator = IntentActuator({ appContext.applicationContext }, mode, confirm)
     }
 }
+
+/**
+ * PURE (framework-free, JVM-unit-testable): the not-found [ActuatorResult] for a package with NO
+ * launcher intent ([launchable] == false), or `null` to proceed. Split out of [IntentActuator.openApp]
+ * so the exact `"app not found or not launchable: <pkg>"` message is unit-tested without a framework
+ * Context/Intent (the launch itself is device-verified, like the rest of [IntentActuator]). This is
+ * NOT the generic intent_only_mode — a genuinely-missing app is a concrete, actionable error.
+ */
+internal fun openAppNotFound(launchable: Boolean, packageName: String): ActuatorResult? =
+    if (launchable) null else ActuatorResult(false, "app not found or not launchable: $packageName")

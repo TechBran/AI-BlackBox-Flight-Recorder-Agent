@@ -3,7 +3,6 @@ package com.aiblackbox.portal.overlay
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
-import android.content.Intent
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
@@ -393,31 +392,14 @@ class Actuators(
         }
     }
 
-    /**
-     * Launch the app with the given [packageName] via its launch [Intent]
-     * (NEW_TASK). If the package isn't installed (`getLaunchIntentForPackage`
-     * returns null) → `success=false, "app not installed: <pkg>"`.
-     */
-    fun openApp(packageName: String): ActuatorResult {
-        val svc = service() ?: return notEnabled()
-        return try {
-            val intent = svc.packageManager?.getLaunchIntentForPackage(packageName)
-                ?: return ActuatorResult(false, "app not installed: $packageName")
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            svc.startActivity(intent)
-            Log.i(TAG, "openApp pkg=$packageName")
-            ActuatorResult(true, "launched $packageName")
-        } catch (e: Exception) {
-            Log.w(TAG, "openApp failed for $packageName (${e.javaClass.simpleName})")
-            ActuatorResult(false, "open app failed: $packageName (${e.javaClass.simpleName})")
-        }
-    }
+    // NOTE (intent-layer first): `open_app` and `home` MOVED to the Application-Context
+    // [IntentActuator] ([IntentActuator.openApp] / [IntentActuator.goHome]) so they work with NO
+    // accessibility (usable on platforms that block sideloaded a11y, e.g. Samsung Galaxy XR). They
+    // are deliberately NOT here anymore — the a11y [Actuators] is reserved for screen inspection,
+    // fine-grained UI manipulation, and global nav (`back`/`recents`) that has no intent equivalent.
 
-    /** Press the system Back button via [AccessibilityService.performGlobalAction]. */
+    /** Press the system Back button via [AccessibilityService.performGlobalAction] (no intent equivalent). */
     fun back(): ActuatorResult = globalAction("back")
-
-    /** Go to the system Home screen via [AccessibilityService.performGlobalAction]. */
-    fun home(): ActuatorResult = globalAction("home")
 
     /**
      * (M1.3) Open the Recents / overview screen via

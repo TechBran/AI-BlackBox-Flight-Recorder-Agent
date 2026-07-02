@@ -138,6 +138,26 @@ object ResidentTools {
      */
     val LOCAL_PHONE_TOOLS: Set<String> = PHONE_ACTUATORS + INTENT_ACTIONS
 
+    /**
+     * The actions that STILL WORK with accessibility OFF (intent_only_mode): every
+     * [INTENT_ACTIONS] entry PLUS the two dedicated actions that now fire via the process-wide
+     * Application Context (NO a11y) — `open_app`
+     * ([com.aiblackbox.portal.overlay.IntentActuator.openApp]) and `home`
+     * ([com.aiblackbox.portal.overlay.IntentActuator.goHome]).
+     *
+     * `open_app`/`home` are DELIBERATELY NOT added to [INTENT_ACTIONS]: they keep their dedicated
+     * dispatch names / wire variants (`open_app` is its own `open_app` action; `home` is a
+     * `global_action`) and are [PHONE_ACTUATORS], and [INTENT_ACTIONS] must stay DISJOINT from every
+     * gesture/global/coordinate dispatch name so an `intent` frame can't smuggle one (see
+     * RemoteActionChannel I1). This set is used ONLY to describe what remains available when a11y is
+     * off — [com.aiblackbox.portal.overlay.AndroidPhoneController.INTENT_ONLY_MODE_DETAIL].
+     *
+     * ROUTING PRINCIPLE (intent-layer first): anything that CAN route through the Application
+     * Context (no a11y) does; accessibility is reserved for what genuinely needs it (screen
+     * inspection, fine-grained UI manipulation, and `back`/`recents` which have no intent path).
+     */
+    val INTENT_ONLY_AVAILABLE_ACTIONS: Set<String> = INTENT_ACTIONS + setOf("open_app", "home")
+
     /** A `{"type":"object"}` schema with no properties (read_screen/back/home). */
     private fun noParams(): JsonObject = buildJsonObject {
         put("type", JsonPrimitive("object"))

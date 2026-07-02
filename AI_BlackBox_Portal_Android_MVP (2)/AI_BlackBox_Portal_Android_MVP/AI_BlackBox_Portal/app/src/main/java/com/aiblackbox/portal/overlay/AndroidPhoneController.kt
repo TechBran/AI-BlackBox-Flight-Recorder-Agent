@@ -154,15 +154,22 @@ class AndroidPhoneController(
                     actuators.scroll(direction).toToolResult()
                 }
 
+                // Intent-layer: launch via the Application Context (getLaunchIntentForPackage) —
+                // NO accessibility. Not in A11Y_DEPENDENT_ACTIONS, so it fires even with a11y
+                // off/absent/blocked (the Samsung XR case). A missing/unlaunchable package returns a
+                // clear "app not found or not launchable" result, never the generic intent_only_mode.
                 "open_app" -> {
                     val pkg = (args["package"] ?: args["package_name"])
                         ?.jsonPrimitive?.contentOrNull
                         ?: return ToolResult(false, JsonPrimitive("package required"))
-                    actuators.openApp(pkg).toToolResult()
+                    intentActuator.openApp(pkg).toToolResult()
                 }
 
+                // back has no reliable Application-Context intent → stays a11y (GLOBAL_ACTION_BACK).
                 "back" -> actuators.back().toToolResult()
-                "home" -> actuators.home().toToolResult()
+                // Intent-layer: home via ACTION_MAIN + CATEGORY_HOME through the Application Context —
+                // NO accessibility (works on a11y-blocked devices like Samsung XR). Not a11y-gated.
+                "home" -> intentActuator.goHome().toToolResult()
 
                 // (M1.3) recents — the third global action (back/home already existed);
                 // routes to the new Actuators.recents() → GLOBAL_ACTION_RECENTS.
@@ -271,27 +278,46 @@ class AndroidPhoneController(
     companion object {
 
         /**
-         * (M8.1) The on-device actions that REQUIRE the [BlackBoxA11yService] (screen-tree reads +
-         * gesture actuation). When a11y is disabled / OS-revoked these degrade to intent_only_mode;
-         * the [ResidentTools.INTENT_ACTIONS] (Application-Context intents) are NOT in this set and
-         * still fire. `open_app` is here because [Actuators.openApp] launches via the a11y service.
+         * ROUTING PRINCIPLE — intent-layer first. An on-device phone action routes through the
+         * Application-Context [IntentActuator] (NO accessibility) whenever an intent/Application-
+         * Context equivalent exists; the [BlackBoxA11yService] is reserved ONLY for what genuinely
+         * needs it: screen inspection, fine-grained UI manipulation, and global navigation with no
+         * intent path (`back`/`recents`). This is what makes the app usable on platforms that BLOCK
+         * sideloaded accessibility services — e.g. the Samsung Galaxy XR, whose platform policy
+         * forbids enabling a sideloaded a11y service at all (permitted-a11y-services allowlist is
+         * empty, no removable device-admin) — where the intent layer is the ENTIRE control surface.
+         *
+         * (M8.1 / XR) The on-device actions that REQUIRE the [BlackBoxA11yService]. When a11y is
+         * disabled / OS-revoked / administratively blocked these degrade to intent_only_mode; the
+         * [ResidentTools.INTENT_ACTIONS] PLUS the Application-Context `open_app`
+         * ([IntentActuator.openApp]) and `home` ([IntentActuator.goHome]) are NOT in this set and
+         * still fire (see [ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS]). Each remaining member is
+         * here because it has NO intent equivalent:
+         *  - `read_screen` — reads the live a11y node tree (only the service can).
+         *  - `tap`/`type`/`swipe`/`scroll`/`coordinate_tap`/`coordinate_swipe` — fine-grained UI
+         *    manipulation (semantic node actions + `dispatchGesture`); no intent path.
+         *  - `press_key` — IME submit / global keys via the service.
+         *  - `back`/`recents` — `GLOBAL_ACTION_BACK`/`GLOBAL_ACTION_RECENTS`; unlike `home`
+         *    (`ACTION_MAIN`+`CATEGORY_HOME`) there is NO reliable Application-Context intent to go
+         *    back / open recents, so they stay a11y-gated.
          */
         val A11Y_DEPENDENT_ACTIONS: Set<String> = setOf(
-            "read_screen", "tap", "type", "swipe", "scroll", "open_app", "back", "home",
+            "read_screen", "tap", "type", "swipe", "scroll", "back",
             "recents", "press_key", "coordinate_tap", "coordinate_swipe",
         )
 
         /**
          * (M8.1) The intent_only_mode detail. Starts with the `intent_only_mode` token the
          * `/action` error classifier ([com.aiblackbox.portal.data.remote.classifyActuatorError]) and
-         * the server-side frontier loop key on, then lists the still-available intent actions (from
-         * [ResidentTools.INTENT_ACTIONS], never hardcoded) so the driver knows what remains. Carries
-         * NO screen text.
+         * the server-side frontier loop key on, then lists the still-available a11y-free actions
+         * (from [ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS] — the intent catalog PLUS the
+         * Application-Context `open_app`/`home`, never hardcoded) so the driver knows what remains.
+         * Carries NO screen text.
          */
         val INTENT_ONLY_MODE_DETAIL: String =
-            "intent_only_mode: on-device accessibility is off (or OS-revoked); screen reading, " +
-                "taps, typing, and gestures are unavailable. Intent actions still work: " +
-                ResidentTools.INTENT_ACTIONS.sorted().joinToString(", ") +
+            "intent_only_mode: on-device accessibility is off (or OS-revoked/blocked); screen " +
+                "reading, taps, typing, and gestures are unavailable. Intent actions still work: " +
+                ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS.sorted().joinToString(", ") +
                 ". Re-enable BlackBox accessibility to resume screen control."
 
         /**

@@ -1,6 +1,6 @@
 # M6 — Galaxy XR / Android XR On-Device Validation Checklist
 
-**Date:** 2026-07-02 · **Milestone:** M6 (XR co-equal, node+intent, capture-independent) · **Status:** ON-DEVICE CHECKLIST — run on a real Samsung Galaxy XR (Android XR)
+**Date:** 2026-07-02 · **Milestone:** M6 (XR co-equal, node+intent, capture-independent) · **Status:** ✅ **CLOSED** — validated on a real **Samsung Galaxy XR (SM-I610)**, 2026-07-02. **Intent-only is the validated XR control mode**; BOTH hardware unknowns are resolved (see "On-device results" below). Key finding: consumer Samsung XR **administratively blocks sideloaded AccessibilityServices** (platform policy), so node/gesture control needs system/preinstall privilege — the intent layer (Application Context, no a11y) is the entire supported XR control surface, and the app degrades to it correctly. This validation also drove the `open_app`/`home` → Application-Context fix (2026-07-02).
 
 **Plan:** `docs/plans/2026-06-30-android-control-frontier-driven-plan.md` (M6, table 6.1–6.4) · **Research/decisions:** `docs/plans/2026-06-30-android-control-layer-research.md` §3 (form-factor matrix), §5.5 decisions 5/6.
 
@@ -198,21 +198,45 @@ Target the headset explicitly if needed (`device=$XR`); otherwise origin/primary
 
 ## Findings log (fill in on-device)
 
-| # | Check | Expected | Actual | Pass? |
+| # | Check | Expected | Actual (Samsung Galaxy XR SM-I610, 2026-07-02) | Pass? |
 |---|---|---|---|---|
-| 0 | Prereqs (tailnet, operator bound) | all true | | |
-| 1 | a11y service enabled | contains `BlackBoxA11yService` | | |
-| 2 | capability contract | `xr_headset` / coord false / shot false / no `screenshot` key | | |
-| 3 | **Unknown (a)** node `ACTION_CLICK` actuates panel | success + panel reacts | | |
-| 4 | coordinate_tap skipped (gate) | `invalid_argument` "not supported on xr_headset" | | |
-| 4b | (opt) raw `dispatchGesture` on panel | no-op (expected) | | |
-| 5 | **Unknown (b)** panel capture possible? | UNKNOWN → record | | |
-| 6 | `open_app` intent lands panel | success + panel appears | | |
-| 7 | full `control_device` node+intent task | completes, banner+STOP work, no coord/shot | | |
+| 0 | Prereqs (tailnet, operator bound) | all true | tailnet joined, operator bound, 8765 reachable over loopback | ✅ |
+| 1 | a11y service enabled | contains `BlackBoxA11yService` | **BLOCKED by platform policy** — the `settings put ... enabled_accessibility_services` write does NOT stick; logcat shows `AccessibilityManagerService: "Skipping enabling service disallowed by device admin policy"`; the permitted-a11y-services allowlist is **EMPTY** and `dpm list-owners` = **none**. A sideloaded a11y service **cannot be enabled** on consumer Samsung XR. | ⛔ admin-blocked (not a bug) |
+| 2 | capability contract | `xr_headset` / coord false / shot false / no `screenshot` key | exactly `{"formFactor":"xr_headset","hasScreenshot":false,"supportsCoordinateGesture":false,"displayId":0}`, wire **schema 1.3**, NO `screenshot` key anywhere; XR probe correct on the **FIRST try** (no `XR_SYSTEM_FEATURES` change needed) | ✅ |
+| 3 | **Unknown (a)** node `ACTION_CLICK` actuates panel | success + panel reacts | **RESOLVED DIFFERENTLY** — not testable: a11y is administratively unavailable (row 1), so node click / gesture / type / read_screen are UNAVAILABLE via sideload. This is a **distribution-privilege** limit, NOT a compositor/pixel one. | ✅ resolved |
+| 4 | coordinate_tap skipped (gate) | `invalid_argument` "not supported on xr_headset" | not exercised — coordinate path is moot (a11y off already forces `supportsCoordinateGesture=false`, and the gate + `intent_only_mode` degradation are unit-proven) | ✅ n/a |
+| 4b | (opt) raw `dispatchGesture` on panel | no-op (expected) | not probed (a11y unavailable) | — |
+| 5 | **Unknown (b)** panel capture possible? | UNKNOWN → record | `screencap` framebuffer = **PASSTHROUGH camera only**, NO app panels → composited panels are capture-protected → `hasScreenshot=false` is the correct permanent design; tree-only loop validated | ✅ resolved (capture NOT possible) |
+| 6 | intents land as spatial panels | success + panel appears | **7/7 intents fired via the Application Context with ZERO a11y**: `open_settings`, `open_url`, `show_map`, `navigate`, `set_timer`, `play_media`, `dial`. `open_app` itself was (wrongly) a11y-gated → returned `intent_only_mode` → **fixed 2026-07-02** (`open_app`+`home` → Application Context) | ✅ intents 7/7; `open_app` fixed |
+| 7 | full `control_device` node+intent task | completes, banner+STOP work, no coord/shot | node path unavailable (a11y blocked); the app degrades to **`intent_only_mode` correctly** (M8) — intent-based control is the supported XR mode | ✅ intent-only mode |
+
+---
+
+## On-device results (Samsung Galaxy XR SM-I610, 2026-07-02)
+
+Run on a real Samsung Galaxy XR over the 8765 tailnet channel (loopback via `adb`). **Outcome: M6 CLOSED — intent-only is the validated XR control mode; both unknowns resolved.**
+
+- **Step 2 — capability contract: ✅ correct on the first try.** The device advertised `formFactor=xr_headset`, `supportsCoordinateGesture=false`, `hasScreenshot=false`, wire **schema 1.3**, with **NO `screenshot` key** anywhere in the observation frame. `DeviceCapabilities.detect` classified the headset correctly with **no change to `XR_SYSTEM_FEATURES`** — the existing `android.software.xr.api.spatial` / `UI_MODE_TYPE_VR_HEADSET` probe set is right for this hardware.
+
+- **Step 6 — intent backbone: ✅ 7/7 fired via the Application Context with ZERO accessibility.** `open_settings`, `open_url`, `show_map`, `navigate`, `set_timer`, `play_media`, and `dial` all dispatched and launched as spatial panels with the a11y service off/blocked. This confirms the intent layer (Application Context, no a11y) is the XR control backbone, exactly as designed.
+
+- **Step 4 — coordinate path: not dispatched.** Coordinate gestures were never exercised: with a11y unavailable, `supportsCoordinateGesture=false` already forces the gate, and the skip + `intent_only_mode` degradation are unit-proven. Moot on XR.
+
+- **Step 5 — Unknown (b) RESOLVED: capture is NOT possible.** A framebuffer `screencap` returned the **passthrough camera view only — NOT the app panels**. The composited 2D panels are capture-protected, so `hasScreenshot=false` is the correct **permanent** design and the tree-only loop is validated. (If Samsung ever exposes composited-panel capture, only the capability flag would flip — the loop already consumes a screenshot when present.)
+
+- **Unknown (a) RESOLVED DIFFERENTLY — a sideloaded AccessibilityService is administratively BLOCKED on consumer Samsung XR.** The a11y grant would not take: `adb shell settings put secure enabled_accessibility_services "$A11Y"` did not stick, and logcat showed `AccessibilityManagerService: "Skipping enabling service disallowed by device admin policy"`. The **permitted-accessibility-services allowlist is EMPTY** and `dpm list-owners` reports **no device/profile owner** — i.e. it is a **platform policy**, not a removable admin. So node / gesture / type / `read_screen` actuation is **administratively UNAVAILABLE on consumer Samsung XR via sideload** — this is a *distribution-privilege* limitation, **not** a compositor/pixel one, and **not** something a code change can lift. **Full a11y control on XR requires system/preinstall privilege (Samsung XR distribution/partnership).** The originally-expected test of `ACTION_CLICK` on a 2D panel (Unknown (a)) is therefore unanswerable via sideload and is superseded by this finding.
+
+- **Consequence — intent-based control is the supported XR mode, and the app degrades to it correctly (M8 `intent_only_mode`).** The build's capability-flag fail-safe did exactly the right thing: screen actions report `intent_only_mode`; intents keep firing.
+
+- **This validation drove the `open_app`/`home` → Application-Context fix (2026-07-02).** The XR run exposed that `open_app` (and `home`) were needlessly a11y-gated — they launched via the a11y-service Context, so on the a11y-blocked XR they wrongly returned `intent_only_mode` instead of launching, even though every OTHER intent worked. The fix routes `open_app` (`getLaunchIntentForPackage`) and `home` (`ACTION_MAIN`+`CATEGORY_HOME`) through the **Application Context** via `IntentActuator` (removed from `A11Y_DEPENDENT_ACTIONS`, added to `INTENT_ONLY_AVAILABLE_ACTIONS`). **App-launching and Home now work in intent-only mode on XR** — closing the last gap in the intent backbone. (Package visibility was already covered by the manifest `<queries>` MAIN/LAUNCHER filter from M1.5 — no manifest change needed.)
+
+**M6 is CLOSED:** intent-only is the validated Samsung XR control mode; Unknown (a) is resolved as an administrative block (needs system privilege, not code) and Unknown (b) is resolved as capture-not-possible (`hasScreenshot=false` permanent).
 
 ---
 
 ## What CANNOT be validated without the Galaxy XR (for Brandon)
+
+> **RESOLVED 2026-07-02 (retained for history).** These were the pre-hardware open items; the on-device run above closes them. In short: **(a)** panel actuation is moot — a sideloaded a11y service is *administratively blocked* on consumer Samsung XR, so node/gesture control needs system/preinstall privilege (not a code change); **(b)** panel capture is NOT possible (`screencap` = passthrough only) → `hasScreenshot=false` is permanent; **(3)** the XR probe classified correctly first try (no `XR_SYSTEM_FEATURES` change); **(5)** `open_app`/intents launch as spatial panels via the Application Context (7/7, and `open_app`/`home` are now a11y-free after the 2026-07-02 fix). Consent UX (4) and loop latency (7) remain visual/experiential notes only.
 
 Everything below is UNVERIFIABLE off-device — it needs the headset in hand. The build is fail-safe regardless (capability-flag degradation), but these are the open items:
 

@@ -75,6 +75,23 @@ class ResidentToolsTest {
         )
     }
 
+    @Test
+    fun `INTENT_ONLY_AVAILABLE_ACTIONS is INTENT_ACTIONS plus the app-context open_app and home`() {
+        // What still works with a11y OFF: the intent catalog PLUS the two dedicated Application-
+        // Context actions (open_app / home) that were moved off the a11y path.
+        val expected = ResidentTools.INTENT_ACTIONS + setOf("open_app", "home")
+        assertEquals(expected, ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS)
+        assertTrue("open_app is available without a11y", "open_app" in ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS)
+        assertTrue("home is available without a11y", "home" in ResidentTools.INTENT_ONLY_AVAILABLE_ACTIONS)
+        // ...but they stay OUT of INTENT_ACTIONS (they keep their own dispatch names / wire variants;
+        // INTENT_ACTIONS must stay disjoint from gesture/global/coordinate names — RemoteActionChannel I1).
+        assertTrue("open_app stays out of INTENT_ACTIONS", "open_app" !in ResidentTools.INTENT_ACTIONS)
+        assertTrue("home stays out of INTENT_ACTIONS", "home" !in ResidentTools.INTENT_ACTIONS)
+        // both remain PHONE_ACTUATORS (local routing unchanged).
+        assertTrue("open_app is still a PHONE_ACTUATOR", "open_app" in ResidentTools.PHONE_ACTUATORS)
+        assertTrue("home is still a PHONE_ACTUATOR", "home" in ResidentTools.PHONE_ACTUATORS)
+    }
+
     /** The `required` array of a schema's parameters, or empty if absent. */
     private fun requiredOf(name: String): Set<String> {
         val params: JsonObject = ResidentTools.intentActions().first { it.name == name }.parameters
