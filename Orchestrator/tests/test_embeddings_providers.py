@@ -196,6 +196,23 @@ async def test_ollama_keep_alive_passthrough(tmp_path, monkeypatch):
     assert seen[0]["json"]["keep_alive"] == EMBEDDING_MODELS[OLLAMA_SLUG]["keep_alive"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slug", ["qwen3-embedding-0.6b", "qwen3-embedding-8b"])
+async def test_ollama_payload_sends_num_ctx_and_truncate_false(slug):
+    """WI-1: Ollama must get an explicit num_ctx (its VRAM-tiered default ctx
+    silently truncated at 4,095 tokens — live-probed) plus truncate:false so
+    an over-budget input fails LOUD (400) instead of silently losing its tail.
+    num_ctx = the registry max_input_tokens (1.0x); the clamp budget is 0.9x,
+    so a 400 can only mean our own accounting failed."""
+    provider = get_provider(slug)
+    seen = []
+    _ollama_with_mock_transport(provider, seen, EMBEDDING_MODELS[slug]["dims"])
+    await provider.embed(["text"], purpose="document")
+    payload = seen[0]["json"]
+    assert payload["options"] == {"num_ctx": EMBEDDING_MODELS[slug]["max_input_tokens"]}
+    assert payload["truncate"] is False
+
+
 def test_ollama_read_timeout_is_generous_for_local_cpu_inference():
     # Ratchet: a cold Qwen3-8B batch-of-8 on CPU measured >120s and timed out
     # the whole retry envelope. The read cap must stay generous so legitimate

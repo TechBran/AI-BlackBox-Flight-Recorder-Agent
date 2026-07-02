@@ -219,6 +219,16 @@ class OllamaProvider(_BaseProvider):
         if purpose == "query" and instruction is not None:
             texts = [instruction + t for t in texts]
         payload = {"model": self.model_id, "input": texts}
+        max_tokens = self._max_input_tokens()
+        if max_tokens is not None:
+            # Explicit num_ctx: Ollama's VRAM-tiered default ctx silently
+            # truncated embed inputs at 4,095 tokens (live-probed on 0.30.8);
+            # truncate:false makes any overshoot a 400 instead of a silent cut.
+            # INVARIANT: the clamp budget (0.9 x max_input_tokens, _clamp_budget)
+            # is strictly below this num_ctx (1.0 x max_input_tokens), so a 400
+            # here can only mean OUR token accounting failed - loud beats silent.
+            payload["options"] = {"num_ctx": max_tokens}
+            payload["truncate"] = False
         # Effective keep_alive = per-box override (wizard toggle) → registry
         # default → this entry's value (synthetic test entries). Read fresh per
         # call so a live toggle takes effect on the next embed without a restart.
