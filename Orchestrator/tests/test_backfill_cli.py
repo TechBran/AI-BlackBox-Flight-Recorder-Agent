@@ -132,8 +132,32 @@ def test_invalid_slug_exits_2_and_lists_valid_slugs(fixture_paths):
 
 
 # ── state-file guard ─────────────────────────────────────────────────────────
+# These two run IN-PROCESS (backfill.main + a monkeypatched liveness probe),
+# not as subprocesses: the M6d liveness guard fires BEFORE the state-file
+# guard, so a subprocess run would exit 5 whenever the real orchestrator is
+# up — the suite must be runnable with the box live. The probe is pinned
+# False so the state-file guard itself is what's under test; main() rebinds
+# config/fossils module globals from argv, so those are monkeypatch-pinned
+# for restore (in-process run, shared interpreter).
 
-def test_running_state_file_blocks_without_force(fixture_paths):
+def _pin_main_globals(monkeypatch):
+    from Orchestrator import backfill_embeddings as backfill
+    from Orchestrator import config, fossils
+
+    monkeypatch.setattr(backfill, "_service_alive", lambda *a, **k: False)
+    monkeypatch.setattr(backfill, "_install_sigint_cancel", lambda: None)
+    monkeypatch.setattr(
+        config, "EMBEDDINGS_STORES_DIR", config.EMBEDDINGS_STORES_DIR
+    )
+    monkeypatch.setattr(fossils, "SNAPSHOT_INDEX", fossils.SNAPSHOT_INDEX)
+    monkeypatch.setattr(fossils, "_index_cache", None)
+    monkeypatch.setattr(fossils, "_index_cache_mtime", 0.0)
+    return backfill
+
+
+def test_running_state_file_blocks_without_force(fixture_paths, monkeypatch,
+                                                 capsys):
+    backfill = _pin_main_globals(monkeypatch)
     stores, index = fixture_paths
     (stores / STATE_FILE).write_text(json.dumps({
         "target": "qwen3-embedding-0.6b",
@@ -143,16 +167,20 @@ def test_running_state_file_blocks_without_force(fixture_paths):
         "started_at": "2026-06-12T00:00:00+00:00",
     }), encoding="utf-8")
 
-    result = run_cli("--target", "gemini-embedding-001", *overrides(stores, index))
-    assert result.returncode == 3
-    assert "RUNNING" in result.stdout
-    assert "--force" in result.stdout  # remediation is spelled out
+    rc = backfill.main(
+        ["--target", "gemini-embedding-001", *overrides(stores, index)]
+    )
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert "RUNNING" in out
+    assert "--force" in out  # remediation is spelled out
 
 
-def test_non_running_state_file_does_not_block(tmp_path):
+def test_non_running_state_file_does_not_block(tmp_path, monkeypatch, capsys):
     """A finished job's state file must not trip the guard; with an empty
     index and target == active the run short-circuits before any provider
     work — proving the guard checks state, not mere file existence."""
+    backfill = _pin_main_globals(monkeypatch)
     stores = tmp_path / "stores"
     stores.mkdir()
     index = tmp_path / "index.json"
@@ -164,6 +192,7 @@ def test_non_running_state_file_does_not_block(tmp_path):
         "total": 5,
     }), encoding="utf-8")
 
-    result = run_cli(*overrides(stores, index))  # default target = active
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Nothing to do" in result.stdout
+    rc = backfill.main(overrides(stores, index))  # default target = active
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Nothing to do" in out

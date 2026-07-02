@@ -15,9 +15,12 @@ dir-swap). Both are spied here and asserted silent on every rebuild test.
 import asyncio
 import json
 import threading
+import time
 
 import numpy as np
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from Orchestrator import backfill_embeddings as backfill
 from Orchestrator import config, fossils
@@ -545,6 +548,157 @@ async def test_rebuild_progress_log_lines(env, fake_provider, capsys):
     assert "snapshots (" in out and "rows)" in out
 
 
+# ── A4 side door: the MODEL-SWITCH engine onto a v2 target must chunk ───────
+
+@pytest.mark.asyncio
+async def test_plain_migration_onto_v2_target_lands_chunk_groups(
+    env, fake_provider, cutover_spies
+):
+    """run_migration filling a schema-2 target must NEVER append whole-body
+    vectors (they'd land as LEGAL 1-chunk groups: missing() empties and the
+    poison self-hides forever). Reachable via bare CLI default mode and
+    POST /embeddings/migrate."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    get_store(TARGET, base_dir=stores_dir, schema=2)   # v2 target pre-exists
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    store = get_store(TARGET, base_dir=stores_dir, schema=2)
+    assert store.snapshots == 3
+    assert store.rows > store.snapshots               # multi-chunk groups
+    assert store.missing(sorted(bodies)) == []
+    ids, ordinals = _read_group_layout(stores_dir / TARGET)
+    assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
+    # PROOF the side door is closed: no whole 17k-char body was ever embedded
+    # — every provider text is a proper chunk of one
+    full_bodies = set(bodies.values())
+    assert not any(t in full_bodies for t in fake_provider.embedded_texts)
+    for texts, _ in fake_provider.calls:
+        assert len(texts) <= migrate.CHUNK_BATCH_CAP
+    # and it is still a MIGRATION: the cutover fires exactly as before
+    assert cutover_spies["set_active_slug"] == [TARGET]
+    assert cutover_spies["swap_active"] == [TARGET]
+
+
+@pytest.mark.asyncio
+async def test_watcher_recovery_entry_onto_v2_target_chunks(
+    env, fake_provider, cutover_spies
+):
+    """The watcher's automatic broken-path recovery calls start_migration —
+    post-6f its selected target can BE the v2 store; it must chunk too."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    get_store(TARGET, base_dir=stores_dir, schema=2)
+
+    job = await migrate.start_migration(TARGET)       # the watcher's exact entry
+    assert job["state"] == "running"
+    result = await migrate._JOB_TASK
+
+    assert result["state"] == "done"
+    store = get_store(TARGET, base_dir=stores_dir, schema=2)
+    assert store.rows > store.snapshots == 3
+    ids, ordinals = _read_group_layout(stores_dir / TARGET)
+    assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
+    assert cutover_spies["swap_active"] == [TARGET]   # recovery still cuts over
+
+
+@pytest.mark.asyncio
+async def test_v1_engine_fill_unchanged_whole_text_single_rows(
+    env, fake_provider, monkeypatch
+):
+    """Schema awareness must not perturb the v1 path: a v1 target still gets
+    ONE whole-text vector per snapshot, chunker never consulted."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+
+    def _no_chunk(text, model_key=None):
+        raise AssertionError("chunker must not run on a v1 engine fill")
+
+    monkeypatch.setattr(migrate, "chunk_snapshot", _no_chunk)
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    store = get_store(TARGET, base_dir=stores_dir)
+    assert store.schema == 1
+    assert store.rows == 3                             # one row per snapshot
+    assert sorted(fake_provider.embedded_texts) == sorted(bodies.values())
+
+
+# ── in-service rebuild trigger (route + start_rebuild) ──────────────────────
+
+def _wait_for_state(state, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = migrate.get_job_status()
+        if status is not None and status["state"] == state:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(
+        f"job never reached state {state!r}: {migrate.get_job_status()}"
+    )
+
+
+@pytest.fixture
+def app():
+    from Orchestrator.routes.embeddings_routes import router
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+def test_route_rebuild_true_launches_build_only(env, fake_provider, app,
+                                                cutover_spies, toolvault_hook):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/embeddings/migrate", json={"target": TARGET, "rebuild": True}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "running"
+        assert body["kind"] == "rebuild" and body["activate"] is False
+        _wait_for_state("done")
+
+    bstore = get_store(TARGET, base_dir=stores_dir / migrate.BUILD_DIR_NAME,
+                       schema=2)
+    assert bstore.ids() == set(bodies)
+    # build-only through the route too: no cutover, no pointer, no hook
+    assert cutover_spies["set_active_slug"] == []
+    assert cutover_spies["swap_active"] == []
+    assert toolvault_hook == []
+    assert not (stores_dir / "active.json").exists()
+
+
+def test_route_rebuild_unknown_slug_404(env, app):
+    with TestClient(app) as client:
+        resp = client.post(
+            "/embeddings/migrate", json={"target": "no-such-model", "rebuild": True}
+        )
+    assert resp.status_code == 404
+
+
+def test_route_plain_call_still_migrates_with_cutover(env, fake_provider, app,
+                                                      cutover_spies):
+    """The rebuild param is ADDITIVE: a body without it behaves exactly as
+    before (model-switch job, cutover at the end)."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=2)
+
+    with TestClient(app) as client:
+        resp = client.post("/embeddings/migrate", json={"target": TARGET})
+        assert resp.status_code == 200
+        assert "kind" not in resp.json()               # kind-less = migrate
+        _wait_for_state("done")
+
+    assert cutover_spies["set_active_slug"] == [TARGET]
+    assert cutover_spies["swap_active"] == [TARGET]
+
+
 # ── gap-heal: v2 active store heals in chunk groups ──────────────────────────
 
 @pytest.mark.asyncio
@@ -560,7 +714,9 @@ async def test_gap_heal_v2_chunks_groups_and_sub_batches(env, fake_provider,
 
     healed = await watcher._gap_heal(TARGET)
 
-    assert healed == 80                               # rows appended
+    # SNAPSHOT currency (matches health["healed"] on every ops surface;
+    # on v1 rows == snapshots so the two currencies coincide there)
+    assert healed == 5
     assert store.snapshots == 5 and store.rows == 80
     assert store.missing(sorted(bodies)) == []
     assert fake_provider.call_sizes == [32, 32, 16]

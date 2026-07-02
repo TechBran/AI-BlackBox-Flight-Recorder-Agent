@@ -237,6 +237,27 @@ async def run_migration(target_slug: str) -> dict:
     return await _run_engine(target_slug)
 
 
+async def start_rebuild(target_slug: str) -> dict:
+    """Route entry for the IN-SERVICE chunk rebuild (M6f build step).
+
+    Mirror of start_migration: claim (kind="rebuild"), schedule the
+    BUILD-ONLY engine on the running loop, return the job dict. Running it
+    inside the service keeps exactly ONE writer on the box while mints
+    continue against the active v1 store (the re-diff loop absorbs them into
+    the candidate). Same ValueError→404 / RuntimeError→409 semantics; the
+    claim happens synchronously BEFORE create_task, so a racing second POST
+    can never double-start.
+    """
+    if target_slug not in EMBEDDING_MODELS:
+        raise ValueError(
+            f"unknown embedding model slug {target_slug!r}; "
+            f"known: {sorted(EMBEDDING_MODELS)}"
+        )
+    _begin_job(target_slug, kind="rebuild")
+    _launch(target_slug, rebuild=True)
+    return get_job_status()
+
+
 async def run_rebuild(target_slug: str) -> dict:
     """Run a chunk-store rebuild to completion in this coroutine (CLI + 6f).
 
@@ -360,6 +381,65 @@ def chunk_group_batches(ids_texts: list, model_key: str) -> tuple:
 
 # ── engine ───────────────────────────────────────────────────────────────────
 
+async def _fill_v2_batch(target, provider, ids_texts: list,
+                         model_key: str) -> tuple:
+    """Embed + group-append one snapshot batch into a schema-2 store.
+
+    The model-switch engine's v2 fill body (A4 side-door fix): chunk each
+    snapshot, pack whole snapshots into ≤CHUNK_BATCH_CAP-chunk provider
+    calls, regroup by offset, ONE atomic append_group per snapshot. Returns
+    (appended_sids, quarantined_sids) — both SNAPSHOT currency, feeding the
+    caller's job_appended/raced set algebra unchanged. A snapshot already
+    present at append time (raced concurrent append) is skipped and credited
+    to NOBODY, mirroring the v1 already_present filter. The rebuild engine
+    keeps its own pass-level variant (per-chunk-batch cancel gates +
+    progress lines); the chunk/pack core is shared via chunk_group_batches.
+    """
+    appended: list = []
+    quarantined: list = []
+    batches, empty_ids = await asyncio.to_thread(
+        chunk_group_batches, ids_texts, model_key
+    )
+    for sid in empty_ids:
+        print(f"[MIGRATE] {sid}: empty snapshot body - skipping this run")
+    quarantined.extend(empty_ids)
+    for batch in batches:
+        batch_ids = [sid for sid, _ in batch]
+        flat = [chunk for _, chunks in batch for chunk in chunks]
+        try:
+            vectors = await provider.embed(flat, "document")
+        except EmbeddingProviderError as e:
+            print(
+                f"[MIGRATE] batch failed after provider retries, quarantining "
+                f"{len(batch_ids)} snapshot(s) for this run: {batch_ids}: {e}"
+            )
+            quarantined.extend(batch_ids)
+            await asyncio.sleep(BATCH_SLEEP_S)
+            continue
+        if not vectors or len(vectors) != len(flat):
+            # Belt-and-braces (mirrors embed_snapshot_for_index): a drifting
+            # provider must never yield a misaligned chunk group.
+            print(
+                f"[MIGRATE] provider returned {len(vectors or [])} vectors "
+                f"for {len(flat)} chunks - quarantining {batch_ids} for this run"
+            )
+            quarantined.extend(batch_ids)
+            await asyncio.sleep(BATCH_SLEEP_S)
+            continue
+        already_present = target.ids()
+        offset = 0
+        for sid, chunks in batch:
+            group = vectors[offset:offset + len(chunks)]
+            offset += len(chunks)
+            if sid in already_present:
+                continue  # raced concurrent append — not credited to this job
+            # fsync-heavy store writes off the loop (engine constraint)
+            if await asyncio.to_thread(target.append_group, sid, group):
+                appended.append(sid)
+        await asyncio.sleep(BATCH_SLEEP_S)
+    return appended, quarantined
+
+
 async def _run_engine(target_slug: str) -> dict:
     """The diff-and-fill loop. Caller has already claimed the job via _begin_job."""
     from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
@@ -367,6 +447,12 @@ async def _run_engine(target_slug: str) -> dict:
     try:
         target = get_store(target_slug)
         provider = get_provider(target_slug)
+        # Schema decides the fill shape ONCE (a live store never changes
+        # schema mid-job): v1 = whole-text single rows (today's path,
+        # byte-identical); v2 = chunk groups — appending whole-snapshot
+        # vectors to a v2 store would land LEGAL 1-chunk groups that empty
+        # missing() and self-hide forever (A4 side door, M6d hardening).
+        target_schema = target.schema
         preexisting_ids = target.ids()      # raced-detection baseline
         job_appended: set[str] = set()      # everything THIS job wrote
         quarantined: set[str] = set()       # skipped for THIS RUN only
@@ -412,7 +498,27 @@ async def _run_engine(target_slug: str) -> dict:
                     texts.append(text)
                     good_ids.append(sid)
 
-                if good_ids:
+                if good_ids and target_schema == 2:
+                    # A4 side-door fix: chunk + group-append via the shared
+                    # helpers; quarantine/credit bookkeeping identical to the
+                    # v1 branch, all in snapshot currency.
+                    appended_now, quarantined_now = await _fill_v2_batch(
+                        target, provider, list(zip(good_ids, texts)),
+                        target_slug,
+                    )
+                    if quarantined_now:
+                        quarantined.update(quarantined_now)
+                        _quarantine_ids(quarantined_now)
+                    job_appended.update(appended_now)
+                    appends_since_persist += len(appended_now)
+                    persist_now = appends_since_persist >= PERSIST_EVERY
+                    _advance_done(
+                        len(good_ids) - len(quarantined_now),
+                        persist=persist_now,
+                    )
+                    if persist_now:
+                        appends_since_persist = 0
+                elif good_ids:
                     try:
                         vectors = await provider.embed(texts, "document")
                     except EmbeddingProviderError as e:

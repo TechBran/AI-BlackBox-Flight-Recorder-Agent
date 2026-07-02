@@ -349,8 +349,10 @@ async def _pick_migration_target(active: str, successor_slug: "str | None") -> t
 # ── gap-heal ─────────────────────────────────────────────────────────────────
 
 async def _gap_heal(active: str) -> int:
-    """Embed up to HEAL_CAP active-store gaps (vector-less mints); rows appended.
+    """Embed up to HEAL_CAP active-store gaps (vector-less mints).
 
+    Returns SNAPSHOTS healed — the health["healed"] currency on every ops
+    surface (on v1, one row per snapshot, so rows and snapshots coincide).
     NEVER raises: a heal failure is logged and retried on the next daily run
     (quarantine-style, matching migrate's skip semantics) — the model is
     healthy, so the state stays ok regardless.
@@ -399,7 +401,7 @@ async def _gap_heal(active: str) -> int:
         )
         for sid in empty_ids:
             print(f"[WATCHER] gap-heal: {sid} chunked to nothing - skipping")
-        appended = 0
+        rows = 0
         healed_snaps = 0
         for batch in batches:
             flat = [chunk for _, chunks in batch for chunk in chunks]
@@ -415,15 +417,19 @@ async def _gap_heal(active: str) -> int:
             for sid, chunks in batch:
                 group = vectors[offset:offset + len(chunks)]
                 offset += len(chunks)
-                appended += await asyncio.to_thread(
+                written = await asyncio.to_thread(
                     store.append_group, sid, group
                 )
-            healed_snaps += len(batch)
+                if written:
+                    rows += written
+                    healed_snaps += 1
         print(
-            f"[WATCHER] gap-heal: embedded {appended} chunk row(s) across "
+            f"[WATCHER] gap-heal: embedded {rows} chunk row(s) across "
             f"{healed_snaps} snapshot(s) for {active}"
         )
-        return appended
+        # SNAPSHOT currency: matches health["healed"] everywhere else (a
+        # group already present — raced-in — is not counted as healed).
+        return healed_snaps
     except Exception as e:  # noqa: BLE001 — heal failure must not flip the state
         print(f"[WATCHER] gap-heal failed (will retry next run): {type(e).__name__}: {e}")
         return 0

@@ -35,6 +35,7 @@ from Orchestrator.embeddings.migrate import (
     get_job_status,
     request_cancel,
     start_migration,
+    start_rebuild,
 )
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
@@ -259,6 +260,7 @@ async def embeddings_validate(req: ValidateRequest):
 
 class MigrateRequest(BaseModel):
     target: str
+    rebuild: bool = False  # M6d: true = BUILD-ONLY chunk-store candidate
 
 
 @router.post("/migrate")
@@ -267,12 +269,20 @@ async def embeddings_migrate(req: MigrateRequest):
 
     404 unknown slug, 409 when a job is already running (one job at a time),
     otherwise the freshly-claimed job dict (state == "running").
+
+    rebuild=true (additive, M6d) starts the BUILD-ONLY chunk rebuild instead:
+    a schema-2 candidate under {stores}/_build/{target}, NO cutover — the
+    service keeps serving (and minting into) the active store while it runs;
+    activation is the separate explicit M6f dir-swap. Plain calls (no
+    rebuild field) behave exactly as before.
     """
     if req.target not in EMBEDDING_MODELS:
         raise HTTPException(
             status_code=404, detail=f"Unknown embedding model slug: {req.target!r}"
         )
     try:
+        if req.rebuild:
+            return await start_rebuild(req.target)
         return await start_migration(req.target)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
