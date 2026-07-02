@@ -16,7 +16,8 @@ FAIRNESS CONTROLS
     perspective — so neither arm is advantaged by query phrasing.
   * The DIGEST body imports the REAL production helpers (_strip_html,
     _extract_keywords) from Orchestrator.tasks, so we test shipped behavior.
-  * Both bodies truncated at EMBEDDING_MAX_CHARS like production.
+  * Both bodies clamped by the production token-aware clamp (per-model
+    max_input_tokens budget via tokenization.py) like production.
   * Embeddings via the production generate_embedding_sync(text, purpose):
     purpose="document" for bodies, purpose="query" for queries.
   * NON-minting LLM calls only (direct Anthropic API, claude-haiku-4-5) for
@@ -27,7 +28,7 @@ FAIRNESS CONTROLS
     random/Date without a fixed seed.
 
 OUTPUT: hit@1 / hit@3 / hit@5 / MRR for each arm, threshold-clear rate at 0.55
-for the true target, 10K-truncation hit counts, N. NO verdict — method + numbers.
+for the true target, clamp hit counts, N. NO verdict — method + numbers.
 
 Run:  Orchestrator/venv/bin/python benchmarks/digest_ab/run_ab.py
       (add --regen to re-generate the LLM artifacts from scratch)
@@ -55,11 +56,14 @@ from Orchestrator.embeddings.search import (  # noqa: E402
 )
 from Orchestrator.config import ANTHROPIC_API_KEY  # noqa: E402
 
-# Production embed truncation constant — lives in the embeddings registry. The
-# provider layer truncates each text to EMBEDDING_MAX_CHARS + "..." before
-# embedding (Orchestrator/embeddings/providers.py), so we only count whether a
-# body would be truncated; we let the live provider do the actual truncation.
-from Orchestrator.embeddings.registry import EMBEDDING_MAX_CHARS  # noqa: E402
+# Production embed clamp — the provider layer token-aware clamps each text to
+# 90% of the registry's per-model max_input_tokens before embedding
+# (Orchestrator/embeddings/providers.py + Orchestrator/tokenization.py), so we
+# only count whether a body would be clamped; we let the live provider do the
+# actual clamping.
+from Orchestrator import tokenization  # noqa: E402
+from Orchestrator.embeddings.providers import EMBED_CLAMP_MARGIN  # noqa: E402
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS  # noqa: E402
 
 ARTIFACTS = HERE / "artifacts.json"   # cached LLM-generated queries + perspectives
 RESULTS = HERE / "results.json"
@@ -156,11 +160,16 @@ def perspective_body(perspective: str) -> str:
     return perspective
 
 
-def will_truncate(text: str) -> bool:
-    """Production truncates inside the provider layer (text[:MAX] + '...'). We
-    pass the FULL body to embed() and let the live provider truncate exactly as
-    it does in production; this only reports whether truncation would occur."""
-    return len(text) > EMBEDDING_MAX_CHARS
+def clamp_budget_tokens(slug: str) -> int:
+    """Mirror of the production clamp budget for the active model."""
+    return int(EMBEDDING_MODELS[slug]["max_input_tokens"] * EMBED_CLAMP_MARGIN)
+
+
+def will_clamp(text: str, slug: str) -> bool:
+    """Production clamps inside the provider layer (token-aware, head-keeping).
+    We pass the FULL body to embed() and let the live provider clamp exactly as
+    it does in production; this only reports whether clamping would occur."""
+    return tokenization.estimate_tokens(text, slug) > clamp_budget_tokens(slug)
 
 
 # ---- cosine -------------------------------------------------------------------
@@ -193,8 +202,10 @@ def main():
     args = ap.parse_args()
 
     slug = get_active_slug()
+    budget = clamp_budget_tokens(slug)
     print(f"[model] active embedding model = {slug}")
-    print(f"[const] EMBEDDING_MAX_CHARS = {EMBEDDING_MAX_CHARS}, threshold = {args.threshold}")
+    print(f"[const] clamp budget = {budget} tokens "
+          f"(max_input_tokens x {EMBED_CLAMP_MARGIN}), threshold = {args.threshold}")
 
     data = generate_artifacts(args.regen)
     items = data["items"]
@@ -208,8 +219,8 @@ def main():
         p = perspective_body(it["perspective"])
         digest_bodies.append(d)
         persp_bodies.append(p)
-        trunc_digest += int(will_truncate(d))
-        trunc_persp += int(will_truncate(p))
+        trunc_digest += int(will_clamp(d, slug))
+        trunc_persp += int(will_clamp(p, slug))
 
     # Embed both corpora as DOCUMENTS, queries as QUERIES (production purposes).
     print(f"[embed] {N} digest docs...")
@@ -255,7 +266,7 @@ def main():
         "embedding_model": slug,
         "llm_model": data["model"],
         "N": N,
-        "embedding_max_chars": EMBEDDING_MAX_CHARS,
+        "clamp_budget_tokens": budget,
         "threshold": args.threshold,
         "truncation_hits": {"digest": trunc_digest, "perspective": trunc_persp},
         "arms": {"digest": digest, "perspective": persp},
@@ -272,7 +283,7 @@ def main():
     print(f"=== A/B RECALL  (N={N}, model={slug}, threshold={args.threshold}) ===")
     row("PERSPECTIVE", persp)
     row("DIGEST", digest)
-    print(f"  truncation@{EMBEDDING_MAX_CHARS}: digest={trunc_digest}/{N} "
+    print(f"  clamp@{budget}tok: digest={trunc_digest}/{N} "
           f"perspective={trunc_persp}/{N}")
 
 

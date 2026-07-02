@@ -286,7 +286,7 @@ async def test_openai_client_created_per_call():
 
 
 # ── token-aware clamp (WI-1 mode 1) ──────────────────────────────────────────
-# The old EMBEDDING_MAX_CHARS char cap (10,000 chars ≈ 3.4k tokens) both
+# The old 10,000-char cap (≈ 3.4k tokens) both
 # over-truncated (672 snapshots lost their tails) and under-protected (Ollama
 # silently cut at its 4,095-token default ctx). The clamp is token-aware via
 # tokenization.clamp_to_tokens with a per-model registry budget and a 10%

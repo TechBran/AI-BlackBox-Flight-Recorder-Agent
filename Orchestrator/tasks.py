@@ -1523,7 +1523,8 @@ def process_chat_task(task: Task):
             # appended "DELIVERY: send an SMS to …" line) before they reached
             # the semantic tool embedder, so send_sms scored below threshold and
             # was never injected — no SMS was sent. Full prompt now; the
-            # embedding layer self-caps at EMBEDDING_MAX_CHARS.
+            # embedding layer self-caps via the token-aware clamp
+            # (per-model max_input_tokens budgets, tokenization.py).
             from Orchestrator.routes.chat_routes import _last_user_msg
             _user_msg = _last_user_msg(inp.messages)
             if _user_msg:
@@ -1905,8 +1906,9 @@ OP_RX      = re.compile(r"^OPERATOR:\s*(.+)$", re.M)
 # Deterministic, dependency-free keyword extraction for the snapshot digest.
 # Replaces the model-authored 'Keywords:' line (which required the JSON envelope).
 # No LLM, no network, no new pip dep — stable output for a given input. The digest
-# is appended to the snapshot body RESPONSE-FIRST / KEYWORDS-SECOND so the 10K
-# embedding truncation (EMBEDDING_MAX_CHARS) never eats the answer or the keywords.
+# is appended to the snapshot body RESPONSE-FIRST / KEYWORDS-SECOND so the
+# embedding layer's token-aware clamp (per-model max_input_tokens budgets via
+# tokenization.py) never eats the answer or the keywords.
 # ORDERING CONTRACT (for the future reasoning sub-task): reasoning, when added,
 # goes LAST (after keywords) so it is truncated first.
 _KW_STOPWORDS = frozenset((

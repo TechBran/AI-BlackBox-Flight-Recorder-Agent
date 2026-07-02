@@ -10,9 +10,9 @@ Shared semantics (all providers):
   per-model max_input_tokens via tokenization.clamp_to_tokens — BOTH purposes,
   documents AND queries, and the clamp NEVER raises (chat_routes._last_user_msg
   and tasks.py tool selection rely on the embedding layer self-capping).
-  This replaced the legacy EMBEDDING_MAX_CHARS char cap (10,000 chars ≈ 3.4k
-  tokens), which over-truncated long snapshots while still letting Ollama
-  silently cut at its 4,095-token default ctx.
+  This replaced the legacy 10,000-char cap (≈ 3.4k tokens), which
+  over-truncated long snapshots while still letting Ollama silently cut at
+  its 4,095-token default ctx.
 - 3 retries after the initial attempt, exponential backoff 1s/2s/4s
   (`_sleep` is an instance attribute so tests can record instead of sleep)
 - EmbeddingProviderError after final failure — callers decide whether to

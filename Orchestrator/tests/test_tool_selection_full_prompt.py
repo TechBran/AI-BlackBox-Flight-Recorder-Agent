@@ -11,8 +11,9 @@ char 500, never reached the embedder, ``send_sms`` scored below the 0.5
 threshold, and the model got no SMS tool — so no SMS was ever sent.
 
 THE FIX: tool selection uses the FULL last user message (the embedding provider
-layer self-caps at EMBEDDING_MAX_CHARS=10000, far above 500, so no app-level cap
-is needed). The mirror truncation in tasks.py is removed too, and the "google"
+layer self-caps via the token-aware clamp — per-model max_input_tokens budgets
+through tokenization.py, thousands of tokens, far above 500 chars — so no
+app-level cap is needed). The mirror truncation in tasks.py is removed too, and the "google"
 provider alias is normalized to gemini so the system-prompt tool instructions are
 formatted for the right provider.
 

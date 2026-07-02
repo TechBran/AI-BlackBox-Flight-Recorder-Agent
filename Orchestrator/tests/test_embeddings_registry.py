@@ -9,7 +9,7 @@ import re
 import pytest
 
 from Orchestrator import config
-from Orchestrator.embeddings.registry import EMBEDDING_MAX_CHARS, EMBEDDING_MODELS
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
 VALID_PROVIDERS = {"gemini", "openai", "ollama"}
 VALID_PRIVACY = {"cloud", "local"}
@@ -63,10 +63,6 @@ def test_exact_slugs_present_with_dims(slug, dims):
 @pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))
 def test_slugs_are_kebab_case(slug):
     assert re.fullmatch(r"[a-z0-9.\-]+", slug), f"slug {slug!r} is not kebab-case"
-
-
-def test_embedding_max_chars():
-    assert EMBEDDING_MAX_CHARS == 10000
 
 
 def test_config_active_default_is_registry_slug():

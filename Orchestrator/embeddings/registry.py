@@ -83,7 +83,6 @@ EMBEDDING_MODELS = {
         "max_input_tokens": 8192,
     },
 }
-EMBEDDING_MAX_CHARS = 10000  # truncate document text before embedding (existing behavior)
 
 # The store that historical inline 3072-dim index vectors transcode into
 # (every inline vector ever written came from the legacy Gemini default).

@@ -138,10 +138,11 @@ def _last_user_msg(messages) -> str:
     500 chars dropped trailing instructions (e.g. a cron job's appended
     ``DELIVERY: send an SMS to …`` line) before they reached the semantic tool
     embedder, so the matching tool (``send_sms``) scored below threshold and was
-    never injected. The genuine ceiling is the embedding provider's
-    ``EMBEDDING_MAX_CHARS`` (10000), enforced downstream in
-    ``Orchestrator/embeddings/providers.py:_truncate`` — far above any realistic
-    prompt; no app-level cap is needed here.
+    never injected. The genuine ceiling is the embedding layer's token-aware
+    clamp (per-model ``max_input_tokens`` budgets via ``tokenization.py``,
+    enforced downstream in ``Orchestrator/embeddings/providers.py`` — clamps,
+    never raises) — far above any realistic prompt; no app-level cap is needed
+    here.
     """
     for m in reversed(messages if isinstance(messages, list) else []):
         if m.get("role") == "user":
