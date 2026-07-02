@@ -8,12 +8,29 @@ config.EMBEDDINGS_STORES_DIR):
 
 The active-model pointer lives at {base_dir}/active.json ({"active": slug}).
 
+Schema v2 (chunk-for-scoring, audit A1–A3/A5) adds, per store:
+  ordinals.json — parallel int list; row i's chunk ordinal within its snapshot
+  meta.json     — additionally {schema: 2, rows, snapshots, generation};
+                  `count` stays SNAPSHOT currency (status/UI binding contract)
+ids.json rows stay BARE snap_ids, repeated once per chunk — snap_id is the one
+currency of ids()/missing()/allowed_ids on every schema. A snapshot's chunks
+form ONE contiguous group (ordinals 0..n-1) written in one lock hold; the
+idempotency key stays snap_id and means "full group present" (whole incoming
+group skipped). search/search_with_vectors collapse to unique snapshots during
+the argsort descent: the first hit per snap_id IS its max-cosine best chunk.
+Absent schema key ⇒ v1: those stores behave byte-identically to today, forever
+(audit A6). Fresh stores default to v1 until the M6f cutover — schema=2 must be
+requested explicitly at construction.
+
 Invariants:
 - Stored rows are L2-normalized at append time, so cosine similarity is a
   single mat-vec (scores = M @ q) — never a python loop over rows.
 - ids.json and vectors.f32 are kept consistent by open()'s self-heal:
   whichever is longer is truncated to match the shorter (torn writes only
-  ever lose the trailing rows, never corrupt earlier ones).
+  ever lose the trailing rows, never corrupt earlier ones). v2 extends the
+  heal to ordinals.json and drops a torn trailing PARTIAL group entirely
+  (ordinal-contiguity walk-back), so a healed snapshot is fully absent →
+  reported missing → cleanly re-embedded.
 - One process owns the store (the orchestrator); a threading.Lock guards
   append/search state mutation across its worker threads.
 """
@@ -30,6 +47,7 @@ from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
 VECTORS_FILE = "vectors.f32"
 IDS_FILE = "ids.json"
+ORDINALS_FILE = "ordinals.json"
 META_FILE = "meta.json"
 ACTIVE_FILE = "active.json"
 
@@ -51,13 +69,22 @@ class VectorStore:
     get_store(); constructing VectorStore directly is for tests only.
     """
 
-    def __init__(self, slug: str, dims: int, base_dir):
+    def __init__(self, slug: str, dims: int, base_dir, schema: "int | None" = None):
+        if schema not in (None, 1, 2):
+            raise ValueError(f"{slug}: unsupported store schema {schema!r}")
         self.slug = slug
         self.dims = dims
         self.dir = Path(base_dir) / slug
         self._row_bytes = 4 * dims  # float32
         self._ids: list[str] = []
         self._id_set: set[str] = set()
+        # None = autodetect from meta.json (a fresh dir defaults to v1 until
+        # the M6f cutover); 1/2 = require/create that schema. Materialized on
+        # first append — open() stays side-effect free on empty dirs.
+        self._requested_schema = schema
+        self._schema = schema or 1
+        self._ordinals: list[int] = []  # v2 only: row i's chunk ordinal
+        self._generation = 0            # v2 only: bumps on every mutation
         self._matrix = None  # lazily loaded; invalidated on append
         self._opened = False
         self._lock = threading.Lock()
@@ -71,6 +98,10 @@ class VectorStore:
     @property
     def ids_path(self) -> Path:
         return self.dir / IDS_FILE
+
+    @property
+    def ordinals_path(self) -> Path:
+        return self.dir / ORDINALS_FILE
 
     @property
     def meta_path(self) -> Path:
@@ -92,18 +123,38 @@ class VectorStore:
         # Dims guard MUST precede self-heal: healing across a dims mismatch
         # reinterprets row boundaries (rows = bytes // wrong_row_bytes),
         # rewrites meta to the wrong dims, and silently corrupts searches.
+        meta_obj = None
         if self.meta_path.exists():
             try:
-                stored_dims = json.loads(
-                    self.meta_path.read_text(encoding="utf-8")
-                )["dims"]
+                meta_obj = json.loads(self.meta_path.read_text(encoding="utf-8"))
+                stored_dims = meta_obj["dims"]
             except (json.JSONDecodeError, KeyError, TypeError, OSError,
                     UnicodeDecodeError):
+                meta_obj = None
                 stored_dims = None  # unreadable meta: heal below rebuilds it
             if stored_dims is not None and stored_dims != self.dims:
                 raise ValueError(
                     f"{self.slug}: store dims {stored_dims} != requested {self.dims}"
                 )
+
+        # Schema guard mirrors the dims guard: the on-disk schema wins, an
+        # explicit conflicting request refuses (never reinterprets bytes).
+        # Absent/unreadable meta: the constructor's request (default v1).
+        if meta_obj is not None:
+            disk_schema = meta_obj.get("schema", 1)
+            if disk_schema not in (1, 2):
+                raise ValueError(
+                    f"{self.slug}: unsupported store schema {disk_schema!r}"
+                )
+            if (self._requested_schema is not None
+                    and disk_schema != self._requested_schema):
+                raise ValueError(
+                    f"{self.slug}: store is schema {disk_schema}, "
+                    f"requested {self._requested_schema}"
+                )
+            self._schema = disk_schema
+        else:
+            self._schema = self._requested_schema or 1
 
         self._matrix = None
         self._ids = []
@@ -114,27 +165,47 @@ class VectorStore:
         if self.vectors_path.exists():
             rows = self.vectors_path.stat().st_size // self._row_bytes
 
-        target = min(len(self._ids), rows)
-        if len(self._ids) != rows or (
-            self.vectors_path.exists()
-            and self.vectors_path.stat().st_size != target * self._row_bytes
-        ):
-            # Self-heal: truncate BOTH sides to the shorter (drops only
-            # trailing rows, including any partial row from a torn write).
-            print(
-                f"[VECSTORE] {self.slug}: healing ids={len(self._ids)} "
-                f"rows={rows} -> {target}"
-            )
-            if self.vectors_path.exists():
-                with open(self.vectors_path, "r+b") as f:
-                    f.truncate(target * self._row_bytes)
-            if len(self._ids) != target:
-                self._ids = self._ids[:target]
-                _atomic_write_json(self.ids_path, self._ids)
-            self._write_meta_locked()
+        if self._schema == 2:
+            self._load_v2_locked(rows, meta_obj)
+        else:
+            target = min(len(self._ids), rows)
+            if len(self._ids) != rows or (
+                self.vectors_path.exists()
+                and self.vectors_path.stat().st_size != target * self._row_bytes
+            ):
+                # Self-heal: truncate BOTH sides to the shorter (drops only
+                # trailing rows, including any partial row from a torn write).
+                print(
+                    f"[VECSTORE] {self.slug}: healing ids={len(self._ids)} "
+                    f"rows={rows} -> {target}"
+                )
+                if self.vectors_path.exists():
+                    with open(self.vectors_path, "r+b") as f:
+                        f.truncate(target * self._row_bytes)
+                if len(self._ids) != target:
+                    self._ids = self._ids[:target]
+                    _atomic_write_json(self.ids_path, self._ids)
+                self._write_meta_locked()
 
         self._id_set = set(self._ids)
         self._opened = True
+
+    def _load_v2_locked(self, rows: int, meta_obj) -> None:
+        """v2 load: ordinals sidecar + generation."""
+        self._generation = 0
+        if isinstance(meta_obj, dict):
+            try:
+                self._generation = int(meta_obj.get("generation", 0))
+            except (TypeError, ValueError):
+                self._generation = 0
+        self._ordinals = []
+        if self.ordinals_path.exists():
+            try:
+                self._ordinals = json.loads(
+                    self.ordinals_path.read_text(encoding="utf-8")
+                )
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                self._ordinals = []  # unreadable sidecar heals like a missing one
 
     def _ensure_open_locked(self) -> None:
         if not self._opened:
@@ -143,8 +214,27 @@ class VectorStore:
     # ── write path ───────────────────────────────────────────────────────────
 
     def append(self, snap_id: str, vector) -> None:
-        """L2-normalize and append one row; idempotent on snap_id."""
+        """L2-normalize and append one row; idempotent on snap_id.
+
+        On a v2 store this is a legal 1-chunk group (ordinal [0])."""
         self.append_many([(snap_id, vector)])
+
+    def append_group(self, snap_id: str, vectors) -> int:
+        """Append one snapshot's chunk vectors as ONE atomic group (v2 only).
+
+        Rows land contiguously with ordinals 0..n-1 under a single lock hold;
+        idempotency is whole-group on snap_id (first group wins — a re-append
+        writes nothing and returns 0). Returns rows written.
+        """
+        with self._lock:
+            self._ensure_open_locked()
+            if self._schema != 2:
+                # Fail loud: v1 first-wins dedupe would silently keep only the
+                # first chunk and masquerade as a whole-snapshot vector.
+                raise ValueError(
+                    f"{self.slug}: append_group requires a schema-2 store"
+                )
+        return self.append_many([(snap_id, vec) for vec in vectors])
 
     def append_many(self, items: list[tuple[str, "np.ndarray | list"]]) -> int:
         """Append a batch of (snap_id, vector) rows; returns rows written.
@@ -155,6 +245,12 @@ class VectorStore:
         wins) are skipped silently, matching append()'s idempotency. The whole
         batch costs ONE fsync set: one vectors.f32 append, one ids.json
         rewrite, one meta rewrite, one matrix invalidation.
+
+        v2 stores treat consecutive same-snap_id runs as chunk GROUPS: each
+        group lands whole (ordinals 0..n-1) or is skipped whole (duplicate
+        snap_id — "already present" means the full group is). The entire
+        batch, all groups, is written under ONE lock hold, so groups can never
+        interleave with or span other batches.
         """
         prepared = []
         for snap_id, vector in items:
@@ -172,6 +268,8 @@ class VectorStore:
 
         with self._lock:
             self._ensure_open_locked()
+            if self._schema == 2:
+                return self._append_groups_locked(prepared)
             new_ids: list[str] = []
             new_rows: list[bytes] = []
             seen: set[str] = set()
@@ -201,22 +299,106 @@ class VectorStore:
             self._matrix = None  # re-read lazily on next search
             return len(new_ids)
 
+    def _append_groups_locked(self, prepared: list) -> int:
+        """v2 write path: consecutive same-snap_id runs land as whole groups.
+
+        A group whose snap_id already exists (in the store or earlier in the
+        batch) is skipped WHOLE — snap_id membership always means "full group
+        present" (post-heal invariant), which is what keeps transcode/migrate
+        crash-rerun idempotency working unchanged.
+        """
+        new_ids: list[str] = []
+        new_ordinals: list[int] = []
+        new_rows: list[bytes] = []
+        seen: set[str] = set()
+        i = 0
+        while i < len(prepared):
+            snap_id = prepared[i][0]
+            j = i
+            while j < len(prepared) and prepared[j][0] == snap_id:
+                j += 1
+            if snap_id not in self._id_set and snap_id not in seen:
+                seen.add(snap_id)
+                for ordinal, (_, vec) in enumerate(prepared[i:j]):
+                    norm = float(np.linalg.norm(vec))
+                    if norm > 0:
+                        vec = vec / norm
+                    new_ids.append(snap_id)
+                    new_ordinals.append(ordinal)
+                    new_rows.append(vec.astype("<f4").tobytes())
+            i = j
+        if not new_ids:
+            return 0
+
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.vectors_path, "ab") as f:
+            f.write(b"".join(new_rows))
+            f.flush()
+            os.fsync(f.fileno())
+        # Write order vectors → ids → ordinals → meta: a crash at any point
+        # heals back to the last complete-group boundary on the next open
+        # (ids/ordinals rewrites are individually atomic and always end at a
+        # group boundary, so only a vectors↔sidecar length mismatch can ever
+        # expose a partial group — which the heal drops whole).
+        self._ids.extend(new_ids)
+        self._id_set.update(new_ids)
+        self._ordinals.extend(new_ordinals)
+        _atomic_write_json(self.ids_path, self._ids)
+        _atomic_write_json(self.ordinals_path, self._ordinals)
+        self._generation += 1
+        self._write_meta_locked()
+        self._matrix = None  # re-read lazily on next search
+        return len(new_ids)
+
     def _write_meta_locked(self) -> None:
-        _atomic_write_json(self.meta_path, {
+        meta = {
             "slug": self.slug,
             "dims": self.dims,
             "normalized": True,
             "count": len(self._ids),
             "last_updated": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if self._schema == 2:
+            # count stays SNAPSHOT currency on v2 — the status/UI binding
+            # contract reads it (audit A11); rows is the new row count.
+            snapshots = len(set(self._ids))
+            meta["count"] = snapshots
+            meta["schema"] = 2
+            meta["rows"] = len(self._ids)
+            meta["snapshots"] = snapshots
+            meta["generation"] = self._generation
+        _atomic_write_json(self.meta_path, meta)
 
     # ── read path ────────────────────────────────────────────────────────────
 
     @property
     def count(self) -> int:
+        """SNAPSHOT currency on every schema (v1 has one row per snapshot)."""
+        with self._lock:
+            self._ensure_open_locked()
+            if self._schema == 2:
+                return len(self._id_set)
+            return len(self._ids)
+
+    @property
+    def rows(self) -> int:
+        """Raw vector-row count (== count on v1; >= snapshots on v2)."""
         with self._lock:
             self._ensure_open_locked()
             return len(self._ids)
+
+    @property
+    def snapshots(self) -> int:
+        """Distinct snap_ids present (full groups, post-heal)."""
+        with self._lock:
+            self._ensure_open_locked()
+            return len(self._id_set)
+
+    @property
+    def schema(self) -> int:
+        with self._lock:
+            self._ensure_open_locked()
+            return self._schema
 
     def ids(self) -> set:
         with self._lock:
@@ -308,13 +490,19 @@ _STORES: dict[tuple[str, str], VectorStore] = {}
 _STORES_LOCK = threading.Lock()
 
 
-def get_store(slug: str, dims: int = None, base_dir=None) -> VectorStore:
+def get_store(slug: str, dims: int = None, base_dir=None,
+              schema: "int | None" = None) -> VectorStore:
     """Canonical-instance factory: ONE live VectorStore per (base_dir, slug).
 
     Two instances on the same directory would race each other's files, so all
     production code must come through here. dims defaults from
     EMBEDDING_MODELS[slug]; base_dir defaults to config.EMBEDDINGS_STORES_DIR.
     The key uses the realpath of base_dir so aliased paths share an instance.
+
+    schema=None (default) autodetects from meta.json — fresh dirs stay v1
+    until the M6f cutover. schema=2 creates/requires a chunk-group store (the
+    6d rebuild path); an explicit request conflicting with an existing store
+    (cached or on disk) refuses.
     """
     if dims is None:
         try:
@@ -331,8 +519,13 @@ def get_store(slug: str, dims: int = None, base_dir=None) -> VectorStore:
         if store is None:
             # open() before caching: a dims-mismatch refusal must not leave a
             # poisoned entry behind.
-            store = VectorStore(slug, dims, base).open()
+            store = VectorStore(slug, dims, base, schema=schema).open()
             _STORES[key] = store
+        elif schema is not None and store.schema != schema:
+            raise ValueError(
+                f"{slug}: live store is schema {store.schema}, "
+                f"requested {schema}"
+            )
         return store
 
 
