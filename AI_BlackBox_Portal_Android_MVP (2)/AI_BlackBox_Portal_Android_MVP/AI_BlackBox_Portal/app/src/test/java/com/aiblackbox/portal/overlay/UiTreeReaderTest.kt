@@ -1,5 +1,8 @@
 package com.aiblackbox.portal.overlay
 
+import android.view.accessibility.AccessibilityWindowInfo
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -245,6 +248,56 @@ class UiTreeReaderTest {
     }
 
     // ---- SECURITY: end-to-end through the reader's own path ----------------
+
+    // ---- (M5.3) window topology: WindowInfo serialization + system-bar gate --
+
+    private val topoJson = Json { encodeDefaults = true }
+
+    @Test
+    fun `WindowInfo serializes with the camelCase schema keys`() {
+        val w = WindowInfo(displayId = 2, appPackage = "com.app", bounds = "0,0,1080,2400", isSystemBar = false)
+        val json = topoJson.encodeToString(listOf(w))
+        assertTrue("displayId key present", json.contains("\"displayId\":2"))
+        assertTrue("appPackage key present", json.contains("\"appPackage\":\"com.app\""))
+        assertTrue("bounds key present", json.contains("\"bounds\":\"0,0,1080,2400\""))
+        assertTrue("isSystemBar key present", json.contains("\"isSystemBar\":false"))
+    }
+
+    @Test
+    fun `WindowInfo carries no screen text — only package geometry type`() {
+        // A window entry is package + geometry + a bool; there is no free-text field to leak.
+        val json = topoJson.encodeToString(listOf(WindowInfo(0, "com.android.systemui", "0,0,1080,96", true)))
+        assertTrue(json.contains("\"isSystemBar\":true"))
+        assertFalse(json.contains("\"text\""))
+    }
+
+    @Test
+    fun `isSystemBarWindow is true only for a TYPE_SYSTEM window`() {
+        assertTrue(isSystemBarWindow(AccessibilityWindowInfo.TYPE_SYSTEM))
+        assertFalse(isSystemBarWindow(AccessibilityWindowInfo.TYPE_APPLICATION))
+        assertFalse(isSystemBarWindow(AccessibilityWindowInfo.TYPE_INPUT_METHOD))
+        assertFalse(isSystemBarWindow(AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER))
+    }
+
+    @Test
+    fun `topology entries carry distinct per-display displayIds (multi-display)`() {
+        // (I2) Simulate the flattened getWindowsOnAllDisplays() output: an app window on the default
+        // display (0), a second app window on a DeX / external display (2), and a system bar on 0.
+        // The pure assembler must PRESERVE each window's displayId — the I2 fix: getWindows() (default
+        // display only) collapsed every displayId to 0; getWindowsOnAllDisplays() carries the real id.
+        val topo = listOf(
+            windowInfoOf(0, "com.app.main", 0, 0, 1080, 2400, AccessibilityWindowInfo.TYPE_APPLICATION),
+            windowInfoOf(2, "com.app.dex", 0, 0, 1920, 1080, AccessibilityWindowInfo.TYPE_APPLICATION),
+            windowInfoOf(0, "com.android.systemui", 0, 0, 1080, 96, AccessibilityWindowInfo.TYPE_SYSTEM),
+        )
+        assertEquals(listOf(0, 2, 0), topo.map { it.displayId })
+        assertEquals("two distinct displays represented", setOf(0, 2), topo.map { it.displayId }.toSet())
+        // The extracted facts flow through: package, bounds, and the system-bar gate.
+        assertEquals("com.app.dex", topo[1].appPackage)
+        assertEquals("0,0,1920,1080", topo[1].bounds)
+        assertTrue("the TYPE_SYSTEM window is a system bar", topo[2].isSystemBar)
+        assertFalse("an app window is not a system bar", topo[0].isSystemBar)
+    }
 
     @Test
     fun `serialized JSON for a password field never contains the raw secret`() {

@@ -21,8 +21,8 @@ loop (M2), no phone endpoint wiring (M1), no Kotlin data classes.
 | Schema | Direction | Purpose |
 |---|---|---|
 | `ui_node.json` | — | One actionable accessibility node. Mirrors the on-device `@Serializable UiNode` **exactly** (JSON keys = `@SerialName`s). |
-| `device_capability.json` | device→brain (inside observation) | `{formFactor, hasScreenshot, supportsCoordinateGesture, displayId}` — what the device can do; the loop degrades gracefully. |
-| `observation.json` | device→brain | `{msg:"observation", ui_tree[], device_capability, screenshot?, timestamp}`. Screen snapshot. |
+| `device_capability.json` | device→brain (inside observation) | `{formFactor, hasScreenshot, supportsCoordinateGesture, displayId, posture?}` — what the device can do; the loop degrades gracefully. `posture?` (M5) = a foldable's hinge state. |
+| `observation.json` | device→brain | `{msg:"observation", ui_tree[], device_capability, screenshot?, window_topology?, posture_changed?, timestamp}`. Screen snapshot. `window_topology?`/`posture_changed?` (M5) = multi-window layout + a foldable posture-change re-observe flag. |
 | `action.json` | brain→device | `{msg:"action", …}` — discriminated union (`type`) of the **nine** actuations. |
 | `action_result.json` | device→brain | `{msg:"action_result", success, detail?, error?, observation?}`. |
 
@@ -187,14 +187,18 @@ Two design questions the M0 scaffold deliberately leaves for M1/M2 to resolve:
 - **Path-encoded major:** every `$id` carries `/v1/`. A breaking change bumps to
   `/v2/` (a parallel directory) and the `observation`/`action` `schema_version`
   major.
-- **`schema_version`** (optional string on `observation`, `const "1.2"`) lets the
-  device and loop negotiate; additive minor changes (new `intent.name`, a new
-  action variant, a new optional field, a new `error` enum value) bump the minor and
-  stay compatible. **1.1** grew `intent.name` from 15 → 26 (decision-9 comprehensive
+- **`schema_version`** (optional string on `observation`, `const "1.3"`) is an
+  **advisory version stamp** (decorative today — no server code reads it to branch;
+  it documents the wire generation for humans and any future negotiation). Additive
+  minor changes (new `intent.name`, a new action variant, a new optional field, a new
+  `error` enum value) bump the minor and stay compatible. **1.1** grew `intent.name` from 15 → 26 (decision-9 comprehensive
   intents + `open_settings` + the guarded `send_intent`). **1.2** added the `press_key`
   action variant (enter/back/home/recents/tab/delete) — `enter` submits the focused
   field via `ACTION_IME_ENTER`, enabling a 'type → submit' flow with no coordinate.
-  Both are additive + back-compatible.
+  **1.3** (M5 — tablet/large-screen/foldable/DeX) added the observation `window_topology`
+  array (which app owns which rectangle + system bars/divider, per `displayId`), the
+  `posture_changed` re-observe flag, and `device_capability.posture` (a foldable's
+  FLAT/HALF_OPENED hinge posture). All additive + back-compatible.
 - **Additive by default:** new fields land as optional; enums grow, never shrink,
   within a major. A field rename or a required-field addition is breaking → new
   major.

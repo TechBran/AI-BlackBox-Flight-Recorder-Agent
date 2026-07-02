@@ -25,7 +25,7 @@ import org.junit.Test
 class AndroidPhoneControllerActionTest {
 
     private fun controller(): AndroidPhoneController = AndroidPhoneController(
-        UiTreeReader { null },
+        UiTreeReader(rootProvider = { null }),
         Actuators({ null }),        // null service -> every actuator returns "not enabled"
         IntentActuator({ null }),
     )
@@ -68,7 +68,7 @@ class AndroidPhoneControllerActionTest {
         hit: CoordinateHit,
         mode: AutonomyMode = AutonomyMode.PERMISSION,
     ) = AndroidPhoneController(
-        UiTreeReader { null },
+        UiTreeReader(rootProvider = { null }),
         Actuators(service = { null }, mode = { mode }, confirm = confirm, coordinateLabeler = { _, _ -> hit }),
         IntentActuator({ null }),
     )

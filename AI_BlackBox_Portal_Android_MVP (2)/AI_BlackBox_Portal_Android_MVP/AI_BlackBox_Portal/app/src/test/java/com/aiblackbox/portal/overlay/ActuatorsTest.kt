@@ -113,6 +113,53 @@ class ActuatorsTest {
         }
     }
 
+    // ---- (M5.1) extent math uses the PROVIDED window bounds ----------------
+    //
+    // The M5.1 fix feeds swipe/scroll the CURRENT window bounds (WindowMetrics), not a
+    // phone-narrow display metric. The pure swipeCoords is what turns those bounds into a
+    // centered gesture, so feeding tablet vs phone bounds must produce DIFFERENT centers.
+
+    @Test
+    fun `swipeCoords centers on the provided bounds — tablet differs from phone`() {
+        val phone = swipeCoords("up", 1080, 2400)!!   // portrait phone
+        val tablet = swipeCoords("up", 2560, 1600)!!  // landscape tablet / unfolded Fold
+        // Vertical swipe is centered horizontally: midX = width/2, which must differ by width.
+        assertEquals(540, phone[0])
+        assertEquals(1280, tablet[0])
+        assertTrue("tablet centered swipe is not the phone-narrow center", tablet[0] != phone[0])
+    }
+
+    @Test
+    fun `swipeCoords horizontal center tracks the provided height`() {
+        val phone = swipeCoords("left", 1080, 2400)!!
+        val tablet = swipeCoords("left", 2560, 1600)!!
+        // Horizontal swipe centers vertically: midY = height/2.
+        assertEquals(1200, phone[1])
+        assertEquals(800, tablet[1])
+        assertInBounds(phone, 1080, 2400)
+        assertInBounds(tablet, 2560, 1600)
+    }
+
+    // ---- (M5.2) shouldSetDisplayId: display-addressed gesture gate (pure) ---
+    //
+    // The plumbing decision behind GestureDescription.Builder.setDisplayId — call it only on
+    // API 30+ (setDisplayId landed in R) AND for a NON-default display, so single-display
+    // behavior is byte-for-byte unchanged (no builder.setDisplayId call) and a DeX / external
+    // display is addressed. (The framework builder.setDisplayId call itself is device-verified,
+    // per this file's pure-decision / framework-verified split.)
+
+    @Test
+    fun `shouldSetDisplayId only for a non-default display on API 30+`() {
+        // Default display (0) → never set, on any API (preserves today's behavior exactly).
+        assertFalse(shouldSetDisplayId(android.view.Display.DEFAULT_DISPLAY, 34))
+        assertFalse(shouldSetDisplayId(0, 30))
+        // Non-default display on API 30+ → address it.
+        assertTrue(shouldSetDisplayId(2, 30))
+        assertTrue(shouldSetDisplayId(1, 34))
+        // Non-default display but pre-30 → cannot (setDisplayId unavailable) → false.
+        assertFalse(shouldSetDisplayId(2, 29))
+    }
+
     // ---- globalActionFor: name → GLOBAL_ACTION_* (pure) --------------------
 
     @Test

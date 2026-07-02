@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.overlay
 
+import android.view.Display
 import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.model.ToolResult
@@ -56,11 +57,20 @@ import kotlinx.serialization.json.jsonPrimitive
  *   Application [Context] and so needs NO accessibility — only the gesture
  *   [Actuators] do (Gallery parity). Wired with the same autonomy mode + confirm.
  *   A call whose name is in [ResidentTools.INTENT_ACTIONS] is forwarded here.
+ *
+ * ## Display addressing (M5.2)
+ * [displayId] supplies the TARGET display for the COORDINATE gestures (`coordinate_tap` /
+ * `coordinate_swipe`) — read per dispatch and passed to [Actuators.tap] / [Actuators.swipe] →
+ * [GestureDescription.Builder.setDisplayId]. Defaults to [Display.DEFAULT_DISPLAY] (0), so a
+ * single-display device is unchanged; a future DeX / external-display target routes its
+ * coordinate gestures to the right display without touching the semantic node path (node
+ * `ACTION_CLICK` is display-agnostic — it acts on the resolved node wherever it lives).
  */
 class AndroidPhoneController(
     private val reader: UiTreeReader,
     private val actuators: Actuators,
     private val intentActuator: IntentActuator,
+    private val displayId: () -> Int = { Display.DEFAULT_DISPLAY },
 ) : PhoneController {
 
     override suspend fun dispatch(name: String, args: JsonObject): ToolResult {
@@ -137,7 +147,8 @@ class AndroidPhoneController(
                         ?: return ToolResult(false, JsonPrimitive("x required"))
                     val y = intArg(args, "y")
                         ?: return ToolResult(false, JsonPrimitive("y required"))
-                    actuators.tap(x, y).toToolResult()
+                    // (M5.2) route to the target display (default 0) via setDisplayId.
+                    actuators.tap(x, y, displayId()).toToolResult()
                 }
 
                 // (M1.3) coordinate_swipe — read the explicit segment (x,y)->(x2,y2)
@@ -156,15 +167,13 @@ class AndroidPhoneController(
                     // not a drag — route it through the GATED coordinate tap so it can't be used
                     // to fire an unconfirmed high-consequence tap disguised as a swipe. A genuine
                     // drag (start != end) is a low-risk scroll/pan and stays ungated.
+                    // (M5.2) coordinate gestures are display-addressed (default display 0).
+                    val display = displayId()
                     if (x == x2 && y == y2) {
-                        actuators.tap(x, y).toToolResult()
+                        actuators.tap(x, y, display).toToolResult()
                     } else {
-                        val duration = intArg(args, "duration_ms")
-                        if (duration != null) {
-                            actuators.swipe(x, y, x2, y2, duration.toLong()).toToolResult()
-                        } else {
-                            actuators.swipe(x, y, x2, y2).toToolResult()
-                        }
+                        val duration = intArg(args, "duration_ms")?.toLong() ?: Actuators.SWIPE_DURATION_MS
+                        actuators.swipe(x, y, x2, y2, duration, display).toToolResult()
                     }
                 }
 
@@ -227,12 +236,16 @@ class AndroidPhoneController(
          * @param credentialHandoff the password-entry handoff seam (Task 4.7; prod:
          *   [OverlayCredentialHandoff]). Default auto-declines so an un-wired call
          *   fails SAFE — a password entry never silently proceeds.
+         * @param displayId (M5.2) the target display for coordinate gestures. Default
+         *   [Display.DEFAULT_DISPLAY] (0). A future multi-display/DeX caller supplies the
+         *   attested device's target display here.
          */
         fun fromService(
             appContext: android.content.Context,
             mode: () -> AutonomyMode = { AutonomyMode.YOLO },
             confirm: ConfirmUi = AutoApproveConfirmUi,
             credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
+            displayId: () -> Int = { Display.DEFAULT_DISPLAY },
         ): AndroidPhoneController =
             AndroidPhoneController(
                 UiTreeReader.fromService(),
@@ -241,6 +254,7 @@ class AndroidPhoneController(
                 // confirm seam as the gestures (its internal gate covers send_*), but
                 // fire through the Application context — NO accessibility required.
                 IntentActuator.fromAppContext(appContext, mode, confirm),
+                displayId = displayId,
             )
     }
 }

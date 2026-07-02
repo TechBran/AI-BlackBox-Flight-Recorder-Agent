@@ -2,6 +2,7 @@ package com.aiblackbox.portal.data.remote
 
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.UiNode
+import com.aiblackbox.portal.overlay.WindowInfo
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -40,14 +41,25 @@ data class Observation(
     // Base64-encoded PNG from the silent AccessibilityService.takeScreenshot(). Null
     // (omitted on the wire) under the tree-first cadence or when hasScreenshot=false.
     val screenshot: String? = null,
+    // (M5.3) The window TOPOLOGY: which app owns which on-screen rectangle, on which display,
+    // and where the system bars / split-screen divider sit (node bounds are display-relative).
+    // Additive + optional; always emitted (may be []) so a multi-window loop always has it.
+    @SerialName("window_topology") val windowTopology: List<WindowInfo> = emptyList(),
+    // (M5.5) True when the foldable POSTURE changed since the previous observation — the loop
+    // must treat prior screen coordinates as invalid and re-observe before its next coordinate
+    // action (the current posture rides in device_capability.posture). Read-and-cleared source:
+    // FoldingFeatureMonitor.consumePostureChanged(). Additive; defaults false.
+    @SerialName("posture_changed") val postureChanged: Boolean = false,
     // Epoch milliseconds (System.currentTimeMillis) — the native Android form; the
     // schema also accepts an RFC-3339 string, but the device emits the integer.
     val timestamp: Long = System.currentTimeMillis(),
 ) {
     companion object {
-        /** The wire-contract version negotiated on the observation (schema `const "1.1"`).
-         *  1.1 = additive minor bump (intent.name enum 15 → 26; see docs/schema/action.json). */
-        const val SCHEMA_VERSION = "1.1"
+        /** The wire-contract version negotiated on the observation (schema `const "1.3"`).
+         *  1.1 = intent.name enum 15 → 26; 1.2 = the press_key action variant; 1.3 (M5, additive) =
+         *  the observation `window_topology` + `posture_changed` fields + `device_capability.posture`
+         *  (foldable/large-screen/DeX display-addressing). All minor, back-compatible bumps. */
+        const val SCHEMA_VERSION = "1.3"
     }
 }
 

@@ -2,11 +2,14 @@ package com.aiblackbox.portal.overlay
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Display
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
@@ -74,6 +77,12 @@ import android.view.accessibility.AccessibilityNodeInfo
  *   coordinate resolves to no node — the FAIL-SAFE the coordinate gate treats as
  *   high-consequence (confirm-by-default in PERMISSION). Injected as a fake in unit
  *   tests to exercise the resolved-benign / resolved-dangerous / unresolved paths.
+ * @param viewportSize (M5.1) reads the CURRENT window bounds `[width,height]` px for a
+ *   centered [swipe]/[scroll]. Prod: [WindowManager.getCurrentWindowMetrics] `.bounds`
+ *   (API 30+; pre-30 falls back to `resources.displayMetrics` — today's behavior), so a
+ *   centered swipe is correct on a tablet / unfolded Fold / split-screen window rather than a
+ *   phone-narrow display metric. Null when no bounds can be read (service off / probe throws).
+ *   Injected as a fake in unit tests.
  */
 class Actuators(
     private val service: () -> BlackBoxA11yService?,
@@ -81,6 +90,7 @@ class Actuators(
     private val confirm: ConfirmUi = AutoApproveConfirmUi,
     private val credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
     private val coordinateLabeler: (Int, Int) -> CoordinateHit = defaultCoordinateLabeler(service),
+    private val viewportSize: () -> IntArray? = defaultViewportSize(service),
 ) {
 
     /**
@@ -172,15 +182,20 @@ class Actuators(
      * coordinate actions when `supportsCoordinateGesture=false`, e.g. XR) — that XR gate is
      * unchanged and independent of this autonomy gate. Never throws; a disabled service →
      * `accessibility service not enabled`.
+     *
+     * (M5.2) [displayId] routes the gesture to a specific display via
+     * [GestureDescription.Builder.setDisplayId] (API 30+). Defaults to [Display.DEFAULT_DISPLAY]
+     * (0) — the current single-display behavior — so a future DeX/external-display target can be
+     * addressed without changing any existing call-site.
      */
-    suspend fun tap(x: Int, y: Int): ActuatorResult {
+    suspend fun tap(x: Int, y: Int, displayId: Int = Display.DEFAULT_DISPLAY): ActuatorResult {
         // C1: recover a label + gate BEFORE the service check, so the confirm-gate is
         // consulted even for an unresolved/tree-blind coordinate (fail-safe high-consequence).
         coordinateGate(coordinateLabeler(x, y))?.let { return it }
 
         val svc = service() ?: return notEnabled()
         return try {
-            val ok = dispatchTap(svc, x, y)
+            val ok = dispatchTap(svc, x, y, displayId)
             logGesture("tap(coord)", ok)
             ActuatorResult(ok, if (ok) "tapped ($x,$y)" else "tap gesture dispatch failed at ($x,$y)")
         } catch (e: Exception) {
@@ -304,13 +319,18 @@ class Actuators(
 
     /**
      * Swipe in a cardinal [direction] ("up"/"down"/"left"/"right") — a centered
-     * swipe across the current screen via [dispatchGesture]. Unknown direction →
+     * swipe across the current WINDOW via [dispatchGesture]. Unknown direction →
      * `success=false`.
+     *
+     * (M5.1) The swipe extents come from [viewportSize] — the CURRENT window bounds
+     * ([WindowManager.getCurrentWindowMetrics], API 30+), NOT the deprecated
+     * `resources.displayMetrics` — so a centered swipe is correct on a tablet / unfolded
+     * Fold / split-screen window, not a phone-narrow display metric.
      */
     fun swipe(direction: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val metrics = svc.resources.displayMetrics
-        val coords = swipeCoords(direction, metrics.widthPixels, metrics.heightPixels)
+        val size = viewportSize() ?: return ActuatorResult(false, "screen bounds unavailable")
+        val coords = swipeCoords(direction, size[0], size[1])
             ?: return ActuatorResult(false, "unknown swipe direction: $direction")
         return swipe(coords[0], coords[1], coords[2], coords[3])
     }
@@ -327,11 +347,21 @@ class Actuators(
      * (M1.3) Swipe along an explicit start→end segment over [durationMs] — the coordinate
      * overload the frontier `coordinate_swipe` action drives (its `duration_ms` maps here;
      * the no-duration overload defaults to [SWIPE_DURATION_MS] = 250ms). Never throws.
+     *
+     * (M5.2) [displayId] routes the swipe to a specific display via
+     * [GestureDescription.Builder.setDisplayId] (API 30+); default [Display.DEFAULT_DISPLAY].
      */
-    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long): ActuatorResult {
+    fun swipe(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        durationMs: Long,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): ActuatorResult {
         val svc = service() ?: return notEnabled()
         return try {
-            val ok = dispatchSwipe(svc, startX, startY, endX, endY, durationMs)
+            val ok = dispatchSwipe(svc, startX, startY, endX, endY, durationMs, displayId)
             logGesture("swipe", ok)
             ActuatorResult(ok, if (ok) "swiped" else "swipe gesture dispatch failed")
         } catch (e: Exception) {
@@ -349,8 +379,9 @@ class Actuators(
      */
     fun scroll(direction: String): ActuatorResult {
         val svc = service() ?: return notEnabled()
-        val metrics = svc.resources.displayMetrics
-        val coords = swipeCoords(direction, metrics.widthPixels, metrics.heightPixels)
+        // (M5.1) window bounds from WindowMetrics, not deprecated resources.displayMetrics.
+        val size = viewportSize() ?: return ActuatorResult(false, "screen bounds unavailable")
+        val coords = swipeCoords(direction, size[0], size[1])
             ?: return ActuatorResult(false, "unknown scroll direction: $direction")
         return try {
             val ok = dispatchSwipe(svc, coords[0], coords[1], coords[2], coords[3], SWIPE_DURATION_MS)
@@ -511,15 +542,26 @@ class Actuators(
         }
     }
 
-    /** Dispatch a single short tap (down→up at one point) as a gesture. */
-    private fun dispatchTap(svc: AccessibilityService, x: Int, y: Int): Boolean {
+    /**
+     * Dispatch a single short tap (down→up at one point) as a gesture. (M5.2) [displayId] targets
+     * a specific display via [GestureDescription.Builder.setDisplayId] when [shouldSetDisplayId]
+     * (API 30+ and a non-default target); otherwise the gesture goes to the default display
+     * exactly as before.
+     */
+    private fun dispatchTap(
+        svc: AccessibilityService,
+        x: Int,
+        y: Int,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, TAP_DURATION_MS)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return svc.dispatchGesture(gesture, null, null)
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        if (shouldSetDisplayId(displayId, Build.VERSION.SDK_INT)) builder.setDisplayId(displayId)
+        return svc.dispatchGesture(builder.build(), null, null)
     }
 
-    /** Dispatch a swipe stroke from start→end over [durationMs]. */
+    /** Dispatch a swipe stroke from start→end over [durationMs]. (M5.2) [displayId] as in [dispatchTap]. */
     private fun dispatchSwipe(
         svc: AccessibilityService,
         startX: Int,
@@ -527,14 +569,16 @@ class Actuators(
         endX: Int,
         endY: Int,
         durationMs: Long,
+        displayId: Int = Display.DEFAULT_DISPLAY,
     ): Boolean {
         val path = Path().apply {
             moveTo(startX.toFloat(), startY.toFloat())
             lineTo(endX.toFloat(), endY.toFloat())
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return svc.dispatchGesture(gesture, null, null)
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        if (shouldSetDisplayId(displayId, Build.VERSION.SDK_INT)) builder.setDisplayId(displayId)
+        return svc.dispatchGesture(builder.build(), null, null)
     }
 
     private fun notEnabled() = ActuatorResult(false, "accessibility service not enabled")
@@ -571,8 +615,8 @@ class Actuators(
         /** Tap stroke duration — short press. */
         private const val TAP_DURATION_MS = 60L
 
-        /** Swipe/scroll stroke duration. */
-        private const val SWIPE_DURATION_MS = 250L
+        /** Swipe/scroll stroke duration (default when the caller supplies no `duration_ms`). */
+        const val SWIPE_DURATION_MS = 250L
 
         /**
          * Production factory: actuates through the live connected
@@ -613,6 +657,59 @@ private fun defaultCoordinateLabeler(
 ): (Int, Int) -> CoordinateHit = { x, y ->
     val svc = service()
     if (svc == null) CoordinateHit.None else UiTreeReader.labelAtPoint(svc.rootInActiveWindow, x, y)
+}
+
+/**
+ * PURE (M5.2): should a gesture be routed to a specific display via
+ * [GestureDescription.Builder.setDisplayId]? True only on API 30+ (`setDisplayId` landed in R)
+ * AND when the target is NOT the default display — so ordinary single-display behavior is
+ * byte-for-byte unchanged (no `setDisplayId` call at all), and only a DeX / external / secondary
+ * display ([displayId] != [Display.DEFAULT_DISPLAY]) triggers the addressing. Framework-free
+ * (takes [sdkInt]) so it is JVM-unit-testable across API levels + display ids.
+ */
+fun shouldSetDisplayId(displayId: Int, sdkInt: Int): Boolean =
+    sdkInt >= Build.VERSION_CODES.R && displayId != Display.DEFAULT_DISPLAY
+
+/**
+ * (M5.1, framework) The production [Actuators.viewportSize] seam: reads the CURRENT window size
+ * `[width,height]` px from the accessibility [service]'s [WindowManager] via
+ * [WindowManager.getCurrentWindowMetrics] `.bounds` (API 30+), falling back to
+ * `resources.displayMetrics` pre-30 (today's behavior). Null when the service is off. Top-level +
+ * private so the [Actuators] constructor default can bind the `service` seam; unit tests inject a
+ * fake viewport instead.
+ */
+private fun defaultViewportSize(
+    service: () -> BlackBoxA11yService?,
+): () -> IntArray? = { service()?.let { currentWindowSize(it) } }
+
+/**
+ * (M5.1, framework) Read `[width,height]` px of the CURRENT WINDOW from [context]:
+ *  - API 30+: [WindowManager.getCurrentWindowMetrics] `.bounds` — the correct large-screen /
+ *    multi-window / unfolded-Fold extent (not the deprecated full-display `defaultDisplay`).
+ *  - pre-30 (or no WindowManager, or a probe failure): `resources.displayMetrics` — exactly the
+ *    behavior swipe/scroll had before M5, so nothing regresses on older devices.
+ * Never throws; returns null only when even the resources fallback is unreadable.
+ */
+internal fun currentWindowSize(context: Context): IntArray? {
+    return try {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+        if (wm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.currentWindowMetrics.bounds
+            intArrayOf(bounds.width(), bounds.height())
+        } else {
+            resourcesViewportSize(context)
+        }
+    } catch (e: Exception) {
+        resourcesViewportSize(context)
+    }
+}
+
+/** Pre-30 / fallback window size from `resources.displayMetrics` (today's behavior). */
+private fun resourcesViewportSize(context: Context): IntArray? = try {
+    val dm = context.resources.displayMetrics
+    intArrayOf(dm.widthPixels, dm.heightPixels)
+} catch (e: Exception) {
+    null
 }
 
 /**

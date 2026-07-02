@@ -28,16 +28,23 @@ import kotlinx.serialization.Serializable
  *   framebuffer) → the loop uses `element_click` + intents; coordinate actions are
  *   skipped/reported on-device.
  * - [displayId]: the target display for capture + gesture. 0 = Display.DEFAULT_DISPLAY;
- *   non-zero (DeX / external / multi-display) lands in M5.
+ *   non-zero (DeX / external / multi-display) is the M5 large-screen work.
+ * - [posture] (M5.5): a foldable's hinge posture (FLAT / HALF_OPENED + orientation) when the
+ *   device is a foldable — null on non-foldables (dropped from the wire). A posture CHANGE
+ *   between observations invalidates coordinate actions (see `FoldingFeatureMonitor`); the loop
+ *   re-observes before its next coordinate tap.
  *
  * ## [detect] is HONEST runtime detection
  * Form factor is classified from the live `smallestScreenWidthDp` (phone < 600dp ≤
- * tablet) and an XR probe (UiMode `VR_HEADSET` or an XR/VR system feature). When XR
- * can't be determined it falls back to phone (never guesses XR). `hasScreenshot` /
- * `supportsCoordinateGesture` reflect the REAL availability for the detected class +
- * API level — not optimistic constants. The pure classifiers ([classifyFormFactor] /
- * [screenshotAvailable] / [coordinateGestureSupported]) are framework-free and
- * unit-tested; [detect] is the thin `Context`-reading shell (device-verified).
+ * tablet), an XR probe (UiMode `VR_HEADSET` or an XR/VR system feature), and — M5.5 — a
+ * FOLDABLE probe: when a [posture] is supplied (a live [FoldingFeature] was observed) the
+ * device reports `formFactor=foldable` regardless of its current sw-dp. When XR can't be
+ * determined it falls back to phone (never guesses XR); no posture → sw-dp classification
+ * (today's behavior). `hasScreenshot` / `supportsCoordinateGesture` reflect the REAL
+ * availability for the detected class + API level — not optimistic constants. The pure
+ * classifiers ([classifyFormFactor] / [screenshotAvailable] / [coordinateGestureSupported])
+ * are framework-free and unit-tested; [detect] is the thin `Context`-reading shell
+ * (device-verified).
  */
 @Serializable
 data class DeviceCapabilities(
@@ -45,6 +52,9 @@ data class DeviceCapabilities(
     val hasScreenshot: Boolean,
     val supportsCoordinateGesture: Boolean,
     val displayId: Int = 0,
+    // (M5.5) The foldable hinge posture (FLAT / HALF_OPENED + orientation), or null on a
+    // non-foldable / when unknown. Dropped from the wire when null (explicitNulls=false).
+    val posture: DevicePosture? = null,
 ) {
     companion object {
         /** `smallestScreenWidthDp` at/above which a device is classified a tablet
@@ -53,22 +63,33 @@ data class DeviceCapabilities(
 
         /**
          * Honest runtime detection from the live [context]. Reads the smallest-width
-         * dp + an XR probe, then derives the capability flags for that class. Never
-         * throws — any probe failure degrades to the phone profile (the safe, most
-         * capable-assumption default for an unknown handheld).
+         * dp + an XR probe + the supplied foldable [posture] (M5.5), then derives the
+         * capability flags for that class. Never throws — any probe failure degrades to
+         * the phone profile (the safe, most capable-assumption default for an unknown
+         * handheld).
+         *
+         * @param posture the current foldable posture from `FoldingFeatureMonitor` (null on a
+         *   non-foldable / when the monitor hasn't observed a hinge). A non-null posture makes
+         *   the device report `formFactor=foldable` and carries the posture on the wire. The
+         *   default reads the process-wide monitor so existing call-sites gain posture for free;
+         *   tests pass an explicit posture (or null).
          */
-        fun detect(context: Context): DeviceCapabilities {
+        fun detect(
+            context: Context,
+            posture: DevicePosture? = FoldingFeatureMonitor.instance.currentPosture(),
+        ): DeviceCapabilities {
             val smallestWidthDp = runCatching {
                 context.resources.configuration.smallestScreenWidthDp
             }.getOrDefault(0)
             val isXr = detectIsXr(context)
-            val formFactor = classifyFormFactor(smallestWidthDp, isXr)
+            val formFactor = classifyFormFactor(smallestWidthDp, isXr, isFoldable = posture != null)
             return DeviceCapabilities(
                 formFactor = formFactor,
                 hasScreenshot = screenshotAvailable(formFactor, Build.VERSION.SDK_INT),
                 supportsCoordinateGesture = coordinateGestureSupported(formFactor),
-                // Multi-display / DeX addressing is M5; the default display for now.
+                // Multi-display / DeX addressing is threaded via displayId (default display now).
                 displayId = 0,
+                posture = posture,
             )
         }
 
@@ -101,16 +122,21 @@ data class DeviceCapabilities(
         )
 
         /**
-         * PURE: classify the form factor from the smallest-width dp + XR probe. XR wins
-         * (a headset can report a large sw-dp); otherwise sw600dp+ is a tablet, below is
-         * a phone. `foldable` / `glasses` are reserved wire values (posture detection is
-         * M5; glasses drive the paired phone) — [detect] does not emit them, matching the
-         * M1.1 scope (phone/tablet by sw-dp, XR by feature, else phone). NOTE: a foldable
-         * therefore reports as `phone` (folded, narrow sw-dp) or `tablet` (unfolded, wide
-         * sw-dp) by its CURRENT smallest-width; the dedicated `foldable`/posture value is M5.
+         * PURE: classify the form factor from the smallest-width dp + XR probe + (M5.5) a
+         * foldable probe. XR wins (a headset can report a large sw-dp); then a device with an
+         * observed hinge ([isFoldable]) is a `foldable` regardless of its CURRENT sw-dp (a Fold
+         * reports foldable whether folded-narrow or unfolded-wide); otherwise sw600dp+ is a
+         * tablet, below is a phone. `glasses` remains a reserved wire value (glasses drive the
+         * paired phone). Back-compat: the default `isFoldable=false` preserves the M1.1 behavior
+         * for callers that don't pass a posture.
          */
-        fun classifyFormFactor(smallestWidthDp: Int, isXr: Boolean): FormFactor = when {
+        fun classifyFormFactor(
+            smallestWidthDp: Int,
+            isXr: Boolean,
+            isFoldable: Boolean = false,
+        ): FormFactor = when {
             isXr -> FormFactor.XR_HEADSET
+            isFoldable -> FormFactor.FOLDABLE
             smallestWidthDp >= TABLET_MIN_SW_DP -> FormFactor.TABLET
             else -> FormFactor.PHONE
         }

@@ -6,6 +6,7 @@ import android.os.Build
 import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import java.io.ByteArrayOutputStream
 
 /**
@@ -112,6 +113,39 @@ class BlackBoxA11yService : AccessibilityService() {
         } catch (e: Exception) {
             Log.w(TAG, "takeScreenshot threw (${e.javaClass.simpleName})")
             callback(null)
+        }
+    }
+
+    /**
+     * (M5.3 / I2) The live windows across ALL displays for the multi-window / multi-display
+     * TOPOLOGY ([UiTreeReader.readWindowTopology]).
+     *
+     * On API 30+ uses [getWindowsOnAllDisplays] — a `SparseArray<List<AccessibilityWindowInfo>>`
+     * keyed by displayId — flattened to a single list, so DeX / external / secondary-display
+     * windows ARE included and each carries its real, non-zero [AccessibilityWindowInfo.getDisplayId].
+     * (The prior `getWindows()` returned only the DEFAULT display, so every window's displayId
+     * collapsed to 0 — contradicting the multi-display claim.) Pre-30 falls back to [getWindows]
+     * (default display only; multi-display is itself API 30+ territory).
+     *
+     * Never throws — any framework failure degrades to an empty list (tree-only topology). Carries
+     * NO screen text: only each window's package / geometry / type is read downstream.
+     */
+    fun allDisplayWindows(): List<AccessibilityWindowInfo> {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val byDisplay = windowsOnAllDisplays // getWindowsOnAllDisplays(): SparseArray<List<..>>
+                val out = ArrayList<AccessibilityWindowInfo>()
+                for (i in 0 until byDisplay.size()) {
+                    byDisplay.valueAt(i)?.let { out.addAll(it) }
+                }
+                out
+            } else {
+                @Suppress("DEPRECATION")
+                windows ?: emptyList()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "allDisplayWindows failed (${e.javaClass.simpleName})")
+            emptyList()
         }
     }
 

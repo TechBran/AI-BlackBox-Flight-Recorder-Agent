@@ -23,6 +23,24 @@
       "minimum": 0,
       "default": 0,
       "description": "Target display for capture + gesture. 0 = Display.DEFAULT_DISPLAY. Non-zero for DeX / external / multi-display; used by GestureDescription.Builder.setDisplayId() and takeScreenshot(displayId) in the M5 large-screen work."
+    },
+    "posture": {
+      "type": "object",
+      "description": "OPTIONAL (M5.5) — a FOLDABLE's hinge posture, present only when formFactor is 'foldable'. Populated from Jetpack WindowManager FoldingFeature (FoldingFeatureMonitor); absent on non-foldables. A CHANGE in posture between observations invalidates prior screen coordinates (see observation.posture_changed) → the loop re-observes before its next coordinate action.",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["flat", "half_opened"],
+          "description": "Hinge state: FLAT (fully opened / flat) or HALF_OPENED (bent, e.g. tabletop / book mode)."
+        },
+        "orientation": {
+          "type": "string",
+          "enum": ["vertical", "horizontal"],
+          "description": "Hinge axis when known (vertical hinge = book fold; horizontal hinge = laptop/flip fold)."
+        }
+      },
+      "required": ["state"],
+      "additionalProperties": false
     }
   },
   "required": ["formFactor", "hasScreenshot", "supportsCoordinateGesture", "displayId"],

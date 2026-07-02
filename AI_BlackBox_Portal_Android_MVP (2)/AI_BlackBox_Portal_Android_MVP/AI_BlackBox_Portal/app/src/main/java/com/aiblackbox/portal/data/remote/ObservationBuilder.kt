@@ -2,10 +2,12 @@ package com.aiblackbox.portal.data.remote
 
 import android.content.Context
 import com.aiblackbox.portal.overlay.DeviceCapabilities
+import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.PreferredScreenCapture
 import com.aiblackbox.portal.overlay.ScreenCaptureResult
 import com.aiblackbox.portal.overlay.UiNode
 import com.aiblackbox.portal.overlay.UiTreeReader
+import com.aiblackbox.portal.overlay.WindowInfo
 
 /**
  * (M1.2) Builds a schema-conforming [Observation] from the LIVE device: the
@@ -39,6 +41,10 @@ class ObservationBuilder(
     private val readTree: () -> List<UiNode>,
     private val capability: () -> DeviceCapabilities,
     private val captureScreenshot: suspend () -> ByteArray?,
+    // (M5.3) the window topology (which app owns which rectangle / where the system bars are).
+    private val readTopology: () -> List<WindowInfo> = { emptyList() },
+    // (M5.5) read-and-clear the "posture changed since the last observation" flag.
+    private val postureChanged: () -> Boolean = { false },
     private val encodeBase64: (ByteArray) -> String = { bytes ->
         android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
     },
@@ -67,6 +73,8 @@ class ObservationBuilder(
             uiTree = tree,
             deviceCapability = cap,
             screenshot = screenshotB64,
+            windowTopology = readTopology(),
+            postureChanged = postureChanged(),
             timestamp = clock(),
         )
     }
@@ -82,6 +90,8 @@ class ObservationBuilder(
             val appContext = context.applicationContext
             return ObservationBuilder(
                 readTree = { UiTreeReader.fromService().readNodes() },
+                // (M5.5) detect() reads the process-wide FoldingFeatureMonitor posture by default,
+                // so a foldable reports formFactor=foldable + its posture here.
                 capability = { DeviceCapabilities.detect(appContext) },
                 captureScreenshot = {
                     when (val r = PreferredScreenCapture().capture()) {
@@ -90,6 +100,10 @@ class ObservationBuilder(
                         else -> null
                     }
                 },
+                // (M5.3) the live window topology from the connected accessibility service.
+                readTopology = { UiTreeReader.fromService().readWindowTopology() },
+                // (M5.5) surface + clear the posture-change flag so the loop re-observes.
+                postureChanged = { FoldingFeatureMonitor.instance.consumePostureChanged() },
             )
         }
     }

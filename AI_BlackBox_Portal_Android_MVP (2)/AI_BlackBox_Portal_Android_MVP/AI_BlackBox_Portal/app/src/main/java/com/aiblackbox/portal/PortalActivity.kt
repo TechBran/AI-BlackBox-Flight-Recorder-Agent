@@ -43,6 +43,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.OverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -250,6 +254,21 @@ class PortalActivity : AppCompatActivity() {
         }
 
         setContentView(R.layout.activity_portal)
+
+        // (M5.5 / I1) Drive the foldable POSTURE monitor from repeatOnLifecycle(STARTED): the
+        // collection re-arms on every STARTED and is cancelled below STARTED. This is load-bearing
+        // on a Fold, where the cover↔main display switch RECREATES this Activity (the prior
+        // lifecycleScope — and its collector — is cancelled on onDestroy); a once-only start() in
+        // onCreate would leave posture tracking dead after the first recreation. The monitor's
+        // start() is idempotent per scope (cancels any prior collector — no double-collection). It
+        // populates the process-wide FoldingFeatureMonitor the device-control observation reads
+        // (formFactor=foldable + posture + the posture-change re-observe flag). Graceful no-op on a
+        // non-foldable / when androidx.window can't attach.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                runCatching { FoldingFeatureMonitor.instance.start(this@PortalActivity, this) }
+            }
+        }
 
         // Enable edge-to-edge display (transparent status and navigation bars)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

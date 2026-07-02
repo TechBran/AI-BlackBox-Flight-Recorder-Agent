@@ -78,10 +78,23 @@ NODE_OK = {
 }
 CAP_PHONE = {"formFactor": "phone", "hasScreenshot": True, "supportsCoordinateGesture": True, "displayId": 0}
 CAP_XR = {"formFactor": "xr_headset", "hasScreenshot": False, "supportsCoordinateGesture": False, "displayId": 0}
+# M5.5: a foldable advertises formFactor=foldable + a posture (FLAT / HALF_OPENED + orientation).
+CAP_FOLDABLE = {
+    "formFactor": "foldable", "hasScreenshot": True, "supportsCoordinateGesture": True, "displayId": 0,
+    "posture": {"state": "half_opened", "orientation": "vertical"},
+}
+# M5.3: window-topology entries (an app window + a system bar).
+WINDOW_APP = {"displayId": 0, "appPackage": "com.app", "bounds": "0,0,1080,2400", "isSystemBar": False}
+WINDOW_SYSBAR = {"displayId": 0, "appPackage": "com.android.systemui", "bounds": "0,0,1080,96", "isSystemBar": True}
 
 OBS_OK = {
-    "msg": "observation", "schema_version": "1.2",
+    "msg": "observation", "schema_version": "1.3",
     "ui_tree": [NODE_OK], "device_capability": CAP_PHONE, "timestamp": 1234567890,
+}
+# M5: an observation carrying the new window_topology + posture_changed on a foldable.
+OBS_M5 = {
+    **OBS_OK, "device_capability": CAP_FOLDABLE,
+    "window_topology": [WINDOW_APP, WINDOW_SYSBAR], "posture_changed": True,
 }
 
 # The 26 intent names the code ships today (ResidentTools.INTENT_ACTIONS) — the schema enum
@@ -144,6 +157,13 @@ NEG_UNKNOWN_GLOBAL = {"msg": "action", "type": "global_action", "action": "sidew
 NEG_PRESS_KEY_UNKNOWN = {"msg": "action", "type": "press_key", "key": "f13"}
 NEG_MISSING_MSG = {"type": "element_click", "resource_id": "com.app:id/ok"}  # no msg
 NEG_BLANK_MSG = {"msg": "", "type": "element_click", "resource_id": "com.app:id/ok"}  # msg not const
+# M5.5: a posture with an out-of-enum state must reject (device only emits flat / half_opened).
+NEG_BAD_POSTURE_STATE = {
+    **OBS_OK,
+    "device_capability": {**CAP_FOLDABLE, "posture": {"state": "folded_shut"}},
+}
+# M5.3: a window-topology entry missing a required key must reject (additionalProperties:false + required).
+NEG_WINDOW_MISSING_KEY = {**OBS_OK, "window_topology": [{"displayId": 0, "appPackage": "com.app", "bounds": "0,0,1,1"}]}
 
 
 # ═════════════════════════ STRUCTURAL layer (always runs) ═════════════════════════
@@ -238,11 +258,44 @@ def test_intent_name_enum_matches_the_26_intent_actions():
         assert gesture not in enum, gesture
 
 
-def test_schema_version_bumped_to_1_2_minor():
+def test_schema_version_bumped_to_1_3_minor():
     # Additive minor bumps (const on observation, no /v2/ path change): 1.1 = 15->26 intents;
-    # 1.2 = the new press_key action variant.
-    assert SCHEMAS["observation.json"]["properties"]["schema_version"]["const"] == "1.2"
+    # 1.2 = the press_key action variant; 1.3 = M5 window_topology + posture_changed + posture.
+    assert SCHEMAS["observation.json"]["properties"]["schema_version"]["const"] == "1.3"
     assert "/v1/" in SCHEMAS["observation.json"]["$id"]  # major path unchanged
+
+
+def test_window_topology_present_and_shaped():
+    # M5.3: an optional (NOT required) array of window descriptors with the exact camelCase keys.
+    obs = SCHEMAS["observation.json"]
+    wt = obs["properties"]["window_topology"]
+    assert wt["type"] == "array"
+    assert "window_topology" not in obs["required"]  # additive/optional
+    item = wt["items"]
+    assert item["additionalProperties"] is False
+    assert set(item["required"]) == {"displayId", "appPackage", "bounds", "isSystemBar"}
+    assert item["properties"]["displayId"]["type"] == "integer"
+    assert item["properties"]["isSystemBar"]["type"] == "boolean"
+
+
+def test_posture_changed_flag_present_and_optional():
+    # M5.5: an optional boolean re-observe flag on the observation.
+    obs = SCHEMAS["observation.json"]
+    assert obs["properties"]["posture_changed"]["type"] == "boolean"
+    assert "posture_changed" not in obs["required"]
+
+
+def test_device_capability_posture_is_optional_and_enumerated():
+    # M5.5: device_capability.posture is an OPTIONAL object (not in required) with a state enum
+    # (flat / half_opened) + an orientation enum (vertical / horizontal), state required.
+    cap = SCHEMAS["device_capability.json"]
+    assert "posture" not in cap["required"]  # foldable-only, additive
+    posture = cap["properties"]["posture"]
+    assert posture["type"] == "object"
+    assert posture["additionalProperties"] is False
+    assert posture["required"] == ["state"]
+    assert posture["properties"]["state"]["enum"] == ["flat", "half_opened"]
+    assert posture["properties"]["orientation"]["enum"] == ["vertical", "horizontal"]
 
 
 def test_press_key_variant_present_and_grounded():
@@ -362,6 +415,30 @@ def test_press_key_sample_validates_and_unknown_key_rejects():
     # M2 / v1.2: the press_key sample validates; a key outside the enum rejects.
     assert _valid("action.json", ACTIONS_OK["press_key"])
     assert not _valid("action.json", NEG_PRESS_KEY_UNKNOWN)
+
+
+@_needs_validator
+def test_m5_observation_with_topology_and_posture_validates():
+    # M5.3 + M5.5: an observation carrying window_topology + a foldable posture + posture_changed.
+    assert _valid("observation.json", OBS_M5)
+
+
+@_needs_validator
+def test_m5_foldable_capability_with_posture_validates():
+    # M5.5: a foldable device_capability with a posture object validates.
+    assert _valid("device_capability.json", CAP_FOLDABLE)
+
+
+@_needs_validator
+def test_m5_negative_bad_posture_state_rejects():
+    # M5.5: a posture.state outside {flat, half_opened} rejects.
+    assert not _valid("observation.json", NEG_BAD_POSTURE_STATE)
+
+
+@_needs_validator
+def test_m5_negative_window_topology_missing_key_rejects():
+    # M5.3: a window entry missing a required key rejects (required + additionalProperties:false).
+    assert not _valid("observation.json", NEG_WINDOW_MISSING_KEY)
 
 
 @_needs_validator

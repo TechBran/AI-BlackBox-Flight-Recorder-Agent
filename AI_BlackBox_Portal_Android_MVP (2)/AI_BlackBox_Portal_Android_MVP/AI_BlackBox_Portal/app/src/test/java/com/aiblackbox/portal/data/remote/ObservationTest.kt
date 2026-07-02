@@ -1,8 +1,12 @@
 package com.aiblackbox.portal.data.remote
 
+import com.aiblackbox.portal.overlay.DevicePosture
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FormFactor
+import com.aiblackbox.portal.overlay.HingeOrientation
+import com.aiblackbox.portal.overlay.PostureState
 import com.aiblackbox.portal.overlay.UiNode
+import com.aiblackbox.portal.overlay.WindowInfo
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -36,10 +40,56 @@ class ObservationTest {
         val obs = Observation(uiTree = listOf(node("OK")), deviceCapability = phoneCap, timestamp = 123L)
         val s = json.encodeToString(obs)
         assertTrue(s, s.contains("\"msg\":\"observation\""))
-        assertTrue(s, s.contains("\"schema_version\":\"1.1\""))
+        assertTrue(s, s.contains("\"schema_version\":\"1.3\""))
         assertTrue(s, s.contains("\"ui_tree\":"))
         assertTrue(s, s.contains("\"device_capability\":"))
         assertTrue(s, s.contains("\"timestamp\":123"))
+    }
+
+    // ---- (M5) window topology + posture-change flag -------------------------
+
+    @Test fun `observation emits window_topology with camelCase entry keys`() {
+        val obs = Observation(
+            uiTree = emptyList(),
+            deviceCapability = phoneCap,
+            windowTopology = listOf(
+                WindowInfo(displayId = 0, appPackage = "com.app", bounds = "0,0,1080,2400", isSystemBar = false),
+                WindowInfo(displayId = 0, appPackage = "com.android.systemui", bounds = "0,0,1080,96", isSystemBar = true),
+            ),
+        )
+        val s = json.encodeToString(obs)
+        assertTrue(s, s.contains("\"window_topology\":"))
+        assertTrue(s, s.contains("\"displayId\":0"))
+        assertTrue(s, s.contains("\"appPackage\":\"com.app\""))
+        assertTrue(s, s.contains("\"bounds\":\"0,0,1080,2400\""))
+        assertTrue(s, s.contains("\"isSystemBar\":true"))
+    }
+
+    @Test fun `posture_changed defaults false and is emitted true when set`() {
+        assertFalse(json.encodeToString(Observation(uiTree = emptyList(), deviceCapability = phoneCap))
+            .contains("\"posture_changed\":true"))
+        val changed = Observation(uiTree = emptyList(), deviceCapability = phoneCap, postureChanged = true)
+        assertTrue(json.encodeToString(changed).contains("\"posture_changed\":true"))
+    }
+
+    @Test fun `foldable posture rides inside device_capability on the wire`() {
+        val foldCap = DeviceCapabilities(
+            FormFactor.FOLDABLE, hasScreenshot = true, supportsCoordinateGesture = true, displayId = 0,
+            posture = DevicePosture(PostureState.HALF_OPENED, HingeOrientation.VERTICAL),
+        )
+        val s = json.encodeToString(Observation(uiTree = emptyList(), deviceCapability = foldCap))
+        assertTrue(s, s.contains("\"formFactor\":\"foldable\""))
+        assertTrue(s, s.contains("\"posture\":"))
+        assertTrue(s, s.contains("\"state\":\"half_opened\""))
+        assertTrue(s, s.contains("\"orientation\":\"vertical\""))
+    }
+
+    @Test fun `non-foldable omits posture from the wire`() {
+        // explicitNulls=false → a null device_capability.posture is dropped, matching
+        // device_capability.json (optional). Check the `"posture":` KEY specifically — the
+        // observation's own `posture_changed` flag legitimately contains the substring "posture".
+        assertFalse(json.encodeToString(Observation(uiTree = emptyList(), deviceCapability = phoneCap))
+            .contains("\"posture\":"))
     }
 
     @Test fun `absent screenshot is omitted from the wire`() {
@@ -135,5 +185,29 @@ class ObservationTest {
             encodeBase64 = { "ENCODED" },
         )
         assertNull(builder.build().screenshot)
+    }
+
+    @Test fun `builder threads window topology and posture-change flag`() = runBlocking {
+        val windows = listOf(WindowInfo(0, "com.app", "0,0,10,10", false))
+        val builder = ObservationBuilder(
+            readTree = { listOf(node("Submit")) },
+            capability = { phoneCap },
+            captureScreenshot = { null },
+            readTopology = { windows },
+            postureChanged = { true },
+        )
+        val obs = builder.build()
+        assertEquals(windows, obs.windowTopology)
+        assertTrue("posture-change flag must be surfaced", obs.postureChanged)
+    }
+
+    @Test fun `builder defaults to empty topology and no posture change`() = runBlocking {
+        val obs = ObservationBuilder(
+            readTree = { emptyList() },
+            capability = { phoneCap },
+            captureScreenshot = { null },
+        ).build()
+        assertTrue(obs.windowTopology.isEmpty())
+        assertFalse(obs.postureChanged)
     }
 }

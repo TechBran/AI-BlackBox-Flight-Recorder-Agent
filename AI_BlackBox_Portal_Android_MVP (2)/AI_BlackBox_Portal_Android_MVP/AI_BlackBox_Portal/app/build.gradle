@@ -88,6 +88,10 @@ dependencies {
     implementation "androidx.xr.scenecore:scenecore:1.0.0-alpha10"
     implementation "androidx.xr.runtime:runtime:1.0.0-alpha10"
 
+    // Jetpack WindowManager (M5) — WindowInfoTracker / FoldingFeature posture for the
+    // foldable / large-screen device-control path (FoldingFeatureMonitor).
+    implementation "androidx.window:window:1.3.0"
+
     // Serialization
     implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1"
 

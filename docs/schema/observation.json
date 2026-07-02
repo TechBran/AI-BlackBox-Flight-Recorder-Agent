@@ -12,8 +12,8 @@
     },
     "schema_version": {
       "type": "string",
-      "const": "1.2",
-      "description": "Wire-contract version. Also encoded in the /v1/ path of every $id. Additive changes bump the minor; a breaking change bumps the /vN/ path + this major. 1.1 (additive): the intent.name enum grew from 15 to 26 (decision-9 comprehensive intents + open_settings + the guarded send_intent escape-hatch). 1.2 (additive, back-compatible): the new `press_key` action variant (enter/back/home/recents/tab/delete) — enter submits the focused field (ACTION_IME_ENTER), enabling a 'type → submit' flow without a coordinate."
+      "const": "1.3",
+      "description": "Wire-contract version. Also encoded in the /v1/ path of every $id. Additive changes bump the minor; a breaking change bumps the /vN/ path + this major. 1.1 (additive): the intent.name enum grew from 15 to 26 (decision-9 comprehensive intents + open_settings + the guarded send_intent escape-hatch). 1.2 (additive, back-compatible): the new `press_key` action variant (enter/back/home/recents/tab/delete) — enter submits the focused field (ACTION_IME_ENTER), enabling a 'type → submit' flow without a coordinate. 1.3 (M5, additive, back-compatible): the observation `window_topology` array + `posture_changed` flag, and `device_capability.posture` — tablet / large-screen / foldable / DeX display-addressing (multi-window topology + foldable posture re-observe)."
     },
     "ui_tree": {
       "type": "array",
@@ -42,6 +42,39 @@
       "contentEncoding": "base64",
       "contentMediaType": "image/png",
       "description": "OPTIONAL base64-encoded PNG from the silent AccessibilityService.takeScreenshot(). Present only when device_capability.hasScreenshot is true and the step needs vision (tree-blind surface or model-requested). Password regions are redaction-gated on the device before capture. Ephemeral — never persisted server-side beyond the loop step."
+    },
+    "window_topology": {
+      "type": "array",
+      "description": "OPTIONAL (M5.3) — the window layout so the model knows WHICH app owns WHICH on-screen rectangle and where the system bars / split-screen divider sit (node bounds are display-relative). One entry per AccessibilityWindowInfo. On a phone it is typically the app window + status/nav bars; in split-screen / multi-window / DeX it distinguishes the separate app windows and their displayIds.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "displayId": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Display this window is on (AccessibilityWindowInfo.getDisplayId, API 30+). 0 = Display.DEFAULT_DISPLAY; non-zero for a second / external / DeX display."
+          },
+          "appPackage": {
+            "type": "string",
+            "description": "Owning app package (from the window root), or \"\" when unavailable (system/overlay windows or a transient tree). A package name — never screen text."
+          },
+          "bounds": {
+            "type": "string",
+            "pattern": "^-?\\d+,-?\\d+,-?\\d+,-?\\d+$",
+            "description": "On-screen window bounds \"l,t,r,b\" (display-relative), matching ui_node.bounds."
+          },
+          "isSystemBar": {
+            "type": "boolean",
+            "description": "True for a TYPE_SYSTEM window (status bar / nav bar / system UI) vs an app window."
+          }
+        },
+        "required": ["displayId", "appPackage", "bounds", "isSystemBar"],
+        "additionalProperties": false
+      }
+    },
+    "posture_changed": {
+      "type": "boolean",
+      "description": "OPTIONAL (M5.5) — true when the foldable POSTURE (device_capability.posture) changed since the previous observation. Prior screen coordinates are INVALID after a posture change; the cloud loop must re-observe before its next coordinate action. ADVISORY today: the M2 loop already re-observes every step, so nothing yet keys behavior off this flag — it exists so a future step-skipping optimization can still force a re-observe across a posture change. Defaults false (no change / non-foldable)."
     },
     "timestamp": {
       "type": ["integer", "string"],

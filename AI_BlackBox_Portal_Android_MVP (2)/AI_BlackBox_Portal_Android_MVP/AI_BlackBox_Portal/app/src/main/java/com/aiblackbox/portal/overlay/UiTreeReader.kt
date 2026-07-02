@@ -1,8 +1,10 @@
 package com.aiblackbox.portal.overlay
 
 import android.graphics.Rect
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -35,7 +37,15 @@ import kotlinx.serialization.json.Json
  * function is Task 4.5. Gesture actuation is 4.3. Screenshots are 4.4.
  * Credentials are 4.7. None of those happen here.
  */
-class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
+class UiTreeReader(
+    private val rootProvider: () -> AccessibilityNodeInfo?,
+    // (M5.3) The live window list for the multi-window/multi-display TOPOLOGY. Optional (defaults
+    // to an empty provider) so a topology-agnostic caller reads only the tree; production wires the
+    // connected service's ALL-DISPLAYS windows via [fromService]. NOTE: because both params are lambdas, a
+    // trailing-lambda call now binds to THIS (the last) param — construct with the NAMED
+    // `rootProvider = { ... }` form (as [fromService] and the tests do).
+    private val windowsProvider: () -> List<AccessibilityWindowInfo>? = { null },
+) {
 
     /**
      * Read the current screen as a compact JSON array of actionable [UiNode]s.
@@ -115,6 +125,70 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
     }
 
     /**
+     * (M5.3) Read the WINDOW TOPOLOGY: one [WindowInfo] per live [AccessibilityWindowInfo] the
+     * service reports across ALL displays, so the cloud model knows WHICH app owns WHICH on-screen
+     * rectangle, ON WHICH display, and WHERE the system bars / split-screen divider sit. On a phone
+     * this is typically the single app window + the status/nav bars; in split-screen / multi-window
+     * / DeX / external-display it distinguishes the separate app windows (and their `displayId`s)
+     * whose node `bounds` are display-relative.
+     *
+     * The window list comes from [BlackBoxA11yService.allDisplayWindows] (`getWindowsOnAllDisplays()`
+     * on API 30+, `getWindows()` pre-30), so a window on a secondary / DeX / external display reports
+     * its real, non-zero `displayId` ([AccessibilityWindowInfo.getDisplayId]) rather than collapsing
+     * every window to the default display (0). Each entry also carries the owning `appPackage` (from
+     * the window's root node, or "" when unavailable), the on-screen `bounds` ("l,t,r,b"), and
+     * `isSystemBar` (a TYPE_SYSTEM window — status/nav bar / system UI). Returns an empty list when
+     * the service isn't connected (null windows); never throws (a malformed window degrades to the
+     * partial list collected so far).
+     *
+     * NO screen text crosses this boundary — only the window's package + geometry + type, none of
+     * which is user content (so it needs no redaction).
+     */
+    fun readWindowTopology(): List<WindowInfo> {
+        val windows = windowsProvider() ?: return emptyList()
+        val out = ArrayList<WindowInfo>(windows.size)
+        try {
+            for (w in windows) {
+                // (a stray null window from a malformed platform list is caught by the try below)
+                val rect = Rect()
+                w.getBoundsInScreen(rect)
+                // getDisplayId() is API 30+; pre-30 the all-displays list can't exist, so 0.
+                val displayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    runCatching { w.displayId }.getOrDefault(0)
+                } else {
+                    0
+                }
+                // Owning package from the window root (may be null on system/overlay windows or a
+                // transient tree) — a package name, never screen text. (M2) Recycle the fetched root
+                // node after reading its package (consistent with the reader's other recycle sites;
+                // matters on API 26–32 where nodes are pooled).
+                val pkg = runCatching {
+                    val rootNode = w.root
+                    val name = rootNode?.packageName?.toString()
+                    @Suppress("DEPRECATION")
+                    try {
+                        rootNode?.recycle()
+                    } catch (_: Exception) {
+                        // recycle() is a no-op / may throw on some versions; never crash the walk.
+                    }
+                    name
+                }.getOrNull() ?: ""
+                out.add(
+                    windowInfoOf(
+                        displayId = displayId,
+                        appPackage = pkg,
+                        left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom,
+                        windowType = w.type,
+                    ),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "readWindowTopology: aborted (${e.javaClass.simpleName}); returning partial")
+        }
+        return out
+    }
+
+    /**
      * Is the currently INPUT-FOCUSED node a password field? (Task W4.2 — the
      * screenshot redaction gate.) Used to REFUSE a MediaProjection screen capture
      * whenever the user is on a password entry, so a credential never reaches the
@@ -176,7 +250,14 @@ class UiTreeReader(private val rootProvider: () -> AccessibilityNodeInfo?) {
          * hard-depend on it (and so the shell stays mockable on-device).
          */
         fun fromService(): UiTreeReader =
-            UiTreeReader { BlackBoxA11yService.instance?.rootInActiveWindow }
+            UiTreeReader(
+                rootProvider = { BlackBoxA11yService.instance?.rootInActiveWindow },
+                // (M5.3 / I2) the live window list across ALL displays for the topology (null when
+                // the service is off). getWindowsOnAllDisplays() (API 30+) so DeX / external /
+                // secondary-display windows carry their real, non-zero displayId — NOT getWindows(),
+                // which returned only the default display (every displayId == 0).
+                windowsProvider = { BlackBoxA11yService.instance?.allDisplayWindows() },
+            )
 
         /**
          * Resolve a `node_id` (the dense actionable index from `read_screen`)
@@ -390,6 +471,54 @@ data class UiNode(
     val clickable: Boolean,
     val editable: Boolean,
     @SerialName("is_password") val isPassword: Boolean,
+)
+
+/**
+ * (M5.3) One window in the device's WINDOW TOPOLOGY — which app owns which on-screen rectangle,
+ * on which display, and whether it is a system bar. Lets the cloud model reason about
+ * split-screen / multi-window / DeX layouts (node `bounds` are display-relative). Serialized to
+ * the wire shape in `docs/schema/observation.json#window_topology`; the camelCase property names
+ * (`displayId` / `appPackage` / `isSystemBar`) match that schema EXACTLY (mirroring
+ * `device_capability`'s camelCase). Carries NO screen text — only package + geometry + type.
+ */
+@Serializable
+data class WindowInfo(
+    val displayId: Int,       // AccessibilityWindowInfo.getDisplayId (0 = Display.DEFAULT_DISPLAY)
+    val appPackage: String,   // owning package (from the window root), or "" when unavailable
+    val bounds: String,       // on-screen bounds "l,t,r,b" (display-relative)
+    val isSystemBar: Boolean, // true for a TYPE_SYSTEM window (status/nav bar / system UI)
+)
+
+/**
+ * PURE (M5.3): does an [AccessibilityWindowInfo] `type` denote a SYSTEM BAR (status bar, nav bar,
+ * or other system UI) vs an app / input-method / accessibility window? True only for TYPE_SYSTEM
+ * — the type the platform assigns the system bars. Framework-free (an int comparison) so it is
+ * JVM-unit-testable.
+ */
+fun isSystemBarWindow(windowType: Int): Boolean =
+    windowType == AccessibilityWindowInfo.TYPE_SYSTEM
+
+/**
+ * PURE (M5.3 / I2): assemble ONE topology [WindowInfo] from already-extracted window facts —
+ * [displayId] (from [AccessibilityWindowInfo.getDisplayId], real + non-zero on a DeX / external /
+ * secondary display), the owning [appPackage], the on-screen edges, and the window [windowType]
+ * (→ `isSystemBar` via [isSystemBarWindow]). Split out of [UiTreeReader.readWindowTopology]'s
+ * framework walk so the multi-display displayId population is JVM-unit-testable without a
+ * (non-constructable) [AccessibilityWindowInfo]. Framework-free (ints + a string) → trivially tested.
+ */
+fun windowInfoOf(
+    displayId: Int,
+    appPackage: String,
+    left: Int,
+    top: Int,
+    right: Int,
+    bottom: Int,
+    windowType: Int,
+): WindowInfo = WindowInfo(
+    displayId = displayId,
+    appPackage = appPackage,
+    bounds = boundsString(left, top, right, bottom),
+    isSystemBar = isSystemBarWindow(windowType),
 )
 
 /** The fixed placeholder emitted in place of any password field's text. */

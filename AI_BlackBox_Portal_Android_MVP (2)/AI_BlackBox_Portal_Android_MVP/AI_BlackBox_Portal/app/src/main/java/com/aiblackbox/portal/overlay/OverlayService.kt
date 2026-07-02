@@ -345,13 +345,10 @@ class OverlayService : Service() {
         instance = this
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-        // Get screen metrics
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
+        // (M5.4) Size the capture from the CURRENT WINDOW METRICS (API 30+), not the deprecated
+        // defaultDisplay.getMetrics — so a tablet / unfolded Fold / multi-window captures at its
+        // true resolution instead of a phone-narrow metric.
+        refreshScreenMetrics()
 
         createNotificationChannel()
 
@@ -599,6 +596,13 @@ class OverlayService : Service() {
                             showToast("Screen capture session has ended.")
                         }
                     }
+
+                    // (M5.4) Android 14+: the captured content resolution changed (fold/unfold,
+                    // rotate, multi-window resize). Invalidate the stale-sized capture + refresh
+                    // the cached dims so no coordinate is derived from a stale resolution.
+                    override fun onCapturedContentResize(width: Int, height: Int) {
+                        onCapturedContentResized(width, height)
+                    }
                 }, handler)
 
 
@@ -724,6 +728,60 @@ class OverlayService : Service() {
         attachedRecording?.delete()
 
         Log.d(TAG, "OverlayService destroyed")
+    }
+
+    /**
+     * (M5.4) Refresh the cached capture dimensions from the CURRENT WINDOW METRICS.
+     *
+     * On API 30+ uses [WindowManager.getCurrentWindowMetrics] `.bounds` — the correct extent on a
+     * tablet / unfolded Fold / multi-window / rotated screen — instead of the deprecated
+     * `defaultDisplay.getMetrics`. Pre-30 keeps the legacy `defaultDisplay.getMetrics` path (so
+     * older devices are unchanged). Density comes from `resources.displayMetrics` (WindowMetrics
+     * exposes no density pre-34). Called on create AND whenever [MediaProjection.Callback.onCapturedContentResize]
+     * reports a resolution change, so the VirtualDisplay/ImageReader are never sized to stale dims
+     * (which would misplace every coordinate). Never throws.
+     */
+    private fun refreshScreenMetrics() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = windowManager.currentWindowMetrics.bounds
+                screenWidth = bounds.width()
+                screenHeight = bounds.height()
+            } else {
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getMetrics(metrics)
+                screenWidth = metrics.widthPixels
+                screenHeight = metrics.heightPixels
+            }
+            screenDensity = resources.displayMetrics.densityDpi
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshScreenMetrics failed (${e.javaClass.simpleName}); keeping ${screenWidth}x${screenHeight}")
+        }
+    }
+
+    /**
+     * (M5.4) Android 14+ `onCapturedContentResize` handler: the captured content changed
+     * resolution (fold/unfold, rotation, multi-window resize). INVALIDATE the cached capture:
+     * update the dims from the new (w,h) AND release the persistent screenshot display + reader so
+     * the NEXT capture rebuilds an ImageReader/VirtualDisplay at the new size — never leaving a
+     * screenshot (and the coordinates derived from it) at a stale resolution. The cloud loop
+     * re-observes each step (M2) and, on a fold, the FoldingFeatureMonitor posture-change flag
+     * additionally tells it to re-observe before its next coordinate action. Runs on [handler].
+     */
+    private fun onCapturedContentResized(width: Int, height: Int) {
+        handler.post {
+            Log.d(TAG, "onCapturedContentResize: ${screenWidth}x${screenHeight} -> ${width}x${height}; invalidating capture")
+            screenWidth = width
+            screenHeight = height
+            // Density can change with the display; re-read it too.
+            runCatching { screenDensity = resources.displayMetrics.densityDpi }
+            // Drop the stale-sized persistent display + reader; next capture recreates at new dims.
+            runCatching { persistentScreenshotDisplay?.release() }
+            persistentScreenshotDisplay = null
+            runCatching { persistentImageReader?.close() }
+            persistentImageReader = null
+        }
     }
 
     /**
@@ -2032,6 +2090,16 @@ class OverlayService : Service() {
         val delay = delays.getOrElse(attempt - 1) { 400L }
 
         handler.postDelayed({
+            // (M4) A fold/rotate at a capture boundary fires onCapturedContentResized(), which
+            // closes + nulls persistentImageReader between this block being scheduled and run — our
+            // captured `reader` would then be CLOSED and acquireLatestImage() would throw
+            // IllegalStateException. Detect the swap up front and return a clean null (the next
+            // capture rebuilds the reader at the new size). MediaProjection stays valid; benign.
+            if (persistentImageReader !== reader) {
+                Log.d(TAG, "attemptImageCaptureFromPersistent: reader reset mid-capture (fold/rotate) -> null")
+                callback(null)
+                return@postDelayed
+            }
             try {
                 val image = reader.acquireLatestImage()
                 if (image != null) {
@@ -2327,6 +2395,17 @@ class OverlayService : Service() {
         val delays = listOf(100L, 200L, 400L)
         val delay = delays.getOrElse(attempt - 1) { 400L }
         handler.postDelayed({
+            // (M4) A fold/rotate at a capture boundary fires onCapturedContentResized(), which
+            // closes + nulls persistentImageReader between this block being scheduled and run —
+            // our captured `reader` would then be CLOSED and acquireLatestImage() would throw
+            // IllegalStateException (caught below, but churning retries). Detect the swap up front
+            // and return a clean null (the loop re-observes at the new size). MediaProjection stays
+            // valid; this is benign.
+            if (persistentImageReader !== reader) {
+                Log.d(TAG, "captureFramePngBytes: reader reset mid-capture (fold/rotate) -> null")
+                callback(null)
+                return@postDelayed
+            }
             try {
                 val image = reader.acquireLatestImage()
                 if (image != null) {

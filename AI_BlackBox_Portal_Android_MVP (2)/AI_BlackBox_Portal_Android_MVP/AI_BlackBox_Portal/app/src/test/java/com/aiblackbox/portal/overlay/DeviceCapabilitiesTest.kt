@@ -36,6 +36,26 @@ class DeviceCapabilitiesTest {
         assertEquals(FormFactor.XR_HEADSET, DeviceCapabilities.classifyFormFactor(900, isXr = true))
     }
 
+    // ---- (M5.5) foldable classification via the FoldingFeature posture probe -
+
+    @Test fun `an observed hinge classifies foldable regardless of sw-dp`() {
+        // A Fold folded (narrow sw-dp) OR unfolded (wide sw-dp) both report FOLDABLE when a
+        // FoldingFeature was observed (isFoldable = a non-null posture on the detect() path).
+        assertEquals(FormFactor.FOLDABLE, DeviceCapabilities.classifyFormFactor(411, isXr = false, isFoldable = true))
+        assertEquals(FormFactor.FOLDABLE, DeviceCapabilities.classifyFormFactor(700, isXr = false, isFoldable = true))
+    }
+
+    @Test fun `xr still wins over a foldable probe`() {
+        assertEquals(FormFactor.XR_HEADSET, DeviceCapabilities.classifyFormFactor(700, isXr = true, isFoldable = true))
+    }
+
+    @Test fun `no hinge keeps the sw-dp phone-tablet split (back-compat default)`() {
+        assertEquals(FormFactor.PHONE, DeviceCapabilities.classifyFormFactor(411, isXr = false, isFoldable = false))
+        assertEquals(FormFactor.TABLET, DeviceCapabilities.classifyFormFactor(600, isXr = false, isFoldable = false))
+        // Default isFoldable=false preserves the M1.1 two-arg behavior exactly.
+        assertEquals(FormFactor.PHONE, DeviceCapabilities.classifyFormFactor(411, isXr = false))
+    }
+
     // ---- capability flags reflect real availability -------------------------
 
     @Test fun `screenshot available on phone-tablet at API 30+ but not XR`() {
@@ -78,5 +98,33 @@ class DeviceCapabilitiesTest {
         assertTrue(ff(FormFactor.FOLDABLE).contains("\"foldable\""))
         assertTrue(ff(FormFactor.XR_HEADSET).contains("\"xr_headset\""))
         assertTrue(ff(FormFactor.GLASSES).contains("\"glasses\""))
+    }
+
+    // ---- (M5.5) posture serialization matches device_capability.json --------
+
+    @Test fun `foldable posture serializes with the schema keys and lowercase enums`() {
+        // Wire encoder drops nulls so a non-foldable omits posture entirely.
+        val wire = Json { encodeDefaults = true; explicitNulls = false }
+        val cap = DeviceCapabilities(
+            FormFactor.FOLDABLE, hasScreenshot = true, supportsCoordinateGesture = true, displayId = 0,
+            posture = DevicePosture(PostureState.HALF_OPENED, HingeOrientation.VERTICAL),
+        )
+        val s = wire.encodeToString(cap)
+        assertTrue(s, s.contains("\"posture\":"))
+        assertTrue(s, s.contains("\"state\":\"half_opened\""))
+        assertTrue(s, s.contains("\"orientation\":\"vertical\""))
+    }
+
+    @Test fun `posture orientation is omitted when unknown`() {
+        val wire = Json { encodeDefaults = true; explicitNulls = false }
+        val s = wire.encodeToString(DevicePosture(PostureState.FLAT))
+        assertTrue(s, s.contains("\"state\":\"flat\""))
+        assertFalse("unknown orientation must be dropped", s.contains("orientation"))
+    }
+
+    @Test fun `non-foldable omits posture entirely`() {
+        val wire = Json { encodeDefaults = true; explicitNulls = false }
+        val cap = DeviceCapabilities(FormFactor.PHONE, hasScreenshot = true, supportsCoordinateGesture = true, displayId = 0)
+        assertFalse(wire.encodeToString(cap).contains("posture"))
     }
 }
