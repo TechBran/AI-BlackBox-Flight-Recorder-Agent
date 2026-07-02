@@ -1,0 +1,211 @@
+{
+  "date": "2026-07-02",
+  "k": 10,
+  "n_rows": 503,
+  "weights": [
+    0.05,
+    0.03,
+    0.02,
+    0.01,
+    0.005,
+    0.0
+  ],
+  "freshness_prefixes": [
+    "SNAP-202607",
+    "SNAP-202606"
+  ],
+  "freshness_queries": [
+    "pluggable embeddings model migration reembed",
+    "control_phone delegate device task tailscale",
+    "on-device gemma phone agent native tool loop",
+    "streaming speech to text multi provider"
+  ],
+  "sweep": [
+    {
+      "weight": 0.05,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.1431,
+          "recall@3": 0.1869,
+          "recall@5": 0.2087,
+          "recall@10": 0.2684,
+          "mrr": 0.174,
+          "recall@10_gt10k": 0.3867,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.1074,
+          "recall@3": 0.1471,
+          "recall@5": 0.1988,
+          "recall@10": 0.3439,
+          "mrr": 0.1531,
+          "recall@10_gt10k": 0.3333,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    },
+    {
+      "weight": 0.03,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.2207,
+          "recall@3": 0.2584,
+          "recall@5": 0.2883,
+          "recall@10": 0.3539,
+          "mrr": 0.2508,
+          "recall@10_gt10k": 0.4733,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.1332,
+          "recall@3": 0.1909,
+          "recall@5": 0.2406,
+          "recall@10": 0.3857,
+          "mrr": 0.186,
+          "recall@10_gt10k": 0.3867,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    },
+    {
+      "weight": 0.02,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.3161,
+          "recall@3": 0.33,
+          "recall@5": 0.3459,
+          "recall@10": 0.4115,
+          "mrr": 0.3334,
+          "recall@10_gt10k": 0.5267,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.169,
+          "recall@3": 0.2107,
+          "recall@5": 0.2724,
+          "recall@10": 0.4056,
+          "mrr": 0.2165,
+          "recall@10_gt10k": 0.3933,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    },
+    {
+      "weight": 0.01,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.3579,
+          "recall@3": 0.3678,
+          "recall@5": 0.3877,
+          "recall@10": 0.4513,
+          "mrr": 0.3746,
+          "recall@10_gt10k": 0.5933,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.2366,
+          "recall@3": 0.2704,
+          "recall@5": 0.326,
+          "recall@10": 0.4414,
+          "mrr": 0.279,
+          "recall@10_gt10k": 0.3867,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    },
+    {
+      "weight": 0.005,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.3817,
+          "recall@3": 0.3936,
+          "recall@5": 0.4155,
+          "recall@10": 0.4891,
+          "mrr": 0.4009,
+          "recall@10_gt10k": 0.6333,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.3201,
+          "recall@3": 0.3499,
+          "recall@5": 0.3936,
+          "recall@10": 0.497,
+          "mrr": 0.3556,
+          "recall@10_gt10k": 0.42,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    },
+    {
+      "weight": 0.0,
+      "arms": {
+        "gemini2-hybrid": {
+          "n": 503,
+          "recall@1": 0.3917,
+          "recall@3": 0.4095,
+          "recall@5": 0.4394,
+          "recall@10": 0.5109,
+          "mrr": 0.4146,
+          "recall@10_gt10k": 0.64,
+          "n_gt10k": 150
+        },
+        "gemini2-semantic": {
+          "n": 503,
+          "recall@1": 0.4453,
+          "recall@3": 0.4771,
+          "recall@5": 0.499,
+          "recall@10": 0.5567,
+          "mrr": 0.4722,
+          "recall@10_gt10k": 0.42,
+          "n_gt10k": 150
+        }
+      },
+      "freshness": {
+        "pluggable embeddings model migration reembed": true,
+        "control_phone delegate device task tailscale": true,
+        "on-device gemma phone agent native tool loop": true,
+        "streaming speech to text multi provider": true
+      }
+    }
+  ]
+}

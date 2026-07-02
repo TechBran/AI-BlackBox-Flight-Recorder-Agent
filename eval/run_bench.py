@@ -25,8 +25,20 @@ overall (uncovered rows counted as misses) and covered-only, clearly labeled.
 Everything is READ-ONLY against the ledger/stores and artifacts-cached per
 (arm, query, operator) in eval/bench_cache.json so re-runs are cheap.
 
+--recency-sweep (M4b, measurement only): re-runs BOTH gemini2 arms over all
+labeled rows at recency_weight in {0.05, 0.03, 0.02, 0.01, 0.005, 0.0} by
+setting the value on the in-process CFG object (retrieve() reads CFG at call
+time) — config.ini ON DISK IS NEVER TOUCHED (byte-asserted before/after, and
+the original in-process value restored). Because the labeled set alone is
+biased toward w=0 (old golds, random spans), each weight ALSO runs the 4
+human recurring-topic queries from test_retrieval_golden through the
+production path and checks a current/previous-month snapshot stays in the
+top-5 (the "latest state of X" freshness use case). NO production code or
+config change is made here; the config decision is made elsewhere.
+
 Run (from the repo root):
     Orchestrator/venv/bin/python eval/run_bench.py [--out-date 2026-07-02]
+    Orchestrator/venv/bin/python eval/run_bench.py --recency-sweep
 """
 from __future__ import annotations
 
@@ -208,13 +220,157 @@ def fmt_md(report: dict) -> str:
     return "\n".join(lines)
 
 
+# ── M4b: recency-weight sweep (measurement only) ─────────────────────────────
+
+SWEEP_WEIGHTS = [0.05, 0.03, 0.02, 0.01, 0.005, 0.0]
+SWEEP_ARMS = [a for a in ARMS if a["slug"] == "gemini-embedding-2"]
+
+
+def _sweep_agg(rows: list, ranks: list) -> dict:
+    """recall@1/3/5/10 + MRR overall, and >10k-band recall@10."""
+    n = len(rows)
+    out = {"n": n}
+    for k in (1, 3, 5, 10):
+        out[f"recall@{k}"] = round(sum(1 for x in ranks if x and x <= k) / n, 4)
+    out["mrr"] = round(sum(1.0 / x for x in ranks if x) / n, 4)
+    band = [(r, rk) for r, rk in zip(rows, ranks) if r.get("length_band") == ">10k"]
+    out["recall@10_gt10k"] = round(
+        sum(1 for _r, rk in band if rk and rk <= 10) / len(band), 4
+    ) if band else None
+    out["n_gt10k"] = len(band)
+    return out
+
+
+def _freshness_prefixes() -> tuple:
+    """SNAP id prefixes for the current and previous month (dynamic, not pinned)."""
+    from datetime import date, timedelta
+    today = date.today()
+    prev = today.replace(day=1) - timedelta(days=1)
+    return f"SNAP-{today:%Y%m}", f"SNAP-{prev:%Y%m}"
+
+
+def run_sweep(rows: list, out_date: str) -> None:
+    """Sweep [retrieval] recency_weight IN-PROCESS ONLY; config.ini untouched."""
+    from Orchestrator.config import CFG
+    # The 4 human recurring-topic queries — single source of truth in the golden test.
+    from Orchestrator.tests.test_retrieval_golden import RECURRING_QUERIES
+
+    ini_path = REPO / "config.ini"
+    ini_before = ini_path.read_bytes()
+
+    store = get_store("gemini-embedding-2")
+    print(f"[sweep] embedding {len(rows)} queries once (reused across all weights/arms)")
+    vecs = embed_queries("gemini-embedding-2", [r["query"] for r in rows])
+
+    if not CFG.has_section("retrieval"):
+        CFG.add_section("retrieval")
+    had_opt = CFG.has_option("retrieval", "recency_weight")
+    orig = CFG.get("retrieval", "recency_weight") if had_opt else None
+    cur_pfx, prev_pfx = _freshness_prefixes()
+
+    result = {"date": out_date, "k": K, "n_rows": len(rows),
+              "weights": SWEEP_WEIGHTS, "freshness_prefixes": [cur_pfx, prev_pfx],
+              "freshness_queries": list(RECURRING_QUERIES), "sweep": []}
+    try:
+        for w in SWEEP_WEIGHTS:
+            CFG.set("retrieval", "recency_weight", str(w))
+            entry = {"weight": w, "arms": {}, "freshness": {}}
+            for arm in SWEEP_ARMS:
+                t0 = time.time()
+                ranks = []
+                for r, qv in zip(rows, vecs):
+                    res = retrieve(
+                        r["query"], operator=r["operator"], k=K,
+                        include_keyword=arm["include_keyword"],
+                        store=store, query_vector=qv,
+                    )
+                    ids = [sid for sid, _s in res]
+                    ranks.append(ids.index(r["gold_snap_id"]) + 1
+                                 if r["gold_snap_id"] in ids else None)
+                entry["arms"][arm["name"]] = _sweep_agg(rows, ranks)
+                a = entry["arms"][arm["name"]]
+                print(f"[sweep w={w}] {arm['name']}: r@10={a['recall@10']} "
+                      f"MRR={a['mrr']} >10k r@10={a['recall@10_gt10k']} "
+                      f"({time.time() - t0:.0f}s)")
+            # Freshness guard: production path (active store + active-model embed),
+            # hybrid, system operator, k=5 — mirrors the golden Half-A assertion.
+            for q in RECURRING_QUERIES:
+                res = retrieve(q, "system", k=5)
+                top = [sid for sid, _s in res]
+                entry["freshness"][q] = any(
+                    sid.startswith(cur_pfx) or sid.startswith(prev_pfx) for sid in top
+                )
+            passed = sum(entry["freshness"].values())
+            print(f"[sweep w={w}] freshness: {passed}/{len(RECURRING_QUERIES)} pass")
+            result["sweep"].append(entry)
+    finally:
+        # Restore the in-process CFG exactly; disk was never written.
+        if had_opt:
+            CFG.set("retrieval", "recency_weight", orig)
+        else:
+            CFG.remove_option("retrieval", "recency_weight")
+    assert ini_path.read_bytes() == ini_before, "config.ini changed on disk — BUG"
+    print("[sweep] config.ini byte-identical before/after: OK")
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    json_path = RESULTS_DIR / f"{out_date}-recency-sweep.json"
+    md_path = RESULTS_DIR / f"{out_date}-recency-sweep.md"
+    json_path.write_text(json.dumps(result, indent=2))
+    md_path.write_text(fmt_sweep_md(result))
+    print(f"[done] wrote {md_path} and {json_path}")
+
+
+def fmt_sweep_md(result: dict) -> str:
+    lines = [
+        f"# Recency-weight sweep — {result['date']} (M4b, measurement only)",
+        "",
+        f"{result['n_rows']} labeled rows, both gemini-embedding-2 arms, full "
+        f"retrieve() pipeline, k={K}. recency_weight set on the in-process CFG "
+        "only — config.ini untouched (byte-asserted). Freshness guard: the 4 "
+        "human recurring-topic queries (test_retrieval_golden Half-A) must keep "
+        f"a {result['freshness_prefixes'][0]}/{result['freshness_prefixes'][1]} "
+        "snapshot in the production top-5.",
+        "",
+    ]
+    for arm in SWEEP_ARMS:
+        lines += [f"## {arm['name']}", "",
+                  "| weight | r@1 | r@3 | r@5 | r@10 | MRR | >10k r@10 |",
+                  "|---|---|---|---|---|---|---|"]
+        for e in result["sweep"]:
+            a = e["arms"][arm["name"]]
+            lines.append(
+                f"| {e['weight']} | {a['recall@1']} | {a['recall@3']} | {a['recall@5']} "
+                f"| {a['recall@10']} | {a['mrr']} | {a['recall@10_gt10k']} |"
+            )
+        lines.append("")
+    lines += ["## Freshness guard (recent snapshot in top-5, production path)", "",
+              "| weight | " + " | ".join(
+                  f"Q{i + 1}" for i in range(len(result["freshness_queries"]))) + " | pass |",
+              "|---|" + "---|" * (len(result["freshness_queries"]) + 1)]
+    for e in result["sweep"]:
+        marks = [("PASS" if e["freshness"][q] else "FAIL")
+                 for q in result["freshness_queries"]]
+        lines.append(f"| {e['weight']} | " + " | ".join(marks) +
+                     f" | {sum(m == 'PASS' for m in marks)}/{len(marks)} |")
+    lines += ["", "Queries: " + "; ".join(
+        f"Q{i + 1}=\"{q}\"" for i, q in enumerate(result["freshness_queries"])), ""]
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-date", default=time.strftime("%Y-%m-%d"))
+    ap.add_argument("--recency-sweep", action="store_true",
+                    help="M4b measurement sweep; no baseline re-run, no cache use")
     args = ap.parse_args()
 
     rows = [json.loads(ln) for ln in LABELED.read_text().splitlines() if ln.strip()]
     print(f"[bench] {len(rows)} labeled rows; active model = {get_active_slug()}")
+
+    if args.recency_sweep:
+        run_sweep(rows, args.out_date)
+        return
+
     cache = load_cache()
 
     report = {
