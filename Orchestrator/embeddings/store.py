@@ -424,11 +424,17 @@ class VectorStore:
 
         Performance constraint: scoring is ONE numpy mat-vec over the whole
         matrix (rows are pre-normalized), never a python loop over rows.
+
+        v2 stores collapse to UNIQUE snapshots during the descent (audit A1):
+        the first row hit per snap_id is by argsort construction its
+        max-cosine best chunk, and k counts distinct snapshots. v1 stores
+        keep today's loop untouched (one row per id — collapse is a no-op).
         """
         with self._lock:
             self._ensure_open_locked()
             matrix = self._get_matrix_locked()
             ids = list(self._ids)
+            schema = self._schema
         if matrix is None or matrix.shape[0] == 0:
             return []
 
@@ -439,6 +445,19 @@ class VectorStore:
         scores = matrix @ q
 
         results = []
+        if schema == 2:
+            seen: set = set()
+            for i in np.argsort(scores)[::-1]:
+                sid = ids[i]
+                if allowed_ids is not None and sid not in allowed_ids:
+                    continue
+                if sid in seen:
+                    continue  # later chunk of an already-returned snapshot
+                seen.add(sid)
+                results.append((sid, float(scores[i])))
+                if len(results) >= k:
+                    break
+            return results
         for i in np.argsort(scores)[::-1]:
             sid = ids[i]
             if allowed_ids is not None and sid not in allowed_ids:
@@ -458,6 +477,10 @@ class VectorStore:
         so a downstream `vec @ other_vec` is a true cosine similarity — exactly
         what MMR diversity needs. Only the top-k rows are materialized; the
         full matrix is never copied.
+
+        v2 stores collapse to unique snapshots exactly like :meth:`search`;
+        the returned vector is the BEST chunk's row (first hit in the
+        descent), so MMR diversifies on each snapshot's most-relevant chunk.
         """
         with self._lock:
             self._ensure_open_locked()
@@ -473,6 +496,19 @@ class VectorStore:
             scores = matrix @ q
 
             results = []
+            if self._schema == 2:
+                seen: set = set()
+                for i in np.argsort(scores)[::-1]:
+                    sid = ids[i]
+                    if allowed_ids is not None and sid not in allowed_ids:
+                        continue
+                    if sid in seen:
+                        continue  # later chunk of an already-returned snapshot
+                    seen.add(sid)
+                    results.append((sid, float(scores[i]), matrix[i].copy()))
+                    if len(results) >= k:
+                        break
+                return results
             for i in np.argsort(scores)[::-1]:
                 sid = ids[i]
                 if allowed_ids is not None and sid not in allowed_ids:

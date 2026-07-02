@@ -244,3 +244,75 @@ def test_groups_never_span_batches(tmp_path):
     reopened = VectorStore(SLUG, DIMS, tmp_path).open()
     assert reopened.schema == 2
     assert reopened.rows == total_rows
+
+
+# ── search collapse (audit A1: collapse lives IN the store) ──────────────────
+
+QUERY = [1.0, 0.0, 0.0, 0.0]
+
+# SNAP-A's first three chunks occupy raw ranks 1-3 against QUERY
+# (cos 1.0, ~0.9995, ~0.9939); SNAP-B ~0.7071; SNAP-C 0.0.
+CHUNKS_A = [
+    [1.0, 0.0, 0.0, 0.0],   # best chunk
+    [0.97, 0.03, 0.0, 0.0],
+    [0.9, 0.1, 0.0, 0.0],
+    [0.1, 0.9, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+]
+
+
+def _chunked_corpus(tmp_path):
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", CHUNKS_A)
+    store.append_group("SNAP-B", [[0.5, 0.5, 0.0, 0.0]])
+    store.append("SNAP-C", [0.0, 1.0, 0.0, 0.0])
+    return store
+
+
+def test_search_collapses_to_unique_snapshots(tmp_path):
+    store = _chunked_corpus(tmp_path)
+    results = store.search_with_vectors(QUERY, k=3)
+    # k = 3 UNIQUE snapshots, even though SNAP-A's chunks hold raw ranks 1-3
+    assert [sid for sid, _, _ in results] == ["SNAP-A", "SNAP-B", "SNAP-C"]
+    a_sid, a_score, a_vec = results[0]
+    # best (max-cosine) chunk's score AND vector, not an arbitrary sibling's
+    assert a_score == pytest.approx(1.0, abs=1e-5)
+    assert np.allclose(a_vec, [1.0, 0.0, 0.0, 0.0], atol=1e-5)
+    assert results[1][1] == pytest.approx(0.7071, abs=1e-3)
+    # k smaller than the raw chunk span still yields k distinct snapshots
+    two = store.search_with_vectors(QUERY, k=2)
+    assert [sid for sid, _, _ in two] == ["SNAP-A", "SNAP-B"]
+
+
+def test_collapse_covers_plain_search(tmp_path):
+    store = _chunked_corpus(tmp_path)
+    results = store.search(QUERY, k=3)
+    assert [sid for sid, _ in results] == ["SNAP-A", "SNAP-B", "SNAP-C"]
+    assert results[0][1] == pytest.approx(1.0, abs=1e-5)
+    assert store.search(QUERY, k=2) == [
+        ("SNAP-A", pytest.approx(1.0, abs=1e-5)),
+        ("SNAP-B", pytest.approx(0.7071, abs=1e-3)),
+    ]
+
+
+def test_allowed_ids_scoping_on_chunked_store(tmp_path):
+    store = _chunked_corpus(tmp_path)
+    # bare-snap_id allowed_ids filters correctly; a scoped op gets results
+    only_b = store.search(QUERY, k=5, allowed_ids={"SNAP-B"})
+    assert [sid for sid, _ in only_b] == ["SNAP-B"]
+    # scoping TO the chunked snapshot returns it once, best chunk's score
+    only_a = store.search(QUERY, k=5, allowed_ids={"SNAP-A"})
+    assert only_a == [("SNAP-A", pytest.approx(1.0, abs=1e-5))]
+    with_vecs = store.search_with_vectors(QUERY, k=5, allowed_ids={"SNAP-A"})
+    assert len(with_vecs) == 1
+    assert np.allclose(with_vecs[0][2], [1.0, 0.0, 0.0, 0.0], atol=1e-5)
+    assert store.search(QUERY, k=5, allowed_ids=set()) == []
+
+
+def test_missing_is_snapshot_currency(tmp_path):
+    store = _chunked_corpus(tmp_path)
+    # ids() returns DISTINCT snap_ids; missing() diffs in snapshot currency
+    assert store.ids() == {"SNAP-A", "SNAP-B", "SNAP-C"}
+    assert store.missing(["SNAP-D", "SNAP-A", "SNAP-B", "SNAP-C", "SNAP-E"]) == [
+        "SNAP-D", "SNAP-E",
+    ]
