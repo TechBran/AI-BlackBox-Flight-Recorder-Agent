@@ -64,10 +64,14 @@ def apply_recency_tiebreak(
 ) -> list[tuple[str, float]]:
     """final = relevance + weight * 2^(-age/half_life). Small weight => tie-break.
 
-    The boost is bounded by `weight` (max at age 0), so with the locked
-    weight=0.05 a fresh snapshot can out-rank an equally-relevant old one but
-    can NEVER overturn a clearly-better older match (relevance dominates). An id
-    absent from age_days is treated as ancient (3650d) -> negligible boost.
+    The boost is bounded by `weight` (max at age 0). Post-RRF, relevance scores
+    span only ~0.0066 (1/60 - 1/99 at candidate_n=40, rrf_c=60), so the weight
+    must be SMALLER than that span for "relevance dominates" to actually hold:
+    0.005 (measured, eval/results/2026-07-02-recency-sweep.md) flips genuine
+    near-ties but cannot displace a clearly-better older match. The original
+    0.05 was ~7.6x the span and demoted older golds by whole ranks (r@10
+    0.268 -> 0.489 when corrected). An id absent from age_days is treated as
+    ancient (3650d) -> negligible boost.
     """
     out: dict[str, float] = {}
     for sid, rel in relevance.items():
@@ -129,7 +133,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     # 1. config knobs from [retrieval] (operator-locked defaults).
     candidate_n = CFG.getint("retrieval", "candidate_n", fallback=40)
     rrf_c = CFG.getint("retrieval", "rrf_c", fallback=60)
-    recency_weight = CFG.getfloat("retrieval", "recency_weight", fallback=0.05)
+    recency_weight = CFG.getfloat("retrieval", "recency_weight", fallback=0.005)
     half_life = CFG.getfloat("retrieval", "recency_half_life_days", fallback=90.0)
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.7)
     junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
