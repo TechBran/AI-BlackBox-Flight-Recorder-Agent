@@ -256,6 +256,11 @@ fun classifyActuatorError(detail: String): String? {
         // User-initiated (decline / handoff) — benign, not an error.
         d.contains("declined") -> null
         d.contains("not enabled") -> "not_enabled"
+        // open_app for a package that isn't installed / has no launcher activity is a caller-input
+        // error (a bad `package`), NOT an a11y node-resolution failure — classify as invalid_argument
+        // (there is no app_not_found enum). Checked BEFORE the generic "not found" so the
+        // openApp detail ("app not found or not launchable: <pkg>") doesn't read as node_not_found.
+        d.contains("not launchable") -> "invalid_argument"
         d.contains("not found") -> "node_not_found"
         d.contains("unknown phone action") || d.contains("unknown intent action") -> "unknown_action"
         // MINOR (b): bad-ARGUMENT phrases → invalid_argument (not the generic dispatch_failed):

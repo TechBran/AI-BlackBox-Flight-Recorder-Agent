@@ -505,6 +505,9 @@ class RemoteActionChannelTest {
     @Test fun `classifyActuatorError maps the actuator phrases`() {
         assertEquals("not_enabled", classifyActuatorError("accessibility service not enabled"))
         assertEquals("node_not_found", classifyActuatorError("node 3 not found"))
+        // open_app for a missing/unlaunchable package → invalid_argument (bad `package`), NOT
+        // node_not_found — even though its detail also contains "not found".
+        assertEquals("invalid_argument", classifyActuatorError("app not found or not launchable: com.x"))
         assertEquals("unknown_action", classifyActuatorError("unknown phone action: foo"))
         assertEquals("invalid_argument", classifyActuatorError("text required"))
         // MINOR (b): bad-argument phrases → invalid_argument (not dispatch_failed).
