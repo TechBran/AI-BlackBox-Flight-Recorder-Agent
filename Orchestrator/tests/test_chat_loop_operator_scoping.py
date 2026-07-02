@@ -28,9 +28,10 @@ Test seams (each loop INLINES the dispatch — there is no shared helper):
     Their dispatch blocks are byte-for-byte the same shape as the non-stream
     ones, so they (and the CU loop, which additionally needs a live session
     object) are covered by the AST structural test below: EVERY
-    hybrid_retrieve call site in the two files must pass an ``operator=``
-    keyword bound to a variable, never a literal (and the site count is
-    pinned so a new unscoped site cannot slip in unseen).
+    hybrid_retrieve call site in the two files must pass ``operator=operator``
+    — the session operator variable each loop holds under exactly that name,
+    never a literal or some other variable (and the site count is pinned so a
+    new unscoped site cannot slip in unseen).
 
   * One live-store integration test (skip-guarded, never fake-pass — pattern
     from test_retrieval_golden.py) proves a real operator gets results, gets
@@ -200,9 +201,10 @@ def test_every_hybrid_retrieval_site_passes_operator(path, expected_count):
             f"(memory search is unscoped: all operators' snapshots visible, "
             f"keyword channel silently empty)"
         )
-        assert not isinstance(kw["operator"], ast.Constant), (
-            f"{path.name}:{site.lineno} operator= is a literal, not the session "
-            f"operator variable"
+        assert isinstance(kw["operator"], ast.Name) and kw["operator"].id == "operator", (
+            f"{path.name}:{site.lineno} operator= must be the session `operator` "
+            f"variable (every loop holds it under exactly that name), got "
+            f"{ast.dump(kw['operator'])}"
         )
 
 
@@ -223,8 +225,14 @@ def _require_live_store():
 
 def test_hybrid_retrieval_live_scoped_to_operator():
     """With a real operator: results come back, ONLY that operator's snapshots
-    rank, and the keyword channel is populated (it is silently empty for '')."""
+    rank, and the keyword channel is populated (it is silently empty for '').
+
+    The operator is picked from the live index (most frequent), NOT hardcoded —
+    this must pass on a fresh box with any operator set (portable-build rule).
+    """
     _require_live_store()
+    from collections import Counter
+
     from Orchestrator.fossils import (
         hybrid_retrieve,
         keyword_retrieve_ids_for_operator,
@@ -232,23 +240,38 @@ def test_hybrid_retrieval_live_scoped_to_operator():
     )
     from Orchestrator.retrieval import retrieve
 
+    # Most frequent scoped operator in the live index. "system" is excluded:
+    # it is the see-everything sentinel, so the per-id scoping assertion below
+    # would not hold for it.
+    index = load_snapshot_index()
+    ops = Counter(
+        m.get("operator") for m in index.values()
+        if m.get("operator") and m.get("operator") != "system"
+    )
+    if not ops:
+        pytest.skip("no operator-attributed snapshots in index")
+    op = ops.most_common(1)[0][0]
+
     query = "BlackBox memory snapshots"
 
-    texts = hybrid_retrieve("", query, k=5, operator="Brandon")
+    texts = hybrid_retrieve("", query, k=5, operator=op)
     if not texts:
-        pytest.skip(f"retrieve returned nothing for {query!r} (query embed unavailable)")
+        pytest.skip(
+            f"hybrid_retrieve returned nothing for {query!r} under operator {op!r} "
+            f"(embed provider down, or no semantically/keyword-matching snapshots "
+            f"for this operator)"
+        )
     assert len(texts) >= 1
 
     # Scoping: every ranked id belongs to the operator.
-    index = load_snapshot_index()
-    ranked = retrieve(query, operator="Brandon", k=5)
+    ranked = retrieve(query, operator=op, k=5)
     assert ranked, "retrieve empty despite hybrid_retrieve returning texts"
     for sid, _score in ranked:
-        assert index.get(sid, {}).get("operator") == "Brandon", (
-            f"{sid} leaked into Brandon-scoped results "
+        assert index.get(sid, {}).get("operator") == op, (
+            f"{sid} leaked into {op!r}-scoped results "
             f"(operator={index.get(sid, {}).get('operator')!r})"
         )
 
     # Keyword channel contributes for a real operator (it matches nothing for "").
-    kw_ids = keyword_retrieve_ids_for_operator("", query, 40, "Brandon")
-    assert kw_ids, "keyword channel empty for a real operator with a live index"
+    kw_ids = keyword_retrieve_ids_for_operator("", query, 40, op)
+    assert kw_ids, f"keyword channel empty for operator {op!r} with a live index"
