@@ -384,6 +384,126 @@ def test_self_heal_ordinals_lagging_ids(tmp_path):
     assert healed.missing(["SNAP-A", "SNAP-B"]) == ["SNAP-B"]
 
 
+def test_first_append_crash_autodetects_v2(tmp_path):
+    """F1: ids+ordinals+vectors present but NO meta (crash during the first
+    append, pre-meta) must autodetect as v2 via the ordinals sidecar — a v1
+    misread would return duplicate results and cement the downgrade."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", CHUNKS_A)
+    (tmp_path / SLUG / "meta.json").unlink()
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()  # autodetect, no request
+    assert healed.schema == 2
+    # store intact, collapse works (no duplicate SNAP-A rows in results)
+    assert healed.rows == 5
+    assert [sid for sid, _ in healed.search(QUERY, k=4)] == ["SNAP-A"]
+    # meta restored truthfully (F2 companion: metaless-but-populated is stale)
+    meta = _read_json(tmp_path, SLUG, "meta.json")
+    assert meta["schema"] == 2
+    assert meta["rows"] == 5 and meta["snapshots"] == 1 and meta["count"] == 1
+
+
+def test_v2_materialization_writes_meta_first(tmp_path, monkeypatch):
+    """F1 belt-and-braces: a fresh v2 store persists its schema identity
+    BEFORE any data lands, so no first-append crash point is metaless."""
+    import Orchestrator.embeddings.store as store_mod
+
+    store = VectorStore(SLUG, DIMS, tmp_path, schema=2).open()
+    real_write = store_mod._atomic_write_json
+
+    def crash_on_ids(path, obj):
+        if path.name == "ids.json":
+            raise RuntimeError("simulated crash before ids rewrite")
+        real_write(path, obj)
+
+    with monkeypatch.context() as m:
+        m.setattr(store_mod, "_atomic_write_json", crash_on_ids)
+        with pytest.raises(RuntimeError):
+            store.append_group("SNAP-X", GROUP_X)
+
+    # crash state: vectors bytes landed, ids/ordinals did not — but meta
+    # already exists carrying schema 2
+    meta = _read_json(tmp_path, SLUG, "meta.json")
+    assert meta["schema"] == 2 and meta["rows"] == 0
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.schema == 2
+    assert healed.rows == 0  # orphan vector rows healed away
+    assert healed.append_group("SNAP-X", GROUP_X) == 3
+
+
+def test_stale_meta_refreshed_on_open(tmp_path):
+    """F2: crash between the ordinals and meta writes leaves consistent files
+    with a STALE meta — open must refresh rows/snapshots/count and bump
+    generation (the future ANN key trusts (slug, schema, generation, rows))."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", GROUP_A2)
+    stale_meta = (tmp_path / SLUG / "meta.json").read_text(encoding="utf-8")
+    store.append_group("SNAP-B", GROUP_B3)
+    (tmp_path / SLUG / "meta.json").write_text(stale_meta)  # roll meta back
+    old_gen = json.loads(stale_meta)["generation"]
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.rows == 5 and healed.snapshots == 2
+    meta = _read_json(tmp_path, SLUG, "meta.json")
+    assert meta["rows"] == 5 and meta["snapshots"] == 2 and meta["count"] == 2
+    assert meta["generation"] > old_gen
+    # no data was truncated — the refresh is meta-only
+    assert (tmp_path / SLUG / "vectors.f32").stat().st_size == 5 * ROW_BYTES
+    assert _read_json(tmp_path, SLUG, "ids.json") == ["SNAP-A"] * 2 + ["SNAP-B"] * 3
+    # and the refreshed store opens clean (no further bump)
+    VectorStore(SLUG, DIMS, tmp_path).open()
+    assert _read_json(tmp_path, SLUG, "meta.json")["generation"] == meta["generation"]
+
+
+def test_corrupt_ordinals_ending_mid_group_drop_partial(tmp_path):
+    """F3: an externally-truncated ordinals.json ending mid-group (ids says
+    the group continues) must NOT claim completeness at its EOF."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", GROUP_A2)
+    store.append_group("SNAP-B", GROUP_B3)
+    # corrupt: ordinals loses its last entry only (ids/vectors full length)
+    (tmp_path / SLUG / "ordinals.json").write_text(json.dumps([0, 1, 0, 1]))
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.rows == 2  # partial SNAP-B dropped WHOLE, not kept at 2/3
+    assert healed.ids() == {"SNAP-A"}
+    assert healed.missing(["SNAP-A", "SNAP-B"]) == ["SNAP-B"]
+    assert _read_json(tmp_path, SLUG, "ordinals.json") == [0, 1]
+
+
+@pytest.mark.parametrize("damage", ["deleted", "torn_json", "not_a_list"])
+def test_lost_ordinals_reconstructed_from_id_runs(tmp_path, damage):
+    """Decision-4 improvement: a MISSING/unreadable ordinals sidecar is fully
+    derivable from consecutive id runs — reconstruct instead of wiping (no
+    paid re-embed on external-only damage). Generation bumps (mutation)."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", GROUP_A2)
+    store.append_group("SNAP-B", GROUP_B3)
+    gen_before = _read_json(tmp_path, SLUG, "meta.json")["generation"]
+    ordinals_path = tmp_path / SLUG / "ordinals.json"
+    if damage == "deleted":
+        ordinals_path.unlink()
+    elif damage == "torn_json":
+        ordinals_path.write_bytes(b"[0, 1, tru")
+    else:
+        ordinals_path.write_text('{"not": "a list"}')
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.rows == 5
+    assert healed.snapshots == 2
+    assert healed.missing(["SNAP-A", "SNAP-B"]) == []
+    assert _read_json(tmp_path, SLUG, "ordinals.json") == [0, 1, 0, 1, 2]
+    meta = _read_json(tmp_path, SLUG, "meta.json")
+    assert meta["generation"] > gen_before
+    assert meta["rows"] == 5
+    # reconstruction must NOT resurrect rows a legitimate crash dropped:
+    # a VALID shorter sidecar is pre-crash truth and still heals by min()
+    ordinals_path.write_text(json.dumps([0, 1]))
+    rehealed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert rehealed.rows == 2
+    assert rehealed.ids() == {"SNAP-A"}
+
+
 def test_generation_bumps_on_append_and_heal(tmp_path):
     store = _v2_store(tmp_path)
     store.append("SNAP-1", [1.0, 0.0, 0.0, 0.0])

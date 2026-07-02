@@ -62,6 +62,24 @@ def _atomic_write_json(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
+def _ordinals_from_id_runs(ids: list) -> list:
+    """Reconstruct the ordinals sidecar from consecutive id runs.
+
+    Valid because groups are contiguous by construction and every run ramps
+    0..m — a prefix-truncated ids list still reconstructs exactly (the cut
+    only removes tail rows; the surviving partial run still starts at 0).
+    """
+    ordinals: list[int] = []
+    i = 0
+    while i < len(ids):
+        j = i
+        while j < len(ids) and ids[j] == ids[i]:
+            ordinals.append(j - i)
+            j += 1
+        i = j
+    return ordinals
+
+
 class VectorStore:
     """Append-only float32 vector store for one embedding model.
 
@@ -153,8 +171,17 @@ class VectorStore:
                     f"requested {self._requested_schema}"
                 )
             self._schema = disk_schema
+        elif self._requested_schema is not None:
+            self._schema = self._requested_schema
+        elif self.ordinals_path.exists():
+            # F1: the ordinals sidecar is v2-only. A metaless dir that has one
+            # is a v2 store whose meta was lost (external damage; our own
+            # writer materializes meta FIRST) — misreading it as v1 would
+            # return duplicate chunk rows from search and the next append
+            # would cement the downgrade.
+            self._schema = 2
         else:
-            self._schema = self._requested_schema or 1
+            self._schema = 1
 
         self._matrix = None
         self._ids = []
@@ -205,18 +232,39 @@ class VectorStore:
             except (TypeError, ValueError):
                 self._generation = 0
         self._ordinals = []
+        sidecar_lost = False
         if self.ordinals_path.exists():
             try:
-                self._ordinals = json.loads(
+                loaded = json.loads(
                     self.ordinals_path.read_text(encoding="utf-8")
                 )
+                if isinstance(loaded, list):
+                    self._ordinals = loaded
+                else:
+                    sidecar_lost = True  # parseable but not a list — garbage
             except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-                self._ordinals = []  # unreadable sidecar heals like a missing one
+                sidecar_lost = True
+        else:
+            sidecar_lost = rows > 0 or bool(self._ids)
+        if sidecar_lost and self._ids:
+            # Decision-4 improvement: the sidecar is fully derivable from ids
+            # (groups are contiguous, each run ramps 0..m) — reconstruct
+            # instead of wiping, so external-only damage costs no re-embed.
+            # ONLY for a MISSING/unreadable sidecar: a VALID shorter list is
+            # pre-crash truth (atomic write order) and must keep min()-healing
+            # — reconstructing over it would resurrect legitimately-dropped
+            # rows.
+            print(
+                f"[VECSTORE] {self.slug}: ordinals sidecar lost — "
+                f"reconstructing from {len(self._ids)} id rows"
+            )
+            self._ordinals = _ordinals_from_id_runs(self._ids)
 
         n = min(rows, len(self._ids), len(self._ordinals))
         target = self._last_complete_group_boundary(n)
         if (
-            len(self._ids) != target
+            sidecar_lost
+            or len(self._ids) != target
             or len(self._ordinals) != target
             or (self.vectors_path.exists()
                 and self.vectors_path.stat().st_size != target * self._row_bytes)
@@ -234,6 +282,30 @@ class VectorStore:
             _atomic_write_json(self.ordinals_path, self._ordinals)
             self._generation += 1  # heal is a mutation (audit A5 / WI-5 seam)
             self._write_meta_locked()
+        else:
+            # F2: files consistent but meta may be STALE (crash between the
+            # ordinals and meta writes) or absent. Downstream trusts meta —
+            # the status payload and the future ANN cache key
+            # (slug, schema, generation, rows) — so refresh counts and bump
+            # generation like any other heal.
+            actual_rows = len(self._ids)
+            snapshots = len(set(self._ids))
+            stale = (
+                (meta_obj is None and actual_rows > 0)
+                or (isinstance(meta_obj, dict) and (
+                    meta_obj.get("schema") != 2
+                    or meta_obj.get("rows") != actual_rows
+                    or meta_obj.get("snapshots") != snapshots
+                    or meta_obj.get("count") != snapshots
+                ))
+            )
+            if stale:
+                print(
+                    f"[VECSTORE] {self.slug}: v2 meta stale/absent — "
+                    f"refreshing (rows={actual_rows} snapshots={snapshots})"
+                )
+                self._generation += 1
+                self._write_meta_locked()
 
     def _last_complete_group_boundary(self, n: int) -> int:
         """Largest t <= n where no torn trailing chunk group survives.
@@ -242,10 +314,14 @@ class VectorStore:
         0..m is fully present (contiguous ramp, one snap_id) AND the next
         recorded entry — ordinals[t] in the PRE-heal sidecar, when one exists
         — starts a new group at ordinal 0. When t is the sidecar's end, the
-        atomic ids/ordinals rewrite order guarantees the boundary. A torn
-        group drops WHOLE (t falls back to the group's first row); malformed
-        runs (can't arise from our own write order) walk back defensively one
-        row at a time.
+        atomic ids/ordinals rewrite order guarantees the boundary UNLESS the
+        pre-heal ids list itself continues the same snap_id past t (F3:
+        externally-truncated ordinals ending mid-group must not claim
+        completeness; a legitimate lagging-ordinals crash never trips this
+        because dedupe forbids a new batch re-appending the trailing sid).
+        A torn group drops WHOLE (t falls back to the group's first row);
+        malformed runs (can't arise from our own write order) walk back
+        defensively one row at a time.
         """
         ids, ordinals = self._ids, self._ordinals
         t = n
@@ -259,7 +335,10 @@ class VectorStore:
             if not run_ok:
                 t -= 1
                 continue
-            if t == len(ordinals) or ordinals[t] == 0:
+            if t == len(ordinals):
+                if t >= len(ids) or ids[t] != ids[t - 1]:
+                    return t
+            elif ordinals[t] == 0:
                 return t
             t = start  # run continues past t: torn group — drop it whole
         return 0
@@ -388,15 +467,21 @@ class VectorStore:
             return 0
 
         self.dir.mkdir(parents=True, exist_ok=True)
+        if not self.meta_path.exists():
+            # F1 belt-and-braces: persist the schema identity BEFORE any data
+            # lands, so no crash point during the first-ever append leaves a
+            # metaless dir that autodetect could misread as v1.
+            self._write_meta_locked()
         with open(self.vectors_path, "ab") as f:
             f.write(b"".join(new_rows))
             f.flush()
             os.fsync(f.fileno())
-        # Write order vectors → ids → ordinals → meta: a crash at any point
-        # heals back to the last complete-group boundary on the next open
-        # (ids/ordinals rewrites are individually atomic and always end at a
-        # group boundary, so only a vectors↔sidecar length mismatch can ever
-        # expose a partial group — which the heal drops whole).
+        # Write order (meta-on-materialize) → vectors → ids → ordinals → meta:
+        # a crash at any point heals back to the last complete-group boundary
+        # on the next open (ids/ordinals rewrites are individually atomic and
+        # always end at a group boundary, so only a vectors↔sidecar length
+        # mismatch can ever expose a partial group — which the heal drops
+        # whole).
         self._ids.extend(new_ids)
         self._id_set.update(new_ids)
         self._ordinals.extend(new_ordinals)

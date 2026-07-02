@@ -123,3 +123,39 @@ def test_gemini_slug_uses_floor_path():
     # "remote:gemini" has no local tokenizer backend — identical to the floor
     text = _long_text()
     assert chunk_snapshot(text, "gemini-embedding-2") == chunk_snapshot(text, None)
+
+
+@pytest.mark.parametrize("model_key", MODEL_KEYS)
+def test_chunks_are_verbatim_substrings(model_key):
+    """C1: exact-tokenizer decode can end in U+FFFD (mid-grapheme cut) — every
+    chunk must be a VERBATIM substring of the source, no replacement chars."""
+    # astral + ZWJ soup with unique markers forces the repair path on exact
+    # backends; unique markers keep position recovery unambiguous
+    text = "".join(f"<{i:05d}>" + "👨‍👩‍👧‍👦🚀🏳️‍🌈" * 6 for i in range(600))
+    chunks = chunk_snapshot(text, model_key)
+    assert len(chunks) > 1
+    covered_to = 0
+    prev_start = -1
+    for chunk in chunks:
+        assert "�" not in chunk
+        start = text.find(chunk)
+        assert start != -1, "chunk is not a verbatim substring"
+        assert start > prev_start          # forward progress
+        assert start <= covered_to         # no gap
+        covered_to = max(covered_to, start + len(chunk))
+        prev_start = start
+    assert covered_to == len(text)
+    assert all(estimate_tokens(c, model_key) <= BUDGET for c in chunks)
+
+
+def test_large_input_bounded_encode_cost():
+    """C2: per-window slices are bounded before clamping — the whole-suffix
+    re-encode was O(n^2) (145k chars took ~27s on the exact backend)."""
+    import time
+    text = "\n".join(f"line {i:06d} " + "lorem ipsum dolor sit amet " * 2
+                     for i in range(2000))  # ~146k chars
+    t0 = time.time()
+    chunks = chunk_snapshot(text, "qwen3-embedding-0.6b")
+    elapsed = time.time() - t0
+    assert len(chunks) > 10
+    assert elapsed < 10  # generous CI margin; the attack script enforces <2s
