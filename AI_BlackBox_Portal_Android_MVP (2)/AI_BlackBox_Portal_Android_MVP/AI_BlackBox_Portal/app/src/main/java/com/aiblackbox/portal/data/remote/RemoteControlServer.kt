@@ -225,11 +225,38 @@ private val WIRE_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true; 
  * production, where [NotificationListenerFgs] always supplies one).
  */
 fun routeRequest(method: String, path: String, body: String,
-                 handler: RemoteTaskHandler, notifier: Notifier? = null): RemoteResponse {
+                 handler: RemoteTaskHandler, notifier: Notifier? = null,
+                 killSwitch: RemoteKillSwitch? = null): RemoteResponse {
     val m = method.uppercase()
     return when {
         path == "/healthz" && m == "GET" ->
             RemoteResponse(200, JSON.encodeToString(HealthBody(handler.healthz())))
+
+        // (M8.2) Global incident kill. Operator-scope is enforced UPSTREAM in [authorize]
+        // (POST body `operator` must equal the device's bound operator), so these routes only
+        // execute the kill. `/kill/{taskId}` halts ONE task; `/kill-all` halts every in-flight
+        // task for the (authorized) operator. Both return {ok, killed_count}. A null [killSwitch]
+        // (never in production — the FGS wires [BusKillSwitch]) → 503.
+        path.startsWith("/kill/") && m == "POST" -> {
+            val taskId = path.removePrefix("/kill/").trim()
+            if (taskId.isBlank())
+                RemoteResponse(400, JSON.encodeToString(ErrorBody("task_id required")))
+            else if (killSwitch == null)
+                RemoteResponse(503, JSON.encodeToString(ErrorBody("kill switch unavailable")))
+            else
+                RemoteResponse(200, JSON.encodeToString(
+                    KillBody(ok = true, killedCount = killSwitch.kill(taskId))))
+        }
+
+        path == "/kill-all" && m == "POST" -> {
+            if (killSwitch == null)
+                RemoteResponse(503, JSON.encodeToString(ErrorBody("kill switch unavailable")))
+            else
+                // The operator is the auth-verified body operator (== bound operator, checked
+                // in authorize) — kill only THIS operator's in-flight tasks.
+                RemoteResponse(200, JSON.encodeToString(
+                    KillBody(ok = true, killedCount = killSwitch.killAll(extractOperator(body)))))
+        }
 
         path == "/task" && m == "POST" -> {
             val req = try {
@@ -274,12 +301,88 @@ fun routeRequest(method: String, path: String, body: String,
         }
 
         path == "/healthz" || path == "/task" || path == "/notify" ||
-            path.startsWith("/status/") ->
+            path.startsWith("/status/") || path.startsWith("/kill/") || path == "/kill-all" ->
             RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
 
         else -> RemoteResponse(404, JSON.encodeToString(ErrorBody("not found")))
     }
 }
+
+/**
+ * (M8.2) The kill seam `POST /kill/{taskId}` + `POST /kill-all` invoke. Abstracted so the
+ * routes are JVM-unit-testable with a fake and the production impl ([BusKillSwitch]) is the
+ * process-wide [RemoteSessionBus].
+ */
+interface RemoteKillSwitch {
+    /** Kill ONE task. Returns how many IN-FLIGHT sessions were aborted (0 or 1); the task is
+     *  recorded killed either way, so every subsequent /action + /stream frame for it is refused. */
+    fun kill(taskId: String): Int
+
+    /** Kill ALL in-flight tasks for [operator]. Returns the count aborted (0 or 1 — the bus
+     *  tracks one active session). Blank operator kills nothing (fail-closed). */
+    fun killAll(operator: String): Int
+}
+
+/** Production [RemoteKillSwitch] over the global [RemoteSessionBus]. */
+object BusKillSwitch : RemoteKillSwitch {
+    override fun kill(taskId: String): Int = if (RemoteSessionBus.stop(taskId) != null) 1 else 0
+    override fun killAll(operator: String): Int = RemoteSessionBus.stopAll(operator)
+}
+
+/**
+ * (M8.3) The read seam `GET /telemetry/{taskId}` + `GET /telemetry/summary?operator=` query.
+ * Abstracted so [buildTelemetryResponse] is JVM-unit-testable with a fake; production is
+ * [BusTelemetryReader] over the process-wide [RemoteSessionTelemetry].
+ */
+interface TelemetryReader {
+    fun stepsFor(taskId: String, operator: String): List<RemoteSessionTelemetry.Step>
+    fun summary(operator: String): RemoteSessionTelemetry.Summary
+}
+
+/** Production [TelemetryReader] over the global [RemoteSessionTelemetry]. */
+object BusTelemetryReader : TelemetryReader {
+    override fun stepsFor(taskId: String, operator: String) =
+        RemoteSessionTelemetry.stepsFor(taskId, operator)
+    override fun summary(operator: String) = RemoteSessionTelemetry.summary(operator)
+}
+
+/** The `{ok, killed_count}` body for the kill routes. No defaults → both always emitted. */
+@Serializable
+private data class KillBody(val ok: Boolean, @SerialName("killed_count") val killedCount: Int)
+
+/** The `GET /telemetry/{taskId}` body: the task's operator-scoped per-step records. */
+@Serializable
+data class TelemetryStepsBody(
+    @SerialName("task_id") val taskId: String,
+    val operator: String,
+    val steps: List<RemoteSessionTelemetry.Step>,
+)
+
+// Telemetry encoder: encodeDefaults=true so every non-sensitive field is emitted.
+private val TELEMETRY_JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+/**
+ * (M8.3) PURE builder for the telemetry GETs. `/telemetry/summary` → the operator aggregate
+ * (avg latency + success rate); `/telemetry/{taskId}` → that task's operator-scoped step list.
+ * OPERATOR-SCOPED: [operator] is the auth-verified query operator (== bound operator, checked in
+ * [authorize]); both reads filter by it, so one operator can never read another's telemetry. No
+ * screen text / secrets are ever in the store, so the response is safe to serialize. Kept pure +
+ * separate from the NanoHTTPD body so the shape is JVM-unit-testable.
+ */
+fun buildTelemetryResponse(path: String, operator: String, telemetry: TelemetryReader): RemoteResponse =
+    when {
+        path == "/telemetry/summary" ->
+            RemoteResponse(200, TELEMETRY_JSON.encodeToString(telemetry.summary(operator)))
+        path.startsWith("/telemetry/") -> {
+            val taskId = path.removePrefix("/telemetry/").trim()
+            if (taskId.isBlank())
+                RemoteResponse(400, JSON.encodeToString(ErrorBody("task_id required")))
+            else
+                RemoteResponse(200, TELEMETRY_JSON.encodeToString(
+                    TelemetryStepsBody(taskId, operator, telemetry.stepsFor(taskId, operator))))
+        }
+        else -> RemoteResponse(404, JSON.encodeToString(ErrorBody("not found")))
+    }
 
 /**
  * (M1.3) Handle POST /action: dispatch the frontier `action` frame in [body] through the
@@ -376,6 +479,21 @@ fun authorize(method: String, path: String, remoteIp: String,
         if (boundOperator.isBlank() || requestOperator != boundOperator)
             return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
     }
+    // (M8.2) The incident-kill routes are control channels like /action — scope them to the
+    // device's bound operator so a foreign operator cannot kill THIS device's sessions. The
+    // operator arrives in the POST body (extracted in serve()). Fail-closed: blank bound
+    // operator OR mismatch → 403.
+    if ((path.startsWith("/kill/") || path == "/kill-all") && m == "POST") {
+        if (boundOperator.isBlank() || requestOperator != boundOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
+    // (M8.3) The telemetry GETs carry per-session step data — scope them to the bound operator
+    // (the ?operator= query param, extracted in serve()) so one operator can't read another's
+    // telemetry. Fail-closed: blank bound operator OR blank/mismatched query operator → 403.
+    if (path.startsWith("/telemetry") && m == "GET") {
+        if (boundOperator.isBlank() || requestOperator != boundOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for this device")))
+    }
     // (I1) The observation↑ stream will carry SCREEN CONTENTS in M1 — scope GET /stream/{id}
     // to the bound operator so it is never cross-operator readable. The operator arrives as
     // the ?operator= query param (a GET has no body), extracted in serve() as requestOperator.
@@ -436,8 +554,9 @@ fun streamMethodGate(method: String): RemoteResponse? =
  * on one signal. Completes the I3 kill-switch: a STOP promptly ends BOTH the `/action` and
  * `/stream` halves of the server loop.
  */
-fun streamKillGate(taskId: String, killed: Boolean): RemoteResponse? =
-    if (killed) RemoteResponse(409, JSON.encodeToString(ErrorBody("remote control stopped by user")))
+fun streamKillGate(taskId: String, killed: Boolean,
+                   detail: String = RemoteSessionBus.DETAIL_USER_STOP): RemoteResponse? =
+    if (killed) RemoteResponse(409, JSON.encodeToString(ErrorBody(detail)))
     else null
 
 /**
@@ -476,6 +595,13 @@ class RemoteControlServer(
     private val subscriptionPredicate: (operator: String) -> Boolean = { true },
     private val actionDispatcherProvider: () -> RemoteActionDispatcher? = { null },
     private val observationProvider: (suspend () -> Observation?)? = null,
+    // (M8.2) the incident-kill seam for POST /kill/{taskId} + /kill-all. Defaults to the
+    // process-wide [BusKillSwitch] so the FGS's single server has kill enabled with no extra
+    // wiring; a fake is injected in tests.
+    private val killSwitchProvider: () -> RemoteKillSwitch? = { BusKillSwitch },
+    // (M8.3) the telemetry read seam for GET /telemetry/{taskId} + /telemetry/summary. Defaults
+    // to the process-wide [BusTelemetryReader].
+    private val telemetryReaderProvider: () -> TelemetryReader = { BusTelemetryReader },
 ) : NanoHTTPD(port) {
 
     fun startServer() = start(SOCKET_READ_TIMEOUT, false)
@@ -486,15 +612,25 @@ class RemoteControlServer(
         val path = session.uri ?: "/"
         val body = if (method.equals("POST", ignoreCase = true)) readBody(session) else ""
         val remoteIp = session.remoteIpAddress ?: ""
-        // /task, /notify and (M0) /action carry a top-level `operator` in the body; (I1)
-        // GET /stream/{id} — a body-less GET — carries it as the ?operator= query param.
+        // /task, /notify, (M0) /action and (M8.2) /kill* carry a top-level `operator` in the
+        // POST body; (I1) GET /stream/{id} and (M8.3) GET /telemetry* — body-less GETs — carry it
+        // as the ?operator= query param.
         val requestOperator = when {
-            path == "/task" || path == "/notify" || path == "/action" -> extractOperator(body)
-            path.startsWith("/stream/") -> session.parameters?.get("operator")?.firstOrNull()?.trim() ?: ""
+            path == "/task" || path == "/notify" || path == "/action" ||
+                path == "/kill-all" || path.startsWith("/kill/") -> extractOperator(body)
+            path.startsWith("/stream/") || path.startsWith("/telemetry") ->
+                session.parameters?.get("operator")?.firstOrNull()?.trim() ?: ""
             else -> ""
         }
         authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate)?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
+        }
+        // (M8.3) The telemetry GETs return a fixed-length JSON body (operator-scoped above).
+        if (path.startsWith("/telemetry")) {
+            val routed = if (method.equals("GET", ignoreCase = true))
+                buildTelemetryResponse(path, requestOperator, telemetryReaderProvider())
+            else RemoteResponse(405, JSON.encodeToString(ErrorBody("method not allowed")))
+            return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
         }
         // (M0 scaffold) The observation↑ half of the frontier streaming control channel
         // (decision #8): a chunked SSE response, so it is served here rather than through
@@ -513,7 +649,7 @@ class RemoteControlServer(
             }
             return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
         }
-        val routed = routeRequest(method, path, body, handlerProvider(), notifier)
+        val routed = routeRequest(method, path, body, handlerProvider(), notifier, killSwitchProvider())
         return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
     }
 
@@ -540,7 +676,10 @@ class RemoteControlServer(
         // (F2 / I3) REFUSE a stopped task: never serve it a fresh observation frame (which would
         // resurrect the consent banner + keep the loop driving a session the user ended). This
         // completes the I3 kill-switch on the /stream half — a STOP promptly ends the server loop.
-        streamKillGate(taskId, RemoteSessionBus.isKilled(taskId))?.let { denied ->
+        // (M8.2) carry the kill REASON detail so an operator incident-kill reads "killed by
+        // operator" (loop → `killed`) vs a user STOP "stopped by user" (loop → `stopped`).
+        streamKillGate(taskId, RemoteSessionBus.isKilled(taskId),
+            RemoteSessionBus.killDetail(taskId))?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
         }
         // Opening the observation stream is the start of a control session → banner on. (The kill

@@ -96,7 +96,31 @@ async def _run_gemma(params: dict, ctx: ToolContext) -> ToolResult:
     return result
 
 
+async def _run_stop(params: dict, ctx: ToolContext) -> ToolResult:
+    """Route control_device(action="stop") to the incident kill switch (M8.2) — the SAME
+    behavior as the stop_device_control tool (delegates to it so there is one kill path).
+    Passes `device`/`task_id` through; `task` is ignored for a stop."""
+    from Orchestrator.toolvault import registry
+    stopper = registry.get_executor("stop_device_control")
+    if stopper is None:
+        return ToolResult(
+            False,
+            "The device-control stop path is unavailable — the stop_device_control tool did not load.",
+            data={"error_kind": "config_error", "action": "stop"})
+    return await stopper(
+        {"device": params.get("device"), "task_id": params.get("task_id")}, ctx)
+
+
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
+    # M8.2 incident kill: control_device(action="stop") halts in-flight control on the device.
+    action = (params.get("action") or "run").strip().lower()
+    if action == "stop":
+        return await _run_stop(params, ctx)
+    if action not in ("run", "stop"):
+        return ToolResult(
+            False, f"Unknown action '{action}'. Expected 'run' (default) or 'stop'.",
+            data={"error_kind": "invalid_argument", "action": action})
+
     task = (params.get("task") or "").strip()
     if not task:
         return ToolResult(False, "task is required (what to do on the device).",

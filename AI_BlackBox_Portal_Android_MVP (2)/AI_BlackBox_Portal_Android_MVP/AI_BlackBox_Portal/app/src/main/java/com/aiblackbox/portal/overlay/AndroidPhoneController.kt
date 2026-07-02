@@ -87,6 +87,11 @@ class AndroidPhoneController(
     private val intentActuator: IntentActuator,
     private val displayId: () -> Int = { Display.DEFAULT_DISPLAY },
     private val capability: () -> DeviceCapabilities? = { null },
+    // (M8.1) live a11y-enabled probe for the intent-fallback gate. Default `{ true }` (no gate)
+    // so the existing direct-constructor call-sites + unit tests behave exactly as before; the
+    // production [fromService] wires `{ BlackBoxA11yService.isConnected() }`, so a disabled /
+    // OS-revoked (Advanced Protection) service degrades screen actions to intent_only_mode.
+    private val a11yEnabled: () -> Boolean = { true },
 ) : PhoneController {
 
     /**
@@ -103,6 +108,15 @@ class AndroidPhoneController(
 
     override suspend fun dispatch(name: String, args: JsonObject): ToolResult {
         return try {
+            // (M8.1) a11y-revocation → intent fallback. If the AccessibilityService is disabled or
+            // OS-revoked (e.g. Android Advanced Protection), the SCREEN actuators can't run — return
+            // a clear intent_only_mode result listing the still-available intent actions instead of
+            // failing opaquely/crashing. The INTENT actions (handled in the `else` branch via the
+            // Application-Context IntentActuator — no a11y) STILL fire. Re-enabling a11y resumes the
+            // tree/gesture path on the very next call (this probes live each dispatch).
+            if (name in A11Y_DEPENDENT_ACTIONS && !a11yEnabled()) {
+                return intentOnlyModeResult()
+            }
             when (name) {
                 "read_screen" ->
                     // The JSON string is handed to the model AS TEXT (a primitive),
@@ -232,6 +246,14 @@ class AndroidPhoneController(
         ToolResult(success = success, result = JsonPrimitive(detail))
 
     /**
+     * (M8.1) The graceful a11y-off result: `success=false` with the machine-detectable
+     * [INTENT_ONLY_MODE_DETAIL] (starts with the `intent_only_mode` token the /action classifier
+     * + frontier loop key on, then lists the still-available intent actions). Never leaks content.
+     */
+    private fun intentOnlyModeResult(): ToolResult =
+        ToolResult(false, JsonPrimitive(INTENT_ONLY_MODE_DETAIL))
+
+    /**
      * (M6.1) The XR coordinate gate. Returns a benign skip [ToolResult] when the memoized
      * [cachedCapability] reports `supportsCoordinateGesture=false` (an XR headset); `null` (proceed)
      * on any device that supports coordinate gestures OR when no capability provider is wired
@@ -247,6 +269,30 @@ class AndroidPhoneController(
     }
 
     companion object {
+
+        /**
+         * (M8.1) The on-device actions that REQUIRE the [BlackBoxA11yService] (screen-tree reads +
+         * gesture actuation). When a11y is disabled / OS-revoked these degrade to intent_only_mode;
+         * the [ResidentTools.INTENT_ACTIONS] (Application-Context intents) are NOT in this set and
+         * still fire. `open_app` is here because [Actuators.openApp] launches via the a11y service.
+         */
+        val A11Y_DEPENDENT_ACTIONS: Set<String> = setOf(
+            "read_screen", "tap", "type", "swipe", "scroll", "open_app", "back", "home",
+            "recents", "press_key", "coordinate_tap", "coordinate_swipe",
+        )
+
+        /**
+         * (M8.1) The intent_only_mode detail. Starts with the `intent_only_mode` token the
+         * `/action` error classifier ([com.aiblackbox.portal.data.remote.classifyActuatorError]) and
+         * the server-side frontier loop key on, then lists the still-available intent actions (from
+         * [ResidentTools.INTENT_ACTIONS], never hardcoded) so the driver knows what remains. Carries
+         * NO screen text.
+         */
+        val INTENT_ONLY_MODE_DETAIL: String =
+            "intent_only_mode: on-device accessibility is off (or OS-revoked); screen reading, " +
+                "taps, typing, and gestures are unavailable. Intent actions still work: " +
+                ResidentTools.INTENT_ACTIONS.sorted().joinToString(", ") +
+                ". Re-enable BlackBox accessibility to resume screen control."
 
         /**
          * (M1 / C1 — SUPERSEDED by M4) The fail-safe autonomy posture the boot-survivable REMOTE
@@ -303,6 +349,11 @@ class AndroidPhoneController(
             credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
             displayId: () -> Int = { Display.DEFAULT_DISPLAY },
             capability: () -> DeviceCapabilities? = { DeviceCapabilities.detect(appContext) },
+            // (M8.1) live a11y-enabled probe — the intent-fallback gate. isConnected() ==
+            // (instance != null); a disabled / OS-revoked service clears the instance in
+            // onUnbind/onDestroy, so screen actions degrade to intent_only_mode and resume
+            // the instant the user re-enables it.
+            a11yEnabled: () -> Boolean = { BlackBoxA11yService.isConnected() },
         ): AndroidPhoneController =
             AndroidPhoneController(
                 UiTreeReader.fromService(),
@@ -313,6 +364,7 @@ class AndroidPhoneController(
                 IntentActuator.fromAppContext(appContext, mode, confirm),
                 displayId = displayId,
                 capability = capability,
+                a11yEnabled = a11yEnabled,
             )
     }
 }

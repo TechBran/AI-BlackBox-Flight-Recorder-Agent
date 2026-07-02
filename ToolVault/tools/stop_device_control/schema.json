@@ -1,0 +1,24 @@
+{
+  "name": "stop_device_control",
+  "description": "Incident kill switch for remote device control (M8.2). Immediately STOPS device-control sessions on the user's phone/tablet/XR device over Tailscale — halting a runaway, unwanted, or mistaken control_device run. By default it kills ALL in-flight device-control tasks for this operator on the resolved device ('kill-all'); pass a specific task_id to kill just that one. The device refuses every subsequent action frame for a killed task and drops its consent banner. Use this the instant the user says 'stop', 'stop controlling my phone', 'cancel that', or when a device-control session is misbehaving. Returns {ok, killed_count}. Operator-scoped: it can only stop this operator's own device sessions.",
+  "category": "computer_control",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "device": {
+        "type": "string",
+        "description": "Optional target device name (tailnet hostname or MagicDNS name). Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Optional specific device-control task id to kill (as returned in a control_device run). Omit to kill ALL in-flight device-control tasks for this operator on the target device."
+      }
+    },
+    "required": []
+  },
+  "returns": "A confirmation of the kill, plus data.killed_count (how many in-flight tasks were aborted), data.device, and — on failure — a structured error_kind (no_device / no_primary_device / invalid_target / origin_mismatch / lost_contact / refused / bad_response).",
+  "example": "stop_device_control()",
+  "notes": "M8.2 of the frontier-driven device-control rewire: reaches the phone's RemoteControlServer POST /kill-all (or POST /kill/{task_id}) over Tailscale, which calls RemoteSessionBus.stopAll(operator) / stop(taskId) on-device (the killed task is refused on every subsequent /action + /stream frame, and its consent banner drops). Operator-scoped + tailnet-gated exactly like /action. Device resolution is origin-aware (mesh.resolve_device), the same rule control_device uses. Also reachable as control_device(action=\"stop\"). See docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M8)."
+}

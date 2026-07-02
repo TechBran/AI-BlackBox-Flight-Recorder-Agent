@@ -213,6 +213,63 @@ class AndroidPhoneControllerActionTest {
         assertTrue(detail(r)!!, detail(r)!!.contains("unknown phone action"))
     }
 
+    // ---- (M8.1) a11y-revocation → intent fallback ----
+
+    /** A controller whose live a11y probe reports the service DISABLED / OS-revoked. */
+    private fun controllerA11yOff(): AndroidPhoneController = AndroidPhoneController(
+        UiTreeReader(rootProvider = { null }),
+        Actuators({ null }),
+        IntentActuator({ null }),
+        a11yEnabled = { false },
+    )
+
+    @Test fun `read_screen degrades to intent_only_mode when a11y is off`() = runBlocking {
+        val r = controllerA11yOff().dispatch("read_screen", JsonObject(emptyMap()))
+        assertFalse(r.success)
+        assertTrue(detail(r)!!, detail(r)!!.startsWith("intent_only_mode"))
+        // it must list the still-available intent actions so the driver knows what remains.
+        assertTrue(detail(r)!!, detail(r)!!.contains("show_map"))
+    }
+
+    @Test fun `tap type swipe scroll all degrade to intent_only_mode when a11y is off`() = runBlocking {
+        val c = controllerA11yOff()
+        for (name in listOf("tap", "type", "swipe", "scroll", "open_app", "back", "home",
+                "recents", "press_key", "coordinate_tap", "coordinate_swipe")) {
+            val r = c.dispatch(name, buildJsonObject {
+                put("resource_id", "x"); put("text", "y"); put("direction", "down")
+                put("package", "com.x"); put("key", "enter"); put("x", 1); put("y", 2)
+                put("x2", 3); put("y2", 4)
+            })
+            assertFalse(name, r.success)
+            assertTrue("$name -> ${detail(r)}", detail(r)!!.startsWith("intent_only_mode"))
+        }
+    }
+
+    @Test fun `the INTENT path still fires when a11y is off (not gated to intent_only_mode)`() = runBlocking {
+        // show_map is an Application-Context intent (no a11y) — it must NOT be intent-only-gated;
+        // it reaches the (null-context) IntentActuator instead.
+        val r = controllerA11yOff().dispatch("show_map", buildJsonObject { put("query", "coffee") })
+        assertFalse("intent action must not be gated as intent_only_mode",
+            detail(r)!!.startsWith("intent_only_mode"))
+    }
+
+    @Test fun `re-enabling a11y resumes the screen path (gate no longer fires)`() = runBlocking {
+        // Same construction but a11y back ON → the a11y action reaches the (null-service) actuator
+        // ("not enabled"), proving the gate is live per-dispatch and resumes when a11y returns.
+        val on = AndroidPhoneController(
+            UiTreeReader(rootProvider = { null }), Actuators({ null }), IntentActuator({ null }),
+            a11yEnabled = { true },
+        )
+        val r = on.dispatch("tap", buildJsonObject { put("resource_id", "x") })
+        assertEquals("accessibility service not enabled", detail(r))
+    }
+
+    @Test fun `default a11yEnabled is true — existing callers unaffected (no gate)`() = runBlocking {
+        // The default direct-constructor controller (no a11yEnabled wired) behaves as a11y-on.
+        val r = controller().dispatch("tap", buildJsonObject { put("resource_id", "x") })
+        assertEquals("accessibility service not enabled", detail(r))
+    }
+
     // ---- the tolerant intArg helper (pure) ----
 
     @Test fun `intArg tolerates int float and string forms`() {

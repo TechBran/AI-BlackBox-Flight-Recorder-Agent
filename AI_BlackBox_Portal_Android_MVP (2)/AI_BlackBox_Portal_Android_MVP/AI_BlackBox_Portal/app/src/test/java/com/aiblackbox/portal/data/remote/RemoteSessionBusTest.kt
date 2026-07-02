@@ -98,6 +98,64 @@ class RemoteSessionBusTest {
         assertFalse(RemoteSessionBus.isKilled("t0"))   // oldest (past the cap) evicted
     }
 
+    // ---- (M8.2) targeted incident kill: stop(taskId) ----
+
+    @Test fun `stop(taskId) aborts the matching active session and records it killed`() {
+        RemoteSessionBus.start("t1", "Brandon")
+        val aborted = RemoteSessionBus.stop("t1")
+        assertEquals("t1", aborted?.taskId)
+        assertFalse(RemoteSessionBus.isActive())
+        assertTrue(RemoteSessionBus.isKilled("t1"))
+        assertEquals(RemoteSessionBus.KillReason.OPERATOR_KILL, RemoteSessionBus.killReason("t1"))
+    }
+
+    @Test fun `stop(taskId) records a kill even when it is NOT the active session`() {
+        RemoteSessionBus.start("active", "Brandon")
+        // Killing a DIFFERENT (e.g. stale/other) task returns null (nothing aborted) but still
+        // records it killed so a late frame for it can never actuate/resurrect it.
+        assertNull(RemoteSessionBus.stop("stale"))
+        assertTrue(RemoteSessionBus.isKilled("stale"))
+        assertTrue(RemoteSessionBus.isActive())              // the real active session is untouched
+        assertEquals("active", RemoteSessionBus.current()?.taskId)
+    }
+
+    @Test fun `stop(taskId) with a blank id is a no-op`() {
+        RemoteSessionBus.start("t1", "Brandon")
+        assertNull(RemoteSessionBus.stop(""))
+        assertTrue(RemoteSessionBus.isActive())
+    }
+
+    // ---- (M8.2) kill-all: stopAll(operator) ----
+
+    @Test fun `stopAll kills this operator's active session and reports count 1`() {
+        RemoteSessionBus.start("t1", "Brandon")
+        assertEquals(1, RemoteSessionBus.stopAll("Brandon"))
+        assertFalse(RemoteSessionBus.isActive())
+        assertTrue(RemoteSessionBus.isKilled("t1"))
+    }
+
+    @Test fun `stopAll does not kill another operator's session (count 0, fail-closed)`() {
+        RemoteSessionBus.start("t1", "Brandon")
+        assertEquals(0, RemoteSessionBus.stopAll("Mallory"))
+        assertTrue(RemoteSessionBus.isActive())               // Brandon's session survives
+        assertEquals(0, RemoteSessionBus.stopAll(""))          // blank operator kills nothing
+        assertTrue(RemoteSessionBus.isActive())
+    }
+
+    // ---- (M8.2) kill reason distinguishes user STOP from operator kill ----
+
+    @Test fun `killReason and killDetail distinguish user stop from operator kill`() {
+        RemoteSessionBus.start("u", "Brandon"); RemoteSessionBus.stop()   // no-arg = USER_STOP
+        RemoteSessionBus.start("o", "Brandon"); RemoteSessionBus.stop("o") // targeted = OPERATOR_KILL
+        assertEquals(RemoteSessionBus.KillReason.USER_STOP, RemoteSessionBus.killReason("u"))
+        assertEquals(RemoteSessionBus.KillReason.OPERATOR_KILL, RemoteSessionBus.killReason("o"))
+        assertEquals(RemoteSessionBus.DETAIL_USER_STOP, RemoteSessionBus.killDetail("u"))
+        assertEquals(RemoteSessionBus.DETAIL_OPERATOR_KILL, RemoteSessionBus.killDetail("o"))
+        // an unkilled / blank task → null reason, and the safe user-stop detail default.
+        assertNull(RemoteSessionBus.killReason("never"))
+        assertEquals(RemoteSessionBus.DETAIL_USER_STOP, RemoteSessionBus.killDetail("never"))
+    }
+
     // ---- I4: atomic session state under concurrency ----
 
     @Test fun `concurrent start-stop never leaves the banner visible (I4)`() {

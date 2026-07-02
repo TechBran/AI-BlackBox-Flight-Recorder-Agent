@@ -250,6 +250,66 @@ class RemoteActionChannelTest {
         assertEquals("foo", c.dispatched[0].second["resource_id"]?.jsonPrimitive?.contentOrNull)
     }
 
+    // ======================= (M8.3) telemetry recording ========================
+
+    /** A recording [TelemetrySink] that captures the non-sensitive fields per step. */
+    private class RecordingSink : TelemetrySink {
+        data class Rec(val taskId: String, val operator: String, val action: String,
+                       val success: Boolean, val latencyMs: Long, val captureType: String)
+        val recs = mutableListOf<Rec>()
+        override fun record(taskId: String, operator: String, action: String, success: Boolean,
+                            latencyMs: Long, captureType: String) {
+            recs.add(Rec(taskId, operator, action, success, latencyMs, captureType))
+        }
+    }
+
+    @Test fun `dispatch records one non-sensitive telemetry step (action + outcome + latency)`() = runBlocking {
+        val sink = RecordingSink()
+        // a fake clock advancing 25ms across the actuation → deterministic latency.
+        var t = 0L
+        val d = PhoneActionDispatcher(
+            FakePhoneController(), capability = { phoneCap }, sessionBus = FakeSession(),
+            telemetry = sink, clockMs = { t += 25L; t },
+        )
+        d.dispatch(body("""{"type":"element_set_text","resource_id":"pw","text":"s3cret"}"""), "t1", "Brandon")
+        assertEquals(1, sink.recs.size)
+        val rec = sink.recs[0]
+        assertEquals("type", rec.action)          // the dispatch NAME, never the typed text
+        assertEquals("t1", rec.taskId)
+        assertEquals("Brandon", rec.operator)
+        assertTrue(rec.success)
+        assertEquals(25L, rec.latencyMs)
+        assertEquals("none", rec.captureType)      // no observationProvider wired → none
+        // NO secret: the typed text never enters the telemetry record.
+        assertFalse(sink.recs.toString().contains("s3cret"))
+    }
+
+    @Test fun `telemetry captureType reflects the follow-on observation`() = runBlocking {
+        val sink = RecordingSink()
+        val obs = Observation(
+            uiTree = emptyList(), deviceCapability = phoneCap, screenshot = "QUJD")  // has a screenshot
+        val d = PhoneActionDispatcher(
+            FakePhoneController(), capability = { phoneCap }, sessionBus = FakeSession(),
+            observationProvider = { obs }, telemetry = sink,
+        )
+        d.dispatch(body("""{"type":"element_click","resource_id":"x"}"""), "t1", "Brandon")
+        assertEquals("screenshot", sink.recs[0].captureType)
+    }
+
+    @Test fun `a killed task uses the reason-specific detail (operator kill)`() = runBlocking {
+        // A SessionSignal whose killDetail says "killed by operator" → the loop reads `killed`.
+        val opKilled = object : SessionSignal {
+            override fun isKilled(taskId: String) = true
+            override fun start(taskId: String, operator: String) {}
+            override fun killDetail(taskId: String) = RemoteSessionBus.DETAIL_OPERATOR_KILL
+        }
+        val r = PhoneActionDispatcher(FakePhoneController(), capability = { phoneCap }, sessionBus = opKilled)
+            .dispatch(body("""{"type":"element_click","resource_id":"x"}"""), "t1", "Brandon")
+        assertFalse(r.success)
+        assertEquals(RemoteSessionBus.DETAIL_OPERATOR_KILL, r.detail)
+        assertNull(r.error)   // a kill is a decision, not a failure — no error code
+    }
+
     @Test fun `dispatch coordinate_tap reaches controller coordinate_tap`() = runBlocking {
         val c = FakePhoneController()
         dispatcher(c).dispatch(body("""{"type":"coordinate_tap","x":100,"y":200}"""), "t1", "Brandon")
@@ -310,6 +370,25 @@ class RemoteActionChannelTest {
         assertFalse(res.success)
         assertEquals("invalid_argument", res.error)
         assertTrue(res.detail!!, res.detail!!.contains("not supported"))
+    }
+
+    // (M2) a11y OFF forces supportsCoordinateGesture=false too, but the coordinate gate must then
+    // report the `intent_only_mode` signal (so the loop short-circuits to its intent_only terminal),
+    // NOT the XR "coordinate gestures not supported on <form>" message.
+    private val a11yOffCap = DeviceCapabilities(
+        FormFactor.PHONE, hasScreenshot = false, supportsCoordinateGesture = false,
+        displayId = 0, accessibilityEnabled = false,
+    )
+
+    @Test fun `coordinate action with a11y off reports intent_only_mode not the XR message (M2)`() = runBlocking {
+        val c = FakePhoneController()
+        val res = dispatcher(c, cap = a11yOffCap)
+            .dispatch(body("""{"type":"coordinate_tap","x":10,"y":20}"""), "t1", "Brandon")
+        assertTrue(c.dispatched.isEmpty())                       // still never actuated
+        assertFalse(res.success)
+        assertEquals("intent_only_mode", res.error)              // → loop fires the intent_only terminal
+        assertTrue(res.detail!!, res.detail!!.startsWith("intent_only_mode"))
+        assertFalse(res.detail!!, res.detail!!.contains("not supported on"))   // NOT the XR wording
     }
 
     @Test fun `element action still works on XR`() = runBlocking {

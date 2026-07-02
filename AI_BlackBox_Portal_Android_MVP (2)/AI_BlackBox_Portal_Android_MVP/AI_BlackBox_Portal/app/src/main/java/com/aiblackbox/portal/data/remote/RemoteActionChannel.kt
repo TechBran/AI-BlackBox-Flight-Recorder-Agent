@@ -3,6 +3,7 @@ package com.aiblackbox.portal.data.remote
 import com.aiblackbox.portal.data.local.PhoneController
 import com.aiblackbox.portal.data.local.ResidentTools
 import com.aiblackbox.portal.data.model.ToolResult
+import com.aiblackbox.portal.overlay.AndroidPhoneController
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -246,6 +247,11 @@ private fun intField(frame: JsonObject, key: String): Int? {
 fun classifyActuatorError(detail: String): String? {
     val d = detail.lowercase()
     return when {
+        // (M8.1) intent-only degradation: the a11y service is off/OS-revoked, so a screen action
+        // (tap/type/gesture/global) is unavailable but the INTENT path still works. Checked FIRST
+        // — its detail mentions "accessibility" and would otherwise be misread as not_enabled. This
+        // is NOT a hard terminal: the frontier loop keys on it to know the device is intent-only.
+        d.contains("intent_only_mode") -> "intent_only_mode"
         // User-initiated (decline / handoff) — benign, not an error.
         d.contains("declined") -> null
         d.contains("not enabled") -> "not_enabled"
@@ -283,6 +289,13 @@ interface RemoteActionDispatcher {
 interface SessionSignal {
     fun isKilled(taskId: String): Boolean
     fun start(taskId: String, operator: String)
+    /**
+     * (M8.2) The wire DETAIL for a killed [taskId] — distinguishes an operator incident-kill
+     * ("remote control killed by operator" → the loop's `killed` terminal) from a user STOP
+     * ("remote control stopped by user" → `stopped`). Default = the user-stop phrase, so an
+     * existing fake SessionSignal (isKilled/start only) keeps the pre-M8 behavior.
+     */
+    fun killDetail(taskId: String): String = RemoteSessionBus.DETAIL_USER_STOP
 }
 
 /** Production [SessionSignal] over the global [RemoteSessionBus]. */
@@ -291,6 +304,7 @@ object BusSessionSignal : SessionSignal {
     override fun start(taskId: String, operator: String) {
         RemoteSessionBus.start(taskId, operator)
     }
+    override fun killDetail(taskId: String): String = RemoteSessionBus.killDetail(taskId)
 }
 
 /**
@@ -322,13 +336,18 @@ class PhoneActionDispatcher(
     private val capability: () -> DeviceCapabilities,
     private val sessionBus: SessionSignal = BusSessionSignal,
     private val observationProvider: (suspend () -> Observation?)? = null,
+    // (M8.3) records one NON-SENSITIVE step per actuated action (action name + outcome + latency
+    // + capture kind). Default = the process-wide store; a fake sink in tests.
+    private val telemetry: TelemetrySink = RemoteSessionTelemetry,
+    // (M8.3) wall clock seam for the actuation latency measurement (injected in tests).
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : RemoteActionDispatcher {
 
     override suspend fun dispatch(body: String, taskId: String, operator: String): ActionResultEnvelope {
-        // KILL SWITCH: a stopped task never actuates or resurrects the session.
+        // KILL SWITCH: a stopped task never actuates or resurrects the session. The detail
+        // distinguishes an operator incident-kill from a user STOP (M8.2) so the loop can too.
         if (sessionBus.isKilled(taskId)) {
-            // User-initiated stop — success=false with a benign detail, no error code.
-            return ActionResultEnvelope(success = false, detail = "remote control stopped by user")
+            return ActionResultEnvelope(success = false, detail = sessionBus.killDetail(taskId))
         }
 
         val frame = try {
@@ -352,7 +371,7 @@ class PhoneActionDispatcher(
                 // refuse subsequent frames for the task; there is no in-flight cancellation of
                 // an already-running actuator call.
                 if (sessionBus.isKilled(taskId)) {
-                    return ActionResultEnvelope(success = false, detail = "remote control stopped by user")
+                    return ActionResultEnvelope(success = false, detail = sessionBus.killDetail(taskId))
                 }
 
                 val cap = capability()
@@ -363,25 +382,56 @@ class PhoneActionDispatcher(
                 val isCoordinate = parsed.kind == ActionKind.COORDINATE ||
                     parsed.dispatchName in COORDINATE_DISPATCH_NAMES
                 if (isCoordinate && !cap.supportsCoordinateGesture) {
+                    val obs = observationProvider?.invoke()
+                    // (M2) a11y OFF also forces supportsCoordinateGesture=false, but the honest
+                    // signal then is NOT "this form factor can't do coordinates" (the XR case) — it's
+                    // that the WHOLE screen path (tree + taps/typing/gestures/coordinates) is gone
+                    // and only the on-device INTENT path remains. Emit the `intent_only_mode` detail
+                    // so the loop short-circuits to its `intent_only` terminal (the cloud driver
+                    // can't issue intents) instead of misreading it as an XR coordinate rejection.
+                    // The XR case (a11y ON, supportsCoordinateGesture=false) keeps its message.
+                    val (gateError, gateDetail) = if (!cap.accessibilityEnabled) {
+                        "intent_only_mode" to AndroidPhoneController.INTENT_ONLY_MODE_DETAIL
+                    } else {
+                        "invalid_argument" to
+                            "coordinate gestures not supported on ${cap.formFactor.name.lowercase()}"
+                    }
+                    // (M8.3) the skip is still a step — record it (no coordinates, just the name).
+                    telemetry.record(taskId, operator, parsed.dispatchName, false, 0L, captureType(obs))
                     return ActionResultEnvelope(
                         success = false,
-                        error = "invalid_argument",
-                        detail = "coordinate gestures not supported on ${cap.formFactor.name.lowercase()}",
-                        observation = observationProvider?.invoke(),
+                        error = gateError,
+                        detail = gateDetail,
+                        observation = obs,
                     )
                 }
 
                 // Dispatch through the real actuators (AndroidPhoneController never throws).
+                val t0 = clockMs()
                 val tr = controller.dispatch(parsed.dispatchName, parsed.args)
+                val latencyMs = clockMs() - t0
                 val detail = toolDetail(tr)
+                val obs = observationProvider?.invoke()
+                // (M8.3) per-step telemetry: the action NAME, its outcome, the actuation latency,
+                // and how the follow-on screen was observed. NO screen/typed text, node content,
+                // coordinates, or args — the sink signature can't carry them.
+                telemetry.record(taskId, operator, parsed.dispatchName, tr.success, latencyMs, captureType(obs))
                 ActionResultEnvelope(
                     success = tr.success,
                     error = if (tr.success) null else classifyActuatorError(detail),
                     detail = detail,
-                    observation = observationProvider?.invoke(),
+                    observation = obs,
                 )
             }
         }
+    }
+
+    /** (M8.3) The non-sensitive capture kind for a follow-on [observation]: `screenshot` when it
+     *  carried one, `tree_only` when it was tree-only, `none` when no observation was embedded. */
+    private fun captureType(observation: Observation?): String = when {
+        observation == null -> "none"
+        observation.screenshot != null -> "screenshot"
+        else -> "tree_only"
     }
 
     /** Pull the non-sensitive detail phrase the actuator reported (never node/typed text). */

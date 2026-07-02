@@ -387,4 +387,113 @@ class RemoteControlServerTest {
             RemoteTaskHandlerHolder.clear()  // restore global seam for other tests
         }
     }
+
+    // ── M8.2: global incident kill routes (POST /kill/{taskId}, POST /kill-all) ──
+
+    private class FakeKillSwitch(private val perTask: Int = 1, private val all: Int = 1) : RemoteKillSwitch {
+        var killedTask: String? = null
+        var killAllOperator: String? = null
+        override fun kill(taskId: String): Int { killedTask = taskId; return perTask }
+        override fun killAll(operator: String): Int { killAllOperator = operator; return all }
+    }
+
+    @Test fun kill_one_task_returns_ok_and_killed_count() {
+        val k = FakeKillSwitch(perTask = 1)
+        val r = routeRequest("POST", "/kill/task-9", """{"operator":"Brandon"}""", FakeHandler(), null, k)
+        assertEquals(200, r.status)
+        assertEquals("task-9", k.killedTask)
+        assertTrue(r.json, r.json.contains("\"ok\":true"))
+        assertTrue(r.json, r.json.contains("\"killed_count\":1"))
+    }
+
+    @Test fun kill_all_kills_the_body_operator() {
+        val k = FakeKillSwitch(all = 1)
+        val r = routeRequest("POST", "/kill-all", """{"operator":"Brandon"}""", FakeHandler(), null, k)
+        assertEquals(200, r.status)
+        assertEquals("Brandon", k.killAllOperator)
+        assertTrue(r.json, r.json.contains("\"killed_count\":1"))
+    }
+
+    @Test fun kill_all_reports_zero_when_nothing_in_flight() {
+        val r = routeRequest("POST", "/kill-all", """{"operator":"Brandon"}""", FakeHandler(), null,
+            FakeKillSwitch(all = 0))
+        assertEquals(200, r.status)
+        assertTrue(r.json, r.json.contains("\"killed_count\":0"))
+    }
+
+    @Test fun kill_blank_task_id_is_400() {
+        assertEquals(400, routeRequest("POST", "/kill/", "{}", FakeHandler(), null, FakeKillSwitch()).status)
+    }
+
+    @Test fun kill_without_a_switch_is_503() {
+        assertEquals(503, routeRequest("POST", "/kill/t1", "{}", FakeHandler()).status)
+        assertEquals(503, routeRequest("POST", "/kill-all", "{}", FakeHandler()).status)
+    }
+
+    @Test fun kill_wrong_method_is_405() {
+        assertEquals(405, routeRequest("GET", "/kill/t1", "", FakeHandler(), null, FakeKillSwitch()).status)
+        assertEquals(405, routeRequest("GET", "/kill-all", "", FakeHandler(), null, FakeKillSwitch()).status)
+    }
+
+    // ── M8.2: kill routes are operator-scoped (authorize) ──
+
+    @Test fun kill_routes_require_the_bound_operator() {
+        // foreign operator -> 403; matching -> allowed (null); blank bound -> fail-closed 403.
+        assertEquals(403, authorize("POST", "/kill/t1", "100.88.0.7", "Mallory", "Brandon")?.status)
+        assertEquals(403, authorize("POST", "/kill-all", "100.88.0.7", "Mallory", "Brandon")?.status)
+        assertNull(authorize("POST", "/kill/t1", "100.88.0.7", "Brandon", "Brandon"))
+        assertNull(authorize("POST", "/kill-all", "100.88.0.7", "Brandon", "Brandon"))
+        assertEquals(403, authorize("POST", "/kill-all", "100.88.0.7", "Brandon", "")?.status)
+        // off-tailnet is rejected before the operator check.
+        assertEquals(403, authorize("POST", "/kill-all", "8.8.8.8", "Brandon", "Brandon")?.status)
+    }
+
+    // ── M8.3: telemetry routes (GET /telemetry/{taskId}, /telemetry/summary) ──
+
+    private class FakeTelemetryReader : TelemetryReader {
+        override fun stepsFor(taskId: String, operator: String) = listOf(
+            RemoteSessionTelemetry.Step(taskId, operator, "tap", true, 12L, "tree_only", 1L))
+        override fun summary(operator: String) =
+            RemoteSessionTelemetry.Summary(operator, 3, 2, 2.0 / 3.0, 150L)
+    }
+
+    @Test fun telemetry_task_steps_are_operator_scoped_and_non_sensitive() {
+        val r = buildTelemetryResponse("/telemetry/task-7", "Brandon", FakeTelemetryReader())
+        assertEquals(200, r.status)
+        assertTrue(r.json, r.json.contains("\"task_id\":\"task-7\""))
+        assertTrue(r.json, r.json.contains("\"action\":\"tap\""))
+        assertTrue(r.json, r.json.contains("\"latency_ms\":12"))
+        // no screen text / node content leaks into a telemetry export.
+        assertFalse(r.json, r.json.contains("resource_id"))
+        assertFalse(r.json, r.json.contains("\"text\""))
+    }
+
+    @Test fun telemetry_summary_aggregates() {
+        val r = buildTelemetryResponse("/telemetry/summary", "Brandon", FakeTelemetryReader())
+        assertEquals(200, r.status)
+        assertTrue(r.json, r.json.contains("\"step_count\":3"))
+        assertTrue(r.json, r.json.contains("\"avg_latency_ms\":150"))
+        assertTrue(r.json, r.json.contains("\"success_count\":2"))
+    }
+
+    @Test fun telemetry_blank_task_id_is_400() {
+        assertEquals(400, buildTelemetryResponse("/telemetry/", "Brandon", FakeTelemetryReader()).status)
+    }
+
+    @Test fun telemetry_routes_require_the_bound_operator() {
+        assertEquals(403, authorize("GET", "/telemetry/summary", "100.88.0.7", "Mallory", "Brandon")?.status)
+        assertEquals(403, authorize("GET", "/telemetry/t1", "100.88.0.7", "", "Brandon")?.status)
+        assertNull(authorize("GET", "/telemetry/summary", "100.88.0.7", "Brandon", "Brandon"))
+    }
+
+    // ── M8.2: streamKillGate carries the kill REASON detail ──
+
+    @Test fun stream_kill_gate_carries_the_operator_kill_detail() {
+        // Default detail stays "stopped by user" (back-compat); an explicit operator-kill detail
+        // rides through so the loop reads `killed by operator` vs `stopped by user`.
+        assertTrue(streamKillGate("t1", true)!!.json.contains("stopped by user"))
+        val opKill = streamKillGate("t1", true, RemoteSessionBus.DETAIL_OPERATOR_KILL)
+        assertEquals(409, opKill?.status)
+        assertTrue(opKill!!.json, opKill.json.contains("killed by operator"))
+    }
 }

@@ -19,6 +19,11 @@
         "type": "string",
         "enum": ["gemini", "claude", "openai", "gemma"],
         "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model — the legacy control_phone path). An explicit value overrides the per-device default."
+      },
+      "action": {
+        "type": "string",
+        "enum": ["run", "stop"],
+        "description": "Optional. 'run' (default) drives the device to complete the task. 'stop' is the incident kill switch: immediately halts ALL in-flight device-control on the resolved device for this operator (equivalent to the stop_device_control tool) — use it to abort a runaway or unwanted session. With action='stop' the 'task' is ignored (pass any placeholder)."
       }
     },
     "required": ["task"]

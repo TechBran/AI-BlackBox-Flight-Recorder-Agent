@@ -452,6 +452,60 @@ def test_terminal_accessibility_off_short_circuits(monkeypatch):
     assert res.error_kind == "accessibility_off"
 
 
+# ── M3: an a11y-off FIRST observation short-circuits to intent_only (no model call) ──
+A11Y_OFF_OBS = {
+    "msg": "observation",
+    "ui_tree": [],  # a11y off → the device reports an empty tree
+    "device_capability": {"formFactor": "phone", "hasScreenshot": False,
+                          "supportsCoordinateGesture": False, "accessibilityEnabled": False,
+                          "displayId": 0},
+    "timestamp": 1,
+}
+
+
+def test_observation_a11y_off_short_circuits_to_intent_only(monkeypatch):
+    # (M3) The device's FIRST observation reports accessibility OFF → the loop stops CLEANLY at the
+    # intent_only terminal BEFORE building a driver / spending a model call. Proof of "no model
+    # call": _make_driver is stubbed to explode; it must never be reached. Nothing is posted.
+    _fast(monkeypatch)
+    posted = []
+
+    async def fake_post(base_url, frame, timeout):
+        posted.append(frame)
+        return {"msg": "action_result", "success": True}
+
+    def boom_driver(*a, **k):
+        raise AssertionError("a driver must NOT be built when a11y is off at the first observation")
+
+    monkeypatch.setattr(fal, "_pull_observation", _aret(A11Y_OFF_OBS))
+    monkeypatch.setattr(fal, "_post_action", fake_post)
+    monkeypatch.setattr(fal, "_make_driver", boom_driver)
+
+    res = _run(fal.run_frontier_loop("http://phone:8765", "do a thing", "Brandon"))
+    assert res.success is False
+    assert res.error_kind == "intent_only"
+    assert res.steps == 0                       # short-circuited before any step
+    assert posted == []                         # nothing dispatched
+    assert "accessibility" in res.message.lower()
+
+
+def test_observation_a11y_on_does_not_short_circuit(monkeypatch):
+    # Back-compat: an observation WITHOUT the accessibilityEnabled key (OBS) is treated as a11y-ON
+    # (default True) and proceeds normally — the M3 short-circuit only fires on an explicit false.
+    _fast(monkeypatch)
+    monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
+
+    async def fake_post(base_url, frame, timeout):
+        return {"msg": "action_result", "success": True}
+
+    monkeypatch.setattr(fal, "_post_action", fake_post)
+    monkeypatch.setattr(fal, "_make_driver",
+                        lambda *a, **k: FakeDriver([{"op": "tap", "x": 500, "y": 700}, "done"]))
+    res = _run(fal.run_frontier_loop("http://phone:8765", "x", "Brandon"))
+    assert res.success is True                   # not short-circuited
+    assert res.error_kind is None
+
+
 # ── MINOR 9: fake-HTTP round-trip over the real _pull_observation / _post_action seams ─
 class _FakeStreamCtx:
     """Async-context-manager stand-in for httpx's streaming response."""

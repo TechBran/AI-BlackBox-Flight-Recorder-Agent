@@ -22,6 +22,7 @@
       "type": "string",
       "enum": [
         "not_enabled",
+        "intent_only_mode",
         "node_not_found",
         "unknown_action",
         "invalid_argument",
@@ -31,7 +32,7 @@
         "timeout",
         "not_wired"
       ],
-      "description": "OPTIONAL structured error kind (present only when success=false for a genuine failure, not a user decline). Maps the device-side failure ('accessibility service not enabled' → not_enabled, 'node N not found' → node_not_found, 'unknown phone action' → unknown_action, '<key> required'/'invalid url' → invalid_argument, gesture/intent launch failure → dispatch_failed) plus the loop-level transport errors (no_device / lost_contact / timeout from the M2 adaptive-timeout layer). `not_wired` is the M0 SCAFFOLD state: the /action endpoint acknowledges a well-formed action but the actuator dispatch (M1) / cloud loop (M2) is not yet bound — it is removed once real dispatch lands."
+      "description": "OPTIONAL structured error kind (present only when success=false for a genuine failure, not a user decline). Maps the device-side failure ('accessibility service not enabled' → not_enabled, 'node N not found' → node_not_found, 'unknown phone action' → unknown_action, '<key> required'/'invalid url' → invalid_argument, gesture/intent launch failure → dispatch_failed) plus the loop-level transport errors (no_device / lost_contact / timeout from the M2 adaptive-timeout layer). `intent_only_mode` (M8.1) is the graceful a11y-revocation degradation: the AccessibilityService is disabled/OS-revoked so a SCREEN action (read/tap/type/gesture) is unavailable while the on-device INTENT path still works — the detail lists the available intent actions; the frontier loop keys on it to know the device is intent-only. `not_wired` is the M0 SCAFFOLD state: the /action endpoint acknowledges a well-formed action but the actuator dispatch (M1) / cloud loop (M2) is not yet bound — it is removed once real dispatch lands."
     },
     "observation": {
       "$ref": "https://schemas.aiblackbox.dev/android-control/v1/observation.json",

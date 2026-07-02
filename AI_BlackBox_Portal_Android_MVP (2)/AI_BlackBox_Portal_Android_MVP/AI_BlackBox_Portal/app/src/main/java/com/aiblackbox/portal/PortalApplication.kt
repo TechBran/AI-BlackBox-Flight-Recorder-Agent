@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.aiblackbox.portal.data.remote.RemoteSessionTelemetry
 import com.aiblackbox.portal.data.remote.RemoteTaskRunner
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.voice.AudioPlaybackManager
@@ -19,6 +20,11 @@ class PortalApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         remoteTaskHandlerFactory = { ctx -> RemoteTaskRunner(ctx) }
+
+        // (M8.3 / I1) Wire the PERSISTENT device-control telemetry store so per-step records
+        // survive an FGS restart / process kill (in-memory until this runs). Idempotent + never
+        // throws — a DB-open failure keeps the in-memory fallback.
+        RemoteSessionTelemetry.init(this)
 
         // Wire the process-lived terminal-session manager to the Application context
         // so it can drive the TerminalForegroundService (Phase 3): start the FGS when

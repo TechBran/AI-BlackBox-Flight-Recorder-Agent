@@ -55,6 +55,11 @@ data class DeviceCapabilities(
     // (M5.5) The foldable hinge posture (FLAT / HALF_OPENED + orientation), or null on a
     // non-foldable / when unknown. Dropped from the wire when null (explicitNulls=false).
     val posture: DevicePosture? = null,
+    // (M8.1) Whether the on-device AccessibilityService is enabled. When FALSE (disabled /
+    // OS-revoked, e.g. Advanced Protection) the SCREEN paths are gone — hasScreenshot +
+    // supportsCoordinateGesture are also forced false and the tree is empty — so the loop knows
+    // the device is INTENT-ONLY. Additive + back-compat (default true); [detect] sets it live.
+    val accessibilityEnabled: Boolean = true,
 ) {
     companion object {
         /** `smallestScreenWidthDp` at/above which a device is classified a tablet
@@ -77,19 +82,27 @@ data class DeviceCapabilities(
         fun detect(
             context: Context,
             posture: DevicePosture? = FoldingFeatureMonitor.instance.currentPosture(),
+            // (M8.1) live a11y-enabled probe — the connected service singleton. A disabled /
+            // OS-revoked service clears the instance, so the wire capability reports intent-only.
+            accessibilityEnabled: Boolean = BlackBoxA11yService.isConnected(),
         ): DeviceCapabilities {
             val smallestWidthDp = runCatching {
                 context.resources.configuration.smallestScreenWidthDp
             }.getOrDefault(0)
             val xr = isXr(context)
             val formFactor = classifyFormFactor(smallestWidthDp, xr, isFoldable = posture != null)
+            // (M8.1) with a11y off, neither the silent screenshot nor a dispatchGesture works — so
+            // the loop must not be told they're available. Force both false; the loop then relies on
+            // the intent path (and the /action dispatcher returns intent_only_mode for screen actions).
+            val a11y = accessibilityEnabled
             return DeviceCapabilities(
                 formFactor = formFactor,
-                hasScreenshot = screenshotAvailable(formFactor, Build.VERSION.SDK_INT),
-                supportsCoordinateGesture = coordinateGestureSupported(formFactor),
+                hasScreenshot = a11y && screenshotAvailable(formFactor, Build.VERSION.SDK_INT),
+                supportsCoordinateGesture = a11y && coordinateGestureSupported(formFactor),
                 // Multi-display / DeX addressing is threaded via displayId (default display now).
                 displayId = 0,
                 posture = posture,
+                accessibilityEnabled = a11y,
             )
         }
 

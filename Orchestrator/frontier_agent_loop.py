@@ -148,6 +148,10 @@ class FrontierResult:
     steps: int = 0
     device: Optional[str] = None
     final_text: Optional[str] = None
+    # (M8.3) Per-step telemetry — a bounded list of NON-SENSITIVE step records
+    # ({step, op, success, latency_ms, capture}); NO screen text or typed text ever
+    # enters this list. Populated by run_frontier_loop, surfaced (bounded) in to_data().
+    telemetry: Optional[List[Dict]] = None
 
     def to_data(self) -> Dict:
         d: Dict = {"steps": self.steps}
@@ -155,7 +159,16 @@ class FrontierResult:
             d["device"] = self.device
         if self.error_kind:
             d["error_kind"] = self.error_kind
+        # (M8.3) surface bounded per-step timing/outcome so the caller can observe the
+        # session without a separate telemetry pull. Retention-bounded (last 50 steps).
+        if self.telemetry:
+            d["telemetry"] = self.telemetry[-TELEMETRY_MAX_STEPS:]
         return d
+
+
+# (M8.3) The cap on per-step telemetry records surfaced in a FrontierResult's data. Keeps
+# the ToolResult bounded on a long/looping session (the step limit is already ~40).
+TELEMETRY_MAX_STEPS = 50
 
 
 @dataclass
@@ -376,6 +389,16 @@ async def _post_with_retry(base_url: str, frame: Dict, deadline: float) -> Optio
 
 
 # ── Terminal-state detection (F2 — stop burning model calls on an unrecoverable device) ─
+# (M8.1 / M3) The single intent_only message — shared by the action-triggered terminal
+# (_terminal_error) and the observation-triggered short-circuit (a first observation reporting
+# accessibilityEnabled=false), so both exit paths tell the user the same thing.
+INTENT_ONLY_MESSAGE = (
+    "The device's accessibility service is off (or OS-revoked, e.g. Advanced "
+    "Protection) — only intent actions (open an app/URL, maps, dial…) remain, which "
+    "this cloud driver cannot issue. Re-enable BlackBox accessibility on the device "
+    "to resume screen control.")
+
+
 def _terminal_error(result: Optional[Dict]) -> Optional[Tuple[str, str]]:
     """Inspect an ``action_result`` for a TERMINAL device state that no amount of re-planning
     can recover, so the loop short-circuits instead of feeding the failure back and spending
@@ -384,8 +407,13 @@ def _terminal_error(result: Optional[Dict]) -> Optional[Tuple[str, str]]:
     going (an ordinary, recoverable action failure like ``node_not_found`` is fed back, not
     terminal). Never raises.
 
-    Terminal states (F2):
+    Terminal states (F2 + M8):
       * ``error == "not_wired"``          → ``no_device`` (the device's control channel is not bound);
+      * ``intent_only_mode`` (M8.1)       → ``intent_only`` (the a11y service is OS-revoked / off, so
+        screen taps/typing are unavailable; only the on-device INTENT path works — which this cloud
+        driver does not emit — so the loop stops CLEANLY with a re-enable-a11y message rather than
+        spinning). Checked BEFORE the accessibility branch because its detail mentions accessibility;
+      * ``killed`` (M8.2)                 → ``killed`` (an operator incident-kill: POST /kill /kill-all);
       * detail contains ``stopped``       → ``stopped`` (the user hit STOP on the device);
       * ``not_enabled`` / ``accessibility`` → ``accessibility_off`` (the a11y service is off).
     """
@@ -397,6 +425,17 @@ def _terminal_error(result: Optional[Dict]) -> Optional[Tuple[str, str]]:
         return ("no_device",
                 "Device control isn't wired on this device (no action dispatcher bound). "
                 "Cannot drive it remotely.")
+    # (M8.1) intent-only degradation: the device's accessibility service is off/OS-revoked so
+    # screen reading + taps/typing/gestures are unavailable. The INTENT path still works
+    # on-device, but this cloud driver emits screen actions only — so stop cleanly and tell the
+    # user to re-enable accessibility (which resumes tree/gesture) rather than loop to max_steps.
+    # Must precede the accessibility branch (the detail names 'accessibility').
+    if error == "intent_only_mode" or "intent_only_mode" in detail:
+        return ("intent_only", INTENT_ONLY_MESSAGE)
+    # (M8.2) operator incident-kill (POST /kill/{taskId} or /kill-all) — distinct from a device
+    # STOP so the caller can tell an incident kill apart from a user stop.
+    if error == "killed" or "killed by operator" in detail or "killed" in detail:
+        return ("killed", "Remote control was killed for this device (operator incident stop).")
     if "stopped by user" in detail or "stopped" in detail:
         return ("stopped", "Remote control was stopped on the device.")
     if error == "not_enabled" or "accessibility" in detail or "not enabled" in detail:
@@ -404,6 +443,28 @@ def _terminal_error(result: Optional[Dict]) -> Optional[Tuple[str, str]]:
                 "The device's accessibility service is off — enable it on the device to "
                 "allow remote control.")
     return None
+
+
+# ── Per-step telemetry (M8.3 — NON-SENSITIVE only) ────────────────────────────────────
+def _record_step(telemetry: List[Dict], step: int, op, success: bool, latency_ms: int,
+                 observation: Dict) -> None:
+    """Append ONE non-sensitive per-step record to ``telemetry``: the action op, its outcome,
+    the phone round-trip latency, and how the screen was observed this step (``screenshot`` vs
+    ``tree_only``). It NEVER records screen text, typed text, coordinates, resource ids, or any
+    action arguments — only the normalized op NAME, a bool, an int, and the capture kind — so a
+    telemetry export can never leak content. Never raises."""
+    try:
+        capture = "screenshot" if (isinstance(observation, dict) and observation.get("screenshot")) \
+            else "tree_only"
+        telemetry.append({
+            "step": step,
+            "op": str(op) if op is not None else "unknown",
+            "success": bool(success),
+            "latency_ms": int(latency_ms),
+            "capture": capture,
+        })
+    except Exception:
+        pass
 
 
 async def _aclose_driver(driver) -> None:
@@ -465,6 +526,26 @@ async def run_frontier_loop(device_base_url: str, task: str, operator: str,
                             model: Optional[str] = None,
                             capability: Optional[Dict] = None,
                             provider: Optional[str] = None) -> FrontierResult:
+    """Public entry: drive ``device_base_url`` to complete ``task`` and stamp per-step telemetry.
+
+    Thin wrapper over :func:`_drive_frontier_loop` that owns the (mutable) telemetry list so
+    EVERY exit path of the driver — including the early no_device / config_error returns and the
+    terminal short-circuits — carries the same bounded, non-sensitive per-step record without the
+    driver having to thread it onto each of its return sites. Signature is unchanged (M2/M7
+    callers + tests are unaffected)."""
+    telemetry: List[Dict] = []
+    result = await _drive_frontier_loop(
+        device_base_url, task, operator, model=model, capability=capability,
+        provider=provider, telemetry=telemetry)
+    result.telemetry = telemetry
+    return result
+
+
+async def _drive_frontier_loop(device_base_url: str, task: str, operator: str,
+                               model: Optional[str] = None,
+                               capability: Optional[Dict] = None,
+                               provider: Optional[str] = None,
+                               telemetry: Optional[List[Dict]] = None) -> FrontierResult:
     """Drive ``device_base_url`` (a phone's RemoteControlServer base URL) to complete ``task``.
 
     Async ReAct loop over the M1 ``/stream`` (observations) + ``/action`` (actions) channels,
@@ -475,7 +556,12 @@ async def run_frontier_loop(device_base_url: str, task: str, operator: str,
     provider-independent — only perception + the emitted coordinate space differ, absorbed by
     the driver's paired coordinate adapter. Returns a :class:`FrontierResult`; never raises on
     a device/model failure (structured error_kind instead). CancellationError propagates.
+
+    ``telemetry`` (M8.3) is an optional caller-owned list the loop APPENDS one non-sensitive
+    record per dispatched action to ({step, op, success, latency_ms, capture}); the public
+    :func:`run_frontier_loop` wrapper supplies it and stamps it onto the result.
     """
+    telemetry = telemetry if telemetry is not None else []
     task = (task or "").strip()
     if not task:
         return FrontierResult(False, "task is required (what to do on the device).",
@@ -502,6 +588,17 @@ async def run_frontier_loop(device_base_url: str, task: str, operator: str,
             "observation source wired. Cannot drive it remotely.",
             error_kind="no_device", device=base_url, steps=0)
     capability = _merge_capability(capability, obs)
+
+    # (M3) If the device's FIRST observation reports accessibility OFF, the whole screen path
+    # (tree read + taps/typing/gestures/coordinates) is gone and ONLY the on-device INTENT path
+    # remains — which this cloud driver cannot emit. Short-circuit to the `intent_only` terminal
+    # HERE, before building a driver or spending a single model call on a screen action (the
+    # action-triggered path in _terminal_error stays as the fallback for a mid-session revocation).
+    # `accessibilityEnabled` defaults True (absent → screen path assumed available), so this only
+    # fires when the device explicitly advertises it off — fresh-box/back-compat safe.
+    if capability.get("accessibilityEnabled", True) is False:
+        return FrontierResult(False, INTENT_ONLY_MESSAGE, error_kind="intent_only",
+                              device=base_url, steps=0)
 
     # M7-M3: on a capture-less device (XR, hasScreenshot=false) a vision-first provider
     # (claude/openai) has no screenshot to reason over — degrade to the tree-first Gemini path
@@ -571,13 +668,21 @@ async def run_frontier_loop(device_base_url: str, task: str, operator: str,
                 continue
 
             # 4) dispatch it to the phone (variant + transport envelope).
+            _dispatch_t0 = time.monotonic()
             result = await _post_with_retry(
                 base_url, _wire_frame(task_id, operator, grounded.frame), deadline)
+            _latency_ms = int((time.monotonic() - _dispatch_t0) * 1000)
             if result is None:
+                # (M8.3) record the lost-contact step too (op + failure + timing; no secrets).
+                _record_step(telemetry, steps, op, False, _latency_ms, obs)
                 return FrontierResult(
                     False, f"Lost contact with the device dispatching '{op}' (step {steps}).",
                     error_kind="lost_contact", device=base_url, steps=steps)
             last_result = result
+            # (M8.3) per-step telemetry: the action op, its outcome, the phone round-trip
+            # latency, and how the screen was observed (screenshot vs tree-only). NO screen
+            # text / typed text ever enters this record — op is the normalized op name only.
+            _record_step(telemetry, steps, op, bool(result.get("success")), _latency_ms, obs)
 
             # F2: a TERMINAL device state (not_wired / stopped / accessibility_off) is
             # unrecoverable — short-circuit with the right error_kind instead of spending another

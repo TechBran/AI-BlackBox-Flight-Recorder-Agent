@@ -22,11 +22,52 @@ android {
         manifestPlaceholders.cleartext="true"
     }
 
+    // (M8.5) Enterprise/sideload signing. The keystore is sourced from Gradle properties OR
+    // environment variables — NEVER a committed keystore (none is checked in). Provide, in
+    // ~/.gradle/gradle.properties or the CI/MDM environment:
+    //   BLACKBOX_KEYSTORE_FILE, BLACKBOX_KEYSTORE_PASSWORD, BLACKBOX_KEY_ALIAS, BLACKBOX_KEY_PASSWORD
+    // See docs/DEVICE_CONTROL_DEPLOYMENT.md. This app is distributed by SIDELOAD / MDM only — it
+    // is Play-ineligible (an assistant/automation a11y app, never android:isAccessibilityTool).
+    signingConfigs {
+        release {
+            def ksPath = project.findProperty('BLACKBOX_KEYSTORE_FILE') ?: System.getenv('BLACKBOX_KEYSTORE_FILE')
+            if (ksPath) {
+                storeFile file(ksPath)
+                storePassword project.findProperty('BLACKBOX_KEYSTORE_PASSWORD') ?: System.getenv('BLACKBOX_KEYSTORE_PASSWORD')
+                keyAlias project.findProperty('BLACKBOX_KEY_ALIAS') ?: System.getenv('BLACKBOX_KEY_ALIAS')
+                keyPassword project.findProperty('BLACKBOX_KEY_PASSWORD') ?: System.getenv('BLACKBOX_KEY_PASSWORD')
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Use the enterprise keystore when configured; otherwise fall back to DEBUG signing so
+            // the release build is still buildable/testable on a fresh box.
+            def hasReleaseKeystore = (project.findProperty('BLACKBOX_KEYSTORE_FILE') ?: System.getenv('BLACKBOX_KEYSTORE_FILE')) != null
+            // (M8.5) DISTRIBUTION HARD GATE. A distributable release MUST be enterprise-signed. Opt
+            // in from the release/CI pipeline with `-PrequireReleaseSigning` (or the env var
+            // BLACKBOX_REQUIRE_RELEASE_SIGNING): with the flag set and no BLACKBOX_KEYSTORE_*
+            // configured, assembleRelease FAILS instead of silently producing a debug-signed APK.
+            // Without the flag (the default) a fresh box still builds — it just falls back to debug
+            // signing with a loud warning. So CI that ships an APK sets the flag; local/dev doesn't.
+            // NB: use hasProperty (not findProperty ?: env) — a bare `-PrequireReleaseSigning` sets
+            // the property to an EMPTY string, which Groovy's `?:` treats as falsy and would drop.
+            def requireReleaseSigning = project.hasProperty('requireReleaseSigning') || System.getenv('BLACKBOX_REQUIRE_RELEASE_SIGNING') != null
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            } else if (requireReleaseSigning) {
+                throw new GradleException('[BlackBox] assembleRelease requires enterprise signing: set BLACKBOX_KEYSTORE_FILE / BLACKBOX_KEYSTORE_PASSWORD / BLACKBOX_KEY_ALIAS / BLACKBOX_KEY_PASSWORD (a debug-signed APK must NEVER be distributed). See docs/DEVICE_CONTROL_DEPLOYMENT.md.')
+            } else {
+                // TODO(release): supply the enterprise keystore via BLACKBOX_KEYSTORE_* (env or
+                // gradle props) before distributing. This DEBUG-signed fallback keeps the release
+                // build green for CI/local; a debug-signed APK MUST NOT be shipped to customers.
+                signingConfig signingConfigs.debug
+                logger.warn('[BlackBox] RELEASE APK is DEBUG-SIGNED (no BLACKBOX_KEYSTORE_FILE set). Do not distribute; pass -PrequireReleaseSigning in the release pipeline to make this a hard failure. See docs/DEVICE_CONTROL_DEPLOYMENT.md')
+            }
         }
     }
 
