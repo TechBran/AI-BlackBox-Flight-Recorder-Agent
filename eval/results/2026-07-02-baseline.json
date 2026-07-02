@@ -1,0 +1,281 @@
+{
+  "date": "2026-07-02",
+  "k": 10,
+  "n_rows": 503,
+  "n_generated": 500,
+  "n_holdout": 3,
+  "index_size": 7578,
+  "active_slug": "gemini-embedding-2",
+  "arms": {
+    "gemini2-hybrid": {
+      "overall": {
+        "n": 503,
+        "recall@1": 0.1431,
+        "recall@3": 0.1869,
+        "recall@5": 0.2087,
+        "recall@10": 0.2684,
+        "mrr": 0.174
+      },
+      "covered_only": {
+        "n": 503,
+        "recall@1": 0.1431,
+        "recall@3": 0.1869,
+        "recall@5": 0.2087,
+        "recall@10": 0.2684,
+        "mrr": 0.174
+      },
+      "gold_uncovered": 0,
+      "strata": {
+        "length_band": {
+          "6-10k": {
+            "n": 87,
+            "recall@1": 0.1954,
+            "recall@3": 0.2414,
+            "recall@5": 0.2644,
+            "recall@10": 0.3103,
+            "mrr": 0.2267
+          },
+          "<6k": {
+            "n": 266,
+            "recall@1": 0.0789,
+            "recall@3": 0.1278,
+            "recall@5": 0.1466,
+            "recall@10": 0.188,
+            "mrr": 0.1075
+          },
+          ">10k": {
+            "n": 150,
+            "recall@1": 0.2267,
+            "recall@3": 0.26,
+            "recall@5": 0.2867,
+            "recall@10": 0.3867,
+            "mrr": 0.2613
+          }
+        },
+        "position_third": {
+          "None": {
+            "n": 3,
+            "recall@1": 1.0,
+            "recall@3": 1.0,
+            "recall@5": 1.0,
+            "recall@10": 1.0,
+            "mrr": 1.0
+          },
+          "head": {
+            "n": 120,
+            "recall@1": 0.1833,
+            "recall@3": 0.225,
+            "recall@5": 0.2417,
+            "recall@10": 0.2917,
+            "mrr": 0.2098
+          },
+          "middle": {
+            "n": 277,
+            "recall@1": 0.1191,
+            "recall@3": 0.1588,
+            "recall@5": 0.1805,
+            "recall@10": 0.2491,
+            "mrr": 0.1491
+          },
+          "tail": {
+            "n": 103,
+            "recall@1": 0.1359,
+            "recall@3": 0.1942,
+            "recall@5": 0.2233,
+            "recall@10": 0.2718,
+            "mrr": 0.1751
+          }
+        }
+      },
+      "holdout": {
+        "n": 3,
+        "hits@10": 3,
+        "detail": {
+          "SNAP-20260606-6930": 1,
+          "SNAP-20260427-6316": 1,
+          "SNAP-20260427-6313": 1
+        }
+      }
+    },
+    "gemini2-semantic": {
+      "overall": {
+        "n": 503,
+        "recall@1": 0.1074,
+        "recall@3": 0.1471,
+        "recall@5": 0.1988,
+        "recall@10": 0.3439,
+        "mrr": 0.1531
+      },
+      "covered_only": {
+        "n": 503,
+        "recall@1": 0.1074,
+        "recall@3": 0.1471,
+        "recall@5": 0.1988,
+        "recall@10": 0.3439,
+        "mrr": 0.1531
+      },
+      "gold_uncovered": 0,
+      "strata": {
+        "length_band": {
+          "6-10k": {
+            "n": 87,
+            "recall@1": 0.0805,
+            "recall@3": 0.1264,
+            "recall@5": 0.1839,
+            "recall@10": 0.3448,
+            "mrr": 0.1319
+          },
+          "<6k": {
+            "n": 266,
+            "recall@1": 0.094,
+            "recall@3": 0.1391,
+            "recall@5": 0.188,
+            "recall@10": 0.3496,
+            "mrr": 0.1439
+          },
+          ">10k": {
+            "n": 150,
+            "recall@1": 0.1467,
+            "recall@3": 0.1733,
+            "recall@5": 0.2267,
+            "recall@10": 0.3333,
+            "mrr": 0.1818
+          }
+        },
+        "position_third": {
+          "None": {
+            "n": 3,
+            "recall@1": 0.3333,
+            "recall@3": 0.3333,
+            "recall@5": 0.3333,
+            "recall@10": 1.0,
+            "mrr": 0.4143
+          },
+          "head": {
+            "n": 120,
+            "recall@1": 0.1167,
+            "recall@3": 0.1417,
+            "recall@5": 0.225,
+            "recall@10": 0.275,
+            "mrr": 0.152
+          },
+          "middle": {
+            "n": 277,
+            "recall@1": 0.1155,
+            "recall@3": 0.1625,
+            "recall@5": 0.2058,
+            "recall@10": 0.3791,
+            "mrr": 0.1661
+          },
+          "tail": {
+            "n": 103,
+            "recall@1": 0.068,
+            "recall@3": 0.1068,
+            "recall@5": 0.1456,
+            "recall@10": 0.3107,
+            "mrr": 0.112
+          }
+        }
+      },
+      "holdout": {
+        "n": 3,
+        "hits@10": 3,
+        "detail": {
+          "SNAP-20260606-6930": 1,
+          "SNAP-20260427-6316": 10,
+          "SNAP-20260427-6313": 7
+        }
+      }
+    },
+    "qwen06-semantic": {
+      "overall": {
+        "n": 503,
+        "recall@1": 0.0875,
+        "recall@3": 0.1193,
+        "recall@5": 0.169,
+        "recall@10": 0.3082,
+        "mrr": 0.13
+      },
+      "covered_only": {
+        "n": 452,
+        "recall@1": 0.0973,
+        "recall@3": 0.1327,
+        "recall@5": 0.1881,
+        "recall@10": 0.3429,
+        "mrr": 0.1447
+      },
+      "gold_uncovered": 51,
+      "strata": {
+        "length_band": {
+          "6-10k": {
+            "n": 87,
+            "recall@1": 0.092,
+            "recall@3": 0.1379,
+            "recall@5": 0.1839,
+            "recall@10": 0.3793,
+            "mrr": 0.1504
+          },
+          "<6k": {
+            "n": 266,
+            "recall@1": 0.0752,
+            "recall@3": 0.109,
+            "recall@5": 0.1692,
+            "recall@10": 0.312,
+            "mrr": 0.1207
+          },
+          ">10k": {
+            "n": 150,
+            "recall@1": 0.1067,
+            "recall@3": 0.1267,
+            "recall@5": 0.16,
+            "recall@10": 0.26,
+            "mrr": 0.1347
+          }
+        },
+        "position_third": {
+          "None": {
+            "n": 3,
+            "recall@1": 0.3333,
+            "recall@3": 0.3333,
+            "recall@5": 0.6667,
+            "recall@10": 1.0,
+            "mrr": 0.4556
+          },
+          "head": {
+            "n": 120,
+            "recall@1": 0.075,
+            "recall@3": 0.125,
+            "recall@5": 0.1417,
+            "recall@10": 0.2667,
+            "mrr": 0.1186
+          },
+          "middle": {
+            "n": 277,
+            "recall@1": 0.0758,
+            "recall@3": 0.1047,
+            "recall@5": 0.1697,
+            "recall@10": 0.296,
+            "mrr": 0.1183
+          },
+          "tail": {
+            "n": 103,
+            "recall@1": 0.1262,
+            "recall@3": 0.1456,
+            "recall@5": 0.1845,
+            "recall@10": 0.3689,
+            "mrr": 0.1652
+          }
+        }
+      },
+      "holdout": {
+        "n": 3,
+        "hits@10": 3,
+        "detail": {
+          "SNAP-20260606-6930": 1,
+          "SNAP-20260427-6316": 5,
+          "SNAP-20260427-6313": 6
+        }
+      }
+    }
+  }
+}

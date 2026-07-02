@@ -104,18 +104,24 @@ def mmr_select(cands, k: int, lam: float) -> list[str]:
 # ── orchestrating retrieve() ───────────────────────────────────────────────────
 
 def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
-             store=None):
+             store=None, query_vector=None):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
 
     operator ""/"system" = all operators; any other operator restricts to its own
     snapshots. include_keyword=False yields a semantic-only path for lean profiles
     (e.g. the on-device phone) that lack the volume text. Returns [] when the query
-    can't be embedded or the active store is empty/unavailable — never raises.
+    can't be embedded or the active store is empty/unavailable — never raises
+    (on the production path; see query_vector below).
 
-    store (keyword-only, eval seam — WI-6): when given, semantic candidates come
-    from this VectorStore instead of get_active_store(), so candidate chunk stores
-    get benched pre-swap through the FULL ranking pipeline. Production callers
-    never pass it; default behavior is byte-identical.
+    store / query_vector (keyword-only, eval seam — WI-6): when `store` is given,
+    semantic candidates come from that VectorStore instead of get_active_store(),
+    so candidate chunk stores get benched pre-swap through the FULL ranking
+    pipeline. When `query_vector` is given, it is used verbatim instead of
+    embedding the query with the ACTIVE model — required for benching a
+    non-active arm (e.g. a qwen store needs a qwen query vector); it is
+    dims-checked against the store and RAISES ValueError on mismatch (an eval
+    harness bug must fail loud, not bench garbage). Production callers never
+    pass either; default behavior is byte-identical.
     """
     if not query or not query.strip():
         return []
@@ -129,8 +135,12 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
 
-    # 2. embed the query (purpose="query" — the retrieval_query fix).
-    qv = _emb.generate_embedding_sync(query, purpose="query")
+    # 2. embed the query (purpose="query" — the retrieval_query fix), unless the
+    #    eval seam supplied a pre-embedded vector for a non-active arm's model.
+    if query_vector is not None:
+        qv = list(query_vector)
+    else:
+        qv = _emb.generate_embedding_sync(query, purpose="query")
     if not qv:
         return []
     if store is None:
@@ -139,6 +149,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         except Exception as e:  # noqa: BLE001 - corrupt dir / dims mismatch
             print(f"[RETRIEVAL] active store unavailable ({e}); returning no results")
             return []
+    if query_vector is not None:
+        store_dims = getattr(store, "dims", None)
+        if store_dims is not None and len(qv) != store_dims:
+            raise ValueError(
+                f"query_vector has {len(qv)} dims but store "
+                f"{getattr(store, 'slug', '?')} expects {store_dims} (eval seam misuse)"
+            )
     if store.count == 0:
         return []
 

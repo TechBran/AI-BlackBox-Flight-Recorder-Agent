@@ -110,6 +110,36 @@ def test_override_store_empty_returns_empty(hermetic):
     assert retrieval.retrieve("test query", "system", k=5, store=FakeStore([])) == []
 
 
+# ── query_vector= override (the non-active-arm half of the eval seam) ─────────
+
+def test_query_vector_skips_active_model_embedding(hermetic, monkeypatch):
+    """A supplied vector must be used verbatim — the ACTIVE embedding provider
+    must never be consulted (a qwen-store arm needs a qwen query vector; letting
+    the active gemini model embed it would bench garbage)."""
+    def _boom_embed(text, purpose="query"):
+        raise AssertionError("active-model embed called despite query_vector override")
+    monkeypatch.setattr(retrieval._emb, "generate_embedding_sync", _boom_embed)
+
+    store = FakeStore([
+        ("SNAP-A", [1.0, 0.1, 0.0, 0.0]),
+        ("SNAP-C", [0.0, 0.0, 1.0, 0.0]),
+    ])
+    results = retrieval.retrieve(
+        "test query", "system", k=5, store=store, query_vector=[1.0, 0.0, 0.0, 0.0]
+    )
+    assert [sid for sid, _ in results] == ["SNAP-A"]
+
+
+def test_query_vector_dims_mismatch_raises(hermetic):
+    """Eval-seam misuse fails LOUD: a wrong-dims vector would silently bench
+    garbage, so retrieve() raises instead of its usual never-raise contract."""
+    store = FakeStore([("SNAP-A", [1.0, 0.1, 0.0, 0.0])])  # dims=4
+    with pytest.raises(ValueError, match="dims"):
+        retrieval.retrieve(
+            "test query", "system", k=5, store=store, query_vector=[1.0, 0.0, 0.0]
+        )
+
+
 # ── default path unchanged ────────────────────────────────────────────────────
 
 def test_default_path_still_uses_active_store(monkeypatch):
