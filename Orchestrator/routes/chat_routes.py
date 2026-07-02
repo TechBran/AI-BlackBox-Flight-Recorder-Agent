@@ -5819,17 +5819,22 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
     CU_ST = active_threshold(CU_ST)
 
+    from Orchestrator.context_builder import fill_unseen  # lazy: matches build_streaming_context's import pattern
+
     vol_txt = read_text_safe(VOL_PATH)
     recent_snaps = get_recent_fossils_for_operator(vol_txt, operator, CU_RF, CU_CAP)
-    keyword_snaps_raw = keyword_retrieve_for_operator(vol_txt, user_text, CU_KF, operator) if user_text else []
-    semantic_snaps_raw = semantic_retrieve(user_text, operator=operator, k=CU_SF, threshold=CU_ST) if user_text else []
-    checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CU_CP)
-
-    # Deduplicate (same pattern as build_streaming_context)
     recent_ids = set(extract_snap_ids(recent_snaps))
-    keyword_snaps = [s for s in keyword_snaps_raw if not any(sid in recent_ids for sid in extract_snap_ids([s]))]
+
+    # WI-7b dedupe-with-backfill (same pattern as build_fossil_context):
+    # over-fetch each channel by len(seen_so_far), then fill the section with
+    # the first section_k UNSEEN snaps — dedupe no longer shrinks sections.
+    keyword_snaps_raw = keyword_retrieve_for_operator(vol_txt, user_text, CU_KF + len(recent_ids), operator) if user_text else []
+    keyword_snaps = fill_unseen(keyword_snaps_raw, CU_KF, recent_ids)
     seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
-    semantic_snaps = [s for s in semantic_snaps_raw if not any(sid in seen_ids for sid in extract_snap_ids([s]))]
+    semantic_snaps_raw = semantic_retrieve(user_text, operator=operator, k=CU_SF + len(seen_ids), threshold=CU_ST) if user_text else []
+    semantic_snaps = fill_unseen(semantic_snaps_raw, CU_SF, seen_ids)
+    # Checkpoints stay UN-deduped: pinned section, not a discovery channel.
+    checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CU_CP)
 
     print(f"[CU-CONTEXT] Operator: {operator} | Recent: {len(recent_snaps)}, Keyword: {len(keyword_snaps)}, Semantic: {len(semantic_snaps)}, Checkpoints: {len(checkpoint_snaps)}")
 

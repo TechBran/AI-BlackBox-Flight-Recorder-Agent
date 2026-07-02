@@ -71,6 +71,35 @@ def _resolve_cap(provider: str | None) -> int:
     return MAX_TOTAL_CONTEXT_CHARS
 
 
+def fill_unseen(ranked_snaps: list[str], k: int, seen_ids: set[str]) -> list[str]:
+    """WI-7b: fill a context section with the first `k` snaps from a channel's
+    ranked list whose snap_id is not already claimed by an earlier section
+    (precedence: recent → keyword → semantic).
+
+    Callers over-fetch each channel by len(seen_ids) — sufficient because at
+    most that many candidates can be dupes — so dedupe backfills from deeper
+    in the channel's own ranking instead of shrinking the section. Preserves
+    rank order; never invents items (an exhausted channel returns short).
+    Blocks with no extractable snap_id are treated as unseen (kept), matching
+    the historical filter semantics. `seen_ids` is not mutated.
+
+    Shared by build_fossil_context (all streaming/voice/agent transports via
+    chat_routes.build_streaming_context), chat_routes.build_cu_context, and
+    the non-stream worker in tasks.process_chat_task.
+    """
+    filled: list[str] = []
+    local_seen = set(seen_ids)
+    for snap in ranked_snaps:
+        if len(filled) >= k:
+            break
+        ids = extract_snap_ids([snap])
+        if any(sid in local_seen for sid in ids):
+            continue
+        filled.append(snap)
+        local_seen.update(ids)
+    return filled
+
+
 def build_fossil_context(
     user_text: str,
     operator: str,
@@ -118,37 +147,36 @@ def build_fossil_context(
     # Four separate retrieval sources, all scoped to `operator`.
     # include_recent / include_keyword let lean profiles (e.g. on-device
     # `local`) skip these sources entirely; cloud callers leave them True.
+    #
+    # WI-7b dedupe-with-backfill: each discovery channel over-fetches by the
+    # number of snap_ids already claimed by earlier sections, then fills its
+    # section with the first section_k UNSEEN snaps (fill_unseen). Dedupe used
+    # to be filter-only, which silently SHRANK the keyword/semantic sections
+    # exactly when channels agreed on a snapshot's relevance.
     recent_snaps = (
         get_recent_fossils_for_operator(vol_txt, operator, RF, CAP)
         if include_recent else []
     )
+    recent_ids = set(extract_snap_ids(recent_snaps))
+
     keyword_snaps_raw = (
-        keyword_retrieve_for_operator(vol_txt, user_text, KF, operator)
+        keyword_retrieve_for_operator(vol_txt, user_text, KF + len(recent_ids), operator)
         if (include_keyword and user_text) else []
     )
-    # Cap to SF defensively: semantic_retrieve already honors k=SF, so this is
-    # a no-op for cloud callers, but it guarantees the lean `local` profile's
-    # item budget even if a retriever over-returns.
+    keyword_snaps = fill_unseen(keyword_snaps_raw, KF, recent_ids)
+
+    # Semantic fills against recent AND keyword. fill_unseen(k=SF) also
+    # guarantees the lean `local` profile's item budget even if a retriever
+    # over-returns (this replaces the old defensive [:SF] slice).
+    seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
     semantic_snaps_raw = (
-        semantic_retrieve(user_text, operator=operator, k=SF, threshold=ST)[:SF]
+        semantic_retrieve(user_text, operator=operator, k=SF + len(seen_ids), threshold=ST)
         if user_text else []
     )
+    semantic_snaps = fill_unseen(semantic_snaps_raw, SF, seen_ids)
+
+    # Checkpoints stay UN-deduped: they are a pinned section, not a discovery channel.
     checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, operator, count=CP)
-
-    # Deduplicate: keyword must not re-include snaps already in recent
-    recent_ids = set(extract_snap_ids(recent_snaps))
-    keyword_snaps = [
-        snap for snap in keyword_snaps_raw
-        if not any(sid in recent_ids for sid in extract_snap_ids([snap]))
-    ]
-
-    # Semantic dedupe against recent AND keyword
-    keyword_ids_set = set(extract_snap_ids(keyword_snaps))
-    seen_ids = recent_ids | keyword_ids_set
-    semantic_snaps = [
-        snap for snap in semantic_snaps_raw
-        if not any(sid in seen_ids for sid in extract_snap_ids([snap]))
-    ]
 
     # Provenance — same shape as chat_routes.build_streaming_context returns
     recent_ids_list = extract_snap_ids(recent_snaps)

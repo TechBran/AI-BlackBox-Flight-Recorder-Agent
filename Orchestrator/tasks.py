@@ -33,6 +33,7 @@ from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
 from Orchestrator.checkpoint import create_checkpoint_async, perform_mint, should_create_checkpoint
 from Orchestrator.config import ANTHROPIC_MODEL_DEFAULT, AUTO_ENABLE, CFG, CURRENT_OPERATOR, DEBOUNCE_MS, DEFAULT_PROVIDER, GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_IMAGEN_MODEL, GOOGLE_VEO_MODEL, ON_RED, ON_YELLOW, OPENAI_MODEL_DEFAULT, TOOLVAULT_ENABLED, TOKENS_THRESHOLD, TURNS_THRESHOLD, UPLOADS_DIR, USERS_DEFAULT, VOL_PATH, XAI_MODEL_DEFAULT
 from Orchestrator.fossils import extract_snap_ids, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve, _extract_terms, _generate_ngrams
+from Orchestrator.context_builder import fill_unseen  # WI-7b dedupe-with-backfill (shared helper)
 from Orchestrator.monitoring import drift_state_for, extract_plan
 from Orchestrator.startup import ChatIn, GeminiProTTSIn, GoogleSSMLIn, LyriaMusicIn
 from Orchestrator.state import get_state, save_operator_state, task_lock, state_lock
@@ -1400,10 +1401,16 @@ def process_chat_task(task: Task):
         update_task(task.task_id, progress=20)
 
         recent_snaps  = get_recent_fossils_for_operator(vol_txt, active_operator, RF, CAP)
-        # Separate keyword and semantic searches for better control
-        keyword_snaps_before = keyword_retrieve_for_operator(vol_txt, user_text, KF, active_operator) if user_text else []
-        semantic_snaps_before = semantic_retrieve(user_text, operator=active_operator, k=SF, threshold=ST) if user_text else []
+        recent_ids = set(extract_snap_ids(recent_snaps))
+        # Separate keyword and semantic searches for better control.
+        # WI-7b dedupe-with-backfill (shared with context_builder / CU): each
+        # channel over-fetches by len(seen_so_far), then the section is filled
+        # with the first section_k UNSEEN snaps — dedupe no longer shrinks it.
+        # Semantic is fetched AFTER the keyword fill because its over-fetch
+        # amount depends on how many ids the earlier sections claimed.
+        keyword_snaps_before = keyword_retrieve_for_operator(vol_txt, user_text, KF + len(recent_ids), active_operator) if user_text else []
 
+        # Checkpoints stay UN-deduped: pinned section, not a discovery channel.
         checkpoint_snaps = get_recent_checkpoints_for_operator(vol_txt, active_operator, count=CP)
         if checkpoint_snaps:
             checkpoint_ids = extract_snap_ids(checkpoint_snaps)
@@ -1419,42 +1426,24 @@ def process_chat_task(task: Task):
         print(f"[KEYWORD] Extracted trigrams: {extracted_trigrams[:3]}")
 
         keyword_ids_before = extract_snap_ids(keyword_snaps_before)
-        semantic_ids_before = extract_snap_ids(semantic_snaps_before)
         print(f"[KEYWORD] Found {len(keyword_snaps_before)} keyword snapshots: {keyword_ids_before}")
+
+        # Fill keyword section: first KF unseen from the channel's ranking
+        keyword_snaps = fill_unseen(keyword_snaps_before, KF, recent_ids)
+        duplicates_removed = [sid for sid in keyword_ids_before if sid in recent_ids]
+        if duplicates_removed:
+            print(f"[KEYWORD] Skipped {len(duplicates_removed)} duplicates already in recent (backfilled from ranking): {duplicates_removed}")
+
+        # Semantic fills against recent AND keyword
+        seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
+        semantic_snaps_before = semantic_retrieve(user_text, operator=active_operator, k=SF + len(seen_ids), threshold=ST) if user_text else []
+        semantic_ids_before = extract_snap_ids(semantic_snaps_before)
         print(f"[SEMANTIC] Found {len(semantic_snaps_before)} semantic snapshots (threshold={ST}): {semantic_ids_before}")
 
-        # Deduplicate keyword snaps against recent
-        recent_ids = set(extract_snap_ids(recent_snaps))
-        deduplicated = []
-        duplicates_removed = []
-        for snap in keyword_snaps_before:
-            snap_ids = extract_snap_ids([snap])
-            if snap_ids:
-                if snap_ids[0] not in recent_ids:
-                    deduplicated.append(snap)
-                else:
-                    duplicates_removed.append(snap_ids[0])
-        keyword_snaps = deduplicated
-
-        if duplicates_removed:
-            print(f"[KEYWORD] Removed {len(duplicates_removed)} duplicates already in recent: {duplicates_removed}")
-
-        # Deduplicate semantic snaps against recent AND keyword
-        keyword_ids_set = set(extract_snap_ids(keyword_snaps))
-        seen_ids = recent_ids | keyword_ids_set
-        semantic_deduplicated = []
-        semantic_duplicates_removed = []
-        for snap in semantic_snaps_before:
-            snap_ids = extract_snap_ids([snap])
-            if snap_ids:
-                if snap_ids[0] not in seen_ids:
-                    semantic_deduplicated.append(snap)
-                else:
-                    semantic_duplicates_removed.append(snap_ids[0])
-        semantic_snaps = semantic_deduplicated
-
+        semantic_snaps = fill_unseen(semantic_snaps_before, SF, seen_ids)
+        semantic_duplicates_removed = [sid for sid in semantic_ids_before if sid in seen_ids]
         if semantic_duplicates_removed:
-            print(f"[SEMANTIC] Removed {len(semantic_duplicates_removed)} duplicates already in recent/keyword: {semantic_duplicates_removed}")
+            print(f"[SEMANTIC] Skipped {len(semantic_duplicates_removed)} duplicates already in recent/keyword (backfilled from ranking): {semantic_duplicates_removed}")
 
         keyword_ids = extract_snap_ids(keyword_snaps)
         semantic_ids = extract_snap_ids(semantic_snaps)
