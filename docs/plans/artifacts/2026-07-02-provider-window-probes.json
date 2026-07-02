@@ -1,0 +1,436 @@
+{
+  "audit": "M3/WI-10 provider context-window probes (measurement only)",
+  "route": "POST /chat/stream (persistence-free; payload as system message)",
+  "operator": "M3-Window-Probe",
+  "marker": "M3WINPROBE",
+  "hard_timeout_s": 240.0,
+  "updated_utc": "2026-07-02T14:40:13Z",
+  "probes": [
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "chars": 75000,
+      "est_tokens": 37500,
+      "request_body_chars": 75398,
+      "ttfb_s": 5.709,
+      "t_stream_start_s": 2.503,
+      "total_s": 6.437,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 313,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 22339,
+        "completion_tokens": 1
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 1,
+        "usage": 3,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:35:07Z"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210546,
+      "ttfb_s": 5.217,
+      "t_stream_start_s": 2.112,
+      "total_s": 10.609,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 1389,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 46543,
+        "completion_tokens": 1
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 3,
+        "usage": 5,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:35:33Z"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "chars": 238000,
+      "est_tokens": 119000,
+      "request_body_chars": 238577,
+      "ttfb_s": 7.065,
+      "t_stream_start_s": 2.146,
+      "total_s": 8.829,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 309,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 51567,
+        "completion_tokens": 1
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 1,
+        "usage": 3,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:36:04Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 75000,
+      "est_tokens": 37500,
+      "request_body_chars": 75394,
+      "ttfb_s": 5.922,
+      "t_stream_start_s": 2.025,
+      "total_s": 5.926,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 35646,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:36:33Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210542,
+      "ttfb_s": 14.039,
+      "t_stream_start_s": 3.915,
+      "total_s": 14.042,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 76488,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:36:59Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 238000,
+      "est_tokens": 119000,
+      "request_body_chars": 238573,
+      "ttfb_s": 6.997,
+      "t_stream_start_s": 2.284,
+      "total_s": 7.147,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 84957,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:37:33Z"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "chars": 75000,
+      "est_tokens": 37500,
+      "request_body_chars": 75383,
+      "ttfb_s": 4.755,
+      "t_stream_start_s": 2.19,
+      "total_s": 4.756,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 20785,
+        "completion_tokens": 10,
+        "total_tokens": 20795,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "usage": 4,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:38:00Z"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210531,
+      "ttfb_s": 7.529,
+      "t_stream_start_s": 2.16,
+      "total_s": 7.541,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 2,
+      "usage": {
+        "prompt_tokens": 44423,
+        "completion_tokens": 4,
+        "total_tokens": 44427,
+        "prompt_tokens_details": {
+          "cached_tokens": 44288,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "tool_start": 1,
+        "usage": 8,
+        "tool_executing": 1,
+        "tool_result": 1,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:38:25Z"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "chars": 238000,
+      "est_tokens": 119000,
+      "request_body_chars": 238562,
+      "ttfb_s": 5.301,
+      "t_stream_start_s": 2.293,
+      "total_s": 5.436,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 49271,
+        "completion_tokens": 10,
+        "total_tokens": 49281,
+        "prompt_tokens_details": {
+          "cached_tokens": 7552,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "usage": 4,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:38:52Z"
+    },
+    {
+      "provider": "xai",
+      "model": "grok-4.3",
+      "chars": 75000,
+      "est_tokens": 37500,
+      "request_body_chars": 75381,
+      "ttfb_s": 3.369,
+      "t_stream_start_s": 2.002,
+      "total_s": 4.275,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 161,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 21043,
+        "completion_tokens": 1,
+        "total_tokens": 21200,
+        "prompt_tokens_details": {
+          "text_tokens": 21043,
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "cached_tokens": 128
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 156,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "num_sources_used": 0,
+        "cost_in_usd_ticks": 265618500
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 34,
+        "content": 1,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:39:18Z"
+    },
+    {
+      "provider": "xai",
+      "model": "grok-4.3",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210529,
+      "ttfb_s": 3.588,
+      "t_stream_start_s": 2.034,
+      "total_s": 4.819,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 161,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 43850,
+        "completion_tokens": 1,
+        "total_tokens": 44039,
+        "prompt_tokens_details": {
+          "text_tokens": 43850,
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "cached_tokens": 128
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 188,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "num_sources_used": 0,
+        "cost_in_usd_ticks": 551506000
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 34,
+        "content": 1,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:39:42Z"
+    },
+    {
+      "provider": "xai",
+      "model": "grok-4.3",
+      "chars": 238000,
+      "est_tokens": 119000,
+      "request_body_chars": 238560,
+      "ttfb_s": 3.811,
+      "t_stream_start_s": 2.289,
+      "total_s": 5.957,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 161,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 48582,
+        "completion_tokens": 1,
+        "total_tokens": 48750,
+        "prompt_tokens_details": {
+          "text_tokens": 48582,
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "cached_tokens": 8320
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 167,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "num_sources_used": 0,
+        "cost_in_usd_ticks": 524115000
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 34,
+        "content": 1,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "error": null,
+      "started_utc": "2026-07-02T14:40:07Z"
+    }
+  ]
+}
