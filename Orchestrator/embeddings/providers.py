@@ -62,10 +62,12 @@ GEMINI_EMBED_TIMEOUT_S = 60.0
 # short so a genuinely dead daemon still fails fast.
 OLLAMA_READ_TIMEOUT_S = 600.0
 
-# WI-1 mode 1: clamp budget = 90% of the registry max_input_tokens. The 10%
-# margin absorbs estimate drift (the floor path guarantees only a CHAR budget;
-# remote tokenizers are never consulted on hot paths) so a clamped text stays
-# comfortably inside the provider's real limit.
+# WI-1 mode 1: clamp budget = 90% of the registry max_input_tokens. The hard
+# budget < limit guarantee holds on the exact-local tokenizer paths (OpenAI
+# tiktoken, Qwen hf — where the Ollama num_ctx invariant is load-bearing); the
+# Gemini floor path (chars/2; remote tokenizers are never consulted on hot
+# paths) can overshoot on token-dense text and then degrades to the provider's
+# own server-side truncation — the pre-M5 status quo, not a failure.
 EMBED_CLAMP_MARGIN = 0.9
 
 
@@ -87,7 +89,8 @@ class _BaseProvider:
         return max_tokens if max_tokens > 0 else None
 
     def _clamp_budget(self, purpose: str):
-        """Per-text token budget for the clamp; None disables clamping."""
+        """Per-text token budget for the clamp; None disables clamping.
+        `purpose` is a subclass hook (OllamaProvider)."""
         max_tokens = self._max_input_tokens()
         if max_tokens is None:
             return None
@@ -202,7 +205,7 @@ class OllamaProvider(_BaseProvider):
         super().__init__(slug, entry)
         self._transport = None  # tests inject httpx.MockTransport
 
-    def _clamp_budget(self, purpose):
+    def _clamp_budget(self, purpose: str):
         budget = super()._clamp_budget(purpose)
         if budget is None or purpose != "query":
             return budget
@@ -212,6 +215,11 @@ class OllamaProvider(_BaseProvider):
         # The registry query_instruction is prefixed AFTER clamping (in _embed
         # below) — its tokens must come out of the text budget or prefix+text
         # would overshoot what the budget promises.
+        # max(0, ...): an instruction longer than the whole budget would go
+        # negative — floor it to 0 so clamp_to_tokens returns "" (an
+        # instruction-only embed, the degenerate outcome) instead of raising;
+        # the registry guard test pins instruction < 25% of budget so this
+        # stays theoretical.
         return max(0, budget - tokenization.estimate_tokens(instruction, self.slug))
 
     async def _embed(self, texts, purpose):
@@ -269,3 +277,11 @@ def get_provider(slug: str):
             provider = _PROVIDER_CLASSES[entry["provider"]](slug, entry)
             _instances[slug] = provider
         return provider
+
+
+def clamp_budget(slug: str, purpose: str = "document"):
+    """Public view of the production clamp budget (tokens) for a registry slug,
+    or None if the entry declares no max_input_tokens. ONE formula — benchmarks
+    and diagnostics consume this instead of re-deriving max * margin (drift
+    guard); ValueError on an unknown slug (via get_provider)."""
+    return get_provider(slug)._clamp_budget(purpose)

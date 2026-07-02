@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from Orchestrator import config
+from Orchestrator import config, tokenization
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
 VALID_PROVIDERS = {"gemini", "openai", "ollama"}
@@ -96,3 +96,21 @@ def test_every_model_declares_max_input_tokens():
            if not isinstance(e.get("max_input_tokens"), int)
            or e.get("max_input_tokens") <= 0]
     assert bad == [], f"models without a positive int max_input_tokens: {bad}"
+
+
+def test_ollama_query_instruction_fits_well_inside_clamp_budget():
+    """WI-1: the Ollama query budget = clamp budget MINUS the query_instruction
+    prefix's tokens (the prefix is added AFTER clamping). Pin the instruction
+    to < 25% of each model's clamp budget: a future small-ctx local embedder
+    paired with a long instruction would otherwise silently embed query vectors
+    that are mostly (or, at the max(0, ...) floor, ONLY) instruction text —
+    fail CI instead."""
+    for slug, e in EMBEDDING_MODELS.items():
+        if e["provider"] != "ollama" or not e.get("query_instruction"):
+            continue
+        budget = int(e["max_input_tokens"] * 0.9)
+        instr_tokens = tokenization.estimate_tokens(e["query_instruction"], slug)
+        assert instr_tokens < 0.25 * budget, (
+            f"{slug}: query_instruction ({instr_tokens} tokens) eats >=25% of "
+            f"the {budget}-token clamp budget — query text would be crowded out"
+        )

@@ -31,6 +31,11 @@ EMBEDDING_MODELS = {
         "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
         "tokenizer": "remote:gemini",
         "max_input_tokens": 2048,  # provider-documented input limit for embedding-001
+        # NOTE: via the chars/2 floor (no local tokenizer) the 2048 budget clamps to
+        # 3,686 chars ≈ ~900-1,270 real Gemini tokens — the fresh-box default embeds
+        # LESS head text than the legacy 10k-char cap effectively did. Diagnosable
+        # marker for any recall report on a gemini-001 box; real fix = post-M6
+        # fail-loud/calibration, out of M5 scope.
     },
     "gemini-embedding-2": {
         "provider": "gemini", "model_id": "models/gemini-embedding-2", "dims": 3072,

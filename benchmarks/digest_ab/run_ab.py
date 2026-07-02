@@ -57,13 +57,12 @@ from Orchestrator.embeddings.search import (  # noqa: E402
 from Orchestrator.config import ANTHROPIC_API_KEY  # noqa: E402
 
 # Production embed clamp — the provider layer token-aware clamps each text to
-# 90% of the registry's per-model max_input_tokens before embedding
-# (Orchestrator/embeddings/providers.py + Orchestrator/tokenization.py), so we
-# only count whether a body would be clamped; we let the live provider do the
-# actual clamping.
+# the per-model budget before embedding (Orchestrator/embeddings/providers.py +
+# Orchestrator/tokenization.py), so we only count whether a body would be
+# clamped; we let the live provider do the actual clamping. The budget comes
+# from providers.clamp_budget — the ONE production formula, never re-derived.
 from Orchestrator import tokenization  # noqa: E402
-from Orchestrator.embeddings.providers import EMBED_CLAMP_MARGIN  # noqa: E402
-from Orchestrator.embeddings.registry import EMBEDDING_MODELS  # noqa: E402
+from Orchestrator.embeddings.providers import clamp_budget  # noqa: E402
 
 ARTIFACTS = HERE / "artifacts.json"   # cached LLM-generated queries + perspectives
 RESULTS = HERE / "results.json"
@@ -160,16 +159,11 @@ def perspective_body(perspective: str) -> str:
     return perspective
 
 
-def clamp_budget_tokens(slug: str) -> int:
-    """Mirror of the production clamp budget for the active model."""
-    return int(EMBEDDING_MODELS[slug]["max_input_tokens"] * EMBED_CLAMP_MARGIN)
-
-
 def will_clamp(text: str, slug: str) -> bool:
     """Production clamps inside the provider layer (token-aware, head-keeping).
     We pass the FULL body to embed() and let the live provider clamp exactly as
     it does in production; this only reports whether clamping would occur."""
-    return tokenization.estimate_tokens(text, slug) > clamp_budget_tokens(slug)
+    return tokenization.estimate_tokens(text, slug) > clamp_budget(slug)
 
 
 # ---- cosine -------------------------------------------------------------------
@@ -202,10 +196,10 @@ def main():
     args = ap.parse_args()
 
     slug = get_active_slug()
-    budget = clamp_budget_tokens(slug)
+    budget = clamp_budget(slug)
     print(f"[model] active embedding model = {slug}")
     print(f"[const] clamp budget = {budget} tokens "
-          f"(max_input_tokens x {EMBED_CLAMP_MARGIN}), threshold = {args.threshold}")
+          f"(production providers.clamp_budget), threshold = {args.threshold}")
 
     data = generate_artifacts(args.regen)
     items = data["items"]
