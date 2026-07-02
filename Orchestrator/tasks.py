@@ -1426,24 +1426,24 @@ def process_chat_task(task: Task):
         print(f"[KEYWORD] Extracted trigrams: {extracted_trigrams[:3]}")
 
         keyword_ids_before = extract_snap_ids(keyword_snaps_before)
-        print(f"[KEYWORD] Found {len(keyword_snaps_before)} keyword snapshots: {keyword_ids_before}")
+        print(f"[KEYWORD] Fetched {len(keyword_snaps_before)} keyword candidates (over-fetch +{len(recent_ids)}): {keyword_ids_before}")
 
         # Fill keyword section: first KF unseen from the channel's ranking
         keyword_snaps = fill_unseen(keyword_snaps_before, KF, recent_ids)
         duplicates_removed = [sid for sid in keyword_ids_before if sid in recent_ids]
         if duplicates_removed:
-            print(f"[KEYWORD] Skipped {len(duplicates_removed)} duplicates already in recent (backfilled from ranking): {duplicates_removed}")
+            print(f"[KEYWORD] Deduped {len(duplicates_removed)} against earlier sections; section filled to {len(keyword_snaps)}/{KF}: {duplicates_removed}")
 
         # Semantic fills against recent AND keyword
         seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
         semantic_snaps_before = semantic_retrieve(user_text, operator=active_operator, k=SF + len(seen_ids), threshold=ST) if user_text else []
         semantic_ids_before = extract_snap_ids(semantic_snaps_before)
-        print(f"[SEMANTIC] Found {len(semantic_snaps_before)} semantic snapshots (threshold={ST}): {semantic_ids_before}")
+        print(f"[SEMANTIC] Fetched {len(semantic_snaps_before)} semantic candidates (over-fetch +{len(seen_ids)}, threshold={ST}): {semantic_ids_before}")
 
         semantic_snaps = fill_unseen(semantic_snaps_before, SF, seen_ids)
         semantic_duplicates_removed = [sid for sid in semantic_ids_before if sid in seen_ids]
         if semantic_duplicates_removed:
-            print(f"[SEMANTIC] Skipped {len(semantic_duplicates_removed)} duplicates already in recent/keyword (backfilled from ranking): {semantic_duplicates_removed}")
+            print(f"[SEMANTIC] Deduped {len(semantic_duplicates_removed)} against earlier sections; section filled to {len(semantic_snaps)}/{SF}: {semantic_duplicates_removed}")
 
         keyword_ids = extract_snap_ids(keyword_snaps)
         semantic_ids = extract_snap_ids(semantic_snaps)

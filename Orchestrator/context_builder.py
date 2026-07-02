@@ -77,11 +77,14 @@ def fill_unseen(ranked_snaps: list[str], k: int, seen_ids: set[str]) -> list[str
     (precedence: recent → keyword → semantic).
 
     Callers over-fetch each channel by len(seen_ids) — sufficient because at
-    most that many candidates can be dupes — so dedupe backfills from deeper
-    in the channel's own ranking instead of shrinking the section. Preserves
-    rank order; never invents items (an exhausted channel returns short).
-    Blocks with no extractable snap_id are treated as unseen (kept), matching
-    the historical filter semantics. `seen_ids` is not mutated.
+    most that many candidates can be dupes, assuming the retriever's ranked
+    list carries distinct snap_ids (they do; intra-list dupes are collapsed
+    defensively anyway) — so dedupe backfills from deeper in the channel's
+    own ranking instead of shrinking the section. Preserves rank order; never
+    invents items (an exhausted channel returns short). Blocks with no
+    extractable snap_id are treated as unseen (kept), matching
+    build_fossil_context's historical filter semantics (the old tasks.py loop
+    dropped id-less blocks). `seen_ids` is not mutated.
 
     Shared by build_fossil_context (all streaming/voice/agent transports via
     chat_routes.build_streaming_context), chat_routes.build_cu_context, and

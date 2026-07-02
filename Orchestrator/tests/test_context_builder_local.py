@@ -11,8 +11,8 @@ def _blk(sid: str) -> str:
 
 
 def test_local_profile_is_lean_and_capped():
-    # semantic_retrieve over-returns (5) though semantic_k=3 — the defensive
-    # [:SF] slice must cap it to 3 for the lean budget.
+    # semantic_retrieve over-returns (5) though semantic_k=3 — the
+    # fill_unseen(k=SF) section fill must cap it to 3 for the lean budget.
     sem_blocks = [_blk(f"SNAP-20260617-000{i}") for i in range(1, 6)]
     with mock.patch.object(cb, "semantic_retrieve", return_value=sem_blocks) as sem, \
          mock.patch.object(cb, "get_recent_checkpoints_for_operator",
