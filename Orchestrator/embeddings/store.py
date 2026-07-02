@@ -191,7 +191,13 @@ class VectorStore:
         self._opened = True
 
     def _load_v2_locked(self, rows: int, meta_obj) -> None:
-        """v2 load: ordinals sidecar + generation."""
+        """v2 load + 3-file self-heal with trailing-partial-group drop.
+
+        Consistent length = min(rows, len(ids), len(ordinals)), then walk back
+        to the last COMPLETE group boundary — a torn group heals to fully
+        absent, so its snap_id is reported missing and re-embedded whole
+        (audit A3: snap_id membership always means "full group present").
+        """
         self._generation = 0
         if isinstance(meta_obj, dict):
             try:
@@ -206,6 +212,57 @@ class VectorStore:
                 )
             except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 self._ordinals = []  # unreadable sidecar heals like a missing one
+
+        n = min(rows, len(self._ids), len(self._ordinals))
+        target = self._last_complete_group_boundary(n)
+        if (
+            len(self._ids) != target
+            or len(self._ordinals) != target
+            or (self.vectors_path.exists()
+                and self.vectors_path.stat().st_size != target * self._row_bytes)
+        ):
+            print(
+                f"[VECSTORE] {self.slug}: v2 healing ids={len(self._ids)} "
+                f"ordinals={len(self._ordinals)} rows={rows} -> {target}"
+            )
+            if self.vectors_path.exists():
+                with open(self.vectors_path, "r+b") as f:
+                    f.truncate(target * self._row_bytes)
+            self._ids = self._ids[:target]
+            self._ordinals = self._ordinals[:target]
+            _atomic_write_json(self.ids_path, self._ids)
+            _atomic_write_json(self.ordinals_path, self._ordinals)
+            self._generation += 1  # heal is a mutation (audit A5 / WI-5 seam)
+            self._write_meta_locked()
+
+    def _last_complete_group_boundary(self, n: int) -> int:
+        """Largest t <= n where no torn trailing chunk group survives.
+
+        The trailing group ending at t-1 is COMPLETE iff its ordinal run
+        0..m is fully present (contiguous ramp, one snap_id) AND the next
+        recorded entry — ordinals[t] in the PRE-heal sidecar, when one exists
+        — starts a new group at ordinal 0. When t is the sidecar's end, the
+        atomic ids/ordinals rewrite order guarantees the boundary. A torn
+        group drops WHOLE (t falls back to the group's first row); malformed
+        runs (can't arise from our own write order) walk back defensively one
+        row at a time.
+        """
+        ids, ordinals = self._ids, self._ordinals
+        t = n
+        while t > 0:
+            o = ordinals[t - 1]
+            start = t - 1 - o if isinstance(o, int) and o >= 0 else -1
+            run_ok = start >= 0 and all(
+                ordinals[start + j] == j and ids[start + j] == ids[t - 1]
+                for j in range(o + 1)
+            )
+            if not run_ok:
+                t -= 1
+                continue
+            if t == len(ordinals) or ordinals[t] == 0:
+                return t
+            t = start  # run continues past t: torn group — drop it whole
+        return 0
 
     def _ensure_open_locked(self) -> None:
         if not self._opened:

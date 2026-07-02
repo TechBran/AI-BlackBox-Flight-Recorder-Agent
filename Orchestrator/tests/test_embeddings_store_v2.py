@@ -316,3 +316,92 @@ def test_missing_is_snapshot_currency(tmp_path):
     assert store.missing(["SNAP-D", "SNAP-A", "SNAP-B", "SNAP-C", "SNAP-E"]) == [
         "SNAP-D", "SNAP-E",
     ]
+
+
+# ── self-heal: 3 files + trailing-partial-group drop ─────────────────────────
+
+GROUP_A2 = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]
+GROUP_B3 = [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 0.0, 0.0]]
+
+
+def _torn_store(tmp_path, keep_rows_bytes):
+    """A(2 chunks)+B(3 chunks), then vectors.f32 torn to keep_rows_bytes."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", GROUP_A2)
+    store.append_group("SNAP-B", GROUP_B3)
+    with open(tmp_path / SLUG / "vectors.f32", "r+b") as f:
+        f.truncate(keep_rows_bytes)
+
+
+@pytest.mark.parametrize("torn_bytes", [
+    3 * ROW_BYTES + ROW_BYTES // 2,  # torn mid-row inside group B
+    4 * ROW_BYTES,                   # clean row boundary but mid-group B
+    2 * ROW_BYTES + 1,               # 1 byte into B's first row
+])
+def test_self_heal_truncates_three_files_and_drops_partial_group(tmp_path, torn_bytes):
+    _torn_store(tmp_path, torn_bytes)
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.schema == 2
+    # the trailing PARTIAL group is dropped ENTIRELY (ordinal contiguity):
+    # SNAP-B is fully absent, never a half-group
+    assert healed.rows == 2
+    assert healed.snapshots == 1
+    assert healed.ids() == {"SNAP-A"}
+    assert healed.missing(["SNAP-A", "SNAP-B"]) == ["SNAP-B"]
+    # all three files healed consistently on disk
+    assert (tmp_path / SLUG / "vectors.f32").stat().st_size == 2 * ROW_BYTES
+    assert _read_json(tmp_path, SLUG, "ids.json") == ["SNAP-A"] * 2
+    assert _read_json(tmp_path, SLUG, "ordinals.json") == [0, 1]
+    meta = _read_json(tmp_path, SLUG, "meta.json")
+    assert meta["rows"] == 2 and meta["snapshots"] == 1 and meta["count"] == 1
+    # still searchable, and the healed snapshot re-appends cleanly
+    assert [sid for sid, _ in healed.search(QUERY, k=5)] == ["SNAP-A"]
+    assert healed.append_group("SNAP-B", GROUP_B3) == 3
+    assert healed.rows == 5
+    assert _read_json(tmp_path, SLUG, "ordinals.json") == [0, 1, 0, 1, 2]
+
+
+def test_self_heal_ordinals_lagging_ids(tmp_path):
+    """Crash between the ids and ordinals rewrites: vectors+ids carry the new
+    group, ordinals.json is still the previous atomic state — the new group
+    heals away whole (min-length is a group boundary by atomic-write order)."""
+    store = _v2_store(tmp_path)
+    store.append_group("SNAP-A", GROUP_A2)
+    store_dir = tmp_path / SLUG
+    # hand-craft the crash state: B's rows in vectors + ids, ordinals stale
+    with open(store_dir / "vectors.f32", "ab") as f:
+        for vec in GROUP_B3:
+            f.write(np.asarray(vec, dtype="<f4").tobytes())
+    (store_dir / "ids.json").write_text(json.dumps(["SNAP-A"] * 2 + ["SNAP-B"] * 3))
+
+    healed = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert healed.rows == 2
+    assert healed.ids() == {"SNAP-A"}
+    assert (store_dir / "vectors.f32").stat().st_size == 2 * ROW_BYTES
+    assert _read_json(tmp_path, SLUG, "ids.json") == ["SNAP-A"] * 2
+    assert _read_json(tmp_path, SLUG, "ordinals.json") == [0, 1]
+    assert healed.missing(["SNAP-A", "SNAP-B"]) == ["SNAP-B"]
+
+
+def test_generation_bumps_on_append_and_heal(tmp_path):
+    store = _v2_store(tmp_path)
+    store.append("SNAP-1", [1.0, 0.0, 0.0, 0.0])
+    gen1 = _read_json(tmp_path, SLUG, "meta.json")["generation"]
+    assert gen1 >= 1
+    store.append_group("SNAP-2", GROUP_A2)
+    gen2 = _read_json(tmp_path, SLUG, "meta.json")["generation"]
+    assert gen2 > gen1
+    # a no-op append (duplicate) is not a mutation — no bump
+    assert store.append("SNAP-1", [0.0, 1.0, 0.0, 0.0]) is None
+    assert _read_json(tmp_path, SLUG, "meta.json")["generation"] == gen2
+
+    # heal is a mutation: torn write -> reopen bumps generation
+    with open(tmp_path / SLUG / "vectors.f32", "r+b") as f:
+        f.truncate(2 * ROW_BYTES)  # mid-group SNAP-2
+    VectorStore(SLUG, DIMS, tmp_path).open()
+    gen3 = _read_json(tmp_path, SLUG, "meta.json")["generation"]
+    assert gen3 > gen2
+    # a clean reopen mutates nothing
+    VectorStore(SLUG, DIMS, tmp_path).open()
+    assert _read_json(tmp_path, SLUG, "meta.json")["generation"] == gen3
