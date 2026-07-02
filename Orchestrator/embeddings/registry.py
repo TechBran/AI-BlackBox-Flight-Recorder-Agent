@@ -16,6 +16,11 @@ tokenizer (WI-11): backend spec consumed by Orchestrator/tokenization.py.
 Orchestrator/tokenizers_vendored/ (offline-safe); "remote:<provider>" means
 exact counts exist only via the explicit-only count_tokens_remote seam —
 hot paths use the calibrated floor. None = floor always.
+
+max_input_tokens (WI-1): the per-model input limit the token-aware clamp in
+providers.py budgets against (clamp budget = 90% of this; Ollama also sends
+it verbatim as options.num_ctx with truncate:false). Every entry MUST declare
+it (guard-tested) — a missing limit would silently disable clamping.
 """
 
 EMBEDDING_MODELS = {
@@ -25,6 +30,7 @@ EMBEDDING_MODELS = {
         "privacy": "cloud", "quality_note": "Current default; auto-tracked for deprecation",
         "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
         "tokenizer": "remote:gemini",
+        "max_input_tokens": 2048,  # provider-documented input limit for embedding-001
     },
     "gemini-embedding-2": {
         "provider": "gemini", "model_id": "models/gemini-embedding-2", "dims": 3072,
@@ -37,6 +43,7 @@ EMBEDDING_MODELS = {
         # p10 (0.6291). Inheriting gemini-001's 0.60 was silently cutting good hits.
         "semantic_threshold": 0.55,
         "tokenizer": "remote:gemini",
+        "max_input_tokens": 8192,  # provider-documented input limit for gemini-embedding-2
     },
     "openai-text-embedding-3-large": {
         "provider": "openai", "model_id": "text-embedding-3-large", "dims": 3072,
@@ -45,6 +52,7 @@ EMBEDDING_MODELS = {
         "query_instruction": None, "keep_alive": None,
         "semantic_threshold": 0.55,  # documented default (no BYOK key to live-measure)
         "tokenizer": "tiktoken:cl100k_base",
+        "max_input_tokens": 8191,  # provider-documented input limit for text-embedding-3-large
     },
     "qwen3-embedding-0.6b": {
         "provider": "ollama", "model_id": "qwen3-embedding:0.6b", "dims": 1024,
@@ -54,6 +62,11 @@ EMBEDDING_MODELS = {
         "keep_alive": "-1m",  # negative duration = stay loaded; bare "-1" fails Go ParseDuration
         "semantic_threshold": 0.54,
         "tokenizer": "hf:qwen3",
+        # model supports 32,768 but we provision 8,192: num_ctx KV allocation at
+        # 32k ≈ 3.7GB CPU RAM per loaded model; 8,192 covers p99 whole snapshots
+        # (~7k tokens) pre-chunking and ALL chunks post-WI-2; raise post-GPU if
+        # measured need.
+        "max_input_tokens": 8192,
     },
     "qwen3-embedding-8b": {
         "provider": "ollama", "model_id": "qwen3-embedding:8b", "dims": 4096,
@@ -63,6 +76,11 @@ EMBEDDING_MODELS = {
         "keep_alive": "5m",
         "semantic_threshold": 0.50,  # documented default; local Qwen scores run low (0.6b uses 0.54), 16-row store not live-measurable
         "tokenizer": "hf:qwen3",  # sample-encode-verified identical to the 0.6B tokenizer (scripts/vendor_tokenizers.py)
+        # model supports 32,768 but we provision 8,192: num_ctx KV allocation at
+        # 32k ≈ 3.7GB CPU RAM per loaded model; 8,192 covers p99 whole snapshots
+        # (~7k tokens) pre-chunking and ALL chunks post-WI-2; raise post-GPU if
+        # measured need.
+        "max_input_tokens": 8192,
     },
 }
 EMBEDDING_MAX_CHARS = 10000  # truncate document text before embedding (existing behavior)

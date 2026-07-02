@@ -7,6 +7,7 @@ fix), and a dims sanity guard. ALL network is mocked — zero live calls,
 zero real sleeps.
 """
 import json
+import re
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from Orchestrator import config
+from Orchestrator import config, tokenization
 from Orchestrator.embeddings import providers
 from Orchestrator.embeddings.providers import (
     EmbeddingProviderError,
@@ -23,7 +24,7 @@ from Orchestrator.embeddings.providers import (
     OpenAIProvider,
     get_provider,
 )
-from Orchestrator.embeddings.registry import EMBEDDING_MAX_CHARS, EMBEDDING_MODELS
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
 GEMINI_SLUG = "gemini-embedding-001"
 OPENAI_SLUG = "openai-text-embedding-3-large"
@@ -267,27 +268,105 @@ async def test_openai_client_created_per_call():
         client.embeddings.create.assert_awaited_once()
 
 
-# ── truncation ───────────────────────────────────────────────────────────────
+# ── token-aware clamp (WI-1 mode 1) ──────────────────────────────────────────
+# The old EMBEDDING_MAX_CHARS char cap (10,000 chars ≈ 3.4k tokens) both
+# over-truncated (672 snapshots lost their tails) and under-protected (Ollama
+# silently cut at its 4,095-token default ctx). The clamp is token-aware via
+# tokenization.clamp_to_tokens with a per-model registry budget and a 10%
+# margin — and it NEVER raises (queries rely on the layer self-capping).
 
-@pytest.mark.asyncio
-async def test_truncation_reaches_gemini_transport():
-    provider = get_provider(GEMINI_SLUG)
-    long_text = "x" * (EMBEDDING_MAX_CHARS + 500)
-    fake = MagicMock(return_value={"embedding": [0.0] * GEMINI_DIMS})
-    with patch.object(providers.genai, "embed_content", fake):
-        await provider.embed([long_text], purpose="document")
-    sent = fake.call_args.kwargs["content"]
-    assert sent == "x" * EMBEDDING_MAX_CHARS + "..."  # monitoring.py semantics
+def _clamp_budget(slug: str) -> int:
+    return int(EMBEDDING_MODELS[slug]["max_input_tokens"] * 0.9)
 
 
 @pytest.mark.asyncio
-async def test_truncation_reaches_ollama_transport_short_text_untouched():
+async def test_qwen_91k_char_document_clamps_to_token_budget():
+    """A 91k-char document (the live-probe size) reaches Ollama at ≤ the
+    per-model token budget — estimate-verified with the exact vendored
+    tokenizer, head-preserving."""
     provider = get_provider(OLLAMA_SLUG)
     seen = []
     _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
-    long_text = "y" * (EMBEDDING_MAX_CHARS + 1)
-    await provider.embed([long_text, "short"], purpose="document")
-    assert seen[0]["json"]["input"] == ["y" * EMBEDDING_MAX_CHARS + "...", "short"]
+    doc = ("The embedding watcher healed the missing snapshots overnight. " * 1500)[:91000]
+    assert len(doc) == 91000
+    await provider.embed([doc], purpose="document")
+    sent = seen[0]["json"]["input"][0]
+    assert tokenization.estimate_tokens(sent, OLLAMA_SLUG) <= _clamp_budget(OLLAMA_SLUG)
+    assert len(sent) < len(doc)
+    assert sent.startswith(doc[:200])  # head-preserving
+
+
+@pytest.mark.asyncio
+async def test_query_purpose_clamps_and_never_raises():
+    """chat_routes._last_user_msg / tasks.py tool selection rely on the
+    embedding layer self-capping queries — oversized and garbage query text
+    must clamp, embed, and NEVER raise."""
+    provider = get_provider(OLLAMA_SLUG)
+    seen = []
+    _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
+    oversized = "how did we fix the upload preview css bug " * 3000  # ~126k chars
+    garbage = "<|endoftext|><|im_start|>\x00\x01� 🤖\n\t" * 400
+    result = await provider.embed([oversized, garbage], purpose="query")
+    assert len(result) == 2
+    budget = _clamp_budget(OLLAMA_SLUG)
+    for sent in seen[0]["json"]["input"]:
+        assert tokenization.estimate_tokens(sent, OLLAMA_SLUG) <= budget
+
+
+@pytest.mark.asyncio
+async def test_ollama_query_budget_accounts_for_instruction_prefix():
+    """The registry query_instruction is prefixed AFTER clamping — the clamp
+    budget must leave room so prefix+text still fits the full budget."""
+    provider = get_provider(OLLAMA_SLUG)
+    seen = []
+    _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
+    query = "find the toolvault reload embedding cache design decision " * 2000
+    await provider.embed([query], purpose="query")
+    sent = seen[0]["json"]["input"][0]
+    instruction = EMBEDDING_MODELS[OLLAMA_SLUG]["query_instruction"]
+    assert sent.startswith(instruction)  # prefix survived, applied post-clamp
+    assert tokenization.estimate_tokens(sent, OLLAMA_SLUG) <= _clamp_budget(OLLAMA_SLUG)
+
+
+@pytest.mark.asyncio
+async def test_per_model_budgets_differentiated_gemini_001_vs_2():
+    """Budgets come from the registry PER MODEL: gemini-001 clamps at its
+    2048-token budget, gemini-2 at its 8192 — same text, different cut."""
+    text = "z" * 40000  # floor path (remote tokenizer): est 20000 tokens, over both
+    sent_lens = {}
+    for slug in (GEMINI_SLUG, "gemini-embedding-2"):
+        provider = get_provider(slug)
+        dims = EMBEDDING_MODELS[slug]["dims"]
+        fake = MagicMock(return_value={"embedding": [0.0] * dims})
+        with patch.object(providers.genai, "embed_content", fake):
+            await provider.embed([text], purpose="document")
+        sent = fake.call_args.kwargs["content"]
+        # remote:* tokenizer → calibrated floor path: budget*2 chars exactly
+        assert len(sent) == _clamp_budget(slug) * tokenization.CHARS_PER_TOKEN_FLOOR
+        sent_lens[slug] = len(sent)
+    assert sent_lens[GEMINI_SLUG] < sent_lens["gemini-embedding-2"]
+
+
+@pytest.mark.asyncio
+async def test_clamp_telemetry_emitted_on_clamp(capsys):
+    provider = get_provider(OLLAMA_SLUG)
+    seen = []
+    _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
+    await provider.embed(["telemetry check text " * 5000], purpose="document")
+    out = capsys.readouterr().out
+    assert re.search(
+        r"\[EMBEDDING\] clamped qwen3-embedding-0\.6b document \d+->\d+ tokens", out
+    ), f"missing clamp telemetry line, got: {out!r}"
+
+
+@pytest.mark.asyncio
+async def test_no_clamp_telemetry_when_under_budget(capsys):
+    provider = get_provider(OLLAMA_SLUG)
+    seen = []
+    _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
+    await provider.embed(["a perfectly ordinary short text"], purpose="document")
+    assert "clamped" not in capsys.readouterr().out
+    assert seen[0]["json"]["input"] == ["a perfectly ordinary short text"]  # untouched
 
 
 # ── retry / backoff ──────────────────────────────────────────────────────────

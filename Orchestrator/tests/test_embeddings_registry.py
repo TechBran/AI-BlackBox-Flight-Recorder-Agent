@@ -90,3 +90,13 @@ def test_every_model_declares_explicit_semantic_threshold():
     missing = [slug for slug, e in EMBEDDING_MODELS.items()
                if e.get("semantic_threshold") is None]
     assert missing == [], f"models without an explicit semantic_threshold: {missing}"
+
+
+def test_every_model_declares_max_input_tokens():
+    """WI-1: the token-aware embedding clamp derives each model's budget from
+    the registry. A missing/invalid limit would silently disable clamping and
+    reopen the Ollama 4,095-token silent-truncation hole."""
+    bad = [slug for slug, e in EMBEDDING_MODELS.items()
+           if not isinstance(e.get("max_input_tokens"), int)
+           or e.get("max_input_tokens") <= 0]
+    assert bad == [], f"models without a positive int max_input_tokens: {bad}"

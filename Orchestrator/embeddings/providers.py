@@ -6,8 +6,13 @@ One async interface over Gemini / OpenAI / Ollama:
     vectors  = await provider.embed(texts, purpose)   # purpose: document|query
 
 Shared semantics (all providers):
-- each text truncated to EMBEDDING_MAX_CHARS + "..." (matches the legacy
-  monitoring.generate_embedding behavior)
+- each text is token-aware clamped (WI-1 mode 1) to 90% of the registry's
+  per-model max_input_tokens via tokenization.clamp_to_tokens — BOTH purposes,
+  documents AND queries, and the clamp NEVER raises (chat_routes._last_user_msg
+  and tasks.py tool selection rely on the embedding layer self-capping).
+  This replaced the legacy EMBEDDING_MAX_CHARS char cap (10,000 chars ≈ 3.4k
+  tokens), which over-truncated long snapshots while still letting Ollama
+  silently cut at its 4,095-token default ctx.
 - 3 retries after the initial attempt, exponential backoff 1s/2s/4s
   (`_sleep` is an instance attribute so tests can record instead of sleep)
 - EmbeddingProviderError after final failure — callers decide whether to
@@ -17,7 +22,8 @@ Shared semantics (all providers):
 
 The purpose parameter exists because the legacy code embedded QUERIES with
 task_type="retrieval_document" — Gemini queries now map to retrieval_query,
-and Ollama/Qwen3 queries get the registry query_instruction prefix.
+and Ollama/Qwen3 queries get the registry query_instruction prefix (added
+AFTER clamping, so the Ollama query budget subtracts the prefix's tokens).
 """
 import asyncio
 import threading
@@ -26,8 +32,8 @@ import google.generativeai as genai
 import httpx
 import openai
 
-from Orchestrator import config
-from Orchestrator.embeddings.registry import EMBEDDING_MAX_CHARS, EMBEDDING_MODELS
+from Orchestrator import config, tokenization
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 
 
 class EmbeddingProviderError(Exception):
@@ -56,11 +62,11 @@ GEMINI_EMBED_TIMEOUT_S = 60.0
 # short so a genuinely dead daemon still fails fast.
 OLLAMA_READ_TIMEOUT_S = 600.0
 
-
-def _truncate(text: str) -> str:
-    if len(text) > EMBEDDING_MAX_CHARS:
-        return text[:EMBEDDING_MAX_CHARS] + "..."
-    return text
+# WI-1 mode 1: clamp budget = 90% of the registry max_input_tokens. The 10%
+# margin absorbs estimate drift (the floor path guarantees only a CHAR budget;
+# remote tokenizers are never consulted on hot paths) so a clamped text stays
+# comfortably inside the provider's real limit.
+EMBED_CLAMP_MARGIN = 0.9
 
 
 class _BaseProvider:
@@ -71,6 +77,39 @@ class _BaseProvider:
         self.dims = entry["dims"]
         self._sleep = asyncio.sleep  # injectable for tests
 
+    def _max_input_tokens(self):
+        """Registry max_input_tokens as a positive int, else None (synthetic
+        test entries). Real entries always declare it (guard-tested)."""
+        try:
+            max_tokens = int(self.entry.get("max_input_tokens") or 0)
+        except (TypeError, ValueError):
+            max_tokens = 0
+        return max_tokens if max_tokens > 0 else None
+
+    def _clamp_budget(self, purpose: str):
+        """Per-text token budget for the clamp; None disables clamping."""
+        max_tokens = self._max_input_tokens()
+        if max_tokens is None:
+            return None
+        return int(max_tokens * EMBED_CLAMP_MARGIN)
+
+    def _clamp(self, text: str, purpose: str) -> str:
+        """Token-aware clamp (WI-1 mode 1). NEVER raises — tokenization's
+        estimate/clamp paths are never-raise by contract, and query callers
+        (chat_routes/tasks) rely on the embedding layer self-capping."""
+        budget = self._clamp_budget(purpose)
+        if budget is None:
+            return text
+        orig_est = tokenization.estimate_tokens(text, self.slug)
+        if orig_est <= budget:
+            return text
+        clamped, new_est = tokenization.clamp_to_tokens(text, budget, self.slug)
+        print(
+            f"[EMBEDDING] clamped {self.slug} {purpose} "
+            f"{orig_est}->{new_est} tokens"
+        )
+        return clamped
+
     async def embed(self, texts: list[str], purpose: str) -> list[list[float]]:
         if purpose not in ("document", "query"):
             raise ValueError(
@@ -78,7 +117,7 @@ class _BaseProvider:
             )
         if not texts:
             return []
-        texts = [_truncate(t) for t in texts]
+        texts = [self._clamp(t, purpose) for t in texts]
 
         for attempt in range(_MAX_ATTEMPTS):
             try:
@@ -162,6 +201,18 @@ class OllamaProvider(_BaseProvider):
     def __init__(self, slug, entry):
         super().__init__(slug, entry)
         self._transport = None  # tests inject httpx.MockTransport
+
+    def _clamp_budget(self, purpose):
+        budget = super()._clamp_budget(purpose)
+        if budget is None or purpose != "query":
+            return budget
+        instruction = self.entry.get("query_instruction")
+        if not instruction:
+            return budget
+        # The registry query_instruction is prefixed AFTER clamping (in _embed
+        # below) — its tokens must come out of the text budget or prefix+text
+        # would overshoot what the budget promises.
+        return max(0, budget - tokenization.estimate_tokens(instruction, self.slug))
 
     async def _embed(self, texts, purpose):
         instruction = self.entry.get("query_instruction")
