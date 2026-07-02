@@ -81,8 +81,8 @@ data class DeviceCapabilities(
             val smallestWidthDp = runCatching {
                 context.resources.configuration.smallestScreenWidthDp
             }.getOrDefault(0)
-            val isXr = detectIsXr(context)
-            val formFactor = classifyFormFactor(smallestWidthDp, isXr, isFoldable = posture != null)
+            val xr = isXr(context)
+            val formFactor = classifyFormFactor(smallestWidthDp, xr, isFoldable = posture != null)
             return DeviceCapabilities(
                 formFactor = formFactor,
                 hasScreenshot = screenshotAvailable(formFactor, Build.VERSION.SDK_INT),
@@ -94,29 +94,44 @@ data class DeviceCapabilities(
         }
 
         /**
-         * Best-effort XR probe. True when the UiMode reports a VR headset OR any known
-         * XR/VR system feature is present (Android XR spatial API — the same heuristic
-         * [OverlayService] uses — or OpenXR / VR head-tracking). Unknown → false, so
-         * [detect] never mis-classifies a handheld as XR. Framework-touching, so it
-         * lives outside the pure classifiers.
+         * (M6 / I1) The SINGLE authoritative "is this an XR headset" probe over the live
+         * [context]. This is the SAME test that drives the wire capability — [detect] feeds this
+         * result into [classifyFormFactor], which returns [FormFactor.XR_HEADSET] iff this is true
+         * (XR wins over foldable/sw-dp), so `isXr(context) == (detect(context).formFactor ==
+         * XR_HEADSET)`. It is ALSO the probe `OverlayService`/`PortalActivity` delegate to for their
+         * overlay-vs-phone routing, so the consent-surface routing can never diverge from the wire
+         * classification (a headset must run the XR overlay UI, or the M6.3 in-headset consent banner
+         * never surfaces). True when the UiMode reports a VR headset OR any known XR/VR system feature
+         * ([XR_SYSTEM_FEATURES]) is present; unknown / probe failure → false, so a handheld is never
+         * mis-classified as XR. Framework-touching; the pure decision is [isXrForm].
          */
-        private fun detectIsXr(context: Context): Boolean = try {
+        fun isXr(context: Context): Boolean = try {
             val uiMode = (context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager)
                 ?.currentModeType
-            if (uiMode == Configuration.UI_MODE_TYPE_VR_HEADSET) {
-                true
-            } else {
-                val pm = context.packageManager
-                XR_SYSTEM_FEATURES.any { runCatching { pm.hasSystemFeature(it) }.getOrDefault(false) }
+            val pm = context.packageManager
+            isXrForm(isVrHeadsetUiMode = uiMode == Configuration.UI_MODE_TYPE_VR_HEADSET) {
+                pm.hasSystemFeature(it)
             }
         } catch (e: Exception) {
             false
         }
 
-        /** System features that identify an XR / VR headset. Kept internal so the
-         *  probe set is inspectable; extended additively as Android XR evolves. */
+        /**
+         * PURE XR decision: true when the UiMode is a VR headset ([isVrHeadsetUiMode]) OR any
+         * [XR_SYSTEM_FEATURES] entry is present per [hasFeature]. Framework-free (the caller supplies
+         * the two facts), so the exact probe [detect] / [OverlayService] / [PortalActivity] run is
+         * JVM-unit-testable — including the OpenXR-only / head-tracking-only cases the old
+         * single-feature (`xr.api.spatial`) probe silently missed.
+         */
+        fun isXrForm(isVrHeadsetUiMode: Boolean, hasFeature: (String) -> Boolean): Boolean =
+            isVrHeadsetUiMode ||
+                XR_SYSTEM_FEATURES.any { runCatching { hasFeature(it) }.getOrDefault(false) }
+
+        /** System features that identify an XR / VR headset. Kept internal so the probe set is
+         *  inspectable; extended additively as Android XR evolves. The WHOLE set (not just the
+         *  spatial API) is the shared probe used by [detect], [OverlayService], and [PortalActivity]. */
         internal val XR_SYSTEM_FEATURES = listOf(
-            "android.software.xr.api.spatial",   // Android XR spatial API (matches OverlayService)
+            "android.software.xr.api.spatial",   // Android XR spatial API
             "android.software.xr.api.openxr",    // OpenXR runtime
             "android.hardware.vr.headtracking",  // legacy VR head-tracking
         )

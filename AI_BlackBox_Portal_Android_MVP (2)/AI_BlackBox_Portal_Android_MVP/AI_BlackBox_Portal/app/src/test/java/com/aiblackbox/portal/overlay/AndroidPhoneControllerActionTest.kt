@@ -54,6 +54,71 @@ class AndroidPhoneControllerActionTest {
         assertEquals("accessibility service not enabled", detail(b))
     }
 
+    // ---- (M6.1) XR coordinate gating — defense in depth at the controller seam ----
+
+    private val xrCap = DeviceCapabilities(
+        FormFactor.XR_HEADSET, hasScreenshot = false, supportsCoordinateGesture = false, displayId = 0)
+    private val phoneCap = DeviceCapabilities(
+        FormFactor.PHONE, hasScreenshot = true, supportsCoordinateGesture = true, displayId = 0)
+
+    /** A controller with a live capability provider (M6.1). Null service → reached actuators
+     *  return "not enabled", which lets us distinguish "gated (never reached)" from "passed
+     *  through (reached, then not enabled)". */
+    private fun controllerWithCapability(cap: DeviceCapabilities?): AndroidPhoneController =
+        AndroidPhoneController(
+            UiTreeReader(rootProvider = { null }),
+            Actuators({ null }),
+            IntentActuator({ null }),
+            capability = { cap },
+        )
+
+    @Test fun `coordinate_tap is skipped and reported on XR`() = runBlocking {
+        val r = controllerWithCapability(xrCap)
+            .dispatch("coordinate_tap", buildJsonObject { put("x", 100); put("y", 200) })
+        assertFalse(r.success)
+        // The gate fired BEFORE the actuator (would otherwise say "not enabled").
+        assertEquals("coordinate gestures not supported on xr_headset", detail(r))
+    }
+
+    @Test fun `coordinate_swipe is skipped and reported on XR`() = runBlocking {
+        val r = controllerWithCapability(xrCap).dispatch("coordinate_swipe", buildJsonObject {
+            put("x", 1); put("y", 2); put("x2", 3); put("y2", 4)
+        })
+        assertFalse(r.success)
+        assertEquals("coordinate gestures not supported on xr_headset", detail(r))
+    }
+
+    @Test fun `element click still passes through on XR`() = runBlocking {
+        // node ACTION_CLICK is display-agnostic — it must NOT be gated on XR. It reaches the
+        // (null-service) actuator → "not enabled", proving it was NOT skipped by the coord gate.
+        val r = controllerWithCapability(xrCap)
+            .dispatch("tap", buildJsonObject { put("resource_id", "ok") })
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", detail(r))
+    }
+
+    @Test fun `intents still pass through on XR`() = runBlocking {
+        // an intent (deterministic OS intent) needs no coordinates → never gated on XR.
+        val r = controllerWithCapability(xrCap)
+            .dispatch("show_map", buildJsonObject { put("query", "coffee") })
+        // reaches the (null-context) IntentActuator rather than being coordinate-skipped.
+        assertFalse(detail(r) == "coordinate gestures not supported on xr_headset")
+    }
+
+    @Test fun `coordinate_tap reaches the actuator on a phone (not gated)`() = runBlocking {
+        val r = controllerWithCapability(phoneCap)
+            .dispatch("coordinate_tap", buildJsonObject { put("x", 100); put("y", 200) })
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", detail(r)) // passed the gate
+    }
+
+    @Test fun `no capability provider leaves coordinate paths unchanged (back-compat)`() = runBlocking {
+        val r = controllerWithCapability(null)
+            .dispatch("coordinate_tap", buildJsonObject { put("x", 100); put("y", 200) })
+        assertFalse(r.success)
+        assertEquals("accessibility service not enabled", detail(r)) // default = no gate
+    }
+
     // ---- (C1, M4) coordinate taps + degenerate swipes route through the GATE ----
 
     /** Records whether the confirm seam was consulted; returns a fixed answer. */

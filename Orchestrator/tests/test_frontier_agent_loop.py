@@ -509,3 +509,130 @@ def test_post_action_round_trip(monkeypatch):
     res = _run(fal._post_action("http://phone:8765", frame, 5.0))
     assert res == {"msg": "action_result", "success": True, "detail": "ok"}
     assert _FakeHttpxClient.posted[0] == ("http://phone:8765/action", frame)  # full envelope POSTed
+
+
+# ── M6.2: XR capture-independent, node+intent-only loop ───────────────────────────────
+# An XR observation: coordinate-less (supportsCoordinateGesture=False), NO screenshot
+# capability, and — critically — no "screenshot" key ever on the wire (the device never
+# captures one). Same resolvable tree so element grounding still lands on real nodes.
+XR_OBS = {
+    "msg": "observation",
+    "ui_tree": [
+        _node(0, "0,0,1080,2400", clickable=True, resource_id="root"),
+        _node(1, "400,600,700,850", editable=True, resource_id="app:id/field"),
+        _node(2, "400,1600,700,1750", clickable=True, resource_id="app:id/submit"),
+    ],
+    "device_capability": {"formFactor": "xr_headset", "hasScreenshot": False,
+                          "supportsCoordinateGesture": False, "displayId": 0},
+    "timestamp": 1,
+}
+
+
+class _ObsRecordingDriver:
+    """A canned driver that also records EVERY observation it was handed — so a test can prove
+    the loop never synthesizes/forwards a screenshot on an XR device (capture-independence)."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.seen_observations = []
+
+    async def next_action(self, observation, last_result):
+        self.seen_observations.append(observation)
+        if not self._script:
+            return Decision(kind="done", text="done")
+        item = self._script.pop(0)
+        if item == "done":
+            return Decision(kind="done", text="XR task complete.")
+        return Decision(kind="action", model_action=item)
+
+
+def test_xr_loop_drives_element_intent_only_with_zero_screenshots(monkeypatch):
+    """M6.2: on an XR device the loop marshals element/intent/global frames ONLY — the two
+    coordinate ops are ungroundable on a coordinate-less device (fed back to the model, never
+    posted) — and no observation the loop hands the (fake) driver carries a ``screenshot`` field.
+
+    This proves the WIRE/routing side of capture-independence, NOT that the loop refrains from
+    REQUESTING/CAPTURING a screenshot: the ``FakeDriver`` here bypasses the real screenshot path
+    (``_screenshot_bytes`` / ``_build_mobile_tools`` / ``_mobile_system_prompt`` are never
+    exercised). Those load-bearing guarantees are covered by the unit tests below —
+    ``test_mobile_system_prompt_forbids_screenshot_on_capture_less_device`` (prompt forbids it) and
+    ``test_build_mobile_tools_prunes_coordinate_functions_on_xr`` (tools pruned) — plus the Kotlin
+    ``ObservationTest`` (the device omits ``screenshot`` from the wire when hasScreenshot=false)."""
+    _fast(monkeypatch)
+    posted = []
+
+    async def fake_pull(base_url, task_id, operator, timeout):
+        return XR_OBS
+
+    async def fake_post(base_url, frame, timeout):
+        posted.append(frame)
+        return {"msg": "action_result", "success": True}   # no embedded screenshot either
+
+    monkeypatch.setattr(fal, "_pull_observation", fake_pull)
+    monkeypatch.setattr(fal, "_post_action", fake_post)
+    driver = _ObsRecordingDriver([
+        {"op": "open_app", "app": "com.foo.bar"},              # intent-class → open_app frame
+        {"op": "type", "x": 500, "y": 300, "text": "hello"},   # → element_set_text (node)
+        {"op": "tap", "x": 500, "y": 700},                     # → element_click (node)
+        {"op": "long_press", "x": 500, "y": 700},              # COORDINATE → ungroundable on XR
+        {"op": "drag", "x": 100, "y": 100, "x2": 900, "y2": 900},  # COORDINATE → ungroundable
+        "done",
+    ])
+    monkeypatch.setattr(fal, "_make_driver", lambda *a, **k: driver)
+
+    res = _run(fal.run_frontier_loop("http://xr:8765", "search on the headset", "Brandon"))
+    assert res.success is True
+    # ONLY element/intent/global frames hit the wire — the two coordinate ops were ungroundable
+    # on a coordinate-less device (fed back to the model, never posted).
+    kinds = [f["type"] for f in posted]
+    assert kinds == ["open_app", "element_set_text", "element_click"]
+    assert not any(str(k).startswith("coordinate_") for k in kinds)
+    # element frames addressed real a11y nodes (resource_id), never a raw coordinate
+    assert posted[1] == {**posted[1], "type": "element_set_text",
+                         "resource_id": "app:id/field", "text": "hello"}
+    assert posted[2]["type"] == "element_click" and posted[2]["resource_id"] == "app:id/submit"
+    # capture-independence: NOT ONE observation handed to the model carried a screenshot.
+    assert driver.seen_observations, "driver must have been consulted"
+    assert all((obs or {}).get("screenshot") is None for obs in driver.seen_observations)
+
+
+def test_mobile_system_prompt_forbids_screenshot_on_capture_less_device():
+    """The system prompt itself enforces capture-independence: on a screenshot-less device the
+    model is told to reason from the a11y tree only and NOT to request a screenshot."""
+    xr = {"formFactor": "xr_headset", "hasScreenshot": False, "supportsCoordinateGesture": False}
+    prompt = fal._mobile_system_prompt(xr)
+    assert "NO screenshot" in prompt
+    assert "Do not request a screenshot" in prompt
+    assert "xr_headset" in prompt
+    # a phone, by contrast, is told it CAN see a screenshot.
+    phone = {"formFactor": "phone", "hasScreenshot": True, "supportsCoordinateGesture": True}
+    assert "screenshot AND a list" in fal._mobile_system_prompt(phone)
+
+
+def test_build_mobile_tools_prunes_coordinate_functions_on_xr():
+    """The model is never even OFFERED a coordinate-only gesture on XR: drag_and_drop is
+    excluded and long_press_at is dropped, so it can't call a function the grounder must reject."""
+    import types as _pytypes
+
+    class _Capture:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    fake_types = _pytypes.SimpleNamespace(
+        Tool=_Capture, ComputerUse=_Capture, FunctionDeclaration=_Capture,
+        Environment=_pytypes.SimpleNamespace(ENVIRONMENT_BROWSER="browser"),
+    )
+
+    xr_tools = fal._build_mobile_tools(fake_types, {"supportsCoordinateGesture": False})
+    cu = next(t for t in xr_tools if "computer_use" in t.kw)
+    assert "drag_and_drop" in cu.kw["computer_use"].kw["excluded_predefined_functions"]
+    fns = next(t for t in xr_tools if "function_declarations" in t.kw)
+    xr_names = [f.kw["name"] for f in fns.kw["function_declarations"]]
+    assert "long_press_at" not in xr_names       # coordinate-only → pruned on XR
+    assert "open_app" in xr_names and "go_back_android" in xr_names   # element/intent stay
+
+    phone_tools = fal._build_mobile_tools(fake_types, {"supportsCoordinateGesture": True})
+    phone_cu = next(t for t in phone_tools if "computer_use" in t.kw)
+    assert "drag_and_drop" not in phone_cu.kw["computer_use"].kw["excluded_predefined_functions"]
+    phone_fns = next(t for t in phone_tools if "function_declarations" in t.kw)
+    assert "long_press_at" in [f.kw["name"] for f in phone_fns.kw["function_declarations"]]

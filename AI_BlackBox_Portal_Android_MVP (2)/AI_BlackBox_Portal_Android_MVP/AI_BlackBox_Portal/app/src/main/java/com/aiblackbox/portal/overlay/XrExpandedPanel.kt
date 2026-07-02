@@ -68,6 +68,13 @@ fun XrExpandedPanel(state: OverlayBridge.OverlayState) {
             .border(2.dp, BbxRed, RoundedCornerShape(16.dp))
             .padding(12.dp)
     ) {
+        // ---- (M6.3) AI remote-control consent banner + kill switch ----
+        // Rendered in-headset (the XR compositor doesn't surface the phone's system-overlay
+        // banner). Driven by RemoteSessionBus via OverlayBridge.controlSessionActive.
+        if (state.controlSessionActive) {
+            ControlBanner()
+        }
+
         // ---- a. Status Bar ----
         StatusBar(state)
 
@@ -106,6 +113,58 @@ fun XrExpandedPanel(state: OverlayBridge.OverlayState) {
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp
+            )
+        }
+    }
+}
+
+// ---------- (M6.3) Remote-control consent banner ----------
+
+/**
+ * The in-headset "AI is controlling this device" consent banner + STOP kill switch, shown at
+ * the top of the expanded panel while a remote-control session is actuating this headset. STOP
+ * routes through [OverlayBridge.stopRemoteControl] → the Service → `RemoteSessionBus.stop()`
+ * (clears the session + refuses subsequent action frames). This is the XR-native equivalent of
+ * the phone's system-overlay banner / the always-on STOP notification.
+ */
+@Composable
+private fun ControlBanner() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xEEB00020)) // strong red, mostly opaque (matches the phone banner)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "AI is controlling this device",
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.White)
+                .clickFeedback { OverlayBridge.stopRemoteControl() }
+                .padding(horizontal = 18.dp, vertical = 6.dp)
+        ) {
+            Text(
+                text = "STOP",
+                color = Color(0xFFB00020),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
             )
         }
     }

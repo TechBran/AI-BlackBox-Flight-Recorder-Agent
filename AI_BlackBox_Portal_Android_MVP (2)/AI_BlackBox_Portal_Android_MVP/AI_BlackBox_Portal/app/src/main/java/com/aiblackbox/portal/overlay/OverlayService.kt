@@ -126,8 +126,13 @@ class OverlayService : Service() {
     }
 
     // ---- XR detection ----
+    // (M6 / I1) Delegate to the SINGLE authoritative XR probe (DeviceCapabilities.isXr — UiMode
+    // VR_HEADSET OR any XR_SYSTEM_FEATURE), the SAME probe that drives the wire device_capability
+    // (detect().formFactor==xr_headset). Keying off one feature (xr.api.spatial) here would let a
+    // headset get correct gating/capture-independence yet still run the PHONE overlay UI, so the
+    // in-headset consent banner (M6.3) would silently never show.
     private val isXrDevice: Boolean by lazy {
-        packageManager.hasSystemFeature("android.software.xr.api.spatial")
+        DeviceCapabilities.isXr(this)
     }
 
     private lateinit var windowManager: WindowManager
@@ -376,7 +381,14 @@ class OverlayService : Service() {
      */
     private val controlSessionListener = RemoteSessionBus.Listener { session ->
         handler.post {
-            if (session != null) showControlBanner() else hideControlBanner()
+            if (isXrDevice) {
+                // (M6.3) XR: the TYPE_APPLICATION_OVERLAY banner doesn't surface in the 3D
+                // compositor, so drive the in-headset panel banner via the bridge state instead.
+                // showControlBanner()/hideControlBanner() are no-ops on XR (kept for symmetry).
+                OverlayBridge.updateState { it.copy(controlSessionActive = session != null) }
+            } else {
+                if (session != null) showControlBanner() else hideControlBanner()
+            }
         }
     }
 
@@ -505,6 +517,14 @@ class OverlayService : Service() {
                 isExpanded = false
                 syncBridgeState()
             }
+        }
+
+        // (M6.3) The in-headset consent kill switch. Routes to the process-wide session bus,
+        // which clears the active session (every surface drops its banner) AND records the kill
+        // so any subsequent /action frame for the task is refused by PhoneActionDispatcher.
+        // Fail-safe + idempotent; the bus listener flips controlSessionActive back to false.
+        override fun stopRemoteControl() {
+            RemoteSessionBus.stop()
         }
     }
 

@@ -153,6 +153,12 @@ fun XrBubbleContent(state: OverlayBridge.OverlayState) {
     val statusText: String
     val statusColor: Color
     when {
+        // (M6.3) A remote-control session takes visual priority on the collapsed orb, so the
+        // user always sees (and can expand to STOP) that the AI is controlling the headset.
+        state.controlSessionActive -> {
+            statusText = "CTRL"
+            statusColor = BbxRed
+        }
         state.isAISpeaking -> {
             statusText = "AI"
             statusColor = Color(0xFF1E90FF)

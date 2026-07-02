@@ -46,6 +46,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.OverlayService
 import kotlinx.coroutines.CoroutineScope
@@ -65,8 +66,12 @@ import kotlin.math.roundToInt
 class PortalActivity : AppCompatActivity() {
 
     private val prefs by lazy { getSharedPreferences("bbx_prefs", MODE_PRIVATE) }
+    // (M6 / I1) Same authoritative XR probe as the wire capability + OverlayService, so this
+    // Activity's XR-vs-phone overlay routing can't diverge from DeviceCapabilities.detect(): a
+    // headset classified xr_headset on the wire but NOT exposing exactly xr.api.spatial must still
+    // take the XR path here, or the in-headset consent banner never surfaces (I1).
     private val isXrDevice: Boolean by lazy {
-        packageManager.hasSystemFeature("android.software.xr.api.spatial")
+        DeviceCapabilities.isXr(this)
     }
     private lateinit var web: WebView
     private lateinit var retryPanel: View

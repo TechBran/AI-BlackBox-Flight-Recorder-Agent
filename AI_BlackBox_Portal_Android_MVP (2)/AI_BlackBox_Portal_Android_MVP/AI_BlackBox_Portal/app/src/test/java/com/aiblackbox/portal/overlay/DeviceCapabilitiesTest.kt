@@ -127,4 +127,55 @@ class DeviceCapabilitiesTest {
         val cap = DeviceCapabilities(FormFactor.PHONE, hasScreenshot = true, supportsCoordinateGesture = true, displayId = 0)
         assertFalse(wire.encodeToString(cap).contains("posture"))
     }
+
+    // ---- (M6 / I1) the ONE XR probe shared by detect() + OverlayService/PortalActivity ----
+    // isXrForm is the pure decision behind DeviceCapabilities.isXr(context); the overlay-routing
+    // call-sites (OverlayService/PortalActivity.isXrDevice) now delegate to the SAME probe that
+    // feeds detect(), so the consent-surface routing can't diverge from the wire capability.
+
+    @Test fun `isXrForm true for a VR-headset UiMode alone`() {
+        // UiMode says VR headset, NO system features present → still XR.
+        assertTrue(DeviceCapabilities.isXrForm(isVrHeadsetUiMode = true) { false })
+    }
+
+    @Test fun `isXrForm true for openxr or head-tracking alone (cases the old single-feature probe missed)`() {
+        // The OLD OverlayService/PortalActivity probe keyed ONLY off xr.api.spatial; a headset
+        // exposing openxr / legacy head-tracking (but not spatial) must STILL classify as XR.
+        assertTrue(DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { it == "android.software.xr.api.openxr" })
+        assertTrue(DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { it == "android.hardware.vr.headtracking" })
+    }
+
+    @Test fun `isXrForm false when neither UiMode nor any XR feature is present`() {
+        assertFalse(DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { false })
+        // an unrelated feature does not trip it
+        assertFalse(DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { it == "android.hardware.camera" })
+    }
+
+    @Test fun `isXr probe agrees with detect formFactor for the UiMode-only and openxr-only cases`() {
+        // The probe result IS the isXr argument detect() feeds classifyFormFactor, and
+        // classifyFormFactor returns XR_HEADSET iff isXr — so isXrDevice (overlay routing) and the
+        // wire capability (detect().formFactor==XR_HEADSET) can NEVER diverge. Prove it for both
+        // XR-positive probe cases, across handheld sw-dp and a co-present foldable hinge.
+        val uiModeOnly = DeviceCapabilities.isXrForm(isVrHeadsetUiMode = true) { false }
+        val openxrOnly = DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { it == "android.software.xr.api.openxr" }
+        for ((probe, sw, foldable) in listOf(
+            Triple(uiModeOnly, 411, false),
+            Triple(uiModeOnly, 900, true),
+            Triple(openxrOnly, 411, false),
+            Triple(openxrOnly, 700, true),
+        )) {
+            val classifiesXr =
+                DeviceCapabilities.classifyFormFactor(sw, isXr = probe, isFoldable = foldable) == FormFactor.XR_HEADSET
+            assertEquals("probe must agree with detect()'s XR classification", probe, classifiesXr)
+            assertTrue("both probe cases ARE XR", classifiesXr)
+        }
+    }
+
+    @Test fun `a non-XR probe never classifies XR (overlay routing matches wire)`() {
+        val notXr = DeviceCapabilities.isXrForm(isVrHeadsetUiMode = false) { false }
+        assertFalse(notXr)
+        assertFalse(DeviceCapabilities.classifyFormFactor(411, isXr = notXr, isFoldable = false) == FormFactor.XR_HEADSET)
+        // even with a foldable hinge co-present, a non-XR probe stays non-XR (foldable, not XR)
+        assertFalse(DeviceCapabilities.classifyFormFactor(700, isXr = notXr, isFoldable = true) == FormFactor.XR_HEADSET)
+    }
 }

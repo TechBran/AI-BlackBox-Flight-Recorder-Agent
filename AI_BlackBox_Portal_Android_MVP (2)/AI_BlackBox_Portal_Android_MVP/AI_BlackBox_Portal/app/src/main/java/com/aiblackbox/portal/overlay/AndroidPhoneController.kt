@@ -65,13 +65,41 @@ import kotlinx.serialization.json.jsonPrimitive
  * single-display device is unchanged; a future DeX / external-display target routes its
  * coordinate gestures to the right display without touching the semantic node path (node
  * `ACTION_CLICK` is display-agnostic — it acts on the resolved node wherever it lives).
+ *
+ * ## XR coordinate gating — defense in depth (M6.1)
+ * [capability] is an OPTIONAL live device-capability provider. When it reports
+ * `supportsCoordinateGesture=false` (an XR headset — the per-panel 3D compositor has no flat
+ * framebuffer), the two COORDINATE dispatch branches (`coordinate_tap` / `coordinate_swipe`)
+ * are SKIPPED + logged and return a benign `success=false, "coordinate gestures not supported
+ * on <formFactor>"` — element `ACTION_CLICK` + intents + global actions still pass through, so
+ * the loop falls back to node+intent actuation. This is DEFENSE IN DEPTH: the frontier
+ * `/action` path already gates coordinate actions one layer up in
+ * [com.aiblackbox.portal.data.remote.PhoneActionDispatcher] (which returns before the
+ * controller is ever called), so on that path this gate never fires; it exists so ANY OTHER
+ * caller that reaches the controller directly (a future on-device planner, a test, a
+ * refactor) can't dispatch a meaningless XR coordinate gesture either. The default provider
+ * `{ null }` means "no gate — behave exactly as before", so phone/tablet/foldable and the
+ * two direct-constructor call-sites are byte-for-byte unchanged.
  */
 class AndroidPhoneController(
     private val reader: UiTreeReader,
     private val actuators: Actuators,
     private val intentActuator: IntentActuator,
     private val displayId: () -> Int = { Display.DEFAULT_DISPLAY },
+    private val capability: () -> DeviceCapabilities? = { null },
 ) : PhoneController {
+
+    /**
+     * (M4) Memoized device capability for the XR coordinate gate. The prod [capability] provider
+     * is [DeviceCapabilities.detect], which reads config + the [FoldingFeatureMonitor] + the
+     * [android.content.pm.PackageManager] — too expensive to re-run on every coordinate action. The
+     * FORM FACTOR (XR vs handheld → `supportsCoordinateGesture`) is stable for the life of a control
+     * session, so we probe ONCE per controller instance. (Foldable POSTURE, which DOES change
+     * mid-session, is handled separately by the observation path + [FoldingFeatureMonitor]; this
+     * gate only needs the posture-stable form factor.) `by lazy` is thread-safe (SYNCHRONIZED),
+     * which matters because [dispatch] is a suspend fn that may run off the main thread.
+     */
+    private val cachedCapability: DeviceCapabilities? by lazy { capability() }
 
     override suspend fun dispatch(name: String, args: JsonObject): ToolResult {
         return try {
@@ -143,6 +171,9 @@ class AndroidPhoneController(
                 // label by hit-testing (x,y) and confirms-by-default on an unlabeled/tree-
                 // blind/dangerous coordinate in PERMISSION — no compose-then-send bypass.
                 "coordinate_tap" -> {
+                    // (M6.1) defense-in-depth: skip+report a coordinate gesture on a
+                    // coordinate-less device (XR). No-op on phone/tablet (capability null/true).
+                    coordinateUnsupported()?.let { return it }
                     val x = intArg(args, "x")
                         ?: return ToolResult(false, JsonPrimitive("x required"))
                     val y = intArg(args, "y")
@@ -155,6 +186,8 @@ class AndroidPhoneController(
                 // (the M0 "swipe" branch read only a `direction`). Optional duration_ms
                 // maps to the stroke duration; absent → the 250ms default overload.
                 "coordinate_swipe" -> {
+                    // (M6.1) defense-in-depth: skip+report on a coordinate-less device (XR).
+                    coordinateUnsupported()?.let { return it }
                     val x = intArg(args, "x")
                         ?: return ToolResult(false, JsonPrimitive("x required"))
                     val y = intArg(args, "y")
@@ -198,6 +231,21 @@ class AndroidPhoneController(
     private fun ActuatorResult.toToolResult(): ToolResult =
         ToolResult(success = success, result = JsonPrimitive(detail))
 
+    /**
+     * (M6.1) The XR coordinate gate. Returns a benign skip [ToolResult] when the memoized
+     * [cachedCapability] reports `supportsCoordinateGesture=false` (an XR headset); `null` (proceed)
+     * on any device that supports coordinate gestures OR when no capability provider is wired
+     * (the default `{ null }` → phone/existing behavior unchanged). The message mirrors the
+     * remote dispatcher's wording so the frontier model reads the same signal on either path.
+     */
+    private fun coordinateUnsupported(): ToolResult? {
+        val cap = cachedCapability ?: return null
+        if (cap.supportsCoordinateGesture) return null
+        val ff = cap.formFactor.name.lowercase()
+        android.util.Log.i("AndroidPhoneController", "coordinate action skipped on $ff (no coordinate gesture)")
+        return ToolResult(false, JsonPrimitive("coordinate gestures not supported on $ff"))
+    }
+
     companion object {
 
         /**
@@ -239,6 +287,14 @@ class AndroidPhoneController(
          * @param displayId (M5.2) the target display for coordinate gestures. Default
          *   [Display.DEFAULT_DISPLAY] (0). A future multi-display/DeX caller supplies the
          *   attested device's target display here.
+         * @param capability (M6.1) the live device-capability provider used by the
+         *   defense-in-depth XR coordinate gate. Default = an HONEST [DeviceCapabilities.detect]
+         *   over [appContext], probed ONCE per controller instance (M4: memoized into
+         *   [cachedCapability] — the form factor is session-stable, so a coordinate tap doesn't
+         *   re-run detect each time), so EVERY production controller self-gates coordinate gestures
+         *   on an XR headset (`supportsCoordinateGesture=false`) while phone/tablet/foldable are
+         *   unaffected. `detect` never throws (degrades to the phone profile), so wiring it is
+         *   always safe.
          */
         fun fromService(
             appContext: android.content.Context,
@@ -246,6 +302,7 @@ class AndroidPhoneController(
             confirm: ConfirmUi = AutoApproveConfirmUi,
             credentialHandoff: CredentialHandoff = AutoDeclineCredentialHandoff,
             displayId: () -> Int = { Display.DEFAULT_DISPLAY },
+            capability: () -> DeviceCapabilities? = { DeviceCapabilities.detect(appContext) },
         ): AndroidPhoneController =
             AndroidPhoneController(
                 UiTreeReader.fromService(),
@@ -255,6 +312,7 @@ class AndroidPhoneController(
                 // fire through the Application context — NO accessibility required.
                 IntentActuator.fromAppContext(appContext, mode, confirm),
                 displayId = displayId,
+                capability = capability,
             )
     }
 }
