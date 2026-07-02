@@ -841,7 +841,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
                     else:
                         try:
                             vol_txt = read_text_safe(VOL_PATH)
-                            results = hybrid_retrieve(vol_txt, query, k=k)
+                            results = hybrid_retrieve(vol_txt, query, k=k, operator=operator)
 
                             if not results:
                                 result_message = f"No snapshots found matching: {query}"
@@ -1450,7 +1450,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
                     else:
                         try:
                             vol_txt = read_text_safe(VOL_PATH)
-                            results = hybrid_retrieve(vol_txt, query, k=k)
+                            results = hybrid_retrieve(vol_txt, query, k=k, operator=operator)
 
                             if not results:
                                 result = f"No snapshots found matching: {query}"
@@ -2232,7 +2232,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                 else:
                                     try:
                                         vol_txt = read_text_safe(VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k)
+                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
                                             tool_result = f"No snapshots found matching: {query}"
@@ -2974,7 +2974,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 else:
                                     try:
                                         vol_txt = read_text_safe(VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k)
+                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
                                             result_message = f"No snapshots found matching: {query}"
@@ -4874,7 +4874,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                 else:
                                     try:
                                         vol_txt = read_text_safe(VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k)
+                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
                                             result_message = f"No snapshots found matching: {query}"
@@ -5539,7 +5539,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                 else:
                                     try:
                                         vol_txt = read_text_safe(VOL_PATH)
-                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k)
+                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
 
                                         if not search_results:
                                             tool_result = f"No snapshots found matching: {query}"
