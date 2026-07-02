@@ -708,7 +708,14 @@ def get_store(slug: str, dims: int = None, base_dir=None,
 
 
 def list_stores(base_dir) -> list:
-    """[{slug, dims, count, last_updated}] from meta.json files; skips malformed dirs."""
+    """[{slug, dims, count, schema, rows, last_updated}] from meta.json files;
+    skips malformed dirs.
+
+    `count` is SNAPSHOT currency on every schema (the status/UI binding
+    contract, audit A11) — v2 metas keep count == snapshots while `rows` is
+    the raw chunk-row count. v1 metas (no schema key) report schema 1 and
+    rows == count (one row per snapshot).
+    """
     base = Path(base_dir)
     if not base.is_dir():
         return []
@@ -723,6 +730,8 @@ def list_stores(base_dir) -> list:
                 "slug": meta["slug"],
                 "dims": meta["dims"],
                 "count": meta["count"],
+                "schema": meta.get("schema", 1),
+                "rows": meta.get("rows", meta["count"]),
                 "last_updated": meta["last_updated"],
             })
         except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError) as e:

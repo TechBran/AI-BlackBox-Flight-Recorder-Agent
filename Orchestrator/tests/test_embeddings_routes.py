@@ -25,12 +25,14 @@ SLUG = "gemini-embedding-001"
 DIMS = 3072
 
 STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama"}
+# schema + rows are the M6e ADDITIVE contract extension (chunked-store ops
+# currency); every pre-existing key below is unchanged — additive only.
 MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
-    "quality_note", "store_exists", "missing", "ready", "blockers",
-    "keep_alive", "warm",
+    "quality_note", "store_exists", "schema", "rows", "missing", "ready",
+    "blockers", "keep_alive", "warm",
 }
-STORE_KEYS = {"slug", "dims", "count", "missing", "last_updated"}
+STORE_KEYS = {"slug", "dims", "count", "schema", "rows", "missing", "last_updated"}
 
 
 @pytest.fixture
@@ -159,6 +161,64 @@ def test_models_missing_math_and_store_exists(env, client):
             continue
         assert model["store_exists"] is False
         assert model["missing"] is None
+
+
+# ── schema/rows ops currency (M6e, additive to the binding contract) ─────────
+
+def test_v1_store_reports_schema1_rows_eq_count(env, client):
+    """v1 metas carry no schema/rows keys — status derives schema 1 and
+    rows == count (one row per snapshot). count stays snapshot currency."""
+    index_path, stores_dir = env
+    _write_index(index_path, ["SNAP-1", "SNAP-2", "SNAP-3"])
+    _populate_store(stores_dir, SLUG, ["SNAP-1", "SNAP-2", "SNAP-3"])
+
+    body = client.get("/embeddings/status").json()
+
+    store = body["stores"][0]
+    assert store["schema"] == 1
+    assert store["rows"] == store["count"] == 3
+    model = next(m for m in body["models"] if m["slug"] == SLUG)
+    assert model["schema"] == 1
+    assert model["rows"] == 3
+
+
+def test_v2_store_reports_schema2_rows_and_snapshot_count(env, client):
+    """A chunked (schema-2) store reports count in SNAPSHOT currency with the
+    raw chunk-row count in rows — count must never inflate with chunking."""
+    index_path, stores_dir = env
+    _write_index(index_path, ["SNAP-1", "SNAP-2", "SNAP-3"])
+    store = get_store(SLUG, base_dir=stores_dir, schema=2)
+    rng = np.random.default_rng(7)
+    store.append_group("SNAP-1", [rng.standard_normal(DIMS) for _ in range(3)])
+    store.append_group("SNAP-2", [rng.standard_normal(DIMS) for _ in range(2)])
+
+    body = client.get("/embeddings/status").json()
+
+    entry = body["stores"][0]
+    assert entry["slug"] == SLUG
+    assert entry["count"] == 2      # snapshots, NOT rows (binding contract)
+    assert entry["schema"] == 2
+    assert entry["rows"] == 5       # 3 + 2 chunk rows
+    assert entry["missing"] == 1    # snapshot currency too
+    model = next(m for m in body["models"] if m["slug"] == SLUG)
+    assert model["schema"] == 2
+    assert model["rows"] == 5
+    assert model["missing"] == 1
+
+
+def test_model_without_store_has_null_schema_and_rows(env, client):
+    index_path, stores_dir = env
+    _write_index(index_path, ["SNAP-1"])
+    _populate_store(stores_dir, SLUG, ["SNAP-1"])
+
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+
+    for slug, model in models.items():
+        if slug == SLUG:
+            continue
+        assert model["store_exists"] is False
+        assert model["schema"] is None
+        assert model["rows"] is None
 
 
 # ── health.json ──────────────────────────────────────────────────────────────

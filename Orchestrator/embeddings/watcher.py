@@ -304,7 +304,12 @@ async def _pick_migration_target(active: str, successor_slug: "str | None") -> t
         if s["slug"] != active and s["slug"] in EMBEDDING_MODELS
         and s["count"] > 0 and ready(s["slug"])
     ]
-    # local-first, then biggest — same precedence; the guard filters within it
+    # local-first, then biggest — same precedence; the guard filters within it.
+    # "Biggest" is SNAPSHOT COVERAGE, pinned (M6e/audit A11): list_stores
+    # `count` stays snapshot currency on every schema (a v2 meta keeps
+    # count == snapshots, distinct from its raw chunk-row `rows`), so a
+    # chunked store's row inflation must never outrank a store that covers
+    # more snapshots. Never sort by s["rows"].
     candidates.sort(
         key=lambda s: (
             EMBEDDING_MODELS[s["slug"]]["privacy"] != "local",

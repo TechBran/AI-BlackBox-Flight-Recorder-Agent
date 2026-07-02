@@ -92,6 +92,34 @@ def test_list_is_side_effect_free(fixture_paths):
     assert list(stores.iterdir()) == []
 
 
+def test_list_shows_schema_and_rows_columns(fixture_paths):
+    """M6e ops currency: --list displays schema + rows after count/missing.
+    A chunked (schema-2) store reports count in SNAPSHOT currency with the
+    raw chunk-row count in the rows column; storeless models show 1 / 0."""
+    import numpy as np
+
+    from Orchestrator.embeddings.store import VectorStore
+
+    stores, index = fixture_paths
+    # Build a real v2 store on disk (the CLI subprocess re-reads it fresh);
+    # direct VectorStore construction is the documented test-only path.
+    store = VectorStore("gemini-embedding-001", 3072, stores, schema=2).open()
+    rng = np.random.default_rng(5)
+    store.append_group(
+        "SNAP-20260101-0001", [rng.standard_normal(3072) for _ in range(3)]
+    )
+
+    result = run_cli("--list", *overrides(stores, index))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    out = result.stdout
+    assert "schema" in out and "rows" in out  # header carries the new columns
+    # v2 row: dims 3072, count 1 (SNAPSHOT currency), missing 1, schema 2, rows 3
+    assert re.search(r"gemini-embedding-001\s+3072\s+1\s+1\s+2\s+3", out), out
+    # a storeless model reports schema 1 / rows 0 (v1 default, nothing on disk)
+    assert re.search(r"qwen3-embedding-0\.6b\s+1024\s+0\s+2\s+1\s+0", out), out
+
+
 # ── invalid slug ─────────────────────────────────────────────────────────────
 
 def test_invalid_slug_exits_2_and_lists_valid_slugs(fixture_paths):

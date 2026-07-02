@@ -184,7 +184,10 @@ def _list_stores(stores_dir: Path, index_path: Path) -> int:
     print(f"  index:      {index_path} ({len(index_ids)} snapshots)")
     print(f"  active:     {active}")
     print()
-    print(f"  {'slug':<32} {'dims':>5} {'count':>7} {'missing':>8}")
+    # count is SNAPSHOT currency on every schema (audit A11); rows is the raw
+    # vector-row count (== count on v1, >= count on chunked v2 stores).
+    print(f"  {'slug':<32} {'dims':>5} {'count':>7} {'missing':>8} "
+          f"{'schema':>6} {'rows':>7}")
     for slug, spec in sorted(EMBEDDING_MODELS.items()):
         try:
             # Probing is side-effect free: VectorStore.open() creates nothing
@@ -192,12 +195,14 @@ def _list_stores(stores_dir: Path, index_path: Path) -> int:
             store = get_store(slug, base_dir=stores_dir)
             count = store.count
             missing = len(store.missing(index_ids))
+            schema, rows = store.schema, store.rows
         except ValueError as e:  # dims mismatch vs registry — surface, keep listing
             print(f"{'*' if slug == active else ' '} {slug:<32} ERROR: {e}")
             continue
         mark = "*" if slug == active else " "
         note = "" if count else "  (no store yet)"
-        print(f"{mark} {slug:<32} {spec['dims']:>5} {count:>7} {missing:>8}{note}")
+        print(f"{mark} {slug:<32} {spec['dims']:>5} {count:>7} {missing:>8} "
+              f"{schema:>6} {rows:>7}{note}")
 
     persisted = _read_state_file(stores_dir)
     if persisted:

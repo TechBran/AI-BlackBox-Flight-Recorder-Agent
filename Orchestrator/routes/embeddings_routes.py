@@ -169,10 +169,16 @@ def embeddings_status(response: Response):
         stores.append({
             "slug": meta["slug"],
             "dims": meta["dims"],
+            # count stays SNAPSHOT currency on every schema (binding contract,
+            # audit A11); schema/rows are ADDITIVE (M6e): schema 1 = one row
+            # per snapshot (rows == count), schema 2 = chunked (rows >= count).
             "count": meta["count"],
+            "schema": meta["schema"],
+            "rows": meta["rows"],
             "missing": _safe_missing(meta["slug"], meta["dims"], base, index_ids),
             "last_updated": meta["last_updated"],
         })
+    stores_by_slug = {s["slug"]: s for s in stores}
 
     models = []
     for slug, entry in EMBEDDING_MODELS.items():
@@ -181,6 +187,10 @@ def embeddings_status(response: Response):
         # keep_alive toggle is local-only (Ollama); null for cloud models
         is_local = entry["provider"] == "ollama"
         keep_alive = get_keep_alive(slug, base_dir=base) if is_local else None
+        # ADDITIVE (M6e): the model card mirrors its store's schema/rows
+        # (same currency as the stores[] entries); null when no readable
+        # store exists — matching the `missing` null convention.
+        smeta = stores_by_slug.get(slug)
         models.append({
             "slug": slug,
             "label": entry["label"],
@@ -190,6 +200,8 @@ def embeddings_status(response: Response):
             "privacy": entry["privacy"],
             "quality_note": entry["quality_note"],
             "store_exists": store_exists,
+            "schema": smeta["schema"] if smeta else None,
+            "rows": smeta["rows"] if smeta else None,
             "missing": (
                 _safe_missing(slug, entry["dims"], base, index_ids)
                 if store_exists else None

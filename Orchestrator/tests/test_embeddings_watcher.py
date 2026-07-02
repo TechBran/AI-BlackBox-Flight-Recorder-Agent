@@ -613,6 +613,41 @@ async def test_pick_migration_target_gap_guard_unit(
 
 
 @pytest.mark.asyncio
+async def test_pick_target_ranks_by_snapshot_coverage_not_rows(
+    env, catalogs, monkeypatch
+):
+    """M6e/audit A11 pin: candidate ranking is SNAPSHOT coverage. A v2 chunk
+    store whose raw row count is inflated by chunking (100 snapshots / 250
+    rows) must NOT outrank a v1 store covering more snapshots (120). Both
+    candidates are cloud (ready) and pass the recent-end gap guard, so the
+    count sort alone decides."""
+    index_path, stores_dir, _ = env
+    ids = _build_index_only(index_path, n=120)
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "test-key")   # gemini-2 ready
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")   # openai ready
+    # both stores must clear the F4 guard: v2 misses the 20 OLDEST ids only
+    monkeypatch.setattr(watcher, "RECENT_GAP_TAIL", 20)
+    monkeypatch.setattr(watcher, "RECENT_GAP_MAX", 30)
+    rng = np.random.default_rng(21)
+    # v1 candidate: every indexed snapshot, one row each → 120 snapshots
+    get_store("gemini-embedding-2").append_many(
+        [(sid, rng.standard_normal(3072)) for sid in ids]
+    )
+    # v2 candidate: the newest 100 snapshots as chunk GROUPS → 250 raw rows
+    v2 = get_store(OPENAI_SLUG, schema=2)
+    for i, sid in enumerate(ids[20:]):
+        n_chunks = 3 if i < 50 else 2   # 50*3 + 50*2 = 250 rows
+        v2.append_group(sid, [rng.standard_normal(3072) for _ in range(n_chunks)])
+    assert v2.snapshots == 100 and v2.rows == 250  # fixture sanity
+
+    target, why = await watcher._pick_migration_target(ACTIVE, None)
+
+    # 120 snapshots beats 100 snapshots; 250 rows must never win the sort
+    assert target == "gemini-embedding-2"
+    assert "(120 vectors)" in why
+
+
+@pytest.mark.asyncio
 async def test_broken_while_migration_already_running(
     env, catalogs, broken_provider, prior_broken_health, monkeypatch
 ):
