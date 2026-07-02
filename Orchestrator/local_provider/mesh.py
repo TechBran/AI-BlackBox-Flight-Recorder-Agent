@@ -226,6 +226,24 @@ def _match_registry_device(device, nodes: List[Node]) -> Optional[Node]:
     return None
 
 
+def default_provider_for_node(node: Node, registry=None) -> Optional[str]:
+    """The per-device ``default_provider`` (M3) for the registry Device that ``node`` maps to,
+    or ``None`` when no device matches / none is set. This is what makes the persisted-but-
+    unconsumed M3 ``default_provider`` LIVE (M7 task 7.5): control_device reads it to pick the
+    frontier brain. Fail-soft (any error → ``None``); the registry is lazily resolved.
+    """
+    reg = registry if registry is not None else _device_registry()
+    if reg is None:
+        return None
+    try:
+        for d in reg.get_all_devices():
+            if _match_registry_device(d, [node]) is not None:
+                return getattr(d, "default_provider", None)
+    except Exception:
+        return None
+    return None
+
+
 def _origin_belongs_to_operator(operator: str, node: Node, registry,
                                 status_json: Optional[str]) -> bool:
     """True if ``node`` (the resolved origin device) is registered to ``operator``.

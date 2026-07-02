@@ -165,6 +165,15 @@ CU_GEMINI_MODEL_DEFAULT = CFG.get("computer_use", "gemini_model_default",
 CU_FRONTIER_PROVIDER    = CFG.get("computer_use", "frontier_provider", fallback="gemini").strip()
 CU_FRONTIER_MODEL       = CFG.get("computer_use", "frontier_model",
                                   fallback=CU_GEMINI_MODEL_DEFAULT).strip()
+# M7 provider-agnostic device control: per-provider default frontier model, so
+# control_device can drive a phone with Claude / OpenAI (DIY-on-Android via the a11y
+# bridge) or Gemini. config.py holds the CHOICE; provider capability facts stay in
+# CU_MODEL_FILTERS. Anthropic default reuses the CU model default (a Claude computer-use
+# model); OpenAI default is the gpt-5.x `computer` tool model.
+CU_FRONTIER_ANTHROPIC_MODEL = CFG.get("computer_use", "frontier_anthropic_model",
+                                      fallback=CU_MODEL_DEFAULT).strip()
+CU_FRONTIER_OPENAI_MODEL    = CFG.get("computer_use", "frontier_openai_model",
+                                      fallback="gpt-5.5").strip()
 CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
 CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
 CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=100)

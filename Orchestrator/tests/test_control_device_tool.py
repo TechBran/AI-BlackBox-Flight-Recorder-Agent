@@ -57,10 +57,12 @@ def test_no_reachable_device(monkeypatch):
 
 def test_happy_path_returns_toolresult(monkeypatch):
     monkeypatch.setattr(cd.mesh, "resolve_device", _resolves_to(NODE))
+    monkeypatch.setattr(cd.mesh, "default_provider_for_node", lambda *a, **k: None)
     seen = {}
 
-    async def fake_loop(*, device_base_url, task, operator, model, capability):
-        seen.update(device_base_url=device_base_url, task=task, operator=operator)
+    async def fake_loop(*, device_base_url, task, operator, model, capability, provider):
+        seen.update(device_base_url=device_base_url, task=task, operator=operator,
+                    provider=provider)
         return FrontierResult(True, "Opened Maps and searched for coffee.",
                               steps=4, device=device_base_url)
 
@@ -70,9 +72,11 @@ def test_happy_path_returns_toolresult(monkeypatch):
     assert res.result == "Opened Maps and searched for coffee."
     assert res.data["steps"] == 4
     assert res.data["device"] == NODE.dns_name           # dns_name preferred
+    assert res.data["provider"] == "gemini"              # config default (no per-device default)
     # addressed the resolved node on the control port
     assert seen["device_base_url"] == f"http://{NODE.dns_name}:{cd.REMOTE_CONTROL_PORT}"
     assert seen["operator"] == "Brandon"
+    assert seen["provider"] == "gemini"
 
 
 def test_structured_error_surfaces(monkeypatch):

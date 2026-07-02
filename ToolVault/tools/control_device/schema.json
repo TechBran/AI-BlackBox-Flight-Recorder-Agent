@@ -14,11 +14,16 @@
       "device": {
         "type": "string",
         "description": "Optional target device name (tailnet hostname or MagicDNS name) — targets ANY device on the tailnet. Omit to use origin-aware routing: the device the request came from, else the operator's designated PRIMARY device. Naming a device that is not this operator's origin is never a silent retarget — it must be an explicit target here."
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["gemini", "claude", "openai", "gemma"],
+        "description": "Optional frontier brain to drive the device. Omit to use the target device's configured default_provider, else the box default. 'gemini' (validated Android CU), 'claude'/'openai' (cloud vision models, DIY-on-Android), or 'gemma' (the on-device model — the legacy control_phone path). An explicit value overrides the per-device default."
       }
     },
     "required": ["task"]
   },
-  "returns": "A natural-language summary of what the frontier loop did on the device, or a structured error (error_kind: no_device / stopped / accessibility_off / lost_contact / timeout / model_error / config_error / invalid_argument / invalid_target / max_steps / loop_error), plus data.steps and data.device.",
+  "returns": "A natural-language summary of what the frontier loop did on the device, or a structured error (error_kind: no_device / stopped / accessibility_off / lost_contact / timeout / model_error / config_error / invalid_argument / invalid_target / max_steps / loop_error), plus data.steps, data.device and data.provider.",
   "example": "control_device(task=\"open the camera app and take a photo\")",
-  "notes": "M2/M3 of the frontier-driven device-control rewire: a server-side Gemini ReAct loop (Orchestrator/frontier_agent_loop.py) drives the phone's M1 endpoints (GET /stream observations + POST /action) over Tailscale with hybrid tree+screenshot grounding. Device resolution is origin-aware (mesh.resolve_device): explicit device → any tailnet node; else the origin device (must belong to this operator — never silent-retarget); else the operator's primary device (device registry). Model is config-knobbed ([computer_use] frontier_provider / frontier_model). See docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M3)."
+  "notes": "M2/M3/M7 of the frontier-driven device-control rewire: a server-side ReAct loop (Orchestrator/frontier_agent_loop.py) drives the phone's M1 endpoints (GET /stream observations + POST /action) over Tailscale with hybrid tree+screenshot grounding. Provider-agnostic (M7): gemini/claude/openai each pair a FrontierDriver with a coordinate adapter (Gemini 0-999; Anthropic/OpenAI absolute-px with screenshot downscale+rescale — frontier_grounding.py); gemma routes to the on-device control_phone path behind the same seam. Provider resolves as explicit param → device default_provider (M3 registry) → [computer_use] frontier_provider. Device resolution is origin-aware (mesh.resolve_device): explicit device → any tailnet node; else the origin device (must belong to this operator — never silent-retarget); else the operator's primary device. See docs/plans/2026-06-30-android-control-frontier-driven-plan.md (M7)."
 }

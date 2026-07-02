@@ -32,14 +32,23 @@ from typing import Dict, List, Optional, Tuple
 DEFAULT_DEVICE_WH: Tuple[int, int] = (1080, 2400)
 
 
-# ── Coordinate adapter seam (M7 extends with Anthropic/OpenAI absolute-px) ───────────
+# ── Coordinate adapter seam (M7: Gemini 0-999 + Anthropic/OpenAI absolute-px) ────────
 class CoordinateAdapter:
     """Provider coordinate space → device pixel adapter (the seam).
 
-    M2 ships only :class:`GeminiCoordinateAdapter` (normalized 0-999). M7 adds Anthropic
-    (absolute-px with ≤1568/2576 downscale+rescale) and OpenAI (absolute-px) subclasses,
-    selected off the CU backend regex. Keeping the denormalization behind this one method
-    means the loop + grounding never hardcode a provider's coordinate convention.
+    Two responsibilities, split by provider convention:
+
+    * ``to_device_px`` — map a model-returned coordinate into REAL device pixels
+      (Gemini: normalized 0-999; Anthropic/OpenAI: absolute pixels in the DOWNSCALED
+      image the model was shown).
+    * ``model_view_dims`` / ``prepare_screenshot`` — for the vision-first providers,
+      DOWNSCALE the device screenshot to the model's max long-edge BEFORE the model
+      sees it (M7 task 7.1a), and report the pixel dimensions the model reasons in.
+      Gemini reasons in 0-999 regardless of image size, so its screenshot passes
+      through untouched (the base defaults are the Gemini behaviour).
+
+    Keeping every provider's convention behind this one class means the loop + the
+    hybrid grounding never hardcode a coordinate space or a downscale rule.
     """
 
     #: Name of the provider whose coordinate convention this adapter speaks.
@@ -48,6 +57,25 @@ class CoordinateAdapter:
     def to_device_px(self, x, y, width: int, height: int) -> Tuple[int, int]:
         raise NotImplementedError
 
+    def to_model_px(self, x, y, width: int, height: int) -> Tuple[int, int]:
+        """Inverse of ``to_device_px`` into the MODEL-VIEW space: map a DEVICE-pixel point
+        into the pixel space the model reasons in. Default (Gemini): identity — the model-view
+        equals the device-pixel space for bounds purposes (Gemini reads element bounds in device
+        px, coordinates in 0-999). The abs-px adapters override this to apply their downscale
+        factor, so the a11y ``bounds`` the model reads are in the SAME space as the downscaled
+        screenshot it sees (M7-I1)."""
+        return (int(round(float(x))), int(round(float(y))))
+
+    def model_view_dims(self, width: int, height: int) -> Tuple[int, int]:
+        """The (w, h) in pixels the model reasons in for a device of (width, height).
+        Default: the device dims unchanged (Gemini — no downscale)."""
+        return (int(width), int(height))
+
+    def prepare_screenshot(self, png_bytes: Optional[bytes],
+                           width: int, height: int) -> Optional[bytes]:
+        """Return the screenshot bytes to hand the model. Default: unchanged (Gemini)."""
+        return png_bytes
+
 
 class GeminiCoordinateAdapter(CoordinateAdapter):
     """Gemini normalized 0-999 → device pixels.
@@ -55,7 +83,9 @@ class GeminiCoordinateAdapter(CoordinateAdapter):
     ``real = int(coord / 999 * dimension)`` — identical to
     ``ADBCommands.denormalize_coords`` so the frontier path lands on the same pixel the
     legacy ADB path would. Coordinates are clamped to [0, 999] so a stray out-of-range
-    value from the model can never index off-screen.
+    value from the model can never index off-screen. ``model_view_dims`` /
+    ``prepare_screenshot`` inherit the pass-through defaults — Gemini reasons in 0-999
+    regardless of the screenshot resolution, so no downscale is applied.
     """
 
     provider = "gemini"
@@ -67,15 +97,160 @@ class GeminiCoordinateAdapter(CoordinateAdapter):
         return (int(cx / self.COORD_MAX * width), int(cy / self.COORD_MAX * height))
 
 
-def get_coordinate_adapter(provider: str) -> CoordinateAdapter:
-    """Factory: a coordinate adapter for ``provider``. M2 only knows Gemini; unknown
-    providers fall back to the Gemini (0-999) adapter with a documented default so the
-    loop never hard-fails on an unrecognized provider (M7 registers the rest)."""
-    p = (provider or "").strip().lower()
-    if p in ("gemini", "google", ""):
+class AbsolutePixelCoordinateAdapter(CoordinateAdapter):
+    """Absolute-pixel adapter for the vision-first providers (Anthropic, OpenAI).
+
+    The model is shown a screenshot DOWNSCALED so its long edge is ≤ ``max_long_edge``
+    (never upscaled) and returns coordinates in THAT downscaled pixel space. One scale
+    factor ``s = min(1, max_long_edge / max(w, h))`` drives both directions:
+
+    * the screenshot is resized to ``(round(w·s), round(h·s))`` before the model sees it;
+    * a returned coordinate ``(dx, dy)`` maps back to device px as ``(dx/s, dy/s)``,
+      clamped on-screen.
+
+    Round-trips are exact within ~1px (integer rounding). When the device already fits
+    the cap (``s == 1``) the screenshot is passed through and coordinates are identity.
+    """
+
+    provider = "abs_px"
+
+    def __init__(self, max_long_edge: int):
+        self.max_long_edge = int(max_long_edge)
+
+    def _scale(self, width: int, height: int) -> float:
+        long_edge = max(int(width), int(height), 1)
+        return min(1.0, self.max_long_edge / long_edge)
+
+    def model_view_dims(self, width: int, height: int) -> Tuple[int, int]:
+        s = self._scale(width, height)
+        return (max(1, int(round(width * s))), max(1, int(round(height * s))))
+
+    def to_device_px(self, x, y, width: int, height: int) -> Tuple[int, int]:
+        s = self._scale(width, height) or 1.0
+        dx = int(round(float(x) / s))
+        dy = int(round(float(y) / s))
+        return (min(max(dx, 0), int(width)), min(max(dy, 0), int(height)))
+
+    def to_model_px(self, x, y, width: int, height: int) -> Tuple[int, int]:
+        """Map a DEVICE-pixel point into the DOWNSCALED model-view space (the inverse of
+        ``to_device_px``): ``(round(x·s), round(y·s))``. Used to render the a11y ``bounds`` the
+        model reads in the SAME pixel space as the downscaled screenshot it is shown, so a model
+        that clicks from a bound emits a coordinate that rescales back on-screen (M7-I1)."""
+        s = self._scale(int(width), int(height))
+        return (int(round(float(x) * s)), int(round(float(y) * s)))
+
+    def prepare_screenshot(self, png_bytes: Optional[bytes],
+                           width: int, height: int) -> Optional[bytes]:
+        """Downscale ``png_bytes`` to ``model_view_dims`` (long-edge ≤ max). No-op when
+        the image already fits the cap, or when PIL is unavailable / the bytes don't
+        decode (returns them unchanged — never raises; correctness degrades to sending a
+        larger image, which the API itself would downscale)."""
+        if not png_bytes:
+            return png_bytes
+        if self._scale(width, height) >= 1.0:
+            return png_bytes
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+            tw, th = self.model_view_dims(width, height)
+            img = img.resize((tw, th))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return png_bytes
+
+
+# Anthropic vision downscale caps (long edge, px): 1568 for the computer_20251124 tool on
+# Claude 4.x; 2576 on the high-resolution vision models (Opus/Sonnet/Fable ≥ 4.7).
+ANTHROPIC_MAX_LONG_EDGE = 1568
+ANTHROPIC_HIRES_MAX_LONG_EDGE = 2576
+# OpenAI's `computer` tool follows the pixel space of the screenshot we send; a ~1280
+# long-edge (720p-class) balances coordinate accuracy against per-image token cost.
+OPENAI_MAX_LONG_EDGE = 1280
+
+
+def _anthropic_is_hires(model) -> bool:
+    """Claude models with high-resolution vision (Opus/Sonnet/Fable/Mythos ≥ 4.7) accept up
+    to 2576px on the long edge; older CU models (e.g. Opus 4.6) cap at 1568."""
+    import re
+    m = (model or "").strip().lower()
+    match = re.match(r"claude-(?:opus|sonnet|fable|mythos)-(\d+)(?:-(\d+))?", m)
+    if not match:
+        return False
+    major = int(match.group(1))
+    minor = int(match.group(2)) if match.group(2) else 0
+    return (major, minor) >= (4, 7)
+
+
+class AnthropicCoordinateAdapter(AbsolutePixelCoordinateAdapter):
+    """Anthropic absolute-px adapter. Long-edge cap is model-aware (1568, or 2576 for the
+    high-resolution ≥4.7 models). The device screenshot is downscaled to that cap before
+    Claude sees it, and Claude's returned pixel coordinate is rescaled back to device px."""
+
+    provider = "anthropic"
+
+    def __init__(self, model=None):
+        super().__init__(ANTHROPIC_HIRES_MAX_LONG_EDGE if _anthropic_is_hires(model)
+                         else ANTHROPIC_MAX_LONG_EDGE)
+        self.model = model
+
+
+class OpenAICoordinateAdapter(AbsolutePixelCoordinateAdapter):
+    """OpenAI absolute-px adapter. The `computer` tool reasons in the pixel space of the
+    screenshot we send, so we downscale to a ~1280 long edge and rescale coordinates back."""
+
+    provider = "openai"
+
+    def __init__(self, model=None):
+        super().__init__(OPENAI_MAX_LONG_EDGE)
+        self.model = model
+
+
+def _provider_from_model(model) -> Optional[str]:
+    """Map a model id → CU backend name (anthropic / google / openai) via the config
+    ``CU_MODEL_FILTERS`` regex — the SAME data that gates the CU model catalog, so the
+    adapter factory and the backend gate never drift. Returns ``None`` on no match."""
+    import re
+    try:
+        from Orchestrator.config import CU_MODEL_FILTERS
+        filters = CU_MODEL_FILTERS
+    except Exception:
+        filters = {
+            "anthropic": r"claude-(opus|sonnet|fable|mythos)-([4-9]|\d{2,})",
+            "google": r"gemini-.*computer-use",
+            "openai": r"(computer-use-preview|gpt-5\.5($|-\d))",
+        }
+    m = (model or "").strip()
+    for backend, pattern in filters.items():
+        try:
+            if re.match(pattern, m):
+                return backend
+        except re.error:
+            continue
+    return None
+
+
+def get_coordinate_adapter(provider: str, model: Optional[str] = None) -> CoordinateAdapter:
+    """Factory: a coordinate adapter for ``provider`` (a provider NAME, or a MODEL id whose
+    backend is inferred from ``config.CU_MODEL_FILTERS``). Gemini → 0-999; Anthropic /
+    OpenAI → absolute-px (downscale+rescale). ``gemma`` runs on-device (grounding unused) →
+    the normalized adapter. An unrecognised value defaults to Gemini so the loop never
+    hard-fails on an unexpected provider/model."""
+    key = (provider or "").strip().lower()
+    if key in ("gemini", "google", "gemma", ""):
         return GeminiCoordinateAdapter()
-    # M7: register anthropic / openai adapters here. Until then, default to Gemini's
-    # normalized space rather than raising — the loop stays resilient.
+    if key in ("anthropic", "claude"):
+        return AnthropicCoordinateAdapter(model or provider)
+    if key in ("openai", "gpt"):
+        return OpenAICoordinateAdapter(model or provider)
+    # Not a known provider name → treat it as a model id and infer the backend.
+    backend = _provider_from_model(provider)
+    if backend == "anthropic":
+        return AnthropicCoordinateAdapter(provider)
+    if backend == "openai":
+        return OpenAICoordinateAdapter(provider)
     return GeminiCoordinateAdapter()
 
 
@@ -96,6 +271,31 @@ def parse_bounds(bounds: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     except (ValueError, TypeError):
         return None
     return (l, t, r, b)
+
+
+def scale_bounds_to_model_view(bounds, adapter: Optional[CoordinateAdapter],
+                               device_wh: Tuple[int, int]):
+    """Render an a11y ``bounds`` string in the adapter's MODEL-VIEW pixel space (M7-I1).
+
+    For a downscale (abs-px) adapter the model is shown a screenshot downscaled by a factor ``s``
+    and emits coordinates in THAT space; the element bounds it reads must be in the same space, or
+    a model clicking from a bound emits a full-res coordinate that rescales (÷s) off-screen and
+    snaps to the wrong node. Scales each corner via ``adapter.to_model_px``. Identity for the
+    Gemini adapter (model-view == device px) and a no-op for ``adapter is None`` or a malformed
+    bounds string. PURE — never mutates the node, never raises. Callers use the returned string
+    ONLY in the model-facing tree text; the internal grounding keeps snapping against the
+    untouched full-res observation bounds.
+    """
+    if adapter is None:
+        return bounds
+    parsed = parse_bounds(bounds)
+    if parsed is None:
+        return bounds
+    w, h = device_wh
+    l, t, r, b = parsed
+    ml, mt = adapter.to_model_px(l, t, w, h)
+    mr, mb = adapter.to_model_px(r, b, w, h)
+    return f"{ml},{mt},{mr},{mb}"
 
 
 def _png_dimensions(png_bytes: bytes) -> Optional[Tuple[int, int]]:
@@ -245,6 +445,13 @@ def snap_to_element(coord_0_999: Tuple[int, int],
 
     node = find_target_node(px, py, observation_tree, prefer_editable=editable)
     if node is not None:
+        # M7-M2: a type (``editable``) whose resolved node is NOT an editable field must not
+        # element_set_text the wrong element. This happens when the model types with no prior
+        # click: the abs-px `type` action carries no coordinate, so it reuses a (0,0) last-click
+        # that snaps to the root container. Return ungroundable so the loop feeds it back and the
+        # model clicks a field first — safer than dumping text into the root (no accidental type).
+        if editable and not node.get("editable"):
+            return GroundedAction(frame=None, method="none")
         ref = _element_ref(node)
         if editable:
             frame = {"type": "element_set_text", **ref, "text": text or ""}

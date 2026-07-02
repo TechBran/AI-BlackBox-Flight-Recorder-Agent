@@ -115,6 +115,21 @@ def test_snap_type_with_no_node_is_ungroundable():
     assert g.frame is None
 
 
+def test_snap_type_onto_non_editable_target_is_ungroundable():
+    # M7-M2: a type whose resolved node is NOT editable (e.g. the model typed with no prior click,
+    # so (0,0) snapped to the root container) must NOT set text on the wrong element — ungroundable
+    # so the loop feeds it back and the model clicks a field first (no accidental type into root).
+    tree = [
+        _node(0, "0,0,1080,2400", clickable=True, resource_id="root"),  # not editable
+        _node(1, "400,600,700,850", editable=True, resource_id="app:id/field"),
+    ]
+    g = snap_to_element((0, 0), tree, (1080, 2400), editable=True, text="hello")
+    assert g.frame is None and g.method == "none"
+    # a type aimed at the real editable field still grounds normally
+    g2 = snap_to_element((510, 302), tree, (1080, 2400), editable=True, text="hello")
+    assert g2.frame == {"type": "element_set_text", "resource_id": "app:id/field", "text": "hello"}
+
+
 def test_find_target_node_prefers_wanted_kind():
     tree = [
         _node(0, "400,600,700,850", clickable=True, resource_id="clicky"),

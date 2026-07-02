@@ -127,6 +127,36 @@ def test_global_and_scroll_actions_marshal(monkeypatch):
     assert posted[2] == {**posted[2], "type": "scroll", "direction": "up"}
 
 
+def test_type_with_no_prior_click_not_dispatched(monkeypatch):
+    # M7-M2: a type action with no prior click (abs-px `type` carries no coordinate → reuses a
+    # (0,0) last-click that snaps to the root container) must NOT be typed into the root — it is
+    # ungroundable, fed back to the model, and never hits the wire. A subsequent real tap does.
+    _fast(monkeypatch)
+    posted = []
+    monkeypatch.setattr(fal, "_pull_observation", _aret(OBS))
+
+    async def fake_post(base_url, frame, timeout):
+        posted.append(frame)
+        return {"msg": "action_result", "success": True}
+    monkeypatch.setattr(fal, "_post_action", fake_post)
+    driver = FakeDriver([
+        {"op": "type", "x": 0, "y": 0, "text": "hi"},   # no prior click → root, non-editable
+        {"op": "tap", "x": 500, "y": 700},              # then a real tap on the submit button
+        "done",
+    ])
+    monkeypatch.setattr(fal, "_make_driver", lambda *a, **k: driver)
+
+    res = _run(fal.run_frontier_loop("http://phone:8765", "type without clicking first", "Brandon"))
+    assert res.success is True
+    # the type never hit the wire (ungroundable); only the element_click did
+    kinds = [f["type"] for f in posted]
+    assert kinds == ["element_click"]
+    assert "element_set_text" not in kinds
+    # the driver was fed back the ungroundable failure before deciding its next step
+    assert driver.seen_results[1]["success"] is False
+    assert "type" in driver.seen_results[1]["detail"]
+
+
 # ── embedded follow-on observation is consumed (no double-observe) ───────────────────
 def test_embedded_observation_used_instead_of_pull(monkeypatch):
     _fast(monkeypatch)
