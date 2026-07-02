@@ -46,6 +46,7 @@ _EXPLICIT_FILES = [
     ORCH / "fossils.py",
     ORCH / "startup.py",
     ORCH / "backfill_embeddings.py",
+    ORCH / "tokenization.py",  # WI-11: backends key off registry tokenizer specs, never slugs
     ORCH / "routes" / "embeddings_routes.py",
 ]
 _EMBEDDINGS_FILES = sorted(

@@ -59,6 +59,12 @@ Orchestrator/asterisk/gateways.json
 !**/.env.example
 !**/*.env.example
 
+# Allow vendored tokenizer assets (WI-11): public model vocabularies fetched
+# at build time by scripts/vendor_tokenizers.py — qwen3/tokenizer.json would
+# otherwise be swallowed by the `**/*token*.json` credential pattern above.
+# These files contain no secrets (BPE merges/vocab only).
+!Orchestrator/tokenizers_vendored/**
+
 # ============================================================================
 # BlackBox immutable storage — not suitable for git
 # ============================================================================

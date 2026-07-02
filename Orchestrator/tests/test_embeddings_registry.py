@@ -32,6 +32,12 @@ def test_entry_has_required_fields(slug):
     assert isinstance(entry["quality_note"], str)
     assert entry["query_instruction"] is None or isinstance(entry["query_instruction"], str)
     assert entry["keep_alive"] is None or isinstance(entry["keep_alive"], str)
+    # WI-11: every model must declare its tokenizer backend spec (None = floor)
+    assert "tokenizer" in entry, f"{slug}: missing WI-11 tokenizer key"
+    tok = entry["tokenizer"]
+    assert tok is None or re.fullmatch(r"(tiktoken|hf|remote):[a-z0-9_.\-]+", tok), (
+        f"{slug}: tokenizer {tok!r} is not a valid backend spec"
+    )
 
 
 @pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))

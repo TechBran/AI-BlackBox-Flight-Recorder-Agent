@@ -10,6 +10,12 @@ when a new embedding model ships, add an entry here — no code changes.
 
 Never repoint model_id under an existing slug — slugs key persistent vector
 stores and the ToolVault cache.
+
+tokenizer (WI-11): backend spec consumed by Orchestrator/tokenization.py.
+"tiktoken:<encoding>" / "hf:<vendored-dir>" count exactly and locally from
+Orchestrator/tokenizers_vendored/ (offline-safe); "remote:<provider>" means
+exact counts exist only via the explicit-only count_tokens_remote seam —
+hot paths use the calibrated floor. None = floor always.
 """
 
 EMBEDDING_MODELS = {
@@ -18,6 +24,7 @@ EMBEDDING_MODELS = {
         "label": "Gemini (cloud)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.15,
         "privacy": "cloud", "quality_note": "Current default; auto-tracked for deprecation",
         "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
+        "tokenizer": "remote:gemini",
     },
     "gemini-embedding-2": {
         "provider": "gemini", "model_id": "models/gemini-embedding-2", "dims": 3072,
@@ -29,6 +36,7 @@ EMBEDDING_MODELS = {
         # (worst - 0.05); 0.55 stays clear of every strong match and well under
         # p10 (0.6291). Inheriting gemini-001's 0.60 was silently cutting good hits.
         "semantic_threshold": 0.55,
+        "tokenizer": "remote:gemini",
     },
     "openai-text-embedding-3-large": {
         "provider": "openai", "model_id": "text-embedding-3-large", "dims": 3072,
@@ -36,6 +44,7 @@ EMBEDDING_MODELS = {
         "privacy": "cloud", "quality_note": "Second cloud option (BYOK OpenAI key)",
         "query_instruction": None, "keep_alive": None,
         "semantic_threshold": 0.55,  # documented default (no BYOK key to live-measure)
+        "tokenizer": "tiktoken:cl100k_base",
     },
     "qwen3-embedding-0.6b": {
         "provider": "ollama", "model_id": "qwen3-embedding:0.6b", "dims": 1024,
@@ -44,6 +53,7 @@ EMBEDDING_MODELS = {
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "-1m",  # negative duration = stay loaded; bare "-1" fails Go ParseDuration
         "semantic_threshold": 0.54,
+        "tokenizer": "hf:qwen3",
     },
     "qwen3-embedding-8b": {
         "provider": "ollama", "model_id": "qwen3-embedding:8b", "dims": 4096,
@@ -52,6 +62,7 @@ EMBEDDING_MODELS = {
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "5m",
         "semantic_threshold": 0.50,  # documented default; local Qwen scores run low (0.6b uses 0.54), 16-row store not live-measurable
+        "tokenizer": "hf:qwen3",  # sample-encode-verified identical to the 0.6B tokenizer (scripts/vendor_tokenizers.py)
     },
 }
 EMBEDDING_MAX_CHARS = 10000  # truncate document text before embedding (existing behavior)
