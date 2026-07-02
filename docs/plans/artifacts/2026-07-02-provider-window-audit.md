@@ -116,3 +116,19 @@ The immutable-ledger constraint required proving the probe route persists nothin
 ## 9. Spend
 
 12 probes, ~545k true input tokens billed (anthropic 197,091 · gemini 120,449 · openai 114,479 · xai 113,475), ~30 output tokens. Est. cost ≈ **$1.50** (anthropic ≈ $0.99 @ $5/M; xai = $0.134 exact from `cost_in_usd_ticks`; openai ≈ $0.14; gemini ≈ $0.25). Zero retries, zero rate-limit events, zero ledger writes.
+
+---
+
+## Post-verification addendum (2026-07-02, independent review)
+
+- **Prompt-cache contamination in openai/xai probes:** the 75k payload is a byte-identical prefix
+  of the 210k/238k payloads, and provider prompt caches engaged on later probes (openai 210k:
+  44,288/44,423 prompt tokens ≈99.7% cached; openai 238k: 7,552 cached; xai 238k: 8,320 cached —
+  see `cached_tokens` in the probes JSON). PASS verdicts stand on window headroom, but **M7 must
+  not size timeouts off openai/xai TTFBs at ≥210k** — they are cache-warm, not cold-prefill.
+- **Anthropic probes show zero caching** — the 14.04s TTFB at 210k is genuinely cold (n=1).
+  M7 should harden for the historical 30–60s band, not 14s.
+- **Re-run cautions:** the script has no confirmation gate (a bare re-run re-fires all 12 probes,
+  ~$1.50); and the ledger guard hard-aborts if any legitimate future snapshot contains the probe
+  marker literals — keep those strings out of dev snapshots; if the guard fires at baseline on a
+  clean ledger, that is why.
