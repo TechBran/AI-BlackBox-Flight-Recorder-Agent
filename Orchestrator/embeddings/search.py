@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from Orchestrator import config
+from Orchestrator.embeddings.chunker import chunk_snapshot
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import VectorStore, get_active_slug, get_store
@@ -201,6 +202,66 @@ def generate_embedding_sync(text: str, purpose: str = "document") -> list[float]
         print(f"[EMBEDDING] {slug}: provider returned no vector")
         return None
     return vectors[0]
+
+
+def embed_snapshot_for_index(text: str) -> dict:
+    """Embed one snapshot body for the mint path, shaped to the ACTIVE store.
+
+    Returns update_snapshot_index-ready kwargs (M6 task 6c / audit A4):
+
+    - v1 active store → ``{"embedding": vec}`` — the whole (provider-clamped)
+      body embedded ONCE, exactly today's behavior. Schema-derived, not
+      flag-derived (audit A6 rollback safety): while production stays v1,
+      mint behavior is byte-identical.
+    - v2 active store → ``{"chunk_vectors": [v0..vn]}`` — chunk_snapshot
+      scoring windows embedded in ONE provider.embed call (the provider layer
+      batches: ollama/openai one request, gemini per-text loop), aligned to
+      chunk order for a contiguous append_group.
+    - any failure (store unavailable, provider down/mid-batch death, empty
+      body) → ``{}`` — the mint completes vector-less and the catch-up loop
+      (migrate diff / watcher gap-heal keyed on store.missing()) re-embeds
+      later. Mirrors generate_embedding_sync's None-on-failure semantics;
+      NEVER raises.
+
+    SNAPSHOT-ONLY seam (audit A7): this is the single place chunker output
+    meets the provider. generate_embedding_sync stays single-vector for its
+    other callers (ToolVault descriptions, watcher probe, queries).
+    fossils.update_snapshot_index re-validates the payload shape against the
+    store's CURRENT schema at append time, covering the race where the active
+    store changed between this embed and the append.
+    """
+    try:
+        store = get_active_store()
+        schema = store.schema
+        slug = store.slug
+    except Exception as e:
+        print(f"[EMBEDDING] active store unavailable; snapshot embed skipped: {e}")
+        return {}
+
+    if schema != 2:
+        vec = generate_embedding_sync(text, purpose="document")
+        return {"embedding": vec} if vec else {}
+
+    try:
+        chunks = chunk_snapshot(text, model_key=slug)
+        if not chunks:
+            print(f"[EMBEDDING] {slug}: empty snapshot body — nothing to embed")
+            return {}
+        provider = get_provider(slug)
+        vectors = _run_async(provider.embed(chunks, "document"))
+    except Exception as e:
+        print(f"[EMBEDDING] {slug}: chunk embedding generation failed: {e}")
+        return {}
+    if not vectors or len(vectors) != len(chunks):
+        # The provider layer already enforces len(vectors) == len(texts);
+        # belt-and-braces so a drifting/fake provider can never misalign a
+        # chunk group (partial groups must not exist — audit A3).
+        print(
+            f"[EMBEDDING] {slug}: provider returned {len(vectors or [])} "
+            f"vectors for {len(chunks)} chunks — dropped"
+        )
+        return {}
+    return {"chunk_vectors": vectors}
 
 
 def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[str, float]]:

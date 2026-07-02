@@ -440,7 +440,7 @@ def rebuild_snapshot_index() -> Dict[str, Dict[str, Any]]:
         print(f"[INDEX] Preserved {embeddings_preserved} embeddings from previous index")
     return index
 
-def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator: str, timestamp: str, snap_type: str = "normal", embedding: Optional[List[float]] = None, media_artifacts: Optional[List[Dict[str, Any]]] = None):
+def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator: str, timestamp: str, snap_type: str = "normal", embedding: Optional[List[float]] = None, media_artifacts: Optional[List[Dict[str, Any]]] = None, chunk_vectors: Optional[List[List[float]]] = None):
     """Update the index with a newly minted snapshot, including optional embedding and media artifacts.
 
     Args:
@@ -450,9 +450,16 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
         operator: Operator/user name
         timestamp: UTC timestamp
         snap_type: Type of snapshot ("normal", "checkpoint", etc.)
-        embedding: Optional embedding vector for semantic search — appended to
-            the ACTIVE VectorStore (Manifest/embeddings/), NEVER stored inline
-            in the JSON entry (post-transcode indexes stay slim)
+        embedding: Optional whole-snapshot embedding vector — appended to the
+            ACTIVE VectorStore (Manifest/embeddings/) when it is schema 1,
+            NEVER stored inline in the JSON entry (post-transcode indexes
+            stay slim)
+        chunk_vectors: Optional chunk-group vectors (M6c) — appended to the
+            ACTIVE VectorStore as ONE contiguous group in document order when
+            it is schema 2. Mutually shaped with `embedding`: the vector-block
+            schema guard below validates whichever arrived against the
+            store's CURRENT schema at append time (audit A4) and drops a
+            mismatch for the catch-up loop to re-embed.
         media_artifacts: Optional list of media artifact metadata dicts containing:
             - type: "image", "video", or "music"
             - url: URL path (e.g., /ui/uploads/sunset-over-mountains_abc123.png)
@@ -475,22 +482,56 @@ def update_snapshot_index(snap_id: str, byte_start: int, byte_end: int, operator
             "type": snap_type
         }
 
-        # Vector write seam (pluggable embeddings): the vector goes to the
-        # ACTIVE binary store, never into the JSON entry. A mint must NEVER
-        # fail because of the vector layer — every store-side error below is
+        # Vector write seam (pluggable embeddings): vectors go to the ACTIVE
+        # binary store, never into the JSON entry. A mint must NEVER fail
+        # because of the vector layer — every store-side error below is
         # logged and the vector dropped (the migration job's catch-up loop
-        # re-embeds missing ids later).
-        if embedding is not None:
+        # re-embeds missing ids later, keyed on store.missing()).
+        #
+        # M6c schema guard (audit A4): the payload shape is validated against
+        # the store's CURRENT schema at APPEND time — covering the race where
+        # the active store changed between embed and append, in BOTH
+        # directions. A whole-snapshot vector must never masquerade as a
+        # 1-chunk group in a schema-2 store, and chunk vectors must never
+        # land as a bogus single row in a v1 store.
+        if embedding is not None or chunk_vectors:
             store = None
+            schema = 1
             try:
                 # Lazy import (monitoring.py's delegate pattern): fossils is
                 # imported very early at startup, before the embeddings stack.
                 from Orchestrator.embeddings.search import get_active_store
                 store = get_active_store()
+                schema = store.schema
             except Exception as e:
+                store = None
                 print(f"[INDEX] active store unavailable; snapshot {snap_id} minted without vector: {e}")
-            if store is not None:
-                if len(embedding) != store.dims:
+            if store is not None and schema == 2:
+                if not chunk_vectors:
+                    # Bare whole-snapshot vector vs chunked store: DROP.
+                    # (Mirror of the dims-mismatch race branch — catch-up
+                    # re-embeds this snapshot as a proper chunk group.)
+                    print(f"[EMBEDDING] {snap_id}: whole-snapshot vector vs chunked store — dropped; catch-up re-embeds")
+                elif any(len(vec) != store.dims for vec in chunk_vectors):
+                    # Cutover race: chunks embedded under the old model, store
+                    # swapped before this index update landed. All-or-nothing:
+                    # a partial group must never exist (audit A3).
+                    bad = next(len(vec) for vec in chunk_vectors if len(vec) != store.dims)
+                    print(f"[INDEX] chunk vector has {bad} dims but active store expects {store.dims}; snapshot {snap_id} minted without vector (catch-up re-embeds it)")
+                else:
+                    try:
+                        # append invalidates the store's matrix cache; next
+                        # search re-reads the file (page-cache warm, tens of ms)
+                        rows = store.append_group(snap_id, chunk_vectors)
+                        print(f"[INDEX] Stored {len(chunk_vectors)}-chunk group for {snap_id} in {store.slug} store ({rows} rows written)")
+                    except Exception as e:
+                        print(f"[INDEX] store append failed; snapshot {snap_id} minted without vector: {e}")
+            elif store is not None:
+                if embedding is None:
+                    # Chunk vectors vs whole-snapshot (v1) store: DROP —
+                    # chunk_vectors[0] is NOT a whole-snapshot embedding.
+                    print(f"[EMBEDDING] {snap_id}: chunk vectors vs whole-snapshot store — dropped; catch-up re-embeds")
+                elif len(embedding) != store.dims:
                     # Cutover race: embedding generated under the old model,
                     # store swapped before this index update landed.
                     print(f"[INDEX] embedding has {len(embedding)} dims but active store expects {store.dims}; snapshot {snap_id} minted without vector (catch-up re-embeds it)")

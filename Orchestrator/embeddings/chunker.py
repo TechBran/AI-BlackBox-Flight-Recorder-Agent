@@ -6,7 +6,9 @@ NEVER be wired into providers.embed or generate_embedding_sync: ToolVault
 descriptions, the watcher health probe, and queries are single-vector
 documents that CLAMP, never chunk — chunking them would multiply vectors
 into stores that expect one row per document (v1) or fabricate groups for
-non-snapshot ids. Nothing imports this module until 6c.
+non-snapshot ids. The only production consumer is
+search.embed_snapshot_for_index (the 6c mint seam); 6d adds the migrate
+backfill.
 
 Sizing is token-aware via Orchestrator.tokenization: exact local backends
 (tiktoken/HF, vendored) produce exact windows; floor models (Gemini remote
