@@ -83,7 +83,11 @@ def _download(url: str, dest: Path) -> None:
         )
     resp.raise_for_status()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(resp.content)
+    # Atomic write: never leave a half-written vendored asset if the run dies
+    # mid-write (a truncated tokenizer.json would floor every count at runtime).
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(resp.content)
+    os.replace(tmp, dest)
     print(f"[qwen] downloaded {url} -> {dest} ({dest.stat().st_size:,} bytes)")
 
 
@@ -111,8 +115,17 @@ def vendor_qwen() -> None:
             print("[qwen] 8B sample-encode DIVERGES from 0.6B — vendoring both")
             dest_8b = QWEN_8B_DIR / "tokenizer.json"
             dest_8b.parent.mkdir(parents=True, exist_ok=True)
-            dest_8b.write_bytes(tmp_8b.read_bytes())
+            tmp_dest = dest_8b.with_suffix(dest_8b.suffix + ".tmp")
+            tmp_dest.write_bytes(tmp_8b.read_bytes())
+            os.replace(tmp_dest, dest_8b)
             print(f"[qwen] vendored {dest_8b}")
+            print("[qwen] REQUIRED FOLLOW-UP (8B counts stay on the shared "
+                  "tokenizer until done):")
+            print("[qwen]   1. Orchestrator/tokenization.py — add an "
+                  "'hf:qwen3_8b' loader (qwen3_8b/tokenizer.json) to "
+                  "_BACKEND_LOADERS")
+            print("[qwen]   2. Orchestrator/embeddings/registry.py — repoint "
+                  "the 8B entry's \"tokenizer\" spec to 'hf:qwen3_8b'")
 
 
 def main() -> None:

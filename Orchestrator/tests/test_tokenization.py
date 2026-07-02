@@ -152,8 +152,10 @@ def test_count_tokens_remote_unknown_model_returns_none():
 #     "input":"<QWEN_PROBE_TEXT below>"}'
 #   → prompt_eval_count: 38
 # The vendored tokenizer (default encode, add_special_tokens=True) also
-# returned 38 — exact match. This test does NOT hit the network; it asserts
-# against the pinned constant.
+# returned 38 — exact match, so the tests below assert EQUALITY. This test
+# does NOT hit the network; it asserts against the pinned constant. If the
+# vendored asset is ever legitimately refreshed, re-run the probe above and
+# re-pin.
 QWEN_PROBE_TEXT = (
     "The BlackBox flight recorder mints immutable conversation snapshots. "
     "Retrieval fuses semantic embeddings with keyword rank so past sessions "
@@ -168,12 +170,11 @@ def test_probe_text_is_the_fixed_200_char_string():
 
 def test_qwen_embedding_count_matches_live_probe_reference():
     est = estimate_tokens(QWEN_PROBE_TEXT, QWEN_SLUG)
-    assert abs(est - QWEN_PROBE_PROMPT_EVAL_COUNT) <= 2, (
+    assert est == QWEN_PROBE_PROMPT_EVAL_COUNT, (
         f"vendored Qwen tokenizer says {est}, live prompt_eval_count was "
-        f"{QWEN_PROBE_PROMPT_EVAL_COUNT} (tolerance ±2)"
+        f"{QWEN_PROBE_PROMPT_EVAL_COUNT} — exact match expected (re-probe "
+        f"and re-pin only if the vendored asset was deliberately refreshed)"
     )
-    # prove this took the exact path, not the floor (floor would say 100)
-    assert est <= 50
 
 
 def test_qwen_8b_embedding_shares_the_family_tokenizer():
@@ -266,6 +267,14 @@ def test_offline_every_embedding_slug_still_counts_and_clamps(monkeypatch):
         clamped, clamp_est = clamp_to_tokens(long_text, 10, slug)
         assert isinstance(clamped, str)
         assert clamp_est <= 10
+
+    # EXACTNESS survives offline, not just availability: both local backends
+    # must still return the pinned reference counts with sockets dead.
+    # (Caveat, accepted: tiktoken's in-process registry caches the Encoding
+    # object once loaded, so within this test process this proves cache-reload
+    # behavior, not a cold-process no-network load.)
+    assert estimate_tokens(QWEN_PROBE_TEXT, QWEN_SLUG) == QWEN_PROBE_PROMPT_EVAL_COUNT
+    assert estimate_tokens(QWEN_PROBE_TEXT, OPENAI_SLUG) == 37
 
 
 def test_local_backend_never_raises_on_unencodable_text():
@@ -415,6 +424,26 @@ def test_remote_local_backend_slug_returns_none(monkeypatch, gemini_key, anthrop
     exact answer is already free and local."""
     assert count_tokens_remote("hello", OPENAI_SLUG) is None
     assert count_tokens_remote("hello", QWEN_SLUG) is None
+
+
+def test_every_remote_spec_and_key_maps_to_a_handled_provider():
+    """Mirror of the local-loader guard for the remote path: a registry typo
+    like 'remote:openai' or an unhandled REMOTE_COUNT_KEYS provider must fail
+    HERE, not silently return None forever."""
+    handled = tokenization._REMOTE_PROVIDER_COUNTERS
+    for slug, entry in EMBEDDING_MODELS.items():
+        spec = entry["tokenizer"]
+        if spec is not None and spec.startswith("remote:"):
+            provider = spec.split(":", 1)[1]
+            assert provider in handled, (
+                f"{slug} names remote tokenizer provider {provider!r} with no "
+                f"counter in count_tokens_remote's dispatch"
+            )
+    for key, (provider, _resolver) in tokenization.REMOTE_COUNT_KEYS.items():
+        assert provider in handled, (
+            f"REMOTE_COUNT_KEYS[{key!r}] names provider {provider!r} with no "
+            f"counter in count_tokens_remote's dispatch"
+        )
 
 
 def test_remote_counter_never_raises_on_garbage(monkeypatch, gemini_key):

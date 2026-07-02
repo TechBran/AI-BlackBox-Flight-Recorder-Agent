@@ -26,13 +26,23 @@ VENDORED_DIR = Path(__file__).resolve().parent / "tokenizers_vendored"
 # ── local backends (lazy, vendored-only, fail-to-floor) ─────────────────────
 
 def _load_tiktoken_cl100k():
-    # Force the cache dir to the vendored copy BEFORE first use: an inherited
-    # TIKTOKEN_CACHE_DIR (or an empty cache) would make tiktoken try the
-    # network, breaking the offline guarantee this module exists to provide.
+    # Point the cache dir at the vendored copy ONLY for the duration of this
+    # load: an inherited TIKTOKEN_CACHE_DIR (or an empty cache) would make
+    # tiktoken try the network, breaking the offline guarantee this module
+    # exists to provide. The env var is restored afterwards — the Encoding
+    # object stays cached in tiktoken's in-process registry, so later calls
+    # never re-read the cache dir.
+    prior = os.environ.get("TIKTOKEN_CACHE_DIR")
     os.environ["TIKTOKEN_CACHE_DIR"] = str(VENDORED_DIR / "tiktoken_cache")
-    import tiktoken
+    try:
+        import tiktoken
 
-    enc = tiktoken.get_encoding("cl100k_base")
+        enc = tiktoken.get_encoding("cl100k_base")
+    finally:
+        if prior is None:
+            os.environ.pop("TIKTOKEN_CACHE_DIR", None)
+        else:
+            os.environ["TIKTOKEN_CACHE_DIR"] = prior
 
     def encode(text: str) -> list[int]:
         # disallowed_special=() — special-token text in user content must
@@ -69,6 +79,24 @@ _BACKEND_LOADERS = {
 }
 
 _backends: dict = {}  # spec → (encode, decode) | None (None = load failed → floor)
+_encode_failure_warned: set = set()  # specs whose first encode failure was logged
+
+
+def _log_encode_failure_once(model_key, exc) -> None:
+    """Telemetry for silent exactness degradation: a backend that loads but
+    then FAILS TO ENCODE floors every call invisibly — log the first one per
+    backend so systemic flooring shows up in journalctl."""
+    try:
+        spec = EMBEDDING_MODELS.get(model_key, {}).get("tokenizer")
+        if spec in _encode_failure_warned:
+            return
+        _encode_failure_warned.add(spec)
+        logger.warning(
+            "[TOKENIZATION] %s encode failed (%s: %s) — flooring this call "
+            "(logged once per backend)", spec, type(exc).__name__, exc,
+        )
+    except Exception:
+        pass
 
 
 def _resolve_backend(model_key):
@@ -128,7 +156,11 @@ def _exact_clamp(text: str, budget: int, encode, decode) -> tuple[str, int]:
     """Head-preserving exact clamp: keep the first `budget` token ids. Decoding
     a truncated id sequence can re-encode slightly differently, so shrink until
     the re-encode fits — the returned estimate is the real count of the
-    returned text."""
+    returned text.
+
+    Worst case O(budget) shrink iterations BY DESIGN (take strictly decreases
+    each pass, so termination is trivial). Do NOT convert to binary search
+    without re-proving termination: re-encode length is not monotone in take."""
     ids = encode(text)
     if len(ids) <= budget:
         return text, len(ids)
@@ -154,8 +186,9 @@ def estimate_tokens(text: str, model_key: str | None = None) -> int:
         if backend is not None:
             try:
                 return len(backend[0](clean))
-            except Exception:
-                pass  # unencodable input — degrade to the floor, never raise
+            except Exception as exc:
+                # unencodable input — degrade to the floor, never raise
+                _log_encode_failure_once(model_key, exc)
         return _floor_estimate(clean)
     except Exception:
         return 0
@@ -163,7 +196,13 @@ def estimate_tokens(text: str, model_key: str | None = None) -> int:
 
 def clamp_to_tokens(text: str, max_tokens: int, model_key: str | None = None) -> tuple[str, int]:
     """Head-preserving clamp to <= max_tokens. Returns (text, est_tokens).
-    Local-tokenizer path clamps exactly; floor path clamps to max_tokens*2 chars."""
+    Local-tokenizer path clamps exactly; floor path clamps to max_tokens*2 chars.
+
+    The floor path guarantees only the CHAR budget: true tokens of dense text
+    (hexdump ≈1.14 chars/token) may exceed max_tokens — pass a model_key with
+    a local tokenizer whenever the budget is a hard limit. Exact backends
+    count tokenizer-mandated special tokens too, so budgets <= the per-encode
+    special-token count return ("", 0)."""
     try:
         clean = _coerce_text(text)
         try:
@@ -176,8 +215,9 @@ def clamp_to_tokens(text: str, max_tokens: int, model_key: str | None = None) ->
         if backend is not None:
             try:
                 return _exact_clamp(clean, budget, backend[0], backend[1])
-            except Exception:
-                pass  # unencodable input — degrade to the floor, never raise
+            except Exception as exc:
+                # unencodable input — degrade to the floor, never raise
+                _log_encode_failure_once(model_key, exc)
         return _floor_clamp(clean, budget)
     except Exception:
         return "", 0
@@ -255,6 +295,16 @@ def _count_anthropic(model_id: str, text: str) -> int | None:
     return int(tokens) if tokens is not None else None
 
 
+# ONE dispatch table for remote providers: "remote:<p>" registry specs and
+# REMOTE_COUNT_KEYS provider names both resolve here. A guard test mirrors
+# the local-loader guard — an unhandled provider fails tests, never silently
+# returns None forever.
+_REMOTE_PROVIDER_COUNTERS = {
+    "gemini": _count_gemini,
+    "anthropic": _count_anthropic,
+}
+
+
 def count_tokens_remote(text: str, model_key: str) -> int | None:
     """Exact remote count (Gemini countTokens / Anthropic count_tokens).
     EXPLICIT-CALL ONLY (preflight, calibration, WI-10 verification). None on any failure."""
@@ -263,14 +313,17 @@ def count_tokens_remote(text: str, model_key: str) -> int | None:
         entry = EMBEDDING_MODELS.get(model_key) if isinstance(model_key, str) else None
         if entry is not None:
             spec = entry.get("tokenizer") or ""
-            if spec == "remote:gemini":
-                return _count_gemini(entry["model_id"], clean)
+            if spec.startswith("remote:"):
+                counter = _REMOTE_PROVIDER_COUNTERS.get(spec.split(":", 1)[1])
+                if counter is not None:
+                    return counter(entry["model_id"], clean)
             return None  # local-backend model: the exact answer is already free
         mapped = REMOTE_COUNT_KEYS.get(model_key)
         if mapped is not None:
             provider, resolve_model_id = mapped
-            if provider == "anthropic":
-                return _count_anthropic(resolve_model_id(), clean)
+            counter = _REMOTE_PROVIDER_COUNTERS.get(provider)
+            if counter is not None:
+                return counter(resolve_model_id(), clean)
         return None
     except Exception:
         return None  # no key / network down / bad body / unknown key — all None
