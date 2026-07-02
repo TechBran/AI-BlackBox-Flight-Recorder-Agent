@@ -34,6 +34,21 @@ One job at a time, module-level singleton (CU session-manager pattern).
 State is persisted to {stores_dir}/migration_state.json every PERSIST_EVERY
 appends and on every state transition — resume metadata only; on boot,
 resume_if_interrupted() relaunches a job whose persisted state says "running".
+
+Rebuild mode (M6 task 6d, ADDITIVE — the model-switch flow above is the
+watcher's recovery path and is untouched): run_rebuild(slug) builds a
+schema-2 chunk store under {stores_dir}/_build/{slug} — same re-diff loop in
+SNAPSHOT currency, but each snapshot's text is chunked (chunk_snapshot),
+chunks are FLATTENED across whole snapshots into ≤CHUNK_BATCH_CAP-chunk
+provider calls (a single snapshot exceeding the cap still goes in ONE call
+by itself — group alignment beats the cap), then regrouped into one
+append_group per snapshot (contiguous ordinals, whole-group idempotent).
+BUILD-ONLY: the rebuild path NEVER cuts over — no set_active_slug, no
+search.swap_active; activation is the explicit M6f stop-service dir-swap.
+The job kind ({"kind": "rebuild", "activate": false}) is PERSISTED in
+migration_state.json so boot resume stays build-only. The _build parent has
+no meta.json of its own and list_stores does not recurse, so candidates are
+invisible to every status/list surface until the swap.
 """
 import asyncio
 import json
@@ -43,15 +58,18 @@ from pathlib import Path
 
 from Orchestrator import config
 from Orchestrator.embeddings import search
+from Orchestrator.embeddings.chunker import chunk_snapshot
 from Orchestrator.embeddings.providers import EmbeddingProviderError, get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import _atomic_write_json, get_store, set_active_slug
 from Orchestrator.volume import read_volume_bytes
 
 STATE_FILE = "migration_state.json"
-BATCH_SIZE = 8          # texts per provider.embed call
+BATCH_SIZE = 8          # texts per provider.embed call (model-switch engine)
 PERSIST_EVERY = 25      # appends between migration_state.json writes
 BATCH_SLEEP_S = 0.2     # cloud rate-limit pause between batches
+CHUNK_BATCH_CAP = 32    # flattened chunks per provider.embed call (rebuild/heal)
+BUILD_DIR_NAME = "_build"  # {stores_dir}/_build/{slug} — invisible to list_stores
 
 # ── singleton job state ──────────────────────────────────────────────────────
 
@@ -121,8 +139,14 @@ def _finish_job(state: str, **fields) -> None:
     print(f"[MIGRATE] job finished: state={state}")
 
 
-def _begin_job(target_slug: str) -> None:
-    """Claim the singleton: RuntimeError if a job is running, else fresh state."""
+def _begin_job(target_slug: str, kind: "str | None" = None) -> None:
+    """Claim the singleton: RuntimeError if a job is running, else fresh state.
+
+    kind="rebuild" marks a build-only chunk-store job: the marker (and
+    activate=false) is PERSISTED so boot resume relaunches into the rebuild
+    engine, never the cutover one. Model-switch jobs stay kind-less — their
+    persisted dict keeps the exact pre-6d key set (compat + status contract).
+    """
     global _JOB
     with _JOB_LOCK:
         if _JOB is not None and _JOB["state"] == "running":
@@ -141,6 +165,9 @@ def _begin_job(target_slug: str) -> None:
             "skipped": [],
             "raced": [],
         }
+        if kind == "rebuild":
+            _JOB["kind"] = "rebuild"
+            _JOB["activate"] = False
         _persist_locked()
 
 
@@ -158,7 +185,7 @@ def _log_engine_task_outcome(task: "asyncio.Task") -> None:
         )
 
 
-def _launch(target_slug: str) -> "asyncio.Task":
+def _launch(target_slug: str, rebuild: bool = False) -> "asyncio.Task":
     """Schedule the engine on the running loop and RETAIN the Task.
 
     The event loop holds only WEAK references to tasks: an engine task nobody
@@ -166,9 +193,12 @@ def _launch(target_slug: str) -> "asyncio.Task":
     _JOB stuck "running" (permanent 409 until restart). _JOB_TASK is the
     strong reference; both launch sites (route POST + startup resume) route
     through here. Claims nothing — caller runs _begin_job first.
+    rebuild=True schedules the build-only chunk-rebuild engine instead of the
+    cutover one (the persisted job kind decides at the resume site).
     """
     global _JOB_TASK
-    task = asyncio.get_running_loop().create_task(_run_engine(target_slug))
+    engine = _run_rebuild_engine if rebuild else _run_engine
+    task = asyncio.get_running_loop().create_task(engine(target_slug))
     task.add_done_callback(_log_engine_task_outcome)
     _JOB_TASK = task
     return task
@@ -207,6 +237,24 @@ async def run_migration(target_slug: str) -> dict:
     return await _run_engine(target_slug)
 
 
+async def run_rebuild(target_slug: str) -> dict:
+    """Run a chunk-store rebuild to completion in this coroutine (CLI + 6f).
+
+    Builds a schema-2 store for target_slug under {stores}/_build/{slug} — a
+    CANDIDATE for the explicit M6f cutover. BUILD-ONLY by contract: this path
+    never calls set_active_slug or search.swap_active; active.json and the
+    live search handle are untouched. Same singleton claim as migrations
+    (one job at a time across both kinds); returns the final job dict.
+    """
+    if target_slug not in EMBEDDING_MODELS:
+        raise ValueError(
+            f"unknown embedding model slug {target_slug!r}; "
+            f"known: {sorted(EMBEDDING_MODELS)}"
+        )
+    _begin_job(target_slug, kind="rebuild")
+    return await _run_rebuild_engine(target_slug)
+
+
 def request_cancel() -> bool:
     """Set the cooperative cancel flag; False (no-op) when no job is running."""
     with _JOB_LOCK:
@@ -235,6 +283,14 @@ def resume_if_interrupted() -> "asyncio.Task | None":
     if target not in EMBEDDING_MODELS:
         print(f"[MIGRATE] interrupted job targets unknown slug {target!r}; not resuming")
         return None
+    # The persisted kind decides the engine: a "rebuild" job resumes into the
+    # build-only engine — a restart must never turn a candidate build into a
+    # cutover. Kind-less state (every pre-6d file + all model-switch jobs)
+    # resumes the migration engine exactly as before.
+    if persisted.get("kind") == "rebuild":
+        print(f"[MIGRATE] resuming interrupted chunk rebuild of {target} (build-only)")
+        _begin_job(target, kind="rebuild")
+        return _launch(target, rebuild=True)
     print(f"[MIGRATE] resuming interrupted migration to {target}")
     _begin_job(target)
     return _launch(target)
@@ -254,6 +310,52 @@ def slice_snapshot_text(snap_id: str, index: dict, vol_bytes: bytes) -> "str | N
     if bs >= len(vol_bytes) or be > len(vol_bytes) or be <= bs:
         return None
     return vol_bytes[bs:be].decode("utf-8", errors="replace")
+
+
+# ── chunk batching helpers (rebuild engine + watcher v2 gap-heal) ────────────
+
+def pack_chunk_batches(chunked: list, cap: "int | None" = None) -> list:
+    """Pack [(snap_id, [chunks])] into provider-call batches of WHOLE snapshots.
+
+    Snapshots are taken in order until adding the next would exceed `cap`
+    flattened chunks; a batch always holds at least one snapshot, so a single
+    snapshot with more than `cap` chunks still goes in ONE call by itself —
+    a chunk group must come from one aligned provider call (whole-snapshot
+    atomicity beats the cap). Order is preserved; nothing is dropped.
+    """
+    if cap is None:
+        cap = CHUNK_BATCH_CAP
+    batches: list = []
+    current: list = []
+    n_chunks = 0
+    for snap_id, chunks in chunked:
+        if current and n_chunks + len(chunks) > cap:
+            batches.append(current)
+            current, n_chunks = [], 0
+        current.append((snap_id, chunks))
+        n_chunks += len(chunks)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def chunk_group_batches(ids_texts: list, model_key: str) -> tuple:
+    """[(snap_id, text)] → (packed chunk batches, empty_ids).
+
+    Chunks each snapshot with chunk_snapshot (verbatim scoring windows sized
+    for model_key) and packs the results via pack_chunk_batches. Snapshots
+    whose text chunks to nothing are returned in empty_ids for the caller's
+    quarantine/skip bookkeeping. Sync + CPU-bound (tokenizer work) — callers
+    run it via asyncio.to_thread.
+    """
+    chunked, empty_ids = [], []
+    for snap_id, text in ids_texts:
+        chunks = chunk_snapshot(text, model_key=model_key)
+        if chunks:
+            chunked.append((snap_id, chunks))
+        else:
+            empty_ids.append(snap_id)
+    return pack_chunk_batches(chunked), empty_ids
 
 
 # ── engine ───────────────────────────────────────────────────────────────────
@@ -401,6 +503,178 @@ async def _run_engine(target_slug: str) -> dict:
         raise
     except Exception as e:  # noqa: BLE001 — park, surface, stay resumable
         print(f"[MIGRATE] job stalled: {type(e).__name__}: {e}")
+        _finish_job("stalled", error=str(e))
+        return get_job_status()
+
+
+# ── rebuild engine (M6 task 6d — build-only, NEVER cuts over) ────────────────
+
+def _build_base_dir() -> Path:
+    """Parent dir for candidate chunk stores: {stores_dir}/_build.
+
+    A distinct realpath from the live stores dir, so get_store hands back a
+    distinct canonical instance; no meta.json lives at _build's root and
+    list_stores does not recurse, so candidates never appear in status/list.
+    """
+    return Path(config.EMBEDDINGS_STORES_DIR) / BUILD_DIR_NAME
+
+
+async def _run_rebuild_engine(target_slug: str) -> dict:
+    """Diff-and-fill a schema-2 chunk store under _build. No cutover, ever.
+
+    Same convergence shape as _run_engine — re-diff missing() in SNAPSHOT
+    currency each pass, converge when empty — but per snapshot the text is
+    chunked and appended as ONE contiguous group. Provider calls are sized in
+    CHUNKS (CHUNK_BATCH_CAP flattened across whole snapshots; regrouped by
+    offset after the call). Failure semantics mirror the migration engine:
+    provider-failed batches are quarantined for the run (retried by a later
+    run via missing()), any non-provider exception parks the job "stalled",
+    and an all-quarantined zero-progress run stalls instead of reporting a
+    dead candidate as "done". Caller has already claimed the job.
+    """
+    from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
+
+    try:
+        # F1 lesson: the build store is ALWAYS opened with explicit schema=2 —
+        # autodetect on a fresh dir would default v1 and cement the downgrade.
+        target = get_store(target_slug, base_dir=_build_base_dir(), schema=2)
+        provider = get_provider(target_slug)
+        quarantined: set[str] = set()   # skipped for THIS RUN only
+        rows_appended = 0               # rows THIS run wrote
+        snaps_appended = 0              # snapshots THIS run wrote
+        appends_since_persist = 0
+
+        while True:
+            # Re-diff each pass (snapshot currency): mints during the build go
+            # to the ACTIVE store (6c is schema-derived), but their index
+            # entries land here on the next pass — the loop converges when
+            # nothing is missing.
+            index = await asyncio.to_thread(load_snapshot_index)
+            missing = [
+                sid for sid in target.missing(sorted(index.keys()))
+                if sid not in quarantined
+            ]
+            if not missing:
+                break
+            _set_total_from_missing(len(missing))
+
+            # One volume read per pass, sliced per snapshot (engine pattern).
+            vol_bytes = await asyncio.to_thread(
+                read_volume_bytes, Path(config.VOL_PATH)
+            )
+            ids_texts, bad_ids = [], []
+            for sid in missing:
+                text = slice_snapshot_text(sid, index, vol_bytes)
+                if text is None:
+                    print(
+                        f"[MIGRATE] rebuild {target_slug}: {sid}: invalid byte "
+                        f"range for {len(vol_bytes)}-byte volume — skipping this run"
+                    )
+                    bad_ids.append(sid)
+                else:
+                    ids_texts.append((sid, text))
+
+            # Chunk + pack off the loop (tokenizer work is CPU-bound).
+            batches, empty_ids = await asyncio.to_thread(
+                chunk_group_batches, ids_texts, target_slug
+            )
+            for sid in empty_ids:
+                print(
+                    f"[MIGRATE] rebuild {target_slug}: {sid}: empty snapshot "
+                    f"body — skipping this run"
+                )
+            bad_ids.extend(empty_ids)
+            if bad_ids:
+                quarantined.update(bad_ids)
+                _quarantine_ids(bad_ids)
+
+            for batch in batches:
+                if _CANCEL.is_set():
+                    _finish_job("cancelled")
+                    return get_job_status()
+
+                batch_ids = [sid for sid, _ in batch]
+                flat = [chunk for _, chunks in batch for chunk in chunks]
+                try:
+                    vectors = await provider.embed(flat, "document")
+                except EmbeddingProviderError as e:
+                    # Provider already retried with backoff — quarantine the
+                    # batch for the run and keep moving (engine constraint 3).
+                    print(
+                        f"[MIGRATE] rebuild batch failed after provider "
+                        f"retries, quarantining {len(batch_ids)} snapshot(s) "
+                        f"for this run: {batch_ids}: {e}"
+                    )
+                    quarantined.update(batch_ids)
+                    _quarantine_ids(batch_ids)
+                    await asyncio.sleep(BATCH_SLEEP_S)
+                    continue
+                if not vectors or len(vectors) != len(flat):
+                    # Belt-and-braces (mirrors embed_snapshot_for_index): a
+                    # drifting provider must never yield a misaligned group.
+                    print(
+                        f"[MIGRATE] rebuild {target_slug}: provider returned "
+                        f"{len(vectors or [])} vectors for {len(flat)} chunks "
+                        f"— quarantining {batch_ids} for this run"
+                    )
+                    quarantined.update(batch_ids)
+                    _quarantine_ids(batch_ids)
+                    await asyncio.sleep(BATCH_SLEEP_S)
+                    continue
+
+                # Regroup by offset; each snapshot lands as ONE atomic group
+                # (append_group is whole-group idempotent: a group already
+                # present — crash-rerun — writes nothing and returns 0).
+                offset = 0
+                for sid, chunks in batch:
+                    group = vectors[offset:offset + len(chunks)]
+                    offset += len(chunks)
+                    rows_appended += await asyncio.to_thread(
+                        target.append_group, sid, group
+                    )
+                snaps_appended += len(batch_ids)
+                appends_since_persist += len(batch_ids)
+                persist_now = appends_since_persist >= PERSIST_EVERY
+                _advance_done(len(batch_ids), persist=persist_now)
+                if persist_now:
+                    appends_since_persist = 0
+                with _JOB_LOCK:
+                    done, total = _JOB["done"], _JOB["total"]
+                print(
+                    f"[MIGRATE] rebuild {target_slug}: {done}/{total} "
+                    f"snapshots ({rows_appended} rows)"
+                )
+                await asyncio.sleep(BATCH_SLEEP_S)
+
+        # ── zero-progress guard (mirror of the cutover guard, minus cutover):
+        # every missing snapshot quarantined and nothing appended (dead
+        # provider) is failure, not a finished candidate — "done" here would
+        # read as ready for the 6f swap.
+        if not snaps_appended and quarantined:
+            msg = (
+                f"provider failed for all {len(quarantined)} snapshots; "
+                f"rebuild made no progress - build store unchanged"
+            )
+            print(f"[MIGRATE] ERROR: {msg}")
+            _finish_job("stalled", error=msg)
+            return get_job_status()
+
+        # Build-only by design: NO cutover on this path, ever — activation is
+        # the explicit M6f dir-swap. Completion records the candidate's counts.
+        _finish_job("done", rows=target.rows, snapshots=target.snapshots)
+        print(
+            f"[MIGRATE] rebuild complete: {target_slug} candidate at "
+            f"{target.dir} ({target.snapshots} snapshots, {target.rows} rows); "
+            f"activation is a separate explicit step"
+        )
+        return get_job_status()
+
+    except asyncio.CancelledError:
+        # Loop teardown (shutdown/restart): leave the persisted state
+        # "running" (kind=rebuild) so boot resume relaunches build-only.
+        raise
+    except Exception as e:  # noqa: BLE001 — park, surface, stay resumable
+        print(f"[MIGRATE] rebuild job stalled: {type(e).__name__}: {e}")
         _finish_job("stalled", error=str(e))
         return get_job_status()
 

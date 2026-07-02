@@ -76,7 +76,11 @@ import httpx
 import openai
 
 from Orchestrator import config
-from Orchestrator.embeddings.migrate import slice_snapshot_text, start_migration
+from Orchestrator.embeddings.migrate import (
+    chunk_group_batches,
+    slice_snapshot_text,
+    start_migration,
+)
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
@@ -368,13 +372,52 @@ async def _gap_heal(active: str) -> int:
         if not good_ids:
             return 0
         provider = get_provider(active)
-        vectors = await provider.embed(texts, "document")
-        # append is idempotent + lock-guarded, so concurrent mint appends are
-        # safe; fsync-heavy write goes off the loop.
-        appended = await asyncio.to_thread(
-            store.append_many, list(zip(good_ids, vectors))
+        if store.schema != 2:
+            # v1 active store: today's exact path — ONE whole-text embed call,
+            # one append_many (byte-identical; audit A6 rollback safety).
+            vectors = await provider.embed(texts, "document")
+            # append is idempotent + lock-guarded, so concurrent mint appends
+            # are safe; fsync-heavy write goes off the loop.
+            appended = await asyncio.to_thread(
+                store.append_many, list(zip(good_ids, vectors))
+            )
+            print(f"[WATCHER] gap-heal: embedded {appended} missing vector(s) for {active}")
+            return appended
+        # v2 active store: heal in chunk GROUPS — same flatten-cap-regroup as
+        # the rebuild engine (chunks flattened across whole snapshots into
+        # ≤CHUNK_BATCH_CAP-chunk provider calls; a 50-snapshot heal may take
+        # several calls), one atomic append_group per snapshot. A mid-heal
+        # provider death keeps the groups already appended (idempotent; the
+        # rest stays missing() and is retried next run).
+        batches, empty_ids = await asyncio.to_thread(
+            chunk_group_batches, list(zip(good_ids, texts)), active
         )
-        print(f"[WATCHER] gap-heal: embedded {appended} missing vector(s) for {active}")
+        for sid in empty_ids:
+            print(f"[WATCHER] gap-heal: {sid} chunked to nothing - skipping")
+        appended = 0
+        healed_snaps = 0
+        for batch in batches:
+            flat = [chunk for _, chunks in batch for chunk in chunks]
+            vectors = await provider.embed(flat, "document")
+            if not vectors or len(vectors) != len(flat):
+                # A misaligned provider must never write a misgrouped batch;
+                # the enclosing except logs + returns (retry next run).
+                raise RuntimeError(
+                    f"provider returned {len(vectors or [])} vectors "
+                    f"for {len(flat)} chunks"
+                )
+            offset = 0
+            for sid, chunks in batch:
+                group = vectors[offset:offset + len(chunks)]
+                offset += len(chunks)
+                appended += await asyncio.to_thread(
+                    store.append_group, sid, group
+                )
+            healed_snaps += len(batch)
+        print(
+            f"[WATCHER] gap-heal: embedded {appended} chunk row(s) across "
+            f"{healed_snaps} snapshot(s) for {active}"
+        )
         return appended
     except Exception as e:  # noqa: BLE001 — heal failure must not flip the state
         print(f"[WATCHER] gap-heal failed (will retry next run): {type(e).__name__}: {e}")
