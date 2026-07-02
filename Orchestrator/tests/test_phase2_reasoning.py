@@ -125,7 +125,7 @@ def test_call_anthropic_separates_reasoning(monkeypatch, _provider_keys):
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(_anthropic_payload()))
 
     text, usage, reasoning, media_tasks = cr.call_anthropic(
-        [{"role": "user", "content": "How does it work?"}], "claude-test"
+        [{"role": "user", "content": "How does it work?"}], "claude-test", operator="test-op"
     )
 
     assert text == ANSWER
@@ -140,7 +140,7 @@ def test_call_gemini_separates_reasoning(monkeypatch, _provider_keys):
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(_gemini_payload()))
 
     text, usage, media_parts, reasoning, media_tasks = cr.call_gemini(
-        [{"role": "user", "content": "How does it work?"}], "gemini-test"
+        [{"role": "user", "content": "How does it work?"}], "gemini-test", operator="test-op"
     )
 
     assert text == ANSWER
@@ -155,7 +155,7 @@ def test_call_xai_separates_reasoning(monkeypatch, _provider_keys):
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(_xai_payload()))
 
     text, usage, reasoning, media_tasks = cr.call_xai(
-        [{"role": "user", "content": "How does it work?"}], "grok-test"
+        [{"role": "user", "content": "How does it work?"}], "grok-test", operator="test-op"
     )
 
     assert text == ANSWER
@@ -174,7 +174,7 @@ def test_call_anthropic_no_reasoning_is_empty(monkeypatch, _provider_keys):
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(payload))
 
     text, usage, reasoning, media_tasks = cr.call_anthropic(
-        [{"role": "user", "content": "hi"}], "claude-test"
+        [{"role": "user", "content": "hi"}], "claude-test", operator="test-op"
     )
     assert text == ANSWER
     assert reasoning == "", "reasoning must be empty string when model did not think"
@@ -190,7 +190,7 @@ def test_call_gemini_no_reasoning_is_empty(monkeypatch, _provider_keys):
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(payload))
 
     text, usage, media_parts, reasoning, media_tasks = cr.call_gemini(
-        [{"role": "user", "content": "hi"}], "gemini-test"
+        [{"role": "user", "content": "hi"}], "gemini-test", operator="test-op"
     )
     assert text == ANSWER
     assert reasoning == ""
@@ -349,7 +349,7 @@ def test_call_gemini_safety_block_returns_4tuple(monkeypatch, _provider_keys):
 
     blocked = {"promptFeedback": {"blockReason": "SAFETY"}}
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(blocked))
-    result = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test")
+    result = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test", operator="test-op")
     assert len(result) == 5, "gemini safety-block return must be a 5-tuple (2-media)"
     text, usage, media_parts, reasoning, media_tasks = result  # must not raise
     assert "blocked" in text.lower()
@@ -359,7 +359,7 @@ def test_call_gemini_safety_block_returns_4tuple(monkeypatch, _provider_keys):
 
     no_candidates = {"candidates": []}
     monkeypatch.setattr(cr.requests, "post", lambda *a, **k: _FakeResp(no_candidates))
-    result2 = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test")
+    result2 = cr.call_gemini([{"role": "user", "content": "x"}], "gemini-test", operator="test-op")
     assert len(result2) == 5, "gemini no-candidates return must be a 5-tuple (2-media)"
     t2, u2, m2, r2, mt2 = result2  # must not raise
     assert r2 == ""

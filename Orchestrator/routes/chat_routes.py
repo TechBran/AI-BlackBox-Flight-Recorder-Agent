@@ -221,7 +221,7 @@ def _get_tools(provider: str, prompt: str = "", group: str = "chat") -> list:
     _inject_cache["tool_names"] = _extract_tool_names(tools)
     return tools
 
-def call_openai(messages: List[Dict], model: str, operator: str = "Brandon"):
+def call_openai(messages: List[Dict], model: str, operator: str):
     if not OPENAI_API_KEY: raise HTTPException(400, "OPENAI_API_KEY not set")
 
     # Process messages to handle images, videos, audio, and documents
@@ -465,7 +465,7 @@ def _prepare_anthropic_messages(messages: List[Dict]):
     return system_text, convo
 
 
-def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
+def call_anthropic(messages: List[Dict], model: str, operator: str):
     if not ANTHROPIC_API_KEY: raise HTTPException(400, "ANTHROPIC_API_KEY not set")
     # Defense-in-depth: extract system text, then collapse any consecutive
     # same-role turns so the conversation array alternates (Anthropic 400s
@@ -1100,7 +1100,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str = "Brandon"):
     return text, total_usage, reasoning, media_tasks
 
 
-def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
+def call_gemini(messages: List[Dict], model: str, operator: str):
     if not GOOGLE_API_KEY: raise HTTPException(400, "GOOGLE_API_KEY not set")
 
     system_instruction = {"parts": []}
@@ -1654,7 +1654,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str = "Brandon"):
     return text, usage, media_parts, reasoning, media_tasks
 
 
-def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
+def call_xai(messages: List[Dict], model: str, operator: str):
     """Call xAI Grok API - OpenAI-compatible format."""
     if not XAI_API_KEY:
         raise HTTPException(400, "XAI_API_KEY not set")
@@ -1864,7 +1864,7 @@ def call_xai(messages: List[Dict], model: str, operator: str = "Brandon"):
 # -----------------------------------------------------------------------------
 import httpx  # For async streaming HTTP requests
 
-async def stream_openai_with_reasoning(messages: List[Dict], model: str, operator: str = "Brandon"):
+async def stream_openai_with_reasoning(messages: List[Dict], model: str, operator: str):
     """Stream OpenAI responses with reasoning support for o1/o3/o4 and GPT-5+ models.
 
     Yields SSE events: {"type": "thinking"|"content"|"done"|"error", "data": "..."}
@@ -2486,7 +2486,7 @@ def _detect_web_search_intent(messages: List[Dict]) -> bool:
     return _detect_tool_intent(messages)
 
 
-async def stream_anthropic_with_thinking(messages: List[Dict], model: str, operator: str = "Brandon", force_tools: bool = False):
+async def stream_anthropic_with_thinking(messages: List[Dict], model: str, operator: str, force_tools: bool = False):
     """Stream Anthropic Claude responses with tools enabled.
 
     Adaptive thinking is enabled for Opus 4.7 and Sonnet 4.6 — these models
@@ -4424,7 +4424,7 @@ def _cu_safe_params(data: dict) -> str:
     return str(safe) if safe else ""
 
 
-async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator: str = "Brandon"):
+async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator: str):
     """Stream Google Gemini responses with thinking mode and tool support.
 
     Yields SSE events: {"type": "thinking"|"content"|"tool_start"|"tool_result"|"done"|"error", "data": "..."}
@@ -5121,7 +5121,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
     yield {"type": "done", "data": {"thinking": thinking_buffer, "content": content_buffer}}
 
 
-async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: str = "Brandon"):
+async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: str):
     """Stream xAI Grok responses with reasoning support.
 
     Note: Only grok-3-mini-beta returns visible reasoning_content.
