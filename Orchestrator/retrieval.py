@@ -103,13 +103,19 @@ def mmr_select(cands, k: int, lam: float) -> list[str]:
 
 # ── orchestrating retrieve() ───────────────────────────────────────────────────
 
-def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True):
+def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
+             store=None):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
 
     operator ""/"system" = all operators; any other operator restricts to its own
     snapshots. include_keyword=False yields a semantic-only path for lean profiles
     (e.g. the on-device phone) that lack the volume text. Returns [] when the query
     can't be embedded or the active store is empty/unavailable — never raises.
+
+    store (keyword-only, eval seam — WI-6): when given, semantic candidates come
+    from this VectorStore instead of get_active_store(), so candidate chunk stores
+    get benched pre-swap through the FULL ranking pipeline. Production callers
+    never pass it; default behavior is byte-identical.
     """
     if not query or not query.strip():
         return []
@@ -127,11 +133,12 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     qv = _emb.generate_embedding_sync(query, purpose="query")
     if not qv:
         return []
-    try:
-        store = _emb.get_active_store()
-    except Exception as e:  # noqa: BLE001 - corrupt dir / dims mismatch
-        print(f"[RETRIEVAL] active store unavailable ({e}); returning no results")
-        return []
+    if store is None:
+        try:
+            store = _emb.get_active_store()
+        except Exception as e:  # noqa: BLE001 - corrupt dir / dims mismatch
+            print(f"[RETRIEVAL] active store unavailable ({e}); returning no results")
+            return []
     if store.count == 0:
         return []
 
