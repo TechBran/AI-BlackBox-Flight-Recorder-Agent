@@ -183,9 +183,94 @@ def clamp_to_tokens(text: str, max_tokens: int, model_key: str | None = None) ->
         return "", 0
 
 
+# ── remote counters (WI-11 part 3) — explicit-call-only, None on failure ────
+#
+# Transport seams (module-level so tests fake them and the policy spy can
+# prove hot paths never touch them). Lazy imports keep hot-path module load
+# free of requests/anthropic.
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+REMOTE_COUNT_TIMEOUT_S = 15
+
+
+def _http_post(url, **kwargs):
+    import requests
+
+    return requests.post(url, **kwargs)
+
+
+def _anthropic_client_factory(api_key):
+    import anthropic
+
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def _anthropic_default_model_id() -> str:
+    # Read at call time: config owns the chat-default choice (WI-10 window
+    # math counts against whatever the box is actually configured to run).
+    from Orchestrator import config
+
+    return config.ANTHROPIC_MODEL_DEFAULT
+
+
+# Non-registry remote count targets: model_key → (provider, model_id resolver).
+# Embedding-registry keys route via their "tokenizer" spec instead; this table
+# is ONLY for keys that have no registry entry (chat models for WI-10).
+REMOTE_COUNT_KEYS = {
+    "anthropic-default": ("anthropic", _anthropic_default_model_id),
+}
+
+
+def _count_gemini(model_id: str, text: str) -> int | None:
+    from Orchestrator import config
+
+    api_key = (getattr(config, "GEMINI_API_KEY", "")
+               or getattr(config, "GOOGLE_API_KEY", ""))
+    if not api_key:
+        return None
+    resp = _http_post(
+        f"{GEMINI_API_BASE}/{model_id}:countTokens",
+        headers={"x-goog-api-key": api_key},
+        json={"contents": [{"parts": [{"text": text}]}]},
+        timeout=REMOTE_COUNT_TIMEOUT_S,
+    )
+    if resp.status_code != 200:
+        return None
+    total = resp.json().get("totalTokens")
+    return int(total) if total is not None else None
+
+
+def _count_anthropic(model_id: str, text: str) -> int | None:
+    from Orchestrator import config
+
+    api_key = getattr(config, "ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    client = _anthropic_client_factory(api_key)
+    result = client.messages.count_tokens(
+        model=model_id,
+        messages=[{"role": "user", "content": text}],
+    )
+    tokens = getattr(result, "input_tokens", None)
+    return int(tokens) if tokens is not None else None
+
+
 def count_tokens_remote(text: str, model_key: str) -> int | None:
     """Exact remote count (Gemini countTokens / Anthropic count_tokens).
     EXPLICIT-CALL ONLY (preflight, calibration, WI-10 verification). None on any failure."""
-    # Remote backends land in WI-11 part 3; until then every call reports
-    # "no exact remote count available" — the contractual failure value.
-    return None
+    try:
+        clean = _coerce_text(text)
+        entry = EMBEDDING_MODELS.get(model_key) if isinstance(model_key, str) else None
+        if entry is not None:
+            spec = entry.get("tokenizer") or ""
+            if spec == "remote:gemini":
+                return _count_gemini(entry["model_id"], clean)
+            return None  # local-backend model: the exact answer is already free
+        mapped = REMOTE_COUNT_KEYS.get(model_key)
+        if mapped is not None:
+            provider, resolve_model_id = mapped
+            if provider == "anthropic":
+                return _count_anthropic(resolve_model_id(), clean)
+        return None
+    except Exception:
+        return None  # no key / network down / bad body / unknown key — all None

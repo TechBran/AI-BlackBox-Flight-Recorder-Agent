@@ -276,3 +276,180 @@ def test_local_backend_never_raises_on_unencodable_text():
     assert isinstance(est, int) and est > 0
     clamped, clamp_est = clamp_to_tokens(weird * 20, 5, OPENAI_SLUG)
     assert isinstance(clamped, str) and clamp_est <= 5
+
+
+# ── WI-11 part 3: remote counters — explicit-only, fakes only ────────────────
+
+GEMINI_SLUG = "gemini-embedding-2"
+ANTHROPIC_KEY = "anthropic-default"
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture
+def gemini_key(monkeypatch):
+    from Orchestrator import config
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-gemini-key", raising=False)
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "test-gemini-key", raising=False)
+
+
+@pytest.fixture
+def anthropic_key(monkeypatch):
+    from Orchestrator import config
+
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-anthropic-key", raising=False)
+
+
+def test_remote_gemini_success_parses_total_tokens(monkeypatch, gemini_key):
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        seen["json"] = kwargs.get("json")
+        return _FakeHTTPResponse(200, {"totalTokens": 7})
+
+    monkeypatch.setattr(tokenization, "_http_post", fake_post)
+    assert count_tokens_remote("hello world", GEMINI_SLUG) == 7
+    # the call went to the registry model's countTokens endpoint
+    assert seen["url"].endswith(
+        EMBEDDING_MODELS[GEMINI_SLUG]["model_id"] + ":countTokens"
+    )
+    assert seen["json"]["contents"][0]["parts"][0]["text"] == "hello world"
+
+
+def test_remote_gemini_non_200_returns_none(monkeypatch, gemini_key):
+    monkeypatch.setattr(
+        tokenization, "_http_post",
+        lambda url, **k: _FakeHTTPResponse(429, {"error": "rate limited"}),
+    )
+    assert count_tokens_remote("hello", GEMINI_SLUG) is None
+
+
+def test_remote_gemini_transport_exception_returns_none(monkeypatch, gemini_key):
+    def boom(url, **kwargs):
+        raise OSError("network down")
+
+    monkeypatch.setattr(tokenization, "_http_post", boom)
+    assert count_tokens_remote("hello", GEMINI_SLUG) is None
+
+
+def test_remote_gemini_malformed_body_returns_none(monkeypatch, gemini_key):
+    monkeypatch.setattr(
+        tokenization, "_http_post",
+        lambda url, **k: _FakeHTTPResponse(200, {"unexpected": True}),
+    )
+    assert count_tokens_remote("hello", GEMINI_SLUG) is None
+
+
+def test_remote_gemini_no_key_returns_none(monkeypatch):
+    from Orchestrator import config
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "", raising=False)
+    monkeypatch.setattr(config, "GOOGLE_API_KEY", "", raising=False)
+
+    def fail_if_called(url, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("transport called without a key")
+
+    monkeypatch.setattr(tokenization, "_http_post", fail_if_called)
+    assert count_tokens_remote("hello", GEMINI_SLUG) is None
+
+
+def test_remote_anthropic_success_parses_input_tokens(monkeypatch, anthropic_key):
+    from types import SimpleNamespace
+
+    from Orchestrator import config
+
+    seen = {}
+
+    class FakeMessages:
+        def count_tokens(self, **kwargs):
+            seen.update(kwargs)
+            return SimpleNamespace(input_tokens=12)
+
+    monkeypatch.setattr(
+        tokenization, "_anthropic_client_factory",
+        lambda api_key: SimpleNamespace(messages=FakeMessages()),
+    )
+    assert count_tokens_remote("hello world", ANTHROPIC_KEY) == 12
+    # WI-10 window math counts against the configured chat default
+    assert seen["model"] == config.ANTHROPIC_MODEL_DEFAULT
+    assert seen["messages"][0]["content"] == "hello world"
+
+
+def test_remote_anthropic_sdk_exception_returns_none(monkeypatch, anthropic_key):
+    class FakeMessages:
+        def count_tokens(self, **kwargs):
+            raise RuntimeError("api error")
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        tokenization, "_anthropic_client_factory",
+        lambda api_key: SimpleNamespace(messages=FakeMessages()),
+    )
+    assert count_tokens_remote("hello", ANTHROPIC_KEY) is None
+
+
+def test_remote_anthropic_no_key_returns_none(monkeypatch):
+    from Orchestrator import config
+
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "", raising=False)
+
+    def fail_if_called(api_key):  # pragma: no cover - must not run
+        raise AssertionError("client built without a key")
+
+    monkeypatch.setattr(tokenization, "_anthropic_client_factory", fail_if_called)
+    assert count_tokens_remote("hello", ANTHROPIC_KEY) is None
+
+
+def test_remote_local_backend_slug_returns_none(monkeypatch, gemini_key, anthropic_key):
+    """Registry models with local tokenizers have no remote counter — the
+    exact answer is already free and local."""
+    assert count_tokens_remote("hello", OPENAI_SLUG) is None
+    assert count_tokens_remote("hello", QWEN_SLUG) is None
+
+
+def test_remote_counter_never_raises_on_garbage(monkeypatch, gemini_key):
+    monkeypatch.setattr(
+        tokenization, "_http_post",
+        lambda url, **k: _FakeHTTPResponse(200, {"totalTokens": 3}),
+    )
+    assert count_tokens_remote(None, GEMINI_SLUG) in (None, 3)
+    assert count_tokens_remote("x", None) is None
+    assert count_tokens_remote("x", 12345) is None
+
+
+def test_hot_paths_never_invoke_remote_transport_for_any_embedding_slug(
+    monkeypatch, gemini_key, anthropic_key
+):
+    """THE WI-11 policy spy: estimate_tokens/clamp_to_tokens must never touch
+    a remote transport for any model key — even with keys configured and cold
+    backend caches."""
+    calls = []
+
+    def spy_post(url, **kwargs):
+        calls.append(("http", url))
+        raise AssertionError("hot path called the Gemini transport")
+
+    def spy_factory(api_key):
+        calls.append(("anthropic", api_key))
+        raise AssertionError("hot path built an Anthropic client")
+
+    monkeypatch.setattr(tokenization, "_http_post", spy_post)
+    monkeypatch.setattr(tokenization, "_anthropic_client_factory", spy_factory)
+    monkeypatch.setattr(tokenization, "_backends", {})
+
+    text = "hot path text " * 100
+    for key in list(EMBEDDING_MODELS) + [ANTHROPIC_KEY, None, "no-such-model"]:
+        estimate_tokens(text, key)
+        clamp_to_tokens(text, 20, key)
+
+    assert calls == [], f"hot paths touched remote transports: {calls}"
