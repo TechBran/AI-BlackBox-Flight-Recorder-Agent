@@ -182,7 +182,12 @@ async def test_ollama_document_not_prefixed():
 # ── Ollama: keep_alive passthrough / omission ────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_ollama_keep_alive_passthrough():
+async def test_ollama_keep_alive_passthrough(tmp_path, monkeypatch):
+    # Hermetic: point the stores dir at an empty tmp dir so a real per-box
+    # keep_alive.json override (wizard toggle) can't shadow the registry
+    # default this test asserts. (Override precedence itself is pinned by
+    # test_embeddings_keep_alive.py::test_provider_sends_overridden_keep_alive.)
+    monkeypatch.setattr(config, "EMBEDDINGS_STORES_DIR", str(tmp_path / "embeddings"))
     provider = get_provider(OLLAMA_SLUG)
     seen = []
     _ollama_with_mock_transport(provider, seen, OLLAMA_DIMS)
