@@ -1,0 +1,252 @@
+{
+  "audit": "M3/WI-10 provider context-window probes (measurement only)",
+  "route": "POST /chat/stream (persistence-free; payload as system message)",
+  "operator": "M3-Window-Probe",
+  "marker": "M3WINPROBE",
+  "hard_timeout_s": 240.0,
+  "updated_utc": "2026-07-03T16:28:59Z",
+  "probes": [
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210546,
+      "ttfb_s": 9.752,
+      "t_stream_start_s": 2.729,
+      "total_s": 9.84,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 412,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 47039,
+        "completion_tokens": 1
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 1,
+        "usage": 3,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:25:34Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210542,
+      "ttfb_s": 4.458,
+      "t_stream_start_s": 2.304,
+      "total_s": 4.554,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 77184,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:26:04Z"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.1",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210531,
+      "ttfb_s": 7.309,
+      "t_stream_start_s": 3.037,
+      "total_s": 7.327,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 44824,
+        "completion_tokens": 10,
+        "total_tokens": 44834,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "audio_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        }
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "usage": 4,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:26:29Z"
+    },
+    {
+      "provider": "xai",
+      "model": "grok-4.3",
+      "chars": 210000,
+      "est_tokens": 105000,
+      "request_body_chars": 210529,
+      "ttfb_s": 8.009,
+      "t_stream_start_s": 2.839,
+      "total_s": 8.012,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 161,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 44316,
+        "completion_tokens": 1,
+        "total_tokens": 44411,
+        "prompt_tokens_details": {
+          "text_tokens": 44316,
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "cached_tokens": 128
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 94,
+          "audio_tokens": 0,
+          "accepted_prediction_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "num_sources_used": 0,
+        "cost_in_usd_ticks": 554981000
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 34,
+        "content": 1,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:26:56Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 500000,
+      "est_tokens": 250000,
+      "request_body_chars": 500861,
+      "ttfb_s": 10.777,
+      "t_stream_start_s": 2.638,
+      "total_s": 11.049,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 164928,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:27:28Z"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "chars": 600000,
+      "est_tokens": 300000,
+      "request_body_chars": 600975,
+      "ttfb_s": 7.273,
+      "t_stream_start_s": 2.402,
+      "total_s": 8.185,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 350,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 116982,
+        "completion_tokens": 1
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "thinking": 1,
+        "usage": 3,
+        "content": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:28:23Z"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "chars": 750000,
+      "est_tokens": 375000,
+      "request_body_chars": 751136,
+      "ttfb_s": 11.534,
+      "t_stream_start_s": 2.91,
+      "total_s": 11.536,
+      "completed": true,
+      "output_head": "OK",
+      "content_chars": 2,
+      "thinking_chars": 0,
+      "tool_events": 0,
+      "usage": {
+        "prompt_tokens": 240573,
+        "completion_tokens": 4
+      },
+      "event_counts": {
+        "stream_start": 1,
+        "content_start": 1,
+        "content": 2,
+        "usage": 1,
+        "done": 1,
+        "stream_end": 1
+      },
+      "keepalives_before_first_token": 0,
+      "keepalive_frames_total": 0,
+      "error": null,
+      "started_utc": "2026-07-03T16:28:47Z"
+    }
+  ]
+}

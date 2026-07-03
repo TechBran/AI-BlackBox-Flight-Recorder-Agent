@@ -132,3 +132,41 @@ The immutable-ledger constraint required proving the probe route persists nothin
   ~$1.50); and the ledger guard hard-aborts if any legitimate future snapshot contains the probe
   marker literals — keep those strings out of dev snapshots; if the guard fires at baseline on a
   clean ledger, that is why.
+
+---
+
+## M7 re-probe addendum (2026-07-03 — cap-removal verification, post-M7 code)
+
+Run against the NEW code (caps removed, SSE keepalive live): commits 4b00003 (Task A keepalive)
+· 484fec0 (Task B Portal watchdog) · 37987ce (Task C cap removal) · d2ae001 (probe extension).
+Results: `docs/plans/artifacts/2026-07-03-m7-reprobe.json` (separate artifact — the M3 record above
+is untouched). Ledger guard passed on every probe; snapshot count + volume bytes identical
+before/after the full run (7,992 / 44,931,346).
+
+| Provider / model | Chars | stream_start (s) | TTFB (s) | provider-silence (s) | Completed | keepalives before first token |
+|---|---:|---:|---:|---:|---|---:|
+| gemini / gemini-3.1-pro-preview | 210,000 | 2.73 | 9.75 | 7.02 | ✅ | 0 |
+| anthropic / claude-opus-4-8 | 210,000 | 2.30 | 4.46 | 2.15 | ✅ | 0 |
+| openai / gpt-5.1 | 210,000 | 3.04 | 7.31 | 4.27 | ✅ | 0 |
+| xai / grok-4.3 | 210,000 | 2.84 | 8.01 | 5.17 | ✅ | 0 |
+| anthropic (escalation) | 500,000 | 2.64 | 10.78 | 8.14 | ✅ | 0 |
+| gemini (escalation) | 600,000 | 2.40 | 7.27 | 4.87 | ✅ | 0 |
+| anthropic (escalation, 240,573 true prompt tok) | 750,000 | 2.91 | 11.53 | 8.62 | ✅ | 0 |
+
+- **All probes completed cap-free** — 210k (the 2026-04-25 stall repro) per provider, plus
+  escalations to 750k chars / 240k true anthropic tokens. Zero keepalives on the wire is
+  CONSISTENT behavior, not absence: provider first-token silence never exceeded 8.62s on the day
+  (< the 10s keepalive interval). Opus 4.8 prefill was far faster than the 4.7-era 30–60s band and
+  plateaued ~8.6s even at 240k tokens.
+- **Keepalive wire proof** (since live providers wouldn't go silent long enough): a throwaway
+  uvicorn served the REAL seam (`chat_routes._stream_with_keepalive` + `SSE_KEEPALIVE_FRAME`
+  inside a `StreamingResponse`) with a fake provider silent for 25s → exactly **2 `": keepalive"`
+  comment frames** arrived on the wire before the first token, at the 10s cadence, and the SSE
+  consumer parsed through them cleanly. Hermetic timing tests: `test_chat_stream_keepalive.py`.
+- **Whole-snapshot delivery, live:** a real Brandon-scoped `/chat/stream` turn (anthropic) at
+  12:27 assembled **252,873 chars ≈ 126,437 floor-tokens** of fossil context (vs the deleted 75k
+  anthropic char cap) including keyword-retrieved **SNAP-20260226-3828 = 101,043 chars delivered
+  WHOLE** (the corpus single-max snapshot). Journal: `[STREAM CONTEXT] Delivery: 252,873 chars …
+  largest snapshot 101,043 chars, delivered WHOLE`; `[ANTHROPIC DEBUG] System: 275,177 chars`.
+  Turn completed (`OK`, TTFB 6.08s). No window-guard drop fired (budget 840,000 tokens).
+- Spend: ~$3 total (4× 210k + 3 escalation probes; anthropic 500k/750k dominate).
