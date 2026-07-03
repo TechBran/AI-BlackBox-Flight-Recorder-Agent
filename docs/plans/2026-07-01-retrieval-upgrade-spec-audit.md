@@ -457,3 +457,8 @@ motivates ANN, the contract is:
 - **Enablement bar (from the audit):** exact cosine at the post-chunk scale (~19-23k rows,
   ~235MB matrix, tens of ms) is nowhere near the ceiling; ANN is opt-in behind a flag, enabled
   only past ~100k rows AND after the gate above passes on the golden set.
+
+> Post-flip note (2026-07-03 review): three openers (search.get_active_store/swap_active,
+> watcher gap-heal, boot transcode) can cache a FILELESS slug as v1; a same-uptime migration
+> to that exact slug then parks with a clean resumable "schema 1 vs requested 2" refusal
+> (restart clears). Unreachable on a box whose stores exist; fails loud, not silent. On record.
