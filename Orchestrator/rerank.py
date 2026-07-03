@@ -76,12 +76,20 @@ from Orchestrator.config import CFG
 # model_id + ops metadata); vram_gb feeds the WI-9/M10 placement arithmetic
 # when reranker placement activates post-GPU.
 RERANK_MODELS = {
+    # query_instruction (REQUIRED for Qwen3-Reranker correctness): the query is
+    # prepended with this instruct prefix before scoring, exactly as the embedding
+    # registry does. Measured live on the RTX 2000 Ada (2026-07-03): WITHOUT the
+    # prefix the reranker scores "is this a well-formed passage" not "is this
+    # relevant to THIS query" and INVERTS — a relevant passage scored 0.726 vs an
+    # off-topic cake recipe at 0.790; WITH the prefix it ranks correctly with a
+    # wide margin (0.822 vs 0.530). Shipping the bare query would degrade recall.
     "qwen3-reranker-0.6b": {
         "provider": "vllm",
         "model_id": "Qwen/Qwen3-Reranker-0.6B",
         "label": "Qwen3 Reranker 0.6B (local GPU)",
         "vram_gb": 1.2,  # FP16 resident (M10 Task 10.2 budget arithmetic)
         "max_input_tokens": 32768,
+        "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
         "quality_note": "Default post-GPU pick; pairs with the qwen3 embedding stores",
     },
     "qwen3-reranker-4b": {
@@ -90,6 +98,7 @@ RERANK_MODELS = {
         "label": "Qwen3 Reranker 4B (local GPU)",
         "vram_gb": 2.5,  # Q4 resident; FP16 ≈ 8GB wants the 16GB card mostly free
         "max_input_tokens": 32768,
+        "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
         "quality_note": "Bigger cross-encoder — only if Phase B shows 0.6B leaves recall on the table",
     },
 }
@@ -116,6 +125,13 @@ def get_settings() -> dict:
         # Registry slug -> wire model id; unknown value passes verbatim
         # (escape hatch for a custom served-model name).
         "model_id": entry["model_id"] if entry else model,
+        # Instruct prefix prepended to the query (Qwen3-Reranker requires it —
+        # see RERANK_MODELS comment). Config override wins; else the model's
+        # registry value; else empty (a reranker that needs no instruction).
+        "query_instruction": CFG.get(
+            "rerank", "query_instruction",
+            fallback=(entry.get("query_instruction", "") if entry else ""),
+        ),
         "timeout_s": CFG.getfloat("rerank", "timeout_s", fallback=15.0),
         "preflight_ceiling_ms": CFG.getfloat(
             "rerank", "preflight_ceiling_ms", fallback=500.0
@@ -142,7 +158,8 @@ def score(query: str, passages: list[str]) -> list[float] | None:
             return None
         resp = requests.post(
             s["base_url"] + "/score",
-            json={"model": s["model_id"], "text_1": query,
+            json={"model": s["model_id"],
+                  "text_1": s["query_instruction"] + query,
                   "text_2": list(passages)},
             timeout=s["timeout_s"],
         )

@@ -130,10 +130,40 @@ def test_score_vllm_parses_and_honors_index_alignment(monkeypatch):
         got = rerank.score("the query", ["pass A", "pass B"])
     assert got == [0.1, 0.9]
     assert calls["url"] == "http://h:8091/score"      # trailing / stripped
-    assert calls["json"] == {"model": "Qwen/Qwen3-Reranker-0.6B",
-                             "text_1": "the query",
-                             "text_2": ["pass A", "pass B"]}
+    # text_1 carries the Qwen3-Reranker instruct prefix (required for correct
+    # scoring — see RERANK_MODELS comment); the raw query follows it.
+    assert calls["json"]["model"] == "Qwen/Qwen3-Reranker-0.6B"
+    assert calls["json"]["text_1"].endswith("\nQuery: the query")
+    assert calls["json"]["text_1"].startswith("Instruct:")
+    assert calls["json"]["text_2"] == ["pass A", "pass B"]
     assert calls["timeout"] == 7.0
+
+
+def test_score_prepends_model_query_instruction(monkeypatch):
+    """Qwen3-Reranker inverts without its instruct prefix (measured on GPU);
+    score() must prepend the active model's query_instruction to the query."""
+    seen = {}
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda url, json=None, timeout=None:
+                        (seen.update(json), FakeResp(200, {"data": [{"index": 0, "score": 0.5}]}))[1])
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 model="qwen3-reranker-0.6b"):
+        rerank.score("fix the truncation", ["some passage"])
+    assert seen["text_1"] == (
+        "Instruct: Given a search query, retrieve relevant passages that answer the query"
+        "\nQuery: fix the truncation")
+
+
+def test_score_config_query_instruction_override(monkeypatch):
+    """[rerank] query_instruction overrides the model default; empty = bare query."""
+    seen = {}
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda url, json=None, timeout=None:
+                        (seen.update(json), FakeResp(200, {"data": [{"index": 0, "score": 0.5}]}))[1])
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 model="qwen3-reranker-0.6b", query_instruction=""):
+        rerank.score("bare", ["p"])
+    assert seen["text_1"] == "bare"
 
 
 def test_score_vllm_missing_index_falls_back_to_order(monkeypatch):
