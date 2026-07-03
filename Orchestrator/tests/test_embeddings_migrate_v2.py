@@ -254,6 +254,46 @@ def test_pack_preserves_order_and_default_cap():
     assert flat == [f"S{i}" for i in range(70)]
 
 
+# ── chunk_group_batches: iteration-2 whole-doc-at-ordinal-0 policy ───────────
+
+def test_chunk_group_batches_prepends_whole_body_for_multichunk(monkeypatch):
+    """A multi-chunk snapshot's group is [whole body] + chunks — the FIRST
+    text is the whole body (ordinal 0), never a chunk; a single-chunk
+    snapshot stays exactly its one chunk (identity chunking, unchanged)."""
+    counts = {"snap00": 3, "snap01": 1}
+    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    body0 = "snap00 whole body text, much longer than any scoring window"
+    body1 = "snap01 short body"
+
+    batches, empty = migrate.chunk_group_batches(
+        [("SNAP-0", body0), ("SNAP-1", body1)], TARGET)
+
+    assert empty == []
+    groups = [(sid, texts) for b in batches for sid, texts in b]
+    assert groups[0][0] == "SNAP-0"
+    assert groups[0][1][0] == body0                    # whole body FIRST
+    assert groups[0][1][1:] == [f"snap00::chunk{j:02d}" for j in range(3)]
+    assert groups[1] == ("SNAP-1", ["snap01::chunk00"])  # single: unchanged
+
+
+def test_chunk_group_batches_counts_whole_body_against_cap(monkeypatch):
+    """The +1 whole-body text per multi-chunk snapshot participates in the
+    CHUNK_BATCH_CAP packing math like any other group member."""
+    counts = {f"snap{i:02d}": 10 for i in range(3)}
+    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    ids_texts = [(f"SNAP-{i}", f"snap{i:02d} body") for i in range(3)]
+
+    batches, empty = migrate.chunk_group_batches(ids_texts, TARGET)
+
+    assert empty == []
+    # groups are 11 texts each: 11+11=22 fits the 32 cap; +11=33 does not
+    assert [[sid for sid, _ in b] for b in batches] == [
+        ["SNAP-0", "SNAP-1"], ["SNAP-2"],
+    ]
+    assert sum(len(t) for _, t in batches[0]) == 22
+    assert sum(len(t) for _, t in batches[1]) == 11
+
+
 # ── rebuild: convergence on a multi-chunk corpus ─────────────────────────────
 
 @pytest.mark.asyncio
@@ -289,6 +329,12 @@ async def test_rebuild_converges_multichunk_corpus(env, fake_provider):
     assert all(purpose == "document" for _, purpose in fake_provider.calls)
     for text in fake_provider.embedded_texts:
         assert any(text in body for body in bodies.values())
+    # iteration-2 policy: every multi-chunk snapshot's WHOLE body was
+    # embedded too (ordinal 0), so its group is n_chunks + 1 rows
+    for sid, body in bodies.items():
+        assert body in fake_provider.embedded_texts
+        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        assert ids.count(sid) == n_chunks + 1
     # every provider call obeyed the flatten cap (no ~10-chunk snapshot here
     # exceeds it alone; the oversize case has its own test below)
     for texts, _ in fake_provider.calls:
@@ -343,7 +389,9 @@ async def test_interrupted_rebuild_resumes_without_duplicates(
 ):
     index_path, stores_dir, volume_path = env
     _build_volume(index_path, volume_path, n=5)
-    # 5 snapshots x 8 chunks: batch 1 = 4 snaps (32 chunks), batch 2 = 1 snap
+    # 5 snapshots x 8 chunks (+1 whole-body row each — iteration-2 policy):
+    # groups of 9 → batch 1 = 3 snaps (27 texts; +9 would exceed the 32 cap),
+    # batch 2 = 2 snaps (18 texts)
     counts = {f"snap{i:02d}": 8 for i in range(5)}
     monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
     fake_provider.hook = lambda _texts: migrate.request_cancel()
@@ -353,7 +401,7 @@ async def test_interrupted_rebuild_resumes_without_duplicates(
     assert result["state"] == "cancelled"
     bstore = get_store(TARGET, base_dir=stores_dir / migrate.BUILD_DIR_NAME,
                        schema=2)
-    assert bstore.snapshots == 4 and bstore.rows == 32   # batch 1 kept
+    assert bstore.snapshots == 3 and bstore.rows == 27   # batch 1 kept
     # persisted state still carries the rebuild kind (resume metadata)
     persisted = json.loads(
         (stores_dir / migrate.STATE_FILE).read_text(encoding="utf-8")
@@ -364,18 +412,18 @@ async def test_interrupted_rebuild_resumes_without_duplicates(
     # re-run converges on the delta only — zero duplicate groups
     result2 = await migrate.run_rebuild(TARGET)
     assert result2["state"] == "done"
-    assert result2["done"] == 1                      # only the remaining snapshot
-    assert bstore.snapshots == 5 and bstore.rows == 40   # exact, no dups
-    assert fake_provider.call_sizes == [32, 8]
+    assert result2["done"] == 2                      # only the remaining snapshots
+    assert bstore.snapshots == 5 and bstore.rows == 45   # exact, no dups
+    assert fake_provider.call_sizes == [27, 18]
     ids, ordinals = _read_group_layout(_build_store_dir(stores_dir))
     _assert_contiguous_groups(ids, ordinals)
 
     # group-skip idempotency at the store seam: a re-append writes nothing
     rng = np.random.default_rng(3)
     assert bstore.append_group(
-        "SNAP-0", [rng.standard_normal(TARGET_DIMS) for _ in range(8)]
+        "SNAP-0", [rng.standard_normal(TARGET_DIMS) for _ in range(9)]
     ) == 0
-    assert bstore.rows == 40
+    assert bstore.rows == 45
 
 
 # ── rebuild: boot resume stays build-only ────────────────────────────────────
@@ -448,10 +496,11 @@ async def test_oversized_snapshot_is_one_provider_call(env, fake_provider,
     result = await migrate.run_rebuild(TARGET)
 
     assert result["state"] == "done"
-    assert fake_provider.call_sizes == [40]          # alone, ONE call, over cap
+    # 40 chunks + the whole-body row: alone, ONE call, over cap
+    assert fake_provider.call_sizes == [41]
     bstore = get_store(TARGET, base_dir=stores_dir / migrate.BUILD_DIR_NAME,
                        schema=2)
-    assert bstore.rows == 40 and bstore.snapshots == 1
+    assert bstore.rows == 41 and bstore.snapshots == 1
 
 
 @pytest.mark.asyncio
@@ -467,11 +516,13 @@ async def test_mixed_batch_packs_whole_snapshots_under_cap(
     result = await migrate.run_rebuild(TARGET)
 
     assert result["state"] == "done"
-    # 10+10+10=30 fits; the 4th snapshot would hit 40 → second call gets 10+2
-    assert fake_provider.call_sizes == [30, 12]
+    # groups are 11,11,11,11,3 (chunks + the whole-body row): 11+11=22 fits;
+    # the 3rd would hit 33 → second call packs 11+11+3=25 — the +1 per
+    # multi-chunk snapshot counts against the cap like any other group member
+    assert fake_provider.call_sizes == [22, 25]
     bstore = get_store(TARGET, base_dir=stores_dir / migrate.BUILD_DIR_NAME,
                        schema=2)
-    assert bstore.rows == 42 and bstore.snapshots == 5
+    assert bstore.rows == 47 and bstore.snapshots == 5
 
 
 # ── rebuild: quarantine + stall guard (engine failure semantics mirrored) ────
@@ -571,10 +622,20 @@ async def test_plain_migration_onto_v2_target_lands_chunk_groups(
     assert store.missing(sorted(bodies)) == []
     ids, ordinals = _read_group_layout(stores_dir / TARGET)
     assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
-    # PROOF the side door is closed: no whole 17k-char body was ever embedded
-    # — every provider text is a proper chunk of one
-    full_bodies = set(bodies.values())
-    assert not any(t in full_bodies for t in fake_provider.embedded_texts)
+    # PROOF the side door is closed: a whole body never lands as a BARE
+    # 1-row group (missing() would empty and the poison would self-hide).
+    # Post-iteration-2 the whole body IS embedded — but only as ordinal 0 of
+    # a multi-row group alongside its chunks (n_chunks + 1 rows).
+    for sid, body in bodies.items():
+        group_size = ids.count(sid)
+        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        assert n_chunks > 1                            # fixture multi-chunks
+        assert group_size == n_chunks + 1
+        assert body in fake_provider.embedded_texts    # whole-doc retained
+        # ordinal 0 is the WHOLE-document vector: querying with the body's
+        # deterministic fake vector must hit this snapshot at cosine ~1.0
+        top = store.search(np.asarray(fake_provider._vec(body)), k=1)
+        assert top[0][0] == sid and top[0][1] == pytest.approx(1.0, abs=1e-5)
     for texts, _ in fake_provider.calls:
         assert len(texts) <= migrate.CHUNK_BATCH_CAP
     # and it is still a MIGRATION: the cutover fires exactly as before
@@ -706,8 +767,10 @@ async def test_gap_heal_v2_chunks_groups_and_sub_batches(env, fake_provider,
                                                          monkeypatch):
     index_path, stores_dir, volume_path = env
     bodies = _build_volume(index_path, volume_path, n=5)
-    # v2 ACTIVE store (the M6f post-cutover state), 5 gaps, 16 chunks each:
-    # 80 chunks → the 32-cap forces 3 provider calls (32, 32, 16)
+    # v2 ACTIVE store (the M6f post-cutover state), 5 gaps, 16 chunks each
+    # (+1 whole-body row — the heal inherits the iteration-2 policy via
+    # chunk_group_batches): groups of 17 → 17+17=34 exceeds the 32 cap, so
+    # every snapshot goes in its own provider call
     store = get_store(TARGET, base_dir=stores_dir, schema=2)
     counts = {f"snap{i:02d}": 16 for i in range(5)}
     monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
@@ -717,9 +780,9 @@ async def test_gap_heal_v2_chunks_groups_and_sub_batches(env, fake_provider,
     # SNAPSHOT currency (matches health["healed"] on every ops surface;
     # on v1 rows == snapshots so the two currencies coincide there)
     assert healed == 5
-    assert store.snapshots == 5 and store.rows == 80
+    assert store.snapshots == 5 and store.rows == 85
     assert store.missing(sorted(bodies)) == []
-    assert fake_provider.call_sizes == [32, 32, 16]
+    assert fake_provider.call_sizes == [17, 17, 17, 17, 17]
     ids, ordinals = _read_group_layout(stores_dir / TARGET)
     assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
 
@@ -763,7 +826,7 @@ async def test_gap_heal_v2_provider_failure_keeps_partial_and_returns(
     healed = await watcher._gap_heal(TARGET)
 
     assert healed == 0                                # failure path returns 0
-    assert store.snapshots == 4 and store.rows == 64  # first 2 batches kept
+    assert store.snapshots == 4 and store.rows == 68  # first 4 batches kept
     assert "gap-heal failed (will retry next run)" in capsys.readouterr().out
 
 

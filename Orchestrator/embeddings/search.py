@@ -216,7 +216,14 @@ def embed_snapshot_for_index(text: str) -> dict:
     - v2 active store → ``{"chunk_vectors": [v0..vn]}`` — chunk_snapshot
       scoring windows embedded in ONE provider.embed call (the provider layer
       batches: ollama/openai one request, gemini per-text loop), aligned to
-      chunk order for a contiguous append_group.
+      chunk order for a contiguous append_group. GROUP POLICY (M6f iteration
+      2): a group of size >1 carries the WHOLE-snapshot vector at ordinal 0 —
+      the raw body is prepended to the provider call (its M5 clamp bounds the
+      length, same as the v1 embedding) so max-cosine collapse scores
+      max(whole, chunks), which strictly dominates both v1 whole-doc and
+      pure-chunk scoring. Single-chunk snapshots are unchanged (their one
+      chunk IS the whole text — identity chunking). M8 windowing relies on
+      this rule: an ordinal-0 hit means "no specific window".
     - any failure (store unavailable, provider down/mid-batch death, empty
       body) → ``{}`` — the mint completes vector-less and the catch-up loop
       (migrate diff / watcher gap-heal keyed on store.missing()) re-embeds
@@ -247,6 +254,12 @@ def embed_snapshot_for_index(text: str) -> dict:
         if not chunks:
             print(f"[EMBEDDING] {slug}: empty snapshot body — nothing to embed")
             return {}
+        if len(chunks) > 1:
+            # Group policy (M6f iteration 2): whole-doc vector at ordinal 0.
+            # The provider's M5 clamp bounds the whole-body length — this is
+            # exactly the v1 whole-snapshot embedding, retained alongside the
+            # chunks so search scores max(whole, chunks).
+            chunks = [text] + chunks
         provider = get_provider(slug)
         vectors = _run_async(provider.embed(chunks, "document"))
     except Exception as e:

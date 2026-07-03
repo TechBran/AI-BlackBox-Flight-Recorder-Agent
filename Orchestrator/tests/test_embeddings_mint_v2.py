@@ -145,10 +145,15 @@ def test_v2_active_returns_aligned_chunk_vectors_one_provider_call(env):
 
     assert list(payload) == ["chunk_vectors"]
     vectors = payload["chunk_vectors"]
-    assert len(vectors) == len(chunks)
-    # ONE provider.embed call carrying ALL chunks in document order
-    assert fake.calls == [(chunks, "document")]
-    # vector i belongs to chunk i (SeqProvider tags by position)
+    # M6f iteration 2: multi-chunk group = whole-doc vector + n chunks
+    assert len(vectors) == len(chunks) + 1
+    # ONE provider.embed call: the WHOLE body FIRST (ordinal 0), then the
+    # chunks in document order — the first embedded text must be the whole
+    # body, never a chunk (the provider's M5 clamp bounds its length).
+    assert fake.calls == [([text] + chunks, "document")]
+    assert fake.calls[0][0][0] == text
+    # vector i belongs to text i (SeqProvider tags by position): vector 0 is
+    # the whole-doc embed, vector i+1 is chunk i
     for i, vec in enumerate(vectors):
         assert vec == _basis(i)
 
@@ -162,6 +167,35 @@ def test_v2_active_short_text_single_chunk_group_of_one(env):
 
     assert payload == {"chunk_vectors": [_basis(0)]}
     assert fake.calls == [(["short snapshot body"], "document")]
+
+
+def test_v2_multichunk_mint_lands_whole_doc_vector_at_ordinal_zero(env):
+    """M6f iteration 2 end-to-end: a minted multi-chunk snapshot's group has
+    n+1 rows and row 0 (ordinal 0) is the WHOLE-document vector — the store's
+    max-cosine collapse then scores max(whole, chunks)."""
+    _, stores_dir = env
+    store = _activate_v2(stores_dir)
+    fake = _install(SeqProvider())
+    text = _long_text()
+    chunks = chunk_snapshot(text, model_key=SLUG)
+    assert len(chunks) > 1
+    snap_id = "SNAP-20260702-0042"
+
+    payload = search_mod.embed_snapshot_for_index(text)
+    _mint(snap_id, **payload)
+
+    assert store.rows == len(chunks) + 1
+    ordinals = json.loads(
+        (stores_dir / SLUG / "ordinals.json").read_text(encoding="utf-8")
+    )
+    assert ordinals == list(range(len(chunks) + 1))
+    # SeqProvider tags by position: text 0 was the whole body, so the row at
+    # ordinal 0 must be its vector (basis 0) — a whole-doc query tops it
+    matrix = _rows_matrix(stores_dir)
+    assert int(np.argmax(matrix[0])) == 0
+    assert fake.calls[0][0][0] == text  # first embedded text = whole body
+    hits = store.search(_basis(0), k=1)
+    assert hits == [(snap_id, pytest.approx(1.0, abs=1e-5))]
 
 
 def test_provider_failure_v1_returns_empty_dict_never_raises(env, capsys):
@@ -415,9 +449,14 @@ def test_mint_with_content_v2_store_gets_full_chunk_group(env, mint_site, monkey
     result = mint_site.mint_with_content("Brandon", "ignored", reason="TEST")
 
     assert result["snap_id"] == "SNAP-20260702-0101"
-    assert fake.calls == [(expected_chunks, "document")]
+    # M6f iteration 2: the whole body leads the provider call (ordinal 0)
+    assert fake.calls == [([body] + expected_chunks, "document")]
     assert store.ids() == {"SNAP-20260702-0101"}
-    assert store.rows == len(expected_chunks)
+    assert store.rows == len(expected_chunks) + 1
+    ordinals = json.loads(
+        (stores_dir / SLUG / "ordinals.json").read_text(encoding="utf-8")
+    )
+    assert ordinals == list(range(len(expected_chunks) + 1))
     entry = _entry(index_path, "SNAP-20260702-0101")
     assert "embedding" not in entry and "chunk_vectors" not in entry
 

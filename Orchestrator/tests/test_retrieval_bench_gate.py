@@ -288,7 +288,7 @@ def _wire_gate(monkeypatch, tmp_path, baseline_hits_tail: bool):
     return argparse.Namespace(
         out_date="2099-01-01", candidate_dir=str(tmp_path), candidate_slug=SLUG,
         gate_sweep_json=str(RB.GATE_SWEEP_JSON), gate_weight=0.005,
-        skip_tests_gate=True)
+        skip_tests_gate=True, mmr_lambda=None, candidate_n=None)
 
 
 def test_run_gate_all_pass_writes_artifacts_and_exits_zero(

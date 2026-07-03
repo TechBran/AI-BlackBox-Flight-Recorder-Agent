@@ -38,8 +38,10 @@ resume_if_interrupted() relaunches a job whose persisted state says "running".
 Rebuild mode (M6 task 6d, ADDITIVE — the model-switch flow above is the
 watcher's recovery path and is untouched): run_rebuild(slug) builds a
 schema-2 chunk store under {stores_dir}/_build/{slug} — same re-diff loop in
-SNAPSHOT currency, but each snapshot's text is chunked (chunk_snapshot),
-chunks are FLATTENED across whole snapshots into ≤CHUNK_BATCH_CAP-chunk
+SNAPSHOT currency, but each snapshot's text is chunked (chunk_snapshot; a
+multi-chunk snapshot additionally carries its WHOLE clamped body at ordinal
+0 — the M6f iteration-2 group policy, see chunk_group_batches), texts are
+FLATTENED across whole snapshots into ≤CHUNK_BATCH_CAP-chunk
 provider calls (a single snapshot exceeding the cap still goes in ONE call
 by itself — group alignment beats the cap), then regrouped into one
 append_group per snapshot (contiguous ordinals, whole-group idempotent).
@@ -368,14 +370,27 @@ def chunk_group_batches(ids_texts: list, model_key: str) -> tuple:
     whose text chunks to nothing are returned in empty_ids for the caller's
     quarantine/skip bookkeeping. Sync + CPU-bound (tokenizer work) — callers
     run it via asyncio.to_thread.
+
+    GROUP POLICY (M6f iteration 2): a multi-chunk snapshot contributes the
+    WHOLE-snapshot text FIRST (ordinal 0 — the provider's M5 clamp bounds
+    its length, same as the v1 embedding) followed by its chunks, so the
+    landed group scores max(whole, chunks) under the v2 max-cosine collapse.
+    Single-chunk snapshots are unchanged (their one chunk IS the whole
+    text). The +1 text per multi-chunk snapshot counts against the
+    CHUNK_BATCH_CAP packing like any other group member. Every group-fill
+    consumer inherits this here: the rebuild engine, the model-switch v2
+    fill (_fill_v2_batch), and the watcher gap-heal. M8 windowing relies on
+    the rule: an ordinal-0 hit means "no specific window".
     """
     chunked, empty_ids = [], []
     for snap_id, text in ids_texts:
         chunks = chunk_snapshot(text, model_key=model_key)
-        if chunks:
-            chunked.append((snap_id, chunks))
-        else:
+        if not chunks:
             empty_ids.append(snap_id)
+            continue
+        if len(chunks) > 1:
+            chunks = [text] + chunks  # whole-doc vector at ordinal 0
+        chunked.append((snap_id, chunks))
     return pack_chunk_batches(chunked), empty_ids
 
 
