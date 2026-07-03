@@ -130,7 +130,8 @@ class BlackBoxToolExecutor:
     """
 
     def __init__(self, operator: str = "system", base_url: str = "http://localhost:9091",
-                 origin_device_id: Optional[str] = None):
+                 origin_device_id: Optional[str] = None,
+                 caller: Optional[str] = None):
         self.operator = operator
         self.base_url = base_url
         # M3: the tailnet identity of the ORIGINATING device (for origin-aware
@@ -138,6 +139,11 @@ class BlackBoxToolExecutor:
         # operator's primary device); the Android app stamps its own tailnet id here
         # (3.6 Android half) so a device task defaults back to that device.
         self.origin_device_id = origin_device_id
+        # M8/WI-7a: calling SURFACE marker (ToolContext.caller). Only
+        # /local/tools/execute stamps it ("local" = on-device phone bridge,
+        # "mcp-gateway" = remote MCP); None everywhere else. Window-bound
+        # executors budget their result size on it.
+        self.caller = caller
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Execute a tool and return the result.
@@ -165,7 +171,8 @@ class BlackBoxToolExecutor:
             return await ex(
                 tool_input,
                 ToolContext(operator=self.operator, base_url=self.base_url,
-                            origin_device_id=self.origin_device_id),
+                            origin_device_id=self.origin_device_id,
+                            caller=self.caller),
             )
         except Exception as e:
             import traceback
@@ -206,6 +213,7 @@ async def execute_tool(
     tool_input: Dict[str, Any],
     operator: str = "system",
     origin_device_id: Optional[str] = None,
+    caller: Optional[str] = None,
 ) -> ToolResult:
     """
     Convenience function to execute a tool.
@@ -215,8 +223,13 @@ async def execute_tool(
     path (resolves to the operator's primary device); the Android-originated surface
     passes its own tailnet id (3.6 Android half).
 
+    ``caller`` (M8/WI-7a) threads the calling-surface marker into ToolContext
+    ("local" = on-device phone bridge, "mcp-gateway" = remote MCP gateway, None =
+    everything else) so window-bound executors can budget their result size.
+
     Usage:
         result = await execute_tool("send_sms", {"phone_number": "+1555...", "message": "Hello"}, "Brandon")
     """
-    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=origin_device_id)
+    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=origin_device_id,
+                                    caller=caller)
     return await executor.execute(tool_name, tool_input)

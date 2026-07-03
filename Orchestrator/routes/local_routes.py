@@ -35,6 +35,7 @@ from Orchestrator.local_provider.tool_injection import (
 )
 from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
+from Orchestrator.toolvault.context import ON_DEVICE_CALLER
 
 # The MCP remote gateway (MCP/blackbox_mcp_server.py) REUSES POST /local/tools/execute
 # to run the FULL ToolVault catalog for frontier models (locked decision,
@@ -259,7 +260,14 @@ async def local_tools_execute(request: Request):
     params["operator"] = operator
 
     try:
-        result = await execute_tool(tool, params, operator)
+        # Caller-surface marker (M8/WI-7a), same fail-closed convention as the
+        # recursion guard above: NO X-BlackBox-Caller header on this endpoint
+        # means the on-device Android bridge -> stamp ON_DEVICE_CALLER so
+        # window-bound executors (search_snapshots) budget their result for
+        # the phone's 6,144-token window. The MCP gateway's declared
+        # "mcp-gateway" passes through unchanged (full-size results).
+        result = await execute_tool(tool, params, operator,
+                                    caller=caller or ON_DEVICE_CALLER)
         return {"success": bool(result.success), "result": result.result}
     except Exception as e:
         print(f"[LOCAL PROVIDER] execute failed: {e}")

@@ -58,9 +58,12 @@ def test_tools_execute_routes_through_execute_tool(client, monkeypatch):
         def __init__(self, tool, operator):
             self.result = {"echo": tool, "op": operator}
 
-    async def fake_execute_tool(tool, params, operator):
+    async def fake_execute_tool(tool, params, operator, caller=None):
         # operator must be threaded both into params AND passed positionally
         assert params.get("operator") == operator
+        # M8: an unmarked request (the Android bridge sends no header) is
+        # stamped as the on-device caller so window-bound executors budget it.
+        assert caller == "local"
         return _FakeResult(tool, operator)
 
     monkeypatch.setattr(local_routes, "execute_tool", fake_execute_tool)
@@ -124,8 +127,11 @@ def test_tools_execute_allows_device_control_for_mcp_gateway(client, monkeypatch
         success = True
         result = {"ok": True}
 
-    async def fake_execute_tool(tool, params, operator):
+    async def fake_execute_tool(tool, params, operator, caller=None):
         ran["tool"] = tool
+        # M8: the declared gateway identity passes through unchanged (full-size
+        # results — the caller-scoped budget applies only to "local").
+        assert caller == "mcp-gateway"
         return _Ok()
 
     monkeypatch.setattr(local_routes, "execute_tool", fake_execute_tool)
