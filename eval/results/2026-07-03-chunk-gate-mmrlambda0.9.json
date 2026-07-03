@@ -1,0 +1,460 @@
+{
+  "date": "2026-07-03",
+  "k": 10,
+  "n_rows": 503,
+  "candidate": {
+    "slug": "gemini-embedding-2",
+    "dir": "/home/ai-black-box-fc/Desktop/blackbox_poc./blackbox_poc/Manifest/embeddings/_build2/gemini-embedding-2",
+    "schema": 2,
+    "rows": 32756,
+    "snapshots": 7601,
+    "generation": 60
+  },
+  "baseline_source": "fresh same-config active-store runs (pipeline overrides active; the sweep-JSON baselines were measured at the default config)",
+  "baseline_weight": 0.005,
+  "pipeline_overrides": {
+    "mmr_lambda": 0.9
+  },
+  "active_store_snapshots": 7906,
+  "gates": [
+    {
+      "gate": "1",
+      "label": "hybrid overall r@10 >= baseline (no regression)",
+      "baseline": 0.5348,
+      "candidate": 0.5229,
+      "verdict": "FAIL",
+      "note": ""
+    },
+    {
+      "gate": "2",
+      "label": "semantic overall r@10 >= baseline (no regression)",
+      "baseline": 0.5408,
+      "candidate": 0.5507,
+      "verdict": "PASS",
+      "note": ""
+    },
+    {
+      "gate": "3a",
+      "label": "hybrid >10k-band r@10 MUST IMPROVE (>)",
+      "baseline": 0.6867,
+      "candidate": 0.72,
+      "verdict": "PASS",
+      "note": ""
+    },
+    {
+      "gate": "3b",
+      "label": "semantic >10k-band r@10 MUST IMPROVE (>)",
+      "baseline": 0.4333,
+      "candidate": 0.5867,
+      "verdict": "PASS",
+      "note": ""
+    },
+    {
+      "gate": "4a",
+      "label": "hybrid tail-third r@10 MUST IMPROVE (>)",
+      "baseline": 0.6019,
+      "candidate": 0.6408,
+      "verdict": "PASS",
+      "note": "baseline measured fresh at the gate weight (sweep JSON has no position strata)"
+    },
+    {
+      "gate": "4b",
+      "label": "semantic tail-third r@10 MUST IMPROVE (>)",
+      "baseline": 0.5437,
+      "candidate": 0.6117,
+      "verdict": "PASS",
+      "note": "baseline measured fresh at the gate weight (sweep JSON has no position strata)"
+    },
+    {
+      "gate": "5a",
+      "label": "hybrid human holdout pairs still hit (hits@10)",
+      "baseline": "3/3",
+      "candidate": "1/3",
+      "verdict": "FAIL",
+      "note": ""
+    },
+    {
+      "gate": "5b",
+      "label": "semantic human holdout pairs still hit (hits@10)",
+      "baseline": "3/3",
+      "candidate": "3/3",
+      "verdict": "PASS",
+      "note": ""
+    },
+    {
+      "gate": "6",
+      "label": "golden + lean-profile suites vs candidate (test_retrieval_golden.py + test_local_lean_retrieval.py)",
+      "baseline": "all pass",
+      "candidate": "FAILURES",
+      "verdict": "FAIL",
+      "note": ""
+    }
+  ],
+  "all_pass": false,
+  "runs": {
+    "baseline": {
+      "hybrid": {
+        "overall": {
+          "n": 503,
+          "recall@1": 0.3817,
+          "recall@3": 0.3976,
+          "recall@5": 0.4274,
+          "recall@10": 0.5348,
+          "mrr": 0.4087
+        },
+        "covered_only": {
+          "n": 503,
+          "recall@1": 0.3817,
+          "recall@3": 0.3976,
+          "recall@5": 0.4274,
+          "recall@10": 0.5348,
+          "mrr": 0.4087
+        },
+        "gold_uncovered": 0,
+        "strata": {
+          "length_band": {
+            "6-10k": {
+              "n": 87,
+              "recall@1": 0.5632,
+              "recall@3": 0.5747,
+              "recall@5": 0.5862,
+              "recall@10": 0.6782,
+              "mrr": 0.5821
+            },
+            "<6k": {
+              "n": 266,
+              "recall@1": 0.2895,
+              "recall@3": 0.3008,
+              "recall@5": 0.3233,
+              "recall@10": 0.4023,
+              "mrr": 0.3098
+            },
+            ">10k": {
+              "n": 150,
+              "recall@1": 0.44,
+              "recall@3": 0.4667,
+              "recall@5": 0.52,
+              "recall@10": 0.6867,
+              "mrr": 0.4834
+            }
+          },
+          "position_third": {
+            "None": {
+              "n": 3,
+              "recall@1": 1.0,
+              "recall@3": 1.0,
+              "recall@5": 1.0,
+              "recall@10": 1.0,
+              "mrr": 1.0
+            },
+            "head": {
+              "n": 120,
+              "recall@1": 0.375,
+              "recall@3": 0.3833,
+              "recall@5": 0.425,
+              "recall@10": 0.5333,
+              "mrr": 0.4003
+            },
+            "middle": {
+              "n": 277,
+              "recall@1": 0.3574,
+              "recall@3": 0.3755,
+              "recall@5": 0.3971,
+              "recall@10": 0.5054,
+              "mrr": 0.3843
+            },
+            "tail": {
+              "n": 103,
+              "recall@1": 0.4369,
+              "recall@3": 0.4563,
+              "recall@5": 0.4951,
+              "recall@10": 0.6019,
+              "mrr": 0.4668
+            }
+          }
+        },
+        "holdout": {
+          "n": 3,
+          "hits@10": 3,
+          "detail": {
+            "SNAP-20260606-6930": 1,
+            "SNAP-20260427-6316": 1,
+            "SNAP-20260427-6313": 1
+          }
+        }
+      },
+      "semantic": {
+        "overall": {
+          "n": 503,
+          "recall@1": 0.3161,
+          "recall@3": 0.3738,
+          "recall@5": 0.4294,
+          "recall@10": 0.5408,
+          "mrr": 0.3652
+        },
+        "covered_only": {
+          "n": 503,
+          "recall@1": 0.3161,
+          "recall@3": 0.3738,
+          "recall@5": 0.4294,
+          "recall@10": 0.5408,
+          "mrr": 0.3652
+        },
+        "gold_uncovered": 0,
+        "strata": {
+          "length_band": {
+            "6-10k": {
+              "n": 87,
+              "recall@1": 0.3793,
+              "recall@3": 0.4253,
+              "recall@5": 0.4483,
+              "recall@10": 0.5517,
+              "mrr": 0.4173
+            },
+            "<6k": {
+              "n": 266,
+              "recall@1": 0.3459,
+              "recall@3": 0.4098,
+              "recall@5": 0.4737,
+              "recall@10": 0.5977,
+              "mrr": 0.402
+            },
+            ">10k": {
+              "n": 150,
+              "recall@1": 0.2267,
+              "recall@3": 0.28,
+              "recall@5": 0.34,
+              "recall@10": 0.4333,
+              "mrr": 0.2698
+            }
+          },
+          "position_third": {
+            "None": {
+              "n": 3,
+              "recall@1": 1.0,
+              "recall@3": 1.0,
+              "recall@5": 1.0,
+              "recall@10": 1.0,
+              "mrr": 1.0
+            },
+            "head": {
+              "n": 120,
+              "recall@1": 0.2333,
+              "recall@3": 0.2917,
+              "recall@5": 0.325,
+              "recall@10": 0.4,
+              "mrr": 0.2697
+            },
+            "middle": {
+              "n": 277,
+              "recall@1": 0.343,
+              "recall@3": 0.4007,
+              "recall@5": 0.4729,
+              "recall@10": 0.5957,
+              "mrr": 0.3981
+            },
+            "tail": {
+              "n": 103,
+              "recall@1": 0.3204,
+              "recall@3": 0.3786,
+              "recall@5": 0.4175,
+              "recall@10": 0.5437,
+              "mrr": 0.3695
+            }
+          }
+        },
+        "holdout": {
+          "n": 3,
+          "hits@10": 3,
+          "detail": {
+            "SNAP-20260606-6930": 1,
+            "SNAP-20260427-6316": 1,
+            "SNAP-20260427-6313": 1
+          }
+        }
+      }
+    },
+    "candidate": {
+      "hybrid": {
+        "overall": {
+          "n": 503,
+          "recall@1": 0.3559,
+          "recall@3": 0.3718,
+          "recall@5": 0.3917,
+          "recall@10": 0.5229,
+          "mrr": 0.3818
+        },
+        "covered_only": {
+          "n": 503,
+          "recall@1": 0.3559,
+          "recall@3": 0.3718,
+          "recall@5": 0.3917,
+          "recall@10": 0.5229,
+          "mrr": 0.3818
+        },
+        "gold_uncovered": 0,
+        "strata": {
+          "length_band": {
+            "6-10k": {
+              "n": 87,
+              "recall@1": 0.4713,
+              "recall@3": 0.4828,
+              "recall@5": 0.4943,
+              "recall@10": 0.6322,
+              "mrr": 0.4948
+            },
+            "<6k": {
+              "n": 266,
+              "recall@1": 0.2481,
+              "recall@3": 0.2556,
+              "recall@5": 0.2669,
+              "recall@10": 0.3759,
+              "mrr": 0.2665
+            },
+            ">10k": {
+              "n": 150,
+              "recall@1": 0.48,
+              "recall@3": 0.5133,
+              "recall@5": 0.5533,
+              "recall@10": 0.72,
+              "mrr": 0.5207
+            }
+          },
+          "position_third": {
+            "None": {
+              "n": 3,
+              "recall@1": 0.3333,
+              "recall@3": 0.3333,
+              "recall@5": 0.3333,
+              "recall@10": 0.3333,
+              "mrr": 0.3333
+            },
+            "head": {
+              "n": 120,
+              "recall@1": 0.4167,
+              "recall@3": 0.425,
+              "recall@5": 0.425,
+              "recall@10": 0.5167,
+              "mrr": 0.4314
+            },
+            "middle": {
+              "n": 277,
+              "recall@1": 0.2996,
+              "recall@3": 0.3177,
+              "recall@5": 0.3394,
+              "recall@10": 0.4838,
+              "mrr": 0.3286
+            },
+            "tail": {
+              "n": 103,
+              "recall@1": 0.4369,
+              "recall@3": 0.4563,
+              "recall@5": 0.4951,
+              "recall@10": 0.6408,
+              "mrr": 0.4683
+            }
+          }
+        },
+        "holdout": {
+          "n": 3,
+          "hits@10": 1,
+          "detail": {
+            "SNAP-20260606-6930": "miss",
+            "SNAP-20260427-6316": "miss",
+            "SNAP-20260427-6313": 1
+          }
+        }
+      },
+      "semantic": {
+        "overall": {
+          "n": 503,
+          "recall@1": 0.3101,
+          "recall@3": 0.3797,
+          "recall@5": 0.4334,
+          "recall@10": 0.5507,
+          "mrr": 0.3678
+        },
+        "covered_only": {
+          "n": 503,
+          "recall@1": 0.3101,
+          "recall@3": 0.3797,
+          "recall@5": 0.4334,
+          "recall@10": 0.5507,
+          "mrr": 0.3678
+        },
+        "gold_uncovered": 0,
+        "strata": {
+          "length_band": {
+            "6-10k": {
+              "n": 87,
+              "recall@1": 0.3678,
+              "recall@3": 0.4828,
+              "recall@5": 0.4943,
+              "recall@10": 0.6552,
+              "mrr": 0.4437
+            },
+            "<6k": {
+              "n": 266,
+              "recall@1": 0.297,
+              "recall@3": 0.3346,
+              "recall@5": 0.3985,
+              "recall@10": 0.4962,
+              "mrr": 0.3405
+            },
+            ">10k": {
+              "n": 150,
+              "recall@1": 0.3,
+              "recall@3": 0.4,
+              "recall@5": 0.46,
+              "recall@10": 0.5867,
+              "mrr": 0.372
+            }
+          },
+          "position_third": {
+            "None": {
+              "n": 3,
+              "recall@1": 0.3333,
+              "recall@3": 0.6667,
+              "recall@5": 0.6667,
+              "recall@10": 1.0,
+              "mrr": 0.5556
+            },
+            "head": {
+              "n": 120,
+              "recall@1": 0.325,
+              "recall@3": 0.3667,
+              "recall@5": 0.4083,
+              "recall@10": 0.4917,
+              "mrr": 0.3625
+            },
+            "middle": {
+              "n": 277,
+              "recall@1": 0.2996,
+              "recall@3": 0.3538,
+              "recall@5": 0.4152,
+              "recall@10": 0.5487,
+              "mrr": 0.3551
+            },
+            "tail": {
+              "n": 103,
+              "recall@1": 0.3204,
+              "recall@3": 0.4563,
+              "recall@5": 0.5049,
+              "recall@10": 0.6117,
+              "mrr": 0.4026
+            }
+          }
+        },
+        "holdout": {
+          "n": 3,
+          "hits@10": 3,
+          "detail": {
+            "SNAP-20260606-6930": 6,
+            "SNAP-20260427-6316": 2,
+            "SNAP-20260427-6313": 1
+          }
+        }
+      }
+    }
+  }
+}
