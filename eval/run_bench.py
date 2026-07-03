@@ -596,6 +596,14 @@ def fmt_gate_md(report: dict) -> str:
         f"{report['n_rows']} labeled rows, k={report['k']}, full retrieve() "
         f"pipeline via the M4 store-override seam; active store at "
         f"{report['active_store_snapshots']} snapshots during the run.",
+    ]
+    if report.get("pipeline_overrides"):
+        lines.append(
+            f"IN-PROCESS pipeline overrides: `{report['pipeline_overrides']}` "
+            "(config.ini untouched, byte-asserted; BOTH the candidate and the "
+            "fresh baseline arms — and the gate-6 pytest run — executed at "
+            "these values, so every gate compares identical pipeline config).")
+    lines += [
         "",
         "## Gates",
         "",
@@ -635,10 +643,29 @@ def fmt_gate_md(report: dict) -> str:
 
 def run_gate(rows: list, args) -> None:
     """Six-gate swap authorization: candidate + fresh baselines, table,
-    artifacts, exit code (any FAIL -> exit 1: STOP, no cutover)."""
+    artifacts, exit code (any FAIL -> exit 1: STOP, no cutover).
+
+    --mmr-lambda / --candidate-n (M6f iteration 1): optional [retrieval]
+    pipeline overrides applied to the IN-PROCESS CFG for the whole gate run
+    (config.ini on disk byte-asserted untouched, original values restored).
+    With overrides active, gates 1-3 CANNOT use the committed sweep-JSON
+    baselines (those were measured at the default pipeline config) — the
+    baselines for ALL gates switch to the fresh same-config active-store
+    runs, so every gate compares candidate-vs-baseline at IDENTICAL pipeline
+    config. Gate 6's pytest run also executes under the overrides (retrieve()
+    reads CFG at call time). Overrides are recorded in the report, embedded
+    in the cache keys, and suffixed onto the output filenames (the default
+    gate artifacts are never clobbered)."""
     from Orchestrator.config import CFG
 
-    sweep_arms = load_gate_baselines(args.gate_sweep_json, args.gate_weight)
+    overrides = {}
+    if args.mmr_lambda is not None:
+        overrides["mmr_lambda"] = str(args.mmr_lambda)
+    if args.candidate_n is not None:
+        overrides["candidate_n"] = str(args.candidate_n)
+
+    sweep_arms = (None if overrides
+                  else load_gate_baselines(args.gate_sweep_json, args.gate_weight))
 
     live_w = CFG.getfloat("retrieval", "recency_weight", fallback=0.05)
     if abs(live_w - args.gate_weight) > 1e-9:
@@ -659,6 +686,10 @@ def run_gate(rows: list, args) -> None:
     active_store = get_store(slug)  # the live store = fresh-baseline arms
     print(f"[gate] candidate {cand_store.meta_path.parent} schema={cand_store.schema} "
           f"rows={cand_store.rows} snapshots={cand_store.snapshots} generation={gen}")
+    if overrides:
+        print(f"[gate] IN-PROCESS pipeline overrides: {overrides} "
+              f"(config.ini untouched; gates 1-3 baselines switch to the "
+              f"fresh same-config active-store runs)")
 
     cache = load_cache()
     print(f"[gate] embedding {len(rows)} labeled queries once "
@@ -666,42 +697,85 @@ def run_gate(rows: list, args) -> None:
     vec_list = embed_queries(slug, [r["query"] for r in rows])
     vec_map = {_qhash(r): v for r, v in zip(rows, vec_list)}
 
-    active_count = active_store.count
-    runs = {"baseline": {}, "candidate": {}}
-    for arm in SWEEP_ARMS:
-        short = "hybrid" if arm["include_keyword"] else "semantic"
-        for side, st, cname in (
-            ("baseline", active_store,
-             f"{arm['name']}|gate-base|w={args.gate_weight}|n={active_count}"),
-            ("candidate", cand_store, f"{arm['name']}|gate-cand|gen={gen}"),
-        ):
-            a = {"name": f"gate-{side}-{short}", "slug": slug,
-                 "include_keyword": arm["include_keyword"],
-                 "store": st, "cache_name": cname}
-            ranked = run_arm(a, rows, cache, vec_map=vec_map)
-            runs[side][short] = metrics(rows, ranked, cname, st.ids())
-            o = runs[side][short]["overall"]
-            print(f"[gate] {side}-{short}: r@10={o['recall@10']} MRR={o['mrr']} "
-                  f">10k={_stratum(runs[side][short], 'length_band', '>10k')} "
-                  f"tail={_stratum(runs[side][short], 'position_third', 'tail')}")
+    ini_path = REPO / "config.ini"
+    ini_before = ini_path.read_bytes()
+    saved = {}
+    for opt, val in overrides.items():
+        saved[opt] = (CFG.has_option("retrieval", opt),
+                      CFG.get("retrieval", opt)
+                      if CFG.has_option("retrieval", opt) else None)
+        CFG.set("retrieval", opt, val)
+    # Cache-key + filename suffix so override runs never collide with (or
+    # clobber) the default-config gate.
+    osuf = "".join(f"|{k}={v}" for k, v in sorted(overrides.items()))
+    fsuf = "".join(
+        f"-{k.replace('_', '')}{v}" for k, v in sorted(overrides.items()))
 
-    tests_gate = None if args.skip_tests_gate else run_tests_gate(cand_store)
-    gate_rows, ok = evaluate_gates(
-        sweep_arms, runs["candidate"], runs["baseline"], tests_gate)
+    try:
+        active_count = active_store.count
+        runs = {"baseline": {}, "candidate": {}}
+        for arm in SWEEP_ARMS:
+            short = "hybrid" if arm["include_keyword"] else "semantic"
+            for side, st, cname in (
+                ("baseline", active_store,
+                 f"{arm['name']}|gate-base|w={args.gate_weight}|n={active_count}{osuf}"),
+                ("candidate", cand_store, f"{arm['name']}|gate-cand|gen={gen}{osuf}"),
+            ):
+                a = {"name": f"gate-{side}-{short}", "slug": slug,
+                     "include_keyword": arm["include_keyword"],
+                     "store": st, "cache_name": cname}
+                ranked = run_arm(a, rows, cache, vec_map=vec_map)
+                runs[side][short] = metrics(rows, ranked, cname, st.ids())
+                o = runs[side][short]["overall"]
+                print(f"[gate] {side}-{short}: r@10={o['recall@10']} MRR={o['mrr']} "
+                      f">10k={_stratum(runs[side][short], 'length_band', '>10k')} "
+                      f"tail={_stratum(runs[side][short], 'position_third', 'tail')}")
+
+        if sweep_arms is None:
+            # Overrides active: every gate compares candidate-vs-baseline at
+            # the SAME pipeline config — gates 1-3 thresholds come from the
+            # fresh active-store runs just measured (the sweep JSON's numbers
+            # were measured at the default config and are not comparable).
+            sweep_arms = {
+                f"gemini2-{side}": {
+                    "recall@10": runs["baseline"][side]["overall"]["recall@10"],
+                    "recall@10_gt10k": _stratum(
+                        runs["baseline"][side], "length_band", ">10k"),
+                } for side in ("hybrid", "semantic")
+            }
+
+        tests_gate = None if args.skip_tests_gate else run_tests_gate(cand_store)
+        gate_rows, ok = evaluate_gates(
+            sweep_arms, runs["candidate"], runs["baseline"], tests_gate)
+    finally:
+        for opt, (had, orig) in saved.items():
+            if had:
+                CFG.set("retrieval", opt, orig)
+            else:
+                CFG.remove_option("retrieval", opt)
+    assert ini_path.read_bytes() == ini_before, "config.ini changed on disk — BUG"
+    if overrides:
+        print("[gate] config.ini byte-identical before/after: OK")
 
     report = {
         "date": args.out_date, "k": K, "n_rows": len(rows),
         "candidate": {"slug": slug, "dir": str(cand_store.meta_path.parent),
                       "schema": cand_store.schema, "rows": cand_store.rows,
                       "snapshots": cand_store.snapshots, "generation": gen},
-        "baseline_source": str(args.gate_sweep_json),
+        "baseline_source": (
+            "fresh same-config active-store runs (pipeline overrides active; "
+            "the sweep-JSON baselines were measured at the default config)"
+            if overrides else str(args.gate_sweep_json)),
         "baseline_weight": args.gate_weight,
+        "pipeline_overrides": {
+            k: (int(v) if k == "candidate_n" else float(v))
+            for k, v in overrides.items()} or None,
         "active_store_snapshots": active_count,
         "gates": gate_rows, "all_pass": ok, "runs": runs,
     }
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    json_path = RESULTS_DIR / f"{args.out_date}-chunk-gate.json"
-    md_path = RESULTS_DIR / f"{args.out_date}-chunk-gate.md"
+    json_path = RESULTS_DIR / f"{args.out_date}-chunk-gate{fsuf}.json"
+    md_path = RESULTS_DIR / f"{args.out_date}-chunk-gate{fsuf}.md"
     json_path.write_text(json.dumps(report, indent=2))
     md_path.write_text(fmt_gate_md(report))
     print("\n" + fmt_gate_table(gate_rows) + "\n")
@@ -734,12 +808,22 @@ def main(argv=None):
     ap.add_argument("--skip-tests-gate", action="store_true",
                     help="skip gate 6 (golden+lean pytest vs candidate); recorded "
                          "as SKIPPED — still required before cutover")
+    ap.add_argument("--mmr-lambda", type=float, default=None,
+                    help="gate-mode [retrieval] mmr_lambda override, applied "
+                         "IN-PROCESS to candidate AND baseline arms (and gate 6); "
+                         "config.ini untouched; recorded in the report")
+    ap.add_argument("--candidate-n", type=int, default=None,
+                    help="gate-mode [retrieval] candidate_n override, applied "
+                         "IN-PROCESS to candidate AND baseline arms (and gate 6); "
+                         "config.ini untouched; recorded in the report")
     args = ap.parse_args(argv)
 
     if args.candidate_dir and not args.candidate_slug:
         ap.error("--candidate-dir requires --candidate-slug")
     if args.gate and not (args.candidate_dir and args.candidate_slug):
         ap.error("--gate requires --candidate-dir and --candidate-slug")
+    if (args.mmr_lambda is not None or args.candidate_n is not None) and not args.gate:
+        ap.error("--mmr-lambda/--candidate-n are gate-mode overrides (require --gate)")
 
     rows = [json.loads(ln) for ln in LABELED.read_text().splitlines() if ln.strip()]
     print(f"[bench] {len(rows)} labeled rows; active model = {get_active_slug()}")

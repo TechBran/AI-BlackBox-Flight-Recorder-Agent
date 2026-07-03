@@ -1,0 +1,1808 @@
+{
+  "date": "2026-07-02",
+  "k": 10,
+  "n_rows": 503,
+  "candidate": {
+    "slug": "gemini-embedding-2",
+    "dir": "Manifest/embeddings/_build/gemini-embedding-2",
+    "schema": 2,
+    "rows": 25746,
+    "snapshots": 7601,
+    "generation": 7601
+  },
+  "active_store_snapshots": 7906,
+  "knobs": {
+    "rrf_c": 60,
+    "recency_weight": 0.005,
+    "half_life": 90.0,
+    "junk_floor": 0.4,
+    "base_mmr_lambda": 0.7,
+    "base_candidate_n": 40
+  },
+  "lambdas": [
+    0.7,
+    0.8,
+    0.85,
+    0.9,
+    0.95,
+    1.0
+  ],
+  "candidate_ns": [
+    40,
+    60
+  ],
+  "diagnosis": [
+    {
+      "query": "android AudioRecord release race SIGABRT fix",
+      "gold": "SNAP-20260606-6930",
+      "arm": "hybrid",
+      "raw_collapsed_rank": 25,
+      "raw_cos": 0.6314,
+      "in_top40_pool": true,
+      "keyword_rank": 1,
+      "post_rrf_recency_rank": 3,
+      "mmr_base_lambda_top10": false,
+      "mmr_off_top10_rank": 3,
+      "killer_sibling": {
+        "sid": "SNAP-20260630-7864",
+        "cos_to_gold": 0.7679
+      }
+    },
+    {
+      "query": "android AudioRecord release race SIGABRT fix",
+      "gold": "SNAP-20260606-6930",
+      "arm": "semantic",
+      "raw_collapsed_rank": 25,
+      "raw_cos": 0.6314,
+      "in_top40_pool": true,
+      "keyword_rank": null,
+      "post_rrf_recency_rank": 11,
+      "mmr_base_lambda_top10": false,
+      "mmr_off_top10_rank": null,
+      "killer_sibling": {
+        "sid": "SNAP-20251010-176",
+        "cos_to_gold": 0.8046
+      }
+    },
+    {
+      "query": "UGV ZUPT zero-velocity IMU drift preprocessor",
+      "gold": "SNAP-20260427-6316",
+      "arm": "hybrid",
+      "raw_collapsed_rank": 4,
+      "raw_cos": 0.7017,
+      "in_top40_pool": true,
+      "keyword_rank": 6,
+      "post_rrf_recency_rank": 3,
+      "mmr_base_lambda_top10": false,
+      "mmr_off_top10_rank": 3,
+      "killer_sibling": {
+        "sid": "SNAP-20260426-6293",
+        "cos_to_gold": 0.8588
+      }
+    },
+    {
+      "query": "UGV ZUPT zero-velocity IMU drift preprocessor",
+      "gold": "SNAP-20260427-6316",
+      "arm": "semantic",
+      "raw_collapsed_rank": 4,
+      "raw_cos": 0.7017,
+      "in_top40_pool": true,
+      "keyword_rank": null,
+      "post_rrf_recency_rank": 4,
+      "mmr_base_lambda_top10": true,
+      "mmr_off_top10_rank": 4,
+      "killer_sibling": null
+    }
+  ],
+  "equivalence": {
+    "checked": 96,
+    "mismatches": []
+  },
+  "sweep": {
+    "n=40|lam=0.7": {
+      "candidate_n": 40,
+      "mmr_lambda": 0.7,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.4751,
+              "mrr": 0.3714
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6867,
+              "mrr": 0.5154
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6117,
+              "mrr": 0.4553
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5169,
+              "mrr": 0.3468
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5467,
+              "mrr": 0.3605
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5825,
+              "mrr": 0.3629
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.4911,
+              "mrr": 0.4008
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.64,
+              "mrr": 0.4784
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5437,
+              "mrr": 0.4619
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.493,
+              "mrr": 0.3501
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4133,
+              "mrr": 0.2618
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.4951,
+              "mrr": 0.3541
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=40|lam=0.8": {
+      "candidate_n": 40,
+      "mmr_lambda": 0.8,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.495,
+              "mrr": 0.3749
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7,
+              "mrr": 0.5206
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6117,
+              "mrr": 0.4556
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5348,
+              "mrr": 0.3507
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5667,
+              "mrr": 0.3668
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6019,
+              "mrr": 0.371
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.507,
+              "mrr": 0.4032
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.66,
+              "mrr": 0.481
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5631,
+              "mrr": 0.4643
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5109,
+              "mrr": 0.3543
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.44,
+              "mrr": 0.2652
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5049,
+              "mrr": 0.3582
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=40|lam=0.85": {
+      "candidate_n": 40,
+      "mmr_lambda": 0.85,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5089,
+              "mrr": 0.3772
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7133,
+              "mrr": 0.5224
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6214,
+              "mrr": 0.4571
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5328,
+              "mrr": 0.3521
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5533,
+              "mrr": 0.3661
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5922,
+              "mrr": 0.37
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5169,
+              "mrr": 0.4052
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6667,
+              "mrr": 0.4824
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5922,
+              "mrr": 0.4676
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5169,
+              "mrr": 0.3571
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4467,
+              "mrr": 0.2696
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5243,
+              "mrr": 0.3648
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=40|lam=0.9": {
+      "candidate_n": 40,
+      "mmr_lambda": 0.9,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5348,
+              "mrr": 0.3815
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7533,
+              "mrr": 0.5296
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6311,
+              "mrr": 0.4602
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5527,
+              "mrr": 0.3592
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6,
+              "mrr": 0.3777
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5825,
+              "mrr": 0.3732
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5348,
+              "mrr": 0.4087
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6867,
+              "mrr": 0.4834
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6019,
+              "mrr": 0.4668
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5408,
+              "mrr": 0.3635
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4333,
+              "mrr": 0.2698
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5437,
+              "mrr": 0.3695
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": true,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=40|lam=0.95": {
+      "candidate_n": 40,
+      "mmr_lambda": 0.95,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5706,
+              "mrr": 0.3899
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7867,
+              "mrr": 0.5423
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6893,
+              "mrr": 0.4705
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 9,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6223,
+              "mrr": 0.3775
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6267,
+              "mrr": 0.3888
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6214,
+              "mrr": 0.3873
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5646,
+              "mrr": 0.4171
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7067,
+              "mrr": 0.4933
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6505,
+              "mrr": 0.4765
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6004,
+              "mrr": 0.3834
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.46,
+              "mrr": 0.282
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6117,
+              "mrr": 0.3881
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": 9,
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 2,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": true,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=40|lam=1.0": {
+      "candidate_n": 40,
+      "mmr_lambda": 1.0,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7177,
+              "mrr": 0.4792
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.8133,
+              "mrr": 0.6041
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7864,
+              "mrr": 0.5532
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 3,
+                "SNAP-20260427-6316": 3,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7276,
+              "mrr": 0.4358
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7067,
+              "mrr": 0.4252
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.8058,
+              "mrr": 0.4465
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 4,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7157,
+              "mrr": 0.4943
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.76,
+              "mrr": 0.5561
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7864,
+              "mrr": 0.556
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6998,
+              "mrr": 0.4462
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5933,
+              "mrr": 0.3397
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7476,
+              "mrr": 0.4721
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": 3,
+          "SNAP-20260427-6316": 3,
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 3,
+        "recurring_pass": 3,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": false,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": true,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": false,
+        "4b": true,
+        "5a": true,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=0.7": {
+      "candidate_n": 60,
+      "mmr_lambda": 0.7,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.4871,
+              "mrr": 0.372
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6933,
+              "mrr": 0.5184
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5922,
+              "mrr": 0.4491
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5169,
+              "mrr": 0.3467
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5467,
+              "mrr": 0.3599
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5825,
+              "mrr": 0.3629
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5229,
+              "mrr": 0.4051
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6467,
+              "mrr": 0.4794
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5631,
+              "mrr": 0.465
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.493,
+              "mrr": 0.3501
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4133,
+              "mrr": 0.2618
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.4951,
+              "mrr": 0.3541
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=0.8": {
+      "candidate_n": 60,
+      "mmr_lambda": 0.8,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5089,
+              "mrr": 0.3766
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7133,
+              "mrr": 0.5257
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6019,
+              "mrr": 0.4493
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5348,
+              "mrr": 0.3507
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5667,
+              "mrr": 0.3668
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6019,
+              "mrr": 0.371
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5427,
+              "mrr": 0.409
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6533,
+              "mrr": 0.479
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5825,
+              "mrr": 0.4659
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5109,
+              "mrr": 0.3543
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.44,
+              "mrr": 0.2653
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5049,
+              "mrr": 0.3584
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=0.85": {
+      "candidate_n": 60,
+      "mmr_lambda": 0.85,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5288,
+              "mrr": 0.3809
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.74,
+              "mrr": 0.5315
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6214,
+              "mrr": 0.4517
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 1,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": "miss",
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5328,
+              "mrr": 0.3522
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5533,
+              "mrr": 0.3661
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5922,
+              "mrr": 0.37
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5567,
+              "mrr": 0.413
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6533,
+              "mrr": 0.4822
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5922,
+              "mrr": 0.4685
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5169,
+              "mrr": 0.357
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4467,
+              "mrr": 0.2696
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5243,
+              "mrr": 0.3648
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": "miss",
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 1,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=0.9": {
+      "candidate_n": 60,
+      "mmr_lambda": 0.9,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5686,
+              "mrr": 0.3895
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7733,
+              "mrr": 0.5383
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6505,
+              "mrr": 0.4628
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 10,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5527,
+              "mrr": 0.3592
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6,
+              "mrr": 0.3777
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5825,
+              "mrr": 0.3732
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5845,
+              "mrr": 0.42
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6867,
+              "mrr": 0.4882
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6311,
+              "mrr": 0.4745
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.5408,
+              "mrr": 0.3635
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.4333,
+              "mrr": 0.2698
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.5437,
+              "mrr": 0.3695
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": 10,
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 2,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": true,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=0.95": {
+      "candidate_n": 60,
+      "mmr_lambda": 0.95,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6183,
+              "mrr": 0.4036
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.8067,
+              "mrr": 0.5519
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7087,
+              "mrr": 0.4737
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 5,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6223,
+              "mrr": 0.3777
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.6267,
+              "mrr": 0.3888
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6214,
+              "mrr": 0.3873
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 2,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6262,
+              "mrr": 0.4336
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7133,
+              "mrr": 0.4992
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7282,
+              "mrr": 0.4921
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6004,
+              "mrr": 0.3834
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.46,
+              "mrr": 0.282
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.6117,
+              "mrr": 0.3881
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": "miss",
+          "SNAP-20260427-6316": 5,
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 2,
+        "recurring_pass": 4,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": true,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": false,
+        "4b": true,
+        "5a": false,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    },
+    "n=60|lam=1.0": {
+      "candidate_n": 60,
+      "mmr_lambda": 1.0,
+      "metrics": {
+        "candidate": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7336,
+              "mrr": 0.4782
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.8267,
+              "mrr": 0.6042
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.8252,
+              "mrr": 0.5564
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 3,
+                "SNAP-20260427-6316": 3,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7276,
+              "mrr": 0.4358
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7067,
+              "mrr": 0.4252
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.8058,
+              "mrr": 0.4465
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 2,
+              "detail": {
+                "SNAP-20260606-6930": "miss",
+                "SNAP-20260427-6316": 4,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        },
+        "baseline": {
+          "hybrid": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.7435,
+              "mrr": 0.4992
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.7867,
+              "mrr": 0.5615
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.835,
+              "mrr": 0.5693
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          },
+          "semantic": {
+            "overall": {
+              "n": 503,
+              "recall@10": 0.6998,
+              "mrr": 0.4462
+            },
+            "gt10k": {
+              "n": 150,
+              "recall@10": 0.5933,
+              "mrr": 0.3397
+            },
+            "tail": {
+              "n": 103,
+              "recall@10": 0.7476,
+              "mrr": 0.4721
+            },
+            "holdout": {
+              "n": 3,
+              "hits@10": 3,
+              "detail": {
+                "SNAP-20260606-6930": 1,
+                "SNAP-20260427-6316": 1,
+                "SNAP-20260427-6313": 1
+              }
+            }
+          }
+        }
+      },
+      "proxy": {
+        "golden": {
+          "SNAP-20260606-6930": 3,
+          "SNAP-20260427-6316": 3,
+          "SNAP-20260427-6313": 1
+        },
+        "golden_hits": 3,
+        "recurring_pass": 3,
+        "recurring": {
+          "pluggable embeddings model migration reembed": true,
+          "control_phone delegate device task tailscale": false,
+          "on-device gemma phone agent native tool loop": true,
+          "streaming speech to text multi provider": true
+        },
+        "lean_ok": true
+      },
+      "gates": {
+        "1": false,
+        "2": true,
+        "3a": true,
+        "3b": true,
+        "4a": false,
+        "4b": true,
+        "5a": true,
+        "5b": false,
+        "6proxy": false,
+        "all_pass": false
+      }
+    }
+  },
+  "recommendation": "NO swept config passes all six gates. Best: mmr_lambda=0.9, candidate_n=40 \u2014 still failing: 5a, 5b, 6proxy. The chunk candidate does not clear the gate with MMR/pool tuning alone."
+}
