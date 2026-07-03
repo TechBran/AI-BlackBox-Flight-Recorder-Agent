@@ -127,6 +127,11 @@ debug_log = false
 # provider: null (no reranker; the default) | vllm (POST {base_url}/score).
 # All keys have code fallbacks; this whole section is optional (fresh-box
 # rule, audit A13). GET /rerank/status reports the resolved state.
+# To enable on a GPU box (M13: the installer provisions vllm-reranker.service
+# on port 8091): set provider = vllm here + rerank_enabled = true under
+# [retrieval], then restart. base_url/model below only OVERRIDE the code
+# defaults (http://localhost:8091 / qwen3-reranker-0.6b — already correct for
+# the installer's service).
 provider = null
 # base_url = http://localhost:8091
 # model = qwen3-reranker-0.6b

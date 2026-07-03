@@ -14,13 +14,17 @@ un-reranked ranking, so a dead reranker can only cost latency, never recall.
 
 Providers ([rerank] provider, code fallback "null" — the [rerank] section may
 be entirely absent, per the A13 fresh-box rule):
-  null (default) — no reranker; score() always returns None. The pre-GPU /
+  null (default) — no reranker; score() always returns None. The CPU /
                    fresh-box state: this module is fully inert.
   vllm           — POST {base_url}/score, vLLM's cross-encoder scoring API:
                      {"model": <model_id>, "text_1": <query>,
                       "text_2": [<passage>, ...]}
                    -> {"data": [{"index": i, "score": s}, ...]} (index maps a
                    score back to its text_2 position; missing index = in-order).
+base_url code fallback is http://localhost:8091 — the port the installer's
+vllm-reranker.service binds (M13) — so a fresh GPU box needs ZERO url/port
+config once the service is up; `provider = vllm` stays the single deliberate
+switch. An EXPLICITLY EMPTY base_url in config still disables (escape hatch).
 
 Latency preflight (audit A9 gating leg 3): retrieve()-time probing is too hot,
 so preflight() runs ONCE per process on first use — it scores a 1-passage dummy
@@ -29,11 +33,15 @@ A failed probe (error OR over-ceiling) disables rerank for the PROCESS LIFETIME
 (cached; logged once). GET /rerank/status surfaces the result.
 
 ── Post-GPU activation checklist (RTX 2000 Ada 16GB — for the operator) ──────
-1. Serve the reranker. Qwen3-Reranker publishes CausalLM weights; vLLM needs
-   the sequence-classification conversion overrides or /score will not exist:
+1. Serve the reranker. On GPU boxes the installer provisions this (M13:
+   installer/templates/blackbox-install-reranker.sh writes ~/start-reranker.sh
+   + the vllm-reranker.service unit on port 8091 and starts it). The manual
+   incantation, kept for reference — Qwen3-Reranker publishes CausalLM
+   weights; vLLM needs the sequence-classification conversion overrides or
+   /score will not exist:
 
      vllm serve Qwen/Qwen3-Reranker-0.6B --port 8091 \
-       --gpu-memory-utilization 0.20 \
+       --gpu-memory-utilization 0.20 --max-model-len 8192 \
        --hf-overrides '{"architectures": ["Qwen3ForSequenceClassification"],
                         "classifier_from_token": ["no", "yes"],
                         "is_original_qwen3_reranker": true}'
@@ -41,11 +49,12 @@ A failed probe (error OR over-ceiling) disables rerank for the PROCESS LIFETIME
    gpu_memory_utilization MUST stay in the 0.15–0.25 band: the Ollama embedder
    (qwen3-embedding on-GPU, WI-9 placement) shares the card, and an
    unconstrained vLLM pre-allocates ~90% of VRAM and evicts it.
-2. config.ini:
+2. config.ini (the wizard's Memory & Search step shows this instruction —
+   nothing ever writes config.ini for you):
      [rerank]
      provider = vllm
-     base_url = http://localhost:8091
-     model = qwen3-reranker-0.6b
+   (base_url and model already default in code to http://localhost:8091 and
+   qwen3-reranker-0.6b — set them only to override)
    and flip [retrieval] rerank_enabled = true.
 3. Restart; GET /rerank/status must show preflight state "ok" with latency
    comfortably under the 500 ms ceiling.
@@ -69,7 +78,13 @@ import time
 
 import requests
 
+from Orchestrator import hardware
 from Orchestrator.config import CFG
+
+# Where the installer's vllm-reranker.service listens (M13). Code fallback so
+# a fresh GPU box works with zero url/port config edits once the service is
+# up; an explicit [rerank] base_url overrides, an explicitly EMPTY one disables.
+DEFAULT_BASE_URL = "http://localhost:8091"
 
 # Reranker model registry — the ONLY home for reranker model literals.
 # Same conventions as EMBEDDING_MODELS (slug-keyed, kebab-case, provider +
@@ -110,12 +125,49 @@ _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 _preflight_lock = threading.Lock()
 _preflight_result: dict | None = None
 
+# Short-TTL reachability cache (M13 wizard): status() is consumed by the
+# onboarding rollup + wizard cards, which may poll — the probe itself is
+# ~1s-capped, the cache keeps repeat calls free. Distinct from the preflight
+# cache on purpose: reachability recovers live (vLLM's cold start can take
+# minutes on first boot), the preflight is deliberately once-per-process.
+_REACH_TTL_S = 5.0
+_reach_lock = threading.Lock()
+_reach_cache: "tuple[float, bool] | None" = None
+
+
+def service_reachable(timeout_s: float = 1.0) -> bool:
+    """Is something answering on the resolved [rerank] base_url? Never raises.
+
+    GETs {base_url}/v1/models (vLLM's model-list endpoint — up as soon as the
+    engine finishes loading) with a ~1s cap, TTL-cached. Probes the DEFAULT
+    base_url even with the null provider: that is exactly the fresh-GPU-box
+    state the wizard must detect ("service up, awaiting the config flip")."""
+    global _reach_cache
+    now = time.monotonic()
+    with _reach_lock:
+        if _reach_cache is not None and (now - _reach_cache[0]) < _REACH_TTL_S:
+            return _reach_cache[1]
+    s = get_settings()
+    ok = False
+    if s["base_url"]:
+        try:
+            ok = requests.get(
+                s["base_url"] + "/v1/models", timeout=timeout_s
+            ).status_code == 200
+        except Exception:  # noqa: BLE001 - never-raise, mirrors score()
+            ok = False
+    with _reach_lock:
+        _reach_cache = (now, ok)
+    return ok
+
 
 def get_settings() -> dict:
     """Resolved [rerank] config with code fallbacks (fresh-box safe: the
     section may be absent — provider then resolves to "null" = inert)."""
     provider = CFG.get("rerank", "provider", fallback="null").strip().lower()
-    base_url = CFG.get("rerank", "base_url", fallback="").strip().rstrip("/")
+    base_url = CFG.get(
+        "rerank", "base_url", fallback=DEFAULT_BASE_URL
+    ).strip().rstrip("/")
     model = CFG.get("rerank", "model", fallback=_DEFAULT_MODEL_SLUG).strip()
     entry = RERANK_MODELS.get(model)
     return {
@@ -227,10 +279,13 @@ def preflight() -> dict:
 
 
 def reset_preflight() -> None:
-    """Clear the one-time probe cache (tests + explicit ops re-check)."""
-    global _preflight_result
+    """Clear the probe caches — preflight AND reachability (tests + explicit
+    ops re-check)."""
+    global _preflight_result, _reach_cache
     with _preflight_lock:
         _preflight_result = None
+    with _reach_lock:
+        _reach_cache = None
 
 
 def available() -> bool:
@@ -248,8 +303,16 @@ def available() -> bool:
 def status() -> dict:
     """/rerank/status payload (ADDITIVE ops contract, /embeddings/status
     style). Triggers the one-time preflight only when a provider is
-    configured — with the null provider this is pure config reads, safe to
-    poll."""
+    configured — with the null provider the rest is config reads plus the
+    TTL-cached ~1s-capped reachability probe; safe to poll.
+
+    M13 additive keys for the wizard's Memory & Search reranker block:
+      gpu               — host has a usable NVIDIA GPU (hardware.probe(),
+                          60s-cached; the reranker is GPU-only hardware-wise)
+      service_reachable — something answers on base_url (TTL-cached probe;
+                          distinguishes "run the installer's reranker step"
+                          from "flip the config" on a GPU box)
+    """
     s = get_settings()
     configured = _configured(s)
     if configured:
@@ -262,6 +325,8 @@ def status() -> dict:
         }
     return {
         "enabled": CFG.getboolean("retrieval", "rerank_enabled", fallback=False),
+        "gpu": bool(hardware.probe().get("gpu")),
+        "service_reachable": service_reachable(),
         "provider": s["provider"],
         "model": s["model"],
         "model_id": s["model_id"],

@@ -47,10 +47,22 @@ def pin_cfg(section: str, **keys):
 
 @pytest.fixture(autouse=True)
 def _clean_preflight():
-    """The preflight cache is process-lifetime state — isolate every test."""
+    """The preflight + reachability caches are process state — isolate every
+    test (reset_preflight clears both)."""
     rerank.reset_preflight()
     yield
     rerank.reset_preflight()
+
+
+@pytest.fixture(autouse=True)
+def _no_network_reach(monkeypatch):
+    """service_reachable (M13) must NEVER hit the real network in tests —
+    base_url now falls back to http://localhost:8091, and a dev box may have
+    a live vLLM there. Default = connection refused; tests that want a
+    reachable service re-monkeypatch rerank.requests.get themselves."""
+    def refuse(*a, **k):
+        raise ConnectionError("test: network disabled")
+    monkeypatch.setattr(rerank.requests, "get", refuse)
 
 
 class FakeResp:
@@ -91,13 +103,16 @@ def test_settings_resolve_slug_to_model_id_and_pass_unknown_verbatim():
 
 
 def test_settings_fresh_box_defaults_are_inert():
-    """[rerank] section absent (audit A13 fresh-box rule): null provider,
-    default slug, 500ms ceiling."""
+    """[rerank] section absent (audit A13 fresh-box rule): null provider =
+    inert, default slug, 500ms ceiling. base_url falls back to the installer's
+    vllm-reranker.service port (M13) so a fresh GPU box needs zero url/port
+    config edits — provider stays the single deliberate switch."""
     with pin_cfg("rerank", provider=None, base_url=None, model=None,
                  timeout_s=None, preflight_ceiling_ms=None):
         s = rerank.get_settings()
     assert s["provider"] == "null"
-    assert s["base_url"] == ""
+    assert s["base_url"] == "http://localhost:8091"
+    assert s["base_url"] == rerank.DEFAULT_BASE_URL
     assert s["model"] == "qwen3-reranker-0.6b"
     assert s["preflight_ceiling_ms"] == 500.0
 
@@ -109,9 +124,26 @@ def test_score_null_provider_returns_none():
         assert rerank.score("q", ["p1", "p2"]) is None
 
 
-def test_score_vllm_without_base_url_returns_none():
-    with pin_cfg("rerank", provider="vllm", base_url=None):
+def test_score_vllm_with_explicitly_empty_base_url_returns_none():
+    """An EXPLICITLY EMPTY base_url is the disable escape hatch (M13) — only
+    an ABSENT key falls back to the installer's default URL."""
+    with pin_cfg("rerank", provider="vllm", base_url=""):
         assert rerank.score("q", ["p"]) is None
+
+
+def test_score_vllm_absent_base_url_falls_back_to_installer_port(monkeypatch):
+    """Fresh-box M13 contract: [rerank] base_url absent → the wire call goes
+    to the installer's vllm-reranker.service (http://localhost:8091)."""
+    calls = {}
+
+    def fake_post(url, json=None, timeout=None):
+        calls["url"] = url
+        return FakeResp(200, {"data": [{"index": 0, "score": 0.5}]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="vllm", base_url=None):
+        assert rerank.score("q", ["p"]) == [0.5]
+    assert calls["url"] == "http://localhost:8091/score"
 
 
 def test_score_vllm_parses_and_honors_index_alignment(monkeypatch):
@@ -254,6 +286,8 @@ def test_preflight_over_ceiling_disables_for_process(monkeypatch, capsys):
 STATUS_KEYS = {
     "enabled", "provider", "model", "model_id", "base_url", "configured",
     "preflight", "available", "candidate_n", "passage_chars", "models",
+    # M13 additive keys for the wizard's reranker block:
+    "gpu", "service_reachable",
 }
 
 
@@ -264,9 +298,20 @@ def client():
     return TestClient(app)
 
 
-def test_status_shape_on_the_pre_gpu_default_box(client):
-    """Null provider + flag off — today's live state. Pure config reads: no
-    probe runs, nothing is cached."""
+def _pin_hardware(monkeypatch, gpu: bool):
+    """Deterministic host-hardware probe (the dev box HAS the GPU, CI hasn't)."""
+    monkeypatch.setattr(rerank.hardware, "probe", lambda **k: {
+        "gpu": gpu, "gpu_name": "RTX Test" if gpu else None,
+        "vram_mb": 16380 if gpu else None, "ram_mb": 32768,
+        "source": "nvidia-smi" if gpu else "none",
+    })
+
+
+def test_status_shape_on_the_pre_gpu_default_box(client, monkeypatch):
+    """Null provider + flag off on a CPU box — the fresh-box default. No
+    latency preflight runs; the only probe is the ~1s-capped reachability
+    check (stubbed refused here)."""
+    _pin_hardware(monkeypatch, gpu=False)
     with pin_cfg("rerank", provider="null", base_url=None), \
          pin_cfg("retrieval", rerank_enabled=None, rerank_candidate_n=None):
         r = client.get("/rerank/status")
@@ -281,6 +326,63 @@ def test_status_shape_on_the_pre_gpu_default_box(client):
     assert body["preflight"]["state"] == "skipped"
     assert body["candidate_n"] == 40
     assert body["models"] == sorted(rerank.RERANK_MODELS)
+    # M13: CPU box, nothing listening → the wizard's one muted line state.
+    assert body["gpu"] is False
+    assert body["service_reachable"] is False
+    # base_url resolves to the installer's default even when unconfigured.
+    assert body["base_url"] == rerank.DEFAULT_BASE_URL
+
+
+def test_status_fresh_gpu_box_with_service_up_awaits_the_config_flip(
+        client, monkeypatch):
+    """M13 zero-config contract: [rerank] absent + installer's service up →
+    gpu + service_reachable true while configured/enabled stay false — the
+    wizard renders the enable instruction (config flip + restart), nothing
+    auto-enables."""
+    _pin_hardware(monkeypatch, gpu=True)
+    monkeypatch.setattr(rerank.requests, "get",
+                        lambda url, timeout=None: FakeResp(200, {"data": []}))
+    with pin_cfg("rerank", provider=None, base_url=None), \
+         pin_cfg("retrieval", rerank_enabled=None):
+        body = client.get("/rerank/status").json()
+    assert body["gpu"] is True
+    assert body["service_reachable"] is True
+    assert body["configured"] is False
+    assert body["enabled"] is False
+    assert body["available"] is False
+
+
+def test_service_reachable_probes_v1_models_and_caches(monkeypatch):
+    """One GET per TTL window; reset_preflight clears the cache too."""
+    seen = []
+
+    def fake_get(url, timeout=None):
+        seen.append((url, timeout))
+        return FakeResp(200, {})
+
+    monkeypatch.setattr(rerank.requests, "get", fake_get)
+    with pin_cfg("rerank", provider=None, base_url=None):
+        assert rerank.service_reachable() is True
+        assert rerank.service_reachable() is True  # cached — no second GET
+        assert len(seen) == 1
+        assert seen[0][0] == "http://localhost:8091/v1/models"
+        assert seen[0][1] == 1.0  # ~1s cap: never blocks the wizard
+        rerank.reset_preflight()
+        assert rerank.service_reachable() is True
+        assert len(seen) == 2
+
+
+def test_service_reachable_false_on_refused_or_explicit_empty(monkeypatch):
+    # Autouse stub refuses connections → False (and cached as False).
+    with pin_cfg("rerank", provider=None, base_url=None):
+        assert rerank.service_reachable() is False
+    rerank.reset_preflight()
+    # Explicitly empty base_url: nothing to probe, never a network call.
+    def boom(*a, **k):
+        raise AssertionError("probed despite empty base_url")
+    monkeypatch.setattr(rerank.requests, "get", boom)
+    with pin_cfg("rerank", provider="vllm", base_url=""):
+        assert rerank.service_reachable() is False
 
 
 def test_status_reports_failed_preflight(client, monkeypatch):

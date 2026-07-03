@@ -484,6 +484,20 @@ KDL_EOF
 }
 step_2c_install_zellij
 
+# ── Step 2d: vLLM reranker provisioning (retrieval M13 — GPU boxes only) ──
+# The script self-gates: nvidia-smi + >=8000 MB VRAM required, CPU boxes get
+# a clear skip message and exit 0 (vLLM must never land on a CPU box), so the
+# installer calls it unconditionally. Non-fatal like the Ollama step:
+# retrieval works un-reranked and the wizard's Memory & Search step shows the
+# remediation. Activation stays a deliberate config flip (rerank.py checklist)
+# — this only provisions the serving side (venv + start script + unit, port
+# 8091 = Orchestrator/rerank.py's base_url code fallback).
+if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-reranker.sh" \
+        "$REAL_USER" "$REAL_HOME" "$BLACKBOX_ROOT"; then
+    echo "[install] WARN: reranker provisioning did not complete — search works un-reranked."
+    echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-reranker.sh"
+fi
+
 # ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"

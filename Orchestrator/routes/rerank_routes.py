@@ -1,12 +1,14 @@
 """Reranker ops surface (M11/WI-4, audit A9).
 
 GET /rerank/status — [retrieval] rerank_enabled flag, resolved [rerank]
-provider config, and the one-time latency-preflight result. ADDITIVE contract
-in the /embeddings/status style, for the M10-style wizard/Portal/Android ops
-cards to consume when reranker placement activates post-GPU. Read-only and
-side-effect-free on the fresh-box/null-provider default (pure config reads);
-with a configured provider it triggers the same once-per-process preflight
-retrieve() would — safe to poll (the probe result is cached).
+provider config, the one-time latency-preflight result, and (M13, additive)
+`gpu` + `service_reachable` for the onboarding wizard's reranker block.
+ADDITIVE contract in the /embeddings/status style, for the M10-style
+wizard/Portal/Android ops cards. Read-only; on the fresh-box/null-provider
+default the only I/O is the TTL-cached ~1s-capped reachability probe of the
+default provider URL (+ the 60s-cached hardware probe); with a configured
+provider it also triggers the same once-per-process preflight retrieve()
+would — safe to poll (every probe result is cached).
 """
 from fastapi import APIRouter, Response
 
