@@ -29,9 +29,9 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
         # Format results
         output_parts = [f"Found {len(results)} relevant memory(ies) for: {query}\n"]
         for i, snap_text in enumerate(results, 1):
-            # Truncate each result
-            if len(snap_text) > 10000:
-                snap_text = snap_text[:10000] + "\n... [truncated]"
+            # WI-10 (M7): deliver retrieved snapshots WHOLE — the old 10k
+            # per-result truncation is gone (caps exist only at the embedding
+            # layer; the count knob `limit` is the budget).
             output_parts.append(f"--- Result {i} ---\n{snap_text}")
 
         return ToolResult(

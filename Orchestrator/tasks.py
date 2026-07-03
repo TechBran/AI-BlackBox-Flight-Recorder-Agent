@@ -1389,9 +1389,12 @@ def process_chat_task(task: Task):
         # ranking floor lives in retrieval.py's junk-floor resolution (M9/WI-3).
         ST = active_threshold(ST)
         CP  = CFG.getint("context", "checkpoint_snapshots", fallback=1)
-        CAP = CFG.getint("context", "max_fossil_chars", fallback=4000)
+        # WI-10 (M7): cloud delivery is cap-free — [context] max_fossil_chars is
+        # no longer consumed on this (non-stream worker) path; every snapshot is
+        # delivered WHOLE. The count knobs above are the only budget.
+        CAP = None
 
-        print(f"[CONTEXT] Config - Recent: {RF}, Keyword: {KF}, Semantic: {SF} (threshold={ST}), Checkpoints: {CP}, Cap: {CAP}")
+        print(f"[CONTEXT] Config - Recent: {RF}, Keyword: {KF}, Semantic: {SF} (threshold={ST}), Checkpoints: {CP}, Cap: {CAP} (uncapped, WI-10)")
 
         actual_file_size = VOL_PATH.stat().st_size if VOL_PATH.exists() else 0
 

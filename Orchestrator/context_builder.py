@@ -34,41 +34,83 @@ from Orchestrator.media import get_recent_media_artifacts
 from Orchestrator.volume import read_text_safe
 
 
-# Global hard cap on total fossil-context chars. 200,000 chars ≈ 50K tokens.
-# Comfortably fits within every provider's input window (Opus 4.7 / Gemini
-# 3.1 Pro = 1M; Sonnet 4.6 / Grok 4.1 / GPT-5.1 = 200-256K).
-MAX_TOTAL_CONTEXT_CHARS = 200000
-
-# Per-provider tighter caps. Hard input limits aren't the issue — TTFB
-# latency from prefill + adaptive-thinking is. Opus 4.7 in particular pauses
-# 30-60+ seconds before emitting any token when given 50K+ tokens of system
-# input plus tool schemas, which exceeds Android OkHttp's default SSE
-# timeout and causes silent stalls. Confirmed empirically (Brandon test
-# 2026-04-25): same 210K-char payload streams cleanly via Gemini 3.1 Pro
-# but stalls via Opus 4.7. Per-provider caps trade some retrieval breadth
-# for reliable end-to-end completion.
+# ─────────────────────────────────────────────────────────────────────────────
+# WI-10 (M7): delivery caps are GONE on cloud surfaces.
 #
-# Anthropic/Opus 4.7 tokenizer runs 1.0x-1.35x more tokens than Opus 4.6
-# for the same text (per Anthropic 'What's new in 4.7' docs), so 75K chars
-# is ~19-25K tokens — fast TTFB, well under any timeout pressure.
+# Brandon's directive (audit doc §5 decision 6): caps exist ONLY at the
+# embedding/chunking layer (so ranking picks the best snapshots); the context
+# the chat model receives is governed by the config.ini COUNT knobs
+# (recent/keyword/semantic/checkpoint) and nothing else — every delivered
+# snapshot arrives WHOLE. The historical char caps here (MAX_TOTAL_CONTEXT_CHARS
+# = 200k, PROVIDER_CAPS anthropic 75k / computer-use 75k / openai 100k) were
+# transport guards for the 2026-04-25 Opus TTFB stall; that stall is now
+# handled at the transport layer instead (server SSE keepalive comment frames
+# + Android M7.1a 300s read timeout + Portal stall watchdog).
+#
+# What remains is a WINDOW SAFETY GUARD (not a cap): a per-provider TOKEN
+# budget derived from the documented/live-verified context window (M3 audit,
+# docs/plans/artifacts/2026-07-02-provider-window-audit.md §3) minus response
+# + prompt-overhead headroom. Token math via tokenization.estimate_tokens
+# (chars/2 conservative floor — measured to OVER-estimate true provider
+# tokenizers 2.2-2.4x on this corpus; never a network call). If the assembled
+# fossil context would exceed the budget, whole LOWEST-RANKED snapshots are
+# dropped (never mid-snapshot truncation) with a "window guard dropped" log
+# line. With live count knobs (RF=5 KF=3 SF=6 CP=2) the measured worst case
+# is ≈119k floor-tokens — the guard essentially never binds on the 1M-class
+# chat windows; it exists for pathological outliers and the Gemini
+# Computer-Use 131,072-token window (the one cloud window that can bind).
+#
+# Budget math (floor-token budgets for the FOSSIL BLOCK; window / max output
+# from the M3 table; "overhead" reserves core system prompt + ToolVault
+# schemas — measured ≈19.4k chars ≈ 10k floor-tokens — plus user history):
+#   anthropic     claude-opus-4-8      1,000,000 − 128,000 out − 32,000 ovh =   840,000
+#   openai        gpt-5.1                272,000 input share  − 32,000 ovh =   240,000
+#                 (400k total = 272k input + 128k output — output does NOT
+#                 consume the input share)
+#   gemini/google gemini-3.1-pro       1,048,576 −  65,536 out − 32,000 ovh =  951,040
+#   xai/grok      grok-4.3             1,000,000 − 128,000 out (assumed sym.)
+#                                                            − 32,000 ovh =   840,000
+#   computer-use  gemini-2.5-CU (the binding backend; anthropic/openai CU
+#                 backends are 1M-class) 131,072 − 65,536 out − 16,384
+#                 loop/screenshot growth                                  =    49,152
+#                 (floor-tokens ⇒ ≈98k chars of fossils — looser than the old
+#                 75k-char cap but still a real guard on the tightest window)
+PROVIDER_WINDOW_GUARD_TOKENS = {
+    "anthropic": 840_000,
+    "openai": 240_000,
+    "gemini": 951_040,
+    "google": 951_040,
+    "xai": 840_000,
+    "grok": 840_000,
+    "computer-use": 49_152,
+}
+# Unknown/absent provider (voice session-open, CLI agent transports): the most
+# conservative CLOUD chat budget. Voice routes additionally apply their own
+# REALTIME_CONTEXT_MAX_CHARS session budget on top (their windows are
+# per-session-model, audit §6 — not inherited from chat).
+DEFAULT_WINDOW_GUARD_TOKENS = 240_000
+
+# The ONE remaining char-capped profile: the on-device phone lean path
+# (provider="local"). Its window is genuinely small (6,144-token engine
+# default, device-proven GPU ceiling — audit §7); M8 (WI-7a matched-chunk
+# windowing) owns its delivery mechanism. Cloud surfaces no longer appear
+# here. local_routes reports this value as the package budget.
 PROVIDER_CAPS = {
-    "anthropic": 75000,    # Opus 4.7 adaptive-thinking TTFB constraint
-    "computer-use": 75000,  # Anthropic-backed CU model uses same path
-    "openai":    100000,   # GPT-5.1 has 256K window but conservative for prefill
-    "local":     16000,    # on-device Gemma: chars ≈ ~4K tokens, reserves ~12K of the phone's 16K window for the agent loop
-    # "google" / "gemini" / "xai" / "grok" → fall back to MAX_TOTAL_CONTEXT_CHARS
+    "local": 16000,  # chars ≈ ~4K tokens, reserves the rest of the phone window for the agent loop
 }
 
 
-def _resolve_cap(provider: str | None) -> int:
-    """Return the tighter of (per-provider cap, global cap) for the request.
-    Falls back to the global MAX_TOTAL_CONTEXT_CHARS if no per-provider entry.
+def window_guard_budget_tokens(provider: str | None) -> int:
+    """Floor-token budget for model-bound context on a cloud provider.
+
+    NOT valid for the local/phone profile — callers route provider="local"
+    through the char-capped lean path instead (M8's domain).
     """
     if provider:
-        provider_lower = provider.lower()
-        if provider_lower in PROVIDER_CAPS:
-            return min(PROVIDER_CAPS[provider_lower], MAX_TOTAL_CONTEXT_CHARS)
-    return MAX_TOTAL_CONTEXT_CHARS
+        budget = PROVIDER_WINDOW_GUARD_TOKENS.get(provider.lower())
+        if budget is not None:
+            return budget
+    return DEFAULT_WINDOW_GUARD_TOKENS
 
 
 def fill_unseen(ranked_snaps: list[str], k: int, seen_ids: set[str]) -> list[str]:
@@ -145,7 +187,13 @@ def build_fossil_context(
     # resolution (M9/WI-3).
     ST = active_threshold(ST)
     CP  = checkpoint_count if checkpoint_count is not None else CFG.getint("context", "checkpoint_snapshots", fallback=2)
-    CAP = CFG.getint("context", "max_fossil_chars", fallback=10000)
+    # [context] max_fossil_chars is LOCAL-PROFILE-ONLY since WI-10 (M7): the
+    # phone lean path keeps its per-snapshot char cap (M8 matched-chunk
+    # windowing owns that delivery); CLOUD delivery is cap-free — every
+    # snapshot arrives WHOLE (None disables the per-snapshot cap in
+    # get_recent_fossils_for_operator). The config key stays live for local.
+    is_local = bool(provider) and provider.lower() == "local"
+    CAP = CFG.getint("context", "max_fossil_chars", fallback=10000) if is_local else None
 
     # Read volume once
     vol_txt = read_text_safe(VOL_PATH)
@@ -250,10 +298,10 @@ def build_fossil_context(
 
     # ORDER + FORMAT UNIFORMITY both matter. Two phenomena to balance:
     #
-    # (1) Cap survival: items at the END are dropped first when the cap
-    #     fires. With MAX_TOTAL_CONTEXT_CHARS=200,000 (since 2026-04-25),
-    #     truncation only fires on outlier turns; ordering matters less
-    #     than it did at 30K.
+    # (1) Window-guard survival: since WI-10 (M7) nothing is char-truncated —
+    #     if the token window guard ever binds, whole LOWEST-VALUE snapshots
+    #     are dropped in reverse section order (keyword first), so section
+    #     order doubles as drop precedence.
     # (2) Lost-in-the-middle attention: long contexts cause models to
     #     under-attend to content in the trailing region. Earlier ordering
     #     put checkpoints LAST, and Brandon's Opus 4.7 reported "0
@@ -263,49 +311,100 @@ def build_fossil_context(
     #
     # Final order: checkpoint (at top, hot attention region) → recent →
     # semantic → keyword. Checkpoints are compressed session summaries
-    # that benefit from being visually prominent. Query-specific
-    # retrieval (recent/semantic/keyword) trails — still survives at 200K
-    # cap, and recent items are typically more recoverable from operator
-    # state if they ever clip.
+    # that benefit from being visually prominent.
     #
-    # All FOUR sources now use the same _fenced helper for visual
+    # All FOUR sources use the same _fenced helper for visual
     # uniformity — section header announcing count + numbered per-item
     # fences with SNAP-ID inline. The old checkpoint format had no
     # section-count header, which contributed to the model under-counting.
-    if checkpoint_snaps:
-        context_parts.append(_fenced("Checkpoint", checkpoint_snaps, checkpoint_ids))
-    if recent_snaps:
-        context_parts.append(_fenced("Recent", recent_snaps, recent_ids_list))
-    if semantic_snaps:
-        context_parts.append(_fenced("Semantic", semantic_snaps, semantic_ids))
-    if keyword_snaps:
-        context_parts.append(_fenced("Keyword-matched", keyword_snaps, keyword_ids))
+    def _assemble() -> str:
+        parts = list(context_parts)  # media block — never dropped by the guard
+        if checkpoint_snaps:
+            parts.append(_fenced("Checkpoint", checkpoint_snaps, extract_snap_ids(checkpoint_snaps)))
+        if recent_snaps:
+            parts.append(_fenced("Recent", recent_snaps, extract_snap_ids(recent_snaps)))
+        if semantic_snaps:
+            parts.append(_fenced("Semantic", semantic_snaps, extract_snap_ids(semantic_snaps)))
+        if keyword_snaps:
+            parts.append(_fenced("Keyword-matched", keyword_snaps, extract_snap_ids(keyword_snaps)))
+        return "\n\n".join(parts)
 
-    fossil_context = "\n\n".join(context_parts)
+    fossil_context = _assemble()
 
-    # Hard cap — prevents context overflow on tool-calling models.
-    # IMPORTANT: capture original size BEFORE the assignment that overwrites
-    # fossil_context with the truncated value. Pre-2026-04-25 the print
-    # statement read len(fossil_context) AFTER reassignment, so it always
-    # reported "30038 → 30000" (the truncation suffix is 38 chars) regardless
-    # of how much was actually lost — masking a 170K-char loss in plain sight.
-    cap = _resolve_cap(provider)
-    if len(fossil_context) > cap:
-        original_len = len(fossil_context)
-        fossil_context = (
-            fossil_context[:cap]
-            + "\n\n[Context truncated for token budget]"
-        )
-        cap_source = (
-            f"provider={provider!r}" if provider and provider.lower() in PROVIDER_CAPS
-            else "global"
+    if is_local:
+        # LOCAL (phone lean) profile: the one genuinely window-bound surface.
+        # Keeps the historical char cap until M8 (WI-7a matched-chunk
+        # windowing) replaces head-truncation with best-chunk windows.
+        # IMPORTANT: capture original size BEFORE the assignment that
+        # overwrites fossil_context with the truncated value (pre-2026-04-25
+        # this print masked a 170K-char loss in plain sight).
+        cap = PROVIDER_CAPS["local"]
+        if len(fossil_context) > cap:
+            original_len = len(fossil_context)
+            fossil_context = (
+                fossil_context[:cap]
+                + "\n\n[Context truncated for token budget]"
+            )
+            print(
+                f"{log_prefix} WARNING: Fossil context truncated from "
+                f"{original_len:,} to {cap:,} chars "
+                f"(dropped {original_len - cap:,} chars; cap source: provider={provider!r}; "
+                f"order is checkpoint → recent → semantic → keyword, so keyword "
+                f"clips first)"
+            )
+    else:
+        # CLOUD delivery: cap-free (WI-10). The window SAFETY GUARD below is
+        # not a cap — with the live count knobs it essentially never binds
+        # (measured worst case ≈119k floor-tokens vs ≥240k budgets). If it
+        # ever would, whole LOWEST-RANKED snapshots are dropped — NEVER a
+        # mid-snapshot truncation — and every drop is logged.
+        from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
+        budget = window_guard_budget_tokens(provider)
+        est = estimate_tokens(fossil_context)
+        dropped: list = []
+        while est > budget:
+            # Drop order = reverse of section value: keyword (lowest rank
+            # first), then semantic (lowest rank first), then recent (oldest
+            # first), then checkpoints (oldest first, last resort).
+            if keyword_snaps:
+                victim, section = keyword_snaps.pop(), "keyword"
+            elif semantic_snaps:
+                victim, section = semantic_snaps.pop(), "semantic"
+            elif recent_snaps:
+                victim, section = recent_snaps.pop(0), "recent"
+            elif checkpoint_snaps:
+                victim, section = checkpoint_snaps.pop(0), "checkpoint"
+            else:
+                break  # nothing droppable left (media block only)
+            vid = (extract_snap_ids([victim]) or ["?"])[0]
+            dropped.append(f"{vid}({section})")
+            print(
+                f"{log_prefix} window guard dropped {vid} ({section}, whole snapshot, "
+                f"{len(victim):,} chars): est {est:,} > budget {budget:,} tokens "
+                f"(provider={provider!r})"
+            )
+            fossil_context = _assemble()
+            est = estimate_tokens(fossil_context)
+        if dropped:
+            # Provenance reflects what is DELIVERED, not what was retrieved.
+            provenance = {
+                "recent": extract_snap_ids(recent_snaps),
+                "keyword": extract_snap_ids(keyword_snaps),
+                "semantic": extract_snap_ids(semantic_snaps),
+                "checkpoint": extract_snap_ids(checkpoint_snaps),
+            }
+            print(
+                f"{log_prefix} window guard summary: dropped {len(dropped)} whole "
+                f"snapshot(s) to fit budget {budget:,} tokens: {dropped}"
+            )
+        largest = max(
+            (len(s) for s in (checkpoint_snaps + recent_snaps + semantic_snaps + keyword_snaps)),
+            default=0,
         )
         print(
-            f"{log_prefix} WARNING: Fossil context truncated from "
-            f"{original_len:,} to {cap:,} chars "
-            f"(dropped {original_len - cap:,} chars; cap source: {cap_source}; "
-            f"order is checkpoint → recent → semantic → keyword, so keyword "
-            f"clips first)"
+            f"{log_prefix} Delivery: {len(fossil_context):,} chars ≈ {est:,} floor-tokens "
+            f"(window-guard budget {budget:,} tokens, provider={provider!r}); "
+            f"largest snapshot {largest:,} chars, delivered WHOLE"
         )
 
     return fossil_context, provenance

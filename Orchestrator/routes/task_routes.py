@@ -261,7 +261,10 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
             if start < len(vol_bytes) and end <= len(vol_bytes):
                 snap_bytes = vol_bytes[start:end]
                 snap_text = snap_bytes.decode('utf-8', errors='replace')
-                # Get first 500 chars as snippet
+                # Get first 500 chars as snippet.
+                # WI-10 note: this 500-char cut is INTENTIONALLY retained — this
+                # is an ID/preview API (MCP browse + Portal lists), not model
+                # delivery. Model-bound surfaces fetch whole snapshots by id.
                 snippet = snap_text[:500] + "..." if len(snap_text) > 500 else snap_text
 
             results.append({

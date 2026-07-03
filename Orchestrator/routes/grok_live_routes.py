@@ -223,9 +223,7 @@ async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: D
         # Format results
         output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
         for i, snap_text in enumerate(results, 1):
-            # Truncate each result
-            if len(snap_text) > 3000:
-                snap_text = snap_text[:3000] + "\n... [truncated]"
+            # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
             output_parts.append(f"--- Result {i} ---\n{snap_text}")
 
         return "\n\n".join(output_parts)
@@ -902,9 +900,7 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
                             snap_text = snap_bytes.decode('utf-8', errors='replace')
                             operator_name = meta.get("operator", "unknown")
 
-                            # Truncate each snapshot
-                            if len(snap_text) > 3000:
-                                snap_text = snap_text[:3000] + "\n... [truncated]"
+                            # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
                             result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")
 
                         result = "\n\n".join(result_parts)

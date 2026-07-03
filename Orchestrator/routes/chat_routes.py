@@ -850,9 +850,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                 # Format results
                                 output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
                                 for i, snap_text in enumerate(results, 1):
-                                    # Truncate each result to prevent context overflow
-                                    if len(snap_text) > 10000:
-                                        snap_text = snap_text[:3000] + "\n... [truncated]"
+                                    # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                     output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                 result_message = "\n\n".join(output_parts)
                                 print(f"[ANTHROPIC] Snapshot search returned {len(results)} results")
@@ -1458,8 +1456,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                             else:
                                 output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
                                 for i, snap_text in enumerate(results, 1):
-                                    if len(snap_text) > 10000:
-                                        snap_text = snap_text[:3000] + "\n... [truncated]"
+                                    # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                     output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                 result = "\n\n".join(output_parts)
                                 print(f"[GEMINI] Snapshot search returned {len(results)} results")
@@ -2240,8 +2237,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                         else:
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
-                                                if len(snap_text) > 10000:
-                                                    snap_text = snap_text[:3000] + "\n... [truncated]"
+                                                # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                                 output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                             tool_result = "\n\n".join(output_parts)
                                             print(f"[OPENAI-STREAM] Snapshot search returned {len(search_results)} results")
@@ -2487,6 +2483,61 @@ def _detect_web_search_intent(messages: List[Dict]) -> bool:
     return _detect_tool_intent(messages)
 
 
+def _guard_anthropic_history(amsgs: List[Dict], system_text: str):
+    """WI-10 (M7) window guard for the anthropic stream path's HISTORY.
+
+    Replaces the old blanket 15,000-char per-message truncation
+    (truncate_large_content) — a delivery cap missing from the original WI-10
+    inventory (M3 audit §1/§8) that silently mutilated long pasted user
+    content and long assistant turns. Semantics now match the fossil-context
+    guard: messages are delivered WHOLE; only if the estimated payload
+    (system + history text) exceeds the verified anthropic window budget are
+    the OLDEST whole messages dropped (never truncated mid-message). The
+    final (current-turn) message is never dropped, and the surviving list
+    still starts with a user turn (Anthropic requires it).
+
+    The token estimate counts system + text parts only — image blocks are
+    metered by the provider separately, and base64 payloads would explode a
+    chars/2 floor estimate (the caller strips inline base64 blobs first).
+
+    Returns (guarded_messages, dropped_count). Never mutates the input list.
+    """
+    from Orchestrator.context_builder import window_guard_budget_tokens
+    from Orchestrator.tokenization import estimate_tokens
+
+    def _text_tokens(m) -> int:
+        c = m.get("content")
+        if isinstance(c, str):
+            return estimate_tokens(c)
+        total = 0
+        for part in c or []:
+            if isinstance(part, dict) and part.get("type") == "text":
+                total += estimate_tokens(part.get("text", ""))
+        return total
+
+    budget = window_guard_budget_tokens("anthropic")
+    est = estimate_tokens(system_text) + sum(_text_tokens(m) for m in amsgs)
+    if est <= budget:
+        return amsgs, 0
+
+    guarded = list(amsgs)
+    dropped = 0
+    while len(guarded) > 1 and est > budget:
+        victim = guarded.pop(0)
+        est -= _text_tokens(victim)
+        dropped += 1
+    # Anthropic requires the first message to be a user turn.
+    while len(guarded) > 1 and guarded[0].get("role") != "user":
+        est -= _text_tokens(guarded[0])
+        guarded.pop(0)
+        dropped += 1
+    print(
+        f"[CONTEXT] window guard dropped {dropped} oldest whole history "
+        f"message(s) on the anthropic path (est {est:,} tokens vs budget {budget:,})"
+    )
+    return guarded, dropped
+
+
 async def stream_anthropic_with_thinking(messages: List[Dict], model: str, operator: str, force_tools: bool = False):
     """Stream Anthropic Claude responses with tools enabled.
 
@@ -2504,36 +2555,23 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
     # Extract system message
     system_text = "\n\n".join([m.get("content", "") for m in messages if m.get("role") == "system"])
 
-    # Helper to truncate oversized messages (prevents context bloat from code blocks/history)
-    def truncate_large_content(text: str, max_size: int = 15000) -> str:
-        """Truncate oversized messages to prevent context explosion.
-
-        Large messages typically contain:
-        - Code blocks from previous coding sessions
-        - HTML-formatted responses with embedded file contents
-        - Base64 image data
-        """
+    # WI-10 (M7): the old truncate_large_content 15,000-char per-message cut
+    # is GONE — history messages are delivered WHOLE. Its window-safety role
+    # moved to _guard_anthropic_history below (drops OLDEST whole messages
+    # only if the verified 1M-window budget would be exceeded — never a
+    # mid-message truncation). What remains here is blob-stripping: inline
+    # base64 data-URLs are junk in a text channel (media rides in proper
+    # image blocks) and would bloat both the payload and the token estimate.
+    def strip_media_blobs(text: str) -> str:
         if not isinstance(text, str):
             return text
-        if len(text) <= max_size:
-            return text
-
-        original_len = len(text)
-
-        # First try to strip base64 data URLs if present
-        import re
         cleaned = re.sub(
             r'data:(image|audio|video)/[^;]+;base64,[A-Za-z0-9+/=\s]{1000,}',
             '[MEDIA DATA REMOVED]',
             text
         )
-
-        # If still too large, truncate
-        if len(cleaned) > max_size:
-            # Keep first portion and add truncation notice
-            cleaned = cleaned[:max_size] + "\n\n[... MESSAGE TRUNCATED - Originally " + f"{original_len:,} chars ...]"
-
-        print(f"[ANTHROPIC] Truncated message: {original_len:,} -> {len(cleaned):,} chars")
+        if len(cleaned) != len(text):
+            print(f"[ANTHROPIC] Stripped inline base64 media: {len(text):,} -> {len(cleaned):,} chars")
         return cleaned
 
     # Build Anthropic-format messages — filter out empty content (Anthropic requires non-empty)
@@ -2560,16 +2598,20 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                         except Exception as e:
                             print(f"Could not process image for Anthropic streaming: {e}")
                     elif part.get("type") == "text":
-                        cleaned_text = truncate_large_content(part.get("text", ""))
+                        cleaned_text = strip_media_blobs(part.get("text", ""))
                         if cleaned_text:  # Skip empty text parts
                             new_content.append({"type": "text", "text": cleaned_text})
                 if new_content:  # Skip messages with no content parts
                     amsgs.append({"role": m["role"], "content": new_content})
             else:
-                cleaned_content = truncate_large_content(content) if isinstance(content, str) else content
+                cleaned_content = strip_media_blobs(content) if isinstance(content, str) else content
                 # Skip empty/None content — Anthropic requires non-empty
                 if cleaned_content:
                     amsgs.append({"role": m["role"], "content": cleaned_content})
+
+    # WI-10 (M7) window guard: history delivered whole; oldest whole messages
+    # drop only if the verified anthropic window budget would be exceeded.
+    amsgs, _hist_dropped = _guard_anthropic_history(amsgs, system_text)
 
     # Tools mode: always enabled for reliable tool calling
     print("[ANTHROPIC] Using TOOLS mode (all tools enabled)")
@@ -2982,8 +3024,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                         else:
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
-                                                if len(snap_text) > 10000:
-                                                    snap_text = snap_text[:3000] + "\n... [truncated]"
+                                                # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                                 output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                             result_message = "\n\n".join(output_parts)
                                             print(f"[ANTHROPIC-STREAM] Snapshot search returned {len(search_results)} results")
@@ -4882,8 +4923,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                         else:
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
-                                                if len(snap_text) > 10000:
-                                                    snap_text = snap_text[:3000] + "\n... [truncated]"
+                                                # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                                 output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                             result_message = "\n\n".join(output_parts)
                                             print(f"[GEMINI-STREAM] Snapshot search returned {len(search_results)} results")
@@ -5547,8 +5587,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                         else:
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
-                                                if len(snap_text) > 10000:
-                                                    snap_text = snap_text[:3000] + "\n... [truncated]"
+                                                # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
                                                 output_parts.append(f"--- Result {i} ---\n{snap_text}")
                                             tool_result = "\n\n".join(output_parts)
                                             print(f"[XAI-STREAM] Snapshot search returned {len(search_results)} results")
@@ -5816,7 +5855,11 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
         Tuple of (context_string, provenance_dict)
     """
     CU_RF, CU_KF, CU_SF, CU_ST = 4, 3, 5, 0.60
-    CU_CP, CU_CAP, CU_MA = 2, 10000, 5
+    # WI-10 (M7): CU delivery is cap-free — CU_CAP=None delivers recent
+    # snapshots WHOLE (the old 10k per-snapshot cap is gone). The safety net is
+    # the token window guard below, sized for the tightest CU backend window
+    # (gemini-2.5-CU 131,072 tokens — the ONE cloud window that can bind).
+    CU_CP, CU_CAP, CU_MA = 2, None, 5
     from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
     # CU_ST is display/log-only: it feeds semantic_retrieve's retained-but-
     # unused threshold param. The ranking floor lives in retrieval.py's
@@ -5877,14 +5920,60 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
             blocks.append(f"=== CHECKPOINT #{i} ===\n{cp}")
         context_parts.append("\n\n".join(blocks))
 
-    if recent_snaps:
-        context_parts.append("=== Recent Snapshots ===\n" + "\n\n".join(recent_snaps))
-    if keyword_snaps:
-        context_parts.append("=== Keyword-Matched Snapshots ===\n" + "\n\n".join(keyword_snaps))
-    if semantic_snaps:
-        context_parts.append("=== Semantically Relevant Snapshots ===\n" + "\n\n".join(semantic_snaps))
+    fixed_parts = list(context_parts)  # prefs + media + checkpoints — never dropped
 
-    return "\n\n".join(context_parts), provenance
+    def _assemble() -> str:
+        parts = list(fixed_parts)
+        if recent_snaps:
+            parts.append("=== Recent Snapshots ===\n" + "\n\n".join(recent_snaps))
+        if keyword_snaps:
+            parts.append("=== Keyword-Matched Snapshots ===\n" + "\n\n".join(keyword_snaps))
+        if semantic_snaps:
+            parts.append("=== Semantically Relevant Snapshots ===\n" + "\n\n".join(semantic_snaps))
+        return "\n\n".join(parts)
+
+    cu_context = _assemble()
+
+    # WI-10 window safety guard (not a cap): if the assembled CU context would
+    # exceed the gemini-CU-sized budget, drop whole LOWEST-RANKED snapshots
+    # (keyword lowest-rank first, then semantic, then oldest recent) — never
+    # truncate mid-snapshot. Same semantics as context_builder's guard.
+    from Orchestrator.context_builder import window_guard_budget_tokens
+    from Orchestrator.tokenization import estimate_tokens
+    budget = window_guard_budget_tokens("computer-use")
+    est = estimate_tokens(cu_context)
+    dropped = []
+    while est > budget:
+        if keyword_snaps:
+            victim, section = keyword_snaps.pop(), "keyword"
+        elif semantic_snaps:
+            victim, section = semantic_snaps.pop(), "semantic"
+        elif recent_snaps:
+            victim, section = recent_snaps.pop(0), "recent"
+        else:
+            break  # prefs/media/checkpoints only — nothing droppable left
+        vid = (extract_snap_ids([victim]) or ["?"])[0]
+        dropped.append(f"{vid}({section})")
+        print(
+            f"[CU-CONTEXT] window guard dropped {vid} ({section}, whole snapshot, "
+            f"{len(victim):,} chars): est {est:,} > budget {budget:,} tokens"
+        )
+        cu_context = _assemble()
+        est = estimate_tokens(cu_context)
+    if dropped:
+        # Provenance reflects what is DELIVERED, not what was retrieved.
+        provenance = {
+            "recent": extract_snap_ids(recent_snaps),
+            "keyword": extract_snap_ids(keyword_snaps),
+            "semantic": extract_snap_ids(semantic_snaps),
+            "checkpoint": extract_snap_ids(checkpoint_snaps),
+        }
+        print(
+            f"[CU-CONTEXT] window guard summary: dropped {len(dropped)} whole "
+            f"snapshot(s) to fit budget {budget:,} tokens: {dropped}"
+        )
+
+    return cu_context, provenance
 
 
 def build_streaming_context(messages: list, operator: str, provider: str = "openai") -> Tuple[list, dict]:
@@ -5915,9 +6004,9 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
             break
 
     # Shared retrieval builder — same output as the old inline pipeline.
-    # Pass provider so context_builder applies the right per-provider cap
-    # (Anthropic = 75K chars to avoid Opus 4.7 adaptive-thinking TTFB stalls,
-    # global cap of 200K otherwise — see PROVIDER_CAPS in context_builder.py).
+    # Pass provider so context_builder sizes the WI-10 window safety guard
+    # (whole-snapshot drops against the verified provider window; the old
+    # per-provider char caps are gone — see PROVIDER_WINDOW_GUARD_TOKENS).
     fossil_context, provenance = build_fossil_context(
         user_text=user_text,
         operator=operator,

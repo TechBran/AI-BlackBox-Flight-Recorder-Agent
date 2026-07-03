@@ -623,7 +623,7 @@ def extract_snap_ids(blocks: List[str]) -> List[str]:
                 out.append(m.group(1))
     return out
 
-def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars_each: int) -> List[str]:
+def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars_each: Optional[int]) -> List[str]:
     """Get recent snapshots for an operator. Uses index if available for O(1) access.
 
     IMPORTANT: Byte offsets in the index are BYTE positions, not character positions.
@@ -631,6 +631,12 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
 
     Special case: "system" operator can see ALL snapshots from all operators.
     This is needed for outbound calls where the AI needs context from prior conversations.
+
+    cap_chars_each: per-snapshot char cap, or None/<=0 for UNCAPPED (whole
+    snapshots). Since WI-10 (M7) all CLOUD delivery passes None — caps exist
+    only at the embedding layer; the remaining capped consumers are the local
+    phone lean profile ([context] max_fossil_chars) and the checkpoint
+    compressor's source window (checkpoint.py).
     """
     index = load_snapshot_index()
 
@@ -696,7 +702,7 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
                 snap_text = ""
                 print(f"[WARNING] Snapshot {snap_id} byte_start ({start}) exceeds vol_bytes length ({len(vol_bytes)})")
 
-            texts.append(cap_chars(snap_text, cap_chars_each))
+            texts.append(cap_chars(snap_text, cap_chars_each) if cap_chars_each and cap_chars_each > 0 else snap_text)
 
         final_texts = texts[-count:] if count > 0 else texts
         return final_texts
@@ -704,7 +710,8 @@ def get_recent_fossils_for_operator(vol_txt: str, op: str, count: int, cap_chars
         # Fallback to old method if index not available
         snaps = split_snapshots(vol_txt)
         texts = [t for (t, _s, _e) in snaps[:]]  # Get all snapshots (no limit)
-        texts = [cap_chars(t, cap_chars_each) for t in texts]
+        if cap_chars_each and cap_chars_each > 0:
+            texts = [cap_chars(t, cap_chars_each) for t in texts]
         texts = filter_by_operator(texts, op)
         return texts[-count:] if count>0 else texts
 
