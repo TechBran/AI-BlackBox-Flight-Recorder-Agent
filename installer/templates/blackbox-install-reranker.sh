@@ -76,7 +76,7 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 # Largest GPU wins on a multi-GPU box; nounits keeps the value a bare MiB int.
 VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
-    | tr -d '[:space:]' | sort -nr | head -n1 || true)"
+    | sort -nr | head -n1 | tr -d '[:space:]' || true)"
 if ! [[ "$VRAM_MB" =~ ^[0-9]+$ ]]; then
     echo "[install-reranker] nvidia-smi present but VRAM unreadable ('$VRAM_MB') — skipping."
     echo "[install-reranker] (Driver not loaded? Check 'nvidia-smi' by hand, then re-run"
