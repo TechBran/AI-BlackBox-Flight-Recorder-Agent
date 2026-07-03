@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from Orchestrator import config, fossils
+from Orchestrator import config, fossils, hardware
 from Orchestrator.embeddings import ollama_io, providers
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import get_store, set_active_slug
@@ -24,15 +24,23 @@ from Orchestrator.routes.embeddings_routes import router
 SLUG = "gemini-embedding-001"
 DIMS = 3072
 
-STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama"}
+# hardware is the WI-9/M10 ADDITIVE contract extension (host probe rollup).
+STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama", "hardware"}
 # schema + rows are the M6e ADDITIVE contract extension (chunked-store ops
-# currency); every pre-existing key below is unchanged — additive only.
+# currency); placement + recommended_placement are WI-9/M10 (device placement);
+# every pre-existing key below is unchanged — additive only.
 MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
     "quality_note", "store_exists", "schema", "rows", "missing", "ready",
-    "blockers", "keep_alive", "warm",
+    "blockers", "keep_alive", "warm", "placement", "recommended_placement",
 }
 STORE_KEYS = {"slug", "dims", "count", "schema", "rows", "missing", "last_updated"}
+
+# Hermetic no-GPU probe result (this box's live shape) for the env fixture.
+NO_GPU_HW = {
+    "gpu": False, "gpu_name": None, "vram_mb": None,
+    "ram_mb": 31167, "source": "none",
+}
 
 
 @pytest.fixture
@@ -53,6 +61,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(ollama_io, "daemon_version", lambda: None)
     monkeypatch.setattr(ollama_io, "local_models", lambda: [])
     monkeypatch.setattr(ollama_io, "ram_preflight", lambda ram_gb: None)
+    # Hermetic hardware probe (WI-9): no subprocess from these tests; the real
+    # command seams are exercised by test_hardware.py.
+    monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: dict(NO_GPU_HW))
     return index_path, stores_dir
 
 
@@ -302,6 +313,77 @@ def test_ollama_models_blocked_when_not_installed(env, client):
         assert m["blockers"] == [
             "Install Ollama: curl -fsSL https://ollama.com/install.sh | sh"
         ]
+
+
+# ── hardware + placement (WI-9/M10, additive to the binding contract) ────────
+
+def test_status_hardware_block_reflects_probe(env, client):
+    body = client.get("/embeddings/status").json()
+    assert body["hardware"] == NO_GPU_HW
+
+
+def test_no_gpu_box_recommends_cpu_for_locals_null_for_cloud(env, client):
+    """This box's live acceptance shape (audit WI-9): every local model still
+    offers a CPU path — recommended, never blocked."""
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug, m in models.items():
+        if EMBEDDING_MODELS[slug]["provider"] == "ollama":
+            assert m["recommended_placement"] == "cpu"
+            assert m["placement"] is None  # no override persisted → auto
+        else:
+            assert m["recommended_placement"] is None
+            assert m["placement"] is None
+
+
+@pytest.mark.parametrize("vram_mb,expect_8b,expect_06b", [
+    # 16GB (RTX 2000 Ada): both fit with >=1GB headroom → gpu, gpu
+    (16380, "gpu", "gpu"),
+    # 8GB: qwen-8b needs 6*1024+1024=7168 <= 8192 → gpu; 0.6b trivially fits
+    (8192, "gpu", "gpu"),
+    # 4GB: 8b doesn't fit (7168 > 4096) → cpu; 0.6b (1024+1024=2048) fits → gpu
+    (4096, "cpu", "gpu"),
+])
+def test_gpu_box_recommendations_follow_vram_budget(
+    env, client, monkeypatch, vram_mb, expect_8b, expect_06b
+):
+    monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: {
+        "gpu": True, "gpu_name": "NVIDIA Test GPU", "vram_mb": vram_mb,
+        "ram_mb": 31167, "source": "nvidia-smi",
+    })
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    assert models["qwen3-embedding-8b"]["recommended_placement"] == expect_8b
+    assert models["qwen3-embedding-0.6b"]["recommended_placement"] == expect_06b
+
+
+def test_gpu_without_known_vram_recommends_cpu(env, client, monkeypatch):
+    """lspci-only probe: presence without VRAM — an unverifiable fit is
+    recommended against (user can still pin gpu explicitly)."""
+    monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: {
+        "gpu": True, "gpu_name": "NVIDIA Corporation GA104", "vram_mb": None,
+        "ram_mb": 31167, "source": "lspci",
+    })
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    assert models["qwen3-embedding-0.6b"]["recommended_placement"] == "cpu"
+    assert models["qwen3-embedding-8b"]["recommended_placement"] == "cpu"
+
+
+def test_hardware_never_adds_blockers(env, client, monkeypatch):
+    """The probe is advisory: blockers on a no-GPU box are byte-identical to
+    the pre-WI-9 set (install one-liner from the hermetic env fixture)."""
+    for m in client.get("/embeddings/status").json()["models"]:
+        if EMBEDDING_MODELS[m["slug"]]["provider"] == "ollama":
+            assert m["blockers"] == [
+                "Install Ollama: curl -fsSL https://ollama.com/install.sh | sh"
+            ]
+
+
+def test_persisted_placement_surfaces_in_status(env, client):
+    from Orchestrator.embeddings import store as store_mod
+    _, stores_dir = env
+    store_mod.set_placement("qwen3-embedding-0.6b", "cpu", base_dir=stores_dir)
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    assert models["qwen3-embedding-0.6b"]["placement"] == "cpu"
+    assert models["qwen3-embedding-8b"]["placement"] is None
 
 
 # ── POST /embeddings/validate ────────────────────────────────────────────────

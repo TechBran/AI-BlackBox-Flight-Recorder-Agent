@@ -246,6 +246,16 @@ class OllamaProvider(_BaseProvider):
         )
         if keep_alive is not None:  # omit the key entirely when None
             payload["keep_alive"] = keep_alive
+        # WI-9 device placement: "cpu" pins the model off the GPU via
+        # options.num_gpu: 0 (zero layers offloaded); "gpu"/None (auto) OMIT
+        # num_gpu so Ollama auto-offloads when a GPU exists. Read fresh per
+        # call like keep_alive — a live toggle applies on the model's next
+        # load (Ollama reloads an already-loaded model when options change).
+        # num_ctx above is deliberately sent on BOTH placements: Ollama's
+        # VRAM-tiered default ctx would otherwise change with the device
+        # (audit WI-9), silently shifting the effective embed window.
+        if store.get_placement(self.slug) == "cpu":
+            payload.setdefault("options", {})["num_gpu"] = 0
         async with httpx.AsyncClient(
             timeout=self.TIMEOUT, transport=self._transport
         ) as client:

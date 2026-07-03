@@ -831,3 +831,60 @@ def set_keep_alive(slug: str, warm: bool, base_dir=None) -> str:
 def is_warm(value) -> bool:
     """True when a keep_alive value means 'stay resident' (negative duration)."""
     return isinstance(value, str) and value.strip().startswith("-")
+
+
+# ── Per-box device placement (local Ollama models, WI-9) ─────────────────────
+# Which device a local model runs on: "cpu" pins it off the GPU (the provider
+# sends options.num_gpu: 0 — zero layers offloaded), "gpu"/absent = auto
+# (num_gpu omitted; Ollama offloads to the GPU when one exists). Same
+# runtime-state pattern as keep_alive.json above: written by the wizard/Portal
+# toggle via POST /embeddings/placement, read fresh per embed call so a toggle
+# takes effect on the model's next load without a restart. Only meaningful for
+# ollama models; recommendations come from Orchestrator/hardware.probe().
+PLACEMENT_FILE = "placement.json"
+PLACEMENTS = ("gpu", "cpu")
+
+
+def get_placement(slug: str, base_dir=None) -> "str | None":
+    """Persisted placement override for slug: "gpu" / "cpu", or None (= auto,
+    Ollama decides). Unknown values in the file read as None — fail-open to
+    today's auto behavior, never to a surprise CPU pin."""
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    try:
+        overrides = json.loads((base / PLACEMENT_FILE).read_text(encoding="utf-8"))
+        if isinstance(overrides, dict):
+            value = overrides.get(slug)
+            if value in PLACEMENTS:
+                return value
+    except (FileNotFoundError, NotADirectoryError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def set_placement(slug: str, placement: "str | None", base_dir=None) -> "str | None":
+    """Write (placement in PLACEMENTS) or clear (None = auto) the per-box
+    placement for a LOCAL model; returns the value written."""
+    entry = EMBEDDING_MODELS.get(slug)
+    if entry is None:
+        raise ValueError(f"unknown embedding model slug {slug!r}")
+    if entry["provider"] != "ollama":
+        raise ValueError(f"{slug!r} is not a local model; placement is Ollama-only")
+    if placement is not None and placement not in PLACEMENTS:
+        raise ValueError(
+            f"placement must be one of {PLACEMENTS} or None (auto), got {placement!r}"
+        )
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / PLACEMENT_FILE
+    try:
+        overrides = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(overrides, dict):
+            overrides = {}
+    except (FileNotFoundError, NotADirectoryError, json.JSONDecodeError):
+        overrides = {}
+    if placement is None:
+        overrides.pop(slug, None)
+    else:
+        overrides[slug] = placement
+    _atomic_write_json(path, overrides)
+    return placement

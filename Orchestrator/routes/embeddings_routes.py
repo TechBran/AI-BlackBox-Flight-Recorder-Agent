@@ -18,6 +18,9 @@ POST /embeddings/ollama/pull    — pull a local model's weights from the Ollama
                                   library (registry slug in, 409 if a pull is
                                   already streaming; progress surfaces in
                                   status as `ollama.pull`).
+POST /embeddings/placement      — set/clear a LOCAL model's device placement
+                                  ("gpu"/"cpu"/null=auto, WI-9); applies on
+                                  the next embed call, no restart.
 
 Status is strictly read-only: it must never create store directories or files
 as a side effect (probing is cheap and safe to poll).
@@ -29,7 +32,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
-from Orchestrator import config
+from Orchestrator import config, hardware
 from Orchestrator.embeddings import ollama_io
 from Orchestrator.embeddings.migrate import (
     get_job_status,
@@ -41,11 +44,14 @@ from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
     META_FILE,
+    PLACEMENTS,
     get_active_slug,
     get_keep_alive,
+    get_placement,
     get_store,
     list_stores,
     set_keep_alive,
+    set_placement,
 )
 from Orchestrator.embeddings.store import is_warm as store_is_warm
 from Orchestrator.embeddings.watcher import run_health_check
@@ -109,8 +115,29 @@ def _ollama_state() -> dict:
     }
 
 
-def _model_preflight(entry: dict, ollama: dict) -> tuple[bool, list[str]]:
-    """ready/blockers for one registry entry, preflight-style.
+# VRAM headroom the GPU recommendation demands beyond the model's resident
+# estimate (registry ram_gb ≈ quantized weights + ctx buffers): KV growth,
+# display server, a co-resident reranker's slice (WI-4). Below this margin the
+# CPU path is recommended — never blocked (audit WI-9: CPU is never a dead end).
+GPU_HEADROOM_MB = 1024
+
+
+def _recommended_placement(entry: dict, hw: dict) -> str:
+    """"gpu" when the probed GPU fits entry's resident estimate with >=1GB
+    headroom, else "cpu". GPU present but VRAM unknown (lspci-only probe)
+    reads as doesn't-fit: an unverifiable fit is recommended against, but the
+    user can still pin "gpu" explicitly via the placement toggle."""
+    if not hw.get("gpu") or not hw.get("vram_mb"):
+        return "cpu"
+    needed_mb = int(entry["ram_gb"] * 1024) + GPU_HEADROOM_MB
+    return "gpu" if hw["vram_mb"] >= needed_mb else "cpu"
+
+
+def _model_preflight(
+    entry: dict, ollama: dict, hw: dict
+) -> tuple[bool, list[str], "str | None"]:
+    """(ready, blockers, recommended_placement) for one registry entry,
+    preflight-style.
 
     Ollama blockers, in order — install/start are mutually exclusive (first
     failing wins between them), everything else applicable is appended so the
@@ -123,13 +150,17 @@ def _model_preflight(entry: dict, ollama: dict) -> tuple[bool, list[str]]:
        ram_gb doubles as the download-size estimate (a quantized model file
        ≈ its RAM footprint; the registry has no separate size field)
     4. free RAM short → ollama_io.ram_preflight remediation string
+
+    recommended_placement (WI-9) is ADVISORY only — hardware never adds a
+    blocker (no GPU / short VRAM ⇒ the CPU path is offered, exactly today's
+    behavior). None for cloud models (placement is a local concept).
     """
     provider = entry["provider"]
     if provider in _CLOUD_KEY_PREFLIGHT:
         attr, remediation = _CLOUD_KEY_PREFLIGHT[provider]
         if getattr(config, attr, ""):
-            return True, []
-        return False, [remediation]
+            return True, [], None
+        return False, [remediation], None
 
     blockers: list[str] = []
     if not ollama["running"]:
@@ -147,7 +178,7 @@ def _model_preflight(entry: dict, ollama: dict) -> tuple[bool, list[str]]:
     ram_blocker = ollama_io.ram_preflight(entry["ram_gb"])
     if ram_blocker is not None:
         blockers.append(ram_blocker)
-    return (not blockers), blockers
+    return (not blockers), blockers, _recommended_placement(entry, hw)
 
 
 @router.get("/status")
@@ -164,6 +195,7 @@ def embeddings_status(response: Response):
     base = Path(config.EMBEDDINGS_STORES_DIR)
     index_ids = set(load_snapshot_index().keys())
     ollama_state = _ollama_state()
+    hw = hardware.probe()  # 60s TTL cache — safe under the wizard's 2s poll
 
     stores = []
     for meta in list_stores(base):
@@ -184,8 +216,8 @@ def embeddings_status(response: Response):
     models = []
     for slug, entry in EMBEDDING_MODELS.items():
         store_exists = (base / slug / META_FILE).is_file()
-        ready, blockers = _model_preflight(entry, ollama_state)
-        # keep_alive toggle is local-only (Ollama); null for cloud models
+        ready, blockers, recommended = _model_preflight(entry, ollama_state, hw)
+        # keep_alive + placement toggles are local-only (Ollama); null for cloud
         is_local = entry["provider"] == "ollama"
         keep_alive = get_keep_alive(slug, base_dir=base) if is_local else None
         # ADDITIVE (M6e): the model card mirrors its store's schema/rows
@@ -211,6 +243,12 @@ def embeddings_status(response: Response):
             "blockers": blockers,
             "keep_alive": keep_alive,
             "warm": store_is_warm(keep_alive) if is_local else None,
+            # ADDITIVE (WI-9/M10): device placement. placement = the persisted
+            # per-box override ("gpu"/"cpu", null = auto — Ollama decides);
+            # recommended_placement = the hardware-probe advisory. Both null
+            # for cloud models, mirroring keep_alive.
+            "placement": get_placement(slug, base_dir=base) if is_local else None,
+            "recommended_placement": recommended,
         })
 
     return {
@@ -220,6 +258,9 @@ def embeddings_status(response: Response):
         "stores": stores,
         "models": models,
         "ollama": ollama_state,
+        # ADDITIVE (WI-9/M10): the host hardware probe, verbatim —
+        # {gpu, gpu_name, vram_mb, ram_mb, source}.
+        "hardware": hw,
     }
 
 
@@ -388,3 +429,41 @@ async def embeddings_keep_alive(req: KeepAliveRequest):
         _WARMUP_TASK = asyncio.create_task(_warmup_model(req.slug))
         _WARMUP_TASK.add_done_callback(_log_warmup_outcome)
     return {"slug": req.slug, "warm": req.warm, "keep_alive": value}
+
+
+class PlacementRequest(BaseModel):
+    slug: str                     # REGISTRY SLUG (local/Ollama model)
+    placement: str | None = None  # "gpu" | "cpu" | null = auto (Ollama decides)
+
+
+@router.post("/placement")
+async def embeddings_placement(req: PlacementRequest):
+    """Set (or clear, placement=null) a LOCAL model's device placement (WI-9).
+
+    "cpu" pins the model off the GPU (the provider sends options.num_gpu: 0);
+    "gpu"/null leave offload to Ollama (num_gpu omitted). Takes effect on the
+    model's NEXT embed call, no restart: the provider reads placement.json
+    fresh per call, and Ollama reloads an already-loaded model when its
+    options change. 404 unknown slug, 400 for a cloud model or a value outside
+    {"gpu", "cpu", null}.
+    """
+    entry = EMBEDDING_MODELS.get(req.slug)
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown embedding model slug: {req.slug!r}"
+        )
+    if entry["provider"] != "ollama":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.slug!r} is a cloud model; placement is Ollama-only",
+        )
+    if req.placement is not None and req.placement not in PLACEMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"placement must be one of {list(PLACEMENTS)} or null (auto), "
+                f"got {req.placement!r}"
+            ),
+        )
+    value = set_placement(req.slug, req.placement)
+    return {"slug": req.slug, "placement": value}
