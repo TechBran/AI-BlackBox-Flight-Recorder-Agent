@@ -40,6 +40,9 @@ _PROVIDER_BINARY_NAMES = {
     # Antigravity ships as `agy` (not `antigravity`) per its install
     # script (Track 1 of 2026-05-22-antigravity-cli-integration plan).
     "antigravity": "agy",
+    # grok (xAI CLI) installs as `grok` under ~/.local/bin (covered by
+    # path_extension.extended_path_dirs()).
+    "grok": "grok",
 }
 
 
@@ -80,7 +83,7 @@ def _resolve_provider_bin(name: str) -> str:
     return bin_name
 
 
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "gemini", "codex", "antigravity")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("claude", "gemini", "codex", "antigravity", "grok")
 
 
 def provider_bin(name: str) -> str | None:
@@ -384,6 +387,7 @@ _ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
     "codex": "codex",
     "agy": "agy",
     "antigravity": "agy",
+    "grok": "grok",
     "terminal": None,
 }
 
@@ -521,7 +525,7 @@ async def zellij_launch(
 
     Body::
 
-        {"provider": "claude"|"gemini"|"codex"|"agy"|"terminal",
+        {"provider": "claude"|"gemini"|"codex"|"agy"|"grok"|"terminal",
          "app": "<app-name>" | null,
          "fork": false}   # optional; default false
 

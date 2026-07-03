@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin
+from Orchestrator.routes.cli_agent_routes import _resolve_provider_bin, provider_bin
 
 
 def test_resolves_binary_in_default_path(tmp_path, monkeypatch):
@@ -100,3 +100,18 @@ def test_empty_nvm_versions_dir_falls_back_to_bare_name(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert _resolve_provider_bin("gemini") == "gemini"
+
+
+def test_grok_is_supported_and_resolves_from_local_bin(tmp_path, monkeypatch):
+    """grok (xAI CLI) is a supported provider; its binary installs to
+    ~/.local/bin/grok, which extended_path_dirs() covers — provider_bin
+    must resolve it to the absolute path (not None / not the bare name)."""
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    fake_grok = local_bin / "grok"
+    fake_grok.write_text("#!/bin/sh\nexit 0\n")
+    fake_grok.chmod(0o755)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("CLI_AGENT_GROK_BIN", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert provider_bin("grok") == str(fake_grok)

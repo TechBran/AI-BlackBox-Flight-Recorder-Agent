@@ -197,6 +197,50 @@ def test_launch_with_zellij_backend_returns_201_no_token_in_response(
     assert args[1] is None  # terminal → no binary
 
 
+# --- launch accepts provider="grok" ------------------------------------
+
+
+def test_launch_with_grok_provider_returns_201(monkeypatch, tmp_path):
+    """grok is a supported zellij launch provider: the endpoint must NOT
+    400 on it, and must resolve + pass the grok binary to launch_session."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    state_dir = tmp_path / "state"
+    state_path = state_dir / "zellij_sessions.json"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_path)
+    # Don't depend on a real grok install on the box running the suite.
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/grok" if name == "grok" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "grok"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["session_name"] == "Brandon__grok__root", body["session_name"]
+    mock_launch.assert_called_once()
+    args, kwargs = mock_launch.call_args
+    assert args[0] == "Brandon__grok__root"
+    assert args[1] == "/fake/.local/bin/grok"  # resolved binary, not None
+
+    rows = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "grok"
+
+
 # --- backend-status endpoint reports configured + effective -----------
 
 
