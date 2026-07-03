@@ -56,8 +56,9 @@ class LocalModelApi(
 
     // 90s read timeout: bytes now stream direct from the HF CDN (a steady link), so a
     // real stall must surface as a retryable failure instead of an eternal 0%. Built
-    // from the shared streamClient (which has readTimeout 0); connect/write timeouts
-    // and the rest of the client config are inherited.
+    // from the shared streamClient (whose own 300s SSE read window — M7.1a — is
+    // deliberately overridden tighter here); connect/write timeouts and the rest of
+    // the client config are inherited.
     private val downloadClient = api.streamClient.newBuilder()
         .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
         .build()

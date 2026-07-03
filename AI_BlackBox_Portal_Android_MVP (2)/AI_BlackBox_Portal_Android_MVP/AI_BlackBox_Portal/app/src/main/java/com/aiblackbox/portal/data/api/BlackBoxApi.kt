@@ -37,10 +37,41 @@ class BlackBoxApi(private val baseUrl: String) {
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * SSE transport client (M7.1a — long-TTFB hardening, 2026-07-02).
+     *
+     * Read timeout is a BOUNDED [STREAM_READ_TIMEOUT_SECONDS] (300s), replacing the
+     * previous `readTimeout(0)` (infinite). Why bounded, and why this value:
+     *
+     *  - The historical failure (2026-04-25) was OkHttp's 10s DEFAULT read timeout
+     *    killing `/chat/stream` mid-TTFB — Opus stalled 30-60s before the first
+     *    token at ~210k-char prefill. The M3 provider-window audit re-measured the
+     *    cold 210k TTFB at 14.0s (claude-opus-4-8) and mandates hardening for the
+     *    historical 30-60s band, not the 14s point sample.
+     *  - `readTimeout(0)` (the interim fix) tolerates any TTFB but detects NOTHING:
+     *    a silently dead TCP path (WiFi walk-out, NAT expiry — no FIN/RST) leaves
+     *    the chat stuck in STREAMING forever. There is no other stall watchdog in
+     *    the chat pipeline, so the read timeout is the ONLY dead-transport detector.
+     *  - 300s = 5-10x the historical stall band, 21x the measured cold TTFB, and
+     *    aligned with the orchestrator's own provider-leg read timeout (httpx
+     *    timeout=300 in chat_routes) — the client never gives up before the server
+     *    leg would. Mid-stream silences are also bounded by this window; the server
+     *    emits tool_start/tool_executing before tool runs, per-step heartbeats on
+     *    CU sessions, and per-iteration heartbeats on the gemini tool loop, each of
+     *    which resets the read timer.
+     *  - Connect stays tight ([STREAM_CONNECT_TIMEOUT_SECONDS], 10s): it bounds only
+     *    the TCP+TLS handshake, so an unreachable host fails fast instead of
+     *    inheriting the wide streaming window.
+     *  - callTimeout is deliberately UNSET (0): it would bound the total stream
+     *    duration end-to-end, which is unbounded by design for long generations.
+     *
+     * Scoped HERE, not on [client]: plain request/response calls keep their tight
+     * 120s read timeout — only SSE calls get the long-TTFB window.
+     */
     val streamClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // No timeout for SSE
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(STREAM_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(STREAM_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(STREAM_WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -171,5 +202,17 @@ class BlackBoxApi(private val baseUrl: String) {
                 cont.resumeWithException(e)
             }
         })
+    }
+
+    companion object {
+        /**
+         * SSE stream transport timeouts (M7.1a). See [streamClient] KDoc for the
+         * full rationale; pinned by BlackBoxApiStreamTimeoutTest so a refactor
+         * cannot silently reintroduce the 10s-default (2026-04-25 stall) or the
+         * infinite-hang (readTimeout 0) failure modes.
+         */
+        const val STREAM_CONNECT_TIMEOUT_SECONDS = 10L
+        const val STREAM_READ_TIMEOUT_SECONDS = 300L
+        const val STREAM_WRITE_TIMEOUT_SECONDS = 60L
     }
 }

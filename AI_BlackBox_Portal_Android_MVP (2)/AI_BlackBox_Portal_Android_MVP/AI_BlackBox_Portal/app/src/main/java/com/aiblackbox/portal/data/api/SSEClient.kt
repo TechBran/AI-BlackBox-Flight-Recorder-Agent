@@ -93,6 +93,10 @@ class SSEClient(private val api: BlackBoxApi) {
                 val data = StringBuilder()
                 reader.forEachLine { line ->
                     when {
+                        // SSE comment/keepalive frame (": ..."): tolerated and dropped,
+                        // never data. Explicit branch (M7.1a) so a server-side heartbeat
+                        // comment can't be misparsed if branches are reordered later.
+                        line.startsWith(":") -> { /* keepalive — ignore */ }
                         line.startsWith("event:") -> eventType = line.removePrefix("event:").trim()
                         line.startsWith("data:") -> data.append(line.removePrefix("data:").trim())
                         line.isBlank() && data.isNotEmpty() -> {
@@ -147,6 +151,9 @@ class SSEClient(private val api: BlackBoxApi) {
 
                     reader.forEachLine { line ->
                         when {
+                            // SSE comment/keepalive frame (": ..."): tolerated and
+                            // dropped, never data (M7.1a — mirrors sseCallback above).
+                            line.startsWith(":") -> { /* keepalive — ignore */ }
                             line.startsWith("event:") -> {
                                 eventType = line.removePrefix("event:").trim()
                             }
