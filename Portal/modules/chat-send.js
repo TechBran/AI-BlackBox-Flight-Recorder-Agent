@@ -1056,8 +1056,36 @@ export async function sendStreamingChat(messages, provider, model, operator) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
 
+            // ── M7 stall watchdog (mirrors Android M7.1a's 300s stream read
+            // timeout, = the server's provider-leg httpx timeout). The server
+            // now emits ": keepalive" SSE comment frames every ~10s during
+            // provider prefill silence (comment frames parse to blocks with no
+            // event:/data: lines and are skipped below), so ANY healthy stream
+            // delivers bytes at least every ~10s. If NOTHING arrives for 300s
+            // the stream is dead — surface an error state instead of leaving
+            // this bubble hanging forever.
+            const STALL_TIMEOUT_MS = 300000;
+            let stallTimer = null;
+            let stalled = false;
+            const armStallWatchdog = () => {
+                if (stallTimer) clearTimeout(stallTimer);
+                stallTimer = setTimeout(() => {
+                    stalled = true;
+                    console.error('[STREAM] Stall watchdog: no stream data for 300s — aborting');
+                    try { reader.cancel(); } catch (e) { /* reader already closed */ }
+                }, STALL_TIMEOUT_MS);
+            };
+
             function processChunk(result) {
                 if (result.done) {
+                    if (stallTimer) clearTimeout(stallTimer);
+                    if (stalled) {
+                        // reader.cancel() resolves the pending read as done —
+                        // route it to the error path, not the finalize path.
+                        toast('Stream stalled — no data received for 5 minutes.');
+                        onStreamError(new Error('Stream stalled: no data received for 300s'));
+                        return;
+                    }
                     // If this was a queued request (bubble was removed), resolve silently
                     if (!bubble.parentNode && provider === 'computer-use') {
                         console.log('[CU] Queued request stream ended — no bubble to finalize');
@@ -1089,6 +1117,8 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                     return;
                 }
 
+                armStallWatchdog(); // any bytes (incl. keepalive comments) reset the stall clock
+
                 const text = decoder.decode(result.value, { stream: true });
                 const events = text.split('\n\n').filter(e => e.trim());
 
@@ -1105,6 +1135,8 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                         }
                     }
 
+                    // Skips SSE comment frames too (e.g. the server's ": keepalive"
+                    // prefill heartbeat, M7) — they parse to no event:/data: lines.
                     if (!eventType || !eventData) continue;
 
                     try {
@@ -1459,10 +1491,12 @@ export async function sendStreamingChat(messages, provider, model, operator) {
             // otherwise the orphaned `.streaming-bubble` lingers and pins the generation
             // ember backdrop on (the outer fetch .catch below only runs for pre-stream errors).
             function onStreamError(err) {
+                if (stallTimer) clearTimeout(stallTimer); // watchdog dies with the stream
                 bubble.classList.remove('streaming-bubble');
                 reject(err);
             }
 
+            armStallWatchdog(); // covers a server that never sends a first chunk
             reader.read().then(processChunk).catch(onStreamError);
 
         }).catch(error => {
