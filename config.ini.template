@@ -107,9 +107,32 @@ junk_floor = 0.40
 # [RETRIEVAL] debug_log lines shows zero sub-floor relevant hits for the
 # active model.
 registry_floor_enabled = false
+# M11 (WI-4): optional cross-encoder rerank stage. When true AND [rerank]
+# below has a live provider AND the one-time latency preflight passes,
+# retrieve() reranks the post-recency top rerank_candidate_n by cross-encoder
+# score (rank-space remap, recency re-applied, MMR unchanged — audit A9).
+# false = byte-identical ranking, zero rerank code on the path. Activation
+# checklist (vllm serve incantation etc.): Orchestrator/rerank.py docstring.
+rerank_enabled = false
+rerank_candidate_n = 40
 final_k = 10
 # OPT-IN provenance logging: when true, retrieve() prints one [RETRIEVAL] line
 # per final result (rrf relevance, age_days, recency_boost, final score, which
 # channels surfaced it). Observability only — does NOT change ranking. Off by
 # default (cheap path); flip to true to debug "why did I get these results".
 debug_log = false
+
+[rerank]
+# Cross-encoder reranker provider (Orchestrator/rerank.py — M11/WI-4).
+# provider: null (no reranker; the default) | vllm (POST {base_url}/score).
+# All keys have code fallbacks; this whole section is optional (fresh-box
+# rule, audit A13). GET /rerank/status reports the resolved state.
+provider = null
+# base_url = http://localhost:8091
+# model = qwen3-reranker-0.6b
+# timeout_s = 15
+# one-time first-use probe: 1 passage must score under this ceiling or rerank
+# is disabled for the process lifetime (surfaced in GET /rerank/status).
+# preflight_ceiling_ms = 500
+# per-candidate passage budget, chars (~= the 1024-token chunk budget).
+# passage_chars = 4096

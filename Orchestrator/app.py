@@ -128,6 +128,9 @@ app.include_router(onboarding_router)
 from Orchestrator.routes.embeddings_routes import router as embeddings_router
 app.include_router(embeddings_router)
 
+from Orchestrator.routes.rerank_routes import router as rerank_router
+app.include_router(rerank_router)
+
 from Orchestrator.routes.credentials_routes import router as credentials_router
 app.include_router(credentials_router)
 

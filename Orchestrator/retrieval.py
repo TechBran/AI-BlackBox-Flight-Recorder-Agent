@@ -7,7 +7,11 @@ session clusters; the fused top-P is protected from elimination — see
 mmr_select) -> top-k. A low junk floor replaces the old hard 0.60
 threshold (per-model registry floors are available behind
 [retrieval] registry_floor_enabled, default false — see _resolve_junk_floor).
-No rerank (offline-capable, incl. the on-device phone profile).
+An OPTIONAL cross-encoder rerank stage ([retrieval] rerank_enabled, default
+false — M11/WI-4, audit A9) can reorder the post-recency pool; off (the
+default, and whenever Orchestrator/rerank.py has no live provider) the
+pipeline is byte-identical to the historical no-rerank path and stays
+offline-capable, incl. the on-device phone profile.
 All semantic candidates come from get_active_store(), so the retriever is
 automatically correct for whatever embedding model is active.
 
@@ -27,6 +31,7 @@ from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.fossils import (
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
+    window_snapshot_text,
 )
 from Orchestrator.volume import read_text_safe
 
@@ -161,6 +166,104 @@ def _resolve_junk_floor(store) -> float:
     return float(value) if value is not None else fallback
 
 
+# ── optional cross-encoder rerank stage (M11/WI-4, audit A9) ──────────────────
+
+# Fall-through is logged ONCE per process (a dead reranker on a hot path must
+# not spam the journal on every retrieve).
+_rerank_fallthrough_logged = False
+
+
+def _log_rerank_fallthrough(reason: str) -> None:
+    global _rerank_fallthrough_logged
+    if not _rerank_fallthrough_logged:
+        print(f"[RERANK] {reason}; falling through to the un-reranked "
+              "ranking (logged once per process)")
+        _rerank_fallthrough_logged = True
+
+
+def _decode_snapshot_text(meta) -> "str | None":
+    """Byte-offset decode of ONE snapshot from the volume (rerank passage
+    source). Targeted seek-read — a few KB per candidate, NOT the ~35MB
+    whole-volume read the no-index keyword fallback pays. None on any
+    failure (missing offsets, short file, IO error) — never raises."""
+    try:
+        start, end = int(meta["byte_start"]), int(meta["byte_end"])
+        if end <= start:
+            return None
+        with open(VOL_PATH, "rb") as f:
+            f.seek(start)
+            raw = f.read(end - start)
+        if len(raw) < end - start:
+            return None  # offsets beyond EOF (index/volume drift)
+        return raw.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - rerank is best-effort, never raises
+        return None
+
+
+def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
+    """Cross-encoder rerank of the post-recency pool -> new RANK-SPACE
+    relevance dict, or None to fall through un-reranked (never raises).
+
+    A9-corrected placement: the pool is the top
+    min([retrieval] rerank_candidate_n (fallback 40), len(ranked)) of the
+    POST-recency ordering. One passage per pool member, all on ONE scale
+    ([rerank] passage_chars, fallback 4096 ≈ the 1024-token chunk budget):
+      - candidates with chunk provenance (v2 store collapse, ordinal >= 1):
+        the best-matched chunk's window via fossils.window_snapshot_text
+        (M8's span re-derivation; model_key = the store's slug — the
+        ordinals came from THAT store's chunker config);
+      - keyword-only / no-provenance candidates (ordinal None or 0): the
+        same helper degrades to the head window, so exact-string keyword
+        wins are scored on the same scale, not annihilated (audit A9).
+    Any pool member that cannot be decoded aborts the stage (partial pools
+    cannot be ranked on one scale) -> None.
+
+    The reranked ORDER (stable: score ties keep the incoming post-recency
+    order) maps back into rank-space relevance 1/(rrf_c + new_rank) over the
+    FULL list — reranked pool first, un-reranked tail after in its original
+    order, so the tail can never leapfrog the pool. The caller RE-APPLIES
+    apply_recency_tiebreak on this dict: rank-space keeps the post-RRF span
+    the recency weight was calibrated against (~0.0066 across 40 candidates
+    vs boost <= 0.005), so freshness keeps exactly its tie-break influence
+    on the new ordering.
+    """
+    try:
+        from Orchestrator import rerank as _rerank  # lazy: flag-on path only
+        if not _rerank.available():
+            return None
+        pool_n = min(
+            CFG.getint("retrieval", "rerank_candidate_n", fallback=40),
+            len(ranked),
+        )
+        if pool_n <= 0:
+            return None
+        passage_chars = CFG.getint("rerank", "passage_chars", fallback=4096)
+        model_key = getattr(store, "slug", None)
+        pool = [sid for sid, _ in ranked[:pool_n]]
+        passages = []
+        for sid in pool:
+            meta = index.get(sid)
+            text = _decode_snapshot_text(meta) if meta else None
+            if not text:
+                _log_rerank_fallthrough(f"passage decode failed for {sid}")
+                return None
+            passages.append(
+                window_snapshot_text(
+                    text, ord_by_id.get(sid), passage_chars, model_key
+                )
+            )
+        scores = _rerank.score(query, passages)
+        if scores is None or len(scores) != len(passages):
+            _log_rerank_fallthrough("scorer returned no usable scores")
+            return None
+        order = sorted(range(pool_n), key=lambda i: scores[i], reverse=True)
+        new_order = [pool[i] for i in order] + [sid for sid, _ in ranked[pool_n:]]
+        return {sid: 1.0 / (rrf_c + r) for r, sid in enumerate(new_order)}
+    except Exception as e:  # noqa: BLE001 - rerank must never break retrieval
+        _log_rerank_fallthrough(f"rerank stage error ({e})")
+        return None
+
+
 def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
              store=None, query_vector=None, return_provenance: bool = False):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
@@ -203,6 +306,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.85)
     mmr_protect = CFG.getint("retrieval", "mmr_protect_top", fallback=3)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
+    rerank_enabled = CFG.getboolean("retrieval", "rerank_enabled", fallback=False)
 
     # 2. embed the query (purpose="query" — the retrieval_query fix), unless the
     #    eval seam supplied a pre-embedded vector for a non-active arm's model.
@@ -249,10 +353,23 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     #    ordinal (M8/WI-7a best-chunk identity); the default call shape stays
     #    the frozen 3-tuple contract so eval fakes/older stores are untouched.
     ord_by_id: dict[str, "int | None"] = {}
-    if return_provenance:
-        sem4 = store.search_with_vectors(
-            qv_np, candidate_n, allowed_ids, with_ordinals=True
-        )
+    if return_provenance or rerank_enabled:
+        # The rerank stage also wants best-chunk identity (its passages window
+        # on the matched chunk — audit A9), so ordinals are fetched whenever
+        # either consumer needs them. Flag-off + no provenance keeps the frozen
+        # 3-tuple call shape below, byte-identical to the historical path.
+        try:
+            sem4 = store.search_with_vectors(
+                qv_np, candidate_n, allowed_ids, with_ordinals=True
+            )
+        except TypeError:
+            if return_provenance:
+                raise  # provenance mode's documented hard requirement
+            # rerank-only on a store without ordinal support (v1-era fake /
+            # eval stub): no chunk identity — every passage degrades to the
+            # head window; ranking still proceeds.
+            sem3 = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
+            sem4 = [(sid, cos, vec, None) for (sid, cos, vec) in sem3]
         sem = [(sid, cos, vec) for (sid, cos, vec, _o) in sem4 if cos >= junk_floor]
         ord_by_id = {sid: o for (sid, cos, _vec, o) in sem4 if cos >= junk_floor}
     else:
@@ -294,6 +411,23 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     }
     ranked = apply_recency_tiebreak(relevance, ages, recency_weight, half_life)
     score_by_id = dict(ranked)
+
+    # 7.5 OPTIONAL cross-encoder rerank (M11/WI-4, audit A9 placement): rerank
+    #     the post-recency top-N pool, map the reranked ORDER back into
+    #     rank-space relevance 1/(rrf_c + new_rank), RE-APPLY the recency
+    #     tie-break on that scale, rebuild score_by_id — then MMR (with the
+    #     channel-conditional protect) runs unchanged on the new ordering.
+    #     Gated on the flag AND provider availability AND the one-time latency
+    #     preflight (all inside _apply_rerank); any failure falls through
+    #     silently (logged once) to the un-reranked ranking above.
+    if rerank_enabled:
+        reranked_rel = _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c)
+        if reranked_rel is not None:
+            relevance = reranked_rel
+            ranked = apply_recency_tiebreak(
+                relevance, ages, recency_weight, half_life
+            )
+            score_by_id = dict(ranked)
 
     # 8. MMR diversity over the top window, then take top-k. The fused top-P
     #    ([retrieval] mmr_protect_top, default 3) is protected from MMR
