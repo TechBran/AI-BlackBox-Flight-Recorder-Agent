@@ -162,7 +162,7 @@ def _resolve_junk_floor(store) -> float:
 
 
 def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
-             store=None, query_vector=None):
+             store=None, query_vector=None, return_provenance: bool = False):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
 
     operator ""/"system" = all operators; any other operator restricts to its own
@@ -180,6 +180,17 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     dims-checked against the store and RAISES ValueError on mismatch (an eval
     harness bug must fail loud, not bench garbage). Production callers never
     pass either; default behavior is byte-identical.
+
+    return_provenance (keyword-only, M8/WI-7a): when True, results become
+    [(snap_id, score, best_ordinal)] — best_ordinal is the winning chunk's
+    ordinal within its snapshot group from the store's collapse (v2 store;
+    0 = whole-doc vector won = "no specific window", >= 1 = a specific chunk
+    won), or None for candidates with no chunk identity (v1-store rows, and
+    keyword-only candidates that never entered the semantic channel). Ranking
+    is IDENTICAL — the flag only annotates the same top-k. Default False is
+    byte-identical to the historical 2-tuple contract (pinned by tests).
+    Requires the store to support `search_with_vectors(..., with_ordinals=
+    True)` (the live VectorStore does; bare eval fakes may not).
     """
     if not query or not query.strip():
         return []
@@ -234,8 +245,19 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         }
 
     # 4. semantic candidates WITH vectors; drop junk-floor misses, keep vectors.
-    sem = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
-    sem = [(sid, cos, vec) for (sid, cos, vec) in sem if cos >= junk_floor]
+    #    Provenance mode additionally asks the store for each winner's chunk
+    #    ordinal (M8/WI-7a best-chunk identity); the default call shape stays
+    #    the frozen 3-tuple contract so eval fakes/older stores are untouched.
+    ord_by_id: dict[str, "int | None"] = {}
+    if return_provenance:
+        sem4 = store.search_with_vectors(
+            qv_np, candidate_n, allowed_ids, with_ordinals=True
+        )
+        sem = [(sid, cos, vec) for (sid, cos, vec, _o) in sem4 if cos >= junk_floor]
+        ord_by_id = {sid: o for (sid, cos, _vec, o) in sem4 if cos >= junk_floor}
+    else:
+        sem = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
+        sem = [(sid, cos, vec) for (sid, cos, vec) in sem if cos >= junk_floor]
     sem_ids = [sid for sid, _cos, _vec in sem]
     vec_by_id = {sid: vec for sid, _cos, vec in sem}
 
@@ -294,7 +316,14 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     ]
     effective_protect = mmr_protect if len(rankings) > 1 else 0
     picked = mmr_select(mmr_cands, k, mmr_lambda, protect=effective_protect)
-    results = [(sid, score_by_id[sid]) for sid in picked]
+    if return_provenance:
+        # Same top-k, annotated with best-chunk identity: ordinal from the
+        # semantic channel's collapse; None for keyword-only candidates
+        # (never scored against chunks) — delivery treats None like 0
+        # ("no specific window" -> head truncation).
+        results = [(sid, score_by_id[sid], ord_by_id.get(sid)) for sid in picked]
+    else:
+        results = [(sid, score_by_id[sid]) for sid in picked]
 
     # 9. OPT-IN provenance logging — answers "why did I get these results" from
     #    logs alone. Cheap: only computed when [retrieval] debug_log = true, and
@@ -304,7 +333,8 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     if debug_log:
         sem_set = set(sem_ids)
         kw_set = set(kw_ids)
-        for sid, final in results:
+        for sid in picked:  # shape-agnostic (results may carry provenance)
+            final = score_by_id[sid]
             rel = relevance.get(sid, 0.0)
             age = ages.get(sid, 3650.0)
             boost = final - rel

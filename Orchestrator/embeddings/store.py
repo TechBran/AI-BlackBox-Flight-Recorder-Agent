@@ -609,7 +609,8 @@ class VectorStore:
                 break
         return results
 
-    def search_with_vectors(self, query_vec, k: int, allowed_ids=None) -> list:
+    def search_with_vectors(self, query_vec, k: int, allowed_ids=None,
+                            with_ordinals: bool = False) -> list:
         """Top-k cosine matches WITH the matched row vector.
 
         Identical scoring to :meth:`search` (ONE numpy mat-vec over the
@@ -623,6 +624,15 @@ class VectorStore:
         v2 stores collapse to unique snapshots exactly like :meth:`search`;
         the returned vector is the BEST chunk's row (first hit in the
         descent), so MMR diversifies on each snapshot's most-relevant chunk.
+
+        with_ordinals (M8/WI-7a, OPT-IN — the default 3-tuple contract is
+        frozen): when True, each tuple gains a 4th element `best_ordinal` —
+        the winning row's chunk ordinal within its snapshot group on a v2
+        store (0 = whole-doc/single-chunk = "no specific window"; >= 1 = a
+        specific chunk won the collapse), or None on a v1 store (one whole-
+        doc row per snapshot — there is no chunk identity to report). This
+        is the best-chunk IDENTITY the matched-chunk delivery windowing
+        needs; the vector alone cannot recover which span matched.
         """
         with self._lock:
             self._ensure_open_locked()
@@ -647,7 +657,10 @@ class VectorStore:
                     if sid in seen:
                         continue  # later chunk of an already-returned snapshot
                     seen.add(sid)
-                    results.append((sid, float(scores[i]), matrix[i].copy()))
+                    row = (sid, float(scores[i]), matrix[i].copy())
+                    if with_ordinals:
+                        row = row + (self._ordinals[i],)
+                    results.append(row)
                     if len(results) >= k:
                         break
                 return results
@@ -656,7 +669,10 @@ class VectorStore:
                 if allowed_ids is not None and sid not in allowed_ids:
                     continue
                 # Copy the row so the caller can never mutate the live matrix.
-                results.append((sid, float(scores[i]), matrix[i].copy()))
+                row = (sid, float(scores[i]), matrix[i].copy())
+                if with_ordinals:
+                    row = row + (None,)  # v1: whole-doc rows, no chunk identity
+                results.append(row)
                 if len(results) >= k:
                     break
             return results
