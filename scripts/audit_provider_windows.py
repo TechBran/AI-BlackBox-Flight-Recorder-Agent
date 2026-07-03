@@ -24,9 +24,16 @@ LEDGER SAFETY (the volume is immutable production memory):
 Idempotent + re-runnable: results are (re)written to the JSON artifact after every
 probe, keyed by (provider, chars); re-running overwrites in place.
 
+M7 extension (transport-hardening acceptance): every probe additionally counts
+SSE COMMENT frames (lines starting ":") — the server's ": keepalive" prefill
+heartbeat — split into keepalives seen BEFORE the first provider token (the
+Task-A acceptance signal) and total. Use --artifact to write M7 re-probe runs
+to a NEW file so the M3 measurement record stays intact.
+
 Usage:
   Orchestrator/venv/bin/python scripts/audit_provider_windows.py [--only PROVIDER]
       [--sizes 75000,210000,238000] [--base http://localhost:9091]
+      [--artifact docs/plans/artifacts/<file>.json]
 """
 from __future__ import annotations
 
@@ -142,6 +149,9 @@ def run_probe(base: str, provider: str, model: str, chars: int) -> dict:
         "tool_events": 0,
         "usage": None,
         "event_counts": {},
+        # M7: SSE comment frames (": keepalive") — transport-hardening acceptance.
+        "keepalives_before_first_token": 0,
+        "keepalive_frames_total": 0,
         "error": None,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -165,6 +175,12 @@ def run_probe(base: str, provider: str, model: str, chars: int) -> dict:
                     if now - t0 > HARD_TIMEOUT_S:
                         rec["error"] = f"hard timeout {HARD_TIMEOUT_S}s exceeded mid-stream"
                         break
+                    if line.startswith(":"):
+                        # SSE comment frame — the M7 keepalive heartbeat.
+                        rec["keepalive_frames_total"] += 1
+                        if first_token_at is None:
+                            rec["keepalives_before_first_token"] += 1
+                        continue
                     if line.startswith("event: "):
                         ev_type = line[7:].strip()
                         rec["event_counts"][ev_type] = rec["event_counts"].get(ev_type, 0) + 1
@@ -231,11 +247,18 @@ def save_results(probes: list[dict]) -> None:
 
 
 def main() -> None:
+    global ARTIFACT
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", help="single provider to probe (gemini|anthropic|openai|xai)")
     ap.add_argument("--sizes", default=",".join(str(s) for s in SIZES))
     ap.add_argument("--base", default="http://localhost:9091")
+    ap.add_argument("--artifact", help="alternate results JSON (keeps the M3 record intact "
+                                       "for re-probe runs); relative paths resolve from repo root")
     args = ap.parse_args()
+
+    if args.artifact:
+        p = Path(args.artifact)
+        ARTIFACT = p if p.is_absolute() else REPO_ROOT / p
 
     sizes = [int(s) for s in args.sizes.split(",")]
     providers = [(p, m) for p, m in PROVIDERS if not args.only or p == args.only]
