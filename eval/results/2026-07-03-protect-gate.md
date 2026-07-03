@@ -117,3 +117,38 @@ At (λ=0.9, P=3), the 4 recurring-topic golden queries against BOTH stores
 (active production path + candidate via the store seam), pass = current- or
 previous-month snapshot in top-5: **8/8 PASS** (4/4 active, 4/4 candidate);
 config.ini byte-identical before/after. The protect does not bury freshness.
+
+## Iteration 4 resolution — channel-conditional protect: ALL SIX GATES PASS
+
+The contradiction above dissolves once the protect is scoped to its own
+justification: cross-channel agreement. A single-channel ranking has no
+agreement signal — and the semantic arm was fully green at P=0. Commit
+ee966a2 makes the protect channel-conditional in retrieve() (effective
+protect = mmr_protect_top only when >1 channel contributed to the fusion;
+semantic-only/lean/empty-keyword calls run unprotected).
+
+Re-gate at the deployment config (λ=0.85 --mmr-lambda, P=3 --mmr-protect,
+stale iteration-3 cache keys purged first — same keys, different code
+semantics): artifact `2026-07-03-it4-chunk-gate-mmrlambda0.85-mmrprotecttop3.{md,json}`.
+
+| # | gate | baseline | candidate | verdict |
+|---|---|---|---|---|
+| 1 | hybrid overall r@10 >= baseline | 0.6302 | 0.6302 | PASS (>=, tied) |
+| 2 | semantic overall r@10 >= baseline | 0.5169 | 0.5348 | PASS |
+| 3a | hybrid >10k must improve | 0.7533 | 0.8133 | PASS |
+| 3b | semantic >10k must improve | 0.4467 | 0.5667 | PASS |
+| 4a | hybrid tail must improve | 0.7087 | 0.7184 | PASS |
+| 4b | semantic tail must improve | 0.5243 | 0.6019 | PASS |
+| 5a | hybrid holdout | 3/3 | 3/3 | PASS |
+| 5b | semantic holdout | 3/3 | 3/3 | PASS |
+| 6 | golden+lean vs candidate | all pass | all pass (10/10) | PASS |
+
+**VERDICT: ALL GATES PASS — cutover authorized (per the gate; execution is
+the controller's, not this session's).**
+
+Proof the semantic arm ran unprotected: candidate-semantic holdout detail is
+6930@6, 6316@2, 6313@1 — byte-for-byte the decomposed-probe P=0 λ=0.85
+prediction from the table above. Candidate-hybrid shows the protected ranks
+(6930@3, 6316@3 — both golds seeded at fused rank 3). Half-A freshness at
+(0.85, P=3) under the channel-conditional code: **8/8 PASS** against BOTH
+stores; config.ini byte-identical on every run. Guarded suite 476/0.
