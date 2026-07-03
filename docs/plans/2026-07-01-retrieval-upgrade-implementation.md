@@ -357,3 +357,35 @@ Append to the audit doc: ANN sidecar invalidation key `(slug, schema, generation
 | Qwen floor wipes phone recall | M9 flag default-off + measured noise floors + permanent lean-profile regression test |
 | Mint-during-migration pollution | 6c schema guard lands before 6f backfill; re-diff loop; raced rows dropped not absorbed |
 | OOM pressure from bigger matrix | 2.52× ≈ 235MB (measured corpus math); leak-hunt is a separate track — monitor after cutover |
+
+---
+
+## As-built addendum (2026-07-02, mid-execution — corrections where the build diverged from plan text)
+
+- **M2/M5 naming + values:** the mint embed helper shipped as `embed_snapshot_for_index(text) -> dict`
+  (schema-aware payload: `{"embedding": vec}` v1 / `{"chunk_vectors": [...]}` v2), not the planned
+  `embed_snapshot_chunks`. Qwen registry `max_input_tokens` shipped as **8192** (not 32768):
+  num_ctx KV at 32k ≈ 3.7GB CPU RAM per loaded model; raise post-GPU (comment on the entries).
+- **M4b (not in the original plan):** the eval harness exposed a production ranking miscalibration —
+  `recency_weight` 0.05 was ~7.6× the post-RRF relevance span, displacing older golds
+  (57.6% of semantic misses had gold in raw top-10). Fixed to **0.005** (measured sweep,
+  eval/results/2026-07-02-recency-sweep.md): r@10 0.268→0.489 hybrid. All M6 gate baselines are
+  the w=0.005 rows; the gate REFUSES to run at any other live weight.
+- **M6 store decisions locked by review:** v2 `meta.count` stays SNAPSHOT currency (rows is the
+  new field) — plan line "count = rows" superseded by audit A11. `append_group` on a v1 store
+  raises. Fresh stores default v1 until the post-gate default flip (board task: model-switch path
+  creates v2 by default AFTER the 6f gate passes — Brandon-confirmed intent).
+- **M6d hardening (post-review):** `_run_engine` is schema-aware at the fill site (v2 targets get
+  chunk groups on ANY migration path incl. watcher auto-recovery — the A4 side door closed);
+  `start_rebuild(slug)` + `POST /embeddings/migrate {"rebuild": true}` = in-service build-only.
+- **6f gate tooling (exact commands):**
+  `Orchestrator/venv/bin/python scripts/calibrate_threshold.py --store-dir Manifest/embeddings/_build --schema 2`
+  `Orchestrator/venv/bin/python eval/run_bench.py --gate --candidate-dir Manifest/embeddings/_build --candidate-slug gemini-embedding-2`
+  (gate exit 0 = cutover authorized; re-runs baseline arms fresh at current config; goldens+lean
+  run against the candidate via an in-process get_active_store patch; skips count as failures).
+- **M7.1a (pulled forward, safely decoupled):** Android SSE hardening landed pre-cutover
+  (9b83714) — discovery: the 2026-04-25 stall had been "fixed" with an INFINITE read timeout
+  (dead sockets hung chat forever, no watchdog). Now: stream client read 300s (= server
+  provider-leg httpx timeout), connect 10s, comment-frame tolerance, test-pinned. Device
+  validation on the Fold at the M7 gate.
+- **M12 shipped early** (audit doc §7): ANN seam contract — pure docs, no code.
