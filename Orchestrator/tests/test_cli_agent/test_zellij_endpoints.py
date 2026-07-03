@@ -410,6 +410,253 @@ def test_launch_fork_creates_distinct_session(monkeypatch, tmp_path):
     fork_launch.assert_called_once()
 
 
+# --- YOLO (skip-permissions) launch ------------------------------------
+
+
+def test_launch_yolo_claude_passes_skip_permissions_flag(monkeypatch, tmp_path):
+    """yolo=true with provider=claude: launch_session receives the claude
+    skip-permissions flag in args, the session name carries the _yolo
+    suffix, and the state row persists yolo=True."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    state_dir = tmp_path / "state"
+    state_path = state_dir / "zellij_sessions.json"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_path)
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/claude" if name == "claude" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "claude", "yolo": True},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["session_name"] == "Brandon__claude__root__yolo", body["session_name"]
+
+    mock_launch.assert_called_once()
+    args, kwargs = mock_launch.call_args
+    assert args[0] == "Brandon__claude__root__yolo"
+    assert args[1] == "/fake/.local/bin/claude"
+    passed_args = args[2] if len(args) > 2 else kwargs.get("args")
+    assert passed_args == ["--dangerously-skip-permissions"], passed_args
+
+    rows = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(rows) == 1
+    assert rows[0]["yolo"] is True
+
+
+def test_launch_non_yolo_claude_passes_no_args(monkeypatch, tmp_path):
+    """Backward compat: omitted yolo behaves like today — claude has no
+    PROVIDER_ARGS entry, so launch_session receives args=None (NOT [])."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/claude" if name == "claude" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "claude"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["session_name"] == "Brandon__claude__root"  # no _yolo suffix
+    mock_launch.assert_called_once()
+    args, kwargs = mock_launch.call_args
+    passed_args = args[2] if len(args) > 2 else kwargs.get("args")
+    assert passed_args is None, passed_args
+
+
+def test_launch_codex_carries_no_alt_screen_onto_zellij_path(monkeypatch, tmp_path):
+    """codex (non-yolo) now carries PROVIDER_ARGS' --no-alt-screen onto
+    the zellij path — the documented fix for codex scrollback under
+    zellij (previously PROVIDER_ARGS was tmux-only)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/codex" if name == "codex" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "codex"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    mock_launch.assert_called_once()
+    args, kwargs = mock_launch.call_args
+    passed_args = args[2] if len(args) > 2 else kwargs.get("args")
+    assert passed_args == ["--no-alt-screen"], passed_args
+
+
+def test_launch_yolo_codex_appends_flag_after_provider_args(monkeypatch, tmp_path):
+    """yolo codex: PROVIDER_ARGS come first, YOLO flag appended after."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+    from Orchestrator.routes import cli_agent_routes
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/codex" if name == "codex" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "codex", "yolo": True},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["session_name"] == "Brandon__codex__root__yolo"
+    mock_launch.assert_called_once()
+    args, kwargs = mock_launch.call_args
+    passed_args = args[2] if len(args) > 2 else kwargs.get("args")
+    assert passed_args == [
+        "--no-alt-screen",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ], passed_args
+
+
+def test_launch_yolo_terminal_returns_400(monkeypatch):
+    """yolo=true with provider='terminal' is a client error: a bare shell
+    has no permission prompts to skip. 400 + nothing launched."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal", "yolo": True},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 400, r.text
+    mock_launch.assert_not_called()
+
+
+def test_list_sessions_includes_yolo_field(monkeypatch):
+    """Sessions list response carries yolo per session: True for a yolo
+    row, False for a legacy row that predates the field (no crash)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_rows = [
+        {
+            "operator": "Brandon",
+            "provider": "claude",
+            "app": None,
+            "session_name": "Brandon__claude__root__yolo",
+            "token_name": "master",
+            "created_at": "2026-07-03T00:00:00+00:00",
+            "expires_at": None,
+            "yolo": True,
+        },
+        {
+            # Legacy row minted before the yolo field existed — no key.
+            "operator": "Brandon",
+            "provider": "terminal",
+            "app": None,
+            "session_name": "Brandon__terminal__root",
+            "token_name": "master",
+            "created_at": "2026-07-01T00:00:00+00:00",
+            "expires_at": None,
+        },
+    ]
+    live = [
+        {"name": "Brandon__claude__root__yolo", "created_at": "1h ago"},
+        {"name": "Brandon__terminal__root", "created_at": "2days ago"},
+    ]
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "list_sessions", return_value=live), \
+         patch.object(zellij_state, "list_for_operator", return_value=state_rows):
+        c = _client()
+        r = c.get("/cli-agent/zellij/sessions", params={"op": "Brandon"})
+
+    assert r.status_code == 200, r.text
+    sessions = {s["name"]: s for s in r.json()["sessions"]}
+    assert sessions["Brandon__claude__root__yolo"]["yolo"] is True
+    assert sessions["Brandon__terminal__root"]["yolo"] is False
+
+
+# --- name helpers: _yolo suffix (pure-function unit tests) ---------------
+
+
+def test_zellij_resume_name_yolo_suffix():
+    from Orchestrator.routes.cli_agent_routes import _zellij_resume_name
+
+    assert _zellij_resume_name("Brandon", "claude", None) == "Brandon__claude__root"
+    assert _zellij_resume_name("Brandon", "claude", None, yolo=True) == (
+        "Brandon__claude__root__yolo"
+    )
+    assert _zellij_resume_name("Brandon", "gemini", "grocery-store", yolo=True) == (
+        "Brandon__gemini__grocery-store__yolo"
+    )
+
+
+def test_zellij_fork_name_yolo_suffix():
+    from Orchestrator.routes.cli_agent_routes import _zellij_fork_name
+
+    plain = _zellij_fork_name("Brandon", "claude", None)
+    assert re.fullmatch(r"Brandon__claude__root__\d+", plain), plain
+
+    yolo = _zellij_fork_name("Brandon", "claude", None, yolo=True)
+    assert re.fullmatch(r"Brandon__claude__root__\d+_yolo", yolo), yolo
+
+    yolo_app = _zellij_fork_name("Brandon", "codex", "grocery-store", yolo=True)
+    assert re.fullmatch(
+        r"Brandon__codex__grocery-store__\d+_yolo", yolo_app
+    ), yolo_app
+
+
 def test_launch_collision_race_falls_back_to_resume(monkeypatch, tmp_path):
     """If the existence probe missed but launch_session hits an existing
     name (rc=1 race), the handler re-checks existence and treats it as a

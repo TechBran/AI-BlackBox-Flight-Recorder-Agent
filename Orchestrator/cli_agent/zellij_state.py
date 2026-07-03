@@ -21,6 +21,10 @@ Schema per row::
       "token_name": str,           # Zellij-assigned name (e.g., "token_3")
       "created_at": str,           # ISO-8601
       "expires_at": str | None,    # ISO-8601 for short-lived; None for terminal
+      "yolo": bool,                # launched with the provider's
+                                   # skip-permissions flag (rows minted
+                                   # before this field lack the key —
+                                   # readers must default to False)
     }
 """
 from __future__ import annotations
@@ -130,11 +134,17 @@ def add_session(
     session_name: str,
     token_name: str,
     expires_at: Optional[str],
+    yolo: bool = False,
 ) -> None:
     """Append (or update) a session row. Idempotent on
     ``(operator, session_name)`` — if a matching row already exists, its
-    ``token_name`` and ``expires_at`` are refreshed in place rather than
-    duplicated.
+    ``token_name``, ``expires_at`` and ``yolo`` are refreshed in place
+    rather than duplicated.
+
+    ``yolo`` (keyword, default False so every existing caller keeps
+    working) records that the session was launched with the provider's
+    skip-permissions flag — persisted so clients can badge YOLO sessions
+    durably across list/reconcile cycles.
 
     SECURITY (audit I7): the parameter is ``token_name`` not
     ``token_value``. Callers MUST pass the Zellij-assigned name
@@ -159,6 +169,7 @@ def add_session(
                 # handlers).
                 row["provider"] = provider
                 row["app"] = app
+                row["yolo"] = yolo
                 matched = True
                 break
         if not matched:
@@ -170,6 +181,7 @@ def add_session(
                 "token_name": token_name,
                 "created_at": now,
                 "expires_at": expires_at,
+                "yolo": yolo,
             })
         save(rows)
     logger.info(

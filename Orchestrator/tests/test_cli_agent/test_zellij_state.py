@@ -70,9 +70,59 @@ def test_add_session_schema_has_no_token_value_uuid(isolated_state):
         "token_name",
         "created_at",
         "expires_at",
+        "yolo",
     }
     assert set(row.keys()) == expected_fields
     assert row["token_name"] == "token_test"
+
+
+# --- yolo round-trip -----------------------------------------------------
+
+
+def test_add_session_persists_yolo_true(isolated_state):
+    """add_session(yolo=True) round-trips: the persisted row carries
+    yolo=True and it survives load()."""
+    zellij_state.add_session(
+        operator="Brandon",
+        provider="claude",
+        app=None,
+        session_name="Brandon__claude__root__yolo",
+        token_name="master",
+        expires_at=None,
+        yolo=True,
+    )
+    rows = zellij_state.load()
+    assert len(rows) == 1
+    assert rows[0]["yolo"] is True
+
+
+def test_add_session_yolo_defaults_false(isolated_state):
+    """Omitted yolo keeps every existing caller working: persisted rows
+    default to yolo=False."""
+    zellij_state.add_session(
+        "Brandon", "claude", None,
+        "Brandon__claude__root", "master", None,
+    )
+    rows = zellij_state.load()
+    assert len(rows) == 1
+    assert rows[0]["yolo"] is False
+
+
+def test_add_session_upsert_refreshes_yolo(isolated_state):
+    """Idempotent upsert on (operator, session_name) refreshes yolo in
+    place (like token_name/expires_at) rather than duplicating the row."""
+    zellij_state.add_session(
+        "Brandon", "claude", None,
+        "Brandon__claude__root__yolo", "master", None, yolo=True,
+    )
+    # Re-launch of the same session name refreshes rather than duplicates.
+    zellij_state.add_session(
+        "Brandon", "claude", None,
+        "Brandon__claude__root__yolo", "master", None, yolo=True,
+    )
+    rows = zellij_state.load()
+    assert len(rows) == 1
+    assert rows[0]["yolo"] is True
 
 
 # --- atomic save pattern (audit polish) --------------------------------

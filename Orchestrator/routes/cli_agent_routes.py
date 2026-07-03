@@ -391,6 +391,24 @@ _ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
     "terminal": None,
 }
 
+# Provider id -> that CLI's skip-permissions ("YOLO") flag, appended to
+# the launch args when the client requests ``yolo=true``. The SERVER owns
+# this map so clients (Portal, Android) never hardcode per-CLI flags.
+# Flags verified against each CLI's --help on this box 2026-07-03.
+#
+# "terminal" deliberately absent — a bare shell has no permission prompts
+# to skip; zellij_launch 400s on terminal+yolo. Any future provider added
+# to _ZELLIJ_PROVIDER_BINARIES without an entry here fails closed (400 on
+# yolo) rather than silently launching un-flagged.
+_YOLO_FLAGS: dict[str, str] = {
+    "claude": "--dangerously-skip-permissions",
+    "gemini": "--yolo",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+    "grok": "--always-approve",
+    "agy": "--dangerously-skip-permissions",
+    "antigravity": "--dangerously-skip-permissions",
+}
+
 # Phase 5 master-token model (2026-05-26) removed the per-session-token
 # TTL machinery (_ZELLIJ_TOKEN_TTL_SECONDS, _schedule_token_revoke). The
 # orchestrator now holds a single long-lived master token and injects it
@@ -422,6 +440,7 @@ def _zellij_resume_name(
     operator: str,
     provider: str,
     app: Optional[str],
+    yolo: bool = False,
 ) -> str:
     """DETERMINISTIC session name = the resume identity for an
     (operator, provider, app) triple. NO timestamp.
@@ -430,6 +449,10 @@ def _zellij_resume_name(
       - CLI providers: ``{operator}__{provider}__{app_or_root}``
       - Terminal mode: ``{operator}__terminal__{app_or_root}``
         (``app_or_root`` = "root" when no app context).
+      - YOLO launch:   ``{operator}__{provider}__{app_or_root}__yolo``
+        — a YOLO session is a DISTINCT resume identity from the normal
+        one for the same triple, and the suffix lets clients badge YOLO
+        sessions from the name alone.
 
     "Open the terminal for app X" always maps to this same name, so a
     relaunch ATTACHES the existing session instead of minting a new one
@@ -439,13 +462,17 @@ def _zellij_resume_name(
     Pure function so it can be unit-tested without FastAPI.
     """
     app_part = app if app else "root"
-    return f"{operator}__{provider}__{app_part}"
+    name = f"{operator}__{provider}__{app_part}"
+    if yolo:
+        name += "__yolo"
+    return name
 
 
 def _zellij_fork_name(
     operator: str,
     provider: str,
     app: Optional[str],
+    yolo: bool = False,
 ) -> str:
     """UNIQUE session name for an explicit "+ New" fork.
 
@@ -454,10 +481,17 @@ def _zellij_fork_name(
     resume session for the same triple is already running. This is the
     "fork a second concurrent terminal for app X" path.
 
+    A YOLO fork appends ``_yolo`` after the timestamp:
+    ``{operator}__{provider}__{app_or_root}__{unix_ts}_yolo`` — so clients
+    can badge YOLO sessions from the name alone.
+
     Pure function so it can be unit-tested without FastAPI.
     """
     app_part = app if app else "root"
-    return f"{operator}__{provider}__{app_part}__{int(time.time() * 1000)}"
+    name = f"{operator}__{provider}__{app_part}__{int(time.time() * 1000)}"
+    if yolo:
+        name += "_yolo"
+    return name
 
 
 def _generate_zellij_session_name(
@@ -527,7 +561,10 @@ async def zellij_launch(
 
         {"provider": "claude"|"gemini"|"codex"|"agy"|"grok"|"terminal",
          "app": "<app-name>" | null,
-         "fork": false}   # optional; default false
+         "fork": false,    # optional; default false
+         "yolo": false}    # optional; default false — launch the CLI with
+                           # its skip-permissions flag (_YOLO_FLAGS).
+                           # Rejected (400) for provider="terminal".
 
     Resume model (Phase 2):
 
@@ -559,6 +596,22 @@ async def zellij_launch(
     if app is not None and not isinstance(app, str):
         raise HTTPException(400, "app must be a string or null")
     fork = bool(body.get("fork", False))
+    yolo = bool(body.get("yolo", False))
+    if yolo:
+        if provider == "terminal":
+            raise HTTPException(
+                400,
+                "yolo=true is not applicable to provider='terminal' — "
+                "a bare shell has no permission prompts to skip",
+            )
+        if provider not in _YOLO_FLAGS:
+            # Fail closed: never silently launch un-flagged when the
+            # client asked for YOLO (e.g. a future provider added to
+            # _ZELLIJ_PROVIDER_BINARIES without a _YOLO_FLAGS entry).
+            raise HTTPException(
+                400,
+                f"Provider {provider!r} has no known skip-permissions flag",
+            )
 
     bare_binary = _ZELLIJ_PROVIDER_BINARIES[provider]
     # Resolve to absolute path: orchestrator service's PATH doesn't include
@@ -580,9 +633,19 @@ async def zellij_launch(
             f"Provider {provider!r} binary {bare_binary!r} not found in any known location",
         )
     if fork:
-        session_name_ = _zellij_fork_name(op, provider, app)
+        session_name_ = _zellij_fork_name(op, provider, app, yolo=yolo)
     else:
-        session_name_ = _zellij_resume_name(op, provider, app)
+        session_name_ = _zellij_resume_name(op, provider, app, yolo=yolo)
+
+    # Per-provider launch args. This deliberately carries PROVIDER_ARGS
+    # (previously tmux-only) onto the zellij path — codex's
+    # --no-alt-screen is the documented fix for codex scrollback under
+    # zellij (see the PROVIDER_ARGS block comment). The YOLO flag is
+    # appended AFTER the provider's baseline args. Empty list -> None so
+    # the KDL layout builder omits the args block entirely.
+    launch_args: list[str] = list(PROVIDER_ARGS.get(provider, []))
+    if yolo:
+        launch_args.append(_YOLO_FLAGS[provider])
 
     # Phase 5 master-token model (2026-05-26): no per-session token mint.
     # The orchestrator's app-proxy (Orchestrator/routes/agent_routes.py)
@@ -636,6 +699,7 @@ async def zellij_launch(
                 zellij_client.launch_session,
                 session_name_,
                 binary,
+                launch_args if launch_args else None,
             )
         except zellij_client.ZellijBinaryMissing as exc:
             logger.error("zellij_launch: %s", exc)
@@ -681,6 +745,7 @@ async def zellij_launch(
             session_name_,
             token_name,
             expires_at,
+            yolo,
         )
     except Exception as exc:  # noqa: BLE001
         # State write failed but the Zellij side is live — log loudly,
@@ -718,7 +783,7 @@ async def zellij_launch(
 
     logger.info(
         "zellij_launch: operator=%s provider=%s app=%s session=%s "
-        "token_name=%s expires_at=%s fork=%s resumed=%s",
+        "token_name=%s expires_at=%s fork=%s yolo=%s resumed=%s",
         op,
         provider,
         app,
@@ -726,6 +791,7 @@ async def zellij_launch(
         token_name,
         expires_at,
         fork,
+        yolo,
         resumed,
     )
 
@@ -785,6 +851,8 @@ async def zellij_list_sessions(op: str = Query(...)):
             "app": row.get("app"),
             "created_at": row.get("created_at"),
             "expires_at": row.get("expires_at"),
+            # Legacy rows predate the yolo field — default False.
+            "yolo": bool(row.get("yolo", False)),
         })
     return {"sessions": out}
 
