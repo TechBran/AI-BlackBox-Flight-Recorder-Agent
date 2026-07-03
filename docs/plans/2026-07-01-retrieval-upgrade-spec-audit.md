@@ -425,3 +425,31 @@ code; there is no `[embeddings]` section on this box).
 - Corpus/cost: measured via scratchpad `corpus_stats.py` over `Manifest/snapshot_index.json` +
   `Volumes/SNAPSHOT_VOLUME.txt`; CPU throughput probed live (46 tok/s warm 8B); Ollama probes:
   default 4,095-tok silent cut, num_ctx honored, truncate:false → 400; `/api/tokenize` → 404
+
+---
+
+## 7. WI-5 — ANN escape-hatch seam (M12, documentation only; no code this cycle)
+
+The seam shipped with store schema v2 (M6a): `meta.json` carries `{schema, rows, snapshots,
+generation}` where `generation` increments on EVERY mutation — appends AND self-heal
+truncations AND meta refreshes (store.py; fuzz-verified). When vector count or latency ever
+motivates ANN, the contract is:
+
+- **Sidecar identity:** the ANN index lives inside the store dir, keyed on
+  `(slug, schema, generation, rows)`. Any mismatch on open ⇒ full rebuild of the index.
+  `generation` (not `rows` or mtime) is the load-bearing field: self-heal can shrink and
+  re-grow to the same row count, and only generation observes that.
+- **Write path:** the index must be updated inside the same append path that invalidates the
+  in-memory matrix, or its staleness window vs the mint-instant-searchability contract
+  (CLAUDE.md: snapshots searchable the moment the mint returns) must be explicitly documented
+  and bounded.
+- **Compaction/pruning is a full-rebuild event** — ANN labels are positional (row i ↔ ids[i]);
+  any row reorder invalidates every label.
+- **The exact-vs-ANN acceptance gate MUST include operator-scoped queries.** allowed_ids
+  filtering is post-scoring: exact search scores ALL rows so the filter is exact; ANN returns
+  k' neighbors, so a scoped operator owning a small fraction of rows needs oversampling
+  (k' ≈ k / ownership-fraction) or filter-aware search. An unscoped-only gate passes trivially
+  and fails precisely for scoped operators.
+- **Enablement bar (from the audit):** exact cosine at the post-chunk scale (~19-23k rows,
+  ~235MB matrix, tens of ms) is nowhere near the ceiling; ANN is opt-in behind a flag, enabled
+  only past ~100k rows AND after the gate above passes on the golden set.
