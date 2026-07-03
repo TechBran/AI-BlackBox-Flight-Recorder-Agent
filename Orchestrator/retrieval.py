@@ -238,6 +238,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     #    ([retrieval] mmr_protect_top, default 3) is protected from MMR
     #    elimination — seeded into the picked set in rank order, counting
     #    toward k (see mmr_select). P=0 disables (pure historical MMR).
+    #    CHANNEL-CONDITIONAL (M6f iteration 4): the protect is justified by
+    #    cross-channel agreement; a single-channel ranking has no agreement
+    #    signal, and measured data shows single-channel MMR must keep full
+    #    elimination freedom (eval/results/2026-07-03-protect-gate.md —
+    #    semantic-only holdout 3/3 at P=0, 2/3 at every P>0). Semantic-only
+    #    calls (lean profile include_keyword=False, or an empty keyword
+    #    channel) therefore run unprotected.
     #    Keyword-only ids (absent from the semantic channel) get a zero vector of
     #    the query's dim so they never register as near-duplicates of anything.
     window = max(k * 2, 20)
@@ -246,7 +253,8 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         (sid, score_by_id[sid], vec_by_id.get(sid, zero))
         for sid, _score in ranked[:window]
     ]
-    picked = mmr_select(mmr_cands, k, mmr_lambda, protect=mmr_protect)
+    effective_protect = mmr_protect if len(rankings) > 1 else 0
+    picked = mmr_select(mmr_cands, k, mmr_lambda, protect=effective_protect)
     results = [(sid, score_by_id[sid]) for sid in picked]
 
     # 9. OPT-IN provenance logging — answers "why did I get these results" from

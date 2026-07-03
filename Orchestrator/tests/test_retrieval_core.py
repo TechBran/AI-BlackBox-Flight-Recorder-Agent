@@ -156,6 +156,8 @@ _PROTECT_STORE_ROWS = [
 
 @pytest.fixture()
 def hermetic_protect(monkeypatch):
+    """Semantic-only by default (keyword channel returns []); hybrid tests
+    add a keyword channel via _with_keyword_channel."""
     import Orchestrator.retrieval as retrieval_mod
     monkeypatch.setattr(
         retrieval_mod._emb, "generate_embedding_sync",
@@ -167,6 +169,17 @@ def hermetic_protect(monkeypatch):
         retrieval_mod, "keyword_retrieve_ids_for_operator",
         lambda vol, q, n, op: [])
     return FakeStore(_PROTECT_STORE_ROWS)
+
+
+def _with_keyword_channel(monkeypatch, ids):
+    """Make the keyword channel return `ids`, turning the fusion genuinely
+    two-channel. Returning the SAME order as the semantic ranks doubles every
+    RRF score without reordering, so the protect scenario (GOLD at fused rank
+    3, near-dup of rank 1) is preserved."""
+    import Orchestrator.retrieval as retrieval_mod
+    monkeypatch.setattr(
+        retrieval_mod, "keyword_retrieve_ids_for_operator",
+        lambda vol, q, n, op: list(ids))
 
 
 def _with_retrieval_keys(**keys):
@@ -200,19 +213,51 @@ def _with_retrieval_keys(**keys):
     return _cm()
 
 
-def test_retrieve_default_protect_is_3_without_config_key(hermetic_protect):
-    """No [retrieval] mmr_protect_top key -> code fallback 3: the rank-3
-    near-duplicate gold SURVIVES on the default path."""
+_KW_RANKS = ["S1", "S2", "GOLD", "S4"]  # same order as the semantic channel
+
+
+def test_retrieve_hybrid_default_protect_is_3_without_config_key(
+        hermetic_protect, monkeypatch):
+    """Two-channel (keyword non-empty) + no [retrieval] mmr_protect_top key ->
+    code fallback 3: the rank-3 near-duplicate gold SURVIVES."""
+    _with_keyword_channel(monkeypatch, _KW_RANKS)
     with _with_retrieval_keys(mmr_protect_top=None, mmr_lambda="0.7"):
         results = retrieve("q", "system", k=3, store=hermetic_protect)
     assert [sid for sid, _ in results] == ["S1", "S2", "GOLD"]
 
 
-def test_retrieve_protect_zero_restores_pure_mmr_behavior(hermetic_protect):
-    """mmr_protect_top=0 disables the protect: exactly the historical pipeline
-    (the near-dup GOLD is MMR-dropped for the diverse S4)."""
+def test_retrieve_hybrid_protect_zero_restores_pure_mmr_behavior(
+        hermetic_protect, monkeypatch):
+    """mmr_protect_top=0 disables the protect even on the two-channel path:
+    exactly the historical pipeline (GOLD MMR-dropped for the diverse S4)."""
+    _with_keyword_channel(monkeypatch, _KW_RANKS)
     with _with_retrieval_keys(mmr_protect_top="0", mmr_lambda="0.7"):
         results = retrieve("q", "system", k=3, store=hermetic_protect)
+    assert [sid for sid, _ in results] == ["S1", "S4", "S2"]
+
+
+# ── channel-conditional protect (M6f iteration 4) ─────────────────────────────
+#
+# The protect is justified by CROSS-CHANNEL agreement; a single-channel ranking
+# has no agreement signal, and measured data shows single-channel MMR must keep
+# full elimination freedom (eval/results/2026-07-03-protect-gate.md: semantic
+# holdout 3/3 at P=0, 2/3 at every P>0 on the whole+chunk candidate).
+
+def test_retrieve_semantic_only_ignores_protect(hermetic_protect):
+    """include_keyword=False (phone lean profile): mmr_protect_top is ignored —
+    the rank-3 near-dup is still MMR-droppable (protect behaves as 0)."""
+    with _with_retrieval_keys(mmr_protect_top="3", mmr_lambda="0.7"):
+        results = retrieve("q", "system", k=3, store=hermetic_protect,
+                           include_keyword=False)
+    assert [sid for sid, _ in results] == ["S1", "S4", "S2"]
+
+
+def test_retrieve_empty_keyword_channel_behaves_semantic_only(hermetic_protect):
+    """include_keyword=True but the keyword channel returns NO hits (fixture
+    default): the fusion is single-channel, so the protect does not apply."""
+    with _with_retrieval_keys(mmr_protect_top="3", mmr_lambda="0.7"):
+        results = retrieve("q", "system", k=3, store=hermetic_protect,
+                           include_keyword=True)
     assert [sid for sid, _ in results] == ["S1", "S4", "S2"]
 
 
