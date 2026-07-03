@@ -904,7 +904,7 @@ class ZellijSpawnRequest(BaseModel):
 # directly via Zellij's `action new-tab -- BINARY`. Resolution happens at
 # request time via shutil.which (or the existing CLI agent provider_bin
 # lookup) so we don't ship hardcoded user-specific paths.
-_SPAWN_ALLOWED_BINARIES = frozenset({"claude", "gemini", "codex", "agy", "antigravity"})
+_SPAWN_ALLOWED_BINARIES = frozenset({"claude", "gemini", "codex", "agy", "antigravity", "grok"})
 
 
 @router.post("/zellij/inject", status_code=204)

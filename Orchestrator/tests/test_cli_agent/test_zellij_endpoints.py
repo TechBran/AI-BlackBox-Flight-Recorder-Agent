@@ -241,6 +241,60 @@ def test_launch_with_grok_provider_returns_201(monkeypatch, tmp_path):
     assert rows[0]["provider"] == "grok"
 
 
+# --- spawn allowlist includes grok --------------------------------------
+
+
+def test_spawn_accepts_grok_binary(monkeypatch):
+    """grok must be in _SPAWN_ALLOWED_BINARIES: POST /zellij/spawn with
+    binary="grok" into the operator's own session → 204, and the RESOLVED
+    grok path is what gets spawned."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client
+    from Orchestrator.routes import cli_agent_routes
+
+    # Don't depend on a real grok install on the box running the suite.
+    monkeypatch.setattr(
+        cli_agent_routes, "provider_bin",
+        lambda name: "/fake/.local/bin/grok" if name == "grok" else None,
+    )
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "spawn_in_place") as mock_spawn:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/spawn",
+            json={"session_name": "Brandon__terminal__root", "binary": "grok"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 204, r.text
+    mock_spawn.assert_called_once_with(
+        "Brandon__terminal__root", "/fake/.local/bin/grok",
+    )
+
+
+def test_spawn_rejects_unknown_binary(monkeypatch):
+    """The spawn allowlist stays tight: a binary outside
+    _SPAWN_ALLOWED_BINARIES → 400, and nothing is spawned."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "spawn_in_place") as mock_spawn:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/spawn",
+            json={"session_name": "Brandon__terminal__root", "binary": "rm"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert "not in allowlist" in r.json()["detail"]
+    mock_spawn.assert_not_called()
+
+
 # --- backend-status endpoint reports configured + effective -----------
 
 
