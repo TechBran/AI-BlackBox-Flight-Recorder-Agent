@@ -62,7 +62,8 @@ def _patch_builder(monkeypatch, recent_blocks, keyword_blocks, semantic_blocks,
     monkeypatch.setattr(cb, "keyword_retrieve_for_operator",
                         lambda vol, q, k, op: list(keyword_blocks)[:k])
     monkeypatch.setattr(cb, "semantic_retrieve",
-                        lambda q, operator="", k=15, threshold=0.60:
+                        lambda q, operator="", k=15, threshold=0.60,
+                        window_budget_chars=None:
                         list(semantic_blocks)[:k])
     monkeypatch.setattr(cb, "get_recent_checkpoints_for_operator",
                         lambda vol, op, count=1: list(checkpoint_blocks)[:count])
@@ -261,7 +262,10 @@ class TestSearchSnapshotsExecutorUncapped:
         big = _blk(A, "M" * 25000)
         import Orchestrator.fossils as fossils
         monkeypatch.setattr(fossils, "hybrid_retrieve",
-                            lambda vol, q, k=5, operator="": [big])
+                            lambda vol, q, k=5, operator="",
+                            window_budget_chars=None: [big])
+        # caller-less ctx = a cloud/box surface -> WHOLE delivery (the M8
+        # on-device bound keys on ctx.caller == "local" only).
         ctx = types.SimpleNamespace(operator="TestOp")
         res = asyncio.run(mod.execute({"query": "anything"}, ctx))
         assert res.success

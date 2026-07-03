@@ -222,9 +222,15 @@ def build_fossil_context(
     # Semantic fills against recent AND keyword. fill_unseen(k=SF) also
     # guarantees the lean `local` profile's item budget even if a retriever
     # over-returns (this replaces the old defensive [:SF] slice).
+    # window_budget_chars (M8/WI-7a): CAP is None on every cloud call (whole
+    # snapshots, byte-identical); on the local lean profile it is
+    # [context] max_fossil_chars, and an over-budget semantic snapshot is
+    # delivered as a window CENTERED on its best-matched chunk instead of a
+    # blind head truncation (see fossils.window_snapshot_text).
     seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
     semantic_snaps_raw = (
-        semantic_retrieve(user_text, operator=operator, k=SF + len(seen_ids), threshold=ST)
+        semantic_retrieve(user_text, operator=operator, k=SF + len(seen_ids), threshold=ST,
+                          window_budget_chars=CAP)
         if user_text else []
     )
     semantic_snaps = fill_unseen(semantic_snaps_raw, SF, seen_ids)
@@ -333,8 +339,12 @@ def build_fossil_context(
 
     if is_local:
         # LOCAL (phone lean) profile: the one genuinely window-bound surface.
-        # Keeps the historical char cap until M8 (WI-7a matched-chunk
-        # windowing) replaces head-truncation with best-chunk windows.
+        # Since M8 (WI-7a) each over-budget SEMANTIC snapshot already arrived
+        # windowed on its best-matched chunk (max_fossil_chars per snapshot,
+        # via semantic_retrieve window_budget_chars above), so this TOTAL cap
+        # is a backstop that should rarely bind; when it does, it still
+        # head-truncates the assembled block (checkpoint/recent/keyword
+        # sections have no chunk identity to window on).
         # IMPORTANT: capture original size BEFORE the assignment that
         # overwrites fossil_context with the truncated value (pre-2026-04-25
         # this print masked a 170K-char loss in plain sight).

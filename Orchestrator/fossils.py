@@ -50,7 +50,160 @@ def cap_chars(text: str, max_chars: int) -> str:
     return "\n".join(parts)
 
 
-def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") -> List[str]:
+# ── M8 / WI-7a: matched-chunk windowed delivery (window-bound profiles) ──────
+# Cloud surfaces deliver snapshots WHOLE (WI-10/M7). The ONE genuinely
+# window-bound profile is the on-device phone lean path (6,144-token engine
+# window, device-proven). For it, an over-budget snapshot is delivered as a
+# window CENTERED on the best-matching chunk (identity from the store's v2
+# collapse via retrieve(return_provenance=True)) instead of a blind head
+# truncation — the head is usually boilerplate; the matched chunk is why the
+# snapshot ranked at all.
+
+_WINDOW_GAP_MARK = "[…]"
+
+
+def window_snapshot_text(text: str, best_ordinal, budget_chars: int,
+                         model_key: Optional[str] = None) -> str:
+    """Deliver `text` within `budget_chars`, windowed on its best-matched chunk.
+
+    best_ordinal is the store-collapse chunk identity from
+    retrieve(return_provenance=True):
+      - None / 0  -> no specific window (v1 row, keyword-only candidate, or the
+        whole-doc vector won) -> today's head truncation (cap_chars).
+      - >= 1      -> chunk (best_ordinal - 1) of the deterministic chunker
+        output won: re-derive spans via chunk_snapshot(text, model_key) (the
+        chunker guarantees verbatim substrings; a multi-chunk group stores the
+        whole doc at ordinal 0 and chunker chunk i at ordinal i+1), locate the
+        chunk's char range, and expand symmetrically to the budget, snapping
+        to line boundaries where cheap.
+
+    The snapshot's START marker line is always preserved (extract_snap_ids /
+    fill_unseen parse provenance from it) and the END marker line is kept when
+    present; elided regions are marked with "[…]". Output length <= budget_chars.
+    Falls back to cap_chars on ANY re-derivation mismatch (chunker config drift
+    since mint, ordinal out of range, span not found) — never raises.
+    """
+    if len(text) <= budget_chars:
+        return text
+    if not isinstance(best_ordinal, int) or best_ordinal < 1:
+        return cap_chars(text, budget_chars)
+    try:
+        from Orchestrator.embeddings.chunker import chunk_snapshot  # lazy: keep fossils import-light
+        chunks = chunk_snapshot(text, model_key=model_key)
+        idx = best_ordinal - 1  # group ordinal i+1 == chunker chunk i
+        if len(chunks) <= 1 or idx >= len(chunks):
+            return cap_chars(text, budget_chars)  # chunker drift since mint
+
+        # Locate the winning chunk's char span. Chunks are verbatim substrings
+        # in document order with strictly increasing start positions, so a
+        # sequential find (each from the previous start + 1) pins the right
+        # occurrence even when chunk text repeats.
+        pos, search_from = -1, 0
+        for j in range(idx + 1):
+            pos = text.find(chunks[j], search_from)
+            if pos == -1:
+                return cap_chars(text, budget_chars)  # re-derivation mismatch
+            search_from = pos + 1
+        c_start, c_end = pos, pos + len(chunks[idx])
+
+        lines = text.splitlines()
+        start_line = lines[0] if lines else ""
+        end_line = (
+            lines[-1]
+            if len(lines) > 1 and lines[-1].startswith("=== END SNAPSHOT")
+            else ""
+        )
+        # Reserve frame overhead (marker lines + gap marks + join newlines) so
+        # the assembled result stays airtight under budget_chars.
+        overhead = (
+            len(start_line) + len(end_line) + 2 * (len(_WINDOW_GAP_MARK) + 2) + 4
+        )
+        body_budget = budget_chars - overhead
+        if body_budget <= 0:
+            return cap_chars(text, budget_chars)
+
+        span = c_end - c_start
+        if span >= body_budget:
+            w_start, w_end = c_start, c_start + body_budget
+        else:
+            pad = (body_budget - span) // 2
+            w_start = max(0, c_start - pad)
+            w_end = min(len(text), w_start + body_budget)
+            w_start = max(0, w_end - body_budget)  # re-anchor when end-clipped
+
+        # Snap to line boundaries where cheap (<=200 chars), never eating into
+        # the matched chunk's span.
+        if w_start > 0:
+            nl = text.find("\n", w_start, min(w_start + 200, c_start))
+            if nl != -1:
+                w_start = nl + 1
+        if w_end < len(text):
+            nl = text.rfind("\n", max(w_end - 200, c_end), w_end)
+            if nl != -1:
+                w_end = nl
+
+        parts = []
+        if w_start > 0:
+            parts.append(start_line)
+            parts.append(_WINDOW_GAP_MARK)
+        parts.append(text[w_start:w_end])
+        if w_end < len(text):
+            parts.append(_WINDOW_GAP_MARK)
+            if end_line:
+                parts.append(end_line)
+        return "\n".join(parts)
+    except Exception:
+        # Never-raise delivery contract: degrade to head truncation.
+        return cap_chars(text, budget_chars)
+
+
+def _decode_scored_snapshots(scored, operator: str,
+                             window_budget_chars: Optional[int] = None) -> List[str]:
+    """Shared decode for the retrieve()-shim retrievers: byte-offset decode of
+    the ranked snap_ids (same operator filter + bounds guard both shims have
+    always applied), plus OPT-IN matched-chunk windowing (M8/WI-7a).
+
+    `scored` rows are (snap_id, score) or, in provenance mode,
+    (snap_id, score, best_ordinal). window_budget_chars=None (every cloud
+    caller) delivers decoded texts UNCHANGED; a positive budget windows each
+    over-budget text on its best-matched chunk via window_snapshot_text. The
+    chunker's model_key is the ACTIVE slug (the ordinals came from the active
+    store) — resolved once, config-read only, no provider/network call.
+    """
+    index = load_snapshot_index()
+    vol_bytes = read_volume_bytes(VOL_PATH)
+
+    model_key = None
+    if window_budget_chars is not None:
+        try:
+            from Orchestrator.embeddings.store import get_active_slug
+            model_key = get_active_slug()
+        except Exception:
+            model_key = None  # tokenization floor still windows correctly
+
+    results = []
+    for row in scored:
+        snap_id = row[0]
+        best_ordinal = row[2] if len(row) > 2 else None
+        meta = index.get(snap_id)
+        if not meta:
+            continue
+        if operator and operator != "system" and meta.get("operator") != operator:
+            continue
+        start = meta["byte_start"]
+        end = meta["byte_end"]
+        if start < len(vol_bytes) and end <= len(vol_bytes):
+            text = vol_bytes[start:end].decode('utf-8', errors='replace')
+            if window_budget_chars is not None:
+                text = window_snapshot_text(
+                    text, best_ordinal, window_budget_chars, model_key
+                )
+            results.append(text)
+    return results
+
+
+def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "",
+                    window_budget_chars: Optional[int] = None) -> List[str]:
     """Hybrid retrieval — thin shim over the canonical retrieve() (Phase 3b).
 
     Ranking now lives entirely in Orchestrator.retrieval.retrieve(): RRF fusion of
@@ -62,36 +215,34 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "") ->
 
     `vol_txt` is retained for signature/caller compatibility but is UNUSED —
     retrieve() reads VOL_PATH itself (and embeds the query) internally.
+
+    window_budget_chars (keyword-use, M8/WI-7a): None (every cloud caller —
+    default) delivers decoded texts WHOLE, byte-identical to before. A positive
+    budget is the window-bound-profile path (the on-device search_snapshots
+    executor): each over-budget text is delivered as a window centered on its
+    best-matched chunk (see window_snapshot_text); keyword-only candidates
+    have no chunk identity and head-truncate.
     """
     # Lazy import: retrieval.py imports from fossils at module top, so importing
     # retrieve at fossils' module top would create an import cycle.
     from Orchestrator.retrieval import retrieve
 
-    scored = retrieve(query, operator=operator, k=k, include_keyword=True)
+    scored = retrieve(
+        query, operator=operator, k=k, include_keyword=True,
+        return_provenance=window_budget_chars is not None,
+    )
 
     # Decode ONLY the result snapshots' bytes (same operator filter + byte-offset
     # guard as before; a snap_id that is absent/operator-mismatched/out-of-bounds
     # is skipped).
-    index = load_snapshot_index()
-    vol_bytes = read_volume_bytes(VOL_PATH)
-
-    results = []
-    for snap_id, _score in scored:
-        meta = index.get(snap_id)
-        if not meta:
-            continue
-        if operator and operator != "system" and meta.get("operator") != operator:
-            continue
-        start = meta["byte_start"]
-        end = meta["byte_end"]
-        if start < len(vol_bytes) and end <= len(vol_bytes):
-            results.append(vol_bytes[start:end].decode('utf-8', errors='replace'))
+    results = _decode_scored_snapshots(scored, operator, window_budget_chars)
 
     print(f"[HYBRID] retrieve() -> {len(results)} results")
     return results
 
 
-def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.60) -> List[str]:
+def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.60,
+                      *, window_budget_chars: Optional[int] = None) -> List[str]:
     """Pure-semantic retrieval — a THIN SHIM over the canonical retrieve() (Phase 3b-2).
 
     This is the shared semantic entry for the per-turn context (cloud chat/voice AND
@@ -119,6 +270,13 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
             [retrieval] junk_floor or, flag-gated, the per-model registry
             junk_floor (M9/WI-3). Kept, not deleted: three live call sites,
             zero behavior value — removal churn > benefit this cycle.
+        window_budget_chars: keyword-only (M8/WI-7a). None (every cloud
+            caller — default) delivers decoded texts WHOLE, byte-identical to
+            before. A positive budget is the window-bound-profile path (the
+            on-device phone lean profile via build_fossil_context's local
+            CAP): each over-budget text is delivered as a window centered on
+            its best-matched chunk instead of blind head truncation (see
+            window_snapshot_text). Ranking is untouched either way.
 
     Returns:
         List of decoded snapshot texts (SAME return type as before), highest-ranked
@@ -128,25 +286,15 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
     # retrieve at fossils' module top would create an import cycle.
     from Orchestrator.retrieval import retrieve
 
-    scored = retrieve(query, operator=operator, k=k, include_keyword=False)
+    scored = retrieve(
+        query, operator=operator, k=k, include_keyword=False,
+        return_provenance=window_budget_chars is not None,
+    )
 
     # Decode ONLY the result snapshots' bytes (same operator filter + byte-offset
     # guard as the old body / hybrid_retrieve; a snap_id that is absent/operator-
     # mismatched/out-of-bounds is skipped).
-    index = load_snapshot_index()
-    vol_bytes = read_volume_bytes(VOL_PATH)
-
-    results = []
-    for snap_id, _score in scored:
-        meta = index.get(snap_id)
-        if not meta:
-            continue
-        if operator and operator != "system" and meta.get("operator") != operator:
-            continue
-        start = meta["byte_start"]
-        end = meta["byte_end"]
-        if start < len(vol_bytes) and end <= len(vol_bytes):
-            results.append(vol_bytes[start:end].decode('utf-8', errors='replace'))
+    results = _decode_scored_snapshots(scored, operator, window_budget_chars)
 
     print(f"[SEMANTIC] retrieve() -> {len(results)} results")
     return results
