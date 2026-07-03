@@ -154,7 +154,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     rrf_c = CFG.getint("retrieval", "rrf_c", fallback=60)
     recency_weight = CFG.getfloat("retrieval", "recency_weight", fallback=0.005)
     half_life = CFG.getfloat("retrieval", "recency_half_life_days", fallback=90.0)
-    mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.7)
+    mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.85)
     mmr_protect = CFG.getint("retrieval", "mmr_protect_top", fallback=3)
     junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
