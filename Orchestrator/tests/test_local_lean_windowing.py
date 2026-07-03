@@ -27,6 +27,14 @@ from unittest import mock
 import numpy as np
 import pytest
 
+# MODULE-level full-app import (mirrors the elevenlabs route tests): pytest
+# imports every test module at collection, BEFORE any test fires a request on
+# the shared FastAPI app — so Orchestrator.app's import-time add_middleware
+# always precedes the first request, regardless of file ordering. A lazy
+# in-test import instead RuntimeErrors ("Cannot add middleware after an
+# application has started") whenever an earlier module's test posted first.
+from Orchestrator.app import app  # noqa: F401  (used by the route test below)
+
 import Orchestrator.fossils as fossils
 import Orchestrator.retrieval as retrieval
 from Orchestrator.embeddings.chunker import chunk_snapshot
@@ -413,11 +421,6 @@ def test_local_tools_execute_stamps_on_device_caller():
     from fastapi.testclient import TestClient
 
     import Orchestrator.routes.local_routes as lr
-    # Import the FULL app (not bare checkpoint.app): Orchestrator.app adds its
-    # middleware at import time, and a request fired on the shared app BEFORE
-    # that import would freeze the middleware stack and break any later test
-    # that imports Orchestrator.app (order-independence).
-    from Orchestrator.app import app
     from Orchestrator.toolvault.context import ON_DEVICE_CALLER, ToolResult
 
     client = TestClient(app)
