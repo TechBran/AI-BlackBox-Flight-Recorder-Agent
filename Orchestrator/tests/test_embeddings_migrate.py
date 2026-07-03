@@ -470,12 +470,16 @@ async def test_switch_back_with_nothing_missing_still_cuts_over(env, fake_provid
 async def test_foreign_append_is_detected_as_raced(env, fake_provider, capsys):
     index_path, stores_dir, volume_path = env
     _build_volume(index_path, volume_path)
-    target = get_store(TARGET, base_dir=stores_dir)
 
     def foreign_append(_texts):
         # Simulates a mint embedded under the OLD model landing in the TARGET
         # store (dims aside, the mechanism is: not preexisting, in the index,
-        # NOT written by the job).
+        # NOT written by the job). The handle is resolved AT APPEND TIME, as a
+        # real foreign writer's would be: get_store hands back the engine's
+        # canonical instance (post-flip a fresh target is schema 2 — a plain
+        # probe BEFORE the engine would cache a conflicting v1 instance the
+        # engine then refuses, which is why open_migration_target exists).
+        target = get_store(TARGET, base_dir=stores_dir)
         target.append("SNAP-9", np.random.default_rng(2).standard_normal(TARGET_DIMS))
 
     fake_provider.hook = foreign_append

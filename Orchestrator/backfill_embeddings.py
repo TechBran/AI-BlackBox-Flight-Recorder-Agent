@@ -370,12 +370,18 @@ def main(argv=None) -> int:
     # ── banner: what this run is about to do ─────────────────────────────────
     index = _load_index(index_path)
     spec = EMBEDDING_MODELS[target]
-    store = get_store(target, base_dir=stores_dir)
+    # MUST be the engine's own target-open helper, not a plain get_store
+    # probe: get_store caches one instance per (base_dir, slug), and the
+    # post-gate default creates FRESH targets as schema 2 — an autodetect
+    # probe here would cache a v1 instance the engine then refuses.
+    # (config.EMBEDDINGS_STORES_DIR was pointed at stores_dir above.)
+    store = migrate.open_migration_target(target)
     missing = len(store.missing(list(index.keys())))
     active = get_active_slug(base_dir=stores_dir)
 
     _print_banner("EMBEDDING BACKFILL / MIGRATION")
-    print(f"  target:    {target} ({spec['provider']}, {spec['dims']} dims)")
+    print(f"  target:    {target} ({spec['provider']}, {spec['dims']} dims, "
+          f"schema {store.schema})")
     print(f"  active:    {active}")
     print(f"  index:     {len(index)} snapshots ({index_path})")
     print(f"  store:     {store.count} embedded, {missing} missing")

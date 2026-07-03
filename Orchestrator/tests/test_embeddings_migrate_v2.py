@@ -669,10 +669,21 @@ async def test_watcher_recovery_entry_onto_v2_target_chunks(
 async def test_v1_engine_fill_unchanged_whole_text_single_rows(
     env, fake_provider, monkeypatch
 ):
-    """Schema awareness must not perturb the v1 path: a v1 target still gets
-    ONE whole-text vector per snapshot, chunker never consulted."""
+    """Schema awareness must not perturb the v1 path: an EXISTING v1 target
+    still gets ONE whole-text vector per snapshot, chunker never consulted.
+    Post-flip pin: existing v1 stores remain legal fill targets (rollback
+    assets + the watcher's recovery path) — only FRESH targets flip to v2."""
     index_path, stores_dir, volume_path = env
     bodies = _build_volume(index_path, volume_path, n=3)
+    # EXISTING v1 store on disk: one old row materializes vectors/ids/meta
+    # (meta without a schema key — the pre-flip on-disk shape).
+    rng = np.random.default_rng(7)
+    seed = get_store(TARGET, base_dir=stores_dir)
+    seed.append("SNAP-OLD", rng.standard_normal(TARGET_DIMS))
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert "schema" not in meta                        # genuine v1 on disk
 
     def _no_chunk(text, model_key=None):
         raise AssertionError("chunker must not run on a v1 engine fill")
@@ -684,8 +695,104 @@ async def test_v1_engine_fill_unchanged_whole_text_single_rows(
     assert result["state"] == "done"
     store = get_store(TARGET, base_dir=stores_dir)
     assert store.schema == 1
-    assert store.rows == 3                             # one row per snapshot
+    assert store.rows == 4                             # seed + one row/snapshot
     assert sorted(fake_provider.embedded_texts) == sorted(bodies.values())
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert "schema" not in meta                        # never upgraded in place
+
+
+# ── post-gate default flip: fresh model-switch targets are CREATED schema 2 ──
+
+@pytest.mark.asyncio
+async def test_model_switch_fresh_target_creates_schema2(env, fake_provider,
+                                                         cutover_spies):
+    """No store on disk for the target slug: the model-switch engine CREATES
+    it schema 2 and fills whole-doc+chunk groups (post-gate flip, Brandon
+    2026-07-02). Cutover still fires — it's a model switch, not a rebuild.
+    The decision is EXISTENCE-based: nothing here pre-declares a schema."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    assert not (stores_dir / TARGET).exists()          # genuinely fresh
+
+    result = await migrate.run_migration(TARGET)
+
+    assert result["state"] == "done"
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["schema"] == 2                         # created chunked ON DISK
+    store = get_store(TARGET, base_dir=stores_dir)
+    assert store.schema == 2
+    assert store.snapshots == 3
+    assert store.rows > store.snapshots               # whole-doc + chunk groups
+    assert store.missing(sorted(bodies)) == []
+    ids, ordinals = _read_group_layout(stores_dir / TARGET)
+    assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
+    # iteration-2 group policy inherited: whole body at ordinal 0 + chunks
+    for sid, body in bodies.items():
+        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        assert n_chunks > 1                            # fixture multi-chunks
+        assert ids.count(sid) == n_chunks + 1
+        assert body in fake_provider.embedded_texts
+    # still a MIGRATION: the cutover fires exactly as before
+    assert cutover_spies["set_active_slug"] == [TARGET]
+    assert cutover_spies["swap_active"] == [TARGET]
+
+
+@pytest.mark.asyncio
+async def test_fresh_box_first_migration_creates_v2_and_activates(
+    env, fake_provider
+):
+    """Brand-new box: EMPTY stores dir (no stores, no active.json). The first
+    migration — the wizard's exact entry — creates a schema-2 store and cuts
+    over for REAL: pointer persisted on disk + live search handle swapped."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    assert not stores_dir.exists()                     # nothing provisioned yet
+
+    job = await migrate.start_migration(TARGET)        # wizard/route entry
+    assert job["state"] == "running"
+    result = await migrate._JOB_TASK
+
+    assert result["state"] == "done"
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["schema"] == 2
+    assert get_active_slug(base_dir=stores_dir) == TARGET   # pointer created
+    assert search._active_store is not None                 # handle swapped
+    assert search._active_store.slug == TARGET
+    assert search._active_store.schema == 2
+    store = get_store(TARGET, base_dir=stores_dir)
+    assert store.ids() == set(bodies)
+    assert store.rows > store.snapshots == 2
+
+
+@pytest.mark.asyncio
+async def test_watcher_recovery_to_fresh_target_creates_v2(env, fake_provider,
+                                                           cutover_spies):
+    """The watcher's auto-recovery calls start_migration — a recovery target
+    with no store on disk inherits the flip and lands chunked."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    assert not (stores_dir / TARGET).exists()
+
+    job = await migrate.start_migration(TARGET)        # the watcher's exact entry
+    assert job["state"] == "running"
+    result = await migrate._JOB_TASK
+
+    assert result["state"] == "done"
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["schema"] == 2
+    store = get_store(TARGET, base_dir=stores_dir)
+    assert store.rows > store.snapshots == 3
+    ids, ordinals = _read_group_layout(stores_dir / TARGET)
+    assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
+    assert cutover_spies["swap_active"] == [TARGET]   # recovery still cuts over
 
 
 # ── in-service rebuild trigger (route + start_rebuild) ──────────────────────
@@ -960,6 +1067,35 @@ def test_cli_rebuild_unknown_slug_exit_2(cli_env, monkeypatch, capsys):
     ])
     assert rc == 2
     assert "unknown embedding model slug" in capsys.readouterr().out
+
+
+def test_cli_target_fresh_store_creates_v2(cli_env, fake_provider,
+                                           monkeypatch, capsys):
+    """--target on a slug with NO store on disk creates it schema 2 (the CLI
+    is the same engine). Load-bearing detail: the CLI's banner probe runs
+    BEFORE the engine in the same process and get_store caches one instance
+    per (base_dir, slug) — the probe must share open_migration_target or it
+    caches a v1 instance the engine's schema-2 request then refuses."""
+    index_path, stores_dir, volume_path = cli_env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    monkeypatch.setattr(backfill, "_service_alive", lambda *a, **k: False)
+
+    rc = backfill.main([
+        "--target", TARGET,
+        "--stores-dir", str(stores_dir), "--index", str(index_path),
+    ])
+
+    assert rc == 0
+    meta = json.loads(
+        (stores_dir / TARGET / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["schema"] == 2
+    store = get_store(TARGET, base_dir=stores_dir)
+    assert store.ids() == set(bodies)
+    assert store.rows > store.snapshots
+    assert get_active_slug(base_dir=stores_dir) == TARGET  # cutover happened
+    out = capsys.readouterr().out
+    assert "schema 2" in out                          # banner says what it does
 
 
 def test_cli_rebuild_and_target_mutually_exclusive(cli_env, capsys):

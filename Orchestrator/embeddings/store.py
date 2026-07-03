@@ -707,6 +707,24 @@ def get_store(slug: str, dims: int = None, base_dir=None,
         return store
 
 
+def store_exists(slug: str, base_dir=None) -> bool:
+    """True when slug has ANY store artifact on disk under base_dir.
+
+    The fresh-vs-existing probe for the migration target schema policy
+    (post-gate default flip): a store only materializes files on first
+    append, so an absent/empty dir means "fresh". meta.json alone is not
+    enough — external damage can lose it while ids/vectors/ordinals survive
+    (the F1 autodetect case), and a damaged-but-real store must never read
+    as fresh: its schema is whatever open()'s autodetect recovers, never
+    the fresh-store default.
+    """
+    d = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR) / slug
+    return any(
+        (d / name).exists()
+        for name in (META_FILE, IDS_FILE, VECTORS_FILE, ORDINALS_FILE)
+    )
+
+
 def list_stores(base_dir) -> list:
     """[{slug, dims, count, schema, rows, last_updated}] from meta.json files;
     skips malformed dirs.

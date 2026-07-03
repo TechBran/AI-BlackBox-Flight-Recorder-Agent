@@ -51,6 +51,14 @@ The job kind ({"kind": "rebuild", "activate": false}) is PERSISTED in
 migration_state.json so boot resume stays build-only. The _build parent has
 no meta.json of its own and list_stores does not recurse, so candidates are
 invisible to every status/list surface until the swap.
+
+Post-gate default (flipped 2026-07-03; Brandon 2026-07-02): the model-switch
+engine CREATES fresh target stores as schema 2 (chunked) — every future model
+switch chunks automatically. The decision is EXISTENCE-based, never
+registry-based (see open_migration_target): a target store already on disk
+keeps its own schema, so v1 stores remain legal fill targets — they are
+rollback assets and the watcher's recovery path, and the schema-aware fill
+below handles both shapes.
 """
 import asyncio
 import json
@@ -63,7 +71,12 @@ from Orchestrator.embeddings import search
 from Orchestrator.embeddings.chunker import chunk_snapshot
 from Orchestrator.embeddings.providers import EmbeddingProviderError, get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
-from Orchestrator.embeddings.store import _atomic_write_json, get_store, set_active_slug
+from Orchestrator.embeddings.store import (
+    _atomic_write_json,
+    get_store,
+    set_active_slug,
+    store_exists,
+)
 from Orchestrator.volume import read_volume_bytes
 
 STATE_FILE = "migration_state.json"
@@ -396,6 +409,27 @@ def chunk_group_batches(ids_texts: list, model_key: str) -> tuple:
 
 # ── engine ───────────────────────────────────────────────────────────────────
 
+def open_migration_target(target_slug: str):
+    """Open the model-switch target store under the post-gate schema policy.
+
+    EXISTENCE-based decision (audit A6 default flipped post-gate, Brandon
+    2026-07-02): a target with NO store files on disk under the live stores
+    dir is CREATED schema 2 — every future model switch chunks automatically.
+    An EXISTING store keeps its on-disk schema via autodetect (schema=None):
+    v1 stores remain legal fill targets — rollback assets and the watcher's
+    recovery path — and the engine's schema-aware fill handles both shapes.
+    Never registry-based: the registry says nothing about what's on disk.
+
+    The CLI's pre-run banner probe MUST share this helper (it does): get_store
+    caches ONE instance per (base_dir, slug), so a plain autodetect probe on a
+    fresh target would cache a v1 instance that the engine's schema-2 request
+    would then refuse.
+    """
+    return get_store(
+        target_slug, schema=None if store_exists(target_slug) else 2
+    )
+
+
 async def _fill_v2_batch(target, provider, ids_texts: list,
                          model_key: str) -> tuple:
     """Embed + group-append one snapshot batch into a schema-2 store.
@@ -460,7 +494,11 @@ async def _run_engine(target_slug: str) -> dict:
     from Orchestrator.fossils import load_snapshot_index  # lazy: avoid import cycle
 
     try:
-        target = get_store(target_slug)
+        # Post-gate default flip: a fresh target (no store files on disk) is
+        # CREATED schema 2; an existing store keeps its own schema. The
+        # existence probe lives in open_migration_target — shared with the
+        # CLI banner so both sides of the get_store cache agree.
+        target = open_migration_target(target_slug)
         provider = get_provider(target_slug)
         # Schema decides the fill shape ONCE (a live store never changes
         # schema mid-job): v1 = whole-text single rows (today's path,

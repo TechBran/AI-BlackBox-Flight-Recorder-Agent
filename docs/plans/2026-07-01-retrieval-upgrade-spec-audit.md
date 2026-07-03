@@ -309,6 +309,10 @@ code; there is no `[embeddings]` section on this box).
    reflect real surfaces.
 4. **Non-active stores:** retain-untouched policy (A6) adopted — no proactive rebuild of
    gemini-001/qwen stores; lazy rebuild on model switch only; never delete (rollback assets).
+   *Update (post-gate flip, Brandon 2026-07-02, landed 2026-07-03):* model-switch migrations now
+   CREATE fresh target stores as schema-2 (chunked) by default; existing v1 stores remain legal
+   fill targets (rollback assets + the watcher's recovery path). Existence-based decision at the
+   engine's target-open site (`migrate.open_migration_target`), never registry-based.
 5. **Hardware-aware onboarding gate + per-model device placement: IN SCOPE (added 2026-07-01).**
    New work item **WI-9**:
    - **Detection.** A server-side host-hardware probe (GPU present? via nvidia-smi/lspci; VRAM;
