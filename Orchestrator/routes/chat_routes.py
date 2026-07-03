@@ -5958,6 +5958,57 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
     return context_messages, provenance
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# M7 / WI-10 transport hardening: SSE keepalive during provider prefill.
+#
+# The M3 window audit (docs/plans/artifacts/2026-07-02-provider-window-audit.md)
+# measured genuinely SILENT first-token waits through /chat/stream — the route
+# emits stream_start then NOTHING until the provider's first event (anthropic
+# 14.0s cold at 210k chars; historical band 30-60s under adaptive thinking).
+# That silence trips idle-based client read timeouts (the 2026-04-25 stall).
+#
+# _stream_with_keepalive wraps every provider stream and yields a None sentinel
+# for each KEEPALIVE_INTERVAL_S of provider silence; generate_sse renders the
+# sentinel as an SSE COMMENT frame (": keepalive") — inert for compliant SSE
+# parsers (Android M7.1a tolerates comment frames, test-pinned in 9b83714; the
+# Portal parser skips blocks with no event:/data: lines). A comment frame is
+# used instead of a named event so no client-side handler can misfire (the
+# Portal already binds a CU-specific "heartbeat" event with step/total data).
+#
+# Gap-based rather than first-token-only: tool-loop FOLLOW-UP prefills (the
+# same silence, after each tool_result) are covered too. While tokens flow,
+# inter-event gaps are sub-second and no keepalive is ever emitted.
+# ─────────────────────────────────────────────────────────────────────────────
+KEEPALIVE_INTERVAL_S = 10.0
+SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
+
+
+async def _stream_with_keepalive(stream, interval_s: float = KEEPALIVE_INTERVAL_S):
+    """Relay provider events unchanged; yield a ``None`` sentinel whenever the
+    next event is more than ``interval_s`` seconds away (the caller emits an
+    SSE comment frame per sentinel). Provider exceptions propagate unchanged;
+    the pending anext task is cancelled if the consumer closes early."""
+    it = stream.__aiter__()
+    while True:
+        nxt = asyncio.ensure_future(it.__anext__())
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(asyncio.shield(nxt), timeout=interval_s)
+                    break
+                except asyncio.TimeoutError:
+                    # Provider still silent — heartbeat, keep awaiting the same task.
+                    yield None
+        except StopAsyncIteration:
+            return
+        finally:
+            # Consumer disconnected / generator closed while the provider task
+            # was still pending — don't leak the anext task.
+            if not nxt.done():
+                nxt.cancel()
+        yield event
+
+
 @app.get("/chat/stream")
 async def chat_stream(request: Request):
     """SSE streaming chat endpoint with thinking/reasoning support.
@@ -6030,7 +6081,11 @@ async def chat_stream(request: Request):
             else:
                 stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
 
-            async for event in stream:
+            async for event in _stream_with_keepalive(stream):
+                if event is None:
+                    # M7: provider prefill keepalive — inert SSE comment frame.
+                    yield SSE_KEEPALIVE_FRAME
+                    continue
                 event_type = event.get("type", "unknown")
                 event_data = event.get("data", "")
 
@@ -6120,7 +6175,11 @@ async def chat_stream_post(request: Request):
             else:
                 stream = stream_gemini_with_thinking(context_messages, model, operator=operator)
 
-            async for event in stream:
+            async for event in _stream_with_keepalive(stream):
+                if event is None:
+                    # M7: provider prefill keepalive — inert SSE comment frame.
+                    yield SSE_KEEPALIVE_FRAME
+                    continue
                 event_type = event.get("type", "unknown")
                 event_data = event.get("data", "")
 
