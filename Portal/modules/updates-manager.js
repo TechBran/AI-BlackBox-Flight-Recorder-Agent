@@ -28,6 +28,13 @@
 // [Manage] deep-links to /onboarding/?step=embeddings (wizard owns the full
 // management surface). Any failure of that fetch hides the card and never
 // breaks the updates panel.
+//
+// Embedding compute card (WI-9/M10): below the notification card the SAME
+// status payload renders a hardware line (status.hardware — GPU name/VRAM or
+// "CPU only") plus a per-local-model Auto/GPU/CPU placement toggle POSTing
+// /embeddings/placement {slug, placement: "gpu"|"cpu"|null}. placement (the
+// persisted pin, null = auto) and recommended_placement come from each
+// models[] entry. A toggle applies on the model's next embed — no restart.
 
 import { toastError } from "./core-utils.js";
 
@@ -313,6 +320,7 @@ async function _onRollbackClick() {
 
 let _embedPollTimer = null;   // 5s job-progress poll; self-clears (see below)
 let _embedWarnedOnce = false; // one console.warn per page load, never spam
+let _placementBusy = null;    // slug whose placement POST is in flight
 
 async function _refreshEmbeddingsCard() {
     const container = document.getElementById("embeddingsCard");
@@ -378,8 +386,13 @@ function _renderEmbeddingsCard(container, status) {
             </div>`;
     }
 
+    // Compute card (WI-9): hardware line + per-local-model placement toggle.
+    // Renders whenever the status carries the probe — independent of whether
+    // anything above is noteworthy.
+    html += _computeCardHtml(status);
+
     if (!html) {
-        _hideEmbeddingsCard(container);  // health ok + no job → nothing to say
+        _hideEmbeddingsCard(container);  // nothing noteworthy, no probe
         return;
     }
     container.innerHTML = html;
@@ -396,9 +409,89 @@ function _renderEmbeddingsCard(container, status) {
         btnUpdate.addEventListener("click",
             () => _onEmbeddingsUpdateClick(btnUpdate, health.successor_slug));
     }
+    container.querySelectorAll(".embeddings-hw-segbtn").forEach((btn) => {
+        btn.addEventListener("click", () => _onPlacementClick(btn));
+    });
 
     if (jobRunning) _startEmbedPoll();
     else _stopEmbedPoll();
+}
+
+// ── Embedding compute card (WI-9/M10: hardware + placement) ────────────
+
+function _computeCardHtml(status) {
+    const hw = status.hardware;
+    if (!hw) return "";  // older backend — additive contract, degrade silently
+    const locals = (status.models || []).filter((m) => m.privacy === "local");
+
+    const rows = locals.map((m) => {
+        const current = m.placement || "";  // "" = auto (null persisted)
+        const rec = m.recommended_placement
+            ? `<span class="embeddings-hw-rec">recommended: ${_esc(m.recommended_placement.toUpperCase())}</span>`
+            : "";
+        const seg = ["", "gpu", "cpu"].map((value) => {
+            const label = value === "" ? "Auto" : value.toUpperCase();
+            const active = value === current ? " embeddings-hw-segbtn-active" : "";
+            const busy = _placementBusy === m.slug ? " disabled" : "";
+            return `<button type="button"
+                        class="embeddings-hw-segbtn${active}"
+                        data-slug="${_esc(m.slug)}" data-placement="${_esc(value)}"
+                        aria-pressed="${value === current}"${busy}>${label}</button>`;
+        }).join("");
+        return `
+            <div class="embeddings-hw-row">
+                <span class="embeddings-hw-model">${_esc(m.label)}</span>
+                ${rec}
+                <span class="embeddings-hw-seg" role="group"
+                      aria-label="Device placement for ${_esc(m.label)}">${seg}</span>
+            </div>`;
+    }).join("");
+
+    return `
+        <div class="embeddings-card embeddings-card-hw">
+            <div class="embeddings-card-title">Embedding compute</div>
+            <p class="embeddings-card-copy">${_hardwareLine(hw)}</p>
+            ${rows}
+        </div>`;
+}
+
+function _hardwareLine(hw) {
+    let line;
+    if (hw.gpu) {
+        const vram = hw.vram_mb
+            ? `${(hw.vram_mb / 1024).toFixed(1)} GB VRAM`
+            : "VRAM unknown";
+        line = `GPU: ${_esc(hw.gpu_name || "detected")} &middot; ${_esc(vram)}`;
+    } else {
+        line = "CPU only &mdash; no GPU detected";
+    }
+    if (hw.ram_mb) {
+        line += ` &middot; ${(hw.ram_mb / 1024).toFixed(1)} GB RAM`;
+    }
+    return line;
+}
+
+async function _onPlacementClick(btn) {
+    const slug = btn.dataset.slug;
+    if (!slug || _placementBusy) return;
+    _placementBusy = slug;
+    btn.disabled = true;
+    try {
+        const r = await fetch("/embeddings/placement", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // data-placement "" means Auto → null clears the persisted pin
+            body: JSON.stringify({
+                slug,
+                placement: btn.dataset.placement || null,
+            }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+        toastError(`Could not change device placement: ${e.message}`);
+    }
+    _placementBusy = null;
+    await _refreshEmbeddingsCard();  // re-render with the server's truth
 }
 
 function _embedProgressLine(job) {

@@ -20,13 +20,18 @@ UPDATES_MANAGER_JS = (
     Path(__file__).resolve().parents[2] / "Portal" / "modules" / "updates-manager.js"
 )
 
-# Every binding the card depends on: endpoints, the wizard deep-link, and the
-# health field that gates the [Update] button / carries the migrate target.
+# Every binding the card depends on: endpoints, the wizard deep-link, the
+# health field that gates the [Update] button / carries the migrate target,
+# and the WI-9/M10 compute-card bindings (status.hardware block + per-model
+# placement/recommended_placement + the placement toggle endpoint).
 REQUIRED_LITERALS = [
     "/embeddings/status",
     "/embeddings/migrate",
     "/onboarding/?step=embeddings",
     "successor_slug",
+    "/embeddings/placement",
+    "recommended_placement",
+    "hardware",
 ]
 
 

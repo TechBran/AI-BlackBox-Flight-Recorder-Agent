@@ -175,6 +175,59 @@
     gap: 0.5rem;
 }
 
+/* ── Embedding compute card (WI-9/M10: hardware + placement toggles) ─── */
+
+.embeddings-card-hw {
+    border-left-color: rgba(255, 255, 255, 0.25);
+}
+.embeddings-hw-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.45rem;
+}
+.embeddings-hw-model {
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.82em;
+    flex: 1 1 auto;
+    min-width: 8rem;
+}
+.embeddings-hw-rec {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.75em;
+    white-space: nowrap;
+}
+.embeddings-hw-seg {
+    display: inline-flex;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: var(--radius-md, 8px);
+    overflow: hidden;
+}
+.embeddings-hw-segbtn {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 0.75em;
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+}
+.embeddings-hw-segbtn + .embeddings-hw-segbtn {
+    border-left: 1px solid rgba(255, 255, 255, 0.18);
+}
+.embeddings-hw-segbtn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+}
+.embeddings-hw-segbtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.embeddings-hw-segbtn-active {
+    background: var(--color-info, #6ca0dc);
+    color: #0b0f14;
+    font-weight: 600;
+}
+
 /* ── SSE log modal ──────────────────────────────────────────────────── */
 
 .updates-log-modal {

@@ -322,6 +322,18 @@ function renderCard(m) {
                <span>$${escapeHtml(fmtNum(m.cost_per_1m_tokens))} / 1M tokens</span>
            </div>`;
 
+    // WI-9 device-placement hint (local models): the recommendation comes
+    // from the server's hardware probe; a persisted pin (m.placement) beats
+    // it. The full Auto/GPU/CPU toggle lives on the Portal updates card
+    // (POST /embeddings/placement) — this line keeps the wizard's model
+    // choice hardware-aware without a second management surface.
+    const placementHint = local && m.recommended_placement
+        ? `<div class="ob-cli-agent-meta-row">
+               <span class="ob-cli-agent-meta-label">Compute</span>
+               <span>${escapeHtml(placementText(m))}</span>
+           </div>`
+        : "";
+
     const blockersHtml = (m.blockers || []).length
         ? `<ul class="ob-emb-blockers">${m.blockers
               .map((b) => `<li>${escapeHtml(b)}</li>`)
@@ -348,6 +360,7 @@ function renderCard(m) {
                 <span>${escapeHtml(String(m.dims))}</span>
             </div>
             ${costRow}
+            ${placementHint}
             ${freshnessHtml(m)}
             ${blockersHtml}
             ${warmToggleHtml(m)}
@@ -867,6 +880,17 @@ function renderJobStalled(job) {
 function modelLabel(slug) {
     const m = (status && status.models || []).find((x) => x.slug === slug);
     return (m && m.label) || slug || "";
+}
+
+function placementText(m) {
+    const rec = m.recommended_placement === "gpu" ? "GPU" : "CPU";
+    if (m.placement) {
+        const pin = m.placement.toUpperCase();
+        return pin === rec
+            ? `${pin} (pinned)`
+            : `${pin} (pinned; ${rec} recommended)`;
+    }
+    return `Auto (${rec} recommended)`;
 }
 
 function showHint(msg, isError) {
