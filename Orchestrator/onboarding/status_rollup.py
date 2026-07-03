@@ -219,7 +219,8 @@ def _derive_mcp(mcp):
 
 
 def build_status(*, env, state, embeddings, cli, web_search, image,
-                 paired, operators, restart, mcp=None, is_complete=False):
+                 paired, operators, restart, mcp=None, rerank=None,
+                 is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
     sections_out = []
     attention_out = []
@@ -270,4 +271,8 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
         "is_complete": is_complete,
         "sections": sections_out,
         "attention": attention_out,
+        # M13 ADDITIVE: verbatim GET /rerank/status block (None when the
+        # collection failed) — no section of its own, the wizard's Memory &
+        # Search step renders it inside the embeddings step.
+        "rerank": rerank,
     }

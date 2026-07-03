@@ -326,6 +326,46 @@ def test_status_route_does_no_tailscale_probe():
     assert r.status_code == 200
 
 
+# ── M13: rerank block in the rollup (additive; fail-soft) ──
+
+
+def test_rollup_carries_rerank_block_verbatim_and_defaults_to_none():
+    """build_status passes the collected GET /rerank/status payload through
+    as a top-level additive key; omitting it (older caller) yields None."""
+    block = {"enabled": False, "gpu": True, "service_reachable": True,
+             "configured": False, "available": False,
+             "preflight": {"state": "skipped"}}
+    inp = _empty_inputs()
+    assert sr.build_status(**inp, rerank=block)["rerank"] == block
+    assert sr.build_status(**inp)["rerank"] is None
+
+
+def test_status_route_includes_rerank_block():
+    """GET /onboarding/status carries the rerank status additively."""
+    c = _client()
+    block = {"enabled": True, "gpu": True, "service_reachable": True,
+             "configured": True, "available": True,
+             "preflight": {"state": "ok", "latency_ms": 42.0}}
+    with patch("Orchestrator.rerank.status", return_value=block):
+        r = c.get("/onboarding/status")
+    assert r.status_code == 200
+    assert r.json()["rerank"] == block
+
+
+def test_status_route_fail_soft_when_rerank_status_raises():
+    """A hanging/broken probe must never take the rollup down — rerank
+    degrades to None, everything else intact (mirrors the embeddings
+    fail-soft)."""
+    c = _client()
+    with patch("Orchestrator.rerank.status",
+               side_effect=TimeoutError("probe hung")):
+        r = c.get("/onboarding/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rerank"] is None
+    assert {s["key"] for s in body["sections"]} == {s["key"] for s in sr.SECTIONS}
+
+
 # ── SSE tests (Task 16): GET /onboarding/status/stream — live re-validation ──
 def _parse_sse(text):
     """Minimal SSE parser -> list of (event, data_str)."""

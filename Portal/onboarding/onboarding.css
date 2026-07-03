@@ -2683,6 +2683,77 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 }
 .ob-emb-blockers li { margin: 0.15rem 0; }
 
+/* ── M13 compute card: hardware line + placement toggles + reranker ──
+ * Mirrors the Portal updates card's compute block (updates-manager.js);
+ * ob-* styling because the wizard has its own token system. */
+.ob-emb-compute {
+    margin: 1.25rem 0 0;
+    padding: 0.85rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.12));
+    border-radius: var(--radius-md, 8px);
+}
+.ob-emb-compute-title {
+    font-size: 0.75em;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.55);
+    margin-bottom: 0.4rem;
+}
+.ob-emb-compute-hw {
+    margin: 0 0 0.5rem;
+    font-size: 0.9em;
+    color: rgba(255, 255, 255, 0.8);
+}
+.ob-emb-compute-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin: 0.35rem 0;
+    font-size: 0.85em;
+}
+.ob-emb-compute-model { color: rgba(255, 255, 255, 0.85); }
+.ob-emb-compute-rec {
+    font-size: 0.85em;
+    color: rgba(180, 220, 255, 0.75);
+}
+.ob-emb-seg {
+    display: inline-flex;
+    margin-left: auto;
+    border: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.15));
+    border-radius: var(--radius-full, 9999px);
+    overflow: hidden;
+}
+.ob-emb-segbtn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.65);
+    font: inherit;
+    font-size: 0.85em;
+    padding: 0.25rem 0.7rem;
+    cursor: pointer;
+}
+.ob-emb-segbtn + .ob-emb-segbtn {
+    border-left: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.15));
+}
+.ob-emb-segbtn:hover { background: rgba(255, 255, 255, 0.06); }
+.ob-emb-segbtn[disabled] { opacity: 0.5; cursor: default; }
+.ob-emb-segbtn-active {
+    background: var(--ob-accent, #cc0000);
+    color: #fff;
+}
+.ob-emb-rerank {
+    margin: 0.6rem 0 0;
+    font-size: 0.85em;
+    line-height: 1.45;
+}
+.ob-emb-rerank-muted { color: rgba(255, 255, 255, 0.45); }
+.ob-emb-rerank-info  { color: rgba(180, 220, 255, 0.85); }
+.ob-emb-rerank-warn  { color: rgba(255, 220, 150, 0.9); }
+.ob-emb-rerank-ok    { color: rgba(180, 240, 200, 0.85); }
+
 .ob-emb-progress-track {
     height: 8px;
     background: var(--ob-surface-border, rgba(255, 255, 255, 0.12));

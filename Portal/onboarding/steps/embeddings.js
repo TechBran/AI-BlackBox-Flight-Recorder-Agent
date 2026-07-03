@@ -44,7 +44,9 @@
 const POLL_MS = 2000;
 
 let status = null;        // last GET /embeddings/status payload
+let rerankStatus = null;  // last GET /rerank/status payload (M13; null = hide)
 let selectedSlug = null;  // card the user clicked (never the active model)
+let placementBusy = null; // slug whose placement POST is in flight (M13)
 let validation = null;    // /embeddings/validate result for selectedSlug
 let validating = false;   // probe in flight
 let migrating = false;    // migrate POST in flight (button debounce)
@@ -61,7 +63,9 @@ let ctx = null;           // { container, next, back, skip }
 export async function render(container, { next, back, skip, sigil }) {
     stopPolling();
     status = null;
+    rerankStatus = null;
     selectedSlug = null;
+    placementBusy = null;
     validation = null;
     validating = false;
     migrating = false;
@@ -128,8 +132,16 @@ export async function render(container, { next, back, skip, sigil }) {
 // ── Status + polling ─────────────────────────────────────────────
 
 async function refreshStatus() {
-    const fresh = await fetchJson("/embeddings/status");
+    // /rerank/status rides along (M13): additive + fail-soft — null keeps the
+    // last known payload (or hides the reranker line entirely on an older
+    // backend). Only refreshStatus() fetches it; the 2s tick() polls
+    // /embeddings/status alone, so the reranker probe isn't hammered.
+    const [fresh, rr] = await Promise.all([
+        fetchJson("/embeddings/status"),
+        fetchJson("/rerank/status"),
+    ]);
     if (fresh) status = fresh;
+    if (rr) rerankStatus = rr;
     return fresh;
 }
 
@@ -249,6 +261,7 @@ function renderPicker() {
     const health = status.health || { state: "ok" };
     contentEl().innerHTML = `
         ${healthBannerHtml(health)}
+        ${computeCardHtml()}
         <div id="ob-emb-grid" class="ob-emb-grid" role="radiogroup"
              aria-label="Embedding models"></div>
         <div id="ob-emb-hint-slot"></div>
@@ -259,7 +272,145 @@ function renderPicker() {
             startMigrate(status.health.successor_slug, switchBtn);
         });
     }
+    // Placement segmented toggles live in the compute card (outside the
+    // grid, so grid re-renders during pull polling never clobber them).
+    contentEl().querySelectorAll(".ob-emb-segbtn").forEach((btn) => {
+        btn.addEventListener("click", () => onPlacementClick(btn));
+    });
     renderGrid();
+}
+
+// ── Compute card (M13: hardware line + placement toggles + reranker) ──
+// Mirrors the Portal updates card's compute block (Portal/modules/
+// updates-manager.js _computeCardHtml/_onPlacementClick — same
+// POST /embeddings/placement contract); markup is mirrored rather than
+// shared because the wizard has its own ob-* module/CSS system.
+
+function computeCardHtml() {
+    const hw = status && status.hardware;
+    const rerankHtml = rerankLineHtml();
+    // Older backend without the hardware block AND no reranker payload —
+    // additive contract, degrade silently.
+    if (!hw && !rerankHtml) return "";
+
+    let hwLine = "";
+    if (hw) {
+        if (hw.gpu) {
+            const vram = hw.vram_mb
+                ? `${(hw.vram_mb / 1024).toFixed(1)} GB VRAM`
+                : "VRAM unknown";
+            hwLine = `GPU: ${escapeHtml(hw.gpu_name || "detected")} &middot; ${escapeHtml(vram)}`;
+        } else {
+            hwLine = "CPU only &mdash; local models run on CPU";
+        }
+        if (hw.ram_mb) {
+            hwLine += ` &middot; ${(hw.ram_mb / 1024).toFixed(1)} GB RAM`;
+        }
+    }
+    // Placement toggles only make sense with a GPU to place onto — on a CPU
+    // box the hardware line above already says where local models run.
+    const rows = hw && hw.gpu ? placementRowsHtml() : "";
+
+    return `
+        <div class="ob-emb-compute" id="ob-emb-compute">
+            <div class="ob-emb-compute-title">Compute</div>
+            ${hwLine ? `<p class="ob-emb-compute-hw">${hwLine}</p>` : ""}
+            ${rows}
+            ${rerankHtml}
+        </div>
+    `;
+}
+
+function placementRowsHtml() {
+    const locals = (status.models || []).filter((m) => m.privacy === "local");
+    return locals.map((m) => {
+        const current = m.placement || ""; // "" = auto (null persisted)
+        const rec = m.recommended_placement
+            ? `<span class="ob-emb-compute-rec">recommended: ${escapeHtml(m.recommended_placement.toUpperCase())}</span>`
+            : "";
+        const seg = ["", "gpu", "cpu"].map((value) => {
+            const label = value === "" ? "Auto" : value.toUpperCase();
+            const active = value === current ? " ob-emb-segbtn-active" : "";
+            const busy = placementBusy === m.slug ? " disabled" : "";
+            return `<button type="button"
+                        class="ob-emb-segbtn${active}"
+                        data-slug="${escapeHtml(m.slug)}" data-placement="${escapeHtml(value)}"
+                        aria-pressed="${value === current}"${busy}>${label}</button>`;
+        }).join("");
+        return `
+            <div class="ob-emb-compute-row">
+                <span class="ob-emb-compute-model">${escapeHtml(m.label)}</span>
+                ${rec}
+                <span class="ob-emb-seg" role="group"
+                      aria-label="Device placement for ${escapeHtml(m.label)}">${seg}</span>
+            </div>
+        `;
+    }).join("");
+}
+
+async function onPlacementClick(btn) {
+    const slug = btn.dataset.slug;
+    if (!slug || placementBusy) return;
+    placementBusy = slug;
+    btn.disabled = true;
+    try {
+        const r = await fetch("/embeddings/placement", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // data-placement "" means Auto → null clears the persisted pin
+            body: JSON.stringify({
+                slug,
+                placement: btn.dataset.placement || null,
+            }),
+        });
+        if (!r.ok) {
+            showHint(`Couldn't change device placement: ${await safeDetail(r)}`, true);
+        }
+    } catch (e) {
+        showHint(`Network error changing device placement: ${e.message}`, true);
+    }
+    placementBusy = null;
+    await refreshStatus(); // re-render with the server's truth
+    renderPicker();
+}
+
+// Reranker status line (M13). One line per state — the wizard INSTRUCTS the
+// config flip (rerank.py activation checklist), it never writes config.ini.
+function rerankLineHtml() {
+    const rr = rerankStatus;
+    if (!rr) return ""; // endpoint unreachable / older backend — hide
+    let cls, text;
+    if (!rr.gpu) {
+        cls = "ob-emb-rerank-muted";
+        text = "Reranker: requires an NVIDIA GPU (available on MS-02 Ultra).";
+    } else if (!rr.service_reachable) {
+        cls = "ob-emb-rerank-warn";
+        text = "Reranker service not running — run the installer's reranker "
+            + "step (sudo bash installer/templates/blackbox-install-reranker.sh).";
+    } else if (!rr.enabled || !rr.configured) {
+        // Service up, awaiting the deliberate operator flip (checklist §2).
+        cls = "ob-emb-rerank-info";
+        text = "Reranker service is up. To enable: edit config.ini — set "
+            + "provider = vllm under [rerank] and rerank_enabled = true under "
+            + "[retrieval] — then restart the BlackBox service.";
+    } else if (rr.available) {
+        cls = "ob-emb-rerank-ok";
+        const ms = rr.preflight && rr.preflight.latency_ms != null
+            ? ` (preflight ${Math.round(rr.preflight.latency_ms)} ms)`
+            : "";
+        text = `Reranker active — cross-encoder reranking is refining search results${ms}.`;
+    } else {
+        // Enabled + configured + service up, but the once-per-process latency
+        // preflight hasn't passed (failed or probed while the service was
+        // still warming up) — a restart re-probes.
+        cls = "ob-emb-rerank-warn";
+        const reason = rr.preflight && rr.preflight.reason
+            ? ` (${rr.preflight.reason})`
+            : "";
+        text = `Reranker enabled but its latency preflight hasn't passed${reason}`
+            + " — restart the BlackBox service to re-probe.";
+    }
+    return `<p class="ob-emb-rerank ${cls}">${escapeHtml(text)}</p>`;
 }
 
 function healthBannerHtml(health) {
@@ -324,9 +475,10 @@ function renderCard(m) {
 
     // WI-9 device-placement hint (local models): the recommendation comes
     // from the server's hardware probe; a persisted pin (m.placement) beats
-    // it. The full Auto/GPU/CPU toggle lives on the Portal updates card
-    // (POST /embeddings/placement) — this line keeps the wizard's model
-    // choice hardware-aware without a second management surface.
+    // it. The Auto/GPU/CPU toggle lives in the compute card above the grid
+    // (M13; same POST /embeddings/placement contract as the Portal updates
+    // card) — this per-card line keeps the model choice hardware-aware at a
+    // glance.
     const placementHint = local && m.recommended_placement
         ? `<div class="ob-cli-agent-meta-row">
                <span class="ob-cli-agent-meta-label">Compute</span>

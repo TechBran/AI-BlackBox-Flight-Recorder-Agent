@@ -662,6 +662,18 @@ def _collect_status_inputs() -> dict:
         logger.exception("status rollup: embeddings_status failed")
         embeddings = {"active": None, "health": {"state": "ok"}, "stores": [], "models": []}
 
+    # reranker (M13) — additive block for the wizard payload. Fail-soft, and
+    # bounded like the embeddings rollup: the reachability probe inside
+    # rerank.status() is ~1s-capped + TTL-cached, the hardware probe 60s-cached,
+    # and the latency preflight fires at most once per process (and only when
+    # [rerank] actually has a live provider).
+    try:
+        from Orchestrator import rerank as _rerank
+        rerank_block = _rerank.status()
+    except Exception:
+        logger.exception("status rollup: rerank status failed")
+        rerank_block = None
+
     # cli agents — installed/auth markers (filesystem only, no spawn). Fail-soft.
     try:
         cli = cli_agent_status()
@@ -682,7 +694,8 @@ def _collect_status_inputs() -> dict:
     return dict(
         env=env, state=state, embeddings=embeddings, cli=cli,
         web_search=web_search, image=image, paired=paired, operators=operators,
-        restart=restart, mcp=mcp, is_complete=_state.is_complete(),
+        restart=restart, mcp=mcp, rerank=rerank_block,
+        is_complete=_state.is_complete(),
     )
 
 
