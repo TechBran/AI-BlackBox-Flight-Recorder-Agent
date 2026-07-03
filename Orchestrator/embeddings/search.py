@@ -47,7 +47,13 @@ def active_threshold(fallback: float) -> float:
     """Per-model semantic-similarity floor; `fallback` (the config global) when
     the active model declares none. Registry is the only place model-specific
     values live (Task-16 ratchet), so a model whose score distribution differs
-    (Gemini retrieval_query vs Qwen instruct-prefixed) carries its own floor."""
+    (Gemini retrieval_query vs Qwen instruct-prefixed) carries its own floor.
+
+    DISPLAY/LOG-ONLY since Phase 3b-2: every caller feeds the result into
+    semantic_retrieve's retained-but-unused `threshold` param. The live
+    ranking floor is retrieval.py's junk-floor resolution (global
+    [retrieval] junk_floor or, flag-gated, the registry per-model junk_floor
+    — M9/WI-3), NOT this value."""
     entry = EMBEDDING_MODELS.get(get_active_slug(), {})
     value = entry.get("semantic_threshold")
     return float(value) if value is not None else float(fallback)

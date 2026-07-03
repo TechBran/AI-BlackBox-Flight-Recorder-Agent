@@ -5,7 +5,9 @@ ACTIVE store) -> RRF fusion (scale-free) -> mild recency tie-break (relevance
 dominates; recency flips only near-ties) -> MMR diversity (drops near-duplicate
 session clusters; the fused top-P is protected from elimination — see
 mmr_select) -> top-k. A low junk floor replaces the old hard 0.60
-threshold. No rerank (offline-capable, incl. the on-device phone profile).
+threshold (per-model registry floors are available behind
+[retrieval] registry_floor_enabled, default false — see _resolve_junk_floor).
+No rerank (offline-capable, incl. the on-device phone profile).
 All semantic candidates come from get_active_store(), so the retriever is
 automatically correct for whatever embedding model is active.
 
@@ -21,6 +23,7 @@ import numpy as np
 
 from Orchestrator.config import CFG, VOL_PATH
 from Orchestrator.embeddings import search as _emb
+from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.fossils import (
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
@@ -126,6 +129,38 @@ def mmr_select(cands, k: int, lam: float, protect: int = 0) -> list[str]:
 
 # ── orchestrating retrieve() ───────────────────────────────────────────────────
 
+def _resolve_junk_floor(store) -> float:
+    """Per-retrieval junk floor (WI-3/M9, audit A8): the store's registry
+    `junk_floor` when `[retrieval] registry_floor_enabled` is true AND the
+    store's model declares one (non-null); otherwise the global
+    `[retrieval] junk_floor` (default 0.40). Flag default false ⇒ the
+    per-model floors are inert and behavior is byte-identical to the
+    historical single-knob path.
+
+    The floor is a NOISE floor (drop obvious junk), never relevance
+    selection: on the live chunk-max store the measured gap between the noise
+    ceiling (0.6125) and the relevance band (≥0.6256) is only +0.013
+    (scripts/calibrate_threshold.py run 2026-07-02 — the script itself warned
+    the bands are too close to select on), so ranking does relevance and the
+    calibrated floors sit well below the band (gemini-2: 0.55).
+
+    Resolution keys on the STORE's slug, not the active pointer, so the eval
+    seam (`retrieve(store=...)`, M4) benches a candidate arm with the floor
+    that arm would ship with. Per-model floors exist because one global value
+    cannot fit every score distribution — audit A8's wipe scenario: qwen3-0.6b
+    scores on-topic hits ~0.45, so a gemini-band 0.54 floor empties the
+    phone-lean semantic-only profile entirely (invariant-2 violation); qwen's
+    own measured noise floor is 0.35. An unknown or slug-less store falls back
+    to the global floor.
+    """
+    fallback = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
+    if not CFG.getboolean("retrieval", "registry_floor_enabled", fallback=False):
+        return fallback
+    entry = EMBEDDING_MODELS.get(getattr(store, "slug", None), {})
+    value = entry.get("junk_floor")
+    return float(value) if value is not None else fallback
+
+
 def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
              store=None, query_vector=None):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
@@ -156,7 +191,6 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     half_life = CFG.getfloat("retrieval", "recency_half_life_days", fallback=90.0)
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.85)
     mmr_protect = CFG.getint("retrieval", "mmr_protect_top", fallback=3)
-    junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
 
     # 2. embed the query (purpose="query" — the retrieval_query fix), unless the
@@ -182,6 +216,11 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
             )
     if store.count == 0:
         return []
+
+    # Junk floor resolves per-STORE (WI-3/M9): the store's registry noise
+    # floor behind [retrieval] registry_floor_enabled (default false → the
+    # global [retrieval] junk_floor). See _resolve_junk_floor.
+    junk_floor = _resolve_junk_floor(store)
 
     qv_np = np.asarray(qv, dtype=np.float32)
     qdim = qv_np.shape[0]

@@ -21,6 +21,16 @@ max_input_tokens (WI-1): the per-model input limit the token-aware clamp in
 providers.py budgets against (clamp budget = 90% of this; Ollama also sends
 it verbatim as options.num_ctx with truncate:false). Every entry MUST declare
 it (guard-tested) — a missing limit would silently disable clamping.
+
+junk_floor (WI-3/M9, audit A8): nullable per-model NOISE floor for the
+canonical retriever. Consumed by Orchestrator/retrieval.py ONLY when
+[retrieval] registry_floor_enabled is true (default false — inert); null =
+the global [retrieval] junk_floor applies. Calibrated from
+scripts/calibrate_threshold.py NOISE bands (off-topic top-1 ceiling): it
+drops obvious junk and is NEVER relevance selection — ranking (RRF + recency
++ MMR) does relevance. Guard-tested present on every entry, numeric when
+non-null, and STRICTLY below semantic_threshold (noise floors sit under
+relevance bands by definition).
 """
 
 EMBEDDING_MODELS = {
@@ -29,6 +39,10 @@ EMBEDDING_MODELS = {
         "label": "Gemini (cloud)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.15,
         "privacy": "cloud", "quality_note": "Current default; auto-tracked for deprecation",
         "query_instruction": None, "keep_alive": None, "semantic_threshold": 0.60,
+        # v1 whole-snapshot store, never calibrated on chunk-max scoring — no
+        # measured noise band to ship; the global [retrieval] junk_floor
+        # applies even with registry_floor_enabled on.
+        "junk_floor": None,
         "tokenizer": "remote:gemini",
         "max_input_tokens": 2048,  # provider-documented input limit for embedding-001
         # NOTE: via the chars/2 floor (no local tokenizer) the 2048 budget clamps to
@@ -42,11 +56,24 @@ EMBEDDING_MODELS = {
         "label": "Gemini 2 (cloud, multimodal)", "ram_gb": 0.0, "cost_per_1m_tokens": 0.20,
         "privacy": "cloud", "quality_note": "Newest Gemini embedding (multimodal); re-embed required to switch",
         "query_instruction": None, "keep_alive": None,
-        # Calibrated 2026-06-21 via scripts/calibrate_threshold.py over the live
-        # 7176-row store: worst real top-10 hit 0.5963, suggested floor 0.5463
-        # (worst - 0.05); 0.55 stays clear of every strong match and well under
-        # p10 (0.6291). Inheriting gemini-001's 0.60 was silently cutting good hits.
-        "semantic_threshold": 0.55,
+        # Recalibrated 2026-07-02 on the LIVE schema-2 chunk-max store
+        # (scripts/calibrate_threshold.py --schema 2): relevance band
+        # 0.6256–0.7899 (worst relevant top-10 hit 0.6256), noise ceiling
+        # 0.6125 — 0.62 sits above every off-topic top-1 and just under the
+        # worst relevant hit. Display/log-only in ranking since Phase 3b-2
+        # (feeds semantic_retrieve's retained-but-unused threshold param); the
+        # live ranking floor is junk_floor below. (The previous 0.55 was the
+        # 2026-06-21 v1 whole-snapshot calibration — superseded by the chunk
+        # store cutover.)
+        "semantic_threshold": 0.62,
+        # Chunk-max calibration 2026-07-02 (same run as above): noise band
+        # 0.529–0.6125, relevance ≥0.6256. 0.55 drops sub-noise junk while
+        # keeping every relevant hit with 0.07+ margin; deliberately NOT in
+        # the 0.58–0.62 discrimination zone — the relevance/noise band gap is
+        # only +0.013 (the calibration script itself warned "bands too close,
+        # pick manually"), far too thin to select on. Ranking, not this floor,
+        # does relevance.
+        "junk_floor": 0.55,
         "tokenizer": "remote:gemini",
         "max_input_tokens": 8192,  # provider-documented input limit for gemini-embedding-2
     },
@@ -56,6 +83,7 @@ EMBEDDING_MODELS = {
         "privacy": "cloud", "quality_note": "Second cloud option (BYOK OpenAI key)",
         "query_instruction": None, "keep_alive": None,
         "semantic_threshold": 0.55,  # documented default (no BYOK key to live-measure)
+        "junk_floor": None,  # no store on this box — nothing to calibrate; global floor applies
         "tokenizer": "tiktoken:cl100k_base",
         "max_input_tokens": 8191,  # provider-documented input limit for text-embedding-3-large
     },
@@ -66,6 +94,14 @@ EMBEDDING_MODELS = {
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "-1m",  # negative duration = stay loaded; bare "-1" fails Go ParseDuration
         "semantic_threshold": 0.54,
+        # v1 whole-snapshot NOISE measurement (audit A8, 2026-07-01): qwen
+        # scores run low — on-topic top-1 hits land ~0.45, so a gemini-band
+        # floor (0.54/0.55) returns EMPTY on the phone-lean semantic-only
+        # profile (the documented wipe scenario; permanent regression test in
+        # test_retrieval_junk_floor.py). Measured noise band ≈0.35–0.40; 0.35
+        # keeps every on-topic hit. This store is still schema 1, so the
+        # v1-era band applies — re-measure on chunk-max if/when it rebuilds.
+        "junk_floor": 0.35,
         "tokenizer": "hf:qwen3",
         # model supports 32,768 but we provision 8,192: num_ctx KV allocation at
         # 32k ≈ 3.7GB CPU RAM per loaded model; 8,192 covers p99 whole snapshots
@@ -80,6 +116,11 @@ EMBEDDING_MODELS = {
         "query_instruction": "Instruct: Given a search query, retrieve relevant conversation snapshots\nQuery: ",
         "keep_alive": "5m",
         "semantic_threshold": 0.50,  # documented default; local Qwen scores run low (0.6b uses 0.54), 16-row store not live-measurable
+        # Same v1-era qwen noise band as the 0.6b entry (audit A8): local Qwen
+        # scores run low, 0.35 protects the phone-lean profile from the wipe
+        # scenario. Store is v1 (16 rows, not independently measurable) —
+        # re-measure on chunk-max if/when it rebuilds.
+        "junk_floor": 0.35,
         "tokenizer": "hf:qwen3",  # sample-encode-verified identical to the 0.6B tokenizer (scripts/vendor_tokenizers.py)
         # model supports 32,768 but we provision 8,192: num_ctx KV allocation at
         # 32k ≈ 3.7GB CPU RAM per loaded model; 8,192 covers p99 whole snapshots

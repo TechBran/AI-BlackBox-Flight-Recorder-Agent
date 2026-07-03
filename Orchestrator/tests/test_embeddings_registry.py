@@ -88,6 +88,30 @@ def test_every_model_declares_explicit_semantic_threshold():
     assert missing == [], f"models without an explicit semantic_threshold: {missing}"
 
 
+@pytest.mark.parametrize("slug", list(EMBEDDING_MODELS))
+def test_every_model_declares_nullable_junk_floor_below_semantic_threshold(slug):
+    """WI-3/M9 (audit A8): junk_floor is a per-model NOISE floor — the key must
+    be present on every entry (null = the global [retrieval] junk_floor
+    applies), numeric when set, and STRICTLY below the model's
+    semantic_threshold: noise floors sit under relevance bands by definition,
+    and a floor at/above the relevance threshold would be doing relevance
+    selection — the thin-band failure (measured gap +0.013 on the chunk-max
+    store) the A8 redesign forbids."""
+    e = EMBEDDING_MODELS[slug]
+    assert "junk_floor" in e, f"{slug}: missing WI-3 junk_floor key"
+    jf = e["junk_floor"]
+    if jf is None:
+        return
+    assert isinstance(jf, (int, float)) and not isinstance(jf, bool), (
+        f"{slug}: junk_floor {jf!r} must be numeric or None"
+    )
+    assert jf < e["semantic_threshold"], (
+        f"{slug}: junk_floor {jf} must sit STRICTLY below "
+        f"semantic_threshold {e['semantic_threshold']} (noise floor, not "
+        f"relevance selection)"
+    )
+
+
 def test_every_model_declares_max_input_tokens():
     """WI-1: the token-aware embedding clamp derives each model's budget from
     the registry. A missing/invalid limit would silently disable clamping and

@@ -99,6 +99,14 @@ recency_weight = 0.05
 recency_half_life_days = 90
 mmr_lambda = 0.7
 junk_floor = 0.40
+# M9 (WI-3): when true, the store's model-specific junk_floor from
+# Orchestrator/embeddings/registry.py (nullable, noise-band calibrated via
+# scripts/calibrate_threshold.py) overrides the global junk_floor above.
+# Default false = per-model floors are inert (byte-identical ranking).
+# Activation criterion: enable only after a representative window of
+# [RETRIEVAL] debug_log lines shows zero sub-floor relevant hits for the
+# active model.
+registry_floor_enabled = false
 final_k = 10
 # OPT-IN provenance logging: when true, retrieve() prints one [RETRIEVAL] line
 # per final result (rrf relevance, age_days, recency_boost, final score, which

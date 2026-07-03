@@ -140,6 +140,9 @@ def build_fossil_context(
     SF  = semantic_k if semantic_k is not None else CFG.getint("context", "semantic_fossils_per_user", fallback=8)
     ST  = CFG.getfloat("context", "semantic_threshold", fallback=0.60)
     from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
+    # ST is display/log-only: it feeds semantic_retrieve's retained-but-unused
+    # threshold param. The ranking floor lives in retrieval.py's junk-floor
+    # resolution (M9/WI-3).
     ST = active_threshold(ST)
     CP  = checkpoint_count if checkpoint_count is not None else CFG.getint("context", "checkpoint_snapshots", fallback=2)
     CAP = CFG.getint("context", "max_fossil_chars", fallback=10000)

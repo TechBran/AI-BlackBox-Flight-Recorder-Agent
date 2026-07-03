@@ -13,7 +13,10 @@ best chunks) and adds:
   * the relevance band as today (strong-query top-10 hits), PLUS
   * a NOISE band: deliberately off-topic queries' top-1/top-5 scores, PLUS
   * a floor-guidance line (worst-relevant minus margin vs the noise ceiling)
-    feeding M9's per-model junk_floor values.
+    feeding the per-model `junk_floor` field in
+    Orchestrator/embeddings/registry.py EMBEDDING_MODELS (M9/WI-3 — a NOISE
+    floor applied by retrieval.py only when [retrieval] registry_floor_enabled
+    is true; the relevance band feeds `semantic_threshold`, display-only).
 
 ALWAYS pass --schema 2 for the candidate (never autodetect). Read-only in
 every mode: store.search only, and a --store-dir that has no existing store

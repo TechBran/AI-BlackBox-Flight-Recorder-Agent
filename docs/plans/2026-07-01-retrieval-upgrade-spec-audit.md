@@ -198,6 +198,16 @@ noise bands) — sequenced AFTER WI-2's store exists, not "alongside". Same chan
 comment the dead `threshold` plumbing (three `active_threshold` call sites → unused param) and
 add an acceptance test that the phone-lean path stays non-empty on each local model with the
 registry floor active.
+*As-built (M9, landed 2026-07-03):* shipped values gemini-2 **0.55** (chunk-max calibration
+2026-07-02: noise 0.529–0.6125, relevance ≥0.6256, band gap +0.013 — floor kept OUT of the
+0.58–0.62 discrimination zone), qwen 0.6b/8b **0.35** (v1-era bands; stores still schema 1),
+gemini-001/openai **null**; `registry_floor_enabled` default **false** (flag-off pinned
+byte-identical); resolution keys on the STORE's slug (`retrieval._resolve_junk_floor`) so the
+eval `store=` seam benches an arm's own floor; dead `threshold`/`active_threshold` plumbing
+marked display-only (not deleted — 3 live call sites, zero behavior value); gemini-2
+`semantic_threshold` recalibrated 0.55→0.62 on chunk-max (display-only field — the guard test
+requires floors strictly below it). Activation criterion: flip the flag only after a
+representative window of `[RETRIEVAL] debug_log` lines shows zero sub-floor relevant hits.
 
 **A9 — WI-4 redesign.** Placement: rerank top-`min(rerank_candidate_n, len(fused))` (pool is ≤40
 on most surfaces), map reranked ORDER to rank-space scores `1/(rrf_c+new_rank)`, re-apply

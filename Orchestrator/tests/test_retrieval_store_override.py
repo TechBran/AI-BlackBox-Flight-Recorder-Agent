@@ -19,11 +19,16 @@ import Orchestrator.retrieval as retrieval
 # ── fakes ─────────────────────────────────────────────────────────────────────
 
 class FakeStore:
-    """Minimal VectorStore stand-in: pre-normalized rows + cosine top-k."""
+    """Minimal VectorStore stand-in: pre-normalized rows + cosine top-k.
 
-    def __init__(self, rows, dims=4):
+    `slug` mirrors VectorStore.slug (None = slug-less store) — the M9
+    junk-floor resolution keys on it (test_retrieval_junk_floor.py).
+    """
+
+    def __init__(self, rows, dims=4, slug=None):
         # rows: [(snap_id, vector)] — normalized here so `vec @ q` is cosine.
         self.dims = dims
+        self.slug = slug
         self._rows = []
         for sid, v in rows:
             vec = np.asarray(v, dtype=np.float32)

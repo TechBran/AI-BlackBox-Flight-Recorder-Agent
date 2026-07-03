@@ -113,6 +113,12 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
         k: Maximum number of results to return
         threshold: RETAINED for signature/caller compatibility only. It is now
             UNUSED and superseded by retrieve()'s own junk_floor + top-k (Phase 3).
+            Display/log-only: the three callers feed it from active_threshold
+            for their [CONTEXT]/[SEMANTIC] log lines; the ranking floor lives
+            in retrieval.py's junk-floor resolution — global
+            [retrieval] junk_floor or, flag-gated, the per-model registry
+            junk_floor (M9/WI-3). Kept, not deleted: three live call sites,
+            zero behavior value — removal churn > benefit this cycle.
 
     Returns:
         List of decoded snapshot texts (SAME return type as before), highest-ranked

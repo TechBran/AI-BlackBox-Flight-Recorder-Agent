@@ -5818,6 +5818,9 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     CU_RF, CU_KF, CU_SF, CU_ST = 4, 3, 5, 0.60
     CU_CP, CU_CAP, CU_MA = 2, 10000, 5
     from Orchestrator.embeddings.search import active_threshold  # lazy: avoid startup cycle
+    # CU_ST is display/log-only: it feeds semantic_retrieve's retained-but-
+    # unused threshold param. The ranking floor lives in retrieval.py's
+    # junk-floor resolution (M9/WI-3).
     CU_ST = active_threshold(CU_ST)
 
     from Orchestrator.context_builder import fill_unseen  # lazy: matches build_streaming_context's import pattern
