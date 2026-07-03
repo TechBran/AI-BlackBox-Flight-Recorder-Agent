@@ -251,9 +251,29 @@ class _FakeActiveStore:
 
 
 class _FakeCfg:
-    @staticmethod
-    def getfloat(section, option, fallback=None):
-        return 0.005
+    """In-process CFG stand-in: dict-backed set/get so the override save/
+    restore path in run_gate is exercised for real (recency_weight reads as
+    the gate weight 0.005 when unset)."""
+
+    def __init__(self):
+        self._d = {}
+
+    def getfloat(self, section, option, fallback=None):
+        if (section, option) in self._d:
+            return float(self._d[(section, option)])
+        return 0.005 if option == "recency_weight" else fallback
+
+    def has_option(self, section, option):
+        return (section, option) in self._d
+
+    def get(self, section, option):
+        return self._d[(section, option)]
+
+    def set(self, section, option, value):
+        self._d[(section, option)] = value
+
+    def remove_option(self, section, option):
+        self._d.pop((section, option), None)
 
 
 def _wire_gate(monkeypatch, tmp_path, baseline_hits_tail: bool):
@@ -288,7 +308,8 @@ def _wire_gate(monkeypatch, tmp_path, baseline_hits_tail: bool):
     return argparse.Namespace(
         out_date="2099-01-01", candidate_dir=str(tmp_path), candidate_slug=SLUG,
         gate_sweep_json=str(RB.GATE_SWEEP_JSON), gate_weight=0.005,
-        skip_tests_gate=True, mmr_lambda=None, candidate_n=None)
+        skip_tests_gate=True, mmr_lambda=None, candidate_n=None,
+        mmr_protect=None)
 
 
 def test_run_gate_all_pass_writes_artifacts_and_exits_zero(
@@ -307,6 +328,39 @@ def test_run_gate_all_pass_writes_artifacts_and_exits_zero(
     cache = json.loads((tmp_path / "bench_cache.json").read_text())
     gen = js["candidate"]["generation"]
     assert any(f"gate-cand|gen={gen}" in k for k in cache)
+
+
+def test_run_gate_mmr_protect_override_recorded_and_suffixed(
+        tmp_path, monkeypatch, capsys):
+    """--mmr-protect flows through the override machinery end-to-end: applied
+    to the in-process CFG for the run (then restored), recorded as an int in
+    pipeline_overrides, baked into the cache keys, and suffixed onto the
+    artifact filenames (never clobbering the default-config gate artifacts)."""
+    args = _wire_gate(monkeypatch, tmp_path, baseline_hits_tail=False)
+    args.mmr_protect = 3
+    import Orchestrator.config as _cfg
+    RB.run_gate(list(GATE_ROWS), args)  # no SystemExit == all gates pass
+    assert "ALL GATES PASS" in capsys.readouterr().out
+    # Override restored on the (fake) CFG after the run.
+    assert not _cfg.CFG.has_option("retrieval", "mmr_protect_top")
+
+    md_path = tmp_path / "results" / "2099-01-01-chunk-gate-mmrprotecttop3.md"
+    js_path = tmp_path / "results" / "2099-01-01-chunk-gate-mmrprotecttop3.json"
+    assert md_path.exists() and js_path.exists()
+    assert not (tmp_path / "results" / "2099-01-01-chunk-gate.md").exists()
+    js = json.loads(js_path.read_text())
+    assert js["pipeline_overrides"] == {"mmr_protect_top": 3}
+    # Baselines switched to the fresh same-config runs (sweep JSON numbers
+    # were measured at the default pipeline config — not comparable).
+    assert "fresh same-config" in js["baseline_source"]
+    assert "IN-PROCESS pipeline overrides" in md_path.read_text()
+    cache = json.loads((tmp_path / "bench_cache.json").read_text())
+    assert any("|mmr_protect_top=3" in k for k in cache)
+
+
+def test_mmr_protect_flag_requires_gate_mode():
+    with pytest.raises(SystemExit):
+        RB.main(["--mmr-protect", "3"])
 
 
 def test_run_gate_failure_exits_nonzero_and_records_fail(

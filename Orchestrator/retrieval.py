@@ -3,7 +3,8 @@
 Pipeline: candidate generation (keyword ids + semantic ids/vectors from the
 ACTIVE store) -> RRF fusion (scale-free) -> mild recency tie-break (relevance
 dominates; recency flips only near-ties) -> MMR diversity (drops near-duplicate
-session clusters) -> top-k. A low junk floor replaces the old hard 0.60
+session clusters; the fused top-P is protected from elimination — see
+mmr_select) -> top-k. A low junk floor replaces the old hard 0.60
 threshold. No rerank (offline-capable, incl. the on-device phone profile).
 All semantic candidates come from get_active_store(), so the retriever is
 automatically correct for whatever embedding model is active.
@@ -80,7 +81,7 @@ def apply_recency_tiebreak(
     return sorted(out.items(), key=lambda kv: kv[1], reverse=True)
 
 
-def mmr_select(cands, k: int, lam: float) -> list[str]:
+def mmr_select(cands, k: int, lam: float, protect: int = 0) -> list[str]:
     """MMR over (snap_id, relevance, unit_vector); greedily max lam*rel-(1-lam)*max_sim.
 
     Greedy Maximal Marginal Relevance: each pick maximizes
@@ -88,10 +89,28 @@ def mmr_select(cands, k: int, lam: float) -> list[str]:
     that is a near-duplicate of something already chosen is penalized — breaking
     near-identical session clusters while still preferring relevant items.
     `cands` is consumed in order; ties keep the earlier (more relevant) item.
+
+    protect (M6f iteration 3 — top-rank protect): `cands` arrives in fused rank
+    order, and the first `protect` of them are seeded into the picked set IN
+    RANK ORDER (their vectors join the diversity comparison) before the greedy
+    loop fills the remaining k-protect slots. WHY: items the fused ranking puts
+    in the top-P are definitionally the strongest cross-channel evidence —
+    MMR's job is breaking near-duplicate clusters in the TAIL of top-k, not
+    vetoing the strongest results. Measured basis: two human-verified golds at
+    post-RRF+recency rank 3, present in BOTH channels, were MMR-dropped as
+    near-duplicates of a first-picked same-domain sibling at every lambda <
+    1.0 (eval/results/2026-07-03-wholevec-gate.md). Protected items count
+    toward k; protect=0 is exactly the historical behavior; protect >= k
+    degrades to the pure fused ranking.
     """
     picked: list[str] = []
     picked_vecs: list = []
     pool = list(cands)
+    n_protect = max(0, min(int(protect), k, len(pool)))
+    for sid, _rel, vec in pool[:n_protect]:
+        picked.append(sid)
+        picked_vecs.append(vec)
+    pool = pool[n_protect:]
     while pool and len(picked) < k:
         best_i, best_val = 0, -1e9
         for i, (_sid, rel, vec) in enumerate(pool):
@@ -136,6 +155,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     recency_weight = CFG.getfloat("retrieval", "recency_weight", fallback=0.005)
     half_life = CFG.getfloat("retrieval", "recency_half_life_days", fallback=90.0)
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.7)
+    mmr_protect = CFG.getint("retrieval", "mmr_protect_top", fallback=3)
     junk_floor = CFG.getfloat("retrieval", "junk_floor", fallback=0.40)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
 
@@ -214,7 +234,10 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     ranked = apply_recency_tiebreak(relevance, ages, recency_weight, half_life)
     score_by_id = dict(ranked)
 
-    # 8. MMR diversity over the top window, then take top-k.
+    # 8. MMR diversity over the top window, then take top-k. The fused top-P
+    #    ([retrieval] mmr_protect_top, default 3) is protected from MMR
+    #    elimination — seeded into the picked set in rank order, counting
+    #    toward k (see mmr_select). P=0 disables (pure historical MMR).
     #    Keyword-only ids (absent from the semantic channel) get a zero vector of
     #    the query's dim so they never register as near-duplicates of anything.
     window = max(k * 2, 20)
@@ -223,7 +246,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         (sid, score_by_id[sid], vec_by_id.get(sid, zero))
         for sid, _score in ranked[:window]
     ]
-    picked = mmr_select(mmr_cands, k, mmr_lambda)
+    picked = mmr_select(mmr_cands, k, mmr_lambda, protect=mmr_protect)
     results = [(sid, score_by_id[sid]) for sid in picked]
 
     # 9. OPT-IN provenance logging — answers "why did I get these results" from

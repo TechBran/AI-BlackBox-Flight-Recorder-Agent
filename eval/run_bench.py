@@ -645,7 +645,8 @@ def run_gate(rows: list, args) -> None:
     """Six-gate swap authorization: candidate + fresh baselines, table,
     artifacts, exit code (any FAIL -> exit 1: STOP, no cutover).
 
-    --mmr-lambda / --candidate-n (M6f iteration 1): optional [retrieval]
+    --mmr-lambda / --candidate-n (M6f iteration 1) / --mmr-protect (M6f
+    iteration 3, [retrieval] mmr_protect_top): optional [retrieval]
     pipeline overrides applied to the IN-PROCESS CFG for the whole gate run
     (config.ini on disk byte-asserted untouched, original values restored).
     With overrides active, gates 1-3 CANNOT use the committed sweep-JSON
@@ -663,6 +664,8 @@ def run_gate(rows: list, args) -> None:
         overrides["mmr_lambda"] = str(args.mmr_lambda)
     if args.candidate_n is not None:
         overrides["candidate_n"] = str(args.candidate_n)
+    if args.mmr_protect is not None:
+        overrides["mmr_protect_top"] = str(args.mmr_protect)
 
     sweep_arms = (None if overrides
                   else load_gate_baselines(args.gate_sweep_json, args.gate_weight))
@@ -768,7 +771,7 @@ def run_gate(rows: list, args) -> None:
             if overrides else str(args.gate_sweep_json)),
         "baseline_weight": args.gate_weight,
         "pipeline_overrides": {
-            k: (int(v) if k == "candidate_n" else float(v))
+            k: (int(v) if k in ("candidate_n", "mmr_protect_top") else float(v))
             for k, v in overrides.items()} or None,
         "active_store_snapshots": active_count,
         "gates": gate_rows, "all_pass": ok, "runs": runs,
@@ -816,14 +819,21 @@ def main(argv=None):
                     help="gate-mode [retrieval] candidate_n override, applied "
                          "IN-PROCESS to candidate AND baseline arms (and gate 6); "
                          "config.ini untouched; recorded in the report")
+    ap.add_argument("--mmr-protect", type=int, default=None,
+                    help="gate-mode [retrieval] mmr_protect_top override (M6f "
+                         "iteration 3 top-rank protect), applied IN-PROCESS to "
+                         "candidate AND baseline arms (and gate 6); config.ini "
+                         "untouched; recorded in the report")
     args = ap.parse_args(argv)
 
     if args.candidate_dir and not args.candidate_slug:
         ap.error("--candidate-dir requires --candidate-slug")
     if args.gate and not (args.candidate_dir and args.candidate_slug):
         ap.error("--gate requires --candidate-dir and --candidate-slug")
-    if (args.mmr_lambda is not None or args.candidate_n is not None) and not args.gate:
-        ap.error("--mmr-lambda/--candidate-n are gate-mode overrides (require --gate)")
+    if (args.mmr_lambda is not None or args.candidate_n is not None
+            or args.mmr_protect is not None) and not args.gate:
+        ap.error("--mmr-lambda/--candidate-n/--mmr-protect are gate-mode "
+                 "overrides (require --gate)")
 
     rows = [json.loads(ln) for ln in LABELED.read_text().splitlines() if ln.strip()]
     print(f"[bench] {len(rows)} labeled rows; active model = {get_active_slug()}")

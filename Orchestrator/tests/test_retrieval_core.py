@@ -78,6 +78,144 @@ def test_mmr_respects_k():
     assert len(mmr_select(cands, k=5, lam=0.7)) == 3  # k > pool -> whole pool
 
 
+# ── MMR top-rank protect (M6f iteration 3) ────────────────────────────────────
+#
+# The fused top-P must be IMMUNE to MMR elimination: two human-verified golds
+# at post-RRF rank 3 were MMR-dropped as near-duplicates of a first-picked
+# same-domain sibling at every lambda < 1.0 (eval/results/2026-07-03-wholevec-gate.md).
+
+def _v(*xs):
+    return np.array(xs, dtype="float32")
+
+
+# Rank order (rel descending): S1, S2, GOLD (near-identical to S1), S4 (diverse).
+PROTECT_CANDS = [
+    ("S1", 1.00, _v(1.0, 0.0, 0.0)),
+    ("S2", 0.98, _v(0.0, 1.0, 0.0)),
+    ("GOLD", 0.96, _v(0.9995, 0.0316, 0.0)),   # cos to S1 ≈ 0.9995
+    ("S4", 0.70, _v(0.0, 0.0, 1.0)),
+]
+
+
+def test_mmr_protect_keeps_rank3_near_duplicate_that_unprotected_mmr_drops():
+    # Unprotected (protect=0 == historical behavior): the rank-3 near-dup of the
+    # first pick loses to the diverse S4 at lambda=0.7 — exactly the gate failure.
+    assert mmr_select(PROTECT_CANDS, k=3, lam=0.7) == ["S1", "S2", "S4"]
+    assert mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=0) == ["S1", "S2", "S4"]
+    # Protected: the fused top-3 survive verbatim; MMR has no remaining slots.
+    assert mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=3) == ["S1", "S2", "GOLD"]
+
+
+def test_mmr_protected_items_lead_in_rank_order_then_mmr_picks_follow():
+    cands = [
+        ("S1", 1.00, _v(1.0, 0.0, 0.0)),
+        ("S2", 0.98, _v(0.9995, 0.0316, 0.0)),  # near-dup of S1
+        ("S3", 0.50, _v(0.0, 0.0, 1.0)),        # diverse
+    ]
+    # Unprotected at lambda=0.6 MMR reorders: S3 beats the near-dup S2.
+    assert mmr_select(cands, k=3, lam=0.6) == ["S1", "S3", "S2"]
+    # protect=2 seeds the top-2 IN RANK ORDER ahead of the greedy picks.
+    assert mmr_select(cands, k=3, lam=0.6, protect=2) == ["S1", "S2", "S3"]
+
+
+def test_mmr_protect_at_or_above_k_degrades_to_pure_fused_ranking():
+    # protect >= k: the top-k of the fused ranking verbatim — MMR is moot.
+    assert mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=3) == ["S1", "S2", "GOLD"]
+    assert mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=99) == ["S1", "S2", "GOLD"]
+    # protect > pool size with room in k: whole pool in rank order, no crash.
+    assert mmr_select(PROTECT_CANDS, k=10, lam=0.7, protect=99) == [
+        "S1", "S2", "GOLD", "S4"]
+
+
+def test_mmr_protect_negative_clamps_to_zero():
+    assert (mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=-1)
+            == mmr_select(PROTECT_CANDS, k=3, lam=0.7, protect=0))
+
+
+# ── retrieve() wiring of the protect knob (hermetic) ──────────────────────────
+
+from Orchestrator.tests.test_retrieval_store_override import FakeStore  # noqa: E402
+
+# Equal timestamps: recency boosts are identical, so fused rank order is the
+# semantic cosine order — the protect scenario is controlled by vectors alone.
+_PROTECT_INDEX = {
+    sid: {"operator": "alice", "timestamp": "2026-06-01T00:00:00Z"}
+    for sid in ("S1", "S2", "GOLD", "S4")
+}
+
+# Cosine-to-query ranks: S1 0.70, S2 0.65, GOLD 0.64 (near-dup of S1, cos≈0.996),
+# S4 0.50 (diverse). All above the 0.40 junk floor. At lambda=0.7/k=3 unprotected
+# MMR picks the diverse S4 over the rank-3 GOLD; the protect must keep GOLD.
+_PROTECT_STORE_ROWS = [
+    ("S1", [0.70, 0.714, 0.0, 0.0]),
+    ("S2", [0.65, 0.0, 0.76, 0.0]),
+    ("GOLD", [0.64, 0.768, 0.0, 0.0]),
+    ("S4", [0.50, 0.0, 0.0, 0.866]),
+]
+
+
+@pytest.fixture()
+def hermetic_protect(monkeypatch):
+    import Orchestrator.retrieval as retrieval_mod
+    monkeypatch.setattr(
+        retrieval_mod._emb, "generate_embedding_sync",
+        lambda text, purpose="query": [1.0, 0.0, 0.0, 0.0],
+    )
+    monkeypatch.setattr(
+        retrieval_mod, "load_snapshot_index", lambda: dict(_PROTECT_INDEX))
+    monkeypatch.setattr(
+        retrieval_mod, "keyword_retrieve_ids_for_operator",
+        lambda vol, q, n, op: [])
+    return FakeStore(_PROTECT_STORE_ROWS)
+
+
+def _with_retrieval_keys(**keys):
+    """Context manager: pin [retrieval] keys on the in-process CFG (value None
+    = ensure the key is ABSENT); restore exactly afterwards. Disk untouched."""
+    import contextlib
+    from Orchestrator.config import CFG
+
+    @contextlib.contextmanager
+    def _cm():
+        if not CFG.has_section("retrieval"):
+            CFG.add_section("retrieval")
+        saved = {
+            opt: (CFG.get("retrieval", opt)
+                  if CFG.has_option("retrieval", opt) else None)
+            for opt in keys
+        }
+        try:
+            for opt, val in keys.items():
+                if val is None:
+                    CFG.remove_option("retrieval", opt)
+                else:
+                    CFG.set("retrieval", opt, str(val))
+            yield
+        finally:
+            for opt, prev in saved.items():
+                if prev is None:
+                    CFG.remove_option("retrieval", opt)
+                else:
+                    CFG.set("retrieval", opt, prev)
+    return _cm()
+
+
+def test_retrieve_default_protect_is_3_without_config_key(hermetic_protect):
+    """No [retrieval] mmr_protect_top key -> code fallback 3: the rank-3
+    near-duplicate gold SURVIVES on the default path."""
+    with _with_retrieval_keys(mmr_protect_top=None, mmr_lambda="0.7"):
+        results = retrieve("q", "system", k=3, store=hermetic_protect)
+    assert [sid for sid, _ in results] == ["S1", "S2", "GOLD"]
+
+
+def test_retrieve_protect_zero_restores_pure_mmr_behavior(hermetic_protect):
+    """mmr_protect_top=0 disables the protect: exactly the historical pipeline
+    (the near-dup GOLD is MMR-dropped for the diverse S4)."""
+    with _with_retrieval_keys(mmr_protect_top="0", mmr_lambda="0.7"):
+        results = retrieve("q", "system", k=3, store=hermetic_protect)
+    assert [sid for sid, _ in results] == ["S1", "S4", "S2"]
+
+
 # ── live integration (skipped when store/provider unavailable) ────────────────
 
 def test_retrieve_live_returns_recent_snapshots():
