@@ -98,6 +98,10 @@ RERANK_MODELS = {
     # relevant to THIS query" and INVERTS — a relevant passage scored 0.726 vs an
     # off-topic cake recipe at 0.790; WITH the prefix it ranks correctly with a
     # wide margin (0.822 vs 0.530). Shipping the bare query would degrade recall.
+    # M2 tiering schema (Task 2.1): auth_kind/key_env/cost_note/privacy/tiers +
+    # per-provider preflight_ceiling_ms/preflight_passage_n. query_instruction
+    # stays ONLY on these Qwen vllm/cpu entries — cloud/LLM providers added in
+    # M6/M7 must NOT inherit the Qwen instruct prefix (it inverts non-Qwen rankers).
     "qwen3-reranker-0.6b": {
         "provider": "vllm",
         "model_id": "Qwen/Qwen3-Reranker-0.6B",
@@ -106,6 +110,13 @@ RERANK_MODELS = {
         "max_input_tokens": 32768,
         "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
         "quality_note": "Default post-GPU pick; pairs with the qwen3 embedding stores",
+        "auth_kind": "none",
+        "key_env": None,
+        "cost_note": "Local GPU — no API cost",
+        "privacy": "local",
+        "tiers": ["HIGH"],
+        "preflight_ceiling_ms": 500,
+        "preflight_passage_n": 1,
     },
     "qwen3-reranker-4b": {
         "provider": "vllm",
@@ -115,6 +126,13 @@ RERANK_MODELS = {
         "max_input_tokens": 32768,
         "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
         "quality_note": "Bigger cross-encoder — only if Phase B shows 0.6B leaves recall on the table",
+        "auth_kind": "none",
+        "key_env": None,
+        "cost_note": "Local GPU — no API cost",
+        "privacy": "local",
+        "tiers": ["HIGH"],
+        "preflight_ceiling_ms": 500,
+        "preflight_passage_n": 1,
     },
 }
 

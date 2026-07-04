@@ -76,6 +76,12 @@ class FakeResp:
 
 # ── RERANK_MODELS registry conventions ────────────────────────────────────────
 
+# M2 Task 2.1 schema enums (mirror the embeddings registry guard style).
+RERANK_AUTH_KINDS = {"none", "bearer_env", "gcp_service_account", "frontier_key"}
+RERANK_PRIVACY = {"local", "cloud"}
+RERANK_TIERS = {"LOW", "MID", "HIGH"}
+
+
 def test_rerank_models_table_shape():
     assert set(rerank.RERANK_MODELS) == {"qwen3-reranker-0.6b", "qwen3-reranker-4b"}
     for slug, entry in rerank.RERANK_MODELS.items():
@@ -85,6 +91,28 @@ def test_rerank_models_table_shape():
             assert field in entry, f"{slug} missing {field}"
         assert entry["provider"] == "vllm"
         assert isinstance(entry["vram_gb"], float)
+
+
+@pytest.mark.parametrize("slug", list(rerank.RERANK_MODELS))
+def test_every_rerank_model_declares_new_schema_keys(slug):
+    """M2 Task 2.1: every RERANK_MODELS entry declares the tiering-schema keys
+    with valid types + enum membership (mirrors test_embeddings_registry.py's
+    per-entry guard). auth_kind/key_env/cost_note/privacy/tiers plus the
+    per-provider preflight_ceiling_ms/preflight_passage_n."""
+    e = rerank.RERANK_MODELS[slug]
+    assert e["auth_kind"] in RERANK_AUTH_KINDS, f"{slug}: bad auth_kind"
+    assert e["key_env"] is None or (
+        isinstance(e["key_env"], str) and e["key_env"]
+    ), f"{slug}: key_env must be a non-empty str or None"
+    assert isinstance(e["cost_note"], str) and e["cost_note"], f"{slug}: cost_note"
+    assert e["privacy"] in RERANK_PRIVACY, f"{slug}: bad privacy"
+    assert isinstance(e["tiers"], list) and e["tiers"], f"{slug}: tiers non-empty list"
+    assert set(e["tiers"]) <= RERANK_TIERS, f"{slug}: tiers must subset LOW/MID/HIGH"
+    for k in ("preflight_ceiling_ms", "preflight_passage_n"):
+        v = e[k]
+        assert isinstance(v, int) and not isinstance(v, bool) and v > 0, (
+            f"{slug}: {k} must be a positive int"
+        )
 
 
 def test_rerank_models_never_pollute_embedding_registry():
