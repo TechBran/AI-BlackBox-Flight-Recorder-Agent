@@ -73,6 +73,7 @@ wire call) or, as an escape hatch, a verbatim served-model name.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -184,15 +185,61 @@ def service_reachable(timeout_s: float = 1.0) -> bool:
     return ok
 
 
+# Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
+# get_settings() outside score()'s try, so a non-numeric [rerank] value would
+# now propagate out of score()/status() as a ValueError. Fix at the source:
+# a bad numeric config value degrades to the default (logged once) so the whole
+# module keeps its never-raise contract (audit A9) even on hand-edited typos.
+_warned_cfg: set[str] = set()
+
+
+def _warn_malformed(section: str, option: str) -> None:
+    key = f"{section}.{option}"
+    if key not in _warned_cfg:
+        _warned_cfg.add(key)
+        print(f"[RERANK] malformed [{section}] {option} in config — "
+              f"using the default")
+
+
+def _cfg_float(section: str, option: str, fallback: float) -> float:
+    """CFG.getfloat that degrades a malformed (non-numeric) value to `fallback`
+    (logged once) instead of raising."""
+    try:
+        return CFG.getfloat(section, option, fallback=fallback)
+    except (ValueError, TypeError):
+        _warn_malformed(section, option)
+        return fallback
+
+
+def _cfg_int(section: str, option: str, fallback: int) -> int:
+    """CFG.getint with the same malformed-config resilience as _cfg_float."""
+    try:
+        return CFG.getint(section, option, fallback=fallback)
+    except (ValueError, TypeError):
+        _warn_malformed(section, option)
+        return fallback
+
+
 def get_settings() -> dict:
     """Resolved [rerank] config with code fallbacks (fresh-box safe: the
-    section may be absent — provider then resolves to "null" = inert)."""
+    section may be absent — provider then resolves to "null" = inert).
+
+    Per-provider preflight tuning (preflight_ceiling_ms / preflight_passage_n)
+    and the auth descriptor (auth_kind / key_env) are resolved FROM the selected
+    model's RERANK_MODELS entry (M3.1); a [rerank] preflight_ceiling_ms in
+    config still overrides the registry ceiling. Numeric reads are
+    malformed-config-resilient (a bad value falls back, logged once) so
+    get_settings() — and thus score()/status() — never raise (audit A9)."""
     provider = CFG.get("rerank", "provider", fallback="null").strip().lower()
     base_url = CFG.get(
         "rerank", "base_url", fallback=DEFAULT_BASE_URL
     ).strip().rstrip("/")
     model = CFG.get("rerank", "model", fallback=_DEFAULT_MODEL_SLUG).strip()
     entry = RERANK_MODELS.get(model)
+    # Registry-sourced preflight tuning (config ceiling override still wins).
+    entry_ceiling = entry.get("preflight_ceiling_ms") if entry else None
+    ceiling_fallback = float(entry_ceiling) if entry_ceiling is not None else 500.0
+    passage_n = int(entry.get("preflight_passage_n", 1)) if entry else 1
     return {
         "provider": provider,
         "base_url": base_url,
@@ -207,10 +254,18 @@ def get_settings() -> dict:
             "rerank", "query_instruction",
             fallback=(entry.get("query_instruction", "") if entry else ""),
         ),
-        "timeout_s": CFG.getfloat("rerank", "timeout_s", fallback=15.0),
-        "preflight_ceiling_ms": CFG.getfloat(
-            "rerank", "preflight_ceiling_ms", fallback=500.0
-        ),
+        "timeout_s": _cfg_float("rerank", "timeout_s", 15.0),
+        # Config override wins over the model entry's registry ceiling.
+        "preflight_ceiling_ms": _cfg_float(
+            "rerank", "preflight_ceiling_ms", ceiling_fallback),
+        "preflight_passage_n": passage_n,
+        # Candidate count the reranker sees at retrieve()-time; feeds the CPU
+        # preflight extrapolation. Lives in [retrieval]; resilient read.
+        "rerank_candidate_n": _cfg_int("retrieval", "rerank_candidate_n", 40),
+        # M2 auth descriptor surfaced for reachability + status (M3) and key
+        # plumbing (M4). "none"/None on a fresh box or unknown model.
+        "auth_kind": entry.get("auth_kind", "none") if entry else "none",
+        "key_env": entry.get("key_env") if entry else None,
     }
 
 
@@ -324,8 +379,14 @@ def score(query: str, passages: list[str]) -> list[float] | None:
 def preflight() -> dict:
     """One-time-per-process latency probe; result cached for process lifetime.
 
-    Scores a 1-passage dummy against the configured provider and requires
-    wall latency under [rerank] preflight_ceiling_ms. States:
+    Scores `preflight_passage_n` dummy passages (M3.1: a realistic batch, not
+    1) against the configured provider and requires wall latency under the
+    resolved ceiling. For the `cpu` provider the measured latency is
+    EXTRAPOLATED to the real candidate count
+    (measured_ms × rerank_candidate_n / preflight_passage_n) before the
+    compare — a CPU cross-encoder scales ~linearly with passage count, so an
+    8-passage probe under-represents a 40-candidate rerank. vLLM/cloud batch,
+    so their passage_n stays 1 and no extrapolation applies. States:
       skipped — no provider configured (NOT cached: config can change);
       ok      — probe scored under the ceiling (cached);
       failed  — provider error or over-ceiling (cached: rerank disabled for
@@ -339,30 +400,45 @@ def preflight() -> dict:
             return _preflight_result
         s = get_settings()
         ceiling = s["preflight_ceiling_ms"]
+        provider = s["provider"]
+        passage_n = s["preflight_passage_n"]
         if not _configured(s):
             # Not a probe failure — do not burn the process-lifetime cache.
             return {"state": "skipped", "latency_ms": None,
-                    "ceiling_ms": ceiling,
+                    "measured_ms": None, "ceiling_ms": ceiling,
+                    "passage_n": passage_n,
                     "reason": "no reranker provider configured"}
+        passages = ["preflight probe passage"] * max(1, passage_n)
         t0 = time.monotonic()
-        got = score("preflight probe", ["preflight probe passage"])
-        ms = (time.monotonic() - t0) * 1000.0
-        if got is None:
-            result = {"state": "failed", "latency_ms": round(ms, 1),
-                      "ceiling_ms": ceiling,
-                      "reason": "provider scoring failed"}
-        elif ms > ceiling:
-            result = {"state": "failed", "latency_ms": round(ms, 1),
-                      "ceiling_ms": ceiling,
-                      "reason": f"probe latency {ms:.0f}ms over the "
-                                f"{ceiling:.0f}ms ceiling"}
+        got = score("preflight probe", passages)
+        measured_ms = (time.monotonic() - t0) * 1000.0
+        # CPU scales ~linearly with candidate count; extrapolate the probe to
+        # the real rerank_candidate_n. Batched providers compare the raw wall.
+        if provider == "cpu" and passage_n > 0:
+            estimated_ms = measured_ms * (s["rerank_candidate_n"] / passage_n)
         else:
-            result = {"state": "ok", "latency_ms": round(ms, 1),
-                      "ceiling_ms": ceiling, "reason": None}
+            estimated_ms = measured_ms
+        base = {"latency_ms": round(estimated_ms, 1),
+                "measured_ms": round(measured_ms, 1),
+                "ceiling_ms": ceiling, "passage_n": passage_n}
+        if got is None:
+            result = {**base, "state": "failed",
+                      "reason": "provider scoring failed"}
+        elif estimated_ms > ceiling:
+            if provider == "cpu":
+                reason = (f"estimated {estimated_ms:.0f}ms (measured "
+                          f"{measured_ms:.0f}ms × {s['rerank_candidate_n']}/"
+                          f"{passage_n}) over the {ceiling:.0f}ms ceiling")
+            else:
+                reason = (f"probe latency {estimated_ms:.0f}ms over the "
+                          f"{ceiling:.0f}ms ceiling")
+            result = {**base, "state": "failed", "reason": reason}
+        else:
+            result = {**base, "state": "ok", "reason": None}
         _preflight_result = result
         print(f"[RERANK] preflight {result['state']}"
-              f" ({result['reason'] or f'{ms:.0f}ms'});"
-              f" provider={s['provider']} model={s['model']}"
+              f" ({result['reason'] or f'{estimated_ms:.0f}ms'});"
+              f" provider={provider} model={s['model']}"
               + (" — rerank disabled for process lifetime"
                  if result["state"] == "failed" else ""))
         return result

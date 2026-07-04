@@ -74,6 +74,54 @@ class FakeResp:
         return self._payload
 
 
+# ── M3 fakes: registry entries + a controllable clock ────────────────────────
+# M7/M5 cloud+cpu RERANK_MODELS entries don't exist yet, so M3 tests inject
+# temporary entries via monkeypatch.setitem to exercise per-provider ceilings.
+
+def _fake_cloud_entry(provider="voyage", key_env="VOYAGE_API_KEY",
+                      ceiling=1200, passage_n=1):
+    return {
+        "provider": provider, "model_id": f"{provider}-rerank",
+        "label": "Fake cloud reranker", "vram_gb": 0.0,
+        "max_input_tokens": 8192, "quality_note": "test-only",
+        "auth_kind": "bearer_env", "key_env": key_env, "cost_note": "test",
+        "privacy": "cloud", "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": ceiling, "preflight_passage_n": passage_n,
+    }
+
+
+def _fake_cpu_entry(ceiling=2000, passage_n=8):
+    return {
+        "provider": "cpu", "model_id": "Qwen/Qwen3-Reranker-0.6B",
+        "label": "Fake CPU reranker", "vram_gb": 0.0,
+        "max_input_tokens": 32768, "quality_note": "test-only",
+        "auth_kind": "none", "key_env": None, "cost_note": "test",
+        "privacy": "local", "tiers": ["MID"],
+        "preflight_ceiling_ms": ceiling, "preflight_passage_n": passage_n,
+        "query_instruction": "Instruct: rank\nQuery: ",
+    }
+
+
+class Clock:
+    """Deterministic monotonic() stand-in; advance by mutating .t."""
+    def __init__(self, t=1000.0):
+        self.t = float(t)
+
+    def __call__(self):
+        return self.t
+
+
+def make_scorer(clock, elapse_s, result):
+    """A fake rerank.score that 'takes' elapse_s of clock time and records the
+    passage count it was probed with."""
+    def _score(query, passages):
+        _score.passages = list(passages)
+        clock.t += elapse_s
+        return result
+    _score.passages = None
+    return _score
+
+
 # ── RERANK_MODELS registry conventions ────────────────────────────────────────
 
 # M2 Task 2.1 schema enums (mirror the embeddings registry guard style).
@@ -369,6 +417,71 @@ def test_preflight_over_ceiling_disables_for_process(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[RERANK] preflight failed" in out
     assert "disabled for process lifetime" in out
+
+
+# ── M3.1 per-provider ceilings + realistic passage-count probe ────────────────
+
+def test_cloud_ceiling_from_registry(monkeypatch):
+    """A cloud model's ceiling comes from its RERANK_MODELS entry: a ~600ms
+    probe PASSES the 1200ms registry ceiling though it would fail the old
+    hardcoded 500ms."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(ceiling=1200, passage_n=1))
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    monkeypatch.setattr(rerank, "score", make_scorer(clock, 0.6, [1.0]))
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage",
+                 preflight_ceiling_ms=None):
+        pf = rerank.preflight()
+    assert pf["ceiling_ms"] == 1200.0        # from the registry, not 500
+    assert pf["latency_ms"] == 600.0
+    assert pf["state"] == "ok"               # 600 < 1200 (would fail old 500)
+
+
+def test_cpu_probe_extrapolates_to_candidate_n(monkeypatch):
+    """The CPU probe scores preflight_passage_n passages (not 1) and
+    extrapolates measured_ms × candidate_n / passage_n before the compare."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-cpu",
+                        _fake_cpu_entry(ceiling=2000, passage_n=8))
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    scorer = make_scorer(clock, 0.3, [1.0] * 8)   # 300ms for the 8-passage probe
+    monkeypatch.setattr(rerank, "score", scorer)
+    with pin_cfg("rerank", provider="cpu", model="fake-cpu",
+                 base_url="http://x:1", preflight_ceiling_ms=None), \
+         pin_cfg("retrieval", rerank_candidate_n="40"):
+        pf = rerank.preflight()
+    assert len(scorer.passages) == 8         # probed 8, not 1
+    assert pf["measured_ms"] == 300.0
+    assert pf["latency_ms"] == 1500.0        # 300 × (40/8)
+    assert pf["ceiling_ms"] == 2000.0
+    assert pf["state"] == "ok"               # 1500 < 2000
+
+
+def test_config_ceiling_override_wins(monkeypatch):
+    """[rerank] preflight_ceiling_ms still overrides the registry ceiling."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(ceiling=1200, passage_n=1))
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage",
+                 preflight_ceiling_ms="999"):
+        assert rerank.get_settings()["preflight_ceiling_ms"] == 999.0
+
+
+def test_get_settings_survives_malformed_numeric_config(monkeypatch):
+    """A hand-edited non-numeric [rerank] value falls back to the default
+    rather than raising — restores score()/status()'s never-raise contract."""
+    monkeypatch.setattr(rerank.hardware, "probe", lambda **k: {
+        "gpu": False, "gpu_name": None, "vram_mb": None, "ram_mb": 32768,
+        "source": "none", "tier": "MID"})
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError()))
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 timeout_s="not-a-number", preflight_ceiling_ms="also-bad"):
+        s = rerank.get_settings()
+        assert s["timeout_s"] == 15.0                 # fallback, not a raise
+        assert s["preflight_ceiling_ms"] == 500.0     # fallback, not a raise
+        assert rerank.score("q", ["p"]) is None       # never raises
+        assert isinstance(rerank.status(), dict)      # never raises
 
 
 # ── GET /rerank/status ────────────────────────────────────────────────────────
