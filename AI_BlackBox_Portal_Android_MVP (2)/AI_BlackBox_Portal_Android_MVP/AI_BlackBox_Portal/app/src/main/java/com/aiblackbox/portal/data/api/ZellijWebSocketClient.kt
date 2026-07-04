@@ -111,15 +111,21 @@ class ZellijWebSocketClient(
     @Volatile private var lastRows: Int = 24
 
     /**
-     * Last MEASURED grid dimensions, reported synchronously by the renderer's
+     * Last MEASURED grid, reported synchronously by the renderer's
      * onSizeChanged. May be AHEAD of [lastCols]/[lastRows] (last SENT) when a
      * rotation happened while the socket was down or while the heavyweight
      * resize was being debounced. Used to reconcile the reconnect /
      * QueryTerminalSize reply so it carries the CURRENT size, not a stale
-     * last-sent value. 0 until the renderer first reports a size.
+     * last-sent value. null until the renderer first reports a size.
+     *
+     * A single atomically-published Pair (NOT two independent @Volatile Ints):
+     * updateMeasuredSize runs on the UI thread while resolveReplaySize runs on
+     * the OkHttp control-WS thread. Per-field @Volatile gives visibility but
+     * not cross-field atomicity, so a two-Int form could hand a reply a new
+     * col + old row — the exact mixed grid [reconcileReplaySize] promises never
+     * to produce. One reference read/written atomically closes that.
      */
-    @Volatile private var measuredCols: Int = 0
-    @Volatile private var measuredRows: Int = 0
+    @Volatile private var measuredSize: Pair<Int, Int>? = null
 
     /** Set true by [close]; suppresses reconnects forever. */
     private val userClosed: AtomicBoolean = AtomicBoolean(false)
@@ -224,10 +230,9 @@ class ZellijWebSocketClient(
      * fires. Ignores non-positive dims.
      */
     fun updateMeasuredSize(cols: Int, rows: Int) {
-        if (cols > 0 && rows > 0) {
-            measuredCols = cols
-            measuredRows = rows
-        }
+        // Single atomic publish (one Pair reference), so the control-WS thread
+        // never reads a half-updated grid. Non-positive dims are ignored.
+        if (cols > 0 && rows > 0) measuredSize = cols to rows
     }
 
     /**
@@ -235,8 +240,10 @@ class ZellijWebSocketClient(
      * measured grid when known, else the last-sent value. Pure logic lives in
      * [reconcileReplaySize] for unit testing.
      */
-    private fun resolveReplaySize(): Pair<Int, Int> =
-        reconcileReplaySize(measuredCols, measuredRows, lastCols, lastRows)
+    private fun resolveReplaySize(): Pair<Int, Int> {
+        val m = measuredSize // single atomic read
+        return reconcileReplaySize(m?.first ?: 0, m?.second ?: 0, lastCols, lastRows)
+    }
 
     /**
      * Force zellij to repaint the full screen. Used on REATTACH: a returning
