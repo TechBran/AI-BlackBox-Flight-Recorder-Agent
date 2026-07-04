@@ -571,11 +571,18 @@ def test_service_reachable_backcompat_wrapper(monkeypatch):
 
 # ── GET /rerank/status ────────────────────────────────────────────────────────
 
-STATUS_KEYS = {
+# Pre-M3 (legacy) status keys — every one must survive (additive contract, so
+# the wizard's current bind + old frontends keep working).
+LEGACY_STATUS_KEYS = {
     "enabled", "provider", "model", "model_id", "base_url", "configured",
     "preflight", "available", "candidate_n", "passage_chars", "models",
     # M13 additive keys for the wizard's reranker block:
     "gpu", "service_reachable",
+}
+# M3.3 additive keys: hardware tier/ram + per-provider auth & reachability.
+STATUS_KEYS = LEGACY_STATUS_KEYS | {
+    "tier", "ram_mb", "reachable", "auth_kind", "key_present",
+    "preflight_ceiling_ms",
 }
 
 
@@ -587,11 +594,15 @@ def client():
 
 
 def _pin_hardware(monkeypatch, gpu: bool):
-    """Deterministic host-hardware probe (the dev box HAS the GPU, CI hasn't)."""
+    """Deterministic host-hardware probe (the dev box HAS the GPU, CI hasn't).
+    Includes the M1 `tier` field so status()'s M3.3 tier passthrough is real."""
+    vram = 16380 if gpu else None
+    ram = 32768
     monkeypatch.setattr(rerank.hardware, "probe", lambda **k: {
         "gpu": gpu, "gpu_name": "RTX Test" if gpu else None,
-        "vram_mb": 16380 if gpu else None, "ram_mb": 32768,
+        "vram_mb": vram, "ram_mb": ram,
         "source": "nvidia-smi" if gpu else "none",
+        "tier": rerank.hardware.derive_tier(gpu, vram, ram),
     })
 
 
@@ -693,3 +704,49 @@ def test_status_reports_ok_preflight_and_available(client, monkeypatch):
     assert body["preflight"]["state"] == "ok"
     assert body["available"] is True
     assert body["model_id"] == "Qwen/Qwen3-Reranker-0.6B"
+
+
+# ── M3.3 status() additive fields ─────────────────────────────────────────────
+
+def test_status_carries_tier_ram_and_key_present(client, monkeypatch):
+    """status() exposes hardware tier + ram_mb and per-provider auth
+    (auth_kind/key_present) + reachability for a keyed cloud provider."""
+    _pin_hardware(monkeypatch, gpu=False)          # MID tier, ram 32768
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(key_env="VOYAGE_API_KEY", ceiling=1200))
+    monkeypatch.setenv("VOYAGE_API_KEY", "present")
+    monkeypatch.setattr(rerank, "score", lambda q, p: None)  # no cloud network
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"), \
+         pin_cfg("retrieval", rerank_enabled=None):
+        body = client.get("/rerank/status").json()
+    assert body["tier"] == "MID"
+    assert body["ram_mb"] == 32768
+    assert body["auth_kind"] == "bearer_env"
+    assert body["key_present"] is True
+    assert body["reachable"] is True               # key present, no network
+    assert body["preflight_ceiling_ms"] == 1200.0
+
+
+def test_status_keeps_all_legacy_keys(client, monkeypatch):
+    """Every pre-M3 status key survives (additive contract)."""
+    _pin_hardware(monkeypatch, gpu=False)
+    with pin_cfg("rerank", provider="null", base_url=None), \
+         pin_cfg("retrieval", rerank_enabled=None, rerank_candidate_n=None):
+        body = client.get("/rerank/status").json()
+    assert LEGACY_STATUS_KEYS <= set(body)
+
+
+def test_status_never_500s(client, monkeypatch):
+    """Malformed numeric config must not 500 status() (ties to M3.1's
+    resilience — get_settings AND status's own reads degrade to defaults)."""
+    _pin_hardware(monkeypatch, gpu=False)
+    monkeypatch.setattr(rerank, "score", lambda q, p: None)  # no vllm network
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 preflight_ceiling_ms="bad", passage_chars="nope"), \
+         pin_cfg("retrieval", rerank_enabled="maybe", rerank_candidate_n="lots"):
+        r = client.get("/rerank/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["candidate_n"] == 40               # malformed → default
+    assert body["passage_chars"] == 4096           # malformed → default
+    assert body["enabled"] is False                # malformed → default

@@ -273,6 +273,16 @@ def _cfg_int(section: str, option: str, fallback: int) -> int:
         return fallback
 
 
+def _cfg_bool(section: str, option: str, fallback: bool) -> bool:
+    """CFG.getboolean with the same malformed-config resilience as _cfg_float
+    (an unrecognised truthy string degrades to `fallback`, logged once)."""
+    try:
+        return CFG.getboolean(section, option, fallback=fallback)
+    except (ValueError, TypeError):
+        _warn_malformed(section, option)
+        return fallback
+
+
 def get_settings() -> dict:
     """Resolved [rerank] config with code fallbacks (fresh-box safe: the
     section may be absent — provider then resolves to "null" = inert).
@@ -548,6 +558,16 @@ def status() -> dict:
       service_reachable — something answers on base_url (TTL-cached probe;
                           distinguishes "run the installer's reranker step"
                           from "flip the config" on a GPU box)
+
+    M3.3 additive keys (tiered selector) — ALL keys stay additive so old
+    frontends + the wizard's current bind keep working:
+      tier              — hardware tier "LOW"/"MID"/"HIGH" (hardware.probe())
+      ram_mb            — system RAM (hardware.probe())
+      reachable         — provider-aware reachability (localhost probe for
+                          vllm, deps for cpu, key-present for cloud — no poll)
+      auth_kind         — the selected model's auth descriptor (M2)
+      key_present       — the model's key_env resolves to a non-empty env value
+      preflight_ceiling_ms — the resolved (per-provider) latency ceiling
     """
     s = get_settings()
     configured = _configured(s)
@@ -555,13 +575,16 @@ def status() -> dict:
         pf = preflight()
     else:
         pf = _preflight_result or {
-            "state": "skipped", "latency_ms": None,
+            "state": "skipped", "latency_ms": None, "measured_ms": None,
             "ceiling_ms": s["preflight_ceiling_ms"],
+            "passage_n": s["preflight_passage_n"],
             "reason": "no reranker provider configured",
         }
+    hw = hardware.probe()
+    key_env = s.get("key_env")
     return {
-        "enabled": CFG.getboolean("retrieval", "rerank_enabled", fallback=False),
-        "gpu": bool(hardware.probe().get("gpu")),
+        "enabled": _cfg_bool("retrieval", "rerank_enabled", False),
+        "gpu": bool(hw.get("gpu")),
         "service_reachable": service_reachable(),
         "provider": s["provider"],
         "model": s["model"],
@@ -570,7 +593,15 @@ def status() -> dict:
         "configured": configured,
         "preflight": pf,
         "available": configured and pf.get("state") == "ok",
-        "candidate_n": CFG.getint("retrieval", "rerank_candidate_n", fallback=40),
-        "passage_chars": CFG.getint("rerank", "passage_chars", fallback=4096),
+        # candidate_n resolves via get_settings' resilient read.
+        "candidate_n": s["rerank_candidate_n"],
+        "passage_chars": _cfg_int("rerank", "passage_chars", 4096),
         "models": sorted(RERANK_MODELS.keys()),
+        # ── M3.3 additive (tier/ram + per-provider auth & reachability) ──
+        "tier": hw.get("tier"),
+        "ram_mb": hw.get("ram_mb"),
+        "reachable": reachable(s),
+        "auth_kind": s["auth_kind"],
+        "key_present": bool(key_env and os.getenv(key_env)),
+        "preflight_ceiling_ms": s["preflight_ceiling_ms"],
     }

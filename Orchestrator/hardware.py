@@ -105,9 +105,9 @@ def derive_tier(gpu: bool, vram_mb: "int | None", ram_mb: int) -> str:
 
     HIGH  a GPU with >=8 GB VRAM, OR an lspci-discovered NVIDIA card whose VRAM
           is unverifiable (vram_mb None) — the installer can still target it.
-          The 8 GB floor matches the vLLM installer gate
-          (installer/templates/blackbox-install-reranker.sh >=8000 MB): a
-          6-8 GB card can't co-host the Ollama embedder + vLLM, so NOT HIGH.
+          The 8 GB floor approximately matches (installer vLLM gate >=8000 MB)
+          — ~8 GiB (8192 MB) vs 8000 MB, a ~192 MB window: a 6-8 GB card can't
+          co-host the Ollama embedder + vLLM, so NOT HIGH.
     MID   no GPU but >=32 GB system RAM — opt-in in-process CPU cross-encoder.
     LOW   everything else — cloud-only reranking.
     """
