@@ -9,6 +9,7 @@ tmp_path fixtures — never the real Manifest/ (same isolation recipe as
 test_embeddings_mint.py).
 """
 import json
+import re
 
 import numpy as np
 import pytest
@@ -28,18 +29,22 @@ DIMS = 3072
 STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama", "hardware"}
 # schema + rows are the M6e ADDITIVE contract extension (chunked-store ops
 # currency); placement + recommended_placement are WI-9/M10 (device placement);
-# every pre-existing key below is unchanged — additive only.
+# cpu_warning is the reranker-tiering M9 ADDITIVE advisory (re-embed slowness /
+# LOW-tier cloud steering); every pre-existing key below is unchanged.
 MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
     "quality_note", "store_exists", "schema", "rows", "missing", "ready",
     "blockers", "keep_alive", "warm", "placement", "recommended_placement",
+    "cpu_warning",
 }
 STORE_KEYS = {"slug", "dims", "count", "schema", "rows", "missing", "last_updated"}
 
 # Hermetic no-GPU probe result (this box's live shape) for the env fixture.
+# tier is the reranker-tiering M1 field the real probe now always returns; this
+# box is LOW (no GPU, <32 GB RAM), so the default env exercises LOW-tier copy.
 NO_GPU_HW = {
     "gpu": False, "gpu_name": None, "vram_mb": None,
-    "ram_mb": 31167, "source": "none",
+    "ram_mb": 31167, "source": "none", "tier": "LOW",
 }
 
 
@@ -384,6 +389,145 @@ def test_persisted_placement_surfaces_in_status(env, client):
     models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
     assert models["qwen3-embedding-0.6b"]["placement"] == "cpu"
     assert models["qwen3-embedding-8b"]["placement"] is None
+
+
+# ── cpu_warning advisory + tier steering (reranker-tiering M9, additive) ─────
+
+_LOCAL_SLUGS = [s for s, e in EMBEDDING_MODELS.items() if e["provider"] == "ollama"]
+_CLOUD_SLUGS = [s for s, e in EMBEDDING_MODELS.items() if e["provider"] != "ollama"]
+
+
+def _est_minutes(warning: str) -> float:
+    """Minutes represented by the '~N min' / '~N.N hr' estimate in the copy
+    (the snapshot count '~N,NNN snapshots' is skipped — it lacks a min/hr unit)."""
+    m = re.search(r"~([\d,.]+)\s*(min|hr)", warning)
+    assert m, f"no duration estimate found in cpu_warning: {warning!r}"
+    value = float(m.group(1).replace(",", ""))
+    return value * (60 if m.group(2) == "hr" else 1)
+
+
+def test_cpu_warning_present_on_local_model_without_gpu(env, client):
+    """No GPU (the default env probe) → every LOCAL model carries an advisory
+    cpu_warning whose estimate is the live corpus size (len(index_ids)) times a
+    per-model CPU rate."""
+    from Orchestrator.routes.embeddings_routes import (
+        _CPU_SECONDS_PER_GB_SNAPSHOT,
+        _fmt_cpu_duration,
+    )
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(1000)])
+
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _LOCAL_SLUGS:
+        w = models[slug]["cpu_warning"]
+        assert isinstance(w, str) and w
+        assert "1,000 snapshots" in w  # scaled from the live snapshot index
+        # rate = model RAM footprint (ram_gb) × the per-GB factor
+        rate = EMBEDDING_MODELS[slug]["ram_gb"] * _CPU_SECONDS_PER_GB_SNAPSHOT
+        assert _fmt_cpu_duration(1000 * rate) in w  # count × per-model rate
+
+
+def test_cpu_warning_scales_with_snapshot_count(env, client):
+    """The estimate grows with the corpus — a 10× larger index → a larger
+    estimated re-embed for the same model."""
+    import Orchestrator.fossils as _fossils
+    index_path, _ = env
+
+    _write_index(index_path, [f"SNAP-{i}" for i in range(200)])
+    small = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    _fossils._index_cache = None  # force a reload of the rewritten index
+    _write_index(index_path, [f"SNAP-{i}" for i in range(2000)])
+    _fossils._index_cache = None
+    large = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+
+    for slug in _LOCAL_SLUGS:
+        assert _est_minutes(large[slug]["cpu_warning"]) > _est_minutes(
+            small[slug]["cpu_warning"]
+        )
+
+
+def test_cpu_warning_absent_with_gpu(env, client, monkeypatch):
+    """A GPU box embeds fine — no cpu_warning on any local model."""
+    monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: {
+        "gpu": True, "gpu_name": "NVIDIA Test GPU", "vram_mb": 16380,
+        "ram_mb": 31167, "source": "nvidia-smi", "tier": "HIGH",
+    })
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(500)])
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _LOCAL_SLUGS:
+        assert models[slug]["cpu_warning"] is None
+
+
+def test_cloud_models_have_no_cpu_warning(env, client):
+    """Cloud models (ram_gb 0) embed off-box — never a CPU concern, GPU or not."""
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(500)])
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _CLOUD_SLUGS:
+        assert models[slug]["cpu_warning"] is None
+
+
+def test_cpu_warning_never_in_blockers_and_ready_unchanged(env, client, monkeypatch):
+    """cpu_warning is ADVISORY: even a fully-available local model (ready True,
+    no blockers) still carries it, and it never enters blockers[]. CPU is never
+    a dead end (audit WI-9)."""
+    monkeypatch.setattr(ollama_io, "binary_installed", lambda: True)
+    monkeypatch.setattr(ollama_io, "daemon_version", lambda: "0.1.0")
+    monkeypatch.setattr(
+        ollama_io, "local_models",
+        lambda: [EMBEDDING_MODELS[s]["model_id"] for s in _LOCAL_SLUGS],
+    )
+    monkeypatch.setattr(ollama_io, "ram_preflight", lambda ram_gb: None)
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(500)])
+
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _LOCAL_SLUGS:
+        m = models[slug]
+        assert m["ready"] is True          # no GPU did NOT block selection
+        assert m["blockers"] == []         # cpu_warning is not a blocker
+        assert isinstance(m["cpu_warning"], str) and m["cpu_warning"]
+        assert m["cpu_warning"] not in m["blockers"]
+
+
+def test_low_tier_cloud_steering(env, client):
+    """LOW tier (no GPU + <32 GB RAM — the default env) → the local warning also
+    carries positive steering toward a cloud model."""
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(500)])
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _LOCAL_SLUGS:
+        w = models[slug]["cpu_warning"].lower()
+        assert "recommended" in w and "cloud" in w
+
+
+def test_mid_tier_softer_note_not_cloud_steering(env, client, monkeypatch):
+    """MID tier (no GPU but >=32 GB RAM) → local is viable; a softer note, NOT
+    the LOW 'cloud recommended' steering."""
+    monkeypatch.setattr(hardware, "probe", lambda ttl_s=60.0: {
+        "gpu": False, "gpu_name": None, "vram_mb": None,
+        "ram_mb": 65536, "source": "none", "tier": "MID",
+    })
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(500)])
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    for slug in _LOCAL_SLUGS:
+        w = models[slug]["cpu_warning"]
+        assert isinstance(w, str) and w
+        assert "locally" in w.lower()
+        assert "recommended" not in w.lower()  # not the LOW steering copy
+
+
+def test_8b_warning_larger_than_0_6b(env, client):
+    """Per-model differentiation: the heavy 8B estimate exceeds the light 0.6B
+    for the same corpus."""
+    index_path, _ = env
+    _write_index(index_path, [f"SNAP-{i}" for i in range(1000)])
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+    assert _est_minutes(models["qwen3-embedding-8b"]["cpu_warning"]) > _est_minutes(
+        models["qwen3-embedding-0.6b"]["cpu_warning"]
+    )
 
 
 # ── POST /embeddings/validate ────────────────────────────────────────────────

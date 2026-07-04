@@ -27,6 +27,7 @@ as a side effect (probing is cheap and safe to poll).
 """
 import asyncio
 import json
+import math
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Response
@@ -133,6 +134,63 @@ def _recommended_placement(entry: dict, hw: dict) -> str:
     return "gpu" if hw["vram_mb"] >= needed_mb else "cpu"
 
 
+# Advisory-only CPU re-embed rate: seconds/snapshot ≈ a local model's RAM
+# footprint (registry ram_gb, which proxies parameter count) × this factor.
+# Deriving from ram_gb — never a slug literal (guard test) — means the heavy
+# 6 GB model estimates ~6x the light 1 GB one for the same corpus, so a no-GPU
+# user sees that the "max quality" local model is the slow one. A coarse "~"
+# ballpark, NOT a benchmark; a "don't kick off an hours-long re-embed
+# unknowingly" nudge. It NEVER gates `ready` and never enters blockers[]
+# (audit WI-9: CPU is never a dead end).
+_CPU_SECONDS_PER_GB_SNAPSHOT = 0.35
+
+
+def _fmt_cpu_duration(total_seconds: float) -> str:
+    """A clearly-approximate '~N min' / '~N.N hr' duration string."""
+    minutes = max(1, math.ceil(total_seconds / 60.0))
+    if minutes < 90:
+        return f"~{minutes} min"
+    return f"~{total_seconds / 3600.0:.1f} hr"
+
+
+def _cpu_warning(entry: dict, hw: dict, snapshot_count: int) -> "str | None":
+    """ADVISORY re-embed-slowness note for a LOCAL model on a no-GPU box.
+
+    Advisory ONLY — never a blocker, never affects `ready` (audit WI-9: CPU is
+    never a dead end; a no-GPU user can still select the heavy local model when
+    RAM fits, they just see this). ram_preflight (ollama_io) stays the hard
+    fit-check for genuinely-insufficient RAM; this is the softer slowness signal
+    on top.
+
+    None for cloud models (ram_gb 0 — fine everywhere) and for any box with a
+    GPU (it embeds fine). Otherwise a corpus-scaled, clearly-approximate estimate
+    plus tier-tuned steering: LOW (no GPU + limited RAM) steers to a cloud model;
+    MID (>=32 GB RAM) notes local is viable, just slow.
+    """
+    if entry["provider"] != "ollama":  # cloud model — no CPU concern
+        return None
+    if hw.get("gpu"):                  # a GPU box embeds fine
+        return None
+    rate = entry["ram_gb"] * _CPU_SECONDS_PER_GB_SNAPSHOT
+    est = _fmt_cpu_duration(snapshot_count * rate)
+    msg = (
+        f"~{snapshot_count:,} snapshots would re-embed on CPU ({est}) if you "
+        f"switch to this local model; a cloud model switches instantly."
+    )
+    tier = hw.get("tier")
+    if tier == "LOW":
+        msg += (
+            " No GPU and limited RAM on this box — a cloud embedding model "
+            "(Gemini/OpenAI) is recommended, and it's fast on any box."
+        )
+    elif tier == "MID":
+        msg += (
+            " This box has the RAM to run it locally; expect a slow one-time "
+            "re-embed on CPU."
+        )
+    return msg
+
+
 def _model_preflight(
     entry: dict, ollama: dict, hw: dict
 ) -> tuple[bool, list[str], "str | None"]:
@@ -194,6 +252,7 @@ def embeddings_status(response: Response):
 
     base = Path(config.EMBEDDINGS_STORES_DIR)
     index_ids = set(load_snapshot_index().keys())
+    snapshot_count = len(index_ids)  # corpus size for the M9 cpu_warning estimate
     ollama_state = _ollama_state()
     hw = hardware.probe()  # 60s TTL cache — safe under the wizard's 2s poll
 
@@ -249,6 +308,11 @@ def embeddings_status(response: Response):
             # for cloud models, mirroring keep_alive.
             "placement": get_placement(slug, base_dir=base) if is_local else None,
             "recommended_placement": recommended,
+            # ADDITIVE (reranker-tiering M9): advisory CPU re-embed-slowness
+            # note for a LOCAL model on a no-GPU box + LOW-tier cloud steering.
+            # Never a blocker, never affects `ready` (CPU is never a dead end);
+            # null for cloud models and any GPU box.
+            "cpu_warning": _cpu_warning(entry, hw, snapshot_count),
         })
 
     return {
