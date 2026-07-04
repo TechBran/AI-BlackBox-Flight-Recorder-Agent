@@ -233,8 +233,13 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
     if p == "cpu":
         return _cpu_reachable()
     if p in CLOUD_PROVIDERS:
+        # key/creds present — the fresh os.getenv read get_settings already did
+        # (M4); NEVER a paid network poll. (settings dicts always carry it;
+        # fall back to a fresh read if an external caller hand-built one.)
+        if "key_present" in s:
+            return bool(s["key_present"])
         key_env = s.get("key_env")
-        return bool(key_env and os.getenv(key_env))  # no network
+        return bool(key_env and os.getenv(key_env))
     return _probe_localhost(s["base_url"], timeout_s)
 
 
@@ -283,22 +288,53 @@ def _cfg_bool(section: str, option: str, fallback: bool) -> bool:
         return fallback
 
 
+def _load_sidecar() -> "dict | None":
+    """The rerank.json selection {enabled, provider, model}, or None when
+    absent/corrupt (store.get_rerank_selection is itself fail-open). Lazily
+    imported: keeps rerank.py's top-level import surface minimal (store pulls in
+    numpy + the embeddings registry) AND is cycle-proof regardless of future
+    refactors. Wrapped never-raise so a bad sidecar can only fall through to
+    config, never propagate out of get_settings (audit A9 / A13 fresh-box)."""
+    try:
+        import Orchestrator.embeddings.store as _store
+        return _store.get_rerank_selection()
+    except Exception:  # noqa: BLE001 - never-raise; fall back to config
+        return None
+
+
 def get_settings() -> dict:
-    """Resolved [rerank] config with code fallbacks (fresh-box safe: the
-    section may be absent — provider then resolves to "null" = inert).
+    """Resolved reranker config, RESOLUTION ORDER: rerank.json sidecar →
+    config.ini [rerank] → code fallback (M4). The sidecar is the wizard/Portal
+    selection (POST /rerank/select); when present its provider/model win over
+    config, so a selection takes effect with no restart or config.ini edit.
+    Fresh-box safe: no sidecar AND no [rerank] section → provider "null" = inert.
 
     Per-provider preflight tuning (preflight_ceiling_ms / preflight_passage_n)
     and the auth descriptor (auth_kind / key_env) are resolved FROM the selected
     model's RERANK_MODELS entry (M3.1); a [rerank] preflight_ceiling_ms in
-    config still overrides the registry ceiling. Numeric reads are
-    malformed-config-resilient (a bad value falls back, logged once) so
-    get_settings() — and thus score()/status() — never raise (audit A9)."""
-    provider = CFG.get("rerank", "provider", fallback="null").strip().lower()
+    config still overrides the registry ceiling. `key_present` reads the key_env
+    FRESH via os.getenv at call time (M4) — never config.py's frozen import-time
+    constants — so a wizard-mirrored os.environ write is visible immediately.
+    Numeric reads are malformed-config-resilient (a bad value falls back, logged
+    once) so get_settings() — and thus score()/status() — never raise (A9)."""
+    sel = _load_sidecar()
+    # provider/model: sidecar wins when it carries a non-blank value, else config,
+    # else the code fallback (null / default slug).
+    sel_provider = str(sel.get("provider", "")).strip() if sel else ""
+    if sel_provider:
+        provider = sel_provider.lower()
+    else:
+        provider = CFG.get("rerank", "provider", fallback="null").strip().lower()
     base_url = CFG.get(
         "rerank", "base_url", fallback=DEFAULT_BASE_URL
     ).strip().rstrip("/")
-    model = CFG.get("rerank", "model", fallback=_DEFAULT_MODEL_SLUG).strip()
+    sel_model = str(sel.get("model", "")).strip() if sel else ""
+    if sel_model:
+        model = sel_model
+    else:
+        model = CFG.get("rerank", "model", fallback=_DEFAULT_MODEL_SLUG).strip()
     entry = RERANK_MODELS.get(model)
+    key_env = entry.get("key_env") if entry else None
     # Registry-sourced preflight tuning (config ceiling override still wins).
     entry_ceiling = entry.get("preflight_ceiling_ms") if entry else None
     ceiling_fallback = float(entry_ceiling) if entry_ceiling is not None else 500.0
@@ -328,8 +364,29 @@ def get_settings() -> dict:
         # M2 auth descriptor surfaced for reachability + status (M3) and key
         # plumbing (M4). "none"/None on a fresh box or unknown model.
         "auth_kind": entry.get("auth_kind", "none") if entry else "none",
-        "key_env": entry.get("key_env") if entry else None,
+        "key_env": key_env,
+        # Key resolved FRESH (M4): the selected model's key_env read via
+        # os.getenv at THIS call — not config.py's frozen constants. This is the
+        # single live-read the reachable()/status() key checks consume, so a
+        # newly-pasted key mirrored into os.environ is seen with no restart.
+        "key_present": bool(key_env and os.getenv(key_env)),
     }
+
+
+def is_enabled() -> bool:
+    """Is the reranker turned ON? Resolution mirrors get_settings (M4): the
+    rerank.json sidecar's `enabled` wins whenever the sidecar EXISTS (the
+    wizard/Portal selection, even over a contradicting config), else the
+    resilient [retrieval] rerank_enabled read (default False on a fresh box, and
+    a malformed value degrades to False — never raises).
+
+    M4 PROVIDES this; it is NOT yet wired into retrieval.py's rerank gate — that
+    swap is M8 (the selector-endpoint milestone), so retrieval still reads its
+    own [retrieval] rerank_enabled today."""
+    sel = _load_sidecar()
+    if sel is not None:
+        return bool(sel.get("enabled", False))
+    return _cfg_bool("retrieval", "rerank_enabled", False)
 
 
 def _configured(settings: dict | None = None) -> bool:
@@ -581,7 +638,6 @@ def status() -> dict:
             "reason": "no reranker provider configured",
         }
     hw = hardware.probe()
-    key_env = s.get("key_env")
     return {
         "enabled": _cfg_bool("retrieval", "rerank_enabled", False),
         "gpu": bool(hw.get("gpu")),
@@ -602,6 +658,7 @@ def status() -> dict:
         "ram_mb": hw.get("ram_mb"),
         "reachable": reachable(s),
         "auth_kind": s["auth_kind"],
-        "key_present": bool(key_env and os.getenv(key_env)),
+        # Single fresh os.getenv read, resolved in get_settings (M4).
+        "key_present": s["key_present"],
         "preflight_ceiling_ms": s["preflight_ceiling_ms"],
     }

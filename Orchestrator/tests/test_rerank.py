@@ -65,6 +65,23 @@ def _no_network_reach(monkeypatch):
     monkeypatch.setattr(rerank.requests, "get", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_rerank_sidecar(tmp_path, monkeypatch):
+    """M4: get_settings()/is_enabled() now read the rerank.json sidecar under
+    config.EMBEDDINGS_STORES_DIR. Point every test at an EMPTY tmp stores dir so
+    no test accidentally reads a real selection (and the sidecar-absent →
+    config-fallback contract holds for the pre-M4 tests). Tests that WANT a
+    sidecar write one via _write_sidecar()."""
+    from Orchestrator import config as _config
+    monkeypatch.setattr(_config, "EMBEDDINGS_STORES_DIR", str(tmp_path / "stores"))
+
+
+def _write_sidecar(selection: dict) -> dict:
+    """Write a rerank.json into the (monkeypatched) tmp stores dir."""
+    from Orchestrator.embeddings import store as _store
+    return _store.set_rerank_selection(selection)
+
+
 class FakeResp:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
@@ -750,3 +767,113 @@ def test_status_never_500s(client, monkeypatch):
     assert body["candidate_n"] == 40               # malformed → default
     assert body["passage_chars"] == 4096           # malformed → default
     assert body["enabled"] is False                # malformed → default
+
+
+# ── M4: sidecar > config > default resolution + live keys + is_enabled ────────
+
+def test_get_settings_prefers_sidecar_over_config():
+    """A rerank.json selection wins over config.ini [rerank] for provider AND
+    model (sidecar > config > default). Config here says vllm/0.6b; the sidecar
+    picks a cloud model → get_settings resolves the sidecar's."""
+    monkeypatch_entry = _fake_cloud_entry(key_env="VOYAGE_API_KEY")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(rerank.RERANK_MODELS, "fake-voyage", monkeypatch_entry)
+        _write_sidecar({"enabled": True, "provider": "voyage",
+                        "model": "fake-voyage"})
+        with pin_cfg("rerank", provider="vllm", base_url="http://x:1",
+                     model="qwen3-reranker-0.6b"):
+            s = rerank.get_settings()
+    assert s["provider"] == "voyage"
+    assert s["model"] == "fake-voyage"
+    assert s["model_id"] == "voyage-rerank"        # resolved off the sidecar pick
+    assert s["auth_kind"] == "bearer_env"          # descriptor flows from it too
+    assert s["key_env"] == "VOYAGE_API_KEY"
+
+
+def test_get_settings_falls_back_to_config_when_no_sidecar():
+    """No sidecar (empty tmp stores dir) → today's config reads stand."""
+    from Orchestrator.embeddings import store as _store
+    assert _store.get_rerank_selection() is None   # sanity: nothing on disk
+    with pin_cfg("rerank", provider="vllm", base_url="http://x:1",
+                 model="qwen3-reranker-4b"):
+        s = rerank.get_settings()
+    assert s["provider"] == "vllm"
+    assert s["model"] == "qwen3-reranker-4b"
+    assert s["model_id"] == "Qwen/Qwen3-Reranker-4B"
+
+
+def test_get_settings_partial_sidecar_backfills_provider_from_config():
+    """A sidecar missing `provider` (or with a blank one) does not blank the
+    provider — the config value still fills the gap (defensive resolution)."""
+    _write_sidecar({"enabled": True, "model": "qwen3-reranker-4b"})
+    with pin_cfg("rerank", provider="vllm", base_url="http://x:1",
+                 model="qwen3-reranker-0.6b"):
+        s = rerank.get_settings()
+    assert s["provider"] == "vllm"                  # from config (sidecar silent)
+    assert s["model"] == "qwen3-reranker-4b"        # from sidecar
+
+
+def test_bearer_key_resolved_from_env_fresh(monkeypatch):
+    """Keys resolve via os.getenv(key_env) at CALL time, NOT via config.py's
+    frozen module constants (bound at import). Set the env AFTER import → the
+    key is seen (key_present True) → proves the resolution is live, so a
+    wizard-mirrored os.environ write takes effect with no restart."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(key_env="VOYAGE_API_KEY"))
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"):
+        assert rerank.get_settings()["key_present"] is False   # not yet set
+        monkeypatch.setenv("VOYAGE_API_KEY", "vk-live-after-import")
+        assert rerank.get_settings()["key_present"] is True     # seen live
+
+
+def test_missing_key_configured_but_key_present_false(monkeypatch):
+    """A selected cloud provider is `configured` (M2 doesn't gate cloud on a
+    key) yet key_present stays False until the env var exists."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(key_env="VOYAGE_API_KEY"))
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"):
+        s = rerank.get_settings()
+        assert rerank._configured(s) is True
+        assert s["key_present"] is False
+
+
+def test_is_enabled_sidecar_then_config():
+    """is_enabled(): the sidecar's `enabled` wins when the sidecar exists (even
+    over a contradicting config); absent sidecar → [retrieval] rerank_enabled."""
+    # sidecar enabled=true beats config false
+    _write_sidecar({"enabled": True, "provider": "vllm", "model": "x"})
+    with pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.is_enabled() is True
+    # sidecar enabled=false beats config true
+    _write_sidecar({"enabled": False, "provider": "vllm", "model": "x"})
+    with pin_cfg("retrieval", rerank_enabled="true"):
+        assert rerank.is_enabled() is False
+
+
+def test_is_enabled_no_sidecar_reads_config():
+    """No sidecar → the resilient [retrieval] rerank_enabled read (default
+    False on a fresh box with the option absent)."""
+    with pin_cfg("retrieval", rerank_enabled="true"):
+        assert rerank.is_enabled() is True
+    with pin_cfg("retrieval", rerank_enabled=None):
+        assert rerank.is_enabled() is False
+
+
+def test_is_enabled_malformed_config_defaults_false():
+    """A malformed [retrieval] rerank_enabled degrades to False (never raises —
+    the _cfg_bool resilient reader), same as status()."""
+    with pin_cfg("retrieval", rerank_enabled="maybe"):
+        assert rerank.is_enabled() is False
+
+
+def test_retrieval_gate_unchanged_in_m4():
+    """M4 provides is_enabled() but must NOT wire it into retrieval yet (that's
+    M8). Pin the current behaviour: retrieval.py still reads its own config
+    gate, not rerank.is_enabled()."""
+    import inspect
+
+    from Orchestrator import retrieval
+    src = inspect.getsource(retrieval)
+    assert "rerank.is_enabled" not in src and "_rerank.is_enabled" not in src

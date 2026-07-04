@@ -392,6 +392,17 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", GOOGLE_API_KEY)
 XAI_API_KEY       = os.getenv("XAI_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 
+# Reranker cloud-provider keys (tiered reranker, M4). Declared here for
+# completeness/documentation — a reader greps ONE place for the reranker key
+# envs. IMPORTANT: rerank.get_settings() does NOT use these constants. They are
+# FROZEN at import; the reranker selector (POST /rerank/select) mirrors a
+# newly-pasted key into os.environ and must take effect with NO restart, so the
+# key is resolved via a FRESH os.getenv(key_env) at call time instead (the
+# frozen-vs-fresh distinction — see rerank.get_settings "key_present").
+VOYAGE_API_KEY    = os.getenv("VOYAGE_API_KEY", "")
+COHERE_API_KEY    = os.getenv("COHERE_API_KEY", "")
+VERTEX_PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "")
+
 # Pairing defaults (used by /pair/claim and /pair/qr/{token} response payload).
 # Customers register their own operators in onboarding step T2.7.1; "Brandon" is the system seed.
 DEFAULT_OPERATOR = os.getenv("DEFAULT_OPERATOR", "Brandon")
