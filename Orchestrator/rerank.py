@@ -73,14 +73,22 @@ wire call) or, as an escape hatch, a verbatim served-model name.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 import time
 
 import requests
 
 from Orchestrator import hardware
-from Orchestrator.config import CFG
+from Orchestrator.config import (
+    ANTHROPIC_URL,
+    CFG,
+    GEMINI_BASE_URL,
+    OPENAI_URL,
+    XAI_URL,
+)
 
 # Where the installer's vllm-reranker.service listens (M13). Code fallback so
 # a fresh GPU box works with zero url/port config edits once the service is
@@ -158,13 +166,82 @@ RERANK_MODELS = {
         "preflight_ceiling_ms": 2000,
         "preflight_passage_n": 8,
     },
+    # ── LLM-as-reranker (M6): the cheap, keyless-beyond-existing-keys cloud
+    # fallback tier. ONE entry per frontier chat key the box already holds. These
+    # are NOT purpose-trained cross-encoders — a general frontier model is asked,
+    # in a single non-streaming completion, to return a relevance-ordered
+    # permutation of the candidate indices (listwise), mapped to synthetic
+    # descending scores. Framed HONESTLY in quality_note so the wizard never
+    # oversells it (Brandon's directive). NO query_instruction: the Qwen instruct
+    # prefix INVERTS non-Qwen rankers (RERANK_MODELS discipline above). model_ids
+    # are the box's current GA/flash/mini tiers, sourced from the fallback model
+    # catalog (routes/admin_routes.py) + config.py — the cheap fast path, never a
+    # date-pinned preview where a stable id exists. Cloud → no local footprint
+    # (no vram_gb/ram_gb). Key resolved FRESH via os.getenv(key_env) at score
+    # time (M4), so a wizard-mirrored paste takes effect with no restart.
+    "llm-rerank-gemini-flash": {
+        "provider": "llm",
+        "model_id": "gemini-2.5-flash",   # GA flash text tier (web_tools/tasks)
+        "label": "LLM reranker — Gemini Flash (your Google key)",
+        "max_input_tokens": 1000000,
+        "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
+        "auth_kind": "frontier_key",
+        "key_env": "GOOGLE_API_KEY",
+        "cost_note": "Uses your existing Google/Gemini key; ~cents/query",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 4000,
+        "preflight_passage_n": 1,
+    },
+    "llm-rerank-gpt-mini": {
+        "provider": "llm",
+        "model_id": "gpt-5-mini-2025-08-07",   # box's GPT-5 Mini (fallback catalog)
+        "label": "LLM reranker — GPT-5 Mini (your OpenAI key)",
+        "max_input_tokens": 400000,
+        "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
+        "auth_kind": "frontier_key",
+        "key_env": "OPENAI_API_KEY",
+        "cost_note": "Uses your existing OpenAI key; ~cents/query",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 4000,
+        "preflight_passage_n": 1,
+    },
+    "llm-rerank-claude-haiku": {
+        "provider": "llm",
+        "model_id": "claude-haiku-4-5-20251001",   # box's Haiku (fallback catalog)
+        "label": "LLM reranker — Claude Haiku (your Anthropic key)",
+        "max_input_tokens": 200000,
+        "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
+        "auth_kind": "frontier_key",
+        "key_env": "ANTHROPIC_API_KEY",
+        "cost_note": "Uses your existing Anthropic key; ~cents/query",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 4000,
+        "preflight_passage_n": 1,
+    },
+    "llm-rerank-grok": {
+        "provider": "llm",
+        "model_id": "grok-4.3",   # box's current xAI default (config XAI_MODEL_DEFAULT)
+        "label": "LLM reranker — Grok (your xAI key)",
+        "max_input_tokens": 1000000,
+        "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
+        "auth_kind": "frontier_key",
+        "key_env": "XAI_API_KEY",
+        "cost_note": "Uses your existing xAI/Grok key; ~cents/query",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 4000,
+        "preflight_passage_n": 1,
+    },
 }
 
 _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 
 # Providers score() knows how to dispatch (M2). "null" is the inert default;
-# the rest each map to a _score_<provider> helper. vllm ships now; cpu (M5),
-# llm (M6), voyage/cohere/vertex (M7) are stubbed to return None until then.
+# the rest each map to a _score_<provider> helper. vllm/cpu/llm ship now;
+# voyage/cohere/vertex (M7) are stubbed to return None until then.
 KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
 
 # Cloud providers whose FAILED preflight is TTL-recoverable (M3.2): a transient
@@ -424,11 +501,14 @@ def _configured(settings: dict | None = None) -> bool:
 
     M2 keeps this minimal — per-provider readiness firms up in M3 (reachability)
     and M4 (key/creds plumbing):
-      vllm/cpu → a base_url is resolved (cpu refines to "CrossEncoder importable"
-                 in M5);
+      vllm/cpu → a base_url is resolved (the cpu deps — sentence-transformers/
+                 torch — and every provider's keys are gated at
+                 preflight()/reachable(), NOT here: a selected provider counts as
+                 configured even before its deps/key resolve, so status can
+                 report the real not-ready reason instead of falsely gating off);
       cloud (voyage/cohere/vertex) + llm → not blocked here; their key/creds
-                 checks land in M4, so for M2 a selected provider counts as
-                 configured (no key plumbing yet — do not falsely gate them off).
+                 checks live in reachable()/the provider helper, so a selected
+                 provider counts as configured (do not falsely gate them off).
     """
     s = settings or get_settings()
     p = s["provider"]
@@ -471,9 +551,10 @@ def _score_vllm(query: str, passages: list[str],
     return out  # type: ignore[return-value]
 
 
-# ── not-yet-implemented provider helpers (real impls land in M5/M6/M7) ─────────
+# ── provider helpers ──────────────────────────────────────────────────────────
 # Same contract as _score_vllm: (query, passages, settings) -> list[float] | None,
-# positionally aligned to `passages`, None on ANY failure. Inert until built.
+# positionally aligned to `passages`, None on ANY failure. cpu (M5) + llm (M6)
+# are implemented below; voyage/cohere/vertex (M7) are inert stubs until built.
 
 def _load_cpu_model(model_id: str):
     """Return a process-cached sentence-transformers CrossEncoder for
@@ -536,9 +617,213 @@ def _score_vertex(query: str, passages: list[str],
     return None  # M7: Vertex semantic-ranker (GCP SA OAuth)
 
 
+# ── LLM-as-reranker (M6) ──────────────────────────────────────────────────────
+# The cheap cloud fallback tier: reuse a frontier CHAT key the box already holds
+# to run a LISTWISE rank in ONE non-streaming completion. NOT a purpose-trained
+# cross-encoder — an honest budget/keyless fallback (RERANK_MODELS quality_note).
+# Each passage is truncated to _LLM_SNIPPET_CHARS before prompting — the single
+# biggest latency/cost lever. The 4 provider request-shapes are small per-key
+# helpers dispatched by key_env; each makes exactly ONE requests.post and returns
+# the completion text or None (never raises), mirroring the box's existing
+# frontier call styles (web_tools.py / sms_processor.py / config.py URLs).
+
+_LLM_SNIPPET_CHARS = 512
+
+
+def _build_llm_rank_prompt(query: str, passages: list[str]) -> str:
+    """Listwise rank prompt: the query + a numbered list of snippet-truncated
+    passages, asking for a JSON permutation of the indices most→least relevant.
+    Deliberately carries NO Qwen instruct prefix (llm entries declare none — it
+    inverts non-Qwen rankers)."""
+    numbered = "\n".join(
+        f"[{i}] {(p or '')[:_LLM_SNIPPET_CHARS]}"
+        for i, p in enumerate(passages))
+    return (
+        "You are a search-result re-ranker. Given a QUERY and a numbered list of "
+        "PASSAGES, order the passage numbers from MOST to LEAST relevant to the "
+        "query. Respond with ONLY a JSON object of the form "
+        '{"ranking": [<passage numbers>]} — a permutation of every passage number '
+        "(0-based), each appearing exactly once. No prose, no markdown.\n\n"
+        f"QUERY: {query}\n\nPASSAGES:\n{numbered}"
+    )
+
+
+def _parse_llm_ranking(text: "str | None", n: int) -> "list[int] | None":
+    """Defensively extract a length-n permutation of 0..n-1 from a model's reply.
+    Any deviation → None (contract): not-JSON / wrong length / duplicate /
+    out-of-range / missing / non-int index. Tolerates a bare array, an object
+    wrapping the list under a relevance key, and a fenced/prose-wrapped array."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip()
+    if t.startswith("```"):                      # strip a ```json … ``` fence
+        t = t.strip("`")
+        nl = t.find("\n")
+        if nl != -1 and t[:nl].strip().lower() in ("json", ""):
+            t = t[nl + 1:]
+        t = t.strip()
+    obj = None
+    try:
+        obj = json.loads(t)
+    except Exception:  # noqa: BLE001 - fall back to a substring array scan
+        m = re.search(r"\[[\s\d,]*\]", t)
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(obj, dict):                    # unwrap {"ranking": [...]}
+        cand = None
+        for k in ("ranking", "order", "indices", "ranked", "result"):
+            v = obj.get(k)
+            if isinstance(v, list):
+                cand = v
+                break
+        if cand is None:
+            for v in obj.values():
+                if isinstance(v, list):
+                    cand = v
+                    break
+        obj = cand
+    if not isinstance(obj, list) or len(obj) != n:
+        return None
+    # strict ints only (reject bool/float/str — a permutation is integer indices)
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in obj):
+        return None
+    if sorted(obj) != list(range(n)):            # duplicate / out-of-range / gap
+        return None
+    return obj
+
+
+def _llm_complete_gemini(model_id: str, api_key: str, prompt: str,
+                         timeout_s: float) -> "str | None":
+    """One Gemini generateContent call, JSON response mode. x-goog-api-key header
+    (key never in the URL). Returns the concatenated text parts or None."""
+    resp = requests.post(
+        f"{GEMINI_BASE_URL}/{model_id}:generateContent",
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json={"contents": [{"parts": [{"text": prompt}]}],
+              "generationConfig": {"response_mime_type": "application/json"}},
+        timeout=timeout_s,
+    )
+    if resp.status_code >= 400:
+        return None
+    try:
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _llm_complete_openai(model_id: str, api_key: str, prompt: str,
+                         timeout_s: float) -> "str | None":
+    """One OpenAI /v1/chat/completions call, json_object response format."""
+    resp = requests.post(
+        OPENAI_URL,
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"},
+        json={"model": model_id,
+              "messages": [{"role": "user", "content": prompt}],
+              "response_format": {"type": "json_object"}},
+        timeout=timeout_s,
+    )
+    if resp.status_code >= 400:
+        return None
+    try:
+        return resp.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _llm_complete_anthropic(model_id: str, api_key: str, prompt: str,
+                            timeout_s: float) -> "str | None":
+    """One Anthropic /v1/messages call. No native JSON mode → a system line
+    reinforces the JSON-only instruction; parsing stays defensive regardless."""
+    resp = requests.post(
+        ANTHROPIC_URL,
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": model_id, "max_tokens": 1024,
+              "system": "Respond with ONLY the requested JSON object. "
+                        "No prose, no markdown.",
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=timeout_s,
+    )
+    if resp.status_code >= 400:
+        return None
+    try:
+        blocks = resp.json()["content"]
+        return "".join(b.get("text", "") for b in blocks
+                       if b.get("type") == "text")
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _llm_complete_xai(model_id: str, api_key: str, prompt: str,
+                      timeout_s: float) -> "str | None":
+    """One xAI /v1/chat/completions call (OpenAI-compatible), json_object mode."""
+    resp = requests.post(
+        XAI_URL,
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"},
+        json={"model": model_id,
+              "messages": [{"role": "user", "content": prompt}],
+              "response_format": {"type": "json_object"}},
+        timeout=timeout_s,
+    )
+    if resp.status_code >= 400:
+        return None
+    try:
+        return resp.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+# key_env → the single-completion helper for that frontier family.
+_LLM_COMPLETERS = {
+    "GOOGLE_API_KEY": _llm_complete_gemini,
+    "GEMINI_API_KEY": _llm_complete_gemini,
+    "OPENAI_API_KEY": _llm_complete_openai,
+    "ANTHROPIC_API_KEY": _llm_complete_anthropic,
+    "XAI_API_KEY": _llm_complete_xai,
+}
+
+
 def _score_llm(query: str, passages: list[str],
                settings: dict) -> list[float] | None:
-    return None  # M6: listwise LLM-as-reranker
+    """Listwise LLM-as-reranker (M6) — the cheap cloud fallback tier.
+
+    Resolves the frontier family from the selected model's key_env, reads the key
+    FRESH via os.getenv (M4), builds a snippet-truncated listwise prompt, and runs
+    ONE non-streaming completion asking for a JSON permutation of the candidate
+    indices. The returned order maps to synthetic descending scores (1/(1+rank))
+    positionally aligned to `passages`. This is NOT a purpose-trained
+    cross-encoder — but it needs no key beyond a frontier chat key already held.
+
+    None on: empty passages, missing key, unknown provider family, HTTP/transport
+    failure, or a reply that is not a clean length-N permutation. Never raises
+    (the dispatcher backstops too, but each helper is self-defended)."""
+    if not passages:
+        return None
+    key_env = settings.get("key_env")
+    if not key_env:
+        return None
+    api_key = os.getenv(key_env)
+    if not api_key:
+        return None
+    complete = _LLM_COMPLETERS.get(key_env)
+    if complete is None:
+        return None
+    prompt = _build_llm_rank_prompt(query, passages)
+    text = complete(settings["model_id"], api_key, prompt, settings["timeout_s"])
+    order = _parse_llm_ranking(text, len(passages))
+    if order is None:
+        return None
+    out = [0.0] * len(passages)
+    for rank, passage_idx in enumerate(order):
+        out[passage_idx] = 1.0 / (1.0 + rank)
+    return out
 
 
 def score(query: str, passages: list[str]) -> list[float] | None:

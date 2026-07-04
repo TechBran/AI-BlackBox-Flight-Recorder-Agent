@@ -149,18 +149,20 @@ RERANK_TIERS = {"LOW", "MID", "HIGH"}
 
 def test_rerank_models_table_shape():
     assert set(rerank.RERANK_MODELS) == {
-        "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu"}
+        "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu",
+        "llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
+        "llm-rerank-claude-haiku", "llm-rerank-grok"}
     for slug, entry in rerank.RERANK_MODELS.items():
         assert slug == slug.lower() and "_" not in slug, "slugs are kebab-case"
         for field in ("provider", "model_id", "label",
                       "max_input_tokens", "quality_note"):
             assert field in entry, f"{slug} missing {field}"
-        # Local footprint field (M10 wizard display): GPU entries carry vram_gb,
-        # the in-process CPU entry ram_gb — both floats.
+        # Local footprint field (M10 wizard display): GPU (vllm) entries carry
+        # vram_gb, the in-process CPU entry ram_gb — both floats. Cloud providers
+        # (llm now; voyage/cohere/vertex in M7) have no local footprint.
         if entry["provider"] == "cpu":
             assert isinstance(entry["ram_gb"], float), f"{slug}: ram_gb float"
-        else:
-            assert entry["provider"] == "vllm"
+        elif entry["provider"] == "vllm":
             assert isinstance(entry["vram_gb"], float), f"{slug}: vram_gb float"
 
 
@@ -962,3 +964,214 @@ def test_retrieval_gate_unchanged_in_m4():
     from Orchestrator import retrieval
     src = inspect.getsource(retrieval)
     assert "rerank.is_enabled" not in src and "_rerank.is_enabled" not in src
+
+
+# ── M6: LLM-as-reranker (listwise, single completion) ─────────────────────────
+# The frontier chat keys we already hold become a cheap, keyless-beyond-existing
+# cloud fallback tier: ONE non-streaming completion returns a permutation of the
+# candidate indices, mapped to synthetic descending scores. Framed honestly as
+# NOT a purpose-trained ranker. Tests MOCK requests.post — no real LLM calls.
+
+_LLM_SLUGS = ["llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
+              "llm-rerank-claude-haiku", "llm-rerank-grok"]
+
+
+def _llm_provider_response(model_slug, text):
+    """A provider-appropriately-shaped FakeResp whose extracted completion text
+    == `text`, keyed off the model's key_env (Gemini generateContent / Anthropic
+    messages / OpenAI+xAI chat-completions)."""
+    key_env = rerank.RERANK_MODELS[model_slug]["key_env"]
+    if key_env in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        return FakeResp(200, {"candidates": [
+            {"content": {"parts": [{"text": text}]}}]})
+    if key_env == "ANTHROPIC_API_KEY":
+        return FakeResp(200, {"content": [{"type": "text", "text": text}]})
+    return FakeResp(200, {"choices": [{"message": {"content": text}}]})
+
+
+def _llm_prompt_from_body(model_slug, body):
+    """Pull the user prompt string out of a captured request body per provider."""
+    key_env = rerank.RERANK_MODELS[model_slug]["key_env"]
+    if key_env in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        return body["contents"][0]["parts"][0]["text"]
+    return body["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("slug", _LLM_SLUGS)
+def test_llm_entries_schema_and_framing(slug):
+    """The 4 M6 entries: provider=llm, frontier_key auth, cloud, all tiers,
+    honest quality_note, per-provider ceiling/passage_n, NO Qwen prefix."""
+    e = rerank.RERANK_MODELS[slug]
+    assert e["provider"] == "llm"
+    assert e["auth_kind"] == "frontier_key"
+    assert e["privacy"] == "cloud"
+    assert set(e["tiers"]) == {"LOW", "MID", "HIGH"}
+    assert e["key_env"] in {
+        "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"}
+    assert "not a purpose-trained ranker" in e["quality_note"]
+    assert "query_instruction" not in e            # llm gets no Qwen prefix
+    assert e["preflight_ceiling_ms"] == 4000
+    assert e["preflight_passage_n"] == 1
+
+
+@pytest.mark.parametrize("slug", _LLM_SLUGS)
+def test_score_llm_valid_permutation_maps_to_aligned_scores(monkeypatch, slug):
+    """A valid index permutation maps to synthetic descending scores aligned to
+    the ORIGINAL passage order. Proven for every frontier provider family (the 4
+    request/response shapes)."""
+    key_env = rerank.RERANK_MODELS[slug]["key_env"]
+    monkeypatch.setenv(key_env, "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(slug, '{"ranking": [2, 0, 1]}'))
+    with pin_cfg("rerank", provider="llm", model=slug):
+        got = rerank.score("q", ["p0", "p1", "p2"])
+    assert got is not None and len(got) == 3
+    # order [2,0,1]: rank0->passage2 (1.0), rank1->passage0 (0.5), rank2->passage1 (1/3)
+    assert got[2] == 1.0
+    assert got[2] > got[0] > got[1]
+    assert got == [0.5, 1.0 / 3.0, 1.0]
+
+
+def test_score_llm_malformed_json_returns_none(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(
+            "llm-rerank-gpt-mini", "not json at all {{"))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+def test_score_llm_missing_or_duplicate_index_returns_none(monkeypatch):
+    """[0,0,1] duplicates 0 and misses 2 → not a length-3 permutation → None."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(
+            "llm-rerank-gpt-mini", '{"ranking": [0, 0, 1]}'))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+def test_score_llm_out_of_range_index_returns_none(monkeypatch):
+    """Index 5 is out of range for 3 passages → None (defensive contract)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(
+            "llm-rerank-gpt-mini", '{"ranking": [5, 0, 1]}'))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+def test_score_llm_wrong_length_returns_none(monkeypatch):
+    """A permutation shorter than the passage count → None."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(
+            "llm-rerank-gpt-mini", '{"ranking": [0, 1]}'))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+def test_score_llm_truncates_passages_to_snippet(monkeypatch):
+    """Each passage is truncated to ≤512 chars before prompting (the biggest
+    latency/cost lever). A 1000-char passage appears only as its 512-char head."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    captured = {}
+
+    def fake_post(url, json=None, timeout=None, **k):
+        captured["body"] = json
+        return _llm_provider_response("llm-rerank-gpt-mini", '{"ranking": [0]}')
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        rerank.score("q", ["A" * 1000])
+    prompt = _llm_prompt_from_body("llm-rerank-gpt-mini", captured["body"])
+    assert ("A" * 512) in prompt          # the 512-char head IS present
+    assert ("A" * 513) not in prompt       # nothing beyond 512 chars leaked
+
+
+def test_score_llm_single_completion(monkeypatch):
+    """Exactly ONE non-streaming HTTP completion per rerank call."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    calls = {"n": 0}
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return _llm_provider_response(
+            "llm-rerank-gpt-mini", '{"ranking": [1, 0]}')
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        got = rerank.score("q", ["p0", "p1"])
+    # order [1,0]: passage1 rank0 (1.0), passage0 rank1 (0.5)
+    assert got == [0.5, 1.0]
+    assert calls["n"] == 1
+
+
+def test_score_llm_missing_key_returns_none(monkeypatch):
+    """No frontier key in the env → None, with ZERO HTTP calls (never raises)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def boom(*a, **k):
+        raise AssertionError("must not call the LLM without a key")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_llm_http_error_returns_none(monkeypatch):
+    """A non-200 completion → None (never raises)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda *a, **k: FakeResp(500, {}))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_llm_transport_exception_returns_none(monkeypatch):
+    """A transport blow-up is swallowed → None (dispatcher never-raise + the
+    helper's own defense)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def boom(*a, **k):
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_llm_no_query_instruction_for_llm(monkeypatch):
+    """llm entries carry NO query_instruction — the Qwen instruct prefix must
+    NOT be prepended (it inverts non-Qwen rankers, RERANK_MODELS discipline)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    captured = {}
+
+    def fake_post(url, json=None, timeout=None, **k):
+        captured["body"] = json
+        return _llm_provider_response("llm-rerank-gpt-mini", '{"ranking": [0]}')
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gpt-mini"):
+        rerank.score("fix the truncation", ["some passage"])
+    prompt = _llm_prompt_from_body("llm-rerank-gpt-mini", captured["body"])
+    assert "Instruct: Given a search query" not in prompt
+    assert "fix the truncation" in prompt
+
+
+def test_score_llm_bare_array_permutation_parses(monkeypatch):
+    """Defensive parse also accepts a bare JSON array (not just {"ranking": ...})
+    — models under response_mime_type=application/json may emit either."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: _llm_provider_response(
+            "llm-rerank-gemini-flash", "[1, 0]"))
+    with pin_cfg("rerank", provider="llm", model="llm-rerank-gemini-flash"):
+        got = rerank.score("q", ["p0", "p1"])
+    assert got == [0.5, 1.0]                # order [1,0]
