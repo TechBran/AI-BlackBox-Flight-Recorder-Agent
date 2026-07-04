@@ -116,6 +116,32 @@ class ZellijTerminalScreenTest {
         )
     }
 
+    @Test
+    fun `PgUp button selects the wheel in a mouse-tracking TUI`() {
+        // The PgUp/PgDn BUTTON handler (deliverButtonScroll) now shares this
+        // exact selection with the swipe path. In claude (mouse tracking on,
+        // alt buffer on) the button must resolve to WHEEL — bare PgUp is
+        // ignored there, which was the "button scroll does nothing" bug.
+        assertEquals(ScrollBranch.WHEEL, scrollBranchFor(mouseTracking = true, altBuffer = true))
+        assertEquals(ScrollBranch.WHEEL, scrollBranchFor(mouseTracking = true, altBuffer = false))
+        // And the button in a no-mouse pager stays PAGE; in a normal shell, LOCAL.
+        assertEquals(ScrollBranch.PAGE, scrollBranchFor(mouseTracking = false, altBuffer = true))
+        assertEquals(ScrollBranch.LOCAL, scrollBranchFor(mouseTracking = false, altBuffer = false))
+    }
+
+    @Test
+    fun `page key bytes carry ESC and the PgUp-PgDn discriminator`() {
+        // Shared by the swipe (deliverScroll) and button (deliverButtonScroll).
+        assertArrayEquals(
+            byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte()),
+            pageKeyBytes(scrollUp = true),
+        )
+        assertArrayEquals(
+            byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte()),
+            pageKeyBytes(scrollUp = false),
+        )
+    }
+
     // ── sgrWheelBytes (Task 7: the 0x1B introducer regression) ───────────
 
     @Test

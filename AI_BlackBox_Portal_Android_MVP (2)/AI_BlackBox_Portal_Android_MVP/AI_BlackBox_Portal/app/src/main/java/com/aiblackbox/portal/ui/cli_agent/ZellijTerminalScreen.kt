@@ -665,23 +665,10 @@ fun ZellijTerminalScreen(
                 client.sendBytes(bytes)
             },
             onScrollLines = { delta ->
-                val v = terminalView ?: return@ExtraKeysBar
-                val emu = v.mEmulator ?: return@ExtraKeysBar
-                if (emu.isAlternateBufferActive) {
-                    val seq: ByteArray = if (delta < 0) {
-                        // PgUp = ESC[5~
-                        byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte())
-                    } else {
-                        // PgDn = ESC[6~
-                        byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte())
-                    }
-                    client.sendBytes(seq)
-                } else {
-                    val maxBack = -emu.screen.activeTranscriptRows
-                    val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
-                    v.topRow = newTop
-                    v.onScreenUpdated()
-                }
+                // Route the PgUp/PgDn buttons through the SAME live-state branch
+                // as the swipe path — so in a mouse-tracking TUI (claude) the
+                // button sends the WHEEL instead of a bare PgUp the app ignores.
+                deliverButtonScroll(terminalView, client, delta)
             },
             micSlot = {
                 CliMicButton(
@@ -744,6 +731,21 @@ internal fun sgrWheelBytes(scrollUp: Boolean): ByteArray {
 }
 
 /**
+ * The conventional page key: PgUp (`ESC[5~`) for [scrollUp], else PgDn
+ * (`ESC[6~`). [internal] so both the swipe ([deliverScroll]) and the button
+ * ([deliverButtonScroll]) share one definition — no duplicated byte literals.
+ */
+internal fun pageKeyBytes(scrollUp: Boolean): ByteArray =
+    if (scrollUp) {
+        byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte())
+    } else {
+        byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte())
+    }
+
+/** Wheel notches a single PgUp/PgDn BUTTON press emits in a mouse-tracking TUI. */
+private const val WHEEL_NOTCHES_PER_PAGE = 3
+
+/**
  * Deliver [wholeLines] of scroll (>0 = toward history) to whichever mechanism
  * the LIVE emulator state calls for right now. Re-reads the emulator flags on
  * every call — no cached / launch-time state — so a manually-launched TUI
@@ -763,15 +765,43 @@ private fun deliverScroll(
             repeat(n) { client.sendBytes(seq) }
         }
         ScrollBranch.PAGE -> {
-            val seq: ByteArray = if (scrollUp) {
-                byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte()) // PgUp
-            } else {
-                byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte()) // PgDn
-            }
+            val seq = pageKeyBytes(scrollUp)
             repeat(n) { client.sendBytes(seq) }
         }
         ScrollBranch.LOCAL -> {
             val delta = -wholeLines
+            val maxBack = -emu.screen.activeTranscriptRows
+            val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
+            v.topRow = newTop
+            v.onScreenUpdated()
+        }
+    }
+}
+
+/**
+ * Deliver ONE PgUp/PgDn BUTTON press through the SAME live-state branch as the
+ * swipe path ([scrollBranchFor], read at press time), so the button matches
+ * whatever the running TUI actually honors. [delta] < 0 = toward history
+ * (PgUp), > 0 = toward live (PgDn); its magnitude is the local-scroll line
+ * count. Critically, in a mouse-tracking TUI (claude) the button now sends the
+ * WHEEL — bare PgUp is ignored there, which is why the button "did nothing"
+ * even after a swipe worked. PAGE = one conventional page key (a no-mouse
+ * pager); LOCAL = scroll the emulator's own transcript by [delta] lines.
+ */
+private fun deliverButtonScroll(
+    v: TerminalView?,
+    client: ZellijWebSocketClient,
+    delta: Int,
+) {
+    val emu = v?.mEmulator ?: return
+    val scrollUp = delta < 0
+    when (scrollBranchFor(emu.isMouseTrackingActive, emu.isAlternateBufferActive)) {
+        ScrollBranch.WHEEL -> {
+            val seq = sgrWheelBytes(scrollUp)
+            repeat(WHEEL_NOTCHES_PER_PAGE) { client.sendBytes(seq) }
+        }
+        ScrollBranch.PAGE -> client.sendBytes(pageKeyBytes(scrollUp))
+        ScrollBranch.LOCAL -> {
             val maxBack = -emu.screen.activeTranscriptRows
             val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
             v.topRow = newTop
