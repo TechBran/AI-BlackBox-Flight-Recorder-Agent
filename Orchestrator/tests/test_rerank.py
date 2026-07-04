@@ -151,7 +151,8 @@ def test_rerank_models_table_shape():
     assert set(rerank.RERANK_MODELS) == {
         "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu",
         "llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
-        "llm-rerank-claude-haiku", "llm-rerank-grok"}
+        "llm-rerank-claude-haiku", "llm-rerank-grok",
+        "voyage-rerank-2.5", "cohere-rerank-4"}
     for slug, entry in rerank.RERANK_MODELS.items():
         assert slug == slug.lower() and "_" not in slug, "slugs are kebab-case"
         for field in ("provider", "model_id", "label",
@@ -1175,3 +1176,151 @@ def test_score_llm_bare_array_permutation_parses(monkeypatch):
     with pin_cfg("rerank", provider="llm", model="llm-rerank-gemini-flash"):
         got = rerank.score("q", ["p0", "p1"])
     assert got == [0.5, 1.0]                # order [1,0]
+
+
+# ── M7: dedicated cloud cross-encoders (Voyage / Cohere, bearer REST) ─────────
+# The PRIMARY quality cloud path — purpose-trained rerankers over raw REST (no
+# SDK deps). {results:[{index, relevance_score}]} scattered back to passage
+# positions on ONE scale; None on missing key / HTTP error / count-or-index
+# anomaly. Tests MOCK requests.post — no real Voyage/Cohere calls.
+
+# (slug, provider, key_env, url, model_id, count_key) per dedicated cloud reranker.
+_DEDICATED_CLOUD = [
+    ("voyage-rerank-2.5", "voyage", "VOYAGE_API_KEY",
+     "https://api.voyageai.com/v1/rerank", "rerank-2.5", "top_k"),
+    ("cohere-rerank-4", "cohere", "COHERE_API_KEY",
+     "https://api.cohere.ai/v2/rerank", "rerank-v4.0-pro", "top_n"),
+]
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_entry_schema(slug, provider, key_env, url, model_id,
+                                      count_key):
+    """The two M7 dedicated entries: bearer_env auth, cloud, all tiers, 1200ms
+    ceiling, 1-passage probe, NO Qwen prefix, no local footprint."""
+    e = rerank.RERANK_MODELS[slug]
+    assert e["provider"] == provider
+    assert e["auth_kind"] == "bearer_env"
+    assert e["key_env"] == key_env
+    assert e["privacy"] == "cloud"
+    assert set(e["tiers"]) == {"LOW", "MID", "HIGH"}
+    assert e["preflight_ceiling_ms"] == 1200
+    assert e["preflight_passage_n"] == 1
+    assert e["model_id"] == model_id
+    assert "query_instruction" not in e          # cloud gets no Qwen prefix
+    assert "vram_gb" not in e and "ram_gb" not in e   # cloud → no local footprint
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_scatters_by_index(monkeypatch, slug, provider, key_env,
+                                           url, model_id, count_key):
+    """Out-of-order {index, relevance_score} rows scatter back to the ORIGINAL
+    passage positions; the request carries the raw query + all-passages count."""
+    monkeypatch.setenv(key_env, "k-test")
+    captured = {}
+
+    def fake_post(u, headers=None, json=None, timeout=None, **k):
+        captured["url"], captured["headers"] = u, headers
+        captured["json"], captured["timeout"] = json, timeout
+        return FakeResp(200, {"results": [
+            {"index": 2, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.1},
+            {"index": 1, "relevance_score": 0.5},
+        ]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider=provider, model=slug, timeout_s="9"):
+        got = rerank.score("the query", ["pA", "pB", "pC"])
+    assert got == [0.1, 0.5, 0.9]                # scattered by index
+    assert captured["url"] == url
+    assert captured["headers"]["Authorization"] == "Bearer k-test"
+    assert captured["json"]["model"] == model_id
+    assert captured["json"]["query"] == "the query"
+    assert captured["json"]["documents"] == ["pA", "pB", "pC"]
+    assert captured["json"][count_key] == 3      # request ALL back (no truncation)
+    assert captured["timeout"] == 9.0
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_missing_key_returns_none(monkeypatch, slug, provider,
+                                                  key_env, url, model_id,
+                                                  count_key):
+    """No key in the env → None with ZERO HTTP calls (never raises)."""
+    monkeypatch.delenv(key_env, raising=False)
+
+    def boom(*a, **k):
+        raise AssertionError("must not call the cloud reranker without a key")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider=provider, model=slug):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_http_error_returns_none(monkeypatch, slug, provider,
+                                                 key_env, url, model_id,
+                                                 count_key):
+    """A non-200 response → None (never raises)."""
+    monkeypatch.setenv(key_env, "k-test")
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda *a, **k: FakeResp(500, {}))
+    with pin_cfg("rerank", provider=provider, model=slug):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_row_count_mismatch_returns_none(monkeypatch, slug,
+                                                         provider, key_env, url,
+                                                         model_id, count_key):
+    """Fewer results than passages → None (a partial result can't rank on one
+    scale)."""
+    monkeypatch.setenv(key_env, "k-test")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: FakeResp(200, {"results": [
+            {"index": 0, "relevance_score": 1.0}]}))
+    with pin_cfg("rerank", provider=provider, model=slug):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_dedicated_cloud_out_of_range_index_returns_none(monkeypatch, slug,
+                                                        provider, key_env, url,
+                                                        model_id, count_key):
+    """An out-of-range index (5 for 2 passages) → None, never an IndexError."""
+    monkeypatch.setenv(key_env, "k-test")
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: FakeResp(200, {"results": [
+            {"index": 5, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.1}]}))
+    with pin_cfg("rerank", provider=provider, model=slug):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+@pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
+                         _DEDICATED_CLOUD)
+def test_no_query_instruction_for_cloud_rerankers(monkeypatch, slug, provider,
+                                                  key_env, url, model_id,
+                                                  count_key):
+    """Voyage + Cohere carry NO query_instruction and send the RAW query — the
+    Qwen instruct prefix must never reach a non-Qwen ranker (it inverts them)."""
+    assert "query_instruction" not in rerank.RERANK_MODELS[slug]
+    monkeypatch.setenv(key_env, "k-test")
+    captured = {}
+
+    def fake_post(u, headers=None, json=None, timeout=None, **k):
+        captured["json"] = json
+        return FakeResp(200, {"results": [{"index": 0, "relevance_score": 0.5}]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider=provider, model=slug):
+        rerank.score("fix the truncation", ["some passage"])
+    assert captured["json"]["query"] == "fix the truncation"
+    assert "Instruct: Given a search query" not in captured["json"]["query"]

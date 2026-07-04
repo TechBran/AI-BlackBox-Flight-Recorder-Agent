@@ -226,13 +226,51 @@ RERANK_MODELS = {
         "model_id": "grok-4.3",   # box's current xAI default (config XAI_MODEL_DEFAULT)
         "label": "LLM reranker — Grok (your xAI key)",
         "max_input_tokens": 1000000,
-        "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
+        # grok-4.3 is xAI's FLAGSHIP — no cheaper Grok tier (mini/flash) ships,
+        # so this is the pricier/slower LLM-fallback option; framed honestly so
+        # the wizard never picks it as a "cheap" default (still NOT a ranker).
+        "quality_note": "General LLM (xAI flagship — no cheaper Grok tier ships; pricier/slower than the Flash/mini/Haiku options), not a purpose-trained ranker",
         "auth_kind": "frontier_key",
         "key_env": "XAI_API_KEY",
-        "cost_note": "Uses your existing xAI/Grok key; ~cents/query",
+        "cost_note": "Uses your existing xAI/Grok key; xAI flagship pricing — pricier than the Flash/mini/Haiku options",
         "privacy": "cloud",
         "tiers": ["LOW", "MID", "HIGH"],
         "preflight_ceiling_ms": 4000,
+        "preflight_passage_n": 1,
+    },
+    # ── Dedicated cloud cross-encoders (M7): the PRIMARY quality cloud path.
+    # Unlike the LLM fallback above these are PURPOSE-TRAINED rerankers, reached
+    # over raw REST (no SDK deps). Bearer key read FRESH via os.getenv(key_env)
+    # at score time (M4) so a wizard-mirrored paste needs no restart. NO
+    # query_instruction — the Qwen instruct prefix INVERTS non-Qwen rankers
+    # (RERANK_MODELS discipline). Cloud → no local vram_gb/ram_gb footprint.
+    # Voyage is the recommended cloud DEFAULT; Cohere is the enterprise reference.
+    "voyage-rerank-2.5": {
+        "provider": "voyage",
+        "model_id": "rerank-2.5",
+        "label": "Voyage rerank-2.5 (cloud)",
+        "max_input_tokens": 32000,
+        "quality_note": "Dedicated cross-encoder — best speed/quality; recommended cloud default",
+        "auth_kind": "bearer_env",
+        "key_env": "VOYAGE_API_KEY",
+        "cost_note": "Voyage API — ~$0.05/1M tokens; 200M-token free tier",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 1200,
+        "preflight_passage_n": 1,
+    },
+    "cohere-rerank-4": {
+        "provider": "cohere",
+        "model_id": "rerank-v4.0-pro",
+        "label": "Cohere Rerank 4 (cloud)",
+        "max_input_tokens": 4096,
+        "quality_note": "Dedicated cross-encoder — enterprise reference",
+        "auth_kind": "bearer_env",
+        "key_env": "COHERE_API_KEY",
+        "cost_note": "Cohere API — ~$2/1K searches",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 1200,
         "preflight_passage_n": 1,
     },
 }
@@ -602,14 +640,87 @@ def _score_cpu(query: str, passages: list[str],
     return out
 
 
+# ── dedicated cloud cross-encoders (M7) ───────────────────────────────────────
+# Voyage + Cohere: purpose-trained rerankers over raw REST (no SDK deps). Both
+# return {results:[{index, relevance_score}]}; each score is scattered back to
+# its passage position so the returned vector is positionally aligned. Bearer
+# key read FRESH via os.getenv(key_env) at score time (M4). None on missing key /
+# non-200 / count-or-index anomaly; transport blow-ups are backstopped by the
+# dispatcher's never-raise (audit A9). NO Qwen instruct prefix (it inverts
+# non-Qwen rankers) — the raw query goes on the wire.
+
+def _scatter_relevance_scores(payload: "dict | None",
+                              n: int) -> "list[float] | None":
+    """Scatter Voyage/Cohere's {results:[{index, relevance_score}]} back onto
+    passage positions: init 0.0, out[index] = relevance_score. None on ANY
+    shape/count/index anomaly — a partial result can't rank on one scale, so
+    the retriever must fall through to its un-reranked ranking (never guess)."""
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or len(results) != n:
+        return None
+    out = [0.0] * n
+    for item in results:
+        try:
+            idx = int(item["index"])
+            sc = float(item["relevance_score"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (0 <= idx < n):          # out of range → None (never IndexError)
+            return None
+        out[idx] = sc
+    return out
+
+
 def _score_voyage(query: str, passages: list[str],
                   settings: dict) -> list[float] | None:
-    return None  # M7: Voyage rerank REST (bearer)
+    """Voyage rerank (POST /v1/rerank) — the recommended cloud default. Requests
+    ALL passages back (top_k=len) so every passage is scored on one scale (no
+    truncation). Missing key / non-200 / malformed / count-mismatch → None."""
+    if not passages:
+        return None
+    key_env = settings.get("key_env")
+    if not key_env:
+        return None
+    api_key = os.getenv(key_env)
+    if not api_key:
+        return None
+    resp = requests.post(
+        "https://api.voyageai.com/v1/rerank",
+        headers={"Authorization": f"Bearer {api_key}",
+                 "content-type": "application/json"},
+        json={"query": query, "documents": list(passages),
+              "model": settings["model_id"], "top_k": len(passages)},
+        timeout=settings["timeout_s"],
+    )
+    if resp.status_code != 200:
+        return None
+    return _scatter_relevance_scores(resp.json(), len(passages))
 
 
 def _score_cohere(query: str, passages: list[str],
                   settings: dict) -> list[float] | None:
-    return None  # M7: Cohere rerank REST (bearer)
+    """Cohere Rerank (POST /v2/rerank) — the enterprise reference. top_n=len so
+    all passages come back scored; same scatter-by-index + failure→None contract
+    as Voyage."""
+    if not passages:
+        return None
+    key_env = settings.get("key_env")
+    if not key_env:
+        return None
+    api_key = os.getenv(key_env)
+    if not api_key:
+        return None
+    resp = requests.post(
+        "https://api.cohere.ai/v2/rerank",
+        headers={"Authorization": f"Bearer {api_key}",
+                 "content-type": "application/json"},
+        json={"model": settings["model_id"], "query": query,
+              "documents": list(passages), "top_n": len(passages)},
+        timeout=settings["timeout_s"],
+    )
+    if resp.status_code != 200:
+        return None
+    return _scatter_relevance_scores(resp.json(), len(passages))
 
 
 def _score_vertex(query: str, passages: list[str],
