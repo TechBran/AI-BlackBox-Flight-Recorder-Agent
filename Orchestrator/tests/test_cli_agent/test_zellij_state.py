@@ -110,19 +110,21 @@ def test_add_session_yolo_defaults_false(isolated_state):
 
 def test_add_session_upsert_refreshes_yolo(isolated_state):
     """Idempotent upsert on (operator, session_name) refreshes yolo in
-    place (like token_name/expires_at) rather than duplicating the row."""
+    place (like token_name/expires_at) rather than duplicating the row —
+    pins the UPDATE branch by flipping the value on the second call."""
     zellij_state.add_session(
         "Brandon", "claude", None,
         "Brandon__claude__root__yolo", "master", None, yolo=True,
     )
-    # Re-launch of the same session name refreshes rather than duplicates.
+    # Second call with the SAME session name but yolo=False must hit the
+    # update branch and refresh the field, not duplicate the row.
     zellij_state.add_session(
         "Brandon", "claude", None,
-        "Brandon__claude__root__yolo", "master", None, yolo=True,
+        "Brandon__claude__root__yolo", "master", None, yolo=False,
     )
     rows = zellij_state.load()
     assert len(rows) == 1
-    assert rows[0]["yolo"] is True
+    assert rows[0]["yolo"] is False
 
 
 # --- atomic save pattern (audit polish) --------------------------------

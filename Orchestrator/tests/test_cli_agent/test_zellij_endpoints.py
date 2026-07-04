@@ -581,6 +581,52 @@ def test_launch_yolo_terminal_returns_400(monkeypatch):
     mock_launch.assert_not_called()
 
 
+def test_launch_rejects_app_containing_name_delimiter(monkeypatch):
+    """`__` is the session-name delimiter — an app containing it can
+    forge name collisions (e.g. app="root__yolo" with yolo=false collides
+    with the legitimate YOLO session name Brandon__claude__root__yolo,
+    attaching to the live YOLO session and falsifying its state row's
+    yolo badge via the upsert). Must 400, nothing launched."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "claude", "app": "root__yolo"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert "__" in r.json()["detail"]
+    mock_launch.assert_not_called()
+
+
+def test_launch_rejects_non_boolean_yolo(monkeypatch):
+    """yolo is a permission-bypass toggle — coercion must be strict. A
+    client sending the STRING "false" (truthy under bool()) must get a
+    400, not a silent YOLO launch."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "claude", "yolo": "false"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert "boolean" in r.json()["detail"].lower()
+    mock_launch.assert_not_called()
+
+
 def test_list_sessions_includes_yolo_field(monkeypatch):
     """Sessions list response carries yolo per session: True for a yolo
     row, False for a legacy row that predates the field (no crash)."""

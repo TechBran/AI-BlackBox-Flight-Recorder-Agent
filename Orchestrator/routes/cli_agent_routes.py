@@ -595,8 +595,24 @@ async def zellij_launch(
     app = body.get("app")
     if app is not None and not isinstance(app, str):
         raise HTTPException(400, "app must be a string or null")
+    if app is not None and "__" in app:
+        # "__" is the session-name delimiter — an app containing it can
+        # forge collisions with other (provider, app, yolo) identities
+        # (e.g. app="root__yolo" with yolo=false collides with the
+        # legitimate YOLO session name and would falsify its persisted
+        # yolo badge via the add_session upsert).
+        raise HTTPException(400, "app must not contain '__' (session-name delimiter)")
     fork = bool(body.get("fork", False))
-    yolo = bool(body.get("yolo", False))
+    # STRICT boolean check for yolo — it is a permission-bypass toggle.
+    # bool("false") is True, so a client sending the string "false" would
+    # silently launch YOLO under naive coercion. Missing/None -> False;
+    # anything else must be a real JSON boolean.
+    yolo_raw = body.get("yolo", False)
+    if yolo_raw is None:
+        yolo_raw = False
+    if not isinstance(yolo_raw, bool):
+        raise HTTPException(400, "yolo must be a boolean")
+    yolo = yolo_raw
     if yolo:
         if provider == "terminal":
             raise HTTPException(
