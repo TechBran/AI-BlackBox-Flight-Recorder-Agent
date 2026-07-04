@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -45,12 +46,12 @@ import androidx.compose.ui.unit.dp
  *     [onLaunchProvider]("terminal"). Long-press falls through to
  *     [onChooseFolderForTerminal] so the user can route through the
  *     existing [AppFolderPicker] flow when they want to pin a workspace.
- *   - **Shortcuts ▾** — toggles inline reveal of four provider buttons
- *     (Claude / Gemini / Codex / Antigravity) in [PROVIDER_SHORTCUTS] order.
- *     TAP a provider button → [onLaunchProvider] (resume the deterministic
- *     session). LONG-PRESS a provider button → [onForkProvider] (fork a NEW
- *     concurrent session of that provider). The long-press fork mirrors this
- *     file's existing long-press idiom (+ Terminal long-press → folder picker).
+ *   - **Shortcuts ▾** — toggles inline reveal of the provider buttons
+ *     (Claude / Gemini / Codex / Antigravity / Grok) in [PROVIDER_SHORTCUTS]
+ *     order. TAP a provider button → [onLaunchProvider] (starts a NEW
+ *     session — fresh-by-default, 2026-07-03). Each agent row also carries a
+ *     compact amber ⚡ button → [onLaunchYolo] (NEW session with permissions
+ *     skipped). The terminal button has no ⚡.
  *
  * **Stateless except for the shortcuts-expanded toggle**, which is local
  * because the screen-level state holder doesn't care whether the panel
@@ -86,11 +87,11 @@ fun CliAgentEmptyState(
     onLaunchProvider: (provider: String) -> Unit,
     onChooseFolderForTerminal: () -> Unit,
     /**
-     * Phase 2-Android (2026-06-22): long-press a provider shortcut to fork a
-     * NEW concurrent session instead of resuming. Default no-op so older call
-     * sites / tests compile unchanged.
+     * Launch a NEW session of [provider] with permissions skipped (YOLO) —
+     * the compact amber ⚡ button beside each agent shortcut. Default no-op
+     * so older call sites / tests compile unchanged.
      */
-    onForkProvider: (provider: String) -> Unit = {},
+    onLaunchYolo: (provider: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     // Local UI-only state: whether the shortcuts panel is expanded.
@@ -183,7 +184,7 @@ fun CliAgentEmptyState(
             // ── Inline expansion: provider shortcut buttons ───────────────
             // Animate the reveal so the user sees a clear "opened panel"
             // affordance. PROVIDER_SHORTCUTS is the canonical order
-            // (claude, gemini, codex, antigravity) defined in
+            // (claude, gemini, codex, antigravity, grok) defined in
             // SessionSwitcherTopBar — single source of truth.
             AnimatedVisibility(
                 visible = shortcutsExpanded,
@@ -198,39 +199,14 @@ fun CliAgentEmptyState(
                 ) {
                     PROVIDER_SHORTCUTS.forEach { providerSlug ->
                         val busy = providerSlug in launchInFlight
-                        // TAP (the Button) = resume; LONG-PRESS (the wrapping
-                        // Box) = fork a new session. Same wrap-in-Box +
-                        // combinedClickable idiom as the "+ Terminal" button
-                        // above, so the visual/busy contract of LaunchButton
-                        // is preserved while adding the long-press fork route.
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(
-                                    // The inner Button handles single-tap;
-                                    // these are the surrounding Box fallbacks
-                                    // for the long-press fork route.
-                                    onClick = {},
-                                    onLongClick = {
-                                        if (!busy) onForkProvider(providerSlug)
-                                    },
-                                    enabled = !busy,
-                                )
-                                // a11y: declare an explicit long-click action so
-                                // TalkBack can announce/invoke the fork.
-                                .semantics {
-                                    role = Role.Button
-                                    onLongClick(
-                                        label = "Fork new ${titleCaseProvider(providerSlug)} session",
-                                    ) {
-                                        if (!busy) {
-                                            onForkProvider(providerSlug)
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                },
+                        // TAP = start a NEW session (fresh-by-default; every
+                        // launch forks). The trailing compact amber ⚡ starts
+                        // a NEW session with permissions skipped (YOLO) —
+                        // same visible-affordance idiom as the switcher rows.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             LaunchButton(
                                 label = titleCaseProvider(providerSlug),
@@ -238,7 +214,12 @@ fun CliAgentEmptyState(
                                 isLoading = busy,
                                 enabled = true,
                                 onClick = { onLaunchProvider(providerSlug) },
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.weight(1f),
+                            )
+                            YoloLaunchButton(
+                                enabled = !busy,
+                                contentDescription = yoloLaunchDescription(providerSlug),
+                                onClick = { onLaunchYolo(providerSlug) },
                             )
                         }
                     }

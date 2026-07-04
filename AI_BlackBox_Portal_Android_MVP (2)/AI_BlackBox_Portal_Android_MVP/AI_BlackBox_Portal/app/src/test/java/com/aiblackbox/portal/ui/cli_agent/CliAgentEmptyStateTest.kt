@@ -14,27 +14,27 @@ import org.junit.Test
  * Compose runtime deps are only wired into `androidTest`.
  *
  * What this file covers (pure logic that drives the composable):
- *   - Provider shortcut ordering matches T21 brief (Claude, Gemini,
- *     Codex, Antigravity).
+ *   - Provider shortcut ordering (Claude, Gemini, Codex, Antigravity, Grok).
  *   - Label rendering goes through [titleCaseProvider] so the buttons
  *     show "Claude" not "claude".
- *   - The shortcut list contains exactly the 4 entries — no terminal
- *     leak into the shortcut row (the terminal button is separate).
+ *   - The shortcut list contains exactly the 5 agent entries — no terminal
+ *     leak into the shortcut row (the terminal button is separate and
+ *     never gets a ⚡ YOLO affordance).
+ *   - ⚡ YOLO content descriptions name each agent for accessibility.
  */
 class CliAgentEmptyStateTest {
 
     @Test
-    fun `PROVIDER_SHORTCUTS used by empty state holds exactly the 4 T21 entries`() {
-        // T21 brief: "stacked vertically. Each provider button uses
-        // LaunchButton with its own isLoading from launchInFlight." The
-        // empty state reads PROVIDER_SHORTCUTS for ordering — there must
-        // be exactly 4, in the specified order, and 'terminal' MUST NOT
-        // appear in this list (terminal is the separate primary button).
+    fun `PROVIDER_SHORTCUTS used by empty state holds exactly the 5 agent entries`() {
+        // The empty state reads PROVIDER_SHORTCUTS for ordering — there must
+        // be exactly 5 agents, in the specified order, and 'terminal' MUST
+        // NOT appear in this list (terminal is the separate primary button
+        // and, unlike the agents, never gets a ⚡ YOLO button).
         assertEquals(
-            listOf("claude", "gemini", "codex", "antigravity"),
+            listOf("claude", "gemini", "codex", "antigravity", "grok"),
             PROVIDER_SHORTCUTS,
         )
-        assertEquals("expected exactly 4 provider shortcuts", 4, PROVIDER_SHORTCUTS.size)
+        assertEquals("expected exactly 5 provider shortcuts", 5, PROVIDER_SHORTCUTS.size)
         assertTrue(
             "'terminal' must not appear in the shortcuts list (it's the primary button)",
             "terminal" !in PROVIDER_SHORTCUTS,
@@ -42,14 +42,31 @@ class CliAgentEmptyStateTest {
     }
 
     @Test
-    fun `titleCaseProvider renders shortcut labels for all 4 providers`() {
+    fun `titleCaseProvider renders shortcut labels for all 5 providers`() {
         // The empty state composable passes each PROVIDER_SHORTCUTS entry
         // through titleCaseProvider for the button label. Verify the
         // resulting labels are the operator-facing strings we expect.
         val labels = PROVIDER_SHORTCUTS.map(::titleCaseProvider)
         assertEquals(
-            listOf("Claude", "Gemini", "Codex", "Antigravity"),
+            listOf("Claude", "Gemini", "Codex", "Antigravity", "Grok"),
             labels,
+        )
+    }
+
+    @Test
+    fun `every agent shortcut gets a YOLO description naming that agent`() {
+        // The empty state renders a compact amber ⚡ button beside each agent
+        // row with this exact content description (accessibility + tests).
+        val descriptions = PROVIDER_SHORTCUTS.map(::yoloLaunchDescription)
+        assertEquals(
+            listOf(
+                "Launch Claude with permissions skipped (YOLO)",
+                "Launch Gemini with permissions skipped (YOLO)",
+                "Launch Codex with permissions skipped (YOLO)",
+                "Launch Antigravity with permissions skipped (YOLO)",
+                "Launch Grok with permissions skipped (YOLO)",
+            ),
+            descriptions,
         )
     }
 

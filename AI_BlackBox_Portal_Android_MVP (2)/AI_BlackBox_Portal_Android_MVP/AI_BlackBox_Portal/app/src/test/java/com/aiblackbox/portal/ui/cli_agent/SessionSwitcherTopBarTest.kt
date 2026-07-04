@@ -83,6 +83,7 @@ class SessionSwitcherTopBarTest {
         assertEquals("Gemini", titleCaseProvider("gemini"))
         assertEquals("Codex", titleCaseProvider("codex"))
         assertEquals("Antigravity", titleCaseProvider("antigravity"))
+        assertEquals("Grok", titleCaseProvider("grok"))
         assertEquals("Terminal", titleCaseProvider("terminal"))
     }
 
@@ -166,10 +167,59 @@ class SessionSwitcherTopBarTest {
     // ── Shortcut list ordering ──────────────────────────────────────────
 
     @Test
-    fun `PROVIDER_SHORTCUTS holds the exact T20 ordered list`() {
+    fun `PROVIDER_SHORTCUTS holds the exact ordered list including grok`() {
         assertEquals(
-            listOf("claude", "gemini", "codex", "antigravity"),
+            listOf("claude", "gemini", "codex", "antigravity", "grok"),
             PROVIDER_SHORTCUTS,
+        )
+    }
+
+    // ── YOLO badge + button helpers ─────────────────────────────────────
+
+    @Test
+    fun `isYoloSession is true when the server yolo flag is set`() {
+        val row = ZellijSessionRow(
+            name = "Brandon__claude___root__1",
+            provider = "claude",
+            yolo = true,
+        )
+        assertEquals(true, isYoloSession(row))
+    }
+
+    @Test
+    fun `isYoloSession falls back to the _yolo name suffix`() {
+        val single = ZellijSessionRow(
+            name = "Brandon__claude___root_yolo",
+            provider = "claude",
+        )
+        assertEquals(true, isYoloSession(single))
+
+        // Double-underscore form also ends with "_yolo".
+        val double = ZellijSessionRow(
+            name = "Brandon__claude___root__yolo",
+            provider = "claude",
+        )
+        assertEquals(true, isYoloSession(double))
+    }
+
+    @Test
+    fun `isYoloSession is false for a plain session`() {
+        val row = ZellijSessionRow(
+            name = "Brandon__claude___root__1",
+            provider = "claude",
+        )
+        assertEquals(false, isYoloSession(row))
+    }
+
+    @Test
+    fun `yoloLaunchDescription names the agent and the permission skip`() {
+        assertEquals(
+            "Launch Claude with permissions skipped (YOLO)",
+            yoloLaunchDescription("claude"),
+        )
+        assertEquals(
+            "Launch Grok with permissions skipped (YOLO)",
+            yoloLaunchDescription("grok"),
         )
     }
 }

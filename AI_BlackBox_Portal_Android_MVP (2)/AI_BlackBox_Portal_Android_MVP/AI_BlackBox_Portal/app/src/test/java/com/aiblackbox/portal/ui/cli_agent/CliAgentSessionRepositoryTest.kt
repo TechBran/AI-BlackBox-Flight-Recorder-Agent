@@ -134,30 +134,7 @@ class CliAgentSessionRepositoryTest {
     }
 
     @Test
-    fun `launchZellijSession omits fork field by default (resume path stays byte-compatible)`() = runTest {
-        server.enqueue(
-            MockResponse.Builder()
-                .code(200)
-                .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"session_name":"x","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
-                .build()
-        )
-
-        repo.launchZellijSession("Brandon", "claude")
-
-        val request = server.takeRequest()
-        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
-        // The default (resume) request must NOT carry a fork key — the backend
-        // treats a missing fork as false, and we keep the wire format identical
-        // to the pre-Phase-2 launch body.
-        assertFalse(
-            "fork key must be absent on the default launch, got: ${request.body!!.utf8()}",
-            sentJson.containsKey("fork"),
-        )
-    }
-
-    @Test
-    fun `launchZellijSession includes fork=true in body when fork param set`() = runTest {
+    fun `launchZellijSession always sends fork=true (fresh-by-default)`() = runTest {
         server.enqueue(
             MockResponse.Builder()
                 .code(201)
@@ -166,37 +143,20 @@ class CliAgentSessionRepositoryTest {
                 .build()
         )
 
-        val session = repo.launchZellijSession("Brandon", "claude", fork = true)
-        // A fork always reports resumed=false (it minted a fresh session).
-        assertFalse("fork must surface resumed=false", session.resumed)
+        repo.launchZellijSession("Brandon", "claude")
 
         val request = server.takeRequest()
         val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
         assertEquals("claude", sentJson["provider"]?.jsonPrimitive?.content)
         assertEquals(
-            "fork must be serialized as the JSON boolean true",
+            "every launch must serialize fork as the JSON boolean true",
             true,
             sentJson["fork"]?.jsonPrimitive?.content?.toBoolean(),
         )
     }
 
     @Test
-    fun `launchZellijSession parses resumed=true from the launch response`() = runTest {
-        server.enqueue(
-            MockResponse.Builder()
-                .code(200)
-                .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"session_name":"Brandon__claude___root__1","session_url":"http://x","token":"t","expires_at":null,"resumed":true}""")
-                .build()
-        )
-
-        val session = repo.launchZellijSession("Brandon", "claude")
-        assertTrue("resumed=true must round-trip into ZellijSession.resumed", session.resumed)
-    }
-
-    @Test
-    fun `launchZellijSession defaults resumed to false when backend omits the field`() = runTest {
-        // Older backends predate the resumed field — must default to false.
+    fun `launchZellijSession omits yolo field by default`() = runTest {
         server.enqueue(
             MockResponse.Builder()
                 .code(201)
@@ -205,8 +165,55 @@ class CliAgentSessionRepositoryTest {
                 .build()
         )
 
-        val session = repo.launchZellijSession("Brandon", "claude")
-        assertFalse("missing resumed must default to false", session.resumed)
+        repo.launchZellijSession("Brandon", "claude")
+
+        val request = server.takeRequest()
+        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+        // Server treats a missing yolo key as false — keep the common body minimal.
+        assertFalse(
+            "yolo key must be absent on the default launch, got: ${request.body!!.utf8()}",
+            sentJson.containsKey("yolo"),
+        )
+    }
+
+    @Test
+    fun `launchZellijSession includes yolo=true in body when yolo param set`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"Brandon__claude___root_yolo__7","session_url":"http://x","token":"t","expires_at":null}""")
+                .build()
+        )
+
+        repo.launchZellijSession("Brandon", "claude", yolo = true)
+
+        val request = server.takeRequest()
+        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+        assertEquals("claude", sentJson["provider"]?.jsonPrimitive?.content)
+        assertEquals(
+            "yolo must be serialized as the JSON boolean true",
+            true,
+            sentJson["yolo"]?.jsonPrimitive?.content?.toBoolean(),
+        )
+    }
+
+    @Test
+    fun `launchZellijSession accepts the grok provider slug`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"Brandon__grok___root__1","session_url":"http://x","token":"t","expires_at":null}""")
+                .build()
+        )
+
+        val session = repo.launchZellijSession("Brandon", "grok")
+        assertEquals("grok", session.provider)
+
+        val request = server.takeRequest()
+        val sentJson = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+        assertEquals("grok", sentJson["provider"]?.jsonPrimitive?.content)
     }
 
     @Test
@@ -303,6 +310,33 @@ class CliAgentSessionRepositoryTest {
     }
 
     @Test
+    fun `listZellijSessions parses the yolo flag and defaults it false when absent`() = runTest {
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body(
+                    """
+                    {
+                      "sessions": [
+                        {"name":"Brandon__claude___root_yolo__1","provider":"claude","yolo":true},
+                        {"name":"Brandon__gemini___root__2","provider":"gemini","yolo":false},
+                        {"name":"Brandon__codex___root__3","provider":"codex"}
+                      ]
+                    }
+                    """.trimIndent()
+                )
+                .build()
+        )
+
+        val sessions = repo.listZellijSessions("Brandon")
+        assertEquals(3, sessions.size)
+        assertTrue("yolo:true must round-trip", sessions[0].yolo)
+        assertFalse("yolo:false must round-trip", sessions[1].yolo)
+        assertFalse("missing yolo must default false (older backends)", sessions[2].yolo)
+    }
+
+    @Test
     fun `listZellijSessions returns empty list when sessions array is empty`() = runTest {
         server.enqueue(
             MockResponse.Builder()
@@ -349,9 +383,12 @@ class CliAgentSessionRepositoryTest {
         }
         assertNotNull("403 must surface as a throw", thrown)
         assertTrue("expected IOException, got ${thrown!!::class.simpleName}", thrown is IOException)
-        assertTrue(
-            "Underlying error should mention HTTP 403; got '${thrown.message}'",
-            thrown.message?.contains("403") == true,
+        // BlackBoxApi.errorFor prefers the backend's FastAPI `detail` over
+        // the bare status line — the customer-facing message rides the
+        // exception verbatim (same mechanism the 409 launch-cap toast uses).
+        assertEquals(
+            "Cannot delete session belonging to another operator",
+            thrown.message,
         )
     }
 

@@ -96,37 +96,37 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
      *
      * Wraps POST /cli-agent/zellij/launch?op={operator}.
      *
-     * **Resume vs fork (Phase 2-Android, 2026-06-22).** The backend's launch
-     * is now attach-if-exists on a deterministic name `{op}__{provider}__{slug}`
-     * — calling this with [fork] = false (the default) RESUMES an existing
-     * session of that name instead of duplicating it (the returned
-     * [ZellijSession.resumed] reports which happened). Pass [fork] = true to
-     * mint a NEW concurrent session for the same provider/app: the backend
-     * appends a uniqueness suffix and always returns `resumed = false`.
+     * **Fresh-by-default (2026-07-03).** Every launch sends `"fork": true`
+     * — the backend always mints a NEW concurrent session (uniqueness
+     * suffix appended). There is no resume path from Android; the server's
+     * `resumed` response field (Portal compat) is ignored. Reattaching to
+     * a running session goes through the session switcher, never launch.
      *
-     * @param fork when true, force a brand-new concurrent session instead of
-     *   resuming the deterministic-name one (sends `"fork": true` in the body).
+     * @param yolo when true, sends `"yolo": true` so the agent launches
+     *   with permissions skipped (server rejects terminal+yolo with 400).
      * @throws IllegalArgumentException if [provider] is not in [ZELLIJ_PROVIDER_SLUGS].
-     * @throws IOException on transport failure or non-2xx response.
+     * @throws IOException on transport failure or non-2xx response (incl.
+     *   409 at the session cap — the server's `detail` message rides the
+     *   exception message verbatim via BlackBoxApi.errorFor).
      */
     @Throws(IOException::class)
     suspend fun launchZellijSession(
         operator: String,
         provider: String,
         app: String? = null,
-        fork: Boolean = false,
+        yolo: Boolean = false,
     ): ZellijSession {
         require(provider in ZELLIJ_PROVIDER_SLUGS) {
             "Unknown Zellij provider '$provider'; expected one of $ZELLIJ_PROVIDER_SLUGS"
         }
         // Build the request body without a `null` app field when omitted.
-        // `fork` is only added when true so the default (resume) request body
-        // stays byte-for-byte identical to the pre-Phase-2 wire format —
-        // the backend treats a missing `fork` key as false.
+        // `yolo` is only added when true — the backend treats a missing
+        // key as false, so the common request body stays minimal.
         val request = buildJsonObject {
             put("provider", JsonPrimitive(provider))
             if (app != null) put("app", JsonPrimitive(app))
-            if (fork) put("fork", JsonPrimitive(true))
+            put("fork", JsonPrimitive(true))
+            if (yolo) put("yolo", JsonPrimitive(true))
         }
         val bodyStr = api.json.encodeToString(JsonObject.serializer(), request)
         val encodedOp = URLEncoder.encode(operator, "UTF-8")
@@ -144,10 +144,6 @@ class CliAgentSessionRepository(private val api: BlackBoxApi) {
             createdAt = null,
             app = app,
             lastActivity = null,
-            // Phase 2-Android: surface whether the backend reattached an
-            // existing session (resume) vs created/forked a fresh one, so
-            // the screen can flash a brief "Resumed" / "Started new" signal.
-            resumed = parsed.resumed,
         )
     }
 

@@ -79,6 +79,7 @@ enum class CliAgentProvider(val slug: String, val display: String) {
     GEMINI("gemini", "Gemini"),
     CODEX("codex", "Codex"),
     ANTIGRAVITY("antigravity", "Antigravity"),
+    GROK("grok", "Grok"),
     ;
 
     companion object {
@@ -93,12 +94,12 @@ enum class CliAgentProvider(val slug: String, val display: String) {
 //
 // Provider slugs accepted by the orchestrator (see _ZELLIJ_PROVIDER_BINARIES
 // in cli_agent_routes.py): "claude", "gemini", "codex", "agy",
-// "antigravity", "terminal". Antigravity has two aliases ("agy" and
-// "antigravity"); we send the long form.
+// "antigravity", "grok", "terminal". Antigravity has two aliases ("agy"
+// and "antigravity"); we send the long form.
 
 /** Allowed provider slugs for Zellij launch. */
 val ZELLIJ_PROVIDER_SLUGS: Set<String> =
-    setOf("claude", "gemini", "codex", "antigravity", "terminal")
+    setOf("claude", "gemini", "codex", "antigravity", "grok", "terminal")
 
 /**
  * Live Zellij session metadata, as returned from POST /launch.
@@ -130,14 +131,6 @@ data class ZellijSession(
     // field is reserved here for forward-compat with audit follow-ups
     // that may add server-side activity tracking.
     @SerialName("last_activity") val lastActivity: String? = null,
-    // Phase 2-Android (2026-06-22, session persistence): true when the
-    // launch ATTACHED an existing deterministic-name session rather than
-    // creating a fresh one. Mirrors ZellijLaunchResponse.resumed; the
-    // repository copies it through so the screen can surface a brief
-    // "Resumed session" vs "Started new session" signal. Default false
-    // keeps every existing synthesised-ZellijSession call site (which omit
-    // it) byte-compatible.
-    val resumed: Boolean = false,
 )
 
 @Serializable
@@ -148,11 +141,10 @@ data class ZellijLaunchResponse(
     // or empty token; field retained for wire compatibility but unused.
     val token: String? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
-    // Phase 2-Android (2026-06-22): backend resume contract. true = the
-    // launch reattached an existing deterministic-name session; false =
-    // created fresh (or forked). Older backends that predate the field
-    // simply omit it → defaults false (no resume signal), which is safe.
-    val resumed: Boolean = false,
+    // NOTE (2026-07-03, fresh-by-default): the server still returns a
+    // `resumed` boolean for Portal compat, but Android launches always
+    // fork fresh — the field is deliberately NOT modelled here and is
+    // dropped by Json{ignoreUnknownKeys=true}.
 )
 
 @Serializable
@@ -174,6 +166,10 @@ data class ZellijSessionRow(
     val app: String? = null,
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
+    // Task 2 (2026-07-03): true when the session was launched with
+    // permissions skipped (YOLO). Drives the ⚡ badge in the session
+    // switcher. Defaults false for backends that predate the field.
+    val yolo: Boolean = false,
 )
 
 /**

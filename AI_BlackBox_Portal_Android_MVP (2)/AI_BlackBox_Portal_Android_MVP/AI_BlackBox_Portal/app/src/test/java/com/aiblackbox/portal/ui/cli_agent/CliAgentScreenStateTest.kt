@@ -104,14 +104,12 @@ class CliAgentScreenStateTest {
         scope: CoroutineScope,
         onLaunchedSessionNames: MutableList<String> = mutableListOf(),
         errors: MutableList<Pair<String, String>> = mutableListOf(),
-        resumeSignals: MutableList<Boolean> = mutableListOf(),
     ): CliAgentScreenState = CliAgentScreenState(
         scope = scope,
         repository = repo,
         operator = "Brandon",
         onLaunched = { onLaunchedSessionNames.add(it.name) },
         onError = { action, reason -> errors.add(action to reason) },
-        onResume = { resumed -> resumeSignals.add(resumed) },
     )
 
     // ── launchInFlight ───────────────────────────────────────────────────
@@ -220,10 +218,10 @@ class CliAgentScreenStateTest {
         assertEquals(1, holder.sessions.size)
     }
 
-    // ── fork / resume (Phase 2-Android) ────────────────────
+    // ── fresh-by-default + YOLO (2026-07-03) ─────────────────────────────
 
     @Test
-    fun `launch with fork=true sends fork in the request body`() = runTest {
+    fun `launch always sends fork=true in the request body`() = runTest {
         val holder = newHolder(this)
 
         server.enqueue(
@@ -241,7 +239,9 @@ class CliAgentScreenStateTest {
                 .build()
         )
 
-        holder.launch("claude", fork = true)
+        // Plain default launch — no fork parameter exists any more; every
+        // tap is a fresh spawn.
+        holder.launch("claude")
         joinChildren()
 
         val request = server.takeRequest()
@@ -249,21 +249,60 @@ class CliAgentScreenStateTest {
             .parseToJsonElement(request.body!!.utf8())
             .let { it as kotlinx.serialization.json.JsonObject }
         assertEquals(
-            "fork must be threaded into the launch body as boolean true",
+            "every launch must send fork=true (fresh-by-default)",
             "true",
             sentJson["fork"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content },
         )
     }
 
     @Test
-    fun `launch default (no fork) omits fork from the request body`() = runTest {
+    fun `launch with yolo=true sends yolo in the request body`() = runTest {
         val holder = newHolder(this)
 
         server.enqueue(
             MockResponse.Builder()
                 .code(201)
                 .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"session_name":"s","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
+                .body("""{"session_name":"Brandon__claude___root_yolo__7","session_url":"x","token":"t","expires_at":null}""")
+                .build()
+        )
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"sessions":[{"name":"Brandon__claude___root_yolo__7","provider":"claude","yolo":true}]}""")
+                .build()
+        )
+
+        holder.launch("claude", yolo = true)
+        joinChildren()
+
+        val request = server.takeRequest()
+        val sentJson = kotlinx.serialization.json.Json
+            .parseToJsonElement(request.body!!.utf8())
+            .let { it as kotlinx.serialization.json.JsonObject }
+        assertEquals(
+            "yolo must be threaded into the launch body as boolean true",
+            "true",
+            sentJson["yolo"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content },
+        )
+        // Synthesised row seeds the yolo flag so the ⚡ badge shows before
+        // the first refresh reconciles from the server list.
+        assertTrue(
+            "synthesised session row must carry yolo=true",
+            holder.sessions.any { it.name == "Brandon__claude___root_yolo__7" && it.yolo },
+        )
+    }
+
+    @Test
+    fun `launch default omits yolo from the request body`() = runTest {
+        val holder = newHolder(this)
+
+        server.enqueue(
+            MockResponse.Builder()
+                .code(201)
+                .headers(headersOf("Content-Type", "application/json"))
+                .body("""{"session_name":"s","session_url":"x","token":"t","expires_at":null}""")
                 .build()
         )
         server.enqueue(
@@ -282,28 +321,22 @@ class CliAgentScreenStateTest {
             .parseToJsonElement(request.body!!.utf8())
             .let { it as kotlinx.serialization.json.JsonObject }
         assertTrue(
-            "default launch must NOT carry a fork key (resume path byte-compatible)",
-            "fork" !in sentJson.keys,
+            "default launch must NOT carry a yolo key (server treats missing as false)",
+            "yolo" !in sentJson.keys,
         )
     }
 
     @Test
-    fun `onResume fires true when backend reports resumed`() = runTest {
-        val resumeSignals = mutableListOf<Boolean>()
-        val holder = newHolder(this, resumeSignals = resumeSignals)
+    fun `launch failing with 409 surfaces the server detail verbatim`() = runTest {
+        val errors = mutableListOf<Pair<String, String>>()
+        val holder = newHolder(this, errors = errors)
 
+        val capDetail = "Session limit reached (12). Close a session (X) first."
         server.enqueue(
             MockResponse.Builder()
-                .code(200)
+                .code(409)
                 .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"session_name":"s","session_url":"x","token":"t","expires_at":null,"resumed":true}""")
-                .build()
-        )
-        server.enqueue(
-            MockResponse.Builder()
-                .code(200)
-                .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"sessions":[{"name":"s","provider":"claude"}]}""")
+                .body("""{"detail":"$capDetail"}""")
                 .build()
         )
 
@@ -311,36 +344,12 @@ class CliAgentScreenStateTest {
         joinChildren()
 
         assertEquals(
-            "onResume must fire exactly once with the parsed resumed flag",
-            listOf(true),
-            resumeSignals,
+            "409 cap detail must reach onError verbatim (BlackBoxApi.errorFor prefers detail)",
+            listOf("launch" to capDetail),
+            errors,
         )
-    }
-
-    @Test
-    fun `onResume fires false for a fork`() = runTest {
-        val resumeSignals = mutableListOf<Boolean>()
-        val holder = newHolder(this, resumeSignals = resumeSignals)
-
-        server.enqueue(
-            MockResponse.Builder()
-                .code(201)
-                .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"session_name":"s__forked","session_url":"x","token":"t","expires_at":null,"resumed":false}""")
-                .build()
-        )
-        server.enqueue(
-            MockResponse.Builder()
-                .code(200)
-                .headers(headersOf("Content-Type", "application/json"))
-                .body("""{"sessions":[{"name":"s__forked","provider":"claude"}]}""")
-                .build()
-        )
-
-        holder.launch("claude", fork = true)
-        joinChildren()
-
-        assertEquals(listOf(false), resumeSignals)
+        assertTrue("no session must be added on a capped launch", holder.sessions.isEmpty())
+        assertTrue("spinner must clear on 409", "claude" !in holder.launchInFlight)
     }
 
     // ── kill ──────────────────────────────────────────────────────────────

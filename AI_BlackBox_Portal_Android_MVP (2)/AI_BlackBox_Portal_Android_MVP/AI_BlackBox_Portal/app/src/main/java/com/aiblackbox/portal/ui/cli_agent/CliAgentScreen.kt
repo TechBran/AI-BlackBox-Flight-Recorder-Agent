@@ -112,6 +112,10 @@ fun CliAgentScreen(
             repository = repository,
             operator = operator,
             onLaunched = { session ->
+                // Fresh-by-default (2026-07-03): every launch mints a new
+                // session, so one uniform toast. (The server still returns
+                // `resumed` for Portal compat; Android ignores it.)
+                Toast.makeText(context, "Started new session", Toast.LENGTH_SHORT).show()
                 // Transition into Terminal with the fully-credentialed
                 // ZellijSession. Token + sessionUrl ride along until the
                 // composable mounts and the ZellijWebSocketClient consumes
@@ -119,22 +123,16 @@ fun CliAgentScreen(
                 state = CliAgentInternalState.Terminal(session)
             },
             onError = { action, reason ->
-                Toast.makeText(
-                    context,
-                    "CLI Agent ${action} failed: $reason",
-                    Toast.LENGTH_SHORT,
-                ).show()
-            },
-            // Phase 2-Android (2026-06-22): brief, non-intrusive resume signal.
-            // Backend launch is attach-if-exists on a deterministic name, so a
-            // plain tap may RESUME a still-running session — tell the user which
-            // happened. Forks always report resumed = false ("Started new").
-            onResume = { resumed ->
-                Toast.makeText(
-                    context,
-                    if (resumed) "Resumed session" else "Started new session",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                // Launch failures surface the backend's FastAPI `detail`
+                // verbatim (BlackBoxApi.errorFor prefers it) — e.g. the 409
+                // session-cap message "Session limit reached (12). Close a
+                // session (X) first." is customer-facing copy as-is.
+                val message = if (action == "launch") {
+                    reason
+                } else {
+                    "CLI Agent ${action} failed: $reason"
+                }
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             },
         )
     }
@@ -204,15 +202,14 @@ fun CliAgentScreen(
                         },
                         onLaunchProvider = { provider ->
                             // Launch path — onLaunched callback drives the
-                            // state transition into Terminal once the
-                            // launch response is in. With the attach-if-exists
-                            // backend this RESUMES the deterministic session.
+                            // state transition into Terminal once the launch
+                            // response is in. Every launch starts a NEW
+                            // session (fresh-by-default, 2026-07-03).
                             screenState.launch(provider)
                         },
-                        onForkProvider = { provider ->
-                            // FORK path (Phase 2-Android): mint a NEW concurrent
-                            // session of [provider] alongside any existing one.
-                            screenState.launch(provider, fork = true)
+                        onLaunchYolo = { provider ->
+                            // ⚡ YOLO path: new session with permissions skipped.
+                            screenState.launch(provider, yolo = true)
                         },
                         onKillSession = { row ->
                             // The X button is the ONLY kill path (Phase 1).
@@ -281,10 +278,9 @@ private fun CliAgentBranches(
                     onLaunchProvider = { provider ->
                         screenState.launch(provider)
                     },
-                    onForkProvider = { provider ->
-                        // Long-press fork (Phase 2-Android): force a new
-                        // concurrent session even from the empty state.
-                        screenState.launch(provider, fork = true)
+                    onLaunchYolo = { provider ->
+                        // ⚡ YOLO: new session with permissions skipped.
+                        screenState.launch(provider, yolo = true)
                     },
                     onChooseFolderForTerminal = {
                         onStateChange(CliAgentInternalState.FolderPicker)

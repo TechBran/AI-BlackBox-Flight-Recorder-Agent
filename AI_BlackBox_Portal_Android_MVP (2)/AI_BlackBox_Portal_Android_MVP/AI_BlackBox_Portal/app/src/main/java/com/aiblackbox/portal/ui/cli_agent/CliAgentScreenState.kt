@@ -81,15 +81,6 @@ internal class CliAgentScreenState(
      * one-line message suitable for a Toast.
      */
     private val onError: (action: String, reason: String) -> Unit = { _, _ -> },
-    /**
-     * Phase 2-Android (2026-06-22): non-intrusive resume signal. Invoked
-     * after a successful launch with `resumed = true` when the backend
-     * REATTACHED an existing deterministic-name session, or `false` when it
-     * created/forked a fresh one. Caller wires this to a brief Toast
-     * ("Resumed session" vs "Started new session"). Default no-op so the
-     * holder is usable without it (e.g. in tests that don't care).
-     */
-    private val onResume: (resumed: Boolean) -> Unit = {},
 ) {
     var sessions: List<ZellijSessionRow> by mutableStateOf(emptyList())
         private set
@@ -171,22 +162,22 @@ internal class CliAgentScreenState(
     }
 
     /**
-     * Launch a fresh zellij session for [provider]. Adds to
-     * [launchInFlight] before the call, **always** removes on completion
-     * (try/finally, never a bare try) so a thrown launch never leaves a
-     * stuck spinner. On success: appends to [sessions], sets as
+     * Launch a fresh zellij session for [provider]. Every launch is a NEW
+     * concurrent session — the repository always sends `"fork": true`
+     * (fresh-by-default, 2026-07-03); reattach goes through the switcher.
+     * Adds to [launchInFlight] before the call, **always** removes on
+     * completion (try/finally, never a bare try) so a thrown launch never
+     * leaves a stuck spinner. On success: appends to [sessions], sets as
      * [currentSession], invokes [onLaunched] so the caller can transition
      * into the Terminal state.
      *
      * @param provider one of [com.aiblackbox.portal.data.model.ZELLIJ_PROVIDER_SLUGS].
      * @param app optional workspace pin (basename of the Apps/ subdir).
-     * @param fork when true, ask the backend to mint a NEW concurrent session
-     *   for this provider/app instead of resuming the deterministic-name one.
-     *   The default (false) is the resume path — the correct default now that
-     *   the backend is attach-if-exists. Threaded straight to
+     * @param yolo when true, launch with permissions skipped (the ⚡ YOLO
+     *   button). Threaded straight to
      *   [CliAgentSessionRepository.launchZellijSession].
      */
-    fun launch(provider: String, app: String? = null, fork: Boolean = false) {
+    fun launch(provider: String, app: String? = null, yolo: Boolean = false) {
         // No-op guard: don't queue a duplicate launch for a provider
         // that's already mid-launch. The UI disables the button via
         // LaunchButton.isLoading, but a fast double-tap before
@@ -200,18 +191,21 @@ internal class CliAgentScreenState(
                     operator = operator,
                     provider = provider,
                     app = app,
-                    fork = fork,
+                    yolo = yolo,
                 )
                 // Synthesise a ZellijSessionRow from the launch response so
                 // we can seed the top bar / list immediately without
                 // waiting on a full refresh round-trip. The next refresh
-                // will reconcile if the backend disagrees.
+                // will reconcile if the backend disagrees. `yolo` is seeded
+                // from the request so the ⚡ badge shows before the first
+                // refresh returns the server-side flag.
                 val row = ZellijSessionRow(
                     name = session.name,
                     provider = session.provider,
                     app = session.app,
                     createdAt = session.createdAt,
                     expiresAt = session.expiresAt,
+                    yolo = yolo,
                 )
                 sessions = (sessions + row).distinctBy { it.name }
                 currentSession = row
@@ -220,11 +214,6 @@ internal class CliAgentScreenState(
                 // not only on the just-fired launch callback.
                 liveSessionsByName[session.name] = session
                 onLaunched(session)
-                // Non-intrusive resume signal (Phase 2-Android). Fork always
-                // reports resumed = false; a default launch reports whatever
-                // the backend did (attach-if-exists). Cheap — the response is
-                // already parsed.
-                onResume(session.resumed)
                 // Schedule a follow-up refresh to pick up server-side
                 // fields the launch response didn't carry (createdAt etc).
                 refreshSessions()

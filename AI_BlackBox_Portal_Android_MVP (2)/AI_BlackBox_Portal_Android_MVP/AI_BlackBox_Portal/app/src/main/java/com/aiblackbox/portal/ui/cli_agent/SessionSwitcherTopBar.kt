@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.ZellijSessionRow
 import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
+import com.aiblackbox.portal.ui.theme.CuWarning
 import android.widget.Toast
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -73,13 +74,17 @@ import kotlin.math.abs
  * session name (e.g. "Brandon__claude__root__1779750372") for debugging.
  *
  * Dropdown order (exact, per brief):
- *   1. Live sessions (●/○ icon + provider · time · app-cwd),
- *      long-press → kill row.
+ *   1. Live sessions (●/○ icon + provider · time · app-cwd + ⚡ YOLO badge),
+ *      trailing ✕ → kill row (with confirm dialog).
  *   2. Divider.
- *   3. "+ Terminal" — launches (resumes) a zellij terminal session;
- *      its trailing "＋" forks a NEW concurrent terminal.
- *   4. "⚡ Shortcuts ▶" — nested submenu for Claude/Gemini/Codex/Antigravity;
- *      each row TAP resumes, its trailing "＋ New" forks a fresh session.
+ *   3. "+ Terminal" — starts a NEW zellij terminal session.
+ *   4. "Shortcuts ▶" — nested submenu for Claude/Gemini/Codex/Antigravity/
+ *      Grok; each row TAP starts a NEW session; its trailing amber ⚡
+ *      launches a NEW session with permissions skipped (YOLO).
+ *
+ * Fresh-by-default (2026-07-03): EVERY launch mints a new concurrent
+ * session — there is no tap-to-resume; reattaching goes through the
+ * session rows above the divider.
  *
  * Per-provider [launchInFlight] (Set<String>, NOT Boolean) so the user can
  * fire "+ Terminal" and "Shortcuts → Claude" in rapid succession and see
@@ -104,12 +109,12 @@ fun SessionSwitcherTopBar(
     onOpenNavDrawer: () -> Unit,
     launchInFlight: Set<String> = emptySet(),
     /**
-     * Phase 2-Android (2026-06-22): FORK a NEW concurrent session for
-     * [provider] instead of resuming the deterministic-name one. Wired to
-     * the trailing "＋ New" icon button on each shortcut row + the
-     * "＋ New session" item. Default no-op keeps older call sites compiling.
+     * Launch a NEW session for [provider] with permissions skipped (YOLO).
+     * Wired to the trailing amber ⚡ button on each agent shortcut row —
+     * the plain terminal entry deliberately has no YOLO affordance.
+     * Default no-op keeps older call sites compiling.
      */
-    onForkProvider: (provider: String) -> Unit = {},
+    onLaunchYolo: (provider: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -269,7 +274,8 @@ fun SessionSwitcherTopBar(
                         color = MaterialTheme.colorScheme.outlineVariant,
                     )
 
-                    // 2) + Terminal (TAP = resume; trailing ＋ = fork new)
+                    // 2) + Terminal (TAP = start a new terminal session; no
+                    //    YOLO affordance for the plain terminal).
                     val terminalInFlight = "terminal" in launchInFlight
                     DropdownMenuItem(
                         text = { Text("+ Terminal") },
@@ -277,13 +283,6 @@ fun SessionSwitcherTopBar(
                             LeadingLaunchIcon(
                                 isLoading = terminalInFlight,
                                 icon = Icons.Default.Add,
-                            )
-                        },
-                        trailingIcon = {
-                            ForkNewButton(
-                                enabled = !terminalInFlight,
-                                contentDescription = "New terminal session",
-                                onClick = { onForkProvider("terminal") },
                             )
                         },
                         enabled = !terminalInFlight,
@@ -326,19 +325,20 @@ fun SessionSwitcherTopBar(
                                             icon = Icons.Default.PlayArrow,
                                         )
                                     },
-                                    // TAP the row = resume the deterministic
-                                    // session; tap the trailing ＋ = fork a NEW
-                                    // concurrent session. Mirrors the proven
-                                    // tap-row-vs-trailing-icon idiom used by the
-                                    // session list's kill (X) button — a VISIBLE
-                                    // affordance, not a hidden long-press (which
-                                    // T23 device QA flagged as undiscoverable).
+                                    // TAP the row = start a NEW session; tap the
+                                    // trailing amber ⚡ = start a NEW session with
+                                    // permissions skipped (YOLO). Mirrors the
+                                    // proven tap-row-vs-trailing-icon idiom used
+                                    // by the session list's kill (X) button — a
+                                    // VISIBLE affordance, not a hidden long-press
+                                    // (which T23 device QA flagged as
+                                    // undiscoverable).
                                     trailingIcon = {
-                                        ForkNewButton(
+                                        YoloLaunchButton(
                                             enabled = !busy,
                                             contentDescription =
-                                                "New ${titleCaseProvider(providerSlug)} session",
-                                            onClick = { onForkProvider(providerSlug) },
+                                                yoloLaunchDescription(providerSlug),
+                                            onClick = { onLaunchYolo(providerSlug) },
                                         )
                                     },
                                     enabled = !busy,
@@ -454,6 +454,20 @@ private fun SessionRowMenuItem(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                // ⚡ YOLO badge — persistent (rebuilt from the server list's
+                // `yolo` flag on every refresh; name-suffix fallback for
+                // pre-field rows). Amber to match the launch button.
+                if (isYoloSession(row)) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "⚡",
+                        color = CuWarning,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics {
+                            contentDescription = "YOLO session (permissions skipped)"
+                        },
+                    )
+                }
                 Spacer(Modifier.width(4.dp))
                 IconButton(
                     onClick = { feedback(); onKillClick() },
@@ -472,33 +486,39 @@ private fun SessionRowMenuItem(
 }
 
 /**
- * Trailing "＋ New" icon button for a launch row (＋ Terminal + each
- * shortcut provider). TAP the row resumes the deterministic-name session;
- * tapping THIS forks a brand-new concurrent one ([onClick] →
- * [SessionSwitcherTopBar.onForkProvider]).
+ * Trailing amber ⚡ YOLO button for an agent shortcut row. Tapping it
+ * launches a NEW session of that provider with permissions skipped
+ * ([onClick] → `onLaunchYolo`). The plain terminal entry never renders
+ * this — YOLO only applies to agent CLIs.
  *
  * A VISIBLE affordance was chosen over a hidden long-press because T23
  * device QA found long-press undiscoverable on the Z Fold 6 (see the
  * SessionRowMenuItem kill-button note). This reuses the same proven
  * "tap row / trailing IconButton" idiom as the kill (X) button. Fires the
  * shared native press feedback so it feels identical to every other tappable.
+ *
+ * Uses the theme's [CuWarning] amber/orange (Color.kt) rather than a
+ * hardcoded hex — the same warning tone the CU status surfaces use.
  */
 @Composable
-private fun ForkNewButton(
+internal fun YoloLaunchButton(
     enabled: Boolean,
     contentDescription: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val feedback = rememberPressFeedback()
     IconButton(
         onClick = { feedback(); onClick() },
         enabled = enabled,
-        modifier = Modifier.size(36.dp),
+        modifier = modifier
+            .size(36.dp)
+            .semantics { this.contentDescription = contentDescription },
     ) {
-        Icon(
-            imageVector = Icons.Default.Add,
-            contentDescription = contentDescription,
-            tint = MaterialTheme.colorScheme.primary,
+        Text(
+            text = "⚡",
+            color = if (enabled) CuWarning else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.titleMedium,
         )
     }
 }
@@ -510,7 +530,21 @@ private fun ForkNewButton(
 
 /** Allowed provider shortcuts for the dropdown's nested menu. */
 internal val PROVIDER_SHORTCUTS: List<String> =
-    listOf("claude", "gemini", "codex", "antigravity")
+    listOf("claude", "gemini", "codex", "antigravity", "grok")
+
+/**
+ * True when [row] is a YOLO (permissions-skipped) session and should show
+ * the ⚡ badge. Primary signal is the server's `yolo` boolean from
+ * GET /cli-agent/zellij/sessions (Task 2); the name-suffix check is the
+ * fallback for rows synthesised before the field existed — YOLO session
+ * names always end `_yolo` (which also matches the `__yolo` app-slug form).
+ */
+internal fun isYoloSession(row: ZellijSessionRow): Boolean =
+    row.yolo || row.name.endsWith("_yolo")
+
+/** Accessibility/content description for a provider's ⚡ YOLO launch button. */
+internal fun yoloLaunchDescription(providerSlug: String): String =
+    "Launch ${titleCaseProvider(providerSlug)} with permissions skipped (YOLO)"
 
 /**
  * Title-case the provider slug for display: "claude" → "Claude",
