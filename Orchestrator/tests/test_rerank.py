@@ -484,6 +484,91 @@ def test_get_settings_survives_malformed_numeric_config(monkeypatch):
         assert isinstance(rerank.status(), dict)      # never raises
 
 
+# ── M3.2 TTL-recoverable cloud preflight + provider-aware reachability ─────────
+
+def test_cloud_failed_preflight_recovers_after_ttl(monkeypatch):
+    """A cloud provider's FAILED preflight is cached only for _PREFLIGHT_FAIL_TTL_S
+    (a transient blip must not disable rerank until restart) — unlike a local
+    provider's process-lifetime failure."""
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(ceiling=5000, passage_n=1))
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    monkeypatch.setattr(rerank, "score", lambda q, p: None)      # cloud down
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"):
+        assert rerank.preflight()["state"] == "failed"
+        # within the TTL window the failure is cached — NOT re-probed
+        def reprobed(q, p):
+            raise AssertionError("cloud preflight re-probed within its TTL")
+        monkeypatch.setattr(rerank, "score", reprobed)
+        assert rerank.preflight()["state"] == "failed"
+        # past the TTL, cloud recovered → re-probe → ok
+        clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 1
+        monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])
+        assert rerank.preflight()["state"] == "ok"
+
+
+def test_local_failed_preflight_stays_process_lifetime(monkeypatch):
+    """The TTL is CLOUD-only: a vllm failure still sticks for the process
+    lifetime even after the same elapsed time (deterministic local provider)."""
+    clock = Clock(1000.0)
+    monkeypatch.setattr(rerank.time, "monotonic", clock)
+    monkeypatch.setattr(rerank, "score", lambda q, p: None)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1",
+                 preflight_ceiling_ms="5000"):
+        assert rerank.preflight()["state"] == "failed"
+        clock.t += rerank._PREFLIGHT_FAIL_TTL_S + 100
+        monkeypatch.setattr(rerank, "score", lambda q, p: [1.0])  # would pass
+        assert rerank.preflight()["state"] == "failed"            # still sticky
+
+
+def test_reachable_bearer_is_key_present_no_network(monkeypatch):
+    """reachable() for a bearer cloud provider is a pure key-present check —
+    ZERO http calls (actual cloud reachability is proven once by preflight)."""
+    def no_net(*a, **k):
+        raise AssertionError("cloud reachability must not hit the network")
+    monkeypatch.setattr(rerank.requests, "get", no_net)
+    monkeypatch.setattr(rerank.requests, "post", no_net)
+    monkeypatch.setitem(rerank.RERANK_MODELS, "fake-voyage",
+                        _fake_cloud_entry(key_env="VOYAGE_API_KEY"))
+    monkeypatch.setenv("VOYAGE_API_KEY", "present")
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"):
+        assert rerank.reachable() is True
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    with pin_cfg("rerank", provider="voyage", model="fake-voyage"):
+        assert rerank.reachable() is False
+
+
+def test_vllm_reachable_still_probes_localhost(monkeypatch):
+    """reachable() for vllm keeps the localhost /v1/models probe."""
+    seen = []
+
+    def fake_get(url, timeout=None):
+        seen.append((url, timeout))
+        return FakeResp(200, {})
+
+    monkeypatch.setattr(rerank.requests, "get", fake_get)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"):
+        assert rerank.reachable() is True
+    assert seen and seen[0][0] == "http://h:1/v1/models"
+
+
+def test_service_reachable_backcompat_wrapper(monkeypatch):
+    """service_reachable() stays a thin wrapper over the localhost /v1/models
+    probe — the fresh-GPU-box detector, independent of the selected provider."""
+    seen = []
+
+    def fake_get(url, timeout=None):
+        seen.append(url)
+        return FakeResp(200, {})
+
+    monkeypatch.setattr(rerank.requests, "get", fake_get)
+    with pin_cfg("rerank", provider="voyage", base_url="http://h:2",
+                 model="qwen3-reranker-0.6b"):
+        assert rerank.service_reachable() is True
+    assert seen and seen[0] == "http://h:2/v1/models"
+
+
 # ── GET /rerank/status ────────────────────────────────────────────────────────
 
 STATUS_KEYS = {

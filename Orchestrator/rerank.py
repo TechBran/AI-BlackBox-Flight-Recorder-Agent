@@ -144,10 +144,20 @@ _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 # llm (M6), voyage/cohere/vertex (M7) are stubbed to return None until then.
 KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
 
+# Cloud providers whose FAILED preflight is TTL-recoverable (M3.2): a transient
+# cloud blip must NOT disable rerank until the next restart. Deliberate,
+# documented deviation from audit A9's local-only once-per-process assumption —
+# the local vllm/cpu providers keep the process-lifetime failure cache.
+CLOUD_PROVIDERS = {"voyage", "cohere", "vertex", "llm"}
+
 # One-time-per-process preflight cache (audit A9). Guarded because retrieve()
 # runs from FastAPI's threadpool — two first-uses must not double-probe.
+# _preflight_expiry is the monotonic deadline for a TTL-bound (cloud-failed)
+# cache entry; None means the entry sticks for the process lifetime (audit A9).
 _preflight_lock = threading.Lock()
 _preflight_result: dict | None = None
+_preflight_expiry: float | None = None
+_PREFLIGHT_FAIL_TTL_S = 60.0
 
 # Short-TTL reachability cache (M13 wizard): status() is consumed by the
 # onboarding rollup + wizard cards, which may poll — the probe itself is
@@ -159,30 +169,73 @@ _reach_lock = threading.Lock()
 _reach_cache: "tuple[float, bool] | None" = None
 
 
-def service_reachable(timeout_s: float = 1.0) -> bool:
-    """Is something answering on the resolved [rerank] base_url? Never raises.
+_cpu_importable: "bool | None" = None
 
-    GETs {base_url}/v1/models (vLLM's model-list endpoint — up as soon as the
-    engine finishes loading) with a ~1s cap, TTL-cached. Probes the DEFAULT
-    base_url even with the null provider: that is exactly the fresh-GPU-box
-    state the wizard must detect ("service up, awaiting the config flip")."""
+
+def _probe_localhost(base_url: str, timeout_s: float = 1.0) -> bool:
+    """TTL-cached GET {base_url}/v1/models (vLLM's model-list endpoint — up as
+    soon as the engine finishes loading), ~1s cap. Never raises. Shared by
+    service_reachable() and reachable()'s vllm/null path."""
     global _reach_cache
     now = time.monotonic()
     with _reach_lock:
         if _reach_cache is not None and (now - _reach_cache[0]) < _REACH_TTL_S:
             return _reach_cache[1]
-    s = get_settings()
     ok = False
-    if s["base_url"]:
+    if base_url:
         try:
             ok = requests.get(
-                s["base_url"] + "/v1/models", timeout=timeout_s
+                base_url + "/v1/models", timeout=timeout_s
             ).status_code == 200
         except Exception:  # noqa: BLE001 - never-raise, mirrors score()
             ok = False
     with _reach_lock:
         _reach_cache = (now, ok)
     return ok
+
+
+def service_reachable(timeout_s: float = 1.0) -> bool:
+    """Back-compat wrapper (M13): is something answering on the resolved
+    [rerank] base_url? The localhost /v1/models probe, provider-INDEPENDENT —
+    it detects the fresh-GPU-box "service up, awaiting the config flip" state
+    even under the null provider. reachable() below is the provider-aware
+    generalization (M3.2); this stays as the vLLM/GPU-box detector."""
+    return _probe_localhost(get_settings()["base_url"], timeout_s)
+
+
+def _cpu_reachable() -> bool:
+    """CPU cross-encoder deps present? sentence-transformers importable
+    (find_spec only — no heavy import), cached. The simplest honest
+    reachability signal for the in-process cpu provider (there is no service to
+    poll); M5 adds the provider itself, M4 the fuller readiness story."""
+    global _cpu_importable
+    if _cpu_importable is None:
+        try:
+            import importlib.util
+            _cpu_importable = (
+                importlib.util.find_spec("sentence_transformers") is not None)
+        except Exception:  # noqa: BLE001 - never-raise
+            _cpu_importable = False
+    return _cpu_importable
+
+
+def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
+    """Provider-aware reachability (M3.2); never raises:
+      vllm / null / unknown → the localhost /v1/models probe;
+      cpu                   → sentence-transformers importable (no service);
+      cloud (voyage/cohere/vertex/llm) → key/creds PRESENT — a config/env read,
+                              NEVER a paid network poll (actual cloud
+                              reachability is proven once by preflight()).
+    Cloud key resolution is the forward-compatible os.getenv(key_env) floor;
+    M4 refines the full sidecar>config>env order but the env read is stable."""
+    s = settings or get_settings()
+    p = s["provider"]
+    if p == "cpu":
+        return _cpu_reachable()
+    if p in CLOUD_PROVIDERS:
+        key_env = s.get("key_env")
+        return bool(key_env and os.getenv(key_env))  # no network
+    return _probe_localhost(s["base_url"], timeout_s)
 
 
 # Malformed-config resilience (M3.1 fold-in from the M2 review). M2 moved
@@ -392,12 +445,17 @@ def preflight() -> dict:
       failed  — provider error or over-ceiling (cached: rerank disabled for
                 the process lifetime; a restart re-probes).
     """
-    global _preflight_result
-    if _preflight_result is not None:
-        return _preflight_result
+    global _preflight_result, _preflight_expiry
+    res = _preflight_result
+    if res is not None and (
+            _preflight_expiry is None or time.monotonic() < _preflight_expiry):
+        return res
     with _preflight_lock:
-        if _preflight_result is not None:
-            return _preflight_result
+        res = _preflight_result
+        if res is not None and (
+                _preflight_expiry is None
+                or time.monotonic() < _preflight_expiry):
+            return res
         s = get_settings()
         ceiling = s["preflight_ceiling_ms"]
         provider = s["provider"]
@@ -435,21 +493,33 @@ def preflight() -> dict:
             result = {**base, "state": "failed", "reason": reason}
         else:
             result = {**base, "state": "ok", "reason": None}
+        # Cache policy (M3.2): a cloud FAILED preflight recovers after a TTL (a
+        # transient blip must not disable rerank until restart — the documented
+        # deviation from audit A9's local-only assumption). Local (vllm/cpu)
+        # failures and every OK stick for the process lifetime.
+        if result["state"] == "failed" and provider in CLOUD_PROVIDERS:
+            _preflight_expiry = time.monotonic() + _PREFLIGHT_FAIL_TTL_S
+            disabled = (f" — rerank disabled for {int(_PREFLIGHT_FAIL_TTL_S)}s"
+                        f" (cloud TTL, then re-probes)")
+        else:
+            _preflight_expiry = None
+            disabled = (" — rerank disabled for process lifetime"
+                        if result["state"] == "failed" else "")
         _preflight_result = result
         print(f"[RERANK] preflight {result['state']}"
               f" ({result['reason'] or f'{estimated_ms:.0f}ms'});"
-              f" provider={provider} model={s['model']}"
-              + (" — rerank disabled for process lifetime"
-                 if result["state"] == "failed" else ""))
+              f" provider={provider} model={s['model']}{disabled}")
         return result
 
 
 def reset_preflight() -> None:
-    """Clear the probe caches — preflight AND reachability (tests + explicit
-    ops re-check)."""
-    global _preflight_result, _reach_cache
+    """Clear the probe caches — preflight (result + TTL deadline) AND
+    reachability (tests + explicit ops re-check; the M8 selector calls this on
+    a provider change so the next preflight() re-probes the new provider)."""
+    global _preflight_result, _preflight_expiry, _reach_cache
     with _preflight_lock:
         _preflight_result = None
+        _preflight_expiry = None
     with _reach_lock:
         _reach_cache = None
 
