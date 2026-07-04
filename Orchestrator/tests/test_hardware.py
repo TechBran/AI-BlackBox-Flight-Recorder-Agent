@@ -54,7 +54,7 @@ def test_no_gpu_box_amd_igpu(monkeypatch):
     _fake_run(monkeypatch, {"nvidia-smi": None, "lspci": LSPCI_AMD_ONLY})
     assert hardware.probe() == {
         "gpu": False, "gpu_name": None, "vram_mb": None,
-        "ram_mb": 31167, "source": "none",
+        "ram_mb": 31167, "source": "none", "tier": "LOW",
     }
 
 
@@ -62,7 +62,7 @@ def test_8gb_vram_box(monkeypatch):
     _fake_run(monkeypatch, {"nvidia-smi": "NVIDIA GeForce RTX 3070, 8192\n"})
     assert hardware.probe() == {
         "gpu": True, "gpu_name": "NVIDIA GeForce RTX 3070", "vram_mb": 8192,
-        "ram_mb": 31167, "source": "nvidia-smi",
+        "ram_mb": 31167, "source": "nvidia-smi", "tier": "HIGH",
     }
 
 
@@ -85,7 +85,7 @@ def test_nvidia_smi_missing_but_lspci_shows_nvidia(monkeypatch):
     assert hardware.probe() == {
         "gpu": True,
         "gpu_name": "NVIDIA Corporation GA104 [GeForce RTX 3070] (rev a1)",
-        "vram_mb": None, "ram_mb": 31167, "source": "lspci",
+        "vram_mb": None, "ram_mb": 31167, "source": "lspci", "tier": "HIGH",
     }
 
 
@@ -96,7 +96,7 @@ def test_everything_fails_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(hardware, "MEMINFO_PATH", str(tmp_path / "absent"))
     assert hardware.probe() == {
         "gpu": False, "gpu_name": None, "vram_mb": None,
-        "ram_mb": 0, "source": "none",
+        "ram_mb": 0, "source": "none", "tier": "LOW",
     }
 
 
@@ -146,3 +146,40 @@ def test_probe_returns_copies(monkeypatch):
     first = hardware.probe()
     first["gpu"] = "mutated"
     assert hardware.probe()["gpu"] is True  # cache unharmed
+
+
+# ── tier derivation (reranker tiering M1) ────────────────────────────────────
+
+def test_tier_low_no_gpu_under_32gb():
+    assert hardware.derive_tier(gpu=False, vram_mb=None, ram_mb=31_900) == "LOW"
+
+
+def test_tier_mid_no_gpu_32gb():
+    assert hardware.derive_tier(gpu=False, vram_mb=None, ram_mb=32_768) == "MID"
+
+
+def test_tier_high_gpu_8gb():
+    assert hardware.derive_tier(gpu=True, vram_mb=8192, ram_mb=31_167) == "HIGH"
+
+
+def test_tier_high_lspci_unknown_vram(monkeypatch):
+    """lspci-discovered NVIDIA (vram None) tiers HIGH — through the real probe()
+    ladder so the additive wiring is proven, not just the pure function."""
+    _fake_run(monkeypatch, {"nvidia-smi": None, "lspci": LSPCI_NVIDIA})
+    assert hardware.probe()["tier"] == "HIGH"
+    assert hardware.derive_tier(gpu=True, vram_mb=None, ram_mb=31_167) == "HIGH"
+
+
+def test_tier_gpu_under_8gb_not_high():
+    """Installer refuses vLLM <8 GB; a 6-8 GB card can't co-host embedder+vLLM."""
+    assert hardware.derive_tier(gpu=True, vram_mb=6144, ram_mb=31_167) != "HIGH"
+    assert hardware.derive_tier(gpu=True, vram_mb=6144, ram_mb=31_167) == "LOW"
+
+
+def test_probe_still_returns_legacy_keys(monkeypatch):
+    """Additive contract: every legacy key survives + tier is added."""
+    _fake_run(monkeypatch, {"nvidia-smi": "NVIDIA X, 8192\n"})
+    result = hardware.probe()
+    for k in ("gpu", "gpu_name", "vram_mb", "ram_mb", "source"):
+        assert k in result
+    assert result["tier"] == "HIGH"

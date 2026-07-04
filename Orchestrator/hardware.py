@@ -12,6 +12,7 @@ and surfaced verbatim as the `hardware` block of GET /embeddings/status
         "vram_mb":  int | None,  # total VRAM; None when undeterminable (lspci)
         "ram_mb":   int,         # system MemTotal; 0 only if /proc/meminfo fails
         "source":   str,         # "nvidia-smi" | "lspci" | "none"
+        "tier":     str,         # "LOW" | "MID" | "HIGH" (derive_tier; additive)
     }
 
 Detection ladder (first hit wins):
@@ -99,6 +100,24 @@ def _probe_gpu() -> "tuple[bool, str | None, int | None, str]":
     return False, None, None, "none"
 
 
+def derive_tier(gpu: bool, vram_mb: "int | None", ram_mb: int) -> str:
+    """Hardware tier for reranker/embeddings gating — "LOW" | "MID" | "HIGH".
+
+    HIGH  a GPU with >=8 GB VRAM, OR an lspci-discovered NVIDIA card whose VRAM
+          is unverifiable (vram_mb None) — the installer can still target it.
+          The 8 GB floor matches the vLLM installer gate
+          (installer/templates/blackbox-install-reranker.sh >=8000 MB): a
+          6-8 GB card can't co-host the Ollama embedder + vLLM, so NOT HIGH.
+    MID   no GPU but >=32 GB system RAM — opt-in in-process CPU cross-encoder.
+    LOW   everything else — cloud-only reranking.
+    """
+    if gpu and (vram_mb is None or vram_mb >= 8192):
+        return "HIGH"
+    if not gpu and ram_mb >= 32768:
+        return "MID"
+    return "LOW"
+
+
 def probe(ttl_s: float = PROBE_TTL_S) -> dict:
     """Cached host-hardware probe. Never raises; see module docstring for the
     shape. Returns a fresh copy per call — callers can't mutate the cache."""
@@ -109,12 +128,14 @@ def probe(ttl_s: float = PROBE_TTL_S) -> dict:
             return dict(_cache[1])
 
     gpu, gpu_name, vram_mb, source = _probe_gpu()
+    ram_mb = _ram_mb()
     result = {
         "gpu": gpu,
         "gpu_name": gpu_name,
         "vram_mb": vram_mb,
-        "ram_mb": _ram_mb(),
+        "ram_mb": ram_mb,
         "source": source,
+        "tier": derive_tier(gpu, vram_mb, ram_mb),
     }
     with _cache_lock:
         _cache = (now, result)
