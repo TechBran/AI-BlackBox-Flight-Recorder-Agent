@@ -731,3 +731,187 @@ def test_launch_collision_race_falls_back_to_resume(monkeypatch, tmp_path):
     assert r.status_code == 201, r.text
     assert r.json()["resumed"] is True
     assert r.json()["session_name"] == "Brandon__terminal__root"
+
+
+# --- per-operator 12-session soft cap ------------------------------------
+
+
+def _cap_fixture_rows(op: str, n: int, provider: str = "terminal"):
+    """Build n LIVE sessions for ``op``: a matching (state_rows, live)
+    pair — every state row's name also appears in the zellij list, so
+    the state∩live intersection counts exactly n."""
+    state_rows: list[dict] = []
+    live: list[dict] = []
+    for i in range(n):
+        name = f"{op}__{provider}__app{i}__{1000 + i}"
+        state_rows.append({
+            "operator": op,
+            "provider": provider,
+            "app": f"app{i}",
+            "session_name": name,
+            "token_name": "master",
+            "created_at": "2026-07-03T00:00:00+00:00",
+            "expires_at": None,
+        })
+        live.append({"name": name, "created_at": "1h ago"})
+    return state_rows, live
+
+
+def test_launch_fork_at_cap_returns_409(monkeypatch):
+    """12 live sessions for the operator → a fork launch (always a
+    CREATE) must 409 with the exact toast message and never reach
+    launch_session."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_rows, live = _cap_fixture_rows("Brandon", 12)
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "list_sessions", return_value=live), \
+         patch.object(zellij_state, "list_for_operator", return_value=state_rows), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal", "fork": True},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == (
+        "Session limit reached (12). Close a session (12) first."
+    )
+    mock_launch.assert_not_called()
+
+
+def test_launch_resume_at_cap_still_succeeds(monkeypatch, tmp_path):
+    """Resuming an EXISTING session at the cap must still succeed — an
+    attach doesn't add a session. session_exists=True routes to the
+    ATTACH path, so the cap check must not fire even though the
+    operator already has 12 live sessions."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    # 11 unrelated live sessions + the resume target itself = 12 (at cap).
+    state_rows, live = _cap_fixture_rows("Brandon", 11)
+    state_rows.append({
+        "operator": "Brandon",
+        "provider": "terminal",
+        "app": None,
+        "session_name": "Brandon__terminal__root",
+        "token_name": "master",
+        "created_at": "2026-07-03T00:00:00+00:00",
+        "expires_at": None,
+    })
+    live.append({"name": "Brandon__terminal__root", "created_at": "1h ago"})
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=True), \
+         patch.object(zellij_client, "list_sessions", return_value=live), \
+         patch.object(zellij_state, "list_for_operator", return_value=state_rows), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["resumed"] is True
+    assert r.json()["session_name"] == "Brandon__terminal__root"
+    mock_launch.assert_not_called()
+
+
+def test_launch_below_cap_creates(monkeypatch, tmp_path):
+    """11 live sessions (one below the cap) → a create still succeeds."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    state_rows, live = _cap_fixture_rows("Brandon", 11)
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=live), \
+         patch.object(zellij_state, "list_for_operator", return_value=state_rows), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal", "fork": True},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    mock_launch.assert_called_once()
+
+
+def test_launch_cap_ignores_other_operators_sessions(monkeypatch, tmp_path):
+    """Another operator's 12 live sessions must NOT count toward this
+    operator's cap — the intersection is per-operator (state rows for
+    THIS op, {op}__ prefix)."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    other_rows, live = _cap_fixture_rows("Other", 12)
+
+    def fake_list_for_operator(op):
+        return other_rows if op == "Other" else []
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=live), \
+         patch.object(zellij_state, "list_for_operator", side_effect=fake_list_for_operator), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    mock_launch.assert_called_once()
+
+
+def test_launch_cap_count_failure_fails_open(monkeypatch, tmp_path):
+    """If the live-session count can't be computed (zellij list fails),
+    the launch proceeds — soft cap fails open, mirroring the attach
+    probe's 'can't tell -> proceed' philosophy."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+
+    from Orchestrator.cli_agent import zellij_client, zellij_state
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(zellij_state, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(zellij_state, "_STATE_PATH", state_dir / "zellij_sessions.json")
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", side_effect=RuntimeError("boom")), \
+         patch.object(zellij_client, "launch_session") as mock_launch:
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/launch",
+            json={"provider": "terminal"},
+            params={"op": "Brandon"},
+        )
+
+    assert r.status_code == 201, r.text
+    mock_launch.assert_called_once()

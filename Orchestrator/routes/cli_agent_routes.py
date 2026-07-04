@@ -379,6 +379,14 @@ async def ws_cli_agent(
 
 _ZELLIJ_WEB_PORT = 9097  # locked per zellij_client._DEFAULT_ZELLIJ_WEB_PORT
 
+# Soft per-operator cap on concurrent zellij sessions. Each claude/gemini/
+# codex/grok CLI is a full Node runtime (hundreds of MB RSS), and the
+# Android client forks a fresh session on every shortcut tap — without a
+# guardrail a tap-happy user could exhaust box RAM. Enforced on the CREATE
+# path of zellij_launch only (resume/attach never adds a session, so it
+# stays allowed at the cap; forks always create, so they ARE capped).
+_MAX_ZELLIJ_SESSIONS_PER_OPERATOR = 12
+
 # Provider id (Portal-facing) -> binary name for `zellij --session NAME -- BINARY`.
 # "terminal" is special: no binary, default shell.
 _ZELLIJ_PROVIDER_BINARIES: dict[str, Optional[str]] = {
@@ -550,6 +558,54 @@ def _zellij_session_url(session_name_: str, token_value: Optional[str] = None) -
 # (2026-05-26). Per-session tokens no longer exist; nothing to revoke.
 
 
+class _ZellijStateReadError(RuntimeError):
+    """``zellij_state.list_for_operator`` failed inside
+    :func:`_live_session_rows`.
+
+    Wraps the original exception (as ``__cause__``) so
+    :func:`zellij_list_sessions` can keep its distinct
+    "Failed to read Zellij state" 500 message, while the session-cap
+    check in :func:`zellij_launch` treats it like any other count
+    failure (fail-open).
+    """
+
+
+async def _live_session_rows(op: str) -> list[dict]:
+    """This operator's LIVE session state rows — the state∩live
+    intersection shared by :func:`zellij_list_sessions` (response body)
+    and the per-operator session-cap check in :func:`zellij_launch`
+    (count only).
+
+    A row counts iff its ``session_name`` starts with ``{op}__`` AND
+    that name is actually present in ``zellij list-sessions`` output.
+    A row that exists in state but not in Zellij is stale (operator may
+    have killed it out-of-band via ``zellij kill-session``) and omitted;
+    the next launch+reconcile cycle will clean it up.
+
+    Raises whatever :func:`zellij_client.list_sessions` raises
+    (including :class:`ZellijBinaryMissing`); a state-read failure is
+    re-raised as :class:`_ZellijStateReadError`. Callers own the
+    failure policy and logging.
+    """
+    zellij_sessions = await asyncio.to_thread(zellij_client.list_sessions)
+    try:
+        state_rows = await asyncio.to_thread(zellij_state.list_for_operator, op)
+    except Exception as exc:  # noqa: BLE001
+        raise _ZellijStateReadError(str(exc)) from exc
+
+    live_names = {s["name"] for s in zellij_sessions if "name" in s}
+    op_prefix = f"{op}__"
+    out: list[dict] = []
+    for row in state_rows:
+        name = row.get("session_name")
+        if not name or not name.startswith(op_prefix):
+            continue
+        if name not in live_names:
+            continue
+        out.append(row)
+    return out
+
+
 @router.post("/zellij/launch", status_code=201)
 async def zellij_launch(
     body: dict = Body(...),
@@ -709,6 +765,44 @@ async def zellij_launch(
             session_name_,
         )
     else:
+        # Per-operator soft session cap — CREATE path only. The attach
+        # probe above has decided this is NOT a resume (a resume never
+        # adds a session, so resuming at the cap stays allowed); a fork
+        # always creates, so it IS capped. Count = the same state∩live
+        # intersection zellij_list_sessions returns.
+        #
+        # Fail-open on count errors, mirroring the attach probe's
+        # "can't tell -> proceed" philosophy: the cap is a soft RAM
+        # guardrail, and refusing to launch because a COUNT couldn't be
+        # computed would turn a transient zellij hiccup into an outage.
+        live_count: Optional[int] = None
+        try:
+            live_count = len(await _live_session_rows(op))
+        except Exception as exc:  # noqa: BLE001 — fail-open, see above
+            logger.warning(
+                "zellij_launch: session-cap count for operator=%s failed "
+                "(%s) — proceeding without cap enforcement",
+                op,
+                exc,
+            )
+        if (
+            live_count is not None
+            and live_count >= _MAX_ZELLIJ_SESSIONS_PER_OPERATOR
+        ):
+            logger.info(
+                "zellij_launch: session cap REACHED for operator=%s "
+                "(%d live >= %d) — rejecting create of %s",
+                op,
+                live_count,
+                _MAX_ZELLIJ_SESSIONS_PER_OPERATOR,
+                session_name_,
+            )
+            raise HTTPException(
+                409,
+                f"Session limit reached ({_MAX_ZELLIJ_SESSIONS_PER_OPERATOR}). "
+                f"Close a session ({live_count}) first.",
+            )
+
         # Launch the session (blocking subprocess call).
         try:
             await asyncio.to_thread(
@@ -834,35 +928,25 @@ async def zellij_list_sessions(op: str = Query(...)):
     _require_zellij_backend()
 
     try:
-        zellij_sessions = await asyncio.to_thread(zellij_client.list_sessions)
+        live_rows = await _live_session_rows(op)
     except zellij_client.ZellijBinaryMissing as exc:
         raise HTTPException(503, str(exc))
+    except _ZellijStateReadError as exc:
+        logger.error(
+            "zellij_list_sessions: state.list_for_operator(%s) failed: %s",
+            op,
+            exc.__cause__,
+            exc_info=True,
+        )
+        raise HTTPException(500, f"Failed to read Zellij state: {exc.__cause__}")
     except Exception as exc:  # noqa: BLE001
         logger.error("zellij_list_sessions: list_sessions failed: %s", exc, exc_info=True)
         raise HTTPException(500, f"Failed to list Zellij sessions: {exc}")
 
-    try:
-        state_rows = await asyncio.to_thread(zellij_state.list_for_operator, op)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "zellij_list_sessions: state.list_for_operator(%s) failed: %s",
-            op,
-            exc,
-            exc_info=True,
-        )
-        raise HTTPException(500, f"Failed to read Zellij state: {exc}")
-
-    live_names = {s["name"] for s in zellij_sessions if "name" in s}
     out: list[dict] = []
-    op_prefix = f"{op}__"
-    for row in state_rows:
-        name = row.get("session_name")
-        if not name or not name.startswith(op_prefix):
-            continue
-        if name not in live_names:
-            continue
+    for row in live_rows:
         out.append({
-            "name": name,
+            "name": row.get("session_name"),
             "provider": row.get("provider"),
             "app": row.get("app"),
             "created_at": row.get("created_at"),
