@@ -23,7 +23,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -77,6 +79,36 @@ private data class KeySpec(
 
 private val ESC = byteArrayOf(0x1b.toByte())
 
+/**
+ * Resolve the bytes an ExtraKeysBar key emits, applying any armed sticky
+ * modifiers. Pure + [internal] so it's unit-testable without a Composable
+ * host — the regression guard for the "dead Esc" bug pins Esc → exactly
+ * `[0x1b]` under every modifier combination here.
+ *
+ *   - Ctrl + single ASCII letter → the control character (letter & 0x1f).
+ *   - Alt  + letter              → ESC-prefixed (meta) sequence.
+ *   - Shift + a key that defines [shiftBytes] → the xterm modified sequence.
+ *   - otherwise                  → the key's bare bytes (Esc, Tab, /, …).
+ *
+ * Esc carries `isLetter = false` and `shiftBytes = null`, so none of the
+ * modifier branches can ever fire for it — it resolves to its bare `[0x1b]`
+ * regardless of which modifiers are armed.
+ */
+internal fun resolveKeyBytes(
+    bytes: ByteArray,
+    isLetter: Boolean,
+    shiftBytes: ByteArray?,
+    ctrlArmed: Boolean,
+    altArmed: Boolean,
+    shiftArmed: Boolean,
+): ByteArray = when {
+    ctrlArmed && isLetter && bytes.size == 1 ->
+        byteArrayOf((bytes[0].toInt() and 0x1f).toByte())
+    altArmed && isLetter -> ESC + bytes
+    shiftArmed && shiftBytes != null -> shiftBytes
+    else -> bytes
+}
+
 @Composable
 fun ExtraKeysBar(
     onKeyBytes: (ByteArray) -> Unit,
@@ -99,19 +131,14 @@ fun ExtraKeysBar(
      * Locked state survives.
      */
     fun fireKey(spec: KeySpec) {
-        val raw = spec.bytes
-        val out: ByteArray = when {
-            // Ctrl + ASCII letter → control character (letter & 0x1f)
-            ctrl != StickyState.Off && spec.isLetter && raw.size == 1 -> {
-                val c = raw[0].toInt()
-                byteArrayOf((c and 0x1f).toByte())
-            }
-            // Alt + letter → ESC prefix
-            alt != StickyState.Off && spec.isLetter -> ESC + raw
-            // Shift + special key with alternate sequence (arrows, PgUp, …)
-            shift != StickyState.Off && spec.shiftBytes != null -> spec.shiftBytes
-            else -> raw
-        }
+        val out = resolveKeyBytes(
+            bytes = spec.bytes,
+            isLetter = spec.isLetter,
+            shiftBytes = spec.shiftBytes,
+            ctrlArmed = ctrl != StickyState.Off,
+            altArmed = alt != StickyState.Off,
+            shiftArmed = shift != StickyState.Off,
+        )
         onKeyBytes(out)
         if (ctrl == StickyState.Pending) ctrl = StickyState.Off
         if (alt == StickyState.Pending) alt = StickyState.Off
@@ -136,20 +163,36 @@ fun ExtraKeysBar(
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 2.dp,
     ) {
-        LazyRow(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(44.dp),
-            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // --- Esc ---
-            item {
+            // --- Esc — PINNED outside the scrollable LazyRow ------------------
+            // Root cause of the "dead Esc" regression: as LazyRow item[0] at the
+            // left scroll edge, Esc's tap was arbitrated by the row's horizontal
+            // drag/over-scroll detector — a tap with the tiniest sideways drift
+            // (or one landing while a busy claude TUI churns recomposition) got
+            // claimed as a scroll and the click never fired, so no 0x1b was sent.
+            // (The byte path itself is sound: fireKey → onKeyBytes →
+            // client.sendBytes emits exactly [0x1b] for Esc under every modifier
+            // state — see resolveKeyBytes.) A fixed slot never competes with the
+            // row's scroll, so a tap always lands as one 0x1b, and the interrupt
+            // key stays permanently visible.
+            Box(modifier = Modifier.padding(start = 6.dp, end = 4.dp)) {
                 ExtraKey(label = "Esc", widthDp = 48) {
                     fireKey(KeySpec("Esc", ESC))
                 }
             }
+            LazyRow(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                contentPadding = PaddingValues(start = 0.dp, top = 4.dp, end = 6.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             // --- Tab ---
             item {
                 ExtraKey(label = "Tab", widthDp = 48) {
@@ -338,6 +381,7 @@ fun ExtraKeysBar(
                 ExtraKey(label = "End", widthDp = 52) {
                     fireKey(KeySpec("End", byteArrayOf(0x1b, '['.code.toByte(), 'F'.code.toByte())))
                 }
+            }
             }
         }
     }

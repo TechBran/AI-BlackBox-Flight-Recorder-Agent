@@ -37,7 +37,8 @@ import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -58,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -324,112 +326,106 @@ fun ZellijTerminalScreen(
         // --- Terminal surface --------------------------------------------------
         //
         // The outer Box wraps the AndroidView<TerminalView> with a Compose
-        // pointerInput layer that intercepts vertical drags and converts them
-        // to terminal scroll operations BEFORE they reach the TerminalView.
+        // pointerInput layer that arbitrates EVERY pointer gesture over the
+        // terminal BEFORE it can reach the Termux TerminalView.
         //
-        // T23 device QA (2026-05-26): without this interception, claude turns
-        // on mouse-tracking mode (CSI ?1000h/?1003h/?1006h) and the underlying
-        // Termux TerminalView forwards every touch as an SGR mouse escape
-        // sequence ("<65;44;17M") that visibly accumulates in the prompt. The
-        // ExtraKeysBar's PgUp/PgDn buttons work but you can't actually swipe
-        // — which is the natural gesture on a phone.
+        // T23 device QA (2026-05-26) + Task 7 (2026-07-03): when claude turns
+        // on mouse-tracking mode (CSI ?1000h/?1003h/?1006h) the Termux
+        // TerminalView encodes EVERY touch it receives — including a
+        // slightly-draggy tap — as an SGR mouse report ("<65;44;17M") that
+        // renders into the prompt then vanishes on the next redraw (the
+        // "phantom characters on tap" bug). detectVerticalDragGestures only
+        // consumed drags PAST touch-slop, so a sub-slop draggy tap still leaked
+        // through to the TerminalView's encoder. The fix: while mouse tracking
+        // is active this layer OWNS the whole gesture — a tap becomes focus +
+        // keyboard ONLY (zero bytes), a deliberate vertical drag becomes a
+        // clean SGR wheel sequence, everything else is swallowed. Nothing raw
+        // ever reaches the TerminalView, so no mouse report can leak.
         //
-        // Implementation:
-        //   - detectVerticalDragGestures only fires after Compose's touchSlop
-        //     is exceeded vertically, so single taps still pass through to
-        //     the TerminalView for IME focus.
-        //   - dragAmount > 0 (finger moving down) → reveal history above
-        //     (topRow more negative) — matches platform-natural scroll.
-        //   - In alt-screen buffer (vim, nano, claude's full-screen TUI),
-        //     dispatch PgUp/PgDn over the WebSocket so the app handles it.
-        //   - change.consume() prevents the gesture from bubbling to the
-        //     TerminalView, so no mouse-tracking sequences get emitted.
+        // Live state, never cached: the scroll branch (see [scrollBranchFor])
+        // is chosen from the emulator flags read AT gesture time on every
+        // scroll, so a plain-terminal session that manually launches claude
+        // scrolls exactly like a claude-launched one — the branch keys off live
+        // emulator state, never the provider the session was launched as.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BbxBlack)
                 .pointerInput(Unit) {
-                    // Fractional pixels we haven't yet converted to a whole
-                    // scroll-line. Reset on drag start/end so a slow swipe
-                    // doesn't accumulate stale fractional movement.
-                    var accumulator = 0f
                     // ~20 device pixels per scroll line. Picked to feel close
                     // to the desktop wheel speed; tuneable in v1.1.
                     val pixelsPerLine = 20f
-                    detectVerticalDragGestures(
-                        onDragStart = { accumulator = 0f },
-                        onDragEnd = { accumulator = 0f },
-                        onDragCancel = { accumulator = 0f },
-                    ) { change, dragAmount ->
-                        accumulator += dragAmount
-                        val wholeLines = (accumulator / pixelsPerLine).toInt()
-                        if (wholeLines != 0) {
-                            val v = terminalView
-                            val emu = v?.mEmulator
-                            if (v != null && emu != null) {
-                                // Natural scroll: dragAmount > 0 (down) →
-                                // user wants HISTORY (scroll up in scrollback).
-                                // wholeLines > 0 → scroll up. We branch the
-                                // delivery on what the TUI expects.
-                                val scrollUp = wholeLines > 0
-                                when {
-                                    // Case 1: TUI has mouse tracking enabled
-                                    // (claude, htop, mc, any modern full-screen
-                                    // TUI). Browsers translate wheel events to
-                                    // SGR mouse buttons 64 (wheel up) / 65
-                                    // (wheel down). The TUI binds those to its
-                                    // own scroll-history command. T23 fix
-                                    // 2026-05-26: previously we sent PgUp/PgDn
-                                    // here, which claude ignores in alt-buffer
-                                    // mode — "swipes did nothing."
-                                    emu.isMouseTrackingActive -> {
-                                        val button = if (scrollUp) 64 else 65
-                                        // ESC[<{button};{col};{row}M
-                                        // col/row are 1-indexed; we use the
-                                        // top-left because wheel events don't
-                                        // care about position for most TUIs.
-                                        val seq = "[<$button;1;1M".toByteArray(
-                                            Charsets.US_ASCII,
-                                        )
-                                        repeat(kotlin.math.abs(wholeLines)) {
-                                            client.sendBytes(seq)
-                                        }
-                                    }
+                    val slop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        // LIVE mouse-tracking flag, read at gesture START (never
+                        // cached across gestures/sessions). When active we own
+                        // every event so the TerminalView never sees a touch to
+                        // encode → no phantom mouse report can leak. Consume the
+                        // down up-front to claim the gesture from the interop
+                        // child.
+                        val mouseTracking =
+                            terminalView?.mEmulator?.isMouseTrackingActive == true
+                        if (mouseTracking) down.consume()
 
-                                    // Case 2: alt-buffer TUI WITHOUT mouse
-                                    // tracking (rare — most modern TUIs turn
-                                    // on mouse tracking; this is the fallback
-                                    // for less / more / man pages etc.).
-                                    // PgUp/PgDn is the conventional binding.
-                                    emu.isAlternateBufferActive -> {
-                                        val seq: ByteArray = if (scrollUp) {
-                                            // PgUp = ESC[5~
-                                            byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte())
-                                        } else {
-                                            // PgDn = ESC[6~
-                                            byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte())
-                                        }
-                                        repeat(kotlin.math.abs(wholeLines)) {
-                                            client.sendBytes(seq)
-                                        }
-                                    }
+                        var pointerId = down.id
+                        var accumulator = 0f
+                        var totalY = 0f
+                        var totalX = 0f
+                        var isDrag = false
 
-                                    // Case 3: Normal-buffer shell (bash prompt
-                                    // after a command). The emulator owns the
-                                    // scrollback — manipulate topRow directly,
-                                    // no bytes go to the WebSocket.
-                                    else -> {
-                                        val delta = -wholeLines
-                                        val maxBack = -emu.screen.activeTranscriptRows
-                                        val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
-                                        v.topRow = newTop
-                                        v.onScreenUpdated()
-                                    }
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                ?: event.changes.firstOrNull()
+                                ?: continue
+                            pointerId = change.id
+                            val dy = change.position.y - change.previousPosition.y
+                            val dx = change.position.x - change.previousPosition.x
+                            totalY += dy
+                            totalX += dx
+
+                            if (change.changedToUpIgnoreConsumed()) {
+                                // Gesture ended without ever becoming a drag → a
+                                // tap. Under mouse tracking we do focus +
+                                // keyboard ourselves and swallow it (zero bytes);
+                                // otherwise let it fall through to the
+                                // TerminalView, whose onSingleTapUp does the same
+                                // focus/keyboard (preserving pre-Task-7 behavior).
+                                if (!isDrag && mouseTracking) {
+                                    focusAndShowKeyboard(terminalView)
+                                    change.consume()
                                 }
+                                break
                             }
-                            accumulator -= wholeLines * pixelsPerLine
+
+                            // Promote to a drag once vertical travel clears slop
+                            // and dominates horizontal (a real scroll, not a
+                            // sideways smudge).
+                            if (!isDrag &&
+                                kotlin.math.abs(totalY) > slop &&
+                                kotlin.math.abs(totalY) >= kotlin.math.abs(totalX)
+                            ) {
+                                isDrag = true
+                                accumulator = 0f
+                            }
+
+                            if (isDrag) {
+                                accumulator += dy
+                                val wholeLines = (accumulator / pixelsPerLine).toInt()
+                                if (wholeLines != 0) {
+                                    deliverScroll(terminalView, client, wholeLines)
+                                    accumulator -= wholeLines * pixelsPerLine
+                                }
+                                // A drag is always ours (both modes) — consume so
+                                // the TerminalView can't also encode it.
+                                change.consume()
+                            } else if (mouseTracking) {
+                                // Pre-drag movement under mouse tracking: swallow
+                                // so a draggy-tap never reaches the encoder.
+                                change.consume()
+                            }
                         }
-                        change.consume()
                     }
                 }
                 .onSizeChanged { _ ->
@@ -709,6 +705,92 @@ fun ZellijTerminalScreen(
 // =========================================================================
 // Helpers
 // =========================================================================
+
+/**
+ * Which mechanism delivers a scroll gesture to the running program.
+ *   - [WHEEL] : SGR mouse wheel report — the TUI has mouse tracking on.
+ *   - [PAGE]  : PgUp/PgDn — an alt-buffer TUI without mouse tracking.
+ *   - [LOCAL] : the emulator's own scrollback transcript — a normal shell.
+ */
+internal enum class ScrollBranch { WHEEL, PAGE, LOCAL }
+
+/**
+ * Choose the scroll-delivery mechanism from LIVE emulator flags read at the
+ * moment of the gesture. Mouse tracking wins even inside the alt buffer (that
+ * is how claude/htop expect the wheel); a no-mouse alt buffer gets PgUp/PgDn;
+ * a normal-buffer shell scrolls its local transcript. Pure + [internal] so a
+ * unit test can pin the ordering, and so the branch can NEVER key off the
+ * provider a session was launched as — only its live emulator state. A plain
+ * terminal that later runs `claude` therefore scrolls identically to a
+ * claude-launched session.
+ */
+internal fun scrollBranchFor(mouseTracking: Boolean, altBuffer: Boolean): ScrollBranch =
+    when {
+        mouseTracking -> ScrollBranch.WHEEL
+        altBuffer -> ScrollBranch.PAGE
+        else -> ScrollBranch.LOCAL
+    }
+
+/**
+ * The SGR mouse-wheel report for one wheel notch: `ESC [ < button ; 1 ; 1 M`,
+ * button 64 = wheel up ([scrollUp]) / 65 = wheel down. The leading 0x1B is
+ * REQUIRED — omitting it (the pre-Task-7 bug) made the report print as literal
+ * "[<64;1;1M" phantom text instead of scrolling. [internal] so the regression
+ * test can pin the 0x1B introducer.
+ */
+internal fun sgrWheelBytes(scrollUp: Boolean): ByteArray {
+    val button = if (scrollUp) 64 else 65
+    return byteArrayOf(0x1b) + "[<$button;1;1M".toByteArray(Charsets.US_ASCII)
+}
+
+/**
+ * Deliver [wholeLines] of scroll (>0 = toward history) to whichever mechanism
+ * the LIVE emulator state calls for right now. Re-reads the emulator flags on
+ * every call — no cached / launch-time state — so a manually-launched TUI
+ * inside a plain terminal is handled the instant it flips mouse tracking on.
+ */
+private fun deliverScroll(
+    v: TerminalView?,
+    client: ZellijWebSocketClient,
+    wholeLines: Int,
+) {
+    val emu = v?.mEmulator ?: return
+    val scrollUp = wholeLines > 0
+    val n = kotlin.math.abs(wholeLines)
+    when (scrollBranchFor(emu.isMouseTrackingActive, emu.isAlternateBufferActive)) {
+        ScrollBranch.WHEEL -> {
+            val seq = sgrWheelBytes(scrollUp)
+            repeat(n) { client.sendBytes(seq) }
+        }
+        ScrollBranch.PAGE -> {
+            val seq: ByteArray = if (scrollUp) {
+                byteArrayOf(0x1b, '['.code.toByte(), '5'.code.toByte(), '~'.code.toByte()) // PgUp
+            } else {
+                byteArrayOf(0x1b, '['.code.toByte(), '6'.code.toByte(), '~'.code.toByte()) // PgDn
+            }
+            repeat(n) { client.sendBytes(seq) }
+        }
+        ScrollBranch.LOCAL -> {
+            val delta = -wholeLines
+            val maxBack = -emu.screen.activeTranscriptRows
+            val newTop = (v.topRow + delta).coerceIn(maxBack, 0)
+            v.topRow = newTop
+            v.onScreenUpdated()
+        }
+    }
+}
+
+/**
+ * Focus the terminal and pop the soft keyboard — the entire effect of a tap
+ * while mouse tracking is active (zero bytes to the emulator). Mirrors the
+ * TerminalView's own onSingleTapUp, which handles the not-tracking case.
+ */
+private fun focusAndShowKeyboard(v: TerminalView?) {
+    v ?: return
+    v.requestFocus()
+    (v.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+        ?.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+}
 
 /**
  * Wrap [text] in bracketed-paste sequences: ESC[200~ before, ESC[201~ after.

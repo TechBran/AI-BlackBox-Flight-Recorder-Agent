@@ -74,6 +74,79 @@ class ZellijTerminalScreenTest {
         assertEquals('b'.code.toByte(), out[8])
     }
 
+    // ── scrollBranchFor (Task 7: live-state scrollback) ──────────────────
+
+    @Test
+    fun `mouse tracking selects the SGR wheel branch`() {
+        // A TUI with mouse tracking on (claude/htop) gets wheel reports.
+        assertEquals(ScrollBranch.WHEEL, scrollBranchFor(mouseTracking = true, altBuffer = false))
+    }
+
+    @Test
+    fun `mouse tracking wins even inside the alt buffer`() {
+        // claude runs in the alt buffer AND with mouse tracking — the wheel
+        // must win, never PgUp. This is the exact combination Brandon's
+        // plain-terminal-then-manual-claude repro produces.
+        assertEquals(ScrollBranch.WHEEL, scrollBranchFor(mouseTracking = true, altBuffer = true))
+    }
+
+    @Test
+    fun `alt buffer without mouse tracking selects PgUp-PgDn`() {
+        // less / man / a no-mouse pager.
+        assertEquals(ScrollBranch.PAGE, scrollBranchFor(mouseTracking = false, altBuffer = true))
+    }
+
+    @Test
+    fun `normal buffer selects the local transcript branch`() {
+        // A bash prompt after a command — emulator owns the scrollback.
+        assertEquals(ScrollBranch.LOCAL, scrollBranchFor(mouseTracking = false, altBuffer = false))
+    }
+
+    @Test
+    fun `branch is a pure function of the two live flags`() {
+        // The delivery mechanism depends ONLY on the live emulator flags —
+        // never on the provider a session was launched as. So a session
+        // "launched as terminal" now running claude (mouseTracking=true) yields
+        // the SAME branch as a session "launched as claude": WHEEL. Encoding
+        // that invariance here is the guard against re-introducing any
+        // launch-provider dependency.
+        assertEquals(
+            scrollBranchFor(mouseTracking = true, altBuffer = true),   // manual claude
+            scrollBranchFor(mouseTracking = true, altBuffer = true),   // launched claude
+        )
+    }
+
+    // ── sgrWheelBytes (Task 7: the 0x1B introducer regression) ───────────
+
+    @Test
+    fun `SGR wheel report carries the required ESC introducer`() {
+        // The pre-Task-7 bug omitted 0x1B, so "[<64;1;1M" printed as literal
+        // phantom text instead of scrolling. Wheel-up = button 64.
+        val up = sgrWheelBytes(scrollUp = true)
+        val expectedUp = byteArrayOf(
+            0x1b, '['.code.toByte(), '<'.code.toByte(),
+            '6'.code.toByte(), '4'.code.toByte(),
+            ';'.code.toByte(), '1'.code.toByte(),
+            ';'.code.toByte(), '1'.code.toByte(),
+            'M'.code.toByte(),
+        )
+        assertArrayEquals(expectedUp, up)
+        assertEquals("must start with the ESC introducer", 0x1b.toByte(), up[0])
+    }
+
+    @Test
+    fun `SGR wheel report uses button 65 for scroll down`() {
+        val down = sgrWheelBytes(scrollUp = false)
+        val expectedDown = byteArrayOf(
+            0x1b, '['.code.toByte(), '<'.code.toByte(),
+            '6'.code.toByte(), '5'.code.toByte(),
+            ';'.code.toByte(), '1'.code.toByte(),
+            ';'.code.toByte(), '1'.code.toByte(),
+            'M'.code.toByte(),
+        )
+        assertArrayEquals(expectedDown, down)
+    }
+
     // ── CliAgentInternalState.Terminal tuple ─────────────────────────────
 
     @Test
