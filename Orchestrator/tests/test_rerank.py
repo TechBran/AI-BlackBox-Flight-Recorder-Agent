@@ -152,7 +152,7 @@ def test_rerank_models_table_shape():
         "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu",
         "llm-rerank-gemini-flash", "llm-rerank-gpt-mini",
         "llm-rerank-claude-haiku", "llm-rerank-grok",
-        "voyage-rerank-2.5", "cohere-rerank-4"}
+        "voyage-rerank-2.5", "cohere-rerank-4", "vertex-semantic-ranker"}
     for slug, entry in rerank.RERANK_MODELS.items():
         assert slug == slug.lower() and "_" not in slug, "slugs are kebab-case"
         for field in ("provider", "model_id", "label",
@@ -1324,3 +1324,192 @@ def test_no_query_instruction_for_cloud_rerankers(monkeypatch, slug, provider,
         rerank.score("fix the truncation", ["some passage"])
     assert captured["json"]["query"] == "fix the truncation"
     assert "Instruct: Given a search query" not in captured["json"]["query"]
+
+
+# ── M7: Vertex semantic-ranker (GCP service-account OAuth) ────────────────────
+# Dedicated cross-encoder via the Discovery Engine Ranking API. Creds come from
+# the ambient GCP service account (GOOGLE_APPLICATION_CREDENTIALS, set +
+# live-mirrored by the credentials upload route). Tests MOCK google.auth.default
+# + credentials.refresh + requests.post — NO real google.auth or network.
+
+_VERTEX_SLUG = "vertex-semantic-ranker"
+_VERTEX_URL_TMPL = ("https://discoveryengine.googleapis.com/v1/projects/{proj}"
+                    "/locations/global/rankingConfigs/"
+                    "default_ranking_config:rank")
+
+
+class _FakeCreds:
+    """Stand-in for google.auth Credentials: refresh() sets .token (or raises)."""
+
+    def __init__(self, token="vertex-token", refresh_raises=False):
+        self._token, self._raise = token, refresh_raises
+        self.token = None
+
+    def refresh(self, request):
+        if self._raise:
+            raise RuntimeError("refresh failed")
+        self.token = self._token
+
+
+def _patch_vertex_auth(monkeypatch, creds, project):
+    """Patch google.auth.default → (creds, project) — the real
+    _vertex_token_and_project then runs (refresh + project resolution)."""
+    import google.auth
+    monkeypatch.setattr(google.auth, "default", lambda *a, **k: (creds, project))
+
+
+def test_vertex_entry_schema():
+    """The M7.2 entry: gcp_service_account auth, no key_env, cloud, all tiers,
+    1500ms ceiling, honest 'Advanced' note, NO Qwen prefix, no local footprint."""
+    e = rerank.RERANK_MODELS[_VERTEX_SLUG]
+    assert e["provider"] == "vertex"
+    assert e["auth_kind"] == "gcp_service_account"
+    assert e["key_env"] is None
+    assert e["privacy"] == "cloud"
+    assert set(e["tiers"]) == {"LOW", "MID", "HIGH"}
+    assert e["preflight_ceiling_ms"] == 1500
+    assert e["preflight_passage_n"] == 1
+    assert e["model_id"] == "semantic-ranker-default-004"
+    assert "query_instruction" not in e
+    assert "vram_gb" not in e and "ram_gb" not in e
+    assert "Advanced" in e["quality_note"]
+
+
+def test_score_vertex_maps_by_record_id(monkeypatch):
+    """Out-of-order {id, score} records map back onto passage positions by the
+    str(original_index) id we sent; the request carries the raw query + all
+    records (no topN truncation)."""
+    monkeypatch.setattr(rerank, "_vertex_token_and_project",
+                        lambda s: ("tok", "my-proj"))
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, **k):
+        captured["url"], captured["headers"] = url, headers
+        captured["json"], captured["timeout"] = json, timeout
+        return FakeResp(200, {"records": [
+            {"id": "2", "score": 0.9},
+            {"id": "0", "score": 0.1},
+            {"id": "1", "score": 0.5},
+        ]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG, timeout_s="9"):
+        got = rerank.score("the query", ["pA", "pB", "pC"])
+    assert got == [0.1, 0.5, 0.9]                # scattered by record id
+    assert captured["url"] == _VERTEX_URL_TMPL.format(proj="my-proj")
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert captured["headers"]["X-Goog-User-Project"] == "my-proj"
+    assert captured["json"]["model"] == "semantic-ranker-default-004"
+    assert captured["json"]["query"] == "the query"
+    assert [r["id"] for r in captured["json"]["records"]] == ["0", "1", "2"]
+    assert [r["content"] for r in captured["json"]["records"]] == \
+        ["pA", "pB", "pC"]
+    assert "topN" not in captured["json"]        # request ALL back
+    assert captured["timeout"] == 9.0
+
+
+def test_score_vertex_project_id_env_override(monkeypatch):
+    """The real _vertex_token_and_project mints a token (google.auth.default +
+    refresh) and prefers VERTEX_PROJECT_ID over the SA's default project."""
+    _patch_vertex_auth(monkeypatch, _FakeCreds(token="tok-live"),
+                       "sa-default-proj")
+    monkeypatch.setenv("VERTEX_PROJECT_ID", "override-proj")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, **k):
+        captured["url"], captured["headers"] = url, headers
+        return FakeResp(200, {"records": [{"id": "0", "score": 0.7}]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        got = rerank.score("q", ["only passage"])
+    assert got == [0.7]
+    assert "projects/override-proj/" in captured["url"]
+    assert captured["headers"]["Authorization"] == "Bearer tok-live"
+    assert captured["headers"]["X-Goog-User-Project"] == "override-proj"
+
+
+def test_score_vertex_no_creds_returns_none(monkeypatch):
+    """google.auth.default raising (no ambient creds) → None, ZERO HTTP calls,
+    never raises."""
+    import google.auth
+    from google.auth.exceptions import DefaultCredentialsError
+
+    def raise_no_creds(*a, **k):
+        raise DefaultCredentialsError("no creds")
+
+    monkeypatch.setattr(google.auth, "default", raise_no_creds)
+
+    def boom(*a, **k):
+        raise AssertionError("must not POST without creds")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_vertex_refresh_failure_returns_none(monkeypatch):
+    """A credentials.refresh() blow-up → None, ZERO HTTP calls (never raises)."""
+    _patch_vertex_auth(monkeypatch, _FakeCreds(refresh_raises=True), "my-proj")
+
+    def boom(*a, **k):
+        raise AssertionError("must not POST when refresh fails")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_vertex_no_project_returns_none(monkeypatch):
+    """Creds refresh OK but neither a default project nor VERTEX_PROJECT_ID →
+    None (no project = nowhere to send the request)."""
+    monkeypatch.delenv("VERTEX_PROJECT_ID", raising=False)
+    _patch_vertex_auth(monkeypatch, _FakeCreds(), None)
+
+    def boom(*a, **k):
+        raise AssertionError("must not POST without a project")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_vertex_http_error_returns_none(monkeypatch):
+    """A non-200 ranking response → None (never raises)."""
+    monkeypatch.setattr(rerank, "_vertex_token_and_project",
+                        lambda s: ("tok", "proj"))
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda *a, **k: FakeResp(500, {}))
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_score_vertex_count_mismatch_returns_none(monkeypatch):
+    """Fewer records than passages → None (a partial result can't rank on one
+    scale)."""
+    monkeypatch.setattr(rerank, "_vertex_token_and_project",
+                        lambda s: ("tok", "proj"))
+    monkeypatch.setattr(
+        rerank.requests, "post",
+        lambda *a, **k: FakeResp(200, {"records": [{"id": "0", "score": 1.0}]}))
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        assert rerank.score("q", ["p0", "p1", "p2"]) is None
+
+
+def test_score_vertex_truncates_record_content(monkeypatch):
+    """Each record's content is truncated to the ~1024-token safe char budget
+    before sending (Vertex's per-record limit)."""
+    monkeypatch.setattr(rerank, "_vertex_token_and_project",
+                        lambda s: ("tok", "proj"))
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, **k):
+        captured["json"] = json
+        return FakeResp(200, {"records": [{"id": "0", "score": 0.5}]})
+
+    monkeypatch.setattr(rerank.requests, "post", fake_post)
+    with pin_cfg("rerank", provider="vertex", model=_VERTEX_SLUG):
+        rerank.score("q", ["Z" * 5000])
+    content = captured["json"]["records"][0]["content"]
+    assert len(content) == rerank._VERTEX_CONTENT_CHARS
+    assert len(content) < 5000

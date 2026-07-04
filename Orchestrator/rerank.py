@@ -273,6 +273,27 @@ RERANK_MODELS = {
         "preflight_ceiling_ms": 1200,
         "preflight_passage_n": 1,
     },
+    # Google Vertex AI semantic-ranker (M7.2) — a dedicated cross-encoder via the
+    # Discovery Engine Ranking API. auth_kind gcp_service_account (NOT a bare
+    # key): creds come from the ambient GCP service account
+    # (GOOGLE_APPLICATION_CREDENTIALS, set + live-mirrored by the credentials
+    # upload route), so key_env is None. Labeled "Advanced" honestly — it needs a
+    # GCP project + SA + discoveryengine enablement, far heavier than paste-a-key
+    # (Voyage is the recommended cloud default). No Qwen prefix; no local footprint.
+    "vertex-semantic-ranker": {
+        "provider": "vertex",
+        "model_id": "semantic-ranker-default-004",
+        "label": "Google Vertex semantic-ranker (cloud)",
+        "max_input_tokens": 1024,  # ~per-record content limit (truncated in-code)
+        "quality_note": "Dedicated cross-encoder (Advanced: requires GCP project + service-account setup)",
+        "auth_kind": "gcp_service_account",
+        "key_env": None,
+        "cost_note": "Vertex AI Ranking API — ~$1/1K queries; needs a GCP project + service account",
+        "privacy": "cloud",
+        "tiers": ["LOW", "MID", "HIGH"],
+        "preflight_ceiling_ms": 1500,
+        "preflight_passage_n": 1,
+    },
 }
 
 _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
@@ -723,9 +744,96 @@ def _score_cohere(query: str, passages: list[str],
     return _scatter_relevance_scores(resp.json(), len(passages))
 
 
+# ── Google Vertex semantic-ranker (M7.2) ──────────────────────────────────────
+# The Discovery Engine Ranking API, reached over raw REST (no google-cloud SDK —
+# only google.auth, transitively present, for the OAuth token). Auth is a GCP
+# SERVICE ACCOUNT, not a bearer key: google.auth.default() picks up the ambient
+# GOOGLE_APPLICATION_CREDENTIALS (set + live-mirrored by the credentials upload
+# route), and we refresh it to mint an access token. Each passage becomes a
+# record {id: str(original_index), content}; scores map back by that id.
+
+# Vertex caps a record's content at ~1024 tokens; truncate to a safe char budget
+# (~3 chars/token) before sending so an over-long passage can't 400 the batch.
+_VERTEX_CONTENT_CHARS = 1024 * 3
+
+
+def _vertex_token_and_project(settings: dict) -> "tuple[str, str] | tuple[None, None]":
+    """Mint a (bearer token, project id) for the Vertex Ranking API from the
+    ambient GCP service-account creds. google.auth.default() → (creds, project);
+    refresh the creds to get an access token. Project prefers a VERTEX_PROJECT_ID
+    env override, else the SA JSON's project. Returns (None, None) on ANY auth
+    failure (no creds, refresh error) or a missing token/project — so the caller
+    degrades to None and NEVER raises (audit A9). google.auth is imported lazily
+    (it is a transitive dep — keep the module import surface minimal + robust)."""
+    try:
+        import google.auth
+        import google.auth.transport.requests as _ga_transport
+        creds, default_project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(_ga_transport.Request())
+        token = creds.token
+    except Exception:  # noqa: BLE001 - absent creds / refresh failure → inert
+        return None, None
+    if not token:
+        return None, None
+    project = os.getenv("VERTEX_PROJECT_ID") or default_project
+    if not project:
+        return None, None
+    return token, project
+
+
+def _scatter_vertex_records(payload: "dict | None",
+                            n: int) -> "list[float] | None":
+    """Scatter Vertex's {records:[{id, score}]} back onto passage positions by
+    the str(original_index) id we sent (init None, verify no gap). None on ANY
+    count/id/shape anomaly — a missing, duplicate, or out-of-range id can't rank
+    on one scale, so the retriever falls through to its un-reranked ranking."""
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or len(records) != n:
+        return None
+    out: list[float | None] = [None] * n
+    for item in records:
+        try:
+            idx = int(item["id"])
+            sc = float(item["score"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (0 <= idx < n):          # out of range → None (never IndexError)
+            return None
+        out[idx] = sc
+    if any(v is None for v in out):     # a duplicate/missing id left a gap
+        return None
+    return out  # type: ignore[return-value]
+
+
 def _score_vertex(query: str, passages: list[str],
                   settings: dict) -> list[float] | None:
-    return None  # M7: Vertex semantic-ranker (GCP SA OAuth)
+    """Vertex AI semantic-ranker (dedicated cross-encoder) via the Discovery
+    Engine Ranking API. Mints an OAuth token + resolves the project from the
+    ambient GCP service account, POSTs the query + all passages as records (each
+    content truncated to the ~1024-token limit), and scatters {id, score} back
+    onto passage positions. None on any auth/project/HTTP/count/id anomaly
+    (never raises — the dispatcher backstops transport blow-ups too)."""
+    if not passages:
+        return None
+    token, project = _vertex_token_and_project(settings)
+    if not token or not project:
+        return None
+    records = [{"id": str(i), "content": (p or "")[:_VERTEX_CONTENT_CHARS]}
+               for i, p in enumerate(passages)]
+    resp = requests.post(
+        f"https://discoveryengine.googleapis.com/v1/projects/{project}"
+        f"/locations/global/rankingConfigs/default_ranking_config:rank",
+        headers={"Authorization": f"Bearer {token}",
+                 "X-Goog-User-Project": project,
+                 "content-type": "application/json"},
+        json={"model": settings["model_id"], "query": query,
+              "records": records},
+        timeout=settings["timeout_s"],
+    )
+    if resp.status_code != 200:
+        return None
+    return _scatter_vertex_records(resp.json(), len(passages))
 
 
 # ── LLM-as-reranker (M6) ──────────────────────────────────────────────────────
