@@ -29,9 +29,9 @@ from Orchestrator.config import CFG, VOL_PATH
 from Orchestrator.embeddings import search as _emb
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.fossils import (
+    extract_snapshot_content,
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
-    window_snapshot_text,
 )
 from Orchestrator.volume import read_text_safe
 
@@ -208,13 +208,23 @@ def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
     min([retrieval] rerank_candidate_n (fallback 40), len(ranked)) of the
     POST-recency ordering. One passage per pool member, all on ONE scale
     ([rerank] passage_chars, fallback 4096 ≈ the 1024-token chunk budget):
-      - candidates with chunk provenance (v2 store collapse, ordinal >= 1):
-        the best-matched chunk's window via fossils.window_snapshot_text
-        (M8's span re-derivation; model_key = the store's slug — the
-        ordinals came from THAT store's chunker config);
-      - keyword-only / no-provenance candidates (ordinal None or 0): the
-        same helper degrades to the head window, so exact-string keyword
-        wins are scored on the same scale, not annihilated (audit A9).
+    the BODY-ONLY content of each snapshot — extract_snapshot_content(text)
+    head-truncated to passage_chars.
+
+    M14.2 (measured, 2026-07-04): passages are body-only, NOT the M8
+    chunk-ordinal window. The envelope (=== START SNAPSHOT === / CROSS-FILE
+    BEACON / VOLUME TRACKER / GAUGES) is near-identical across the corpus and
+    measurably sabotages cross-encoders — reranking on body-only text lifted
+    Vertex recall@10 0.654 -> 0.846 (+29%). The chunk-ordinal window was
+    designed for envelope-inclusive chunk space and is inconsistent with body
+    extraction; the body head (user message + AI response start) is the most
+    representative content for reranking, so keyword-only and chunk-provenance
+    candidates alike are scored on the clean body head (audit A9's
+    same-scale-for-all invariant holds — the ordinal is simply no longer
+    consulted). Limitation: a plain head-cut can clip a very long body before
+    its most relevant turn; a smarter body-window is a possible refinement, not
+    this task.
+
     Any pool member that cannot be decoded aborts the stage (partial pools
     cannot be ranked on one scale) -> None.
 
@@ -238,7 +248,6 @@ def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
         if pool_n <= 0:
             return None
         passage_chars = CFG.getint("rerank", "passage_chars", fallback=4096)
-        model_key = getattr(store, "slug", None)
         pool = [sid for sid, _ in ranked[:pool_n]]
         passages = []
         for sid in pool:
@@ -247,11 +256,11 @@ def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
             if not text:
                 _log_rerank_fallthrough(f"passage decode failed for {sid}")
                 return None
-            passages.append(
-                window_snapshot_text(
-                    text, ord_by_id.get(sid), passage_chars, model_key
-                )
-            )
+            # M14.2: body-only passage — strip the bookkeeping envelope, then
+            # head-cut to passage_chars. ord_by_id/store are no longer consulted
+            # for passage building (see docstring); the ordinal fetch is kept
+            # upstream for provenance mode.
+            passages.append(extract_snapshot_content(text)[:passage_chars])
         scores = _rerank.score(query, passages)
         if scores is None or len(scores) != len(passages):
             _log_rerank_fallthrough("scorer returned no usable scores")

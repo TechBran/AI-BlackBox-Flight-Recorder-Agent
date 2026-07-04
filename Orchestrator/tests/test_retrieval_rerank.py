@@ -242,7 +242,13 @@ def test_keyword_only_candidates_get_passages_and_scores(world, monkeypatch):
     """Pool = all 4 fused candidates (rerank_candidate_n=40 > pool). The fake
     scorer must see EXACTLY 4 passages — the keyword-only KW1 (never in the
     semantic channel) is decoded and scored on the same scale (audit A9:
-    otherwise the keyword channel's exact-string wins are annihilated)."""
+    otherwise the keyword channel's exact-string wins are annihilated).
+
+    M14.2: passages are now body-only content head-cuts
+    (extract_snapshot_content truncated to passage_chars), NOT chunk-ordinal
+    windows — the chunk ordinal no longer flows into passage building. The IDX
+    fixture texts carry no envelope markers, so extract_snapshot_content
+    returns them unchanged (and they fit under passage_chars)."""
     seen = {}
     monkeypatch.setattr(rerank_mod, "available", lambda: True)
 
@@ -251,11 +257,6 @@ def test_keyword_only_candidates_get_passages_and_scores(world, monkeypatch):
         return [0.0] * len(ps)     # all ties -> stable sort keeps the order
 
     monkeypatch.setattr(rerank_mod, "score", fake_score)
-    windowed = []
-    monkeypatch.setattr(
-        retrieval, "window_snapshot_text",
-        lambda text, ordinal, budget, model_key: (
-            windowed.append((text, ordinal, budget, model_key)) or text))
 
     store = make_store(ordinals={"A": 2, "B": 0})
     with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
@@ -266,17 +267,57 @@ def test_keyword_only_candidates_get_passages_and_scores(world, monkeypatch):
     assert len(seen["passages"]) == 4              # every pool member scored
     assert seen["passages"] == [IDX[sid]["text"]
                                 for sid in ("A", "KW1", "B", "C")]
-    # Passage wiring: chunk provenance flows into the M8 window helper —
-    # A's winning chunk ordinal 2; B's whole-doc win 0; KW1 (keyword-only,
-    # no semantic identity) None -> head window. Budget + the STORE's slug
-    # (the ordinals came from that store's chunker config) pass through.
-    assert [(o, b, mk) for _t, o, b, mk in windowed] == [
-        (2, 1234, "test-slug"), (None, 1234, "test-slug"),
-        (0, 1234, "test-slug"), (None, 1234, "test-slug")]
     # all-tie scores: the stable sort preserves the incoming post-recency
     # ORDER (scores become rank-space values, so compare ids, not floats).
     assert [sid for sid, _ in results] == [
         sid for sid, _ in expected_flag_off()]
+
+
+def test_rerank_passages_are_body_only_not_the_envelope(world, monkeypatch):
+    """M14.2: the passage handed to rerank.score() for a full-envelope snapshot
+    is the body-only content (from 'Raw Session Log' onward), NOT the
+    CROSS-FILE BEACON / VOLUME TRACKER / GAUGES bookkeeping that measurably
+    sabotages the cross-encoder (Vertex +29% recall@10 on body-only). Also
+    proves the passage_chars head-cut."""
+    envelope = (
+        "=== START SNAPSHOT — UTC 2026-07-04T00:00:00Z — SNAP-1 ===\n"
+        "CROSS-FILE BEACON\n"
+        "===============================\n"
+        "VOLUME TRACKER\nTail: SNAP-0\n\n"
+        "GAUGES\nOPERATOR: alice\n\n"
+        "SNAPSHOT BODY\n\nKernel Index\n- Tail: SNAP-0\n\n"
+        "Raw Session Log\n"
+        "- [1] user: how do I strip the envelope for reranking?\n"
+        "- [2] assistant: build the passage from extract_snapshot_content.\n"
+    )
+    seen = {}
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+
+    def fake_score(q, ps):
+        seen["passages"] = list(ps)
+        return [0.0] * len(ps)
+
+    monkeypatch.setattr(rerank_mod, "score", fake_score)
+    # Every pool member decodes to the same full-envelope snapshot text.
+    monkeypatch.setattr(retrieval, "_decode_snapshot_text", lambda meta: envelope)
+
+    with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
+        with pin_cfg("rerank", passage_chars="4096"):
+            retrieval.retrieve("q", "system", k=10, store=make_store())
+
+    assert seen["passages"]
+    for passage in seen["passages"]:
+        assert passage.startswith("Raw Session Log")
+        assert "how do I strip the envelope for reranking?" in passage
+        assert "CROSS-FILE BEACON" not in passage
+        assert "VOLUME TRACKER" not in passage
+        assert "GAUGES" not in passage
+
+    # passage_chars is a head-cut of the body content.
+    with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
+        with pin_cfg("rerank", passage_chars="10"):
+            retrieval.retrieve("q", "system", k=10, store=make_store())
+    assert all(p == "Raw Sessio" for p in seen["passages"])
 
 
 def test_legacy_store_without_ordinal_support_still_reranks(world, monkeypatch):
