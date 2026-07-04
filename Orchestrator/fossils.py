@@ -157,6 +157,58 @@ def window_snapshot_text(text: str, best_ordinal, budget_chars: int,
         return cap_chars(text, budget_chars)
 
 
+# ── M14: body-only extraction for RANKING (rerank passages + embed chunks) ────
+# Every snapshot text leads with a fixed bookkeeping envelope
+# (=== START SNAPSHOT … === / CROSS-FILE BEACON / VOLUME TRACKER / GAUGES) that
+# is near-identical across the whole corpus and measurably sabotages ranking:
+# reranking on body-only text lifted Vertex recall@10 0.654 -> 0.846 (+29%) /
+# MRR 0.352 -> 0.495 (+41%) on 26 labeled same-corpus queries (2026-07-04), and
+# the envelope also dilutes every embedding chunk (chunk-0 becomes a
+# near-identical boilerplate vector). This helper returns the content-bearing
+# region only — the user+AI turns and any distilled summary — so the reranker
+# and (M14.3+) the embedder score the meat, not the bookkeeping.
+
+# Content markers, most-specific first. "Raw Session Log" is the primary cut
+# (the turns + any Release Notes/summary after them); "SNAPSHOT BODY" is the
+# fallback (still drops BEACON/TRACKER/GAUGES, keeps Kernel Index/Provenance).
+_CONTENT_MARKERS = ("Raw Session Log", "SNAPSHOT BODY")
+
+
+def extract_snapshot_content(text: str) -> str:
+    """Return the content-bearing portion of a snapshot for RANKING.
+
+    Strips the leading bookkeeping envelope, returning from the first content
+    marker onward:
+      1. "Raw Session Log" — the user+AI turns plus any Release Notes/summary
+         that follows them (dense, keyword-rich content) — the primary cut;
+      2. else "SNAPSHOT BODY" — fallback: still drops the worst offenders
+         (BEACON/TRACKER/GAUGES) though it keeps the Kernel Index / Context
+         Provenance bookkeeping below it;
+      3. else the full text unchanged — a snapshot (or non-snapshot text)
+         without these markers is NEVER reduced to empty.
+
+    Uses the FIRST occurrence of each marker and returns from the start of that
+    marker's line (snapping to line start so an indented marker line still
+    drops everything above it). Only the leading envelope is stripped — the
+    content region is returned verbatim. Never raises; empty in -> empty out.
+    """
+    if not text:
+        return text
+    try:
+        for marker in _CONTENT_MARKERS:
+            idx = text.find(marker)  # FIRST occurrence
+            if idx != -1:
+                # Return from the start of the marker's own line. rfind("\n")
+                # -> -1 when the marker is on the first line, so +1 yields 0.
+                line_start = text.rfind("\n", 0, idx) + 1
+                return text[line_start:]
+        return text
+    except Exception:
+        # Never-raise contract: on any unexpected failure, degrade to the full
+        # text (ranking on the envelope-inclusive text, never on nothing).
+        return text
+
+
 def _decode_scored_snapshots(scored, operator: str,
                              window_budget_chars: Optional[int] = None) -> List[str]:
     """Shared decode for the retrieve()-shim retrievers: byte-offset decode of
