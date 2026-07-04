@@ -148,14 +148,20 @@ RERANK_TIERS = {"LOW", "MID", "HIGH"}
 
 
 def test_rerank_models_table_shape():
-    assert set(rerank.RERANK_MODELS) == {"qwen3-reranker-0.6b", "qwen3-reranker-4b"}
+    assert set(rerank.RERANK_MODELS) == {
+        "qwen3-reranker-0.6b", "qwen3-reranker-4b", "qwen3-reranker-0.6b-cpu"}
     for slug, entry in rerank.RERANK_MODELS.items():
         assert slug == slug.lower() and "_" not in slug, "slugs are kebab-case"
-        for field in ("provider", "model_id", "label", "vram_gb",
+        for field in ("provider", "model_id", "label",
                       "max_input_tokens", "quality_note"):
             assert field in entry, f"{slug} missing {field}"
-        assert entry["provider"] == "vllm"
-        assert isinstance(entry["vram_gb"], float)
+        # Local footprint field (M10 wizard display): GPU entries carry vram_gb,
+        # the in-process CPU entry ram_gb — both floats.
+        if entry["provider"] == "cpu":
+            assert isinstance(entry["ram_gb"], float), f"{slug}: ram_gb float"
+        else:
+            assert entry["provider"] == "vllm"
+            assert isinstance(entry["vram_gb"], float), f"{slug}: vram_gb float"
 
 
 @pytest.mark.parametrize("slug", list(rerank.RERANK_MODELS))
@@ -378,6 +384,85 @@ def test_dispatcher_never_raises(monkeypatch):
 def test_known_providers_set():
     assert rerank.KNOWN_PROVIDERS == {
         "null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
+
+
+# ── M5: in-process CPU CrossEncoder provider ──────────────────────────────────
+# The real sentence-transformers/torch stack is NOT installed here (LOW box +
+# CI) — _score_cpu lazy-imports it, so we inject a fake `sentence_transformers`
+# module exposing CrossEncoder via sys.modules. This is the seam that proves the
+# lazy `from sentence_transformers import CrossEncoder` resolves without the
+# real dep. The CPU model cache is process state cleared by reset_preflight()
+# (the autouse _clean_preflight fixture isolates every test).
+
+def _install_fake_cross_encoder(monkeypatch, predict_impl=None):
+    """Inject a fake sentence_transformers module; return the FakeCrossEncoder
+    class whose .constructed (model_ids passed to __init__) and .last_pairs
+    record calls. predict_impl(pairs) -> scores; default returns 0.5 per pair."""
+    import sys
+    import types
+
+    class FakeCrossEncoder:
+        constructed: list = []
+        last_pairs = None
+
+        def __init__(self, model_id, *a, **k):
+            FakeCrossEncoder.constructed.append(model_id)
+
+        def predict(self, pairs, *a, **k):
+            FakeCrossEncoder.last_pairs = list(pairs)
+            if predict_impl is not None:
+                return predict_impl(FakeCrossEncoder.last_pairs)
+            return [0.5] * len(FakeCrossEncoder.last_pairs)
+
+    mod = types.ModuleType("sentence_transformers")
+    mod.CrossEncoder = FakeCrossEncoder
+    monkeypatch.setitem(sys.modules, "sentence_transformers", mod)
+    return FakeCrossEncoder
+
+
+def test_score_cpu_returns_aligned_floats(monkeypatch):
+    """A fake CrossEncoder's per-pair scores come back as python floats aligned
+    to `passages` (the real lib returns an ndarray → numpy→float conversion)."""
+    fake = _install_fake_cross_encoder(
+        monkeypatch, predict_impl=lambda pairs: [0.1, 0.9, 0.5])
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        got = rerank.score("q", ["p1", "p2", "p3"])
+    assert got == [0.1, 0.9, 0.5]
+    assert all(isinstance(v, float) for v in got)
+    assert len(fake.last_pairs) == 3
+
+
+def test_score_cpu_import_failure_returns_none(monkeypatch):
+    """No sentence_transformers installed → None, never raises (absent deps →
+    inert; a fresh LOW box has no torch)."""
+    import sys
+    monkeypatch.delitem(sys.modules, "sentence_transformers", raising=False)
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        assert rerank.score("q", ["p1", "p2"]) is None
+
+
+def test_score_cpu_prepends_query_instruction(monkeypatch):
+    """Parity with _score_vllm: the Qwen instruct prefix is prepended to the
+    query before scoring (the CPU CrossEncoder is the SAME model — it inverts
+    without its instruct prefix)."""
+    fake = _install_fake_cross_encoder(monkeypatch)
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        rerank.score("fix truncation", ["some passage"])
+    instructed_query, passage = fake.last_pairs[0]
+    assert instructed_query == (
+        "Instruct: Given a search query, retrieve relevant passages that answer the query"
+        "\nQuery: fix truncation")
+    assert passage == "some passage"
+
+
+def test_score_cpu_model_cached(monkeypatch):
+    """The loaded CrossEncoder is process-cached (keyed by model_id): two score
+    calls construct it exactly once (mirrors the preflight cache pattern)."""
+    fake = _install_fake_cross_encoder(monkeypatch)
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        rerank.score("q1", ["p"])
+        rerank.score("q2", ["p"])
+    assert fake.constructed == ["Qwen/Qwen3-Reranker-0.6B"]
 
 
 # ── one-time latency preflight ────────────────────────────────────────────────

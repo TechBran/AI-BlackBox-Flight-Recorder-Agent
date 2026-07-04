@@ -135,6 +135,29 @@ RERANK_MODELS = {
         "preflight_ceiling_ms": 500,
         "preflight_passage_n": 1,
     },
+    # MID-tier opt-in (M5): the SAME Qwen 0.6B weights served IN-PROCESS on CPU
+    # via a sentence-transformers CrossEncoder — no second service, no GPU. Slower
+    # than the vLLM path (hence the 2000ms preflight ceiling + an 8-passage probe
+    # that M3 extrapolates to the real candidate count). Carries ram_gb (a CPU
+    # RAM footprint) where the GPU entries carry vram_gb — for the M10 wizard
+    # footprint display. query_instruction is the Qwen instruct prefix: it is the
+    # same model as the GPU 0.6b, so it needs the SAME prefix (it inverts without).
+    "qwen3-reranker-0.6b-cpu": {
+        "provider": "cpu",
+        "model_id": "Qwen/Qwen3-Reranker-0.6B",
+        "label": "Qwen3 Reranker 0.6B (local CPU)",
+        "ram_gb": 2.0,  # approx resident RAM footprint (M10 wizard display)
+        "max_input_tokens": 32768,
+        "query_instruction": "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
+        "quality_note": "MID-tier opt-in; same weights as the GPU 0.6b, in-process on CPU (slower)",
+        "auth_kind": "none",
+        "key_env": None,
+        "cost_note": "Local CPU — no API cost; slower than GPU",
+        "privacy": "local",
+        "tiers": ["MID"],
+        "preflight_ceiling_ms": 2000,
+        "preflight_passage_n": 8,
+    },
 }
 
 _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
@@ -170,6 +193,13 @@ _reach_cache: "tuple[float, bool] | None" = None
 
 
 _cpu_importable: "bool | None" = None
+
+# M5 in-process CPU CrossEncoder: the loaded model is process-cached (keyed by
+# model_id) behind a lock — load once, reuse across retrieve() calls (mirrors
+# the preflight cache pattern). Cleared by reset_preflight() so an M8 provider/
+# model switch (and every test) re-loads fresh.
+_cpu_model_lock = threading.Lock()
+_cpu_model_cache: dict = {}
 
 
 def _probe_localhost(base_url: str, timeout_s: float = 1.0) -> bool:
@@ -445,9 +475,50 @@ def _score_vllm(query: str, passages: list[str],
 # Same contract as _score_vllm: (query, passages, settings) -> list[float] | None,
 # positionally aligned to `passages`, None on ANY failure. Inert until built.
 
+def _load_cpu_model(model_id: str):
+    """Return a process-cached sentence-transformers CrossEncoder for
+    `model_id`, or None on ANY import/load failure. The import is LAZY (inside
+    this function, NEVER at module top) so a fresh LOW box — which has no
+    torch/sentence-transformers — stays import-clean; absent deps make the CPU
+    provider inert, never raise. Double-checked-locked so concurrent retrieve()
+    calls from the FastAPI threadpool load the ~0.6B model only once."""
+    model = _cpu_model_cache.get(model_id)
+    if model is not None:
+        return model
+    with _cpu_model_lock:
+        model = _cpu_model_cache.get(model_id)
+        if model is not None:
+            return model
+        try:
+            from sentence_transformers import CrossEncoder
+            model = CrossEncoder(model_id)
+        except Exception:  # noqa: BLE001 - absent deps / load failure → inert
+            return None
+        _cpu_model_cache[model_id] = model
+        return model
+
+
 def _score_cpu(query: str, passages: list[str],
                settings: dict) -> list[float] | None:
-    return None  # M5: in-process sentence-transformers CrossEncoder
+    """In-process CrossEncoder scoring — the MID-tier opt-in path (no second
+    service; runs in the FastAPI threadpool where retrieve() already executes).
+    Prepends the model's query_instruction to the query (parity with
+    _score_vllm — the Qwen reranker inverts without its instruct prefix) and
+    returns per-passage scores as python floats aligned to `passages` (the real
+    predict() returns an ndarray). None on absent deps / load failure — a clean
+    None on import/load failure is better UX than relying on the dispatcher's
+    never-raise backstop (which still guards a predict() blow-up)."""
+    if not passages:
+        return None
+    model = _load_cpu_model(settings["model_id"])
+    if model is None:
+        return None
+    instructed = settings.get("query_instruction", "") + query
+    scores = model.predict([(instructed, p) for p in passages])
+    out = [float(s) for s in scores]
+    if len(out) != len(passages):
+        return None
+    return out
 
 
 def _score_voyage(query: str, passages: list[str],
@@ -580,15 +651,18 @@ def preflight() -> dict:
 
 
 def reset_preflight() -> None:
-    """Clear the probe caches — preflight (result + TTL deadline) AND
-    reachability (tests + explicit ops re-check; the M8 selector calls this on
-    a provider change so the next preflight() re-probes the new provider)."""
+    """Clear the probe caches — preflight (result + TTL deadline), reachability,
+    AND the in-process CPU CrossEncoder cache (M5). The M8 selector calls this on
+    a provider change so the next preflight() re-probes the new provider (and a
+    model switch re-loads the CPU model); tests use it for isolation."""
     global _preflight_result, _preflight_expiry, _reach_cache
     with _preflight_lock:
         _preflight_result = None
         _preflight_expiry = None
     with _reach_lock:
         _reach_cache = None
+    with _cpu_model_lock:
+        _cpu_model_cache.clear()
 
 
 def available() -> bool:
