@@ -25,6 +25,7 @@ from typing import Tuple
 from Orchestrator.config import CFG, VOL_PATH
 from Orchestrator.fossils import (
     extract_snap_ids,
+    format_snapshot_for_delivery,
     get_recent_checkpoints_for_operator,
     get_recent_fossils_for_operator,
     keyword_retrieve_for_operator,
@@ -299,7 +300,18 @@ def build_fossil_context(
         for i, snap in enumerate(snaps, 1):
             sid = ids[i - 1] if i - 1 < len(ids) else "?"
             lines.append(f"=== {label} #{i}: {sid} ===")
-            lines.append(snap)
+            # M15.2: deliver body-only text to the model — a compact
+            # [SNAP-id · date · operator] attribution + Context Provenance +
+            # the Raw Session Log, dropping the ~1,000-char/snapshot bookkeeping
+            # envelope (BEACON/VOLUME-TRACKER/GAUGES/Kernel-Index) the model
+            # can't use. Formatting the RENDERED text only (not the `snaps`
+            # lists) keeps extract_snap_ids / the window guard / provenance
+            # operating on the whole blocks; the guard/cap below therefore cap
+            # CLEANER text. A snapshot lacking the content markers passes through
+            # unchanged (never-worse contract). The on-device semantic snaps are
+            # already matched-chunk windowed upstream; format composes safely
+            # (never-raises) over that.
+            lines.append(format_snapshot_for_delivery(snap))
         return "\n".join(lines)
 
     # ORDER + FORMAT UNIFORMITY both matter. Two phenomena to balance:

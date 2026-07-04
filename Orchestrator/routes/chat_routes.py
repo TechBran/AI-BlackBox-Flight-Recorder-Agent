@@ -33,7 +33,7 @@ from Orchestrator.startup import ChatIn
 from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
 from Orchestrator.checkpoint import perform_mint, should_create_checkpoint
 from Orchestrator.config import ANTHROPIC_API_KEY, ANTHROPIC_URL, AUTO_ENABLE, CFG, CU_MODEL_DEFAULT, DEBOUNCE_MS, GEMINI_BASE_URL, GOOGLE_API_KEY, ON_RED, ON_YELLOW, OPENAI_API_KEY, OPENAI_URL, TOKENS_THRESHOLD, TURNS_THRESHOLD, UPLOADS_DIR, USERS_DEFAULT, VOL_PATH, XAI_API_KEY, XAI_MODEL_DEFAULT, XAI_URL
-from Orchestrator.fossils import extract_snap_ids, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve
+from Orchestrator.fossils import extract_snap_ids, format_snapshot_for_delivery, get_recent_checkpoints_for_operator, get_recent_fossils_for_operator, hybrid_retrieve, keyword_retrieve_for_operator, semantic_retrieve
 from Orchestrator.media import get_recent_media_artifacts
 from Orchestrator.models import TaskType
 from Orchestrator.monitoring import drift_state_for
@@ -5914,10 +5914,14 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
             lines.append(f"- [{a.get('type','').upper()}] {a.get('url','')} | \"{a.get('prompt','')[:80]}\"")
         context_parts.append("\n".join(lines))
 
+    # M15.2: deliver body-only text to the CU model — same envelope-stripping as
+    # build_fossil_context (_fenced). Format only the RENDERED text; the
+    # recent/keyword/semantic lists stay whole so the window guard + provenance
+    # below keep operating on the full blocks (and now cap CLEANER text).
     if checkpoint_snaps:
         blocks = []
         for i, cp in enumerate(checkpoint_snaps, 1):
-            blocks.append(f"=== CHECKPOINT #{i} ===\n{cp}")
+            blocks.append(f"=== CHECKPOINT #{i} ===\n{format_snapshot_for_delivery(cp)}")
         context_parts.append("\n\n".join(blocks))
 
     fixed_parts = list(context_parts)  # prefs + media + checkpoints — never dropped
@@ -5925,11 +5929,11 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     def _assemble() -> str:
         parts = list(fixed_parts)
         if recent_snaps:
-            parts.append("=== Recent Snapshots ===\n" + "\n\n".join(recent_snaps))
+            parts.append("=== Recent Snapshots ===\n" + "\n\n".join(format_snapshot_for_delivery(s) for s in recent_snaps))
         if keyword_snaps:
-            parts.append("=== Keyword-Matched Snapshots ===\n" + "\n\n".join(keyword_snaps))
+            parts.append("=== Keyword-Matched Snapshots ===\n" + "\n\n".join(format_snapshot_for_delivery(s) for s in keyword_snaps))
         if semantic_snaps:
-            parts.append("=== Semantically Relevant Snapshots ===\n" + "\n\n".join(semantic_snaps))
+            parts.append("=== Semantically Relevant Snapshots ===\n" + "\n\n".join(format_snapshot_for_delivery(s) for s in semantic_snaps))
         return "\n\n".join(parts)
 
     cu_context = _assemble()
