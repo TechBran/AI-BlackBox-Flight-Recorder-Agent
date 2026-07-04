@@ -253,6 +253,68 @@ def test_score_vllm_transport_exception_returns_none(monkeypatch):
         assert rerank.score("q", ["a"]) is None  # never raises (audit A9)
 
 
+# ── score(): M2 provider dispatcher ───────────────────────────────────────────
+
+def test_score_dispatches_by_provider(monkeypatch):
+    """M2 Task 2.2: score() routes to the helper named by settings['provider'],
+    passing exactly (query, passages, settings). Proven for the vLLM path AND a
+    cloud path so the dispatch is provider-keyed, not vLLM-hardcoded."""
+    seen = {}
+
+    def fake_vllm(query, passages, settings):
+        seen["called"] = "vllm"
+        seen["args"] = (query, passages, settings)
+        return [0.42]
+
+    monkeypatch.setattr(rerank, "_score_vllm", fake_vllm)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"):
+        assert rerank.score("q", ["p"]) == [0.42]
+    assert seen["called"] == "vllm"
+    q, passages, settings = seen["args"]
+    assert q == "q" and passages == ["p"]
+    assert isinstance(settings, dict) and settings["provider"] == "vllm"
+
+    # A different provider routes to its own helper (no key plumbing yet — M4).
+    def fake_voyage(query, passages, settings):
+        seen["called"] = "voyage"
+        return [0.9]
+
+    monkeypatch.setattr(rerank, "_score_voyage", fake_voyage)
+    with pin_cfg("rerank", provider="voyage"):
+        assert rerank.score("q", ["p"]) == [0.9]
+    assert seen["called"] == "voyage"
+
+
+def test_unknown_provider_returns_none():
+    with pin_cfg("rerank", provider="banana"):
+        assert rerank.score("q", ["p"]) is None
+
+
+def test_null_provider_returns_none():
+    with pin_cfg("rerank", provider="null", base_url=None):
+        assert rerank.score("q", ["p1", "p2"]) is None
+
+
+def test_empty_passages_returns_none():
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"):
+        assert rerank.score("q", []) is None
+
+
+def test_dispatcher_never_raises(monkeypatch):
+    """A provider helper that raises must be swallowed by the dispatcher's
+    never-raise backstop (audit A9): score() returns None, not an exception."""
+    def boom(query, passages, settings):
+        raise RuntimeError("provider blew up")
+    monkeypatch.setattr(rerank, "_score_vllm", boom)
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"):
+        assert rerank.score("q", ["p"]) is None
+
+
+def test_known_providers_set():
+    assert rerank.KNOWN_PROVIDERS == {
+        "null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
+
+
 # ── one-time latency preflight ────────────────────────────────────────────────
 
 def test_preflight_unconfigured_is_skipped_and_not_cached(monkeypatch):

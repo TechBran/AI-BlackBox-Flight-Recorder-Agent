@@ -138,6 +138,11 @@ RERANK_MODELS = {
 
 _DEFAULT_MODEL_SLUG = "qwen3-reranker-0.6b"
 
+# Providers score() knows how to dispatch (M2). "null" is the inert default;
+# the rest each map to a _score_<provider> helper. vllm ships now; cpu (M5),
+# llm (M6), voyage/cohere/vertex (M7) are stubbed to return None until then.
+KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
+
 # One-time-per-process preflight cache (audit A9). Guarded because retrieve()
 # runs from FastAPI's threadpool — two first-uses must not double-probe.
 _preflight_lock = threading.Lock()
@@ -210,41 +215,108 @@ def get_settings() -> dict:
 
 
 def _configured(settings: dict | None = None) -> bool:
+    """Is a real (non-null) provider selected AND provider-appropriately ready?
+
+    M2 keeps this minimal — per-provider readiness firms up in M3 (reachability)
+    and M4 (key/creds plumbing):
+      vllm/cpu → a base_url is resolved (cpu refines to "CrossEncoder importable"
+                 in M5);
+      cloud (voyage/cohere/vertex) + llm → not blocked here; their key/creds
+                 checks land in M4, so for M2 a selected provider counts as
+                 configured (no key plumbing yet — do not falsely gate them off).
+    """
     s = settings or get_settings()
-    return s["provider"] == "vllm" and bool(s["base_url"])
+    p = s["provider"]
+    if p not in (KNOWN_PROVIDERS - {"null"}):
+        return False
+    if p in ("vllm", "cpu"):
+        return bool(s["base_url"])
+    return True
+
+
+def _score_vllm(query: str, passages: list[str],
+                settings: dict) -> list[float] | None:
+    """vLLM /score cross-encoder scoring — the original score() body, verbatim.
+
+    Does NOT wrap its own try/except: the dispatcher owns the never-raise
+    backstop (audit A9). Returns None on unconfigured/non-200/malformed/
+    row-count-mismatch exactly as before; `settings` is passed in so score()
+    resolves config once per call (no double get_settings)."""
+    s = settings
+    if not _configured(s) or not passages:
+        return None
+    resp = requests.post(
+        s["base_url"] + "/score",
+        json={"model": s["model_id"],
+              "text_1": s["query_instruction"] + query,
+              "text_2": list(passages)},
+        timeout=s["timeout_s"],
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json().get("data")
+    if not isinstance(data, list) or len(data) != len(passages):
+        return None
+    out: list[float | None] = [None] * len(passages)
+    for i, item in enumerate(data):
+        idx = int(item.get("index", i))
+        out[idx] = float(item["score"])
+    if any(v is None for v in out):
+        return None
+    return out  # type: ignore[return-value]
+
+
+# ── not-yet-implemented provider helpers (real impls land in M5/M6/M7) ─────────
+# Same contract as _score_vllm: (query, passages, settings) -> list[float] | None,
+# positionally aligned to `passages`, None on ANY failure. Inert until built.
+
+def _score_cpu(query: str, passages: list[str],
+               settings: dict) -> list[float] | None:
+    return None  # M5: in-process sentence-transformers CrossEncoder
+
+
+def _score_voyage(query: str, passages: list[str],
+                  settings: dict) -> list[float] | None:
+    return None  # M7: Voyage rerank REST (bearer)
+
+
+def _score_cohere(query: str, passages: list[str],
+                  settings: dict) -> list[float] | None:
+    return None  # M7: Cohere rerank REST (bearer)
+
+
+def _score_vertex(query: str, passages: list[str],
+                  settings: dict) -> list[float] | None:
+    return None  # M7: Vertex semantic-ranker (GCP SA OAuth)
+
+
+def _score_llm(query: str, passages: list[str],
+               settings: dict) -> list[float] | None:
+    return None  # M6: listwise LLM-as-reranker
 
 
 def score(query: str, passages: list[str]) -> list[float] | None:
     """Cross-encoder scores for (query, passage) pairs — None on ANY failure.
 
-    Never raises. The returned list is positionally aligned with `passages`
-    (vLLM's /score `index` field is honored when present). A response whose
-    row count doesn't match the request is treated as failure — a partial
-    score set cannot rank the pool on one scale.
+    Provider dispatcher (M2): resolves [rerank] once, routes to the selected
+    provider's _score_<provider> helper, and NEVER raises — any helper
+    exception is swallowed to None so a dead reranker only costs latency (the
+    retriever falls through to its un-reranked ranking). The returned list is
+    positionally aligned with `passages`.
     """
+    if not passages:
+        return None
+    s = get_settings()
+    p = s["provider"]
+    if p == "null":
+        return None
+    fn = {"vllm": _score_vllm, "cpu": _score_cpu, "voyage": _score_voyage,
+          "cohere": _score_cohere, "vertex": _score_vertex,
+          "llm": _score_llm}.get(p)
+    if fn is None:
+        return None
     try:
-        s = get_settings()
-        if not _configured(s) or not passages:
-            return None
-        resp = requests.post(
-            s["base_url"] + "/score",
-            json={"model": s["model_id"],
-                  "text_1": s["query_instruction"] + query,
-                  "text_2": list(passages)},
-            timeout=s["timeout_s"],
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json().get("data")
-        if not isinstance(data, list) or len(data) != len(passages):
-            return None
-        out: list[float | None] = [None] * len(passages)
-        for i, item in enumerate(data):
-            idx = int(item.get("index", i))
-            out[idx] = float(item["score"])
-        if any(v is None for v in out):
-            return None
-        return out  # type: ignore[return-value]
+        return fn(query, passages, s)
     except Exception:  # noqa: BLE001 - never-raise contract (audit A9)
         return None
 
