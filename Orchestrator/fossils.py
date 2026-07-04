@@ -209,6 +209,109 @@ def extract_snapshot_content(text: str) -> str:
         return text
 
 
+# ── M15: body-only formatting for DELIVERY (what the MODEL receives) ──────────
+# extract_snapshot_content (above) strips for RANKING — it keeps ONLY the Raw
+# Session Log region. DELIVERY keeps MORE: a compact attribution header
+# ([SNAP-id · UTC date · operator: <op>]) so the model still knows WHICH
+# snapshot each memory came from, plus the Context Provenance section (the
+# fossil lineage), plus the content (Raw Session Log onward). It still DROPS the
+# ~1,000-chars/snapshot bookkeeping envelope the model can't use
+# (START / CROSS-FILE BEACON / VOLUME TRACKER / GAUGES / Kernel Index) — measured
+# ~5,000 tokens (~8%) of a ~19-snapshot turn. Deliberately a DIFFERENT kept-set
+# from the ranking extractor (different consumer, different needs).
+
+# Compact attribution parser: the START line carries UTC date + SNAP-id; GAUGES
+# carries OPERATOR. Both are best-effort — a missing/unparseable field is simply
+# omitted (never fabricated, never raises).
+_DELIVERY_START_RX = re.compile(
+    r'^\s*===\s*START SNAPSHOT\s*[—-]\s*UTC\s*(?P<utc>.+?)\s*[—-]\s*'
+    r'(?P<snap>SNAP-\d{8}-\d+).*?===\s*$',
+    re.M,
+)
+# Horizontal-whitespace-only around the value: an empty "OPERATOR:" line must
+# NOT let \s* swallow the newline and capture the next GAUGES line's value.
+_DELIVERY_OPERATOR_RX = re.compile(r'^[ \t]*OPERATOR:[ \t]*(?P<op>\S.*?)[ \t]*$', re.M)
+_PROVENANCE_MARKER = "Context Provenance"
+
+
+def _delivery_attribution(text: str) -> Optional[str]:
+    """Best-effort compact attribution header `[SNAP-id · <date> · operator: op]`.
+
+    Returns None when the START line is absent (skip the header entirely). When
+    the START line is present, the SNAP-id is always emitted; the date and
+    operator are each included only if parseable (omit just the missing field).
+    """
+    m = _DELIVERY_START_RX.search(text)
+    if not m:
+        return None
+    fields = [m.group("snap")]
+    utc = (m.group("utc") or "").strip()
+    if utc:
+        fields.append(utc)
+    op_m = _DELIVERY_OPERATOR_RX.search(text)
+    if op_m:
+        op = (op_m.group("op") or "").strip()
+        if op:
+            fields.append(f"operator: {op}")
+    return "[" + " · ".join(fields) + "]"
+
+
+def _delivery_provenance_section(text: str, body: str) -> str:
+    """The `Context Provenance` section text, IF it sits above the body cut.
+
+    `body` is a suffix of `text` (extract_snapshot_content returns text[k:]), so
+    its start offset is len(text) - len(body). When Context Provenance is above
+    that cut (the common Raw-Session-Log case) it is lifted verbatim; when it is
+    at/below the cut (the SNAPSHOT-BODY fallback keeps it inside `body`) return
+    "" so it is not duplicated. Absent marker -> "".
+    """
+    idx = text.find(_PROVENANCE_MARKER)
+    if idx == -1:
+        return ""
+    prov_start = text.rfind("\n", 0, idx) + 1  # start of the marker's own line
+    body_start = len(text) - len(body)
+    if prov_start >= body_start:
+        return ""  # already inside the delivered body — don't duplicate
+    return text[prov_start:body_start].rstrip()
+
+
+def format_snapshot_for_delivery(text: str) -> str:
+    """Return a snapshot formatted for MODEL DELIVERY (context injection + the
+    AI-invoked search tools).
+
+    Emits, in order:
+      1. a compact attribution header `[SNAP-id · <UTC date> · operator: <op>]`
+         (best-effort; fields omitted individually when unparseable; skipped
+         entirely when the START line is absent),
+      2. the `Context Provenance` section (the fossil lineage), if present, and
+      3. `extract_snapshot_content(text)` — the Raw Session Log onward (the
+         user+AI turns plus any Release Notes).
+
+    Drops the bookkeeping envelope the model can't use: START / CROSS-FILE
+    BEACON / VOLUME TRACKER / GAUGES / Kernel Index.
+
+    Robust: markers absent (nothing to strip) -> return `text` unchanged; empty
+    in -> empty out; never raises. Distinct from extract_snapshot_content, which
+    strips for RANKING and keeps ONLY from Raw Session Log.
+    """
+    if not text:
+        return text
+    try:
+        body = extract_snapshot_content(text)
+        # body == text means no leading envelope was stripped (no content marker,
+        # or the marker is already the first line) — there is nothing to gain by
+        # reformatting, and we never fabricate a header onto un-stripped text.
+        if body == text:
+            return text
+        header = _delivery_attribution(text)
+        provenance = _delivery_provenance_section(text, body)
+        parts = [p for p in (header, provenance, body) if p]
+        return "\n".join(parts)
+    except Exception:
+        # Never-raise delivery contract: degrade to the full text unchanged.
+        return text
+
+
 def _decode_scored_snapshots(scored, operator: str,
                              window_budget_chars: Optional[int] = None) -> List[str]:
     """Shared decode for the retrieve()-shim retrievers: byte-offset decode of

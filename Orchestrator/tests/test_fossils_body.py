@@ -8,7 +8,7 @@ that leading envelope, returning from the first content marker
 ("Raw Session Log", else "SNAPSHOT BODY") onward; a snapshot without either
 marker (or non-snapshot text) is returned unchanged, never reduced to empty.
 """
-from Orchestrator.fossils import extract_snapshot_content
+from Orchestrator.fossils import extract_snapshot_content, format_snapshot_for_delivery
 
 
 # A realistic snapshot: the full bookkeeping envelope followed by SNAPSHOT BODY
@@ -177,3 +177,103 @@ def test_real_decoded_snapshot_drops_envelope_keeps_turns():
     assert "CROSS-FILE BEACON" not in result
     assert "VOLUME TRACKER" not in result
     assert len(result) < len(text)  # envelope actually stripped
+
+
+# ── M15.1: format_snapshot_for_delivery() — attribution + provenance + body ───
+# The DELIVERY formatter (what the MODEL receives) keeps MORE than the RANKING
+# extractor: a compact [SNAP-id · date · operator] attribution header + the
+# Context Provenance section + the Raw Session Log onward. It still DROPS the
+# bookkeeping envelope (START/BEACON/VOLUME-TRACKER/GAUGES/Kernel-Index) — the
+# ~1,000 chars/snapshot the model can't use.
+
+
+def test_delivery_has_attribution_provenance_and_body():
+    result = format_snapshot_for_delivery(FULL_SNAPSHOT)
+    # Compact attribution header parsed from the START line + GAUGES OPERATOR.
+    assert "[SNAP-20260704-7980" in result
+    assert "operator: Anna" in result
+    assert "2026-07-04T22:37:21Z" in result
+    assert result.splitlines()[0].startswith("[SNAP-")
+    assert result.splitlines()[0].endswith("]")
+    # Keeps the Context Provenance fossil-lineage section.
+    assert "Context Provenance" in result
+    assert "Recent fossils: SNAP-20260704-7978" in result
+    # Keeps the Raw Session Log content + Release Notes.
+    assert "Raw Session Log" in result
+    assert "how do I add a reranker seam?" in result
+    assert "add a provider abstraction in rerank.py." in result
+    assert "Release Notes" in result
+    assert "Added cross-encoder rerank provider abstraction" in result
+
+
+def test_delivery_drops_the_bookkeeping_envelope():
+    result = format_snapshot_for_delivery(FULL_SNAPSHOT)
+    # None of the envelope bookkeeping the model can't use survives.
+    assert "CROSS-FILE BEACON" not in result
+    assert "Tail lock confirmed" not in result
+    assert "BYTES_AFTER_END" not in result
+    assert "VOLUME TRACKER" not in result
+    assert "GAUGES" not in result
+    assert "Kernel Index" not in result
+    # The raw START/END marker lines are dropped (attribution replaces them);
+    # the compact header carries the id/date instead.
+    assert "START SNAPSHOT" not in result
+
+
+def test_delivery_measurably_reduces_chars():
+    result = format_snapshot_for_delivery(FULL_SNAPSHOT)
+    dropped = len(FULL_SNAPSHOT) - len(result)
+    # The envelope on this fixture is ~700 chars; a real snapshot's is ~1,000.
+    assert dropped > 500, f"only dropped {dropped} chars"
+    assert len(result) < len(FULL_SNAPSHOT)
+
+
+def test_delivery_omits_operator_field_when_gauges_absent():
+    # GAUGES stripped/absent -> operator unparseable -> omit JUST that field,
+    # still emit the id + date header (best-effort attribution).
+    no_gauges = FULL_SNAPSHOT.replace("OPERATOR: Anna", "OPERATOR:")
+    result = format_snapshot_for_delivery(no_gauges)
+    assert "[SNAP-20260704-7980" in result
+    assert "operator:" not in result.splitlines()[0]
+    assert "how do I add a reranker seam?" in result
+
+
+def test_delivery_skips_header_when_start_line_absent():
+    # No START line -> skip the header, but still strip to the body.
+    no_start = "\n".join(
+        ln for ln in FULL_SNAPSHOT.splitlines()
+        if not ln.startswith("=== START SNAPSHOT")
+    )
+    result = format_snapshot_for_delivery(no_start)
+    assert not result.splitlines()[0].startswith("[SNAP-")
+    assert "CROSS-FILE BEACON" not in result
+    assert "how do I add a reranker seam?" in result
+
+
+def test_delivery_markers_absent_returns_unchanged():
+    plain = "just some arbitrary text\nwith no snapshot markers at all\n"
+    assert format_snapshot_for_delivery(plain) == plain
+
+
+def test_delivery_empty_input_returns_empty():
+    assert format_snapshot_for_delivery("") == ""
+
+
+def test_delivery_never_raises_on_none():
+    assert format_snapshot_for_delivery(None) is None
+
+
+def test_delivery_falls_back_to_snapshot_body_when_no_raw_session_log():
+    # No "Raw Session Log" -> body cut falls back to "SNAPSHOT BODY"; the
+    # Context Provenance then lives INSIDE that body (not lifted separately, no
+    # duplication), and the envelope above SNAPSHOT BODY is still dropped.
+    no_rsl = FULL_SNAPSHOT.replace("Raw Session Log", "Session Transcript")
+    result = format_snapshot_for_delivery(no_rsl)
+    assert "[SNAP-20260704-7980" in result
+    assert "CROSS-FILE BEACON" not in result
+    assert "VOLUME TRACKER" not in result
+    assert "GAUGES" not in result
+    assert "SNAPSHOT BODY" in result
+    assert "Session Transcript" in result
+    # Context Provenance appears exactly once (in the body, not duplicated).
+    assert result.count("Context Provenance") == 1
