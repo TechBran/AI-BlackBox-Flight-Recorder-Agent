@@ -296,6 +296,71 @@ Scope Android to **select-an-already-keyed-provider + enable** (paste-key input 
 
 ---
 
+## M14 — Body-only ranking (measured discovery, 2026-07-04)
+
+**Context/measured basis:** every snapshot leads with a fixed bookkeeping envelope
+(`=== START SNAPSHOT … === CROSS-FILE BEACON … VOLUME TRACKER … GAUGES …`) before the
+`SNAPSHOT BODY` → `Raw Session Log` (the user+AI turns — the actual content). Reranking on the
+envelope-prefixed passage measurably hurts: on 26 same-corpus labeled queries, **Vertex
+semantic-ranker went recall@10 0.654 → 0.846 (+29%), MRR 0.352 → 0.495 (+41%) when passed
+body-only text instead of the envelope window** (Cohere is robust to the envelope but also
+benefits; it couldn't be cleanly re-measured due to its free-trial per-minute rate limit). The
+envelope also dilutes every EMBEDDING chunk (the first chunk of each snapshot is mostly
+boilerplate → a near-identical vector across all snapshots). **Brandon's decision (2026-07-04):
+strip the envelope everywhere ranking happens — rerank passages AND embedding chunks (accept a
+full re-embed); keep Cohere the default reranker regardless of the head-to-head.**
+
+North star: content-only ranking gets "right to the meat" — the reranker and the embedder both
+score the user message + AI response, not the bookkeeping.
+
+### Task 14.1: `extract_snapshot_content()` — the one body extractor
+**Files:** new helper in `Orchestrator/fossils.py` (beside `window_snapshot_text`); Test: `test_fossils_body.py`.
+`extract_snapshot_content(text) -> str`: return from the `Raw Session Log` marker onward (the
+user+AI turns + any Release Notes/summary that follows — those are dense, keyword-rich content);
+if absent, fall back to the `SNAPSHOT BODY` marker; if neither present, return the full text
+(robustness — never returns empty for a non-empty input). Never raises. Tests: real snapshot →
+drops BEACON/TRACKER/GAUGES header, keeps the session log; a snapshot missing the markers →
+full text; empty → empty. **Measured basis:** the eval that lifted Vertex used exactly this
+"from Raw Session Log / SNAPSHOT BODY onward" cut.
+
+### Task 14.2: Rerank passages use body-only (immediate, no re-embed)
+**Files:** `Orchestrator/retrieval.py` `_apply_rerank` passage building (~240-255); Test: `test_retrieval_rerank.py`.
+Build each rerank passage from `extract_snapshot_content(decoded_text)` truncated to
+`passage_chars`, instead of the envelope-inclusive `window_snapshot_text`. (For long bodies the
+head of the session log is the most representative; the chunk-ordinal window was designed for
+envelope-inclusive chunk space and is inconsistent with body extraction — prefer the clean body
+head. Note this in a comment.) Test: the passage passed to `rerank.score` contains the session
+log, not the BEACON header. **Then re-run the Cohere-vs-Vertex head-to-head on body-only passages
+(clean, Cohere un-rate-limited) and record the numbers — Cohere stays default per Brandon; the
+data just confirms the gain and Vertex's rescue.**
+
+### Task 14.3: Embedding chunks body-only (mint path)
+**Files:** the snapshot embed seam — `Orchestrator/embeddings/search.py::embed_snapshot_for_index`
+(or `chunker.chunk_snapshot`'s caller) so the chunker receives `extract_snapshot_content(text)`,
+NOT the full envelope-prefixed text; `Orchestrator/checkpoint.py` mint sites feed the body.
+Tests: a minted snapshot's chunks derive from the session log (no BEACON in chunk-0). **Do NOT
+strip the envelope inside `chunk_snapshot` itself** (it's a generic chunker — the snapshot-only
+body extraction belongs at the snapshot embed seam, mirroring the ToolVault-protection rule from
+the retrieval upgrade). New snapshots embed body-only immediately; the existing corpus is handled
+by 14.4.
+
+### Task 14.4: Re-embed the corpus body-only (gated cutover)
+Reuse the retrieval-upgrade M6f machinery (build-only migrate rebuild → `_build` candidate →
+calibrate → gate → explicit stop-swap-restart cutover → retain `.pre-body` rollback dir). The
+active `gemini-embedding-2` store is rebuilt body-only (~$2–3 cloud, <1h). **Gate:** the eval
+harness (`eval/run_bench.py`) shows semantic recall@10 ≥ the current envelope-inclusive baseline
+(expect improvement — cleaner vectors), goldens + lean-profile pass against the candidate, and
+the rerank head-to-head re-run on the body-only store confirms the gain. Then cut over; keep the
+`.pre-body` store for instant rollback. The Ultra's qwen store rebuilds body-only lazily on its
+own switchover. Runbook artifact: `docs/plans/artifacts/2026-07-0X-body-only-reembed-runbook.md`.
+
+**Sequencing:** 14.1→14.2 land + measure first (immediate rerank win, no re-embed). 14.3 (mint
+body-only) before 14.4 (so mints during the rebuild are already body-only — the A4 lesson). 14.4's
+candidate can build in the background while the UI milestones (M10–M12) proceed; gate+cutover when
+green. Cohere stays the live default throughout.
+
+---
+
 ## Risks & rollback (top line)
 
 | Risk | Mitigation |
