@@ -355,7 +355,20 @@ private fun CliAgentBranches(
                         screenState.clearCurrent()
                         onStateChange(CliAgentInternalState.EmptyState)
                     },
-                    modifier = Modifier.fillMaxSize().padding(innerPadding),
+                    // Task 5 (single-owner insets): apply ONLY the top inset
+                    // here, NOT full innerPadding. The SessionSwitcherTopBar is
+                    // visible over the terminal (showSwitcher = true for the
+                    // Terminal state), and Scaffold lays terminal content out
+                    // BELOW it — so innerPadding.top = status-bar + 40dp bar and
+                    // must be honoured or the emulator would slide under the bar.
+                    // But innerPadding's bottom (nav bar) + horizontal edges are
+                    // left to ZellijTerminalScreen, which owns them via its own
+                    // navigationBarsPadding()/imePadding(). Applying full
+                    // innerPadding here PLUS those inside the terminal was the
+                    // double-padding that wasted border space on the phone.
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = innerPadding.calculateTopPadding()),
                 )
             }
         }

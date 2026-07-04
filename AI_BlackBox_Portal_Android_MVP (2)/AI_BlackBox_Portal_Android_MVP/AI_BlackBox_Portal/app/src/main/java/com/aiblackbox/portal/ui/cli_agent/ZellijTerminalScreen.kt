@@ -46,7 +46,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -269,20 +268,36 @@ fun ZellijTerminalScreen(
     }
 
     // --- Compose UI ---------------------------------------------------------
+    //
+    // Insets ownership (Task 5, single-owner rule): this screen is NO LONGER
+    // the top-inset owner. The Scaffold's SessionSwitcherTopBar (in
+    // CliAgentScreen) is visible over the terminal and already consumes the
+    // status-bar inset + its own 40dp height; the Terminal branch passes only
+    // that top inset down as padding. So we DROP statusBarsPadding() here to
+    // avoid double top padding. This Column remains the SOLE owner of the
+    // BOTTOM (nav-bar) inset and the IME inset via navigationBarsPadding() +
+    // imePadding(), so the emulator claims full width and full height minus the
+    // real system bars + keyboard, with no wasted border.
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(BbxBlack)
-            .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        // --- Reconnect / status banner ---
-        val bannerLine = bannerText
-        if (bannerLine != null) {
-            ReconnectBanner(text = bannerLine, kind = bannerKind)
-        }
-
+        // --- Terminal region (fills all vertical space; banner overlays it) ----
+        //
+        // Task 5: the reconnect banner is a top-aligned OVERLAY inside this
+        // weighted Box, NOT a Column sibling. As a sibling it consumed layout
+        // height, shrinking the emulator every time it appeared/disappeared
+        // while (re)connecting — a resize churn (exactly what Task 6 addresses).
+        // As an overlay the emulator keeps its full height regardless of banner
+        // visibility; the banner just draws transiently over the top rows.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = true),
+        ) {
         // --- Terminal surface --------------------------------------------------
         //
         // The outer Box wraps the AndroidView<TerminalView> with a Compose
@@ -308,8 +323,7 @@ fun ZellijTerminalScreen(
         //     TerminalView, so no mouse-tracking sequences get emitted.
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f, fill = true)
+                .fillMaxSize()
                 .background(BbxBlack)
                 .pointerInput(Unit) {
                     // Fractional pixels we haven't yet converted to a whole
@@ -598,6 +612,24 @@ fun ZellijTerminalScreen(
             )
         }
 
+            // --- Reconnect / status banner (overlay) ---------------------------
+            //
+            // Drawn LAST inside the weighted Box so it renders on top of the
+            // emulator (Compose z-order = declaration order), pinned to the top
+            // edge. Transient: bannerText is non-null only while connecting /
+            // reconnecting / on error. Because it's an overlay it takes no part
+            // in the Box's layout sizing, so showing/hiding it never resizes
+            // the emulator (no reflow churn).
+            val bannerLine = bannerText
+            if (bannerLine != null) {
+                ReconnectBanner(
+                    text = bannerLine,
+                    kind = bannerKind,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
+        }
+
         // --- Extra-keys bar + mic ----------------------------------------------
         ExtraKeysBar(
             onKeyBytes = { bytes ->
@@ -673,7 +705,11 @@ internal fun buildBracketedPaste(text: String): ByteArray {
 private enum class ZellijBannerKind { Info, Warn, Error }
 
 @Composable
-private fun ReconnectBanner(text: String, kind: ZellijBannerKind) {
+private fun ReconnectBanner(
+    text: String,
+    kind: ZellijBannerKind,
+    modifier: Modifier = Modifier,
+) {
     val bg: Color = when (kind) {
         ZellijBannerKind.Info -> Neutral500.copy(alpha = 0.25f)
         ZellijBannerKind.Warn -> BbxAccent.copy(alpha = 0.18f)
@@ -686,7 +722,7 @@ private fun ReconnectBanner(text: String, kind: ZellijBannerKind) {
         ZellijBannerKind.Error -> "⚠"
     }
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(bg)
             .padding(horizontal = 12.dp, vertical = 6.dp),
