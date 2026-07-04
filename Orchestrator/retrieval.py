@@ -306,7 +306,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     mmr_lambda = CFG.getfloat("retrieval", "mmr_lambda", fallback=0.85)
     mmr_protect = CFG.getint("retrieval", "mmr_protect_top", fallback=3)
     debug_log = CFG.getboolean("retrieval", "debug_log", fallback=False)
-    rerank_enabled = CFG.getboolean("retrieval", "rerank_enabled", fallback=False)
+    # Rerank gate resolves sidecar > config (M8): a wizard/Portal selection
+    # (POST /rerank/select) that flips `enabled` in rerank.json turns the rerank
+    # stage on here with no config.ini edit or restart. is_enabled() never
+    # raises (fail-open to config, default False). Lazy import mirrors the
+    # flag-on-path import in _apply_rerank below (cheap sys.modules lookup).
+    from Orchestrator import rerank as _rerank
+    rerank_enabled = _rerank.is_enabled()
 
     # 2. embed the query (purpose="query" — the retrieval_query fix), unless the
     #    eval seam supplied a pre-embedded vector for a non-active arm's model.

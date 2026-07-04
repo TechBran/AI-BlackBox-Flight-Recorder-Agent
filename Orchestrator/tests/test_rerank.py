@@ -644,6 +644,38 @@ def test_reachable_bearer_is_key_present_no_network(monkeypatch):
         assert rerank.reachable() is False
 
 
+def test_reachable_vertex_uses_sa_creds_path(monkeypatch):
+    """M8 fold-in (M7 review nit #1): Vertex (gcp_service_account, key_env None)
+    reports reachable from the ambient SA creds path
+    (GOOGLE_APPLICATION_CREDENTIALS the credentials route sets), NOT the
+    always-False key_present. Pure env read — ZERO network."""
+    def no_net(*a, **k):
+        raise AssertionError("vertex reachability must not hit the network")
+    monkeypatch.setattr(rerank.requests, "get", no_net)
+    monkeypatch.setattr(rerank.requests, "post", no_net)
+    with pin_cfg("rerank", provider="vertex", model="vertex-semantic-ranker"):
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+        assert rerank.reachable() is True
+        monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+        assert rerank.reachable() is False
+
+
+def test_scatter_relevance_scores_gap_returns_none():
+    """M8 fold-in (M7 review nit #2): a duplicate index leaves another position
+    unfilled — the voyage/cohere scatter now returns None on that gap (parity with
+    _scatter_vertex_records), never a silent 0.0 for the missing passage. A clean
+    all-unique response still scatters correctly (no regression to the live path)."""
+    # index 0 twice, index 1 missing (len == n but a gap) → None
+    gap = {"data": [{"index": 0, "relevance_score": 0.1},
+                    {"index": 0, "relevance_score": 0.2},
+                    {"index": 2, "relevance_score": 0.9}]}
+    assert rerank._scatter_relevance_scores(gap, 3) is None
+    ok = {"results": [{"index": 2, "relevance_score": 0.9},
+                      {"index": 0, "relevance_score": 0.1},
+                      {"index": 1, "relevance_score": 0.5}]}
+    assert rerank._scatter_relevance_scores(ok, 3) == [0.1, 0.5, 0.9]
+
+
 def test_vllm_reachable_still_probes_localhost(monkeypatch):
     """reachable() for vllm keeps the localhost /v1/models probe."""
     seen = []
@@ -956,15 +988,19 @@ def test_is_enabled_malformed_config_defaults_false():
         assert rerank.is_enabled() is False
 
 
-def test_retrieval_gate_unchanged_in_m4():
-    """M4 provides is_enabled() but must NOT wire it into retrieval yet (that's
-    M8). Pin the current behaviour: retrieval.py still reads its own config
-    gate, not rerank.is_enabled()."""
+def test_retrieval_gate_uses_is_enabled():
+    """M8 wires the retrieve() rerank gate to rerank.is_enabled() (sidecar>config)
+    so enabling via the selector sidecar (POST /rerank/select) turns the rerank
+    stage on without a config.ini edit. Replaces M4's
+    test_retrieval_gate_unchanged_in_m4 — the gate moved from a config-only read
+    to is_enabled() in M8."""
     import inspect
 
     from Orchestrator import retrieval
     src = inspect.getsource(retrieval)
-    assert "rerank.is_enabled" not in src and "_rerank.is_enabled" not in src
+    assert "_rerank.is_enabled()" in src
+    # the old config-only enablement gate is gone (is_enabled resolves it now).
+    assert 'CFG.getboolean("retrieval", "rerank_enabled"' not in src
 
 
 # ── M6: LLM-as-reranker (listwise, single completion) ─────────────────────────

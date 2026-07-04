@@ -399,6 +399,12 @@ def reachable(settings: dict | None = None, timeout_s: float = 1.0) -> bool:
     if p == "cpu":
         return _cpu_reachable()
     if p in CLOUD_PROVIDERS:
+        # Vertex (gcp_service_account) has NO key_env, so key_present is always
+        # False even with a valid GCP SA — its reachability is the ambient SA
+        # creds path the credentials upload route sets/live-mirrors. Check that
+        # instead (still a pure env read, NEVER a paid network poll).
+        if s.get("auth_kind") == "gcp_service_account":
+            return bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
         # key/creds present — the fresh os.getenv read get_settings already did
         # (M4); NEVER a paid network poll. (settings dicts always carry it;
         # fall back to a fresh read if an external caller hand-built one.)
@@ -675,17 +681,19 @@ def _score_cpu(query: str, passages: list[str],
 def _scatter_relevance_scores(payload: "dict | None",
                               n: int) -> "list[float] | None":
     """Scatter a cloud reranker's {index, relevance_score} rows back onto passage
-    positions: init 0.0, out[index] = relevance_score. The rows array key differs
-    by provider (live-verified): Voyage uses `data`, Cohere `results` — accept
-    either, `data` first. None on ANY shape/count/index anomaly — a partial
-    result can't rank on one scale, so the retriever must fall through to its
-    un-reranked ranking (never guess)."""
+    positions: init None, out[index] = relevance_score, then require no gap. The
+    rows array key differs by provider (live-verified): Voyage uses `data`, Cohere
+    `results` — accept either, `data` first. None on ANY shape/count/index anomaly
+    — a partial result (a duplicate index leaving another position unfilled) can't
+    rank on one scale, so the retriever must fall through to its un-reranked
+    ranking (never guess). Mirrors _scatter_vertex_records' None-init gap check for
+    symmetry — a valid all-unique response is byte-identical to the old 0.0-init."""
     rows = None
     if isinstance(payload, dict):
         rows = payload.get("data") or payload.get("results")
     if not isinstance(rows, list) or len(rows) != n:
         return None
-    out = [0.0] * n
+    out: list[float | None] = [None] * n
     for item in rows:
         try:
             idx = int(item["index"])
@@ -695,7 +703,9 @@ def _scatter_relevance_scores(payload: "dict | None",
         if not (0 <= idx < n):          # out of range → None (never IndexError)
             return None
         out[idx] = sc
-    return out
+    if any(v is None for v in out):     # a duplicate/missing index left a gap
+        return None
+    return out  # type: ignore[return-value]
 
 
 def _score_voyage(query: str, passages: list[str],

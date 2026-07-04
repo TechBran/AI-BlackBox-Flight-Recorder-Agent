@@ -107,10 +107,17 @@ def pin_retrieval(**extra):
 
 
 @pytest.fixture()
-def world(monkeypatch):
+def world(monkeypatch, tmp_path):
     """Hermetic retrieve() world: fixed query vector, fixed index, keyword
     channel [KW1, A], passage decode from the index fixture, pinned ages,
-    reset once-per-process rerank state."""
+    reset once-per-process rerank state.
+
+    Isolates the rerank.json sidecar dir (M8): the retrieve() gate now reads
+    rerank.is_enabled() (sidecar > config), so an EMPTY tmp stores dir makes
+    _load_sidecar() return None and these tests' pinned [retrieval]
+    rerank_enabled config gate the enable decision, as they assume."""
+    from Orchestrator import config as _config
+    monkeypatch.setattr(_config, "EMBEDDINGS_STORES_DIR", str(tmp_path / "stores"))
     monkeypatch.setattr(
         retrieval._emb, "generate_embedding_sync",
         lambda text, purpose="query": [1.0, 0.0, 0.0, 0.0])
