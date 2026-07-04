@@ -904,3 +904,43 @@ def set_placement(slug: str, placement: "str | None", base_dir=None) -> "str | N
         overrides[slug] = placement
     _atomic_write_json(path, overrides)
     return placement
+
+
+# ── Reranker selection sidecar (tiered reranker, M4) ─────────────────────────
+# Which reranker the box uses: {enabled, provider, model}. Same runtime-state
+# pattern as placement.json / keep_alive.json above (beside the stores under
+# EMBEDDINGS_STORES_DIR, atomic write, fail-open read) — written by the wizard /
+# Portal / POST /rerank/select, read fresh by rerank.get_settings() so a
+# selection (and a live-pasted key mirrored into os.environ) takes effect on the
+# next retrieve() without a restart or a config.ini edit. UNLIKE placement (a
+# per-slug map), the WHOLE file IS the single selection object — not keyed by
+# slug. rerank.get_settings() layers this ABOVE config.ini [rerank] and the code
+# fallback (sidecar > config > default). Absent/corrupt/wrong-shape → None =
+# fall back to config (audit A13 fresh-box rule: no sidecar = inert null).
+RERANK_FILE = "rerank.json"
+
+
+def get_rerank_selection(base_dir=None) -> "dict | None":
+    """Persisted reranker selection {enabled, provider, model}, or None when the
+    sidecar is absent/corrupt/not an object — fail-open exactly like
+    get_placement (FileNotFoundError/NotADirectoryError/JSONDecodeError → None),
+    so a missing or hand-mangled file resolves to the config/default path,
+    never an exception."""
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    try:
+        selection = json.loads((base / RERANK_FILE).read_text(encoding="utf-8"))
+        if isinstance(selection, dict):
+            return selection
+    except (FileNotFoundError, NotADirectoryError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def set_rerank_selection(selection: dict, base_dir=None) -> dict:
+    """Write the reranker selection atomically (tmp + os.replace, mkdir parents);
+    returns the dict written. The whole file IS the selection object (a single
+    write REPLACES it wholesale — not a per-slug merge like set_placement)."""
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(base / RERANK_FILE, selection)
+    return selection
