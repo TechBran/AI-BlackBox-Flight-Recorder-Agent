@@ -229,17 +229,34 @@ Per LOCAL embedding model when `not hw.gpu`: add an advisory `cpu_warning` strin
 
 ---
 
-## M10 — Wizard reranker selector (surface 1/3)
+## M10 — Wizard reranker: keys in the API-Keys step + selector in the Memory step (surface 1/3)
 
-### Task 10.1: Tier-driven selector replaces `rerankLineHtml`
+**Brandon's UX decision (2026-07-04):** cloud reranker keys (Voyage, Cohere) belong in the **API-Keys step** alongside every other provider key — same paste + reveal + **Validate**-on-the-spot UX — NOT as paste fields buried in the reranker selector. The Memory-step reranker selector then just **selects** a provider from what's already configured/validated. This keeps one home for all keys and reuses the proven per-provider validator pattern.
 
-**Files:** Modify `Portal/onboarding/steps/embeddings.js` (`rerankLineHtml` `379-414`, `computeCardHtml` `289-322`, per-card `cpu_warning` in `renderCard` `454-522`), `Portal/onboarding/onboarding.css`; manual/DOM test via the wizard harness.
+### Task 10.0: Voyage + Cohere as first-class API-Keys entries + live validators
 
-Render tier-appropriate options from `status.models` + `status.tier`: LOW → cloud-only (Voyage paste-key / Vertex **Advanced** SA-setup panel deep-linking the credentials UI / LLM keyless-fallback with the honest disclaimer); MID → + "CPU reranker (opt-in, may be slow)"; HIGH → local GPU vLLM (best) keeping the existing installer remediation. Per provider: paste-key field (Voyage/Cohere), "uses your existing Gemini/OpenAI/Claude/Grok key" (LLM, no field), or the Vertex SA panel. Show quality/cost/latency (`preflight.latency_ms` when present). Selecting POSTs `/rerank/select` (mirror `onPlacementClick` `351-375`), then `refreshStatus()`.
+**Files:** Modify `Orchestrator/onboarding/validators.py` (add `validate_voyage` + `validate_cohere`), `Portal/onboarding/steps/api_keys.js` (add two PROVIDERS entries), the `/onboarding/validate` dispatch (find where it maps provider id → validator), `Orchestrator/onboarding/status_rollup.py` (`_PROVIDER_KEY` map ~59), `Orchestrator/onboarding/secrets_writer.py` (key-format regex `_KEY_RE` — confirm Voyage `pa-…`/Cohere alnum keys pass), `Orchestrator/onboarding/state.py` (validated_at tracking is generic — confirm). Tests: `Orchestrator/tests/test_validators*` / onboarding validate-route test.
 
-**Step:** implement; assert tier→options mapping + POST shape (DOM/manual); `rerankStatus===null` still hides the block (old-backend degrade). Commit `feat(onboarding): tier-driven reranker selector + auth guidance (M10)`.
+- `validate_voyage(api_key)` / `validate_cohere(api_key)` follow the `_measure(fn) -> ValidationResult` pattern (validators.py:30), **raw `requests`, no new SDK**: Cohere uses the zero-cost `POST https://api.cohere.ai/v1/check-api-key` (returns `{valid, organization_name}`); Voyage uses a **1-document** `POST /v1/rerank` (tiny — stays under the free-tier 10K-TPM cap that a full 40-doc rerank exceeds; see the M8 live finding). Both return `ok`/`latency_ms`/`error` so the wizard shows clean feedback; a bad key → `ok:false` with the provider's error.
+- `api_keys.js` PROVIDERS entries: `{id:"voyage", envVar:"VOYAGE_API_KEY", label:"Voyage (reranking)", description:"Reranks search results with a dedicated cross-encoder — sharper memory recall. Free tier available."}` and the same for Cohere. They render with the identical paste/reveal/Validate card the other keys use (no bespoke UI).
+- Honest descriptions: frame both as **optional reranker upgrades** ("improves search result ordering; embeddings/memory work without it").
 
-**Milestone gate:** restart; drive the wizard on this box (LOW/MID) — verify cloud paste-key + CPU opt-in render and persist; device-validate. Review; push.
+**Step:** TDD the two validators (mock the HTTP — valid → ok, 401/bad → not-ok, never raises); wire the dispatch + rollup + regex; DOM-check the two new cards render + Validate posts to `/onboarding/validate`. Commit `feat(onboarding): Voyage + Cohere reranker keys in the API-Keys step with live validators (M10.0)`.
+
+### Task 10.1: Memory-step reranker selector (selects from configured keys)
+
+**Files:** Modify `Portal/onboarding/steps/embeddings.js` (`rerankLineHtml` `379-414` → a tier-driven selector, `computeCardHtml` `289-322`, per-card `cpu_warning` in `renderCard`), `Portal/onboarding/onboarding.css`; manual/DOM test.
+
+Render tier-appropriate options from `status.models` + `status.tier` + each cloud model's `key_present`:
+- **Voyage / Cohere:** shown as selectable when their key is validated (`key_present:true`); if not, show "Add your Voyage/Cohere key in the API Keys step" with a deep-link back to that step (do NOT paste the key here — Task 10.0 owns key entry).
+- **Vertex:** "Advanced" — deep-link the SA-upload (credentials UI); reachable via `GOOGLE_APPLICATION_CREDENTIALS` (M8 fix).
+- **LLM (Gemini/GPT/Claude/Grok):** "uses your existing <provider> key" (no field), honest not-a-purpose-trained-ranker note.
+- **CPU (MID) / GPU vLLM (HIGH):** tier-gated local options; CPU carries the "opt-in, may be slow" note; GPU keeps the installer remediation.
+Show quality/cost/latency (`preflight.latency_ms`). Selecting POSTs `/rerank/select` **without** `api_key` (the key is already in `.env` from Task 10.0), then `refreshStatus()`. Respect the `status.enabled` field (now correct post-M8) for the on/off toggle.
+
+**Step:** implement; assert tier→options mapping + the key-present gating + POST shape (no api_key in the body); `rerankStatus===null` still hides the block. Commit `feat(onboarding): Memory-step reranker selector over configured providers (M10.1)`.
+
+**Milestone gate:** restart; drive the wizard on this box (LOW) — API-Keys step: paste + Validate the Voyage/Cohere keys live (they're already in `.env`; re-validate proves the button); Memory step: select Cohere (validated) → status `available` → toggle enable → a real query reranks; device-validate. Review; push.
 
 ---
 
