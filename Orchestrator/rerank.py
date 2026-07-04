@@ -1233,7 +1233,11 @@ def status() -> dict:
         }
     hw = hardware.probe()
     return {
-        "enabled": _cfg_bool("retrieval", "rerank_enabled", False),
+        # Track the ACTUAL retrieve() gate (M8): is_enabled() resolves
+        # sidecar > config, so the wizard/status card can't show "disabled"
+        # while a sidecar selection has rerank ON. Backward-compatible — no
+        # sidecar falls back to [retrieval] rerank_enabled, same as before.
+        "enabled": is_enabled(),
         "gpu": bool(hw.get("gpu")),
         "service_reachable": service_reachable(),
         "provider": s["provider"],

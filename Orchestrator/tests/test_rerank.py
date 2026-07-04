@@ -988,6 +988,40 @@ def test_is_enabled_malformed_config_defaults_false():
         assert rerank.is_enabled() is False
 
 
+def test_status_enabled_tracks_is_enabled_sidecar_over_config(monkeypatch):
+    """M8 live-review fix: status()['enabled'] mirrors the ACTUAL retrieve() gate
+    (is_enabled → sidecar > config), so the wizard can't show "disabled" while a
+    sidecar selection has rerank ON. A sidecar {enabled:true} that CONTRADICTS
+    config rerank_enabled=false → status enabled True; no sidecar + config false →
+    False (backward-compatible fallback)."""
+    # status() runs preflight() for a configured cloud provider → guard the
+    # network hard (the box may hold a real COHERE key; the autouse fixture only
+    # stubs .get). No key + no post → preflight None, zero network.
+    def _no_net(*a, **k):
+        raise ConnectionError("test: network disabled")
+    monkeypatch.setattr(rerank.requests, "post", _no_net)
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    # sidecar ON, config OFF → status.enabled follows the sidecar (the live gate).
+    _write_sidecar({"enabled": True, "provider": "cohere",
+                    "model": "cohere-rerank-4"})
+    with pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.is_enabled() is True
+        assert rerank.status()["enabled"] is True
+
+
+def test_status_enabled_falls_back_to_config_when_no_sidecar(monkeypatch):
+    """Backward-compatible: no sidecar → status()['enabled'] is the [retrieval]
+    rerank_enabled config read, exactly as pre-M8 (the empty tmp stores dir makes
+    _load_sidecar None; belt-and-suspenders monkeypatch it too)."""
+    monkeypatch.setattr(rerank, "_load_sidecar", lambda: None)
+    with pin_cfg("rerank", provider="null"), \
+         pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.status()["enabled"] is False
+    with pin_cfg("rerank", provider="null"), \
+         pin_cfg("retrieval", rerank_enabled="true"):
+        assert rerank.status()["enabled"] is True
+
+
 def test_retrieval_gate_uses_is_enabled():
     """M8 wires the retrieve() rerank gate to rerank.is_enabled() (sidecar>config)
     so enabling via the selector sidecar (POST /rerank/select) turns the rerank
