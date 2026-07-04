@@ -75,7 +75,6 @@ private val WaveRed = Color(0xFFEF4444)
 private val WaveRedDim = Color(0xFFDC2626)
 private val WaveRedGlow = Color(0x40EF4444)
 private val WaveUnplayed = Color(0xFF2A2A2A)
-private val WaveBg = Color(0xFF000000)
 private val TimeColor = Color(0xCCEF4444)
 
 @Composable
@@ -143,7 +142,8 @@ fun AudioPlayerBar(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(RadiusMd))
-            .background(WaveBg)
+            // Transparent by design: the player bar sits over the Ember backdrop,
+            // so no opaque fill here — embers glow through. (Was Color(0xFF000000).)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
