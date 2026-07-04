@@ -132,7 +132,9 @@ fun CliAgentScreen(
                 } else {
                     "CLI Agent ${action} failed: $reason"
                 }
-                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                // LENGTH_LONG: error copy is a full sentence (e.g. the 409
+                // cap message), too long to read in the 2s SHORT window.
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             },
         )
     }

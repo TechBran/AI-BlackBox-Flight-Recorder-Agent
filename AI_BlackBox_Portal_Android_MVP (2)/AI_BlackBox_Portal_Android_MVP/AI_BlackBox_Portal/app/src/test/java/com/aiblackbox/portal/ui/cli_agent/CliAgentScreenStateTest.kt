@@ -352,6 +352,30 @@ class CliAgentScreenStateTest {
         assertTrue("spinner must clear on 409", "claude" !in holder.launchInFlight)
     }
 
+    @Test
+    fun `launch failing with a transport error surfaces a prefixed message`() = runTest {
+        val errors = mutableListOf<Pair<String, String>>()
+        val holder = newHolder(this, errors = errors)
+
+        // Close the server so the connect attempt fails: a raw transport
+        // error (ConnectException) with no HTTP `detail` — the opposite of
+        // the 409 case above. Its bare message ("Failed to connect to …")
+        // must NOT be shown verbatim; it should be prefixed with context.
+        server.close()
+
+        holder.launch("gemini")
+        joinChildren()
+
+        assertEquals("exactly one launch error expected", 1, errors.size)
+        val (action, reason) = errors.first()
+        assertEquals("launch", action)
+        assertTrue(
+            "transport failures must be prefixed with context, not shown raw (was: \"$reason\")",
+            reason.startsWith("Couldn't launch gemini:"),
+        )
+        assertTrue("spinner must clear on a transport failure", "gemini" !in holder.launchInFlight)
+    }
+
     // ── kill ──────────────────────────────────────────────────────────────
 
     @Test

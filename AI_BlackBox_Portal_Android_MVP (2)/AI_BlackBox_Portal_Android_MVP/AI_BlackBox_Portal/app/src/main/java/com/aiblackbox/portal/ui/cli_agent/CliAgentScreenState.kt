@@ -3,6 +3,7 @@ package com.aiblackbox.portal.ui.cli_agent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.model.ZellijSession
 import com.aiblackbox.portal.data.model.ZellijSessionRow
 import kotlinx.coroutines.CoroutineScope
@@ -221,8 +222,16 @@ internal class CliAgentScreenState(
                 // Unknown provider slug — should never happen via UI but
                 // is plausible if a caller passes a typo'd literal.
                 onError("launch", e.message ?: "Unknown provider")
-            } catch (e: IOException) {
+            } catch (e: ApiHttpException) {
+                // Server said no with a presentable message (e.g. the 409
+                // session-cap detail) — surface it VERBATIM. Caught before
+                // the generic IOException branch since it subclasses it.
                 onError("launch", e.message ?: "Couldn't launch $provider")
+            } catch (e: IOException) {
+                // Raw transport failure (timeout, connection refused). Its
+                // bare message ("timeout", "Failed to connect to /…") reads
+                // as gibberish to a user, so prefix it with context.
+                onError("launch", "Couldn't launch $provider: ${e.message ?: "connection error"}")
             } finally {
                 launchInFlight = launchInFlight - provider
             }

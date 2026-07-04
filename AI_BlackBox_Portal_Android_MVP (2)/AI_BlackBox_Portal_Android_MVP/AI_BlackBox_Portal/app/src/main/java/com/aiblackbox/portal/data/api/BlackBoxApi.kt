@@ -23,6 +23,17 @@ import kotlin.coroutines.resumeWithException
 
 private const val TAG = "BlackBoxApi"
 
+/**
+ * A non-2xx HTTP response whose [message] is user-presentable: either the
+ * backend's FastAPI `detail` string (customer-facing copy, e.g. the CLI
+ * Agent 409 session-cap message) or the "HTTP <code>: <reason>" status
+ * line. Subclasses [IOException] so existing `catch (e: IOException)`
+ * sites keep working; catch THIS first when a caller wants to show the
+ * message verbatim but wrap raw transport failures (whose messages are
+ * gibberish like "timeout" or "Failed to connect...") in friendlier copy.
+ */
+class ApiHttpException(message: String) : IOException(message)
+
 class BlackBoxApi(private val baseUrl: String) {
 
     val json: Json = Json {
@@ -91,8 +102,12 @@ class BlackBoxApi(private val baseUrl: String) {
      * missing `detail` falls back to "HTTP <code>: <reason>".
      *
      * NOTE: consumes the response body, so call this only on the error path.
+     *
+     * Returns [ApiHttpException] (an [IOException] subtype) so callers can
+     * distinguish "server said no, with a presentable message" from raw
+     * transport failures (ConnectException, SocketTimeoutException, …).
      */
-    private fun errorFor(response: Response): IOException {
+    private fun errorFor(response: Response): ApiHttpException {
         val fallback = "HTTP ${response.code}: ${response.message}"
         val detail = try {
             val raw = response.body?.string()
@@ -101,7 +116,7 @@ class BlackBoxApi(private val baseUrl: String) {
         } catch (_: Exception) {
             null
         }
-        return IOException(detail?.takeIf { it.isNotBlank() } ?: fallback)
+        return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback)
     }
 
     suspend fun get(path: String): String {

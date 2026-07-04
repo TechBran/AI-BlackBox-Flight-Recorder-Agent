@@ -40,6 +40,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -456,16 +459,16 @@ private fun SessionRowMenuItem(
                 )
                 // ⚡ YOLO badge — persistent (rebuilt from the server list's
                 // `yolo` flag on every refresh; name-suffix fallback for
-                // pre-field rows). Amber to match the launch button.
+                // pre-field rows). A tinted vector, NOT the "⚡" emoji: U+26A1
+                // has Emoji_Presentation=Yes, so a colored Text glyph renders
+                // as the system's yellow color-emoji and ignores `color`.
                 if (isYoloSession(row)) {
                     Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "⚡",
-                        color = CuWarning,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.semantics {
-                            contentDescription = "YOLO session (permissions skipped)"
-                        },
+                    Icon(
+                        imageVector = BoltIcon,
+                        contentDescription = "YOLO session (permissions skipped)",
+                        tint = CuWarning,
+                        modifier = Modifier.size(16.dp),
                     )
                 }
                 Spacer(Modifier.width(4.dp))
@@ -499,6 +502,14 @@ private fun SessionRowMenuItem(
  *
  * Uses the theme's [CuWarning] amber/orange (Color.kt) rather than a
  * hardcoded hex — the same warning tone the CU status surfaces use.
+ *
+ * The glyph is a tinted [BoltIcon] vector, NOT the "⚡" emoji: U+26A1 has
+ * Emoji_Presentation=Yes, so `Text("⚡", color = …)` renders the system's
+ * yellow color-emoji and silently drops the tint — which would make the
+ * enabled and disabled states visually identical on a permission-bypass
+ * control. The IconButton keeps a full 48dp interactive target (the glyph
+ * itself is a compact 20dp) so this permission-bypass control clears the
+ * 48dp minimum touch-target guidance on a phone.
  */
 @Composable
 internal fun YoloLaunchButton(
@@ -512,16 +523,54 @@ internal fun YoloLaunchButton(
         onClick = { feedback(); onClick() },
         enabled = enabled,
         modifier = modifier
-            .size(36.dp)
+            .size(48.dp)
             .semantics { this.contentDescription = contentDescription },
     ) {
-        Text(
-            text = "⚡",
-            color = if (enabled) CuWarning else MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.titleMedium,
+        Icon(
+            imageVector = BoltIcon,
+            contentDescription = null, // description is on the IconButton
+            tint = if (enabled) CuWarning else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
         )
     }
 }
+
+/**
+ * A monochrome lightning-bolt vector (Material "Bolt" filled path) used for
+ * the YOLO launch button and session badge. Built once and cached, mirroring
+ * the material-icons builder idiom — we define it locally instead of pulling
+ * in the whole `material-icons-extended` artifact for a single glyph, and it
+ * is a template vector so [Icon]'s `tint` fully colors it (unlike the "⚡"
+ * emoji, whose fixed color-emoji presentation ignores tint).
+ */
+private var _boltIcon: ImageVector? = null
+private val BoltIcon: ImageVector
+    get() {
+        _boltIcon?.let { return it }
+        return ImageVector.Builder(
+            name = "Bolt",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+        ).apply {
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(11f, 21f)
+                horizontalLineToRelative(-1f)
+                lineToRelative(1f, -7f)
+                horizontalLineTo(7.5f)
+                curveToRelative(-0.88f, 0f, -0.33f, -0.75f, -0.31f, -0.78f)
+                curveTo(8.48f, 10.94f, 10.42f, 7.54f, 13f, 3f)
+                horizontalLineToRelative(1f)
+                lineToRelative(-1f, 7f)
+                horizontalLineToRelative(3.5f)
+                curveToRelative(0.49f, 0f, 0.56f, 0.33f, 0.47f, 0.51f)
+                lineToRelative(-0.07f, 0.15f)
+                curveTo(12.96f, 17.55f, 11f, 21f, 11f, 21f)
+                close()
+            }
+        }.build().also { _boltIcon = it }
+    }
 
 // =========================================================================
 // Pure helpers — exposed at package scope so SessionSwitcherTopBarTest.kt
@@ -538,6 +587,14 @@ internal val PROVIDER_SHORTCUTS: List<String> =
  * GET /cli-agent/zellij/sessions (Task 2); the name-suffix check is the
  * fallback for rows synthesised before the field existed — YOLO session
  * names always end `_yolo` (which also matches the `__yolo` app-slug form).
+ *
+ * Known benign edge case: because the fallback is OR'd in, the server's
+ * `yolo = false` cannot veto it, so a legacy resume-style session whose
+ * app slug literally ends in `_yolo` (e.g. `op__claude__my_yolo`) would
+ * badge ⚡ even though it isn't a YOLO session. This is cosmetic and
+ * legacy-only: every session Android creates now is fork-named with a
+ * `__{timestamp}` suffix (`…__{ts}` or `…__{ts}_yolo`), so a fresh row's
+ * suffix reliably reflects its real YOLO state.
  */
 internal fun isYoloSession(row: ZellijSessionRow): Boolean =
     row.yolo || row.name.endsWith("_yolo")
