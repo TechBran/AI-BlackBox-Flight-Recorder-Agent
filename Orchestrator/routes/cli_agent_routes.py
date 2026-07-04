@@ -797,10 +797,13 @@ async def zellij_launch(
                 _MAX_ZELLIJ_SESSIONS_PER_OPERATOR,
                 session_name_,
             )
+            # "(X)" is LITERAL — it names the X kill button in the
+            # Android session UI (the client toasts this detail string
+            # verbatim). Only the limit is interpolated.
             raise HTTPException(
                 409,
                 f"Session limit reached ({_MAX_ZELLIJ_SESSIONS_PER_OPERATOR}). "
-                f"Close a session ({live_count}) first.",
+                "Close a session (X) first.",
             )
 
         # Launch the session (blocking subprocess call).

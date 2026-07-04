@@ -138,6 +138,7 @@ def test_launch_with_zellij_backend_returns_201_no_token_in_response(
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -220,6 +221,7 @@ def test_launch_with_grok_provider_returns_201(monkeypatch, tmp_path):
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -349,6 +351,7 @@ def test_launch_attaches_if_session_exists_no_relaunch(monkeypatch, tmp_path):
     # First launch: session does NOT exist -> create.
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as first_launch:
         c = _client()
         r1 = c.post("/cli-agent/zellij/launch",
@@ -394,6 +397,7 @@ def test_launch_fork_creates_distinct_session(monkeypatch, tmp_path):
     # attach to it — it forks a brand-new uniquely-named session.
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=True) as exists_probe, \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as fork_launch:
         c = _client()
         r = c.post("/cli-agent/zellij/launch",
@@ -433,6 +437,7 @@ def test_launch_yolo_claude_passes_skip_permissions_flag(monkeypatch, tmp_path):
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -475,6 +480,7 @@ def test_launch_non_yolo_claude_passes_no_args(monkeypatch, tmp_path):
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -510,6 +516,7 @@ def test_launch_codex_carries_no_alt_screen_onto_zellij_path(monkeypatch, tmp_pa
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -542,6 +549,7 @@ def test_launch_yolo_codex_appends_flag_after_provider_args(monkeypatch, tmp_pat
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", return_value=False), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session") as mock_launch:
         c = _client()
         r = c.post(
@@ -722,6 +730,7 @@ def test_launch_collision_race_falls_back_to_resume(monkeypatch, tmp_path):
 
     with patch.object(zellij_client, "web_server_healthy", return_value=True), \
          patch.object(zellij_client, "session_exists", side_effect=lambda n: next(exists_results)), \
+         patch.object(zellij_client, "list_sessions", return_value=[]), \
          patch.object(zellij_client, "launch_session", side_effect=err):
         c = _client()
         r = c.post("/cli-agent/zellij/launch",
@@ -779,8 +788,10 @@ def test_launch_fork_at_cap_returns_409(monkeypatch):
         )
 
     assert r.status_code == 409, r.text
+    # "(X)" is LITERAL — the X kill button in the Android session UI
+    # (the client toasts this string verbatim), NOT the live count.
     assert r.json()["detail"] == (
-        "Session limit reached (12). Close a session (12) first."
+        "Session limit reached (12). Close a session (X) first."
     )
     mock_launch.assert_not_called()
 
