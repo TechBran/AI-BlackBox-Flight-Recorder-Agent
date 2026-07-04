@@ -86,6 +86,15 @@ private const val DEFAULT_ROWS = 24
 private const val TRANSCRIPT_ROWS = 2000
 
 /**
+ * Trailing-debounce window for pushing a new grid size to zellij. Rotation and
+ * IME animations emit a BURST of intermediate cols/rows; the [LaunchedEffect]
+ * keyed on them is cancelled + relaunched on each change, so only the FINAL
+ * size survives this delay and reaches the (heavyweight) zellij session reflow.
+ * 150ms comfortably outlasts a rotation/IME animation without perceptible lag.
+ */
+private const val RESIZE_DEBOUNCE_MS = 150L
+
+/**
  * Zellij-backed terminal Composable. Hosts a Termux [TerminalView] inside
  * [AndroidView], proxies bytes between the emulator and a freshly-minted
  * [ZellijWebSocketClient], and shows an [ExtraKeysBar] + [CliMicButton]
@@ -126,6 +135,13 @@ fun ZellijTerminalScreen(
     // --- Grid dimensions; pushed via sendResize whenever they change --------
     var cols by remember { mutableStateOf(DEFAULT_COLS) }
     var rows by remember { mutableStateOf(DEFAULT_ROWS) }
+
+    // Last size actually PUSHED to zellij (post-debounce). Distinct from
+    // cols/rows (the live measured size): the send guard compares against this
+    // so a burst that collapses back to the same grid sends nothing. Starts at
+    // 0 so the first real measured size always sends.
+    var lastSentCols by remember(session.name) { mutableStateOf(0) }
+    var lastSentRows by remember(session.name) { mutableStateOf(0) }
 
     // --- ZellijWebSocketClient ownership (Phase 1: persistent sessions) ----
     //
@@ -204,13 +220,6 @@ fun ZellijTerminalScreen(
     // manager's process scope (NOT this composition's rememberCoroutineScope)
     // so reconnect survives navigation. We re-fetch the same instance on
     // recomposition via remember(session.name).
-    // Was a live client already held for this session BEFORE this mount? If
-    // so, this mount is a REATTACH (nav return) and the fresh empty
-    // TerminalView needs a forced repaint to show the existing screen. false =
-    // first-ever launch, which repaints on attach.
-    val wasReused = remember(session.name) { TerminalSessionManager.hasLiveClient(session.name) }
-    val repaintDone = remember(session.name) { mutableStateOf(false) }
-
     val client: ZellijWebSocketClient = remember(session.name) {
         TerminalSessionManager.getOrConnect(
             session = session,
@@ -245,26 +254,40 @@ fun ZellijTerminalScreen(
         onBack()
     }
 
-    // --- Push resize whenever cols/rows change ------------------------------
+    // --- Push resize whenever cols/rows change (trailing debounce) ----------
+    //
+    // Rotation and IME animations emit a BURST of intermediate cols/rows.
+    // Because this LaunchedEffect is keyed on (cols, rows) it is cancelled +
+    // relaunched on every change, so the delay below collapses that burst to
+    // just the FINAL size — each survivor is one heavyweight zellij session
+    // reflow, so we want exactly one per rotation, not one per animation frame.
     LaunchedEffect(cols, rows) {
-        Log.d(TAG, "Resize → ${cols}x${rows}")
+        kotlinx.coroutines.delay(RESIZE_DEBOUNCE_MS)
+
+        // Guard (pure, unit-tested in ZellijWebSocketClientTest): never push a
+        // non-positive grid, and skip a burst that collapsed back to the size
+        // we already sent.
+        if (!ZellijWebSocketClient.shouldSendResize(cols, rows, lastSentCols, lastSentRows)) {
+            return@LaunchedEffect
+        }
+
+        Log.d(TAG, "Resize → ${cols}x${rows} (debounced)")
         try {
             terminalSession?.updateSize(cols, rows)
         } catch (t: Throwable) {
             Log.w(TAG, "session.updateSize failed", t)
         }
         client.sendResize(cols = cols, rows = rows)
-        // On reattach (nav return), the new TerminalView is empty and the live
-        // socket only streams NEW output. Force zellij to repaint the existing
-        // screen, once, after the view is sized. The small delay lets the
-        // AndroidView factory attach the view before the repainted frame
-        // arrives (otherwise onBytes drops to a null view). First-ever launch
-        // paints on attach, so skip it there (wasReused == false).
-        if (wasReused && !repaintDone.value && cols > 0 && rows > 0) {
-            kotlinx.coroutines.delay(80)
-            client.requestRepaint()
-            repaintDone.value = true
-        }
+        lastSentCols = cols
+        lastSentRows = rows
+
+        // Unconditional repaint AFTER the debounced resize for a NEW grid. A
+        // rotation that races zellij's redraw otherwise leaves the OLD grid
+        // painted (the "rotate twice to fix it" bug); and a reattach's fresh,
+        // empty TerminalView needs the existing screen redrawn too. zellij
+        // repaints its whole frame on a TerminalResize, so requestRepaint()
+        // (a 1-row toggle) guarantees a full redraw for the current size.
+        client.requestRepaint()
     }
 
     // --- Compose UI ---------------------------------------------------------
@@ -419,6 +442,12 @@ fun ZellijTerminalScreen(
                             (nc != cols || nr != rows)) {
                             cols = nc
                             rows = nr
+                            // Keep the client's measured-size cache current
+                            // SYNCHRONOUSLY (cheap, no wire I/O) so a reconnect
+                            // / QueryTerminalSize reply reflects the latest grid
+                            // even before the debounced resize fires. See
+                            // ZellijWebSocketClient.updateMeasuredSize.
+                            client.updateMeasuredSize(nc, nr)
                         }
                     }
                 },
@@ -607,6 +636,9 @@ fun ZellijTerminalScreen(
                     if (newCols != cols || newRows != rows) {
                         cols = newCols
                         rows = newRows
+                        // Mirror onSizeChanged: keep the client's measured-size
+                        // cache current so reconnect/query replies reconcile.
+                        client.updateMeasuredSize(newCols, newRows)
                     }
                 },
             )

@@ -110,6 +110,17 @@ class ZellijWebSocketClient(
     @Volatile private var lastCols: Int = 80
     @Volatile private var lastRows: Int = 24
 
+    /**
+     * Last MEASURED grid dimensions, reported synchronously by the renderer's
+     * onSizeChanged. May be AHEAD of [lastCols]/[lastRows] (last SENT) when a
+     * rotation happened while the socket was down or while the heavyweight
+     * resize was being debounced. Used to reconcile the reconnect /
+     * QueryTerminalSize reply so it carries the CURRENT size, not a stale
+     * last-sent value. 0 until the renderer first reports a size.
+     */
+    @Volatile private var measuredCols: Int = 0
+    @Volatile private var measuredRows: Int = 0
+
     /** Set true by [close]; suppresses reconnects forever. */
     private val userClosed: AtomicBoolean = AtomicBoolean(false)
 
@@ -203,6 +214,29 @@ class ZellijWebSocketClient(
             safeOnError(t)
         }
     }
+
+    /**
+     * Record the renderer's CURRENT measured grid. Called synchronously from
+     * onSizeChanged — cheap, no wire I/O — so it can run on every intermediate
+     * size while the heavyweight [sendResize] is debounced. The reconnect /
+     * QueryTerminalSize reply reconciles against this (see [resolveReplaySize])
+     * so it reflects the latest measurement even before the debounced resize
+     * fires. Ignores non-positive dims.
+     */
+    fun updateMeasuredSize(cols: Int, rows: Int) {
+        if (cols > 0 && rows > 0) {
+            measuredCols = cols
+            measuredRows = rows
+        }
+    }
+
+    /**
+     * The size a reconnect / QueryTerminalSize reply should carry: the CURRENT
+     * measured grid when known, else the last-sent value. Pure logic lives in
+     * [reconcileReplaySize] for unit testing.
+     */
+    private fun resolveReplaySize(): Pair<Int, Int> =
+        reconcileReplaySize(measuredCols, measuredRows, lastCols, lastRows)
 
     /**
      * Force zellij to repaint the full screen. Used on REATTACH: a returning
@@ -449,8 +483,11 @@ class ZellijWebSocketClient(
 
     private val controlListener: WebSocketListener = object : WebSocketListener() {
         override fun onOpen(ws: WebSocket, response: Response) {
-            logd(TAG, "Control WS onOpen — sending initial TerminalResize ${lastCols}x${lastRows}")
-            sendResize(lastCols, lastRows)
+            // Reconcile: a rotation may have happened while this socket was
+            // down, so replay the CURRENT measured size, not a stale last-sent.
+            val (c, r) = resolveReplaySize()
+            logd(TAG, "Control WS onOpen — sending TerminalResize ${c}x${r} (reconciled)")
+            sendResize(c, r)
         }
 
         override fun onMessage(ws: WebSocket, text: String) {
@@ -497,8 +534,11 @@ class ZellijWebSocketClient(
                 }
             }
             "QueryTerminalSize" -> {
-                // Reply with the most recent dimensions.
-                sendResize(lastCols, lastRows)
+                // Reply with the CURRENT measured size (reconciled), not a
+                // possibly-stale last-sent value — a rotation may have happened
+                // while the resize was debounced or the socket was down.
+                val (c, r) = resolveReplaySize()
+                sendResize(c, r)
             }
             "SetConfig", "Log", "LogError" -> {
                 // Theme/font/log frames — not actioned in T18. UI wiring in T19+.
@@ -631,6 +671,7 @@ class ZellijWebSocketClient(
     ) = safeOnDisconnected(code, reason, willReconnect)
     @VisibleForTesting internal fun invokeOnErrorForTest(t: Throwable) = safeOnError(t)
     @VisibleForTesting internal fun scheduleReconnectForTest() = scheduleReconnect()
+    @VisibleForTesting internal fun resolveReplaySizeForTest(): Pair<Int, Int> = resolveReplaySize()
 
     companion object {
         private const val TAG = "ZellijWS"
@@ -768,6 +809,39 @@ class ZellijWebSocketClient(
             val escapedId = escapeJsonString(webClientId)
             return """{"web_client_id":"$escapedId","payload":{"type":"TerminalResize","rows":$rows,"cols":$cols}}"""
         }
+
+        /**
+         * Guard for the debounced resize send: only push a grid that is
+         * positive in both dims AND differs from the last size we sent. Every
+         * send is a heavyweight zellij session reflow, so a burst that
+         * collapses back to the already-sent size must send nothing. Pure so
+         * the debounce path in ZellijTerminalScreen can be verified here.
+         */
+        @JvmStatic
+        internal fun shouldSendResize(
+            cols: Int,
+            rows: Int,
+            lastCols: Int,
+            lastRows: Int,
+        ): Boolean = cols > 0 && rows > 0 && (cols != lastCols || rows != lastRows)
+
+        /**
+         * Pick the size a reconnect / QueryTerminalSize reply should carry:
+         * the CURRENT measured grid when both dims are positive, else the
+         * last-sent value. Reconciles a rotation that landed while the socket
+         * was down or the resize was debounced. Falls back as a PAIR (never
+         * mixes a measured col with a stale row) so the reply is always a grid
+         * that actually existed.
+         */
+        @JvmStatic
+        internal fun reconcileReplaySize(
+            measuredCols: Int,
+            measuredRows: Int,
+            lastCols: Int,
+            lastRows: Int,
+        ): Pair<Int, Int> =
+            if (measuredCols > 0 && measuredRows > 0) measuredCols to measuredRows
+            else lastCols to lastRows
 
         /** Minimal JSON-string escaper — handles `"` and `\` (sufficient for UUIDs and our envelope fields). */
         private fun escapeJsonString(s: String): String {

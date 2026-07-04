@@ -372,4 +372,81 @@ class ZellijWebSocketClientTest {
         assertEquals("detached client must not forward to a listener", 0, bytesSeen.get())
         c.close()
     }
+
+    // --- Task 6: resize debounce guard + current-size reconcile ----------
+
+    @Test
+    fun `shouldSendResize rejects an unchanged grid`() {
+        // A rotation burst that collapses back to the size we already sent must
+        // send nothing — every send is a heavyweight zellij session reflow.
+        assertTrue(
+            "unchanged grid must NOT resend",
+            !ZellijWebSocketClient.shouldSendResize(80, 24, 80, 24),
+        )
+    }
+
+    @Test
+    fun `shouldSendResize rejects non-positive dimensions`() {
+        assertTrue("cols=0 must not send", !ZellijWebSocketClient.shouldSendResize(0, 24, 80, 24))
+        assertTrue("rows=0 must not send", !ZellijWebSocketClient.shouldSendResize(80, 0, 80, 24))
+        assertTrue("cols<0 must not send", !ZellijWebSocketClient.shouldSendResize(-1, 24, 80, 24))
+        assertTrue("rows<0 must not send", !ZellijWebSocketClient.shouldSendResize(80, -5, 80, 24))
+    }
+
+    @Test
+    fun `shouldSendResize accepts a new positive grid`() {
+        // Rotation to a genuinely new grid (differs in either dim) must send.
+        assertTrue(
+            "changed cols must send",
+            ZellijWebSocketClient.shouldSendResize(100, 24, 80, 24),
+        )
+        assertTrue(
+            "changed rows must send",
+            ZellijWebSocketClient.shouldSendResize(80, 50, 80, 24),
+        )
+        // First-ever send: last-sent seeded at 0/0.
+        assertTrue(
+            "first send from 0,0 must send",
+            ZellijWebSocketClient.shouldSendResize(80, 24, 0, 0),
+        )
+    }
+
+    @Test
+    fun `reconcileReplaySize prefers the current measured size`() {
+        // A rotation landed while disconnected: measured is 120x40, last-sent is
+        // the stale 80x24. The reconnect reply must carry the CURRENT size.
+        assertEquals(
+            120 to 40,
+            ZellijWebSocketClient.reconcileReplaySize(120, 40, 80, 24),
+        )
+    }
+
+    @Test
+    fun `reconcileReplaySize falls back to last-sent when no measurement yet`() {
+        // Before the renderer reports (measured 0/0), reply with last-sent.
+        assertEquals(
+            80 to 24,
+            ZellijWebSocketClient.reconcileReplaySize(0, 0, 80, 24),
+        )
+        // Partial/degenerate measurement also falls back as a whole pair (never
+        // mixes a measured col with a stale row).
+        assertEquals(
+            80 to 24,
+            ZellijWebSocketClient.reconcileReplaySize(120, 0, 80, 24),
+        )
+    }
+
+    @Test
+    fun `resolveReplaySize on the instance uses the latest measured size`() {
+        val c = newClient()
+        // No measurement yet → falls back to the seeded last-sent 80x24.
+        assertEquals(80 to 24, c.resolveReplaySizeForTest())
+        // Renderer reports a rotation → reply now reconciles to the new grid.
+        c.updateMeasuredSize(100, 50)
+        assertEquals(100 to 50, c.resolveReplaySizeForTest())
+        // Non-positive measurements are ignored (last good measurement stands).
+        c.updateMeasuredSize(0, 0)
+        assertEquals(100 to 50, c.resolveReplaySizeForTest())
+        c.close()
+    }
 }
