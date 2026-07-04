@@ -498,6 +498,20 @@ if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-reranker.sh" \
     echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-reranker.sh"
 fi
 
+# ── Step 2e: CPU reranker deps (retrieval M5 — MID-tier boxes only) ──
+# The MID-tier sibling of Step 2d: no GPU + >=32 GB RAM installs the in-process
+# CrossEncoder stack (CPU torch + sentence-transformers) into the Orchestrator
+# venv. Self-gates via Orchestrator/hardware.py's probe(): GPU boxes skip (they
+# use Step 2d's vLLM reranker) and LOW (<32 GB) boxes skip (cloud-only rerank),
+# each exit 0 — so the installer calls it unconditionally. Non-fatal like the
+# GPU step. Enablement stays a deliberate wizard/config selection ([rerank]
+# provider = cpu); this only installs the deps + warms the model cache.
+if ! bash "$BLACKBOX_ROOT/installer/templates/blackbox-install-reranker-cpu.sh" \
+        "$REAL_USER" "$REAL_HOME" "$BLACKBOX_ROOT"; then
+    echo "[install] WARN: CPU reranker deps did not install — search works un-reranked."
+    echo "[install]       Re-run later: sudo bash installer/templates/blackbox-install-reranker-cpu.sh"
+fi
+
 # ── Step 3: .env from template (audit I2 — created as $REAL_USER, mode 0600 since it holds API keys) ──
 if [[ ! -f "$BLACKBOX_ROOT/.env" ]]; then
     sudo -u "$REAL_USER" cp "$BLACKBOX_ROOT/.env.template" "$BLACKBOX_ROOT/.env"
