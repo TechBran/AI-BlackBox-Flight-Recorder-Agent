@@ -1193,6 +1193,18 @@ _DEDICATED_CLOUD = [
 ]
 
 
+def _cloud_body(provider: str, rows: list) -> dict:
+    """The provider's REAL response envelope (both live-verified against the
+    APIs): Voyage nests the {index, relevance_score} rows under `data` (inside an
+    {"object":"list", ..., "model", "usage"} envelope), Cohere under `results`.
+    The `data`-vs-`results` divergence is exactly what a wrong-field parse
+    (masked by a mock that used the wrong key) got wrong on the live call."""
+    if provider == "voyage":
+        return {"object": "list", "data": rows, "model": "rerank-2.5",
+                "usage": {"total_tokens": 36}}
+    return {"results": rows}
+
+
 @pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
                          _DEDICATED_CLOUD)
 def test_dedicated_cloud_entry_schema(slug, provider, key_env, url, model_id,
@@ -1224,11 +1236,12 @@ def test_dedicated_cloud_scatters_by_index(monkeypatch, slug, provider, key_env,
     def fake_post(u, headers=None, json=None, timeout=None, **k):
         captured["url"], captured["headers"] = u, headers
         captured["json"], captured["timeout"] = json, timeout
-        return FakeResp(200, {"results": [
+        # provider-REAL envelope (Voyage `data`, Cohere `results`).
+        return FakeResp(200, _cloud_body(provider, [
             {"index": 2, "relevance_score": 0.9},
             {"index": 0, "relevance_score": 0.1},
             {"index": 1, "relevance_score": 0.5},
-        ]})
+        ]))
 
     monkeypatch.setattr(rerank.requests, "post", fake_post)
     with pin_cfg("rerank", provider=provider, model=slug, timeout_s="9"):
@@ -1241,6 +1254,33 @@ def test_dedicated_cloud_scatters_by_index(monkeypatch, slug, provider, key_env,
     assert captured["json"]["documents"] == ["pA", "pB", "pC"]
     assert captured["json"][count_key] == 3      # request ALL back (no truncation)
     assert captured["timeout"] == 9.0
+
+
+def test_score_voyage_parses_real_data_envelope(monkeypatch):
+    """Regression (live-API corrected): Voyage's real /v1/rerank response nests
+    the rows under `data` (NOT `results`) inside an object/model/usage envelope.
+    A parse that reads `results` returns None on every real call — this pins the
+    `data` shape so that regression can't return. Verified live: HTTP 200 with
+    {"object":"list","data":[{"relevance_score":..,"index":..},...],"usage":..}."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
+    real_envelope = {
+        "object": "list",
+        "data": [
+            {"relevance_score": 0.890625, "index": 3},
+            {"relevance_score": 0.886, "index": 1},
+            {"relevance_score": 0.5, "index": 0},
+            {"relevance_score": 0.4, "index": 2},
+        ],
+        "model": "rerank-2.5",
+        "usage": {"total_tokens": 36},
+    }
+    monkeypatch.setattr(rerank.requests, "post",
+                        lambda *a, **k: FakeResp(200, real_envelope))
+    with pin_cfg("rerank", provider="voyage", model="voyage-rerank-2.5"):
+        got = rerank.score("q", ["p0", "p1", "p2", "p3"])
+    # scattered back by index → passage3 highest, passage2 lowest
+    assert got == [0.5, 0.886, 0.4, 0.890625]
+    assert got is not None and len(got) == 4
 
 
 @pytest.mark.parametrize("slug,provider,key_env,url,model_id,count_key",
@@ -1282,8 +1322,8 @@ def test_dedicated_cloud_row_count_mismatch_returns_none(monkeypatch, slug,
     monkeypatch.setenv(key_env, "k-test")
     monkeypatch.setattr(
         rerank.requests, "post",
-        lambda *a, **k: FakeResp(200, {"results": [
-            {"index": 0, "relevance_score": 1.0}]}))
+        lambda *a, **k: FakeResp(200, _cloud_body(
+            provider, [{"index": 0, "relevance_score": 1.0}])))
     with pin_cfg("rerank", provider=provider, model=slug):
         assert rerank.score("q", ["p0", "p1", "p2"]) is None
 
@@ -1297,9 +1337,9 @@ def test_dedicated_cloud_out_of_range_index_returns_none(monkeypatch, slug,
     monkeypatch.setenv(key_env, "k-test")
     monkeypatch.setattr(
         rerank.requests, "post",
-        lambda *a, **k: FakeResp(200, {"results": [
+        lambda *a, **k: FakeResp(200, _cloud_body(provider, [
             {"index": 5, "relevance_score": 0.9},
-            {"index": 0, "relevance_score": 0.1}]}))
+            {"index": 0, "relevance_score": 0.1}])))
     with pin_cfg("rerank", provider=provider, model=slug):
         assert rerank.score("q", ["p0", "p1"]) is None
 
@@ -1317,7 +1357,8 @@ def test_no_query_instruction_for_cloud_rerankers(monkeypatch, slug, provider,
 
     def fake_post(u, headers=None, json=None, timeout=None, **k):
         captured["json"] = json
-        return FakeResp(200, {"results": [{"index": 0, "relevance_score": 0.5}]})
+        return FakeResp(200, _cloud_body(
+            provider, [{"index": 0, "relevance_score": 0.5}]))
 
     monkeypatch.setattr(rerank.requests, "post", fake_post)
     with pin_cfg("rerank", provider=provider, model=slug):

@@ -662,25 +662,31 @@ def _score_cpu(query: str, passages: list[str],
 
 
 # ── dedicated cloud cross-encoders (M7) ───────────────────────────────────────
-# Voyage + Cohere: purpose-trained rerankers over raw REST (no SDK deps). Both
-# return {results:[{index, relevance_score}]}; each score is scattered back to
-# its passage position so the returned vector is positionally aligned. Bearer
-# key read FRESH via os.getenv(key_env) at score time (M4). None on missing key /
-# non-200 / count-or-index anomaly; transport blow-ups are backstopped by the
-# dispatcher's never-raise (audit A9). NO Qwen instruct prefix (it inverts
-# non-Qwen rankers) — the raw query goes on the wire.
+# Voyage + Cohere: purpose-trained rerankers over raw REST (no SDK deps). Each
+# returns a list of {index, relevance_score} rows scattered back to their
+# passage positions so the returned vector is positionally aligned. The array
+# KEY differs by provider (live-verified): Voyage nests rows under `data` (its
+# envelope is {"object":"list","data":[...],"model":...,"usage":...}), Cohere
+# under `results`. Bearer key read FRESH via os.getenv(key_env) at score time
+# (M4). None on missing key / non-200 / count-or-index anomaly; transport
+# blow-ups are backstopped by the dispatcher's never-raise (audit A9). NO Qwen
+# instruct prefix (it inverts non-Qwen rankers) — the raw query goes on the wire.
 
 def _scatter_relevance_scores(payload: "dict | None",
                               n: int) -> "list[float] | None":
-    """Scatter Voyage/Cohere's {results:[{index, relevance_score}]} back onto
-    passage positions: init 0.0, out[index] = relevance_score. None on ANY
-    shape/count/index anomaly — a partial result can't rank on one scale, so
-    the retriever must fall through to its un-reranked ranking (never guess)."""
-    results = payload.get("results") if isinstance(payload, dict) else None
-    if not isinstance(results, list) or len(results) != n:
+    """Scatter a cloud reranker's {index, relevance_score} rows back onto passage
+    positions: init 0.0, out[index] = relevance_score. The rows array key differs
+    by provider (live-verified): Voyage uses `data`, Cohere `results` — accept
+    either, `data` first. None on ANY shape/count/index anomaly — a partial
+    result can't rank on one scale, so the retriever must fall through to its
+    un-reranked ranking (never guess)."""
+    rows = None
+    if isinstance(payload, dict):
+        rows = payload.get("data") or payload.get("results")
+    if not isinstance(rows, list) or len(rows) != n:
         return None
     out = [0.0] * n
-    for item in results:
+    for item in rows:
         try:
             idx = int(item["index"])
             sc = float(item["relevance_score"])
