@@ -268,6 +268,17 @@ def _apply_rerank(query, ranked, index, rrf_c):
             return None
         order = sorted(range(pool_n), key=lambda i: scores[i], reverse=True)
         new_order = [pool[i] for i in order] + [sid for sid, _ in ranked[pool_n:]]
+        # Observability (2026-07-05): log a concise SUCCESS line so a live rerank
+        # is visible in the journal — previously only preflight + failures logged,
+        # so a healthy rerank ran completely silently. Never breaks retrieval.
+        try:
+            _s = _rerank.get_settings()
+            _top = pool[order[0]]
+            _moved = "top→#1 CHANGED" if order[0] != 0 else "top unchanged"
+            print(f"[RERANK] provider={_s.get('provider')} model={_s.get('model')}: "
+                  f"scored {pool_n} passages, {_moved} ({_top} now #1)")
+        except Exception:  # noqa: BLE001 - logging must never break retrieval
+            pass
         return {sid: 1.0 / (rrf_c + r) for r, sid in enumerate(new_order)}
     except Exception as e:  # noqa: BLE001 - rerank must never break retrieval
         _log_rerank_fallthrough(f"rerank stage error ({e})")
