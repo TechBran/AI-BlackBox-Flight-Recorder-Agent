@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from Orchestrator import backfill_embeddings as backfill
 from Orchestrator import config, fossils
-from Orchestrator.embeddings import migrate, ollama_io, providers, search, watcher
+from Orchestrator.embeddings import chunker, migrate, ollama_io, providers, search, watcher
 from Orchestrator.embeddings.providers import EmbeddingProviderError
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import get_active_slug, get_store, set_active_slug
@@ -261,7 +261,7 @@ def test_chunk_group_batches_prepends_whole_body_for_multichunk(monkeypatch):
     text is the whole body (ordinal 0), never a chunk; a single-chunk
     snapshot stays exactly its one chunk (identity chunking, unchanged)."""
     counts = {"snap00": 3, "snap01": 1}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
     body0 = "snap00 whole body text, much longer than any scoring window"
     body1 = "snap01 short body"
 
@@ -280,7 +280,7 @@ def test_chunk_group_batches_counts_whole_body_against_cap(monkeypatch):
     """The +1 whole-body text per multi-chunk snapshot participates in the
     CHUNK_BATCH_CAP packing math like any other group member."""
     counts = {f"snap{i:02d}": 10 for i in range(3)}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
     ids_texts = [(f"SNAP-{i}", f"snap{i:02d} body") for i in range(3)]
 
     batches, empty = migrate.chunk_group_batches(ids_texts, TARGET)
@@ -333,7 +333,7 @@ async def test_rebuild_converges_multichunk_corpus(env, fake_provider):
     # embedded too (ordinal 0), so its group is n_chunks + 1 rows
     for sid, body in bodies.items():
         assert body in fake_provider.embedded_texts
-        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        n_chunks = len(chunker.chunk_snapshot(body, model_key=TARGET))
         assert ids.count(sid) == n_chunks + 1
     # every provider call obeyed the flatten cap (no ~10-chunk snapshot here
     # exceeds it alone; the oversize case has its own test below)
@@ -393,7 +393,7 @@ async def test_interrupted_rebuild_resumes_without_duplicates(
     # groups of 9 → batch 1 = 3 snaps (27 texts; +9 would exceed the 32 cap),
     # batch 2 = 2 snaps (18 texts)
     counts = {f"snap{i:02d}": 8 for i in range(5)}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
     fake_provider.hook = lambda _texts: migrate.request_cancel()
 
     result = await migrate.run_rebuild(TARGET)
@@ -490,7 +490,7 @@ async def test_oversized_snapshot_is_one_provider_call(env, fake_provider,
     index_path, stores_dir, volume_path = env
     _build_volume(index_path, volume_path, n=1)
     monkeypatch.setattr(
-        migrate, "chunk_snapshot", _fixed_chunker({"snap00": 40})
+        chunker, "chunk_snapshot", _fixed_chunker({"snap00": 40})
     )
 
     result = await migrate.run_rebuild(TARGET)
@@ -511,7 +511,7 @@ async def test_mixed_batch_packs_whole_snapshots_under_cap(
     _build_volume(index_path, volume_path, n=5)
     counts = {f"snap{i:02d}": 10 for i in range(4)}
     counts["snap04"] = 2
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
 
     result = await migrate.run_rebuild(TARGET)
 
@@ -534,7 +534,7 @@ async def test_rebuild_quarantines_failing_batch_and_completes(
     index_path, stores_dir, volume_path = env
     bodies = _build_volume(index_path, volume_path, n=5)
     counts = {f"snap{i:02d}": 2 for i in range(5)}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
     monkeypatch.setattr(migrate, "CHUNK_BATCH_CAP", 2)   # one snapshot per call
     fake_provider.fail_substring = "snap03"
 
@@ -628,7 +628,7 @@ async def test_plain_migration_onto_v2_target_lands_chunk_groups(
     # a multi-row group alongside its chunks (n_chunks + 1 rows).
     for sid, body in bodies.items():
         group_size = ids.count(sid)
-        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        n_chunks = len(chunker.chunk_snapshot(body, model_key=TARGET))
         assert n_chunks > 1                            # fixture multi-chunks
         assert group_size == n_chunks + 1
         assert body in fake_provider.embedded_texts    # whole-doc retained
@@ -688,7 +688,7 @@ async def test_v1_engine_fill_unchanged_whole_text_single_rows(
     def _no_chunk(text, model_key=None):
         raise AssertionError("chunker must not run on a v1 engine fill")
 
-    monkeypatch.setattr(migrate, "chunk_snapshot", _no_chunk)
+    monkeypatch.setattr(chunker, "chunk_snapshot", _no_chunk)
 
     result = await migrate.run_migration(TARGET)
 
@@ -732,7 +732,7 @@ async def test_model_switch_fresh_target_creates_schema2(env, fake_provider,
     assert _assert_contiguous_groups(ids, ordinals) == set(bodies)
     # iteration-2 group policy inherited: whole body at ordinal 0 + chunks
     for sid, body in bodies.items():
-        n_chunks = len(migrate.chunk_snapshot(body, model_key=TARGET))
+        n_chunks = len(chunker.chunk_snapshot(body, model_key=TARGET))
         assert n_chunks > 1                            # fixture multi-chunks
         assert ids.count(sid) == n_chunks + 1
         assert body in fake_provider.embedded_texts
@@ -880,7 +880,7 @@ async def test_gap_heal_v2_chunks_groups_and_sub_batches(env, fake_provider,
     # every snapshot goes in its own provider call
     store = get_store(TARGET, base_dir=stores_dir, schema=2)
     counts = {f"snap{i:02d}": 16 for i in range(5)}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
 
     healed = await watcher._gap_heal(TARGET)
 
@@ -907,7 +907,7 @@ async def test_gap_heal_v1_path_is_todays_whole_text_single_call(
     def _no_chunk(text, model_key=None):
         raise AssertionError("chunker must not run on the v1 heal path")
 
-    monkeypatch.setattr(migrate, "chunk_snapshot", _no_chunk)
+    monkeypatch.setattr(chunker, "chunk_snapshot", _no_chunk)
 
     healed = await watcher._gap_heal(TARGET)
 
@@ -927,7 +927,7 @@ async def test_gap_heal_v2_provider_failure_keeps_partial_and_returns(
     _build_volume(index_path, volume_path, n=5)
     store = get_store(TARGET, base_dir=stores_dir, schema=2)
     counts = {f"snap{i:02d}": 16 for i in range(5)}
-    monkeypatch.setattr(migrate, "chunk_snapshot", _fixed_chunker(counts))
+    monkeypatch.setattr(chunker, "chunk_snapshot", _fixed_chunker(counts))
     fake_provider.fail_substring = "snap04"          # dies on the LAST batch
 
     healed = await watcher._gap_heal(TARGET)

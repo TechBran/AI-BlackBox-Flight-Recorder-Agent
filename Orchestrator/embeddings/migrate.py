@@ -68,7 +68,7 @@ from pathlib import Path
 
 from Orchestrator import config
 from Orchestrator.embeddings import search
-from Orchestrator.embeddings.chunker import chunk_snapshot
+from Orchestrator.embeddings.chunker import chunks_for_snapshot
 from Orchestrator.embeddings.providers import EmbeddingProviderError, get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import (
@@ -154,13 +154,18 @@ def _finish_job(state: str, **fields) -> None:
     print(f"[MIGRATE] job finished: state={state}")
 
 
-def _begin_job(target_slug: str, kind: "str | None" = None) -> None:
+def _begin_job(target_slug: str, kind: "str | None" = None,
+               content_mode: str = "full") -> None:
     """Claim the singleton: RuntimeError if a job is running, else fresh state.
 
     kind="rebuild" marks a build-only chunk-store job: the marker (and
     activate=false) is PERSISTED so boot resume relaunches into the rebuild
     engine, never the cutover one. Model-switch jobs stay kind-less — their
     persisted dict keeps the exact pre-6d key set (compat + status contract).
+
+    content_mode (M14.3d) is PERSISTED on rebuild jobs (default "full" omits
+    the key, so a full rebuild's persisted dict is byte-identical to pre-14.3),
+    so boot resume rebuilds the SAME (full | body) candidate.
     """
     global _JOB
     with _JOB_LOCK:
@@ -183,6 +188,8 @@ def _begin_job(target_slug: str, kind: "str | None" = None) -> None:
         if kind == "rebuild":
             _JOB["kind"] = "rebuild"
             _JOB["activate"] = False
+            if content_mode != "full":
+                _JOB["content_mode"] = content_mode
         _persist_locked()
 
 
@@ -200,7 +207,8 @@ def _log_engine_task_outcome(task: "asyncio.Task") -> None:
         )
 
 
-def _launch(target_slug: str, rebuild: bool = False) -> "asyncio.Task":
+def _launch(target_slug: str, rebuild: bool = False,
+            content_mode: str = "full") -> "asyncio.Task":
     """Schedule the engine on the running loop and RETAIN the Task.
 
     The event loop holds only WEAK references to tasks: an engine task nobody
@@ -209,11 +217,15 @@ def _launch(target_slug: str, rebuild: bool = False) -> "asyncio.Task":
     strong reference; both launch sites (route POST + startup resume) route
     through here. Claims nothing — caller runs _begin_job first.
     rebuild=True schedules the build-only chunk-rebuild engine instead of the
-    cutover one (the persisted job kind decides at the resume site).
+    cutover one (the persisted job kind decides at the resume site);
+    content_mode (M14.3d) is passed to the rebuild engine only.
     """
     global _JOB_TASK
-    engine = _run_rebuild_engine if rebuild else _run_engine
-    task = asyncio.get_running_loop().create_task(engine(target_slug))
+    if rebuild:
+        coro = _run_rebuild_engine(target_slug, content_mode)
+    else:
+        coro = _run_engine(target_slug)
+    task = asyncio.get_running_loop().create_task(coro)
     task.add_done_callback(_log_engine_task_outcome)
     _JOB_TASK = task
     return task
@@ -252,7 +264,7 @@ async def run_migration(target_slug: str) -> dict:
     return await _run_engine(target_slug)
 
 
-async def start_rebuild(target_slug: str) -> dict:
+async def start_rebuild(target_slug: str, content_mode: str = "full") -> dict:
     """Route entry for the IN-SERVICE chunk rebuild (M6f build step).
 
     Mirror of start_migration: claim (kind="rebuild"), schedule the
@@ -261,19 +273,20 @@ async def start_rebuild(target_slug: str) -> dict:
     continue against the active v1 store (the re-diff loop absorbs them into
     the candidate). Same ValueError→404 / RuntimeError→409 semantics; the
     claim happens synchronously BEFORE create_task, so a racing second POST
-    can never double-start.
+    can never double-start. content_mode="body" (M14.3d) builds a body-only
+    candidate (the 14.4 cutover engine).
     """
     if target_slug not in EMBEDDING_MODELS:
         raise ValueError(
             f"unknown embedding model slug {target_slug!r}; "
             f"known: {sorted(EMBEDDING_MODELS)}"
         )
-    _begin_job(target_slug, kind="rebuild")
-    _launch(target_slug, rebuild=True)
+    _begin_job(target_slug, kind="rebuild", content_mode=content_mode)
+    _launch(target_slug, rebuild=True, content_mode=content_mode)
     return get_job_status()
 
 
-async def run_rebuild(target_slug: str) -> dict:
+async def run_rebuild(target_slug: str, content_mode: str = "full") -> dict:
     """Run a chunk-store rebuild to completion in this coroutine (CLI + 6f).
 
     Builds a schema-2 store for target_slug under {stores}/_build/{slug} — a
@@ -281,14 +294,15 @@ async def run_rebuild(target_slug: str) -> dict:
     never calls set_active_slug or search.swap_active; active.json and the
     live search handle are untouched. Same singleton claim as migrations
     (one job at a time across both kinds); returns the final job dict.
+    content_mode="body" (M14.3d) builds a body-only candidate.
     """
     if target_slug not in EMBEDDING_MODELS:
         raise ValueError(
             f"unknown embedding model slug {target_slug!r}; "
             f"known: {sorted(EMBEDDING_MODELS)}"
         )
-    _begin_job(target_slug, kind="rebuild")
-    return await _run_rebuild_engine(target_slug)
+    _begin_job(target_slug, kind="rebuild", content_mode=content_mode)
+    return await _run_rebuild_engine(target_slug, content_mode)
 
 
 def request_cancel() -> bool:
@@ -324,9 +338,15 @@ def resume_if_interrupted() -> "asyncio.Task | None":
     # cutover. Kind-less state (every pre-6d file + all model-switch jobs)
     # resumes the migration engine exactly as before.
     if persisted.get("kind") == "rebuild":
-        print(f"[MIGRATE] resuming interrupted chunk rebuild of {target} (build-only)")
-        _begin_job(target, kind="rebuild")
-        return _launch(target, rebuild=True)
+        # Resume the SAME (full | body) candidate build (M14.3d): the persisted
+        # content_mode decides, absent -> "full" (every pre-14.3 rebuild).
+        content_mode = persisted.get("content_mode", "full")
+        print(
+            f"[MIGRATE] resuming interrupted chunk rebuild of {target} "
+            f"(build-only, content_mode={content_mode})"
+        )
+        _begin_job(target, kind="rebuild", content_mode=content_mode)
+        return _launch(target, rebuild=True, content_mode=content_mode)
     print(f"[MIGRATE] resuming interrupted migration to {target}")
     _begin_job(target)
     return _launch(target)
@@ -375,34 +395,38 @@ def pack_chunk_batches(chunked: list, cap: "int | None" = None) -> list:
     return batches
 
 
-def chunk_group_batches(ids_texts: list, model_key: str) -> tuple:
+def chunk_group_batches(ids_texts: list, model_key: str,
+                        content_mode: str = "full") -> tuple:
     """[(snap_id, text)] → (packed chunk batches, empty_ids).
 
-    Chunks each snapshot with chunk_snapshot (verbatim scoring windows sized
-    for model_key) and packs the results via pack_chunk_batches. Snapshots
-    whose text chunks to nothing are returned in empty_ids for the caller's
-    quarantine/skip bookkeeping. Sync + CPU-bound (tokenizer work) — callers
-    run it via asyncio.to_thread.
+    Chunks each snapshot via the SHARED helper chunker.chunks_for_snapshot
+    (the ONE place the group policy + body-only cut live, M14.3) and packs the
+    results via pack_chunk_batches. Snapshots whose text chunks to nothing are
+    returned in empty_ids for the caller's quarantine/skip bookkeeping. Sync +
+    CPU-bound (tokenizer work) — callers run it via asyncio.to_thread.
 
-    GROUP POLICY (M6f iteration 2): a multi-chunk snapshot contributes the
-    WHOLE-snapshot text FIRST (ordinal 0 — the provider's M5 clamp bounds
-    its length, same as the v1 embedding) followed by its chunks, so the
-    landed group scores max(whole, chunks) under the v2 max-cosine collapse.
-    Single-chunk snapshots are unchanged (their one chunk IS the whole
-    text). The +1 text per multi-chunk snapshot counts against the
-    CHUNK_BATCH_CAP packing like any other group member. Every group-fill
-    consumer inherits this here: the rebuild engine, the model-switch v2
-    fill (_fill_v2_batch), and the watcher gap-heal. M8 windowing relies on
-    the rule: an ordinal-0 hit means "no specific window".
+    content_mode ("full" | "body", M14.3d) is threaded straight to the shared
+    helper, so migrate and the mint seam (search.embed_snapshot_for_index)
+    produce IDENTICAL chunks for the same (text, mode) — new-mint and
+    re-embedded snapshots can never diverge. Default "full" is byte-identical
+    to the previous inline chunk_snapshot(text) + whole-doc-at-ordinal-0.
+
+    GROUP POLICY (M6f iteration 2, in the shared helper): a multi-chunk
+    snapshot contributes the WHOLE (or, in body mode, whole-BODY) text FIRST
+    (ordinal 0 — the provider's M5 clamp bounds its length) followed by its
+    chunks, so the landed group scores max(whole, chunks) under the v2
+    max-cosine collapse. Single-chunk snapshots are unchanged. Every group-fill
+    consumer inherits this: the rebuild engine, the model-switch v2 fill
+    (_fill_v2_batch), and the watcher gap-heal.
     """
     chunked, empty_ids = [], []
     for snap_id, text in ids_texts:
-        chunks = chunk_snapshot(text, model_key=model_key)
+        chunks = chunks_for_snapshot(
+            text, model_key=model_key, content_mode=content_mode
+        )
         if not chunks:
             empty_ids.append(snap_id)
             continue
-        if len(chunks) > 1:
-            chunks = [text] + chunks  # whole-doc vector at ordinal 0
         chunked.append((snap_id, chunks))
     return pack_chunk_batches(chunked), empty_ids
 
@@ -446,8 +470,12 @@ async def _fill_v2_batch(target, provider, ids_texts: list,
     """
     appended: list = []
     quarantined: list = []
+    # Chunk mode = the TARGET store's content_mode (M14.3d): mint and migrate
+    # both read chunk mode from the store, so a body-mode fill target chunks
+    # body-only. A model-switch target is created "full" by open_migration_target
+    # unless the store already exists as body.
     batches, empty_ids = await asyncio.to_thread(
-        chunk_group_batches, ids_texts, model_key
+        chunk_group_batches, ids_texts, model_key, target.content_mode
     )
     for sid in empty_ids:
         print(f"[MIGRATE] {sid}: empty snapshot body - skipping this run")
@@ -678,7 +706,7 @@ def _build_base_dir() -> Path:
     return Path(config.EMBEDDINGS_STORES_DIR) / BUILD_DIR_NAME
 
 
-async def _run_rebuild_engine(target_slug: str) -> dict:
+async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:
     """Diff-and-fill a schema-2 chunk store under _build. No cutover, ever.
 
     Same convergence shape as _run_engine — re-diff missing() in SNAPSHOT
@@ -696,7 +724,14 @@ async def _run_rebuild_engine(target_slug: str) -> dict:
     try:
         # F1 lesson: the build store is ALWAYS opened with explicit schema=2 —
         # autodetect on a fresh dir would default v1 and cement the downgrade.
-        target = get_store(target_slug, base_dir=_build_base_dir(), schema=2)
+        # content_mode (M14.3d) stamps the candidate meta; the engine then reads
+        # it BACK off the store below so mint and migrate share one source of
+        # truth (a resumed build re-derives it from the on-disk meta).
+        target = get_store(
+            target_slug, base_dir=_build_base_dir(), schema=2,
+            content_mode=content_mode,
+        )
+        store_content_mode = target.content_mode
         provider = get_provider(target_slug)
         quarantined: set[str] = set()   # skipped for THIS RUN only
         rows_appended = 0               # rows THIS run wrote
@@ -735,7 +770,7 @@ async def _run_rebuild_engine(target_slug: str) -> dict:
 
             # Chunk + pack off the loop (tokenizer work is CPU-bound).
             batches, empty_ids = await asyncio.to_thread(
-                chunk_group_batches, ids_texts, target_slug
+                chunk_group_batches, ids_texts, target_slug, store_content_mode
             )
             for sid in empty_ids:
                 print(
