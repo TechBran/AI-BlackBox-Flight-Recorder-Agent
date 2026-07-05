@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from Orchestrator import config
-from Orchestrator.embeddings.chunker import chunk_snapshot
+from Orchestrator.embeddings.chunker import chunk_snapshot, chunks_for_snapshot
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.embeddings.store import VectorStore, get_active_slug, get_store
@@ -247,6 +247,7 @@ def embed_snapshot_for_index(text: str) -> dict:
         store = get_active_store()
         schema = store.schema
         slug = store.slug
+        content_mode = store.content_mode
     except Exception as e:
         print(f"[EMBEDDING] active store unavailable; snapshot embed skipped: {e}")
         return {}
@@ -256,16 +257,15 @@ def embed_snapshot_for_index(text: str) -> dict:
         return {"embedding": vec} if vec else {}
 
     try:
-        chunks = chunk_snapshot(text, model_key=slug)
+        # Shared helper (M14.3): the ONE place that turns (text, content_mode)
+        # into stored chunks — the whole-doc-at-ordinal-0 group policy and the
+        # body-only cut both live there, so mint == migrate == windower. When
+        # content_mode=="full" (production until the 14.4 cutover) this is
+        # byte-identical to the previous inline chunk_snapshot(text)+prepend.
+        chunks = chunks_for_snapshot(text, model_key=slug, content_mode=content_mode)
         if not chunks:
             print(f"[EMBEDDING] {slug}: empty snapshot body — nothing to embed")
             return {}
-        if len(chunks) > 1:
-            # Group policy (M6f iteration 2): whole-doc vector at ordinal 0.
-            # The provider's M5 clamp bounds the whole-body length — this is
-            # exactly the v1 whole-snapshot embedding, retained alongside the
-            # chunks so search scores max(whole, chunks).
-            chunks = [text] + chunks
         provider = get_provider(slug)
         vectors = _run_async(provider.embed(chunks, "document"))
     except Exception as e:

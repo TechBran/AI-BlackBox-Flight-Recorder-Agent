@@ -62,8 +62,22 @@ def cap_chars(text: str, max_chars: int) -> str:
 _WINDOW_GAP_MARK = "[…]"
 
 
+def _resolve_active_content_mode() -> str:
+    """The active store's content_mode ("full" | "body"), "full" if unavailable.
+
+    Read fresh (config-only, no network) so the windower re-derives against the
+    SAME text the store chunked. Never raises — a corrupt/absent store degrades
+    to "full" (today's whole-text re-derivation)."""
+    try:
+        from Orchestrator.embeddings.search import get_active_store  # lazy: import-light
+        return get_active_store().content_mode
+    except Exception:
+        return "full"
+
+
 def window_snapshot_text(text: str, best_ordinal, budget_chars: int,
-                         model_key: Optional[str] = None) -> str:
+                         model_key: Optional[str] = None,
+                         content_mode: Optional[str] = None) -> str:
     """Deliver `text` within `budget_chars`, windowed on its best-matched chunk.
 
     best_ordinal is the store-collapse chunk identity from
@@ -71,11 +85,23 @@ def window_snapshot_text(text: str, best_ordinal, budget_chars: int,
       - None / 0  -> no specific window (v1 row, keyword-only candidate, or the
         whole-doc vector won) -> today's head truncation (cap_chars).
       - >= 1      -> chunk (best_ordinal - 1) of the deterministic chunker
-        output won: re-derive spans via chunk_snapshot(text, model_key) (the
+        output won: re-derive spans via chunk_snapshot(<source>, model_key) (the
         chunker guarantees verbatim substrings; a multi-chunk group stores the
         whole doc at ordinal 0 and chunker chunk i at ordinal i+1), locate the
         chunk's char range, and expand symmetrically to the budget, snapping
         to line boundaries where cheap.
+
+    content_mode (M14.3c) picks WHAT the re-derivation chunks — it MUST match
+    the store that produced best_ordinal, or every ordinal shifts by the
+    envelope chunk count and the window points at the wrong passage:
+      - None (default) -> resolve from the active store (the ordinals came from
+        it); a corrupt/absent store degrades to "full".
+      - "full" -> chunk the whole `text` (today's behavior, byte-identical).
+      - "body" -> chunk extract_snapshot_content(text) (the Raw-Session-Log
+        body — a SUFFIX of `text`), matching a body-mode store's stored chunks.
+    Span-location + windowing stay on the FULL `text` either way: the body is a
+    suffix, so text.find(body_chunk) still locates it and the START/END marker
+    preservation below is unchanged.
 
     The snapshot's START marker line is always preserved (extract_snap_ids /
     fill_unseen parse provenance from it) and the END marker line is kept when
@@ -89,7 +115,17 @@ def window_snapshot_text(text: str, best_ordinal, budget_chars: int,
         return cap_chars(text, budget_chars)
     try:
         from Orchestrator.embeddings.chunker import chunk_snapshot  # lazy: keep fossils import-light
-        chunks = chunk_snapshot(text, model_key=model_key)
+        if content_mode is None:
+            content_mode = _resolve_active_content_mode()
+        # Re-derive against the SAME text the store chunked (M14.3c). In body
+        # mode the body is a suffix of `text`, so the located span still lives
+        # inside `text` and all the full-text windowing below is unchanged.
+        chunk_source = text
+        if content_mode == "body":
+            body = extract_snapshot_content(text)
+            if body:
+                chunk_source = body
+        chunks = chunk_snapshot(chunk_source, model_key=model_key)
         idx = best_ordinal - 1  # group ordinal i+1 == chunker chunk i
         if len(chunks) <= 1 or idx >= len(chunks):
             return cap_chars(text, budget_chars)  # chunker drift since mint
@@ -329,12 +365,18 @@ def _decode_scored_snapshots(scored, operator: str,
     vol_bytes = read_volume_bytes(VOL_PATH)
 
     model_key = None
+    content_mode = "full"
     if window_budget_chars is not None:
         try:
             from Orchestrator.embeddings.store import get_active_slug
             model_key = get_active_slug()
         except Exception:
             model_key = None  # tokenization floor still windows correctly
+        # Resolve the active store's content_mode ONCE (M14.3c) and thread it
+        # to every window call — the ordinals came from this store, so the
+        # windower must re-chunk the same (full | body) text. Cheap + never
+        # raises (degrades to "full").
+        content_mode = _resolve_active_content_mode()
 
     results = []
     for row in scored:
@@ -351,7 +393,8 @@ def _decode_scored_snapshots(scored, operator: str,
             text = vol_bytes[start:end].decode('utf-8', errors='replace')
             if window_budget_chars is not None:
                 text = window_snapshot_text(
-                    text, best_ordinal, window_budget_chars, model_key
+                    text, best_ordinal, window_budget_chars, model_key,
+                    content_mode=content_mode,
                 )
             results.append(text)
     return results

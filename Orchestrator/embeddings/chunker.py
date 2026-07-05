@@ -153,3 +153,44 @@ def chunk_snapshot(text: str, model_key: str | None = None) -> list[str]:
     except Exception:
         # Never-raise contract: degrade to today's whole-snapshot behavior.
         return [clean]
+
+
+def chunks_for_snapshot(text: str, model_key: str | None = None,
+                        content_mode: str = "full") -> list[str]:
+    """Build ONE snapshot's stored chunk list, honoring the store's content_mode.
+
+    The SINGLE source of truth for "given (text, mode), what chunks land in the
+    v2 store" — called by BOTH the mint seam (search.embed_snapshot_for_index)
+    and the migrate/rebuild path (migrate.chunk_group_batches) so new-mint and
+    re-embedded snapshots can NEVER diverge (M14.3 shared-helper mandate). The
+    windower (fossils.window_snapshot_text) re-derives against the same body
+    cut, so its ordinal round-trip agrees too.
+
+    content_mode:
+      - "full" (default) — today's behavior, byte-identical: chunk the whole
+        envelope-inclusive `text`; a multi-chunk group carries the WHOLE text
+        as the ordinal-0 whole-doc vector (`[text] + chunks`).
+      - "body" (M14.3) — chunk extract_snapshot_content(text) (the Raw-Session-
+        Log body) and use that BODY as the ordinal-0 whole-doc text, so every
+        stored vector scores clean content, not the bookkeeping envelope. If
+        the body is empty (never for non-empty input — extract_snapshot_content
+        never returns empty — but belt-and-braces) fall back to the full text.
+
+    Returns [] for empty input (the caller drops it — a partial/empty group must
+    never land). Never raises (chunk_snapshot is never-raise; the lazy body
+    extractor is never-raise).
+    """
+    source = text
+    if content_mode == "body":
+        # Lazy import keeps chunker import-light and avoids any fossils cycle
+        # (fossils lazy-imports chunk_snapshot, never chunker at module top).
+        from Orchestrator.fossils import extract_snapshot_content
+        body = extract_snapshot_content(text)
+        if body:
+            source = body
+    chunks = chunk_snapshot(source, model_key=model_key)
+    if len(chunks) > 1:
+        # Group policy (M6f iteration 2): the whole-doc (here whole-BODY in
+        # body mode) vector at ordinal 0 — search scores max(whole, chunks).
+        chunks = [source] + chunks
+    return chunks

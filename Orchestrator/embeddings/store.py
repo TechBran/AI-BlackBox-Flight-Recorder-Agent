@@ -87,9 +87,12 @@ class VectorStore:
     get_store(); constructing VectorStore directly is for tests only.
     """
 
-    def __init__(self, slug: str, dims: int, base_dir, schema: "int | None" = None):
+    def __init__(self, slug: str, dims: int, base_dir, schema: "int | None" = None,
+                 content_mode: str = "full"):
         if schema not in (None, 1, 2):
             raise ValueError(f"{slug}: unsupported store schema {schema!r}")
+        if content_mode not in ("full", "body"):
+            raise ValueError(f"{slug}: unsupported content_mode {content_mode!r}")
         self.slug = slug
         self.dims = dims
         self.dir = Path(base_dir) / slug
@@ -101,6 +104,15 @@ class VectorStore:
         # first append — open() stays side-effect free on empty dirs.
         self._requested_schema = schema
         self._schema = schema or 1
+        # content_mode ("full" | "body", M14.3): are the stored chunk vectors
+        # built from the WHOLE envelope-inclusive text ("full", today) or the
+        # body-only content ("body")? Persisted in v2 meta and STORE-schema-
+        # derived — mint, the windower, and migrate all read this one source of
+        # truth so a re-embed's mixed corpus stays self-consistent. The disk
+        # value wins on an existing store (like schema autodetect); a fresh
+        # store keeps the constructor request. Absent meta field -> "full".
+        self._requested_content_mode = content_mode
+        self._content_mode = content_mode
         self._ordinals: list[int] = []  # v2 only: row i's chunk ordinal
         self._generation = 0            # v2 only: bumps on every mutation
         self._matrix = None  # lazily loaded; invalidated on append
@@ -171,6 +183,10 @@ class VectorStore:
                     f"requested {self._requested_schema}"
                 )
             self._schema = disk_schema
+            # content_mode: the on-disk value wins (mirror of the schema branch
+            # above); absent field -> "full" so every pre-M14.3 store keeps
+            # working byte-identically.
+            self._content_mode = meta_obj.get("content_mode", "full")
         elif self._requested_schema is not None:
             self._schema = self._requested_schema
         elif self.ordinals_path.exists():
@@ -509,6 +525,9 @@ class VectorStore:
             meta["rows"] = len(self._ids)
             meta["snapshots"] = snapshots
             meta["generation"] = self._generation
+            # content_mode is a v2 concept (chunk vectors) — written on v2 only
+            # so the v1 meta key set stays frozen (status/UI binding contract).
+            meta["content_mode"] = self._content_mode
         _atomic_write_json(self.meta_path, meta)
 
     # ── read path ────────────────────────────────────────────────────────────
@@ -541,6 +560,15 @@ class VectorStore:
         with self._lock:
             self._ensure_open_locked()
             return self._schema
+
+    @property
+    def content_mode(self) -> str:
+        """"full" (chunk vectors from the whole envelope-inclusive text — the
+        default and today's behavior) or "body" (chunk vectors from the
+        body-only content, M14.3). v2-persisted; a v1 store is always "full"."""
+        with self._lock:
+            self._ensure_open_locked()
+            return self._content_mode
 
     def ids(self) -> set:
         with self._lock:
@@ -685,7 +713,7 @@ _STORES_LOCK = threading.Lock()
 
 
 def get_store(slug: str, dims: int = None, base_dir=None,
-              schema: "int | None" = None) -> VectorStore:
+              schema: "int | None" = None, content_mode: str = "full") -> VectorStore:
     """Canonical-instance factory: ONE live VectorStore per (base_dir, slug).
 
     Two instances on the same directory would race each other's files, so all
@@ -712,8 +740,11 @@ def get_store(slug: str, dims: int = None, base_dir=None,
         store = _STORES.get(key)
         if store is None:
             # open() before caching: a dims-mismatch refusal must not leave a
-            # poisoned entry behind.
-            store = VectorStore(slug, dims, base, schema=schema).open()
+            # poisoned entry behind. content_mode is the FRESH-store request
+            # (like schema): an existing store's on-disk value wins in open().
+            store = VectorStore(
+                slug, dims, base, schema=schema, content_mode=content_mode
+            ).open()
             _STORES[key] = store
         elif schema is not None and store.schema != schema:
             raise ValueError(
