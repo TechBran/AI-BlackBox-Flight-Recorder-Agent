@@ -1197,6 +1197,37 @@ def available() -> bool:
     return preflight().get("state") == "ok"
 
 
+def model_catalog() -> list[dict]:
+    """Per-model selector metadata for the M10 wizard/Portal reranker selector.
+
+    The flat `models` slug list in status() carries no per-model provider/tiers/
+    key_present, so a tier-driven, key-gated selector can't be built from it.
+    This exposes exactly what the selector needs, additively. `key_present` is
+    resolved FRESH via os.getenv(key_env) per model (M4 pattern) so a wizard-
+    mirrored paste gates selectability with no restart. Sorted by slug to match
+    `models`. Never raises."""
+    out = []
+    for slug in sorted(RERANK_MODELS):
+        e = RERANK_MODELS[slug]
+        key_env = e.get("key_env")
+        out.append({
+            "slug": slug,
+            "provider": e.get("provider"),
+            "label": e.get("label", slug),
+            "tiers": list(e.get("tiers", [])),
+            "privacy": e.get("privacy"),
+            "auth_kind": e.get("auth_kind", "none"),
+            "key_env": key_env,
+            # Cloud bearer models: present iff their key_env resolves. Vertex
+            # (gcp_service_account, key_env=None) is always False here — the UI
+            # treats it as "Advanced" and deep-links the SA-upload regardless.
+            "key_present": bool(key_env and os.getenv(key_env)),
+            "cost_note": e.get("cost_note", ""),
+            "quality_note": e.get("quality_note", ""),
+        })
+    return out
+
+
 def status() -> dict:
     """/rerank/status payload (ADDITIVE ops contract, /embeddings/status
     style). Triggers the one-time preflight only when a provider is
@@ -1251,6 +1282,10 @@ def status() -> dict:
         "candidate_n": s["rerank_candidate_n"],
         "passage_chars": _cfg_int("rerank", "passage_chars", 4096),
         "models": sorted(RERANK_MODELS.keys()),
+        # M10.1 additive: per-model selector metadata (provider/tiers/key_present/
+        # notes) the wizard/Portal reranker selector needs — `models` stays the
+        # flat slug list for backward compatibility.
+        "model_catalog": model_catalog(),
         # ── M3.3 additive (tier/ram + per-provider auth & reachability) ──
         "tier": hw.get("tier"),
         "ram_mb": hw.get("ram_mb"),

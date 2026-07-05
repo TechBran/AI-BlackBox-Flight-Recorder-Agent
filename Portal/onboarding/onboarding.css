@@ -2765,6 +2765,89 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
 .ob-emb-rerank-warn  { color: rgba(255, 220, 150, 0.9); }
 .ob-emb-rerank-ok    { color: rgba(180, 240, 200, 0.85); }
 
+/* ── Reranker SELECTOR (M10.1): tier-driven picker over rr.model_catalog ── */
+.ob-emb-rerank-selector {
+    margin: 0.75rem 0 0;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.1));
+}
+.ob-emb-rerank-title {
+    font-family: var(--ob-font-display);
+    font-weight: var(--ob-display-weight-bold, 600);
+    font-size: 0.95em;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.ob-emb-rerank-tier {
+    font-family: var(--ob-font-body);
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.5);
+}
+.ob-emb-rerank-lede {
+    margin: 0.3rem 0 0.6rem;
+    font-size: 0.82em;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.6);
+    max-width: 60ch;
+}
+.ob-emb-rerank-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.06));
+}
+.ob-emb-rerank-row-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.ob-emb-rerank-label { font-weight: 600; font-size: 0.9em; }
+.ob-emb-rerank-badge {
+    font-size: 0.65em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-full, 9999px);
+    background: rgba(180, 240, 200, 0.18);
+    color: rgba(180, 240, 200, 0.95);
+}
+.ob-emb-rerank-note {
+    font-size: 0.78em;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.5);
+}
+.ob-emb-rerank-action { margin-top: 0.15rem; }
+.ob-emb-rerank-current {
+    font-size: 0.8em;
+    color: rgba(180, 240, 200, 0.85);
+}
+.ob-emb-rerank-btn {
+    font-size: 0.8em;
+    padding: 0.35rem 0.8rem;
+}
+.ob-emb-rerank-link {
+    font-size: 0.8em;
+    color: var(--ob-accent, #cc4444);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+}
+.ob-emb-rerank-link:hover { border-bottom-color: currentColor; }
+.ob-emb-rerank-off {
+    margin-top: 0.6rem;
+    font-size: 0.78em;
+    background: none;
+    border: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.18));
+    color: rgba(255, 255, 255, 0.6);
+    padding: 0.3rem 0.7rem;
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+}
+.ob-emb-rerank-off:hover { color: rgba(255, 255, 255, 0.9); }
+
 .ob-emb-progress-track {
     height: 8px;
     background: var(--ob-surface-border, rgba(255, 255, 255, 0.12));

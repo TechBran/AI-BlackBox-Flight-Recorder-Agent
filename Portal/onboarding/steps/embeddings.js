@@ -47,6 +47,7 @@ let status = null;        // last GET /embeddings/status payload
 let rerankStatus = null;  // last GET /rerank/status payload (M13; null = hide)
 let selectedSlug = null;  // card the user clicked (never the active model)
 let placementBusy = null; // slug whose placement POST is in flight (M13)
+let rerankBusy = null;    // slug/provider whose /rerank/select POST is in flight (M10.1)
 let validation = null;    // /embeddings/validate result for selectedSlug
 let validating = false;   // probe in flight
 let migrating = false;    // migrate POST in flight (button debounce)
@@ -277,6 +278,10 @@ function renderPicker() {
     contentEl().querySelectorAll(".ob-emb-segbtn").forEach((btn) => {
         btn.addEventListener("click", () => onPlacementClick(btn));
     });
+    // Reranker selector buttons (M10.1) live in the compute card too.
+    contentEl().querySelectorAll(".ob-emb-rerank-btn, .ob-emb-rerank-off").forEach((btn) => {
+        btn.addEventListener("click", () => onRerankSelect(btn));
+    });
     renderGrid();
 }
 
@@ -374,43 +379,139 @@ async function onPlacementClick(btn) {
     renderPicker();
 }
 
-// Reranker status line (M13). One line per state — the wizard INSTRUCTS the
-// config flip (rerank.py activation checklist), it never writes config.ini.
+// Reranker SELECTOR (M10.1). A tier-driven picker over the models the backend
+// reports in rr.model_catalog (the additive per-model metadata added to
+// /rerank/status): tier-gate options to this box's hardware tier, gate cloud/
+// LLM selectability on each model's key_present, and — crucially — NEVER enter
+// a key here. Keys live in the API-Keys step (M10.0); un-keyed cloud options
+// deep-link back there, and Vertex (Advanced, needs a GCP service account)
+// deep-links the SA-upload in the optional-integrations step. Selecting POSTs
+// /rerank/select WITHOUT an api_key (the key is already in .env) — see
+// onRerankSelect. rerankStatus === null hides the whole block.
 function rerankLineHtml() {
     const rr = rerankStatus;
     if (!rr) return ""; // endpoint unreachable / older backend — hide
-    let cls, text;
-    if (!rr.gpu) {
-        cls = "ob-emb-rerank-muted";
-        text = "Reranker: requires an NVIDIA GPU (available on MS-02 Ultra).";
-    } else if (!rr.service_reachable) {
-        cls = "ob-emb-rerank-warn";
-        text = "Reranker service not running — run the installer's reranker "
-            + "step (sudo bash installer/templates/blackbox-install-reranker.sh).";
-    } else if (!rr.enabled || !rr.configured) {
-        // Service up, awaiting the deliberate operator flip (checklist §2).
-        cls = "ob-emb-rerank-info";
-        text = "Reranker service is up. To enable: edit config.ini — set "
-            + "provider = vllm under [rerank] and rerank_enabled = true under "
-            + "[retrieval] — then restart the BlackBox service.";
-    } else if (rr.available) {
-        cls = "ob-emb-rerank-ok";
-        const ms = rr.preflight && rr.preflight.latency_ms != null
-            ? ` (preflight ${Math.round(rr.preflight.latency_ms)} ms)`
-            : "";
-        text = `Reranker active — cross-encoder reranking is refining search results${ms}.`;
-    } else {
-        // Enabled + configured + service up, but the once-per-process latency
-        // preflight hasn't passed (failed or probed while the service was
-        // still warming up) — a restart re-probes.
-        cls = "ob-emb-rerank-warn";
-        const reason = rr.preflight && rr.preflight.reason
-            ? ` (${rr.preflight.reason})`
-            : "";
-        text = `Reranker enabled but its latency preflight hasn't passed${reason}`
-            + " — restart the BlackBox service to re-probe.";
+
+    const tier = rr.tier;
+    const catalog = Array.isArray(rr.model_catalog) ? rr.model_catalog : [];
+    // Tier-gate: only models whose tiers include this box's hardware tier.
+    const forTier = catalog.filter((m) => (m.tiers || []).includes(tier));
+
+    const activeSlug = rr.model;
+    const rerankOn = !!rr.enabled; // status.enabled is the real retrieve() gate (post-M8)
+
+    // Friendly provider-key name for the "add your <X> key" deep-link.
+    const keyLabel = (m) => {
+        if (m.provider === "voyage") return "Voyage";
+        if (m.provider === "cohere") return "Cohere";
+        return ({
+            GOOGLE_API_KEY: "Google", OPENAI_API_KEY: "OpenAI",
+            ANTHROPIC_API_KEY: "Anthropic", XAI_API_KEY: "xAI",
+        })[m.key_env] || "provider";
+    };
+
+    const selectBtn = (m) =>
+        `<button type="button" class="ob-cta ob-emb-rerank-btn"
+                 data-slug="${escapeHtml(m.slug)}" data-provider="${escapeHtml(m.provider)}"
+                 data-enabled="true">Use this reranker</button>`;
+
+    const optionHtml = (m) => {
+        const isActive = m.slug === activeSlug && rerankOn;
+        const badge = isActive ? `<span class="ob-emb-rerank-badge">Active</span>` : "";
+        const notes = [];
+        if (m.cost_note) notes.push(m.cost_note);
+        if (m.quality_note) notes.push(m.quality_note);
+        if (isActive && rr.preflight && rr.preflight.latency_ms != null) {
+            notes.push(`preflight ${Math.round(rr.preflight.latency_ms)} ms`);
+        }
+        const noteHtml = notes.length
+            ? `<span class="ob-emb-rerank-note">${escapeHtml(notes.join(" · "))}</span>` : "";
+
+        let action;
+        if (m.provider === "vertex") {
+            // Advanced — a GCP service account, not a paste-a-key. Deep-link the
+            // SA-upload (optional_integrations owns GOOGLE_APPLICATION_CREDENTIALS).
+            action = `<a class="ob-emb-rerank-link" href="?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+        } else if (m.provider === "voyage" || m.provider === "cohere" || m.provider === "llm") {
+            // Cloud / LLM: selectable iff the key is present; else deep-link the
+            // API-Keys step (key entry lives THERE, never here).
+            if (m.key_present) {
+                action = isActive
+                    ? `<span class="ob-emb-rerank-current">Selected</span>`
+                    : selectBtn(m);
+            } else {
+                action = `<a class="ob-emb-rerank-link" href="?step=api_keys">Add your ${escapeHtml(keyLabel(m))} key in the API Keys step ↗</a>`;
+            }
+        } else {
+            // Local: cpu (MID) is always in-process; vllm (HIGH) needs the
+            // installed+running reranker service (installer remediation).
+            const ready = m.provider === "cpu" ? true : (rr.gpu && rr.service_reachable);
+            action = ready
+                ? (isActive ? `<span class="ob-emb-rerank-current">Selected</span>` : selectBtn(m))
+                : `<span class="ob-emb-rerank-muted">Run the installer's reranker step to enable the local GPU reranker.</span>`;
+        }
+
+        return `
+            <div class="ob-emb-rerank-row" data-slug="${escapeHtml(m.slug)}">
+                <div class="ob-emb-rerank-row-head">
+                    <span class="ob-emb-rerank-label">${escapeHtml(m.label)}</span>
+                    ${badge}
+                </div>
+                ${noteHtml}
+                <div class="ob-emb-rerank-action">${action}</div>
+            </div>`;
+    };
+
+    const rows = forTier.map(optionHtml).join("");
+    const empty = rows ? "" :
+        `<p class="ob-emb-rerank-muted">No reranker options for this hardware tier yet — add a Voyage or Cohere key in the API Keys step to unlock the cloud reranker.</p>`;
+    // Turn-off affordance when reranking is currently ON.
+    const offBtn = rerankOn
+        ? `<button type="button" class="ob-emb-rerank-off"
+                   data-slug="${escapeHtml(activeSlug || "")}"
+                   data-provider="${escapeHtml(rr.provider || "")}"
+                   data-enabled="false">Turn reranking off</button>`
+        : "";
+
+    return `
+        <div class="ob-emb-rerank-selector" id="ob-emb-rerank">
+            <div class="ob-emb-rerank-title">Reranker
+                <span class="ob-emb-rerank-tier">${escapeHtml(tier || "?")} tier</span>
+            </div>
+            <p class="ob-emb-rerank-lede">Optional cross-encoder that re-orders
+               search results for sharper recall. Your memory works without it.</p>
+            ${rows}
+            ${empty}
+            ${offBtn}
+        </div>`;
+}
+
+// Persist a reranker choice live (M10.1). POST /rerank/select with
+// provider/model/enabled and NO api_key — the key is already in .env (written
+// by the API-Keys step, M10.0). Mirrors onPlacementClick's refresh-from-server
+// discipline. data-enabled="false" (the turn-off control) disables reranking.
+async function onRerankSelect(btn) {
+    const slug = btn.dataset.slug;
+    const provider = btn.dataset.provider;
+    if (!provider || rerankBusy) return;
+    const enabled = btn.dataset.enabled !== "false";
+    rerankBusy = slug || provider;
+    btn.disabled = true;
+    try {
+        const r = await fetch("/rerank/select", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider, model: slug, enabled }),
+        });
+        if (!r.ok) {
+            showHint(`Couldn't change the reranker: ${await safeDetail(r)}`, true);
+        }
+    } catch (e) {
+        showHint(`Network error changing the reranker: ${e.message}`, true);
     }
-    return `<p class="ob-emb-rerank ${cls}">${escapeHtml(text)}</p>`;
+    rerankBusy = null;
+    await refreshStatus(); // reflect the server's truth (key_present, preflight)
+    renderPicker();
 }
 
 function healthBannerHtml(health) {

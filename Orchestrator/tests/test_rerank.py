@@ -717,9 +717,10 @@ LEGACY_STATUS_KEYS = {
     "gpu", "service_reachable",
 }
 # M3.3 additive keys: hardware tier/ram + per-provider auth & reachability.
+# M10.1 additive: model_catalog (per-model selector metadata for the wizard).
 STATUS_KEYS = LEGACY_STATUS_KEYS | {
     "tier", "ram_mb", "reachable", "auth_kind", "key_present",
-    "preflight_ceiling_ms",
+    "preflight_ceiling_ms", "model_catalog",
 }
 
 
@@ -1624,3 +1625,56 @@ def test_score_vertex_truncates_record_content(monkeypatch):
     content = captured["json"]["records"][0]["content"]
     assert len(content) == rerank._VERTEX_CONTENT_CHARS
     assert len(content) < 5000
+
+
+# ── M10.1: model_catalog() — per-model selector metadata for the wizard/Portal ──
+# The live /rerank/status `models` is a flat slug list with no per-model
+# provider/tiers/key_present, so the tier-driven selector the plan describes
+# cannot be built from it. model_catalog() exposes that metadata additively;
+# key_present is resolved FRESH per model so a just-pasted+mirrored cloud key
+# gates selectability with no restart.
+
+def test_model_catalog_has_one_entry_per_model_with_required_fields():
+    cat = rerank.model_catalog()
+    assert isinstance(cat, list)
+    assert {c["slug"] for c in cat} == set(rerank.RERANK_MODELS)
+    required = {"slug", "provider", "label", "tiers", "privacy",
+                "key_env", "key_present", "cost_note", "quality_note"}
+    for c in cat:
+        assert required <= set(c), f"{c['slug']} missing {required - set(c)}"
+        assert isinstance(c["tiers"], list)
+
+
+def test_model_catalog_key_present_reads_env_fresh(monkeypatch):
+    """A cloud model's key_present tracks os.getenv(key_env) at call time —
+    a live-mirrored paste gates selectability without a restart."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-live")
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    cat = {c["slug"]: c for c in rerank.model_catalog()}
+    assert cat["voyage-rerank-2.5"]["key_present"] is True
+    assert cat["cohere-rerank-4"]["key_present"] is False
+
+
+def test_model_catalog_local_models_need_no_key(monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    cat = {c["slug"]: c for c in rerank.model_catalog()}
+    local = cat["qwen3-reranker-0.6b"]
+    assert local["privacy"] == "local"
+    assert local["key_env"] is None
+    assert local["key_present"] is False
+
+
+def test_status_exposes_model_catalog_additively():
+    """status() carries the catalog AND keeps the flat `models` slug list
+    (M11/M12/M13 + old frontends bind to `models` — must not change shape)."""
+    st = rerank.status()
+    assert st["models"] == sorted(rerank.RERANK_MODELS.keys())  # unchanged
+    assert {c["slug"] for c in st["model_catalog"]} == set(rerank.RERANK_MODELS)
+
+
+def test_model_catalog_tiers_match_registry():
+    """Tier gating in the UI relies on tiers being the registry's tiers verbatim."""
+    cat = {c["slug"]: c for c in rerank.model_catalog()}
+    assert cat["cohere-rerank-4"]["tiers"] == ["LOW", "MID", "HIGH"]
+    assert cat["qwen3-reranker-0.6b"]["tiers"] == ["HIGH"]       # GPU only
+    assert cat["qwen3-reranker-0.6b-cpu"]["tiers"] == ["MID"]    # CPU opt-in
