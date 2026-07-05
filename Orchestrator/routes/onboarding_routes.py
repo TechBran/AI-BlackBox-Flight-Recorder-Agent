@@ -90,7 +90,7 @@ class CurrentConfigResponse(BaseModel):
 
 
 class ValidateRequest(BaseModel):
-    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "tailscale", "gmail", "elevenlabs"]
+    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "voyage", "cohere", "tailscale", "gmail", "elevenlabs"]
     credentials: dict[str, str] = {}  # provider-specific shape; tailscale needs none
 
 
@@ -327,6 +327,8 @@ _VALIDATE_KEY_ENV = {
     "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
     "perplexity": "PERPLEXITY_API_KEY", "elevenlabs": "ELEVENLABS_API_KEY",
+    # M10 reranker upgrade keys — re-validate a stored key without re-sending it.
+    "voyage": "VOYAGE_API_KEY", "cohere": "COHERE_API_KEY",
 }
 
 
@@ -366,6 +368,10 @@ def validate(req: ValidateRequest) -> ValidateResponse:
             result = validators.validate_xai(creds["api_key"])
         elif req.provider == "perplexity":
             result = validators.validate_perplexity(creds["api_key"])
+        elif req.provider == "voyage":
+            result = validators.validate_voyage(creds["api_key"])
+        elif req.provider == "cohere":
+            result = validators.validate_cohere(creds["api_key"])
         elif req.provider == "tailscale":
             result = validators.validate_tailscale()
         elif req.provider == "gmail":

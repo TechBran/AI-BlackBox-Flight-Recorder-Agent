@@ -49,6 +49,28 @@ const PROVIDERS = [
         keyUrl: "https://www.perplexity.ai/settings/api",
         keyHint: "pplx-…",
     },
+    // ── Reranker upgrade keys (M10). Same paste/reveal/Validate card as every
+    // other provider; the Memory step's reranker selector just picks from
+    // whatever's validated here. Honest framing: memory works WITHOUT them.
+    {
+        id: "voyage",
+        label: "Voyage (reranking)",
+        envVar: "VOYAGE_API_KEY",
+        keyUrl: "https://dashboard.voyageai.com/api-keys",
+        keyHint: "pa-…",
+        description: "Optional reranker upgrade — sharpens memory recall with a "
+            + "dedicated cross-encoder. Embeddings and memory work without it. "
+            + "Generous free tier.",
+    },
+    {
+        id: "cohere",
+        label: "Cohere (reranking)",
+        envVar: "COHERE_API_KEY",
+        keyUrl: "https://dashboard.cohere.com/api-keys",
+        keyHint: "your Cohere key",
+        description: "Optional reranker upgrade — reorders search results with a "
+            + "dedicated cross-encoder. Embeddings and memory work without it.",
+    },
 ];
 
 // Per-instance state — reset on each render() call (which fires when wizard
@@ -155,6 +177,7 @@ function renderProviderCard(p) {
                     Get a key <span aria-hidden="true">↗</span>
                 </a>
             </div>
+            ${p.description ? `<p class="ob-provider-desc">${escapeHtml(p.description)}</p>` : ""}
             <div class="ob-provider-input-row">
                 <input
                     type="password"
@@ -199,6 +222,7 @@ function renderProviderCardConfigured(p, s) {
                     Get a new key <span aria-hidden="true">↗</span>
                 </a>
             </div>
+            ${p.description ? `<p class="ob-provider-desc">${escapeHtml(p.description)}</p>` : ""}
             <div class="ob-provider-configured-row">
                 <span class="ob-status-pill ob-status-pill-ok">
                     <span class="ob-status-pill-glyph" aria-hidden="true">&check;</span>
@@ -424,6 +448,12 @@ function formatDetail(providerId, detail) {
     }
     if (providerId === "anthropic" || providerId === "xai" || providerId === "perplexity") {
         return detail.model ? detail.model : "";
+    }
+    if (providerId === "voyage") {
+        return detail.model ? detail.model : "";
+    }
+    if (providerId === "cohere") {
+        return detail.organization ? detail.organization : "";
     }
     return "";
 }

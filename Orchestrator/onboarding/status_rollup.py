@@ -57,10 +57,16 @@ _LLM_KEY_ENV = [
     "XAI_API_KEY", "PERPLEXITY_API_KEY",
 ]
 # provider id (validated_at key) -> its env var, for the present-but-unvalidated check.
+# Voyage/Cohere are the M10 reranker upgrade keys — they live in the API-Keys
+# step alongside the LLM keys, so the rollup tracks them the same way (a
+# present-but-unvalidated key nudges the operator to click Validate). They are
+# NOT in _LLM_KEY_ENV: a reranker key alone does not satisfy the "have an LLM
+# key" requirement, so their absence never trips the "No API keys" attention.
 _PROVIDER_KEY = {
     "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY", "xai": "XAI_API_KEY",
     "perplexity": "PERPLEXITY_API_KEY",
+    "voyage": "VOYAGE_API_KEY", "cohere": "COHERE_API_KEY",
 }
 
 

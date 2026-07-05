@@ -1026,6 +1026,17 @@ body::after {
     border-bottom-color: var(--ob-accent);
 }
 
+/* Optional per-provider blurb (M10 reranker keys — honest "works without it"
+   framing). Rendered only when a PROVIDERS entry declares a description. */
+.ob-provider-desc {
+    font-family: var(--ob-font-body);
+    font-size: var(--ob-text-sm);
+    line-height: 1.5;
+    color: var(--ob-text-muted, #9aa0a6);
+    margin: 0 0 var(--ob-space-3, 0.75rem);
+    max-width: 60ch;
+}
+
 .ob-provider-input-row {
     display: grid;
     grid-template-columns: 1fr auto auto;

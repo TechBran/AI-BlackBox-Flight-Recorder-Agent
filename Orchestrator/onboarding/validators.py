@@ -156,6 +156,59 @@ def validate_elevenlabs(api_key: str) -> ValidationResult:
     return _measure(_fn)
 
 
+def validate_cohere(api_key: str) -> ValidationResult:
+    """Validate a Cohere key via the zero-cost POST /v1/check-api-key endpoint.
+
+    Reranker upgrade key (M10) — lives in the API-Keys step like every other
+    provider. check-api-key costs nothing and returns {valid, organization_name}
+    so the wizard shows the org the key belongs to. raw requests, no new SDK.
+    """
+    def _fn():
+        import requests
+        r = requests.post(
+            "https://api.cohere.ai/v1/check-api-key",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if r.status_code in (401, 403):
+            raise RuntimeError("Invalid Cohere API key")
+        r.raise_for_status()
+        data = r.json() or {}
+        return {"organization": data.get("organization_name") or ""}
+    return _measure(_fn)
+
+
+def validate_voyage(api_key: str) -> ValidationResult:
+    """Validate a Voyage key via a tiny 1-document POST /v1/rerank.
+
+    Reranker upgrade key (M10). A ONE-document rerank stays under the free-tier
+    10K-TPM cap that a full 40-doc rerank exceeds (the M8 live finding) while
+    still exercising the key end-to-end. raw requests, no new SDK.
+    """
+    def _fn():
+        import requests
+        r = requests.post(
+            "https://api.voyageai.com/v1/rerank",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "rerank-2.5",
+                "query": "ping",
+                "documents": ["pong"],
+                "top_k": 1,
+            },
+            timeout=10,
+        )
+        if r.status_code in (401, 403):
+            raise RuntimeError("Invalid Voyage API key")
+        r.raise_for_status()
+        data = r.json() or {}
+        return {"model": data.get("model") or "rerank-2.5"}
+    return _measure(_fn)
+
+
 def validate_tailscale() -> ValidationResult:
     """Validate Tailscale install + auth via 'tailscale status --json'."""
     def _fn():

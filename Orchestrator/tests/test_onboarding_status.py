@@ -83,6 +83,23 @@ def test_api_keys_attention_when_present_but_never_validated():
                for a in rollup["attention"])
 
 
+def test_api_keys_reranker_providers_are_tracked_items(monkeypatch):
+    """M10: Voyage/Cohere reranker keys live in the API-Keys step, so the rollup
+    tracks them as items with a validated_at stamp (present-but-unvalidated
+    nudges the same as any other key)."""
+    inp = _empty_inputs()
+    inp["env"] = {"OPENAI_API_KEY": "sk-xxx", "VOYAGE_API_KEY": "pa-xxx"}
+    inp["state"]["validated_at"] = {"openai": 1.0}  # voyage present, unvalidated
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "api_keys")
+    item_keys = {i["key"] for i in sec["items"]}
+    assert {"voyage", "cohere"} <= item_keys
+    # A present-but-unvalidated reranker key flags attention (validate nudge).
+    assert sec["state"] == sr.ATTENTION
+    assert any("voyage" in a["message"] for a in rollup["attention"]
+               if a["section"] == "api_keys")
+
+
 def test_operator_required_attention_when_none():
     rollup = sr.build_status(**_empty_inputs())
     assert _section(rollup, "operator")["state"] == sr.ATTENTION
