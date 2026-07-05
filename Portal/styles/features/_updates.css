@@ -228,6 +228,80 @@
     font-weight: 600;
 }
 
+/* ── Reranker selector card (M11: mirrors the Memory-step selector) ──── */
+
+.embeddings-card-rerank {
+    border-left-color: rgba(255, 255, 255, 0.25);
+}
+.embeddings-rerank-tier {
+    margin-left: 0.5rem;
+    font-size: 0.72em;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.5);
+}
+.embeddings-rerank-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+    margin-top: 0.55rem;
+    padding-top: 0.55rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.embeddings-rerank-row-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 1 1 10rem;
+    min-width: 8rem;
+}
+.embeddings-rerank-label {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em;
+}
+.embeddings-rerank-badge {
+    font-size: 0.68em;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 0.08rem 0.4rem;
+    border-radius: var(--radius-sm, 5px);
+    background: var(--color-ok, #4caf82);
+    color: #0b0f14;
+}
+.embeddings-rerank-note {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.75em;
+    flex: 1 1 100%;
+}
+.embeddings-rerank-action {
+    display: inline-flex;
+    align-items: center;
+    margin-left: auto;
+}
+.embeddings-rerank-link {
+    color: var(--color-info, #6ca0dc);
+    font-size: 0.78em;
+    text-decoration: none;
+}
+.embeddings-rerank-link:hover {
+    text-decoration: underline;
+}
+.embeddings-rerank-current {
+    color: rgba(180, 240, 200, 0.85);
+    font-size: 0.78em;
+    font-weight: 600;
+}
+.embeddings-rerank-muted {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.78em;
+}
+.embeddings-rerank-off {
+    margin-top: 0.7rem;
+}
+
 /* ── SSE log modal ──────────────────────────────────────────────────── */
 
 .updates-log-modal {

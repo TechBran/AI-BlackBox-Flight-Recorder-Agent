@@ -321,10 +321,16 @@ async function _onRollbackClick() {
 let _embedPollTimer = null;   // 5s job-progress poll; self-clears (see below)
 let _embedWarnedOnce = false; // one console.warn per page load, never spam
 let _placementBusy = null;    // slug whose placement POST is in flight
+let _rerankStatus = null;     // last GET /rerank/status payload (M11; null = hide)
+let _rerankBusy = null;       // slug/provider whose /rerank/select POST is in flight
 
 async function _refreshEmbeddingsCard() {
     const container = document.getElementById("embeddingsCard");
     if (!container) return;  // panel not in DOM (menu modal not built yet)
+    // /rerank/status rides along (M11): additive + fail-soft. Fetched BEFORE
+    // the embeddings status so a reranker hiccup can never mask an embeddings
+    // error; null (older backend / unreachable) hides only the reranker block.
+    _rerankStatus = await _fetchJsonSoft("/rerank/status");
     try {
         const r = await fetch("/embeddings/status", { cache: "no-store" });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -390,6 +396,9 @@ function _renderEmbeddingsCard(container, status) {
     // Renders whenever the status carries the probe — independent of whether
     // anything above is noteworthy.
     html += _computeCardHtml(status);
+    // Reranker selector card (M11): mirrors the Memory-step selector. Renders
+    // whenever /rerank/status is reachable (returns "" when null → hidden).
+    html += _rerankCardHtml();
 
     if (!html) {
         _hideEmbeddingsCard(container);  // nothing noteworthy, no probe
@@ -411,6 +420,10 @@ function _renderEmbeddingsCard(container, status) {
     }
     container.querySelectorAll(".embeddings-hw-segbtn").forEach((btn) => {
         btn.addEventListener("click", () => _onPlacementClick(btn));
+    });
+    // Reranker selector + turn-off buttons (M11).
+    container.querySelectorAll(".embeddings-rerank-btn, .embeddings-rerank-off").forEach((btn) => {
+        btn.addEventListener("click", () => _onRerankSelect(btn));
     });
 
     if (jobRunning) _startEmbedPoll();
@@ -492,6 +505,159 @@ async function _onPlacementClick(btn) {
     }
     _placementBusy = null;
     await _refreshEmbeddingsCard();  // re-render with the server's truth
+}
+
+// ── Reranker selector card (M11: surface 2/3) ─────────────────────────
+//
+// Mirrors the Memory-step reranker selector (Portal/onboarding/steps/
+// embeddings.js rerankLineHtml/onRerankSelect — M10.1); markup is MIRRORED
+// rather than shared, per the established wizard-vs-portal split (the wizard
+// has its own ob-* module/CSS system). Same /rerank/status + /rerank/select
+// contract and tier→options mapping. A tier-driven picker over the models the
+// backend reports in rr.model_catalog (the additive per-model metadata added
+// to /rerank/status by M10): tier-gate options to this box's hardware tier,
+// gate cloud/LLM selectability on each model's key_present, and — crucially —
+// NEVER enter a key here. In the Portal there's no key-entry step, so un-keyed
+// cloud options deep-link to the onboarding API-Keys step, and Vertex
+// (Advanced, needs a GCP service account) deep-links the SA-upload
+// (optional_integrations). Selecting POSTs /rerank/select WITHOUT an api_key
+// (the key is already in .env) — see _onRerankSelect. A null/failed
+// /rerank/status hides the whole block.
+function _rerankCardHtml() {
+    const rr = _rerankStatus;
+    if (!rr) return "";  // endpoint unreachable / older backend — hide
+
+    const tier = rr.tier;
+    const catalog = Array.isArray(rr.model_catalog) ? rr.model_catalog : [];
+    // Tier-gate: only models whose tiers include this box's hardware tier.
+    const forTier = catalog.filter((m) => (m.tiers || []).includes(tier));
+
+    const activeSlug = rr.model;
+    const rerankOn = !!rr.enabled; // status.enabled is the real retrieve() gate (post-M8)
+
+    // Friendly provider-key name for the "add your <X> key" deep-link.
+    const keyLabel = (m) => {
+        if (m.provider === "voyage") return "Voyage";
+        if (m.provider === "cohere") return "Cohere";
+        return ({
+            GOOGLE_API_KEY: "Google", OPENAI_API_KEY: "OpenAI",
+            ANTHROPIC_API_KEY: "Anthropic", XAI_API_KEY: "xAI",
+        })[m.key_env] || "provider";
+    };
+
+    const selectBtn = (m) =>
+        `<button type="button" class="btn btn-primary embeddings-rerank-btn"
+                 data-slug="${_esc(m.slug)}" data-provider="${_esc(m.provider)}"
+                 data-enabled="true">Use this reranker</button>`;
+
+    const optionHtml = (m) => {
+        const isActive = m.slug === activeSlug && rerankOn;
+        const badge = isActive ? `<span class="embeddings-rerank-badge">Active</span>` : "";
+        const notes = [];
+        if (m.cost_note) notes.push(m.cost_note);
+        if (m.quality_note) notes.push(m.quality_note);
+        if (isActive && rr.preflight && rr.preflight.latency_ms != null) {
+            notes.push(`preflight ${Math.round(rr.preflight.latency_ms)} ms`);
+        }
+        const noteHtml = notes.length
+            ? `<span class="embeddings-rerank-note">${_esc(notes.join(" · "))}</span>` : "";
+
+        let action;
+        if (m.provider === "vertex") {
+            // Advanced — a GCP service account, not a paste-a-key. Deep-link the
+            // SA-upload (optional_integrations owns GOOGLE_APPLICATION_CREDENTIALS).
+            action = `<a class="embeddings-rerank-link" href="/onboarding/?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+        } else if (m.provider === "voyage" || m.provider === "cohere" || m.provider === "llm") {
+            // Cloud / LLM: selectable iff the key is present; else deep-link the
+            // onboarding API-Keys step (key entry lives THERE, never here).
+            if (m.key_present) {
+                action = isActive
+                    ? `<span class="embeddings-rerank-current">Selected</span>`
+                    : selectBtn(m);
+            } else {
+                action = `<a class="embeddings-rerank-link" href="/onboarding/?step=api_keys">Add your ${_esc(keyLabel(m))} key in the API Keys step ↗</a>`;
+            }
+        } else {
+            // Local: cpu (MID) is always in-process; vllm (HIGH) needs the
+            // installed+running reranker service (installer remediation).
+            const ready = m.provider === "cpu" ? true : (rr.gpu && rr.service_reachable);
+            action = ready
+                ? (isActive ? `<span class="embeddings-rerank-current">Selected</span>` : selectBtn(m))
+                : `<span class="embeddings-rerank-muted">Run the installer's reranker step to enable the local GPU reranker.</span>`;
+        }
+
+        return `
+            <div class="embeddings-rerank-row" data-slug="${_esc(m.slug)}">
+                <div class="embeddings-rerank-row-head">
+                    <span class="embeddings-rerank-label">${_esc(m.label)}</span>
+                    ${badge}
+                </div>
+                ${noteHtml}
+                <div class="embeddings-rerank-action">${action}</div>
+            </div>`;
+    };
+
+    const rows = forTier.map(optionHtml).join("");
+    const empty = rows ? "" :
+        `<p class="embeddings-rerank-muted">No reranker options for this hardware tier yet — add a Voyage or Cohere key in the API Keys step to unlock the cloud reranker.</p>`;
+    // Turn-off affordance when reranking is currently ON.
+    const offBtn = rerankOn
+        ? `<button type="button" class="btn embeddings-rerank-off"
+                   data-slug="${_esc(activeSlug || "")}"
+                   data-provider="${_esc(rr.provider || "")}"
+                   data-enabled="false">Turn reranking off</button>`
+        : "";
+
+    return `
+        <div class="embeddings-card embeddings-card-rerank" id="embeddingsRerank">
+            <div class="embeddings-card-title">Reranker
+                <span class="embeddings-rerank-tier">${_esc(tier || "?")} tier</span>
+            </div>
+            <p class="embeddings-card-copy">Optional cross-encoder that re-orders
+               search results for sharper recall. Your memory works without it.</p>
+            ${rows}
+            ${empty}
+            ${offBtn}
+        </div>`;
+}
+
+// Persist a reranker choice live (M11). POST /rerank/select with
+// provider/model/enabled and NO api_key — the key is already in .env (written
+// by the onboarding API-Keys step). Mirrors _onPlacementClick's
+// refresh-from-server discipline. data-enabled="false" (the turn-off control)
+// disables reranking.
+async function _onRerankSelect(btn) {
+    const slug = btn.dataset.slug;
+    const provider = btn.dataset.provider;
+    if (!provider || _rerankBusy) return;
+    const enabled = btn.dataset.enabled !== "false";
+    _rerankBusy = slug || provider;
+    btn.disabled = true;
+    try {
+        const r = await fetch("/rerank/select", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider, model: slug, enabled }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+        toastError(`Could not change the reranker: ${e.message}`);
+    }
+    _rerankBusy = null;
+    await _refreshEmbeddingsCard();  // reflect the server's truth (key_present, preflight)
+}
+
+// Fail-soft JSON GET: null on any non-2xx or network error (never throws).
+// Used for the additive /rerank/status probe so an older backend or a blip
+// hides only the reranker block, never the whole embeddings card.
+async function _fetchJsonSoft(url) {
+    try {
+        const r = await fetch(url, { cache: "no-store" });
+        if (!r.ok) return null;
+        return await r.json();
+    } catch (_) {
+        return null;
+    }
 }
 
 function _embedProgressLine(job) {
