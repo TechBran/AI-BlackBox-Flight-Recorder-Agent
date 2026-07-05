@@ -1678,3 +1678,177 @@ def test_model_catalog_tiers_match_registry():
     assert cat["cohere-rerank-4"]["tiers"] == ["LOW", "MID", "HIGH"]
     assert cat["qwen3-reranker-0.6b"]["tiers"] == ["HIGH"]       # GPU only
     assert cat["qwen3-reranker-0.6b-cpu"]["tiers"] == ["MID"]    # CPU opt-in
+
+
+# ── M13: fresh LOW-box portability + rollback matrix (audit A13) ──────────────
+# The consolidation regression: this box IS the fresh LOW box (no GPU, no
+# reranker deps, no [rerank] config, no rerank.json — the autouse
+# _isolate_rerank_sidecar points every test at an EMPTY tmp stores dir). These
+# pin that the reranker ships INERT and import-clean out of the box, and that
+# every rollback lever independently forces it off.
+
+def test_requirements_has_no_torch_or_cloud_reranker_sdk():
+    """A fresh box installs from requirements.txt — it must NOT pull torch (the
+    reranker is CPU/GPU-OPTIONAL, never a base dep; the CPU CrossEncoder path
+    lazy-imports sentence-transformers) nor any cloud reranker SDK (Voyage /
+    Cohere / Vertex are reached over RAW REST). Pin so dependency creep can't
+    make the base install heavy or GPU-coupled (audit A13 fresh-box rule)."""
+    from pathlib import Path
+    req = Path(__file__).resolve().parents[2] / "requirements.txt"
+    assert req.exists(), f"requirements.txt not found at {req}"
+    pkgs = []
+    for raw in req.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip().lower()
+        if line:
+            # normalize the leading distribution name (strip any version spec)
+            import re as _re
+            pkgs.append(_re.split(r"[<>=~!\[ ]", line, 1)[0])
+    for banned in ("torch", "sentence-transformers", "sentence_transformers",
+                   "cohere", "voyageai", "google-cloud-discoveryengine"):
+        assert banned not in pkgs, (
+            f"{banned} must NOT be a base requirement (fresh-box portability)")
+
+
+def test_fresh_low_box_heavy_deps_absent_but_modules_import_clean():
+    """rerank.py + retrieval.py imported successfully at collection WITHOUT
+    torch / sentence-transformers / a cloud reranker SDK present — proving they
+    do not import any heavy dep at module top (the CPU path lazy-imports; cloud
+    paths use raw REST). Pin the absence AS a regression so a stray top-level
+    `import torch` (which would crash import on a fresh box) can't slip in."""
+    import importlib
+    import importlib.util
+    import sys
+
+    # This IS a fresh LOW box: the heavy stack is genuinely not installed.
+    for dep in ("torch", "sentence_transformers", "cohere", "voyageai"):
+        assert importlib.util.find_spec(dep) is None, (
+            f"{dep} unexpectedly installed — the fresh-box import test is moot")
+
+    # The modules under test imported anyway (they are in sys.modules) and a
+    # fresh import raises NO ImportError with the heavy deps absent.
+    assert "Orchestrator.rerank" in sys.modules
+    importlib.import_module("Orchestrator.retrieval")   # no ImportError
+    importlib.import_module("Orchestrator.rerank")      # idempotent, clean
+
+
+def test_fresh_low_box_reranker_is_inert():
+    """No [rerank] section + no rerank.json (empty tmp stores) + no deps →
+    get_settings resolves the null default, is_enabled False, score() inert
+    (None), available() False WITHOUT probing anything. The whole module is a
+    no-op — the fresh-box default costs one config read and touches no network."""
+    from Orchestrator.embeddings import store as _store
+    assert _store.get_rerank_selection() is None        # no sidecar on disk
+    with pin_cfg("rerank", provider=None, base_url=None, model=None), \
+         pin_cfg("retrieval", rerank_enabled=None):
+        s = rerank.get_settings()
+        assert s["provider"] == "null"
+        assert rerank.is_enabled() is False
+        assert rerank.score("q", ["p0", "p1"]) is None
+        assert rerank.available() is False              # null → no preflight probe
+
+
+def test_fresh_low_box_cpu_path_inert_no_import_error(monkeypatch):
+    """The CPU provider selected on a box with NO sentence-transformers/torch:
+    _load_cpu_model lazy-imports, catches the absent dep, and returns None →
+    score() returns None (inert), never an ImportError. Belt-and-braces evicts
+    any cached module so the lazy import genuinely resolves against absent deps."""
+    import sys
+    monkeypatch.delitem(sys.modules, "sentence_transformers", raising=False)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    with pin_cfg("rerank", provider="cpu", model="qwen3-reranker-0.6b-cpu"):
+        assert rerank._load_cpu_model("Qwen/Qwen3-Reranker-0.6B") is None
+        assert rerank.score("q", ["p0", "p1"]) is None   # inert, no raise
+
+
+# ── rollback matrix: every lever independently forces the reranker OFF ────────
+
+def test_rollback_delete_sidecar_falls_back_to_config():
+    """Delete rerank.json (the wizard/Portal selection) → resolution falls back
+    to config.ini [rerank] / the null default. A sidecar that enabled a cloud
+    provider vanishes → get_settings + is_enabled resolve config-only again."""
+    _write_sidecar({"enabled": True, "provider": "cohere",
+                    "model": "cohere-rerank-4"})
+    with pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.is_enabled() is True              # sidecar governs
+    # Roll back: remove the sidecar file entirely.
+    from pathlib import Path
+
+    from Orchestrator import config as _config
+    from Orchestrator.embeddings import store as _store
+    Path(_config.EMBEDDINGS_STORES_DIR, "rerank.json").unlink(missing_ok=True)
+    assert _store.get_rerank_selection() is None
+    # Now config alone governs: null provider + rerank_enabled false → off.
+    with pin_cfg("rerank", provider=None), \
+         pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.is_enabled() is False
+        assert rerank.get_settings()["provider"] == "null"
+
+
+def test_rollback_config_flag_false_forces_off_without_sidecar():
+    """The [retrieval] rerank_enabled=false lever: with NO sidecar it force-offs
+    the reranker regardless of a configured provider (the config rollback path
+    an operator uses when there is no wizard selection to clear)."""
+    with pin_cfg("rerank", provider="vllm", base_url="http://h:1"), \
+         pin_cfg("retrieval", rerank_enabled="false"):
+        assert rerank.is_enabled() is False
+
+
+def test_rollback_sidecar_enabled_false_forces_off_over_config_true():
+    """The sidecar rollback lever: a rerank.json with enabled=false wins over a
+    config rerank_enabled=true (the wizard 'turn it off' toggle disables even a
+    config that says on)."""
+    _write_sidecar({"enabled": False, "provider": "vllm", "model": "x"})
+    with pin_cfg("retrieval", rerank_enabled="true"):
+        assert rerank.is_enabled() is False
+
+
+@pytest.mark.parametrize("provider,slug,key_env", [
+    ("voyage", "voyage-rerank-2.5", "VOYAGE_API_KEY"),
+    ("cohere", "cohere-rerank-4", "COHERE_API_KEY"),
+    ("llm", "llm-rerank-gpt-mini", "OPENAI_API_KEY"),
+])
+def test_rollback_cloud_provider_inert_without_its_key(monkeypatch, provider,
+                                                       slug, key_env):
+    """Each keyed cloud provider is independently INERT when its key_env is
+    unset — score() returns None with ZERO HTTP calls (rolling back a key
+    disables just that provider, never crashes, never leaks a call)."""
+    monkeypatch.delenv(key_env, raising=False)
+
+    def boom(*a, **k):
+        raise AssertionError(f"{provider} must not call out without its key")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider=provider, model=slug):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_rollback_vertex_inert_without_sa_creds(monkeypatch):
+    """Vertex (gcp_service_account, no key_env) is inert when the ambient SA
+    creds are absent: _vertex_token_and_project returns (None, None) →
+    score() None, ZERO HTTP calls."""
+    monkeypatch.setattr(rerank, "_vertex_token_and_project",
+                        lambda s: (None, None))
+
+    def boom(*a, **k):
+        raise AssertionError("vertex must not POST without creds")
+
+    monkeypatch.setattr(rerank.requests, "post", boom)
+    with pin_cfg("rerank", provider="vertex", model="vertex-semantic-ranker"):
+        assert rerank.score("q", ["p0", "p1"]) is None
+
+
+def test_tier_is_advisory_only_never_gates_retrieval():
+    """The hardware `tier` (LOW/MID/HIGH) is ADVISORY: it steers wizard copy but
+    NEVER blocks retrieval. Pin (1) retrieval.py holds no tier/hardware coupling
+    at all (retrieve() never reads it), and (2) a LOW-tier box still exposes
+    tier as an informational status field (not a gate)."""
+    import inspect
+
+    from Orchestrator import retrieval as _retrieval
+    src = inspect.getsource(_retrieval)
+    assert "tier" not in src, "retrieve() must not consult the hardware tier"
+    assert "derive_tier" not in src
+    assert "hardware" not in src
+    # tier surfaces in status() as advisory metadata only (a plain string).
+    tier = rerank.hardware.probe().get("tier")
+    assert tier in {"LOW", "MID", "HIGH"}

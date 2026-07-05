@@ -396,3 +396,76 @@ def test_provenance_mode_annotates_reranked_topk(world, monkeypatch):
                                      return_provenance=True)
     assert [(sid, o) for sid, _s, o in results] == [
         ("B", 1), ("KW1", None), ("A", 2), ("C", 0)]
+
+
+# ── M13: _apply_rerank is PROVIDER-AGNOSTIC (the north-star invariant) ─────────
+# _apply_rerank consumes ONLY the uniform score() contract: list[float] | None,
+# positionally aligned to the passages, higher = more relevant. The six shipped
+# providers (vllm/cpu/voyage/cohere/vertex/llm) each return scores on their OWN
+# value scale — raw cross-encoder logits (negative allowed), 0..1 relevance, or
+# the LLM's synthetic 1/(1+rank). _apply_rerank sorts by score DESC, so it must
+# be INVARIANT to the value range: the same ranking in → the same reorder out,
+# no matter which provider produced the floats. These fakes stand in for each
+# provider's score() RETURN (the real per-provider wire parsing is pinned
+# exhaustively in test_rerank.py); every shape below encodes the SAME order
+# (A < KW1 < B < C by relevance, ascending by pool position), so every provider
+# must reorder the post-recency pool [A, KW1, B, C] identically to [C, B, KW1, A].
+_PROVIDER_SCORE_SHAPES = {
+    "vllm":   [-3.5, -0.2, 1.8, 6.0],       # raw logits, negatives allowed
+    "cpu":    [-8.0, -1.0, 2.5, 9.9],       # in-process CrossEncoder logits
+    "voyage": [0.05, 0.30, 0.61, 0.94],     # 0..1 relevance
+    "cohere": [0.10, 0.42, 0.55, 0.88],     # 0..1 relevance
+    "vertex": [0.001, 0.20, 0.50, 0.999],   # 0..1 relevance
+    "llm":    [0.25, 1.0 / 3.0, 0.5, 1.0],  # synthetic 1/(1+rank), ranking [3,2,1,0]
+}
+
+
+@pytest.mark.parametrize("provider", sorted(_PROVIDER_SCORE_SHAPES))
+def test_apply_rerank_reorders_identically_across_provider_shapes(
+        world, monkeypatch, provider):
+    """Every provider's score() shape (logits / 0..1 / synthetic) that encodes
+    the SAME ranking drives _apply_rerank to the SAME reorder — proving the
+    rerank insertion is provider-agnostic (it never reads a provider-specific
+    value scale, only relative order)."""
+    shape = _PROVIDER_SCORE_SHAPES[provider]
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+    # score() is called with the full 4-member pool (candidate_n 40 > pool).
+    monkeypatch.setattr(rerank_mod, "score", lambda q, ps: list(shape))
+    with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
+        results = retrieval.retrieve("q", "system", k=10, store=make_store())
+    assert results, "reranked result is never empty"
+    assert [sid for sid, _ in results] == ["C", "B", "KW1", "A"], (
+        f"provider shape {provider} must reorder identically")
+
+
+@pytest.mark.parametrize("provider", sorted(_PROVIDER_SCORE_SHAPES))
+def test_apply_rerank_none_falls_through_to_unreranked_for_any_provider(
+        world, monkeypatch, provider):
+    """ANY provider returning None (unconfigured / missing key / HTTP error /
+    malformed / count-mismatch — all collapse to None in score()) → _apply_rerank
+    returns None → the un-reranked ranking stands, byte-identical to flag-off.
+    Never empty, never raises (the north-star: a dead reranker can't empty
+    memory)."""
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+    monkeypatch.setattr(rerank_mod, "score", lambda q, ps: None)
+    with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
+        results = retrieval.retrieve("q", "system", k=10, store=make_store())
+    assert results == expected_flag_off()
+    assert results          # explicitly: never empty
+
+
+def test_apply_rerank_scorer_exception_falls_through_never_raises(
+        world, monkeypatch):
+    """A provider helper that RAISES mid-score (past the dispatcher, e.g. a bug
+    in _apply_rerank's own passage build) is caught by the stage's never-raise
+    backstop → un-reranked ranking stands. retrieve() never propagates it."""
+    monkeypatch.setattr(rerank_mod, "available", lambda: True)
+
+    def boom(q, ps):
+        raise RuntimeError("provider blew up mid-score")
+
+    monkeypatch.setattr(rerank_mod, "score", boom)
+    with pin_retrieval(rerank_enabled="true", rerank_candidate_n="40"):
+        results = retrieval.retrieve("q", "system", k=10, store=make_store())
+    assert results == expected_flag_off()
+    assert results

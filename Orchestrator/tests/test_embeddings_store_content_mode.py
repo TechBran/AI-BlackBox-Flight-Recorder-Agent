@@ -12,11 +12,26 @@ Hermetic against tmp_path — never the live Manifest/ stores.
 """
 import json
 
+from Orchestrator import fossils
+from Orchestrator.embeddings.chunker import chunk_snapshot, chunks_for_snapshot
 from Orchestrator.embeddings.store import VectorStore
 
 DIMS = 4
 SLUG = "unit-content-mode"
 GROUP = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]
+
+# A full envelope-inclusive snapshot (BEACON/TRACKER/GAUGES header → SNAPSHOT
+# BODY → Raw Session Log body), long enough that the chunker emits >1 chunk so
+# the ordinal-0 whole-doc prepend + windowing paths are both exercised.
+_ENVELOPE_TEXT = (
+    "=== START SNAPSHOT — UTC 2026-07-04T00:00:00Z — SNAP-M13 ===\n"
+    "CROSS-FILE BEACON\nTail lock confirmed\n"
+    "VOLUME TRACKER\nTail: SNAP-0\nGAUGES\nOPERATOR: Anna\n\n"
+    "SNAPSHOT BODY\n\nKernel Index\n- Current: SNAP-M13\n\nRaw Session Log\n"
+    + "\n".join(f"- [{i}] user: line {i:05d} " + "abcdefghij" * 4
+                for i in range(400))
+    + "\n=== END SNAPSHOT — SNAP-M13 ===\n"
+)
 
 
 def _read_meta(tmp_path, slug=SLUG):
@@ -77,3 +92,60 @@ def test_v1_meta_never_gains_content_mode_key(tmp_path):
     meta = _read_meta(tmp_path)
     assert "content_mode" not in meta
     assert store.content_mode == "full"
+
+
+# ── M13 consolidation: fresh-box / content_mode-absent back-compat ────────────
+# The M14.4 re-embed was ABANDONED — the ACTIVE store stays content_mode-absent
+# (→ "full"), so the M14.3 body-only infra must be byte-identically INERT on a
+# full store. These pin that a store predating the flag opens "full" AND that
+# the shared chunk helper + the windower behave exactly as pre-M14.3 there
+# (envelope KEPT — zero body-only stripping).
+
+def test_full_mode_chunks_are_byte_identical_to_pre_m14_3():
+    """chunks_for_snapshot(text, "full") == the exact pre-M14.3 inline behavior
+    ([text] + chunk_snapshot(text)), envelope included at ordinal 0. BOTH the
+    mint seam (embed_snapshot_for_index) and migrate (chunk_group_batches)
+    delegate to this ONE helper, so full-mode parity here IS their parity."""
+    expected = [_ENVELOPE_TEXT] + chunk_snapshot(_ENVELOPE_TEXT, model_key=None)
+    assert len(expected) > 1                       # sanity: ordinal-0 prepend applies
+    got = chunks_for_snapshot(_ENVELOPE_TEXT, model_key=None, content_mode="full")
+    assert got == expected
+    assert "CROSS-FILE BEACON" in got[0]           # envelope PRESENT (no stripping)
+
+
+def test_absent_content_mode_store_reads_full_and_feeds_full_to_the_helper(tmp_path):
+    """A v2 store whose meta predates the flag opens "full" (the abandoned-14.4
+    state — the active store is content_mode-absent), and threading that
+    resolved mode through the shared chunk helper keeps the envelope, exactly
+    as pre-M14.3."""
+    store = VectorStore(SLUG, DIMS, tmp_path, schema=2).open()
+    store.append_group("SNAP-A", GROUP)
+    meta_path = tmp_path / SLUG / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("content_mode", None)                 # simulate a pre-M14.3 store
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    reopened = VectorStore(SLUG, DIMS, tmp_path).open()
+    assert reopened.content_mode == "full"
+    chunks = chunks_for_snapshot(_ENVELOPE_TEXT, model_key=None,
+                                 content_mode=reopened.content_mode)
+    assert chunks == [_ENVELOPE_TEXT] + chunk_snapshot(_ENVELOPE_TEXT,
+                                                       model_key=None)
+
+
+def test_full_mode_window_is_byte_identical_and_the_body_param_is_inert(monkeypatch):
+    """window_snapshot_text on a full/fresh store: the explicit content_mode="full"
+    output equals the content_mode-DEFAULT (None) output — the body-only param is
+    inert. A fresh box (no active store) degrades the None default to "full", so
+    the window keeps the START marker and the envelope-anchored span, exactly as
+    pre-M14.3 (before content_mode existed)."""
+    ordinal, budget = 2, 2000
+    full = fossils.window_snapshot_text(_ENVELOPE_TEXT, ordinal, budget,
+                                        model_key=None, content_mode="full")
+    # Simulate the fresh box: the active-store resolver degrades to "full".
+    monkeypatch.setattr(fossils, "_resolve_active_content_mode", lambda: "full")
+    default = fossils.window_snapshot_text(_ENVELOPE_TEXT, ordinal, budget,
+                                           model_key=None)
+    assert full == default                         # content_mode param inert here
+    assert len(full) <= budget
+    assert full.startswith("=== START SNAPSHOT")   # START marker always preserved
