@@ -361,6 +361,86 @@ green. Cohere stays the live default throughout.
 
 ---
 
+## M15 — Delivery-side snapshot formatting (measured, 2026-07-04)
+
+**Context/measured basis:** the envelope isn't only bad for ranking — it ships to the MODEL. A live
+inspection of one query's assembled context (`context_builder.build_fossil_context`) delivered
+**250,718 chars (~62,700 tokens) across 19 snapshot blocks, each carrying ~1,000 chars of
+bookkeeping** (`=== START SNAPSHOT … === CROSS-FILE BEACON … Tail-first sweep resolved tip …
+COUNT=1 | TARGET_ID … UFL: OUTSIDE-JUNK IGNORED | BYTES_AFTER_END=0 … Tail lock confirmed …
+VOLUME TRACKER … GAUGES … Kernel Index …`) before the content — **~20,000 chars (~5,000 tokens,
+~8% of the turn) of pure internal bookkeeping** the model can't use and that competes with the real
+memory. **Brandon's decision (2026-07-04): deliver only the useful sections — a compact snapshot
+attribution (SNAP id + date + operator — the model must know which snapshot each memory is from),
+Context Provenance (the fossil lineage), and the Raw Session Log (user message + AI full response) +
+any Release Notes summary. Drop BEACON / VOLUME TRACKER / GAUGES / Kernel Index.**
+
+Distinct from M14: M14 strips for RANKING (embed + rerank score on Raw Session Log only); M15 strips
+for DELIVERY (keeps a clean ID attribution + Context Provenance + content). Same "kill the envelope"
+theme, different kept-set.
+
+### Task 15.1: `format_snapshot_for_delivery()`
+**Files:** new helper in `Orchestrator/fossils.py` (near `extract_snapshot_content` from M14.1);
+Test: `test_fossils_body.py`.
+`format_snapshot_for_delivery(text) -> str`: emit a compact attribution header `[SNAP-… · <UTC
+date> · operator: <op>]` (parsed from the START line + GAUGES `OPERATOR:`), then the `Context
+Provenance` section (if present), then from `Raw Session Log` onward (content + Release Notes).
+Drop the START/BEACON/VOLUME-TRACKER/GAUGES/Kernel-Index lines. Robust: markers absent → return the
+text unchanged (never empty for non-empty; never raises). Preserve enough of GAUGES to build the
+attribution (date/operator) but not the full block. Tests: a real snapshot → output has the
+`[SNAP-… · … · operator]` header + Context Provenance + Raw Session Log, and does NOT contain
+"CROSS-FILE BEACON"/"Tail lock confirmed"/"BYTES_AFTER_END"/"VOLUME TRACKER"/"GAUGES"/"Kernel
+Index"; markers absent → unchanged; measure the char reduction (~1,000 chars/snapshot dropped).
+
+### Task 15.2: Apply at the delivery/context-assembly seam
+**Files:** `Orchestrator/context_builder.py` (where the retrieved whole-snapshot texts are assembled
+into the fossil-context string — the recent/keyword/semantic/checkpoint sections); confirm whether
+to format in `context_builder` or in the `fossils.py` delivery shims (`hybrid_retrieve` /
+`semantic_retrieve`). DECIDE: format in the CONTEXT-ASSEMBLY path only (chat/voice/MCP context
+injection), NOT in raw single-snapshot tools (`get_snapshot`, the Android timeline `/fossil/snapshot`
+— those legitimately show the full snapshot). So the seam is `context_builder` (and the chat-loop
+`hybrid_retrieve` consumers if they bypass context_builder — grep). Apply `format_snapshot_for_delivery`
+to each delivered block; the `max_fossil_chars` / WI-10 window guards still apply AFTER formatting
+(now they cap cleaner text). Tests: assembled context contains the attribution header, not the
+beacon noise; per-turn char count drops ~5–8%; the snapshot-id attribution is present so the model
+still knows the source; a raw `get_snapshot` call is UNCHANGED (full envelope preserved).
+
+**Measured basis:** the inspection above (250,718 chars, 19 blocks, ~1,000-char envelope each).
+**Verify end-to-end:** re-run the inspection after 15.2 — the same query's context should drop
+~5,000 tokens and read clean (attribution + provenance + session log, no bookkeeping). Commit each
+task; adversarial review; this is context the model sees, so device-validate a real chat turn.
+
+### Task 15.3: The AI-invoked SEARCH tools return body-only results (Brandon addition 2026-07-04)
+When an AI model calls the snapshot-search tool, results must be reranked (already true — verified)
+AND body-only formatted (not yet). **VERIFIED LIVE:** both search surfaces already run the full
+`retrieve()` pipeline incl. rerank — `[RERANK] provider=cohere` fires on both — so the RANKING
+requirement is met; only the RESULT FORMATTING carries envelope noise.
+- **`ToolVault/tools/search_snapshots/executor.py`** (the chat-model tool + on-device
+  `/local/tools/execute`): today it returns each `hybrid_retrieve` result as the WHOLE
+  envelope-inclusive `snap_text` (executor.py:59-60). Apply `format_snapshot_for_delivery` to each
+  result before the `--- Result i ---` join. On-device (window_budget_chars set): extract body
+  FIRST, then respect the budget window — compose body-extraction with the existing
+  `LOCAL_RESULT_BUDGET_CHARS` windowing so the phone still gets a size-bounded but body-only result.
+- **`/fossil/hybrid`** (`Orchestrator/routes/task_routes.py`, the MCP `search_snapshots` /
+  `get_context` path via `blackbox_mcp_server.py`): today it returns a 500-char `snippet` that is
+  the HEAD of the whole snapshot = pure BEACON/START envelope (a useless preview). Build the snippet
+  from `extract_snapshot_content(text)` (the session-log head), so the MCP client sees a meaningful
+  content preview, not bookkeeping. Keep the ranked `snap_id` + `similarity` fields.
+- **North star (Brandon):** "we don't want the search to pull back junk and noise — actual results,
+  perfect results, no matter what." Both AI-facing search surfaces return reranked, body-only,
+  attribution-tagged results.
+- Tests: the executor output for a full-envelope snapshot contains the session log + attribution,
+  NOT "CROSS-FILE BEACON"; the `/fossil/hybrid` snippet is body content, not the START header;
+  on-device path stays within its char budget AND is body-only. **Live-verify:** an MCP/tool
+  `search_snapshots` call returns reranked + clean results (re-run the live check above).
+Commit `feat(search): search_snapshots + /fossil/hybrid return reranked body-only results (M15.3)`.
+
+**Sequencing:** M15 after M14.1 (shares `fossils.py`; avoid a conflicting concurrent edit). It's
+independent of the re-embed (delivery formatting is orthogonal to what's embedded). 15.1→15.2→15.3
+in order (15.3 reuses 15.1's `format_snapshot_for_delivery`/`extract_snapshot_content`).
+
+---
+
 ## Risks & rollback (top line)
 
 | Risk | Mitigation |
