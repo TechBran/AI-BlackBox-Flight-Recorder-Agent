@@ -65,6 +65,7 @@ import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.util.normalizeApiOrigin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -197,6 +198,15 @@ class NativeMainActivity : ComponentActivity() {
                 var sttBaseBefore by remember { mutableStateOf("") }
                 var sttBaseAfter by remember { mutableStateOf("") }
 
+                // Tap-toggle STT (Brandon 2026-07-05): tap 1 starts + live-appends into
+                // the input; tap 2 stops and AUTO-SENDS once the trailing stt_final lands.
+                // whisperPendingSend is armed on the stop-tap and consumed by that final
+                // (snappy) or a grace-window fallback; isWhisperFinalizing keeps the mic
+                // indicator lit from stop-tap until the send so it never looks idle while
+                // the last words are still finalizing.
+                var isWhisperFinalizing by remember { mutableStateOf(false) }
+                var whisperPendingSend by remember { mutableStateOf(false) }
+
                 // Raw audio recorder for Gemini audio analysis
                 val rawAudioRecorder = remember { AudioRecorderManager(applicationContext) }
                 var isRawAudioRecording by remember { mutableStateOf(false) }
@@ -272,6 +282,17 @@ class NativeMainActivity : ComponentActivity() {
                                 chatViewModel.onInputChange(
                                     TextFieldValue(merged, TextRange(sttBaseBefore.length))
                                 )
+                                // Stop-tap armed the send and the trailing final just
+                                // landed → send now (snappy path; the fallback below is
+                                // only reached if no trailing final arrives).
+                                if (whisperPendingSend) {
+                                    whisperPendingSend = false
+                                    isWhisperFinalizing = false
+                                    val toSend = merged.trim()
+                                    sttBaseBefore = ""
+                                    sttBaseAfter = ""
+                                    if (toSend.isNotEmpty()) chatViewModel.sendMessage()
+                                }
                             }
                             is SttEvent.Error -> {
                                 Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
@@ -704,9 +725,27 @@ class NativeMainActivity : ComponentActivity() {
                                 launchFilePicker()
                             },
                             onWhisper = {
-                                // Toggle live streaming dictation via /ws/stt.
+                                // Tap-toggle dictation via /ws/stt (Brandon 2026-07-05).
+                                // Tap 1 = start + live-append; tap 2 = stop + AUTO-SEND.
                                 if (sttClient.isStreaming.value) {
+                                    // Tap 2: stop; the trailing stt_final drives the send
+                                    // (see the Final handler). Keep the mic lit until then.
+                                    whisperPendingSend = true
+                                    isWhisperFinalizing = true
                                     sttClient.stop()
+                                    // Fallback: if no trailing final arrives within the
+                                    // client's stop grace, send whatever's in the box.
+                                    scope.launch {
+                                        delay(1600)
+                                        if (whisperPendingSend) {
+                                            whisperPendingSend = false
+                                            isWhisperFinalizing = false
+                                            val toSend = chatViewModel.inputText.value.text.trim()
+                                            sttBaseBefore = ""
+                                            sttBaseAfter = ""
+                                            if (toSend.isNotEmpty()) chatViewModel.sendMessage()
+                                        }
+                                    }
                                 } else {
                                     withMicPermission {
                                         // Capture the caret-anchored base for the
@@ -790,7 +829,7 @@ class NativeMainActivity : ComponentActivity() {
                             // Allow sends during robotics ER missions (prompt injection)
                             isStreaming = (chatState == ChatState.STREAMING || chatState == ChatState.THINKING)
                                 && !(provider == "robotics" && erMissionActive),
-                            isRecording = isWhisperStreaming,
+                            isRecording = isWhisperStreaming || isWhisperFinalizing,
                             isRecordingAudio = isRawAudioRecording,
                             recordingAmplitude = {
                                 if (isWhisperStreaming) sttAmp
