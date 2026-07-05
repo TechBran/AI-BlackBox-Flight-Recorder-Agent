@@ -275,8 +275,9 @@ def _apply_rerank(query, ranked, index, rrf_c):
             _s = _rerank.get_settings()
             _top = pool[order[0]]
             _moved = "top→#1 CHANGED" if order[0] != 0 else "top unchanged"
+            _q = (query[:80] + "…") if len(query) > 80 else query
             print(f"[RERANK] provider={_s.get('provider')} model={_s.get('model')}: "
-                  f"scored {pool_n} passages, {_moved} ({_top} now #1)")
+                  f"query={_q!r} → scored {pool_n} passages, {_moved} ({_top} now #1)")
         except Exception:  # noqa: BLE001 - logging must never break retrieval
             pass
         return {sid: 1.0 / (rrf_c + r) for r, sid in enumerate(new_order)}
