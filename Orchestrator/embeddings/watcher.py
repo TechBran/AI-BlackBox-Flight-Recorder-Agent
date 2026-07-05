@@ -396,8 +396,12 @@ async def _gap_heal(active: str) -> int:
         # several calls), one atomic append_group per snapshot. A mid-heal
         # provider death keeps the groups already appended (idempotent; the
         # rest stays missing() and is retried next run).
+        # Thread the active store's content_mode (M14.3e): gap-heal is mint
+        # catch-up, so it MUST chunk in the same mode the mint seam uses, or a
+        # body-mode active store would gain full-mode chunks (envelope-inclusive
+        # ordinal-0 + shifted ordinals) and desync the windower for healed snaps.
         batches, empty_ids = await asyncio.to_thread(
-            chunk_group_batches, list(zip(good_ids, texts)), active
+            chunk_group_batches, list(zip(good_ids, texts)), active, store.content_mode
         )
         for sid in empty_ids:
             print(f"[WATCHER] gap-heal: {sid} chunked to nothing - skipping")

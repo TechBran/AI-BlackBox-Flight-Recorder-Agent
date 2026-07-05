@@ -789,6 +789,38 @@ async def test_gap_heal_provider_failure_keeps_state_ok(
     assert _read_health_file(stores_dir)["state"] == "ok"
 
 
+@pytest.mark.asyncio
+async def test_gap_heal_threads_active_store_content_mode(
+    env, catalogs, fake_provider, monkeypatch
+):
+    """M14.3e: gap-heal is mint catch-up, so it MUST chunk in the active store's
+    content_mode. A body-mode active store must never gain full-mode
+    (envelope-inclusive ordinal-0 + shifted ordinals) chunks from the healer, or
+    the windower desyncs for every healed snapshot. Regression guard for the
+    watcher.py:400 miss the M14.3 review caught."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=3)
+    # Active store as a v2 BODY-mode store; append_group one snapshot so
+    # meta.json persists content_mode="body", leaving the rest missing() to heal.
+    store = get_store(ACTIVE, schema=2, content_mode="body")
+    rng = np.random.default_rng(3)
+    store.append_group("SNAP-0", [rng.standard_normal(ACTIVE_DIMS)])
+    assert store.content_mode == "body"  # fixture sanity
+
+    captured = {}
+
+    def spy(ids_texts, model_key, content_mode="full"):
+        captured["mode"] = content_mode
+        return [], [sid for sid, _ in ids_texts]  # short-circuit: all "empty"
+
+    monkeypatch.setattr(watcher, "chunk_group_batches", spy)
+
+    await watcher._gap_heal(ACTIVE)
+
+    # The healer must pass the store's mode through — not the "full" default.
+    assert captured["mode"] == "body"
+
+
 # ── health.json shape through the routes reader ──────────────────────────────
 
 @pytest.mark.asyncio
