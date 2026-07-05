@@ -25,7 +25,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
     # Imported lazily (at call time) so this module never imports
     # chat_routes at module level (no import cycle).
     from Orchestrator.config import VOL_PATH
-    from Orchestrator.fossils import hybrid_retrieve
+    from Orchestrator.fossils import format_snapshot_for_delivery, hybrid_retrieve
     from Orchestrator.models import TaskType
     from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
     from Orchestrator.tasks import create_task, generate_prompt_slug
@@ -425,7 +425,7 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                                 for i, snap_text in enumerate(search_results, 1):
                                     if len(snap_text) > 10000:
                                         snap_text = snap_text[:3000] + "\n... [truncated]"
-                                    output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                    output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                 result_msg = "\n\n".join(output_parts)
                         except Exception as e:
                             result_msg = f"Search failed: {str(e)}"

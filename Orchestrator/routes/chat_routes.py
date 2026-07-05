@@ -851,7 +851,7 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                                 output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
                                 for i, snap_text in enumerate(results, 1):
                                     # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                    output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                    output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                 result_message = "\n\n".join(output_parts)
                                 print(f"[ANTHROPIC] Snapshot search returned {len(results)} results")
                         except Exception as e:
@@ -1457,7 +1457,7 @@ def call_gemini(messages: List[Dict], model: str, operator: str):
                                 output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
                                 for i, snap_text in enumerate(results, 1):
                                     # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                    output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                    output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                 result = "\n\n".join(output_parts)
                                 print(f"[GEMINI] Snapshot search returned {len(results)} results")
                         except Exception as e:
@@ -2238,7 +2238,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
                                                 # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                                output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                                output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                             tool_result = "\n\n".join(output_parts)
                                             print(f"[OPENAI-STREAM] Snapshot search returned {len(search_results)} results")
                                     except Exception as e:
@@ -3025,7 +3025,7 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
                                                 # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                                output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                                output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                             result_message = "\n\n".join(output_parts)
                                             print(f"[ANTHROPIC-STREAM] Snapshot search returned {len(search_results)} results")
                                     except Exception as e:
@@ -4924,7 +4924,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
                                                 # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                                output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                                output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                             result_message = "\n\n".join(output_parts)
                                             print(f"[GEMINI-STREAM] Snapshot search returned {len(search_results)} results")
                                     except Exception as e:
@@ -5588,7 +5588,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
                                             output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
                                             for i, snap_text in enumerate(search_results, 1):
                                                 # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-                                                output_parts.append(f"--- Result {i} ---\n{snap_text}")
+                                                output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
                                             tool_result = "\n\n".join(output_parts)
                                             print(f"[XAI-STREAM] Snapshot search returned {len(search_results)} results")
                                     except Exception as e:

@@ -57,6 +57,7 @@ from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.live_session_reaper import release_payload
 from Orchestrator.fossils import (
     hybrid_retrieve,
+    format_snapshot_for_delivery,
     get_recent_fossils_for_operator,
     get_recent_checkpoints_for_operator
 )
@@ -224,7 +225,7 @@ async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: D
         output_parts = [f"Found {len(results)} relevant snapshot(s) for: {query}\n"]
         for i, snap_text in enumerate(results, 1):
             # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
-            output_parts.append(f"--- Result {i} ---\n{snap_text}")
+            output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
 
         return "\n\n".join(output_parts)
 
