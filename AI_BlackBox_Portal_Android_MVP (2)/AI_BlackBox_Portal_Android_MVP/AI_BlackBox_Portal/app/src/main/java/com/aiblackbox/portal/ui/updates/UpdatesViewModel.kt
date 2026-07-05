@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
+import com.aiblackbox.portal.data.model.RerankStatus
 import com.aiblackbox.portal.data.model.UpdateStatus
 import com.aiblackbox.portal.data.repository.UpdateRepository
 import kotlinx.coroutines.Job
@@ -70,6 +71,19 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     private val _embeddingsError = MutableStateFlow<String?>(null)
     val embeddingsError: StateFlow<String?> = _embeddingsError.asStateFlow()
 
+    // Reranker selector card (M12, surface 3/3 — parity with the M11 Portal
+    // card + M10.1 wizard selector). null = /rerank/status unavailable or not
+    // yet fetched → card absent; a reranker failure can NEVER break the panel.
+    private val _rerankStatus = MutableStateFlow<RerankStatus?>(null)
+    val rerankStatus: StateFlow<RerankStatus?> = _rerankStatus.asStateFlow()
+
+    private val _rerankBusy = MutableStateFlow(false)
+    val rerankBusy: StateFlow<Boolean> = _rerankBusy.asStateFlow()
+
+    /** One-shot error message for the reranker-select snackbar. */
+    private val _rerankError = MutableStateFlow<String?>(null)
+    val rerankError: StateFlow<String?> = _rerankError.asStateFlow()
+
     private var streamJob: Job? = null
     private var pollJob: Job? = null
 
@@ -85,6 +99,7 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
         val r = repo ?: return
         _state.value = UpdatesUiState.Loading
         refreshEmbeddings()
+        refreshRerank()
         viewModelScope.launch {
             try {
                 val status = if (forceFresh) r.preflight() else r.getStatus()
@@ -140,6 +155,55 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
 
     fun clearEmbeddingsError() {
         _embeddingsError.value = null
+    }
+
+    // ── Reranker selector card (M12) ────────────────────────────────────
+
+    /**
+     * Independent fetch of GET /rerank/status. Failure → null → the card
+     * simply doesn't render; it never touches the main updates state (same
+     * fail-quiet contract as the embeddings card + the Portal's soft
+     * /rerank/status probe in updates-manager.js).
+     */
+    fun refreshRerank() {
+        val r = repo ?: return
+        viewModelScope.launch {
+            _rerankStatus.value = try {
+                r.getRerankStatus()
+            } catch (e: Exception) {
+                Log.w(TAG, "rerank status unavailable: ${e.message}")
+                null
+            }
+        }
+    }
+
+    /**
+     * Select a reranker (or toggle it off). POSTs /rerank/select with
+     * provider/model/enabled and — for an already-keyed provider — NO api_key;
+     * only the paste-key path (an un-keyed Voyage/Cohere entry) passes [apiKey],
+     * which the endpoint writes to .env + mirrors into os.environ. Mirrors the
+     * Portal's _onRerankSelect refresh-from-server discipline: the echoed status
+     * updates the card (key_present/preflight/enabled) without a second fetch.
+     */
+    fun selectRerank(provider: String, model: String, enabled: Boolean, apiKey: String? = null) {
+        val r = repo ?: return
+        if (_rerankBusy.value) return  // double-tap guard
+        _rerankBusy.value = true
+        viewModelScope.launch {
+            try {
+                _rerankStatus.value = r.selectRerank(provider, model, enabled, apiKey)
+            } catch (e: Exception) {
+                Log.e(TAG, "rerank select failed", e)
+                _rerankError.value = "Could not change the reranker: ${e.message}"
+                refreshRerank()  // fall back to the server's current truth
+            } finally {
+                _rerankBusy.value = false
+            }
+        }
+    }
+
+    fun clearRerankError() {
+        _rerankError.value = null
     }
 
     private fun mapStatusToState(status: UpdateStatus): UpdatesUiState {

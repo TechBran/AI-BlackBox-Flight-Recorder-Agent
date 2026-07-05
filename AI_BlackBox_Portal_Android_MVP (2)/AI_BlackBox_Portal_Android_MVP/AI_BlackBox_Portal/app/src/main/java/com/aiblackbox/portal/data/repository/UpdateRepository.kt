@@ -6,6 +6,8 @@ import com.aiblackbox.portal.data.api.SSEClient
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.model.EmbeddingsMigrateRequest
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
+import com.aiblackbox.portal.data.model.RerankSelectRequest
+import com.aiblackbox.portal.data.model.RerankStatus
 import com.aiblackbox.portal.data.model.UpdateRollbackResponse
 import com.aiblackbox.portal.data.model.UpdateStartRequest
 import com.aiblackbox.portal.data.model.UpdateStartResponse
@@ -85,6 +87,36 @@ class UpdateRepository(private val api: BlackBoxApi) {
         } catch (e: IOException) {
             if (e.message?.startsWith("HTTP 409") != true) throw e
         }
+    }
+
+    // ── Reranker selector card (M12, surface 3/3) ──────────────────────
+    // Parity with the M11 Portal card + M10.1 wizard selector: the updates
+    // panel also surfaces the reranker from GET /rerank/status and can change
+    // it via POST /rerank/select. Additive + fail-soft in the ViewModel — a
+    // reranker hiccup never breaks the updates panel.
+
+    /** GET /rerank/status — tier + per-model model_catalog for the selector. */
+    suspend fun getRerankStatus(): RerankStatus =
+        json.decodeFromString(RerankStatus.serializer(), api.get("/rerank/status"))
+
+    /**
+     * POST /rerank/select {provider, model, enabled, api_key?}. [apiKey] is
+     * null for an already-keyed provider (the body then omits it — encodeDefaults
+     * is off) and only set on the Android paste-key path for an un-keyed
+     * Voyage/Cohere entry, where the endpoint writes it to .env + os.environ.
+     * Returns the fresh status the endpoint echoes back.
+     */
+    suspend fun selectRerank(
+        provider: String,
+        model: String,
+        enabled: Boolean,
+        apiKey: String? = null,
+    ): RerankStatus {
+        val body = json.encodeToString(
+            RerankSelectRequest.serializer(),
+            RerankSelectRequest(provider = provider, model = model, enabled = enabled, apiKey = apiKey),
+        )
+        return json.decodeFromString(RerankStatus.serializer(), api.post("/rerank/select", body))
     }
 
     private fun decode(jsonText: String): UpdateStatus =
