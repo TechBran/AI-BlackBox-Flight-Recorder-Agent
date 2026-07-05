@@ -96,6 +96,14 @@ private enum class MicState { Idle, Recording, Transcribing }
 internal fun previewTail(text: String, max: Int = 160): String =
     if (text.length > max) "…" + text.takeLast(max) else text
 
+/** Join two transcript segments with a single space (no double/edge spaces). */
+internal fun joinTranscript(a: String, b: String): String = when {
+    a.isBlank() -> b
+    b.isBlank() -> a
+    a.last().isWhitespace() || b.first().isWhitespace() -> a + b
+    else -> "$a $b"
+}
+
 @Composable
 fun CliMicButton(
     onTranscript: (String) -> Unit,
@@ -117,8 +125,15 @@ fun CliMicButton(
     // Set true by long-press cancel: the next Final is discarded (not pasted).
     var cancelRequested by remember { mutableStateOf(false) }
 
-    // Latest CUMULATIVE interim transcript from stt_delta; shown live in the chip.
+    // Live preview text (committed segments + the current partial) shown in the chip.
     var interimText by remember { mutableStateOf("") }
+    // Continuous-dictation model (Brandon 2026-07-05): mirror the main-chat mic —
+    // ACCUMULATE every final segment and keep recording; a mid-stream final (VAD
+    // endpoint, or a reconnect across the ~30s WS drop) must NOT end the session or
+    // paste. Only the user's stop tap pastes the full transcript + goes idle.
+    var committed by remember { mutableStateOf("") }
+    // Set true by the stop tap so the trailing final finishes + pastes.
+    var stopping by remember { mutableStateOf(false) }
 
     // Keep the latest callback without restarting the events collector.
     val currentOnTranscript by rememberUpdatedState(onTranscript)
@@ -126,6 +141,8 @@ fun CliMicButton(
     fun beginStreaming() {
         cancelRequested = false
         interimText = ""
+        committed = ""
+        stopping = false
         state = MicState.Recording
         sttClient.start()
     }
@@ -146,29 +163,39 @@ fun CliMicButton(
         }
     }
 
-    // Collect transcript events. Final → one-shot paste; Error → toast; Delta → live chip.
+    // Collect transcript events. Continuous-dictation model: Delta → live chip;
+    // Final → ACCUMULATE (mid-stream finals keep going); only a stop-tap's final
+    // pastes + idles. Error → toast + reset. Mirrors the main-chat mic's flow.
     LaunchedEffect(sttClient) {
         sttClient.events.collect { event ->
             when (event) {
+                is SttEvent.Delta -> {
+                    // Live preview = accumulated finals + the current partial. Survives a
+                    // reconnect because `committed` is preserved across the WS blip.
+                    interimText = joinTranscript(committed, event.text)
+                }
                 is SttEvent.Final -> {
-                    if (cancelRequested) {
-                        // Discarded by long-press/cancel — do NOT paste.
+                    if (event.text.isNotBlank()) committed = joinTranscript(committed, event.text)
+                    interimText = committed
+                    if (stopping) {
+                        // The user tapped stop → this is the trailing final. Paste the
+                        // WHOLE accumulated transcript and return to idle.
+                        if (!cancelRequested && committed.isNotBlank()) currentOnTranscript(committed)
                         cancelRequested = false
-                    } else if (event.text.isNotBlank()) {
-                        currentOnTranscript(event.text)
+                        stopping = false
+                        committed = ""
+                        interimText = ""
+                        state = MicState.Idle
                     }
-                    interimText = ""
-                    state = MicState.Idle
+                    // else: a mid-stream final (VAD endpoint / reconnect) — keep recording.
                 }
                 is SttEvent.Error -> {
                     cancelRequested = false
+                    stopping = false
                     Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
+                    committed = ""
                     interimText = ""
                     state = MicState.Idle
-                }
-                is SttEvent.Delta -> {
-                    // Cumulative interim — show it live in the preview chip.
-                    interimText = event.text
                 }
             }
         }
@@ -254,7 +281,9 @@ fun CliMicButton(
                                 }
                             }
                             MicState.Recording -> {
-                                // Stop streaming; the trailing Final drives → Idle (paste).
+                                // User stop: arm the paste so the trailing final commits the
+                                // WHOLE accumulated transcript, then → Idle.
+                                stopping = true
                                 state = MicState.Transcribing
                                 sttClient.stop()
                             }
@@ -265,8 +294,11 @@ fun CliMicButton(
                     },
                     onLongPress = {
                         if (state == MicState.Recording) {
-                            // Discard: suppress the next Final, stop, return to idle.
+                            // Discard: suppress the paste, drop the accumulated transcript,
+                            // stop, return to idle.
                             cancelRequested = true
+                            stopping = false
+                            committed = ""
                             sttClient.stop()
                             interimText = ""
                             state = MicState.Idle
