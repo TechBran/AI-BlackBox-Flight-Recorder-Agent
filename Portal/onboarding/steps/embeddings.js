@@ -429,9 +429,17 @@ function rerankLineHtml() {
 
         let action;
         if (m.provider === "vertex") {
-            // Advanced — a GCP service account, not a paste-a-key. Deep-link the
-            // SA-upload (optional_integrations owns GOOGLE_APPLICATION_CREDENTIALS).
-            action = `<a class="ob-emb-rerank-link" href="?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+            // Advanced — a GCP service account, not a paste-a-key. Selectable
+            // once the SA is uploaded (key_present resolves from
+            // GOOGLE_APPLICATION_CREDENTIALS); else deep-link the SA-upload
+            // (optional_integrations owns it).
+            if (m.key_present) {
+                action = isActive
+                    ? `<span class="ob-emb-rerank-current">Selected</span>`
+                    : selectBtn(m);
+            } else {
+                action = `<a class="ob-emb-rerank-link" href="?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+            }
         } else if (m.provider === "voyage" || m.provider === "cohere" || m.provider === "llm") {
             // Cloud / LLM: selectable iff the key is present; else deep-link the
             // API-Keys step (key entry lives THERE, never here).
@@ -452,7 +460,7 @@ function rerankLineHtml() {
         }
 
         return `
-            <div class="ob-emb-rerank-row" data-slug="${escapeHtml(m.slug)}">
+            <div class="ob-emb-rerank-row${isActive ? " is-active" : ""}" data-slug="${escapeHtml(m.slug)}">
                 <div class="ob-emb-rerank-row-head">
                     <span class="ob-emb-rerank-label">${escapeHtml(m.label)}</span>
                     ${badge}

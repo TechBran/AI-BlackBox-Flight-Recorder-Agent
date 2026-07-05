@@ -309,6 +309,20 @@ KNOWN_PROVIDERS = {"null", "vllm", "cpu", "voyage", "cohere", "vertex", "llm"}
 # the local vllm/cpu providers keep the process-lifetime failure cache.
 CLOUD_PROVIDERS = {"voyage", "cohere", "vertex", "llm"}
 
+
+def _key_present_for(auth_kind: "str | None", key_env: "str | None") -> bool:
+    """Whether the credential a model needs is configured, read FRESH (M4).
+
+    gcp_service_account (Vertex) has NO key_env — its credential is the service-
+    account file at GOOGLE_APPLICATION_CREDENTIALS (set + live-mirrored by the
+    credentials upload route), so presence resolves from THAT, mirroring
+    reachable(). Every other cloud/frontier model resolves from its bearer
+    key_env. Fixes the wizard bug where an uploaded Google SA still showed Vertex
+    as unselectable (key_present was always False for a None key_env)."""
+    if auth_kind == "gcp_service_account":
+        return bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+    return bool(key_env and os.getenv(key_env))
+
 # One-time-per-process preflight cache (audit A9). Guarded because retrieve()
 # runs from FastAPI's threadpool — two first-uses must not double-probe.
 # _preflight_expiry is the monotonic deadline for a TTL-bound (cloud-failed)
@@ -541,7 +555,9 @@ def get_settings() -> dict:
         # os.getenv at THIS call — not config.py's frozen constants. This is the
         # single live-read the reachable()/status() key checks consume, so a
         # newly-pasted key mirrored into os.environ is seen with no restart.
-        "key_present": bool(key_env and os.getenv(key_env)),
+        # Vertex (gcp_service_account) resolves from GOOGLE_APPLICATION_CREDENTIALS.
+        "key_present": _key_present_for(
+            entry.get("auth_kind") if entry else None, key_env),
     }
 
 
@@ -1219,9 +1235,9 @@ def model_catalog() -> list[dict]:
             "auth_kind": e.get("auth_kind", "none"),
             "key_env": key_env,
             # Cloud bearer models: present iff their key_env resolves. Vertex
-            # (gcp_service_account, key_env=None) is always False here — the UI
-            # treats it as "Advanced" and deep-links the SA-upload regardless.
-            "key_present": bool(key_env and os.getenv(key_env)),
+            # (gcp_service_account, key_env=None) resolves from the uploaded SA
+            # file at GOOGLE_APPLICATION_CREDENTIALS so it's selectable once set.
+            "key_present": _key_present_for(e.get("auth_kind", "none"), key_env),
             "cost_note": e.get("cost_note", ""),
             "quality_note": e.get("quality_note", ""),
         })

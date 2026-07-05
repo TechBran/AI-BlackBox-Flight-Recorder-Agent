@@ -2799,6 +2799,20 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     gap: 0.25rem;
     padding: 0.5rem 0;
     border-bottom: 1px solid var(--ob-surface-border, rgba(255, 255, 255, 0.06));
+    border-left: 3px solid transparent;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+/* The currently-selected reranker: unmistakable green highlight so it's clear
+   at a glance which one is active (Brandon's live-test feedback 2026-07-05). */
+.ob-emb-rerank-row.is-active {
+    border-left-color: rgba(120, 220, 150, 0.95);
+    background: rgba(120, 220, 150, 0.09);
+    padding-left: 0.6rem;
+    border-radius: 6px;
+}
+.ob-emb-rerank-row.is-active .ob-emb-rerank-badge {
+    background: rgba(120, 220, 150, 0.3);
+    color: rgba(190, 248, 208, 1);
 }
 .ob-emb-rerank-row-head {
     display: flex;

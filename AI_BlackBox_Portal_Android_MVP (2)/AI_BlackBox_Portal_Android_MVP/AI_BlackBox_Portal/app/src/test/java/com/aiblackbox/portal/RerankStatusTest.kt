@@ -151,10 +151,13 @@ class RerankStatusTest {
             rerankActionFor(model("llm-rerank-gpt-mini", "llm", keyPresent = false), status()))
     }
 
-    @Test fun `vertex is always Advanced regardless of key`() {
+    @Test fun `vertex is selectable once the SA is uploaded, else Advanced`() {
+        // Brandon live-test 2026-07-05: an uploaded Google SA makes Vertex
+        // key_present=true (backend resolves it from GOOGLE_APPLICATION_CREDENTIALS)
+        // → SELECTABLE; without it, deep-link the SA setup (VERTEX_ADVANCED).
         assertEquals(RerankAction.VERTEX_ADVANCED,
             rerankActionFor(model("vertex-semantic-ranker", "vertex", keyPresent = false), status()))
-        assertEquals(RerankAction.VERTEX_ADVANCED,
+        assertEquals(RerankAction.SELECTABLE,
             rerankActionFor(model("vertex-semantic-ranker", "vertex", keyPresent = true), status()))
     }
 

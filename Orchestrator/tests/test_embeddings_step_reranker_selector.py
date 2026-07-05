@@ -69,6 +69,25 @@ def test_vertex_deeplinks_to_credentials_upload_step():
         "Vertex (Advanced) must deep-link the SA-upload (optional_integrations)"
 
 
+def test_vertex_selectable_when_sa_present():
+    """Brandon live-test 2026-07-05: Vertex must become SELECTABLE once the SA is
+    uploaded (key_present), not be permanently deep-linked. The vertex branch
+    gates on key_present (select button when present, SA-upload link when not)."""
+    body = _rerank_fn()
+    m = re.search(r'provider === "vertex"(.*?)provider === "voyage"', body, re.DOTALL)
+    assert m, "could not isolate the vertex branch"
+    assert "key_present" in m.group(1), \
+        "vertex branch must gate on key_present (selectable when the SA is present)"
+
+
+def test_active_row_gets_visual_highlight_class():
+    """Brandon live-test 2026-07-05: the selected reranker must be visually clear
+    — the active row carries an is-active class the CSS highlights (green)."""
+    body = _rerank_fn()
+    assert "is-active" in body, \
+        "the active reranker row must get an is-active class for the selected visual"
+
+
 def test_select_posts_without_api_key():
     """Selecting POSTs /rerank/select; the body carries provider/model/enabled
     but NEVER an api_key (the key is already in .env from the API-Keys step)."""

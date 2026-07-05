@@ -564,9 +564,16 @@ function _rerankCardHtml() {
 
         let action;
         if (m.provider === "vertex") {
-            // Advanced — a GCP service account, not a paste-a-key. Deep-link the
-            // SA-upload (optional_integrations owns GOOGLE_APPLICATION_CREDENTIALS).
-            action = `<a class="embeddings-rerank-link" href="/onboarding/?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+            // Advanced — a GCP service account, not a paste-a-key. Selectable
+            // once the SA is uploaded (key_present resolves from
+            // GOOGLE_APPLICATION_CREDENTIALS); else deep-link the SA-upload.
+            if (m.key_present) {
+                action = isActive
+                    ? `<span class="embeddings-rerank-current">Selected</span>`
+                    : selectBtn(m);
+            } else {
+                action = `<a class="embeddings-rerank-link" href="/onboarding/?step=optional_integrations">Advanced — set up a Google service account ↗</a>`;
+            }
         } else if (m.provider === "voyage" || m.provider === "cohere" || m.provider === "llm") {
             // Cloud / LLM: selectable iff the key is present; else deep-link the
             // onboarding API-Keys step (key entry lives THERE, never here).
@@ -587,7 +594,7 @@ function _rerankCardHtml() {
         }
 
         return `
-            <div class="embeddings-rerank-row" data-slug="${_esc(m.slug)}">
+            <div class="embeddings-rerank-row${isActive ? " is-active" : ""}" data-slug="${_esc(m.slug)}">
                 <div class="embeddings-rerank-row-head">
                     <span class="embeddings-rerank-label">${_esc(m.label)}</span>
                     ${badge}

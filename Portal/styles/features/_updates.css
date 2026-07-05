@@ -249,6 +249,15 @@
     margin-top: 0.55rem;
     padding-top: 0.55rem;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-left: 3px solid transparent;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+/* Currently-selected reranker: clear green highlight (Brandon live-test 2026-07-05). */
+.embeddings-rerank-row.is-active {
+    border-left-color: var(--color-ok, #4caf82);
+    background: rgba(76, 175, 130, 0.1);
+    padding-left: 0.55rem;
+    border-radius: 6px;
 }
 .embeddings-rerank-row-head {
     display: inline-flex;

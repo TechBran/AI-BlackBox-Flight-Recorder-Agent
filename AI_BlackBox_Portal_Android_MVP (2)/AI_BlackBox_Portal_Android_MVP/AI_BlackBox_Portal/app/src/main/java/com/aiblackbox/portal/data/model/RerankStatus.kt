@@ -107,7 +107,10 @@ fun rerankActionFor(model: RerankModel, status: RerankStatus): RerankAction {
     val isActive = model.slug == status.model && status.enabled
     if (isActive) return RerankAction.ACTIVE
     return when (model.provider) {
-        "vertex" -> RerankAction.VERTEX_ADVANCED
+        // Vertex: selectable once the SA is uploaded (keyPresent resolves from
+        // GOOGLE_APPLICATION_CREDENTIALS on the backend); else deep-link setup.
+        "vertex" ->
+            if (model.keyPresent) RerankAction.SELECTABLE else RerankAction.VERTEX_ADVANCED
         "voyage", "cohere" ->
             if (model.keyPresent) RerankAction.SELECTABLE else RerankAction.NEEDS_KEY_PASTE
         "llm" ->

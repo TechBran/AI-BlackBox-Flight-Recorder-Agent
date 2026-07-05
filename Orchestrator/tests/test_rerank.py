@@ -660,6 +660,41 @@ def test_reachable_vertex_uses_sa_creds_path(monkeypatch):
         assert rerank.reachable() is False
 
 
+def test_model_catalog_vertex_key_present_via_sa(monkeypatch):
+    """Brandon live-test 2026-07-05: an uploaded Google SA must make Vertex
+    SELECTABLE in the wizard. model_catalog resolves Vertex's key_present from
+    GOOGLE_APPLICATION_CREDENTIALS (gcp_service_account, key_env None) — not the
+    old always-False bearer formula that kept Vertex permanently deep-linked."""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+    vertex = next(m for m in rerank.model_catalog()
+                  if m["provider"] == "vertex")
+    assert vertex["key_present"] is True, \
+        "Vertex must report key_present once the SA is uploaded (selectable)"
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    vertex = next(m for m in rerank.model_catalog()
+                  if m["provider"] == "vertex")
+    assert vertex["key_present"] is False, \
+        "Vertex must report not-present without the SA (deep-link the setup)"
+    # Bearer providers unaffected: still key_env-driven.
+    monkeypatch.setenv("COHERE_API_KEY", "co-x")
+    cohere = next(m for m in rerank.model_catalog()
+                  if m["provider"] == "cohere")
+    assert cohere["key_present"] is True
+
+
+def test_key_present_for_helper(monkeypatch):
+    """The shared _key_present_for: gcp_service_account → GOOGLE_APPLICATION_
+    CREDENTIALS; every other model → its bearer key_env. Fresh env read."""
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    assert rerank._key_present_for("gcp_service_account", None) is False
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json")
+    assert rerank._key_present_for("gcp_service_account", None) is True
+    assert rerank._key_present_for("bearer_env", "VOYAGE_API_KEY") is False
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-x")
+    assert rerank._key_present_for("bearer_env", "VOYAGE_API_KEY") is True
+
+
 def test_scatter_relevance_scores_gap_returns_none():
     """M8 fold-in (M7 review nit #2): a duplicate index leaves another position
     unfilled — the voyage/cohere scatter now returns None on that gap (parity with
