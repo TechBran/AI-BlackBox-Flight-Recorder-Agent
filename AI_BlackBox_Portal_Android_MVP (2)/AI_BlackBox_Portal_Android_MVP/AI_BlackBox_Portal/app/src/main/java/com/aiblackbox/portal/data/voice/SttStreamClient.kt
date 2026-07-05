@@ -77,6 +77,18 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     @Volatile private var sessionEpoch = 0
     @Volatile private var graceJob: Job? = null
 
+    // Reconnect-resume (Brandon 2026-07-05): a network/proxy drop mid-recording
+    // (the ~30s Tailscale idle-reap of the WS) must NOT end the session — the WS
+    // lifetime tracks the mic button, so we transparently reconnect and continue
+    // for as long as _isStreaming stays true. userStopped distinguishes a user
+    // stop() (do NOT reconnect) from an unexpected drop. lastInterim is the newest
+    // cumulative partial, replayed as a Final before a reconnect so the fresh
+    // server session's deltas append after it (no transcribed words lost). Bounded.
+    @Volatile private var userStopped = false
+    @Volatile private var reconnectAttempts = 0
+    @Volatile private var lastInterim = ""
+    private val maxReconnects = 40  // ~1 per 30s cap → ~20 min continuous dictation
+
     @Volatile
     private var audioRecord: AudioRecord? = null
 
@@ -104,52 +116,78 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         val epoch = ++sessionEpoch
         _isStreaming.value = true
         _amplitude.value = 0f
+        userStopped = false
+        reconnectAttempts = 0
+        lastInterim = ""
 
         val newScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = newScope
-        val sessionWs = WebSocketClient(client)
-        wsClient = sessionWs
 
         val url = baseWsUrl + Constants.WS_STT
         android.util.Log.d(TAG, "Connecting to: $url")
+        val startMsgText = buildJsonObject {
+            put("type", "stt_start")
+            put("target", target)
+            put("provider", provider)
+            put("lang", lang)
+            put("sample_rate", SAMPLE_RATE)
+        }.toString()
 
         connectionJob = newScope.launch {
-            try {
-                sessionWs.connect(url).collect { msg ->
-                    when (msg) {
-                        is WsMessage.Connected -> {
-                            val startMsg = buildJsonObject {
-                                put("type", "stt_start")
-                                put("target", target)
-                                put("provider", provider)
-                                put("lang", lang)
-                                put("sample_rate", SAMPLE_RATE)
+            // Reconnect loop: hold ONE logical STT session across transient WS drops
+            // (the ~30s Tailscale idle-reap) for as long as the user holds the mic.
+            // Each iteration is one physical socket; a drop mid-recording reconnects
+            // and resumes rather than ending the session.
+            while (isActive && _isStreaming.value && epoch == sessionEpoch) {
+                val sessionWs = WebSocketClient(client)
+                wsClient = sessionWs
+                try {
+                    sessionWs.connect(url).collect { msg ->
+                        when (msg) {
+                            is WsMessage.Connected -> {
+                                sessionWs.send(startMsgText)
+                                android.util.Log.d(TAG, "Sent stt_start (provider='$provider', lang='$lang', target='$target')")
+                                startCapture(newScope, sessionWs)
                             }
-                            sessionWs.send(startMsg.toString())
-                            android.util.Log.d(TAG, "Sent stt_start (provider='$provider', lang='$lang', target='$target')")
-                            startCapture(newScope, sessionWs)
-                        }
-                        is WsMessage.Text -> parseMessage(msg.text, epoch)
-                        is WsMessage.Closing -> {
-                            android.util.Log.w(TAG, "Server closing: ${msg.code} ${msg.reason}")
-                            cleanup()
-                        }
-                        is WsMessage.Error -> {
-                            android.util.Log.e(TAG, "WS error: ${msg.error.message}")
-                            if (epoch == sessionEpoch) _events.emit(SttEvent.Error(msg.error.message ?: "Connection error"))
-                            cleanup()
-                        }
-                        is WsMessage.Disconnected -> {
-                            android.util.Log.d(TAG, "WS disconnected")
-                            cleanup()
+                            is WsMessage.Text -> parseMessage(msg.text, epoch)
+                            is WsMessage.Closing ->
+                                android.util.Log.w(TAG, "Server closing: ${msg.code} ${msg.reason}")
+                            is WsMessage.Error ->
+                                android.util.Log.e(TAG, "WS error: ${msg.error.message}")
+                            is WsMessage.Disconnected ->
+                                android.util.Log.d(TAG, "WS disconnected")
                         }
                     }
+                } catch (e: Exception) {
+                    android.util.Log.e(TAG, "Connection loop error: ${e.message}", e)
                 }
-            } catch (e: Exception) {
-                android.util.Log.e(TAG, "Connection loop error: ${e.message}", e)
-                if (epoch == sessionEpoch) _events.emit(SttEvent.Error(e.message ?: "Connection error"))
-                cleanup()
+                // The collect returned = THIS socket closed. Stop this leg's capture
+                // so a fresh AudioRecord binds to the next socket.
+                releaseAudioRecord()
+                // User stop(), a newer session, or a clean end after our stt_stop →
+                // end the logical session WITHOUT reconnecting.
+                if (userStopped || !_isStreaming.value || epoch != sessionEpoch) break
+                // Unexpected mid-recording drop → reconnect + resume.
+                reconnectAttempts++
+                if (reconnectAttempts > maxReconnects) {
+                    if (epoch == sessionEpoch) _events.emit(
+                        SttEvent.Error("Transcription connection lost — please try again"))
+                    break
+                }
+                // Commit the newest partial so the FRESH session's deltas append after
+                // it (the server restarts its cumulative transcript at empty on the new
+                // socket). No transcribed words are lost across the seam.
+                if (lastInterim.isNotBlank() && epoch == sessionEpoch) {
+                    _events.emit(SttEvent.Final(lastInterim))
+                    lastInterim = ""
+                }
+                android.util.Log.w(TAG, "STT WS dropped mid-session — reconnecting & resuming (attempt $reconnectAttempts)")
+                delay(200)  // brief backoff; _isStreaming stays TRUE so the mic stays lit
             }
+            // Logical session over — flip to idle ONCE (do not cancel our own job here).
+            releaseAudioRecord()
+            _amplitude.value = 0f
+            if (epoch == sessionEpoch) _isStreaming.value = false
         }
     }
 
@@ -160,6 +198,9 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
      */
     fun stop() {
         if (!_isStreaming.value && audioRecord == null && connectionJob == null) return
+        // Mark user-initiated so the reconnect loop exits instead of resuming when
+        // its socket closes after the stt_stop below.
+        userStopped = true
         _isStreaming.value = false
 
         // Stop + release the mic immediately (signals capture loop to exit too).
@@ -271,10 +312,12 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
             when (type) {
                 "stt_delta" -> {
                     val text = obj["text"]?.jsonPrimitive?.content ?: ""
+                    lastInterim = text  // newest partial — replayed as a Final on reconnect
                     _events.emit(SttEvent.Delta(text)) // cumulative — emit verbatim
                 }
                 "stt_final" -> {
                     val text = obj["text"]?.jsonPrimitive?.content ?: ""
+                    lastInterim = ""  // committed — nothing pending for a reconnect
                     _events.emit(SttEvent.Final(text))
                 }
                 "stt_error" -> {

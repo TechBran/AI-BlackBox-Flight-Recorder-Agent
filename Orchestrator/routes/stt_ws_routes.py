@@ -347,10 +347,17 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
             while True:
                 kind, pcm = await audio_q.get()
                 progressed["v"] = True
-                if kind == "audio":
-                    await el_ws.send(_el_audio_msg(pcm, sample_rate, commit=False))
-                else:  # stop
-                    await el_ws.send(_el_audio_msg("", sample_rate, commit=True))
+                try:
+                    if kind == "audio":
+                        await el_ws.send(_el_audio_msg(pcm, sample_rate, commit=False))
+                    else:  # stop
+                        await el_ws.send(_el_audio_msg("", sample_rate, commit=True))
+                        return
+                except Exception:
+                    # Scribe closed the socket under us (its ~30s cap closes with a
+                    # clean 1000 mid-stream). Stop feeding and return cleanly — the
+                    # reader's rotate fingerprint drives the reconnect; raising here
+                    # would instead crash the epoch and tear down the client WS.
                     return
 
         async def reader():
@@ -382,6 +389,23 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 await websocket.send_json(m)
                 if m["type"] == "stt_final" and stop_evt.is_set():
                     return
+            # Fell out of `async for` = Scribe ended the frame stream ITSELF
+            # (provider-initiated close), NOT via our error/stop/rotate returns.
+            # MEASURED 2026-07-05: at its ~30s session cap Scribe closes with a
+            # CLEAN WebSocket 1000 and NO session_time_limit_exceeded frame — so the
+            # error-frame path above never fires. Fingerprint of a cap-close vs. a
+            # real end: the stream ended, the client never sent stt_stop, and the
+            # session had transcribed (progressed). That trio can only mean "Scribe
+            # timed out mid-utterance" → rotate (reconnect + resume, prefix carries
+            # continuity), bounded by _EL_MAX_ROTATIONS in the caller.
+            print(
+                f"[STT/WS] scribe frame-stream ended by provider "
+                f"close_code={getattr(el_ws, 'close_code', None)} "
+                f"reason={getattr(el_ws, 'close_reason', None)!r} "
+                f"progressed={progressed['v']} stop={stop_evt.is_set()}"
+            )
+            if progressed["v"] and not stop_evt.is_set() and not disconnect_evt.is_set():
+                rotate["v"] = True
 
         feeder_task = asyncio.ensure_future(feeder())
         reader_task = asyncio.ensure_future(reader())
