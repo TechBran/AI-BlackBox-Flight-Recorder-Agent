@@ -261,11 +261,14 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
             if start < len(vol_bytes) and end <= len(vol_bytes):
                 snap_bytes = vol_bytes[start:end]
                 snap_text = snap_bytes.decode('utf-8', errors='replace')
-                # Get first 500 chars as snippet.
-                # WI-10 note: this 500-char cut is INTENTIONALLY retained — this
-                # is an ID/preview API (MCP browse + Portal lists), not model
-                # delivery. Model-bound surfaces fetch whole snapshots by id.
-                snippet = snap_text[:500] + "..." if len(snap_text) > 500 else snap_text
+                # M15.3: the 500-char preview is the BODY head (Raw Session Log
+                # onward), not the START/BEACON envelope head. The MCP
+                # search_snapshots / get_context client (and Portal lists) then
+                # see meaningful content, not bookkeeping. The 500-char cut and
+                # the ranked snap_id + similarity fields are unchanged.
+                from Orchestrator.fossils import extract_snapshot_content
+                body = extract_snapshot_content(snap_text)
+                snippet = body[:500] + "..." if len(body) > 500 else body
 
             results.append({
                 "snap_id": snap_id,

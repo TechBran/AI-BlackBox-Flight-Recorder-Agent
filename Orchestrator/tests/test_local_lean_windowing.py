@@ -364,7 +364,24 @@ def test_build_fossil_context_passes_local_cap_as_window_budget():
 
 # ── 5. search_snapshots executor: on-device caller bound ─────────────────────
 
-def _run_search_executor(caller, limit=5):
+# A full-envelope snapshot with a long session log (> the on-device per-result
+# budget) so the executor's body-first-then-cap bounding is actually exercised.
+def _envelope_snapshot(sid="SNAP-20260703-0001", body_len=4000):
+    turn = "user: tell me about the reranker seam and how it composes. "
+    return (
+        f"=== START SNAPSHOT — UTC 2026-07-03T00:00:00Z — {sid} ===\n"
+        "CROSS-FILE BEACON\n"
+        "Tail lock confirmed | BYTES_AFTER_END=0\n"
+        "VOLUME TRACKER\nMode: NORMAL\n"
+        "GAUGES\nOPERATOR: alice\n\n"
+        "Context Provenance\n- Recent fossils: SNAP-20260703-0000\n\n"
+        "Raw Session Log\n"
+        + ("- [1] " + turn * (body_len // len(turn) + 1)) + "\n"
+        f"=== END SNAPSHOT — {sid} ===\n"
+    )
+
+
+def _run_search_executor(caller, limit=5, snaps=None):
     import importlib.util
     from pathlib import Path
 
@@ -383,7 +400,7 @@ def _run_search_executor(caller, limit=5):
     def _fake_hybrid(vol_txt, query, k=3, operator="", window_budget_chars=None):
         captured["window_budget_chars"] = window_budget_chars
         captured["k"] = k
-        return [f"--- snap for {query} ---"]
+        return list(snaps) if snaps is not None else [f"--- snap for {query} ---"]
 
     with mock.patch.object(fossils, "hybrid_retrieve", _fake_hybrid), \
          mock.patch("Orchestrator.volume.read_text_safe", return_value=""):
@@ -393,25 +410,43 @@ def _run_search_executor(caller, limit=5):
 
 
 def test_executor_bounds_on_device_caller_only():
+    # M15.3: the executor now fetches WHOLE (reranked) — window_budget_chars is
+    # NOT threaded to hybrid_retrieve — then formats each result BODY-ONLY and
+    # (on-device only) bounds each body to its per-result char budget.
     from Orchestrator.toolvault.context import ON_DEVICE_CALLER
 
-    # on-device caller: bounded, budget split across the requested results
-    result, captured = _run_search_executor(ON_DEVICE_CALLER, limit=5)
-    assert result.success
-    assert captured["window_budget_chars"] == 8000 // 5
-    assert captured["k"] == 5
+    big = _envelope_snapshot()  # ~4k-char session log, over the 8000//5 budget
 
-    # every other surface (None / MCP gateway) stays WHOLE per WI-10/M7
+    # on-device caller: body-only AND bounded to the per-result budget
+    result, captured = _run_search_executor(ON_DEVICE_CALLER, limit=5, snaps=[big])
+    assert result.success
+    assert captured["window_budget_chars"] is None  # fetched WHOLE; bound in executor
+    assert captured["k"] == 5
+    assert "CROSS-FILE BEACON" not in result.result   # envelope stripped
+    assert "VOLUME TRACKER" not in result.result
+    # each result block is bounded to ~budget (allow the framing/attribution
+    # overhead of the "--- Result i ---" preamble).
+    budget = 8000 // 5
+    assert len(result.result) < budget + 400
+
+    # every other surface (None / MCP gateway): body-only but WHOLE (uncapped)
     for caller in (None, "mcp-gateway"):
-        result, captured = _run_search_executor(caller)
+        result, captured = _run_search_executor(caller, limit=5, snaps=[big])
         assert result.success
         assert captured["window_budget_chars"] is None
+        assert "CROSS-FILE BEACON" not in result.result       # body-only everywhere
+        assert len(result.result) > budget                    # not truncated (whole body)
 
 
 def test_executor_window_floor_for_large_limits():
+    # At a large limit the per-result budget collapses to the LOCAL_MIN floor
+    # (1000). The on-device result must still respect it (with framing slack).
     from Orchestrator.toolvault.context import ON_DEVICE_CALLER
-    _, captured = _run_search_executor(ON_DEVICE_CALLER, limit=20)
-    assert captured["window_budget_chars"] == 1000  # LOCAL_MIN_WINDOW_CHARS floor
+    big = _envelope_snapshot(body_len=6000)
+    result, _ = _run_search_executor(ON_DEVICE_CALLER, limit=20, snaps=[big])
+    assert result.success
+    assert "CROSS-FILE BEACON" not in result.result
+    assert len(result.result) < 1000 + 400  # LOCAL_MIN_WINDOW_CHARS floor + framing
 
 
 def test_local_tools_execute_stamps_on_device_caller():
