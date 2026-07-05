@@ -200,7 +200,7 @@ def _decode_snapshot_text(meta) -> "str | None":
         return None
 
 
-def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
+def _apply_rerank(query, ranked, index, rrf_c):
     """Cross-encoder rerank of the post-recency pool -> new RANK-SPACE
     relevance dict, or None to fall through un-reranked (never raises).
 
@@ -257,9 +257,10 @@ def _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c):
                 _log_rerank_fallthrough(f"passage decode failed for {sid}")
                 return None
             # M14.2: body-only passage — strip the bookkeeping envelope, then
-            # head-cut to passage_chars. ord_by_id/store are no longer consulted
-            # for passage building (see docstring); the ordinal fetch is kept
-            # upstream for provenance mode.
+            # head-cut to passage_chars. The chunk ordinal (ord_by_id) and the
+            # store are no longer consulted for passage building (M13: dropped
+            # from this signature); the ordinal fetch is kept upstream in
+            # retrieve() for provenance mode.
             passages.append(extract_snapshot_content(text)[:passage_chars])
         scores = _rerank.score(query, passages)
         if scores is None or len(scores) != len(passages):
@@ -436,7 +437,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     #     preflight (all inside _apply_rerank); any failure falls through
     #     silently (logged once) to the un-reranked ranking above.
     if rerank_enabled:
-        reranked_rel = _apply_rerank(query, ranked, ord_by_id, index, store, rrf_c)
+        reranked_rel = _apply_rerank(query, ranked, index, rrf_c)
         if reranked_rel is not None:
             relevance = reranked_rel
             ranked = apply_recency_tiebreak(
