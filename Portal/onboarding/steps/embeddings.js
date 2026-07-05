@@ -488,6 +488,9 @@ function rerankLineHtml() {
             </div>
             <p class="ob-emb-rerank-lede">Optional cross-encoder that re-orders
                search results for sharper recall. Your memory works without it.</p>
+            ${rr.tier_guidance
+                ? `<p class="ob-emb-rerank-guidance">${escapeHtml(rr.tier_guidance)}</p>`
+                : ""}
             ${rows}
             ${empty}
             ${offBtn}

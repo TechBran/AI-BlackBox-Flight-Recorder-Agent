@@ -88,6 +88,14 @@ def test_active_row_gets_visual_highlight_class():
         "the active reranker row must get an is-active class for the selected visual"
 
 
+def test_renders_tier_guidance():
+    """Brandon 2026-07-05: the selector renders the backend's tier-aware
+    'which should I pick?' guidance (free-first, leads with the local reranker)."""
+    body = _rerank_fn()
+    assert "tier_guidance" in body, \
+        "selector must render rr.tier_guidance (the free-first pick guidance)"
+
+
 def test_select_posts_without_api_key():
     """Selecting POSTs /rerank/select; the body carries provider/model/enabled
     but NEVER an api_key (the key is already in .env from the API-Keys step)."""

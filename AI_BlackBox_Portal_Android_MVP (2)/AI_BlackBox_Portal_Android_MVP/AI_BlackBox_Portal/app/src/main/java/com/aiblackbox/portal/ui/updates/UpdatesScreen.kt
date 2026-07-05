@@ -622,6 +622,17 @@ private fun RerankCard(
             color = BbxDim,
             fontSize = 13.sp,
         )
+        // Tier-aware "which should I pick?" guidance (free-first; leads with the
+        // local reranker on capable hardware). Parity with the web selectors.
+        status.tierGuidance?.let { guidance ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                guidance,
+                color = Color(0xFFBEDCFF),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+        }
 
         val models = status.tierModels()
         if (models.isEmpty()) {

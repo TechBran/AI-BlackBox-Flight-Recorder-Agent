@@ -20,6 +20,9 @@ data class RerankStatus(
     val enabled: Boolean = false,
     val available: Boolean = false,
     val tier: String? = null,
+    // Honest, tier-aware "which should I pick?" guidance (free-first; leads with
+    // the local reranker on capable hardware). Rendered under the card lede.
+    @SerialName("tier_guidance") val tierGuidance: String? = null,
     val provider: String? = null,
     val model: String? = null,
     // Local-vllm readiness gate (mirrors the Portal card's `rr.gpu &&

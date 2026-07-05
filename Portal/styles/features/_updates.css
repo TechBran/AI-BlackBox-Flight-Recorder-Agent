@@ -259,6 +259,17 @@
     padding-left: 0.55rem;
     border-radius: 6px;
 }
+/* Tier-aware "which should I pick?" guidance — free-first, leads with local. */
+.embeddings-rerank-guidance {
+    margin: 0.15rem 0 0.5rem;
+    padding: 0.45rem 0.65rem;
+    font-size: 0.82em;
+    line-height: 1.45;
+    color: rgba(190, 220, 255, 0.85);
+    background: rgba(120, 170, 240, 0.08);
+    border-left: 3px solid rgba(120, 170, 240, 0.55);
+    border-radius: 6px;
+}
 .embeddings-rerank-row-head {
     display: inline-flex;
     align-items: center;

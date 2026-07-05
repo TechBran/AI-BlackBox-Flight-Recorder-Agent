@@ -622,6 +622,9 @@ function _rerankCardHtml() {
             </div>
             <p class="embeddings-card-copy">Optional cross-encoder that re-orders
                search results for sharper recall. Your memory works without it.</p>
+            ${rr.tier_guidance
+                ? `<p class="embeddings-rerank-guidance">${_esc(rr.tier_guidance)}</p>`
+                : ""}
             ${rows}
             ${empty}
             ${offBtn}

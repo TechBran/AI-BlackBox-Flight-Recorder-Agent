@@ -121,7 +121,7 @@ RERANK_MODELS = {
         "quality_note": "Default post-GPU pick; pairs with the qwen3 embedding stores",
         "auth_kind": "none",
         "key_env": None,
-        "cost_note": "Local GPU — no API cost",
+        "cost_note": "Local GPU — free, private, unlimited (runs on your box; nothing leaves it)",
         "privacy": "local",
         "tiers": ["HIGH"],
         "preflight_ceiling_ms": 500,
@@ -137,7 +137,7 @@ RERANK_MODELS = {
         "quality_note": "Bigger cross-encoder — only if Phase B shows 0.6B leaves recall on the table",
         "auth_kind": "none",
         "key_env": None,
-        "cost_note": "Local GPU — no API cost",
+        "cost_note": "Local GPU — free, private, unlimited (runs on your box; nothing leaves it)",
         "privacy": "local",
         "tiers": ["HIGH"],
         "preflight_ceiling_ms": 500,
@@ -160,7 +160,7 @@ RERANK_MODELS = {
         "quality_note": "MID-tier opt-in; same weights as the GPU 0.6b, in-process on CPU (slower)",
         "auth_kind": "none",
         "key_env": None,
-        "cost_note": "Local CPU — no API cost; slower than GPU",
+        "cost_note": "Local CPU — free, private, unlimited (on your box); slower than GPU/cloud",
         "privacy": "local",
         "tiers": ["MID"],
         "preflight_ceiling_ms": 2000,
@@ -187,7 +187,7 @@ RERANK_MODELS = {
         "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
         "auth_kind": "frontier_key",
         "key_env": "GOOGLE_API_KEY",
-        "cost_note": "Uses your existing Google/Gemini key; ~cents/query",
+        "cost_note": "Uses your existing Google/Gemini key — no separate signup or quota; ~cents/query",
         "privacy": "cloud",
         "tiers": ["LOW", "MID", "HIGH"],
         "preflight_ceiling_ms": 4000,
@@ -201,7 +201,7 @@ RERANK_MODELS = {
         "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
         "auth_kind": "frontier_key",
         "key_env": "OPENAI_API_KEY",
-        "cost_note": "Uses your existing OpenAI key; ~cents/query",
+        "cost_note": "Uses your existing OpenAI key — no separate signup or quota; ~cents/query",
         "privacy": "cloud",
         "tiers": ["LOW", "MID", "HIGH"],
         "preflight_ceiling_ms": 4000,
@@ -215,7 +215,7 @@ RERANK_MODELS = {
         "quality_note": "General LLM, not a purpose-trained ranker — budget/keyless fallback",
         "auth_kind": "frontier_key",
         "key_env": "ANTHROPIC_API_KEY",
-        "cost_note": "Uses your existing Anthropic key; ~cents/query",
+        "cost_note": "Uses your existing Anthropic key — no separate signup or quota; ~cents/query",
         "privacy": "cloud",
         "tiers": ["LOW", "MID", "HIGH"],
         "preflight_ceiling_ms": 4000,
@@ -267,7 +267,7 @@ RERANK_MODELS = {
         "quality_note": "Dedicated cross-encoder — enterprise reference",
         "auth_kind": "bearer_env",
         "key_env": "COHERE_API_KEY",
-        "cost_note": "Cohere API — ~$2/1K searches",
+        "cost_note": "Cohere API — free trial ~1,000 searches/mo (fine for personal use); ~$2/1K + billing after",
         "privacy": "cloud",
         "tiers": ["LOW", "MID", "HIGH"],
         "preflight_ceiling_ms": 1200,
@@ -1244,6 +1244,27 @@ def model_catalog() -> list[dict]:
     return out
 
 
+def _tier_guidance(tier: "str | None") -> str:
+    """A short, honest 'which reranker should I pick?' line for the selector,
+    adapted to the box's hardware tier (Brandon 2026-07-05). Free-first framing
+    for a personal-use box: on capable hardware the LOCAL reranker is free,
+    private, and unlimited — the best pick; LOW boxes lean on cloud, where the
+    free tiers cover personal use and a production key is only for heavy use."""
+    if tier == "HIGH":
+        return ("This box has a GPU — the local reranker is free, private, and "
+                "unlimited (nothing leaves your box). That's the recommended "
+                "pick; the cloud options work too.")
+    if tier == "MID":
+        return ("This box can run the local CPU reranker — free, private, and "
+                "unlimited (a bit slower than cloud). Or pick a cloud reranker "
+                "below.")
+    # LOW (or unknown hardware): cloud-only.
+    return ("This box uses a cloud reranker. Cohere's free trial (~1,000 "
+            "searches/mo) is fine for personal use, or reuse your existing chat "
+            "model's key with no separate quota. Add a production key only for "
+            "heavy or commercial use.")
+
+
 def status() -> dict:
     """/rerank/status payload (ADDITIVE ops contract, /embeddings/status
     style). Triggers the one-time preflight only when a provider is
@@ -1304,6 +1325,8 @@ def status() -> dict:
         "model_catalog": model_catalog(),
         # ── M3.3 additive (tier/ram + per-provider auth & reachability) ──
         "tier": hw.get("tier"),
+        # Honest, tier-aware "which should I pick?" line for the selector.
+        "tier_guidance": _tier_guidance(hw.get("tier")),
         "ram_mb": hw.get("ram_mb"),
         "reachable": reachable(s),
         "auth_kind": s["auth_kind"],

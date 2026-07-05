@@ -682,6 +682,24 @@ def test_model_catalog_vertex_key_present_via_sa(monkeypatch):
     assert cohere["key_present"] is True
 
 
+def test_tier_guidance_is_free_first_and_tier_aware():
+    """Brandon 2026-07-05: honest 'which should I pick?' guidance, free-first.
+    MID/HIGH lead with the LOCAL reranker (free/private/unlimited); LOW steers to
+    the cloud free tiers for personal use, production key only for heavy use."""
+    high = rerank._tier_guidance("HIGH")
+    mid = rerank._tier_guidance("MID")
+    low = rerank._tier_guidance("LOW")
+    assert "local" in high.lower() and "free" in high.lower()
+    assert "local" in mid.lower() and "free" in mid.lower()
+    assert "cohere" in low.lower() and ("free trial" in low.lower() or "free" in low.lower())
+    assert "personal" in low.lower()
+    # Unknown hardware degrades to the safe cloud guidance, never raises/empties.
+    assert rerank._tier_guidance(None)
+    # status() surfaces it additively for all three selector surfaces.
+    with pin_cfg("rerank", provider="cohere", model="cohere-rerank-4"):
+        assert "tier_guidance" in rerank.status()
+
+
 def test_key_present_for_helper(monkeypatch):
     """The shared _key_present_for: gcp_service_account → GOOGLE_APPLICATION_
     CREDENTIALS; every other model → its bearer key_env. Fresh env read."""
@@ -756,6 +774,8 @@ LEGACY_STATUS_KEYS = {
 STATUS_KEYS = LEGACY_STATUS_KEYS | {
     "tier", "ram_mb", "reachable", "auth_kind", "key_present",
     "preflight_ceiling_ms", "model_catalog",
+    # Tier-aware "which should I pick?" guidance (Brandon 2026-07-05).
+    "tier_guidance",
 }
 
 

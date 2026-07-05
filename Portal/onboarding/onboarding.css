@@ -2793,6 +2793,19 @@ a.ob-summary-row:hover .ob-summary-cta { text-decoration: underline; }
     color: rgba(255, 255, 255, 0.6);
     max-width: 60ch;
 }
+/* Tier-aware "which should I pick?" guidance (Brandon 2026-07-05): free-first,
+   leads with the local reranker on capable hardware. */
+.ob-emb-rerank-guidance {
+    margin: 0 0 0.7rem;
+    padding: 0.5rem 0.7rem;
+    font-size: 0.8em;
+    line-height: 1.45;
+    color: rgba(190, 220, 255, 0.85);
+    background: rgba(120, 170, 240, 0.08);
+    border-left: 3px solid rgba(120, 170, 240, 0.55);
+    border-radius: 6px;
+    max-width: 60ch;
+}
 .ob-emb-rerank-row {
     display: flex;
     flex-direction: column;
