@@ -359,6 +359,31 @@ body-only) before 14.4 (so mints during the rebuild are already body-only — th
 candidate can build in the background while the UI milestones (M10–M12) proceed; gate+cutover when
 green. Cohere stays the live default throughout.
 
+> **OUTCOME (2026-07-05): 14.4 re-embed ABANDONED — gate FAILED, body-only embeddings do not
+> help retrieval.** The full 7,648-snapshot body-only candidate built clean (26,225 chunks vs the
+> full store's 33,039 — ~21% boilerplate removed) with `content_mode="body"`. But the six-gate
+> eval, read apples-to-apples (fresh full store vs fresh body candidate, both from `runs` in
+> `eval/results/2026-07-04-chunk-gate.json`), showed body-only is **neutral-to-negative** on the
+> production **hybrid** path: overall recall@10 **0.634 → 0.612 (−11 queries)**, worse in <6k
+> (−10 q) and 6–10k (−3 q), only +2 q in >10k. Semantic-only (phone lean) was +6 q net. **Caution
+> on the gate table's own columns:** its overall/>10k gates compare the candidate against a STALE
+> July-2 recency-sweep baseline (0.489) — that inflated a −2pt change into an apparent "+25% win."
+> Always read `runs.baseline` (fresh current store) vs `runs.candidate`, not the table's baseline
+> column, for a cutover decision. **Why:** a bi-encoder already averages the near-constant envelope
+> into a tiny offset that barely moves cosine ranks, while re-chunking the body shifts chunk
+> boundaries and drops the envelope's structured terms that the keyword channel uses — so hybrid
+> loses more than the boilerplate removal gains. This is the OPPOSITE of 14.2 (rerank), where a
+> cross-encoder reads whole passages and boilerplate genuinely distracts it (Vertex 0.654→0.846).
+> **Same idea, opposite outcome, because embedding and reranking consume text differently.**
+>
+> **Decision (Brandon):** do NOT cut over — keep the full-envelope store. Candidate discarded.
+> **KEEP the M14.3 `content_mode` infrastructure inert** (store flag + body-mint + windower branch
+> + watcher fix, commits `2dd1b94`/`19f89ac`/`33c8c58` watcher) — it's byte-identical on a
+> full-mode store, tested, and lets a FUTURE model/box that benefits re-embed body-only. Full is
+> the proven default for gemini-embedding-2 on this corpus; the finding is model/corpus-specific,
+> not universal. The real body-only wins (14.2 rerank + M15 delivery) are orthogonal to what is
+> embedded and remain shipped. `.pre-body` rollback dir was never needed (no cutover occurred).
+
 ---
 
 ## M15 — Delivery-side snapshot formatting (measured, 2026-07-04)
