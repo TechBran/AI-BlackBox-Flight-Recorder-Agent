@@ -596,6 +596,8 @@ class VectorStore:
             return [sid for sid in all_snap_ids if sid not in present]
 
     def _get_matrix_locked(self):
+        if self._closed:
+            return None            # retired instance: surface nothing, never stale-labeled rows
         if self._matrix is None and self.vectors_path.exists():
             try:
                 self._matrix = np.fromfile(self.vectors_path, dtype="<f4").reshape(

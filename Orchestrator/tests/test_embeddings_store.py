@@ -382,7 +382,7 @@ def test_store_dir_resolves_under_base(tmp_path):
 
 def test_list_stores_ignores_backup_and_incoming_dirs(tmp_path):
     from Orchestrator.embeddings import store as st
-    import numpy as np, shutil
+    import shutil
     dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
     live = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
     live.append("SNAP-0", np.zeros(dims))
@@ -396,7 +396,6 @@ def test_list_stores_ignores_backup_and_incoming_dirs(tmp_path):
 
 def test_get_matrix_survives_vectors_file_vanishing(tmp_path):
     from Orchestrator.embeddings import store as st
-    import numpy as np
     dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
     s = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
     s.append("SNAP-0", np.zeros(dims))
@@ -405,9 +404,20 @@ def test_get_matrix_survives_vectors_file_vanishing(tmp_path):
     assert s.search([0.0] * dims, k=1) == []
 
 
+def test_get_matrix_survives_truncated_vectors_file(tmp_path):
+    from Orchestrator.embeddings import store as st
+    dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
+    s = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
+    s.append("SNAP-0", np.zeros(dims))
+    s._matrix = None                                      # force a re-read
+    vp = tmp_path / "qwen3-embedding-0.6b" / "vectors.f32"
+    with open(vp, "r+b") as f:
+        f.truncate(dims * 4 - 4)                          # 1023 floats: .exists() True, reshape ValueError
+    assert s.search([0.0] * dims, k=1) == []              # guard → None → []
+
+
 def test_closed_store_rejects_appends(tmp_path):
     from Orchestrator.embeddings import store as st
-    import numpy as np, pytest
     dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
     s = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
     s.append("SNAP-0", np.zeros(dims))
@@ -416,3 +426,15 @@ def test_closed_store_rejects_appends(tmp_path):
         s.append("SNAP-1", np.zeros(dims))
     with pytest.raises(RuntimeError, match="retired"):
         s.append_many([("SNAP-2", np.zeros(dims))])
+    with pytest.raises(RuntimeError, match="retired"):
+        s.append_group("SNAP-3", [np.zeros(dims)])
+
+
+def test_closed_store_reads_return_empty(tmp_path):
+    from Orchestrator.embeddings import store as st
+    dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
+    s = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
+    s.append("SNAP-0", np.zeros(dims))
+    assert s.search([0.0] * dims, k=1) != []      # returns a hit while open
+    s.close()
+    assert s.search([0.0] * dims, k=1) == []      # retired → no reads
