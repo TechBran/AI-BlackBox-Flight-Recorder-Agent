@@ -65,7 +65,6 @@ import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.util.normalizeApiOrigin
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -199,13 +198,14 @@ class NativeMainActivity : ComponentActivity() {
                 var sttBaseAfter by remember { mutableStateOf("") }
 
                 // Tap-toggle STT (Brandon 2026-07-05): tap 1 starts + live-appends into
-                // the input; tap 2 stops and AUTO-SENDS once the trailing stt_final lands.
-                // whisperPendingSend is armed on the stop-tap and consumed by that final
-                // (snappy) or a grace-window fallback; isWhisperFinalizing keeps the mic
-                // indicator lit from stop-tap until the send so it never looks idle while
-                // the last words are still finalizing.
-                var isWhisperFinalizing by remember { mutableStateOf(false) }
-                var whisperPendingSend by remember { mutableStateOf(false) }
+                // the input; tap 2 just STOPS — the transcript stays in the box for
+                // editing, no auto-send. The mic writes text; the user sends explicitly.
+                // Tapping send while the mic is live stops it and sends in one tap.
+                // stop() flushes a graceful close that can emit one trailing stt_final;
+                // on a mic-tap stop we want it (last words land), but right after a
+                // send-while-live it would repopulate the just-cleared box, so
+                // sttDiscardTrailingFinal drops exactly that one late final.
+                var sttDiscardTrailingFinal by remember { mutableStateOf(false) }
 
                 // Raw audio recorder for Gemini audio analysis
                 val rawAudioRecorder = remember { AudioRecorderManager(applicationContext) }
@@ -266,6 +266,9 @@ class NativeMainActivity : ComponentActivity() {
                     sttClient.events.collect { event ->
                         when (event) {
                             is SttEvent.Delta -> {
+                                // Ignore any late interim after a send-while-live cleared
+                                // the box (the trailing final is dropped separately).
+                                if (sttDiscardTrailingFinal) return@collect
                                 val newText = sttBaseBefore + event.text + sttBaseAfter
                                 chatViewModel.onInputChange(
                                     TextFieldValue(
@@ -275,6 +278,13 @@ class NativeMainActivity : ComponentActivity() {
                                 )
                             }
                             is SttEvent.Final -> {
+                                // A send-while-live already consumed + cleared the box;
+                                // drop the one trailing final stop()'s grace emits so it
+                                // doesn't repopulate the now-empty input.
+                                if (sttDiscardTrailingFinal) {
+                                    sttDiscardTrailingFinal = false
+                                    return@collect
+                                }
                                 val committed = if (event.text.isNotEmpty() && !event.text.last().isWhitespace())
                                     "${event.text} " else event.text
                                 sttBaseBefore += committed
@@ -282,17 +292,6 @@ class NativeMainActivity : ComponentActivity() {
                                 chatViewModel.onInputChange(
                                     TextFieldValue(merged, TextRange(sttBaseBefore.length))
                                 )
-                                // Stop-tap armed the send and the trailing final just
-                                // landed → send now (snappy path; the fallback below is
-                                // only reached if no trailing final arrives).
-                                if (whisperPendingSend) {
-                                    whisperPendingSend = false
-                                    isWhisperFinalizing = false
-                                    val toSend = merged.trim()
-                                    sttBaseBefore = ""
-                                    sttBaseAfter = ""
-                                    if (toSend.isNotEmpty()) chatViewModel.sendMessage()
-                                }
                             }
                             is SttEvent.Error -> {
                                 Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
@@ -670,6 +669,16 @@ class NativeMainActivity : ComponentActivity() {
                             value = inputText,
                             onValueChange = { chatViewModel.onInputChange(it) },
                             onSend = {
+                                // Send while the mic is live → stop it and send in one
+                                // tap. Kill the stream, arm the trailing-final discard so
+                                // stop()'s grace final doesn't repopulate the box after
+                                // sendMessage() clears it, and drop the STT base anchors.
+                                if (sttClient.isStreaming.value) {
+                                    sttDiscardTrailingFinal = true
+                                    sttClient.stop()
+                                    sttBaseBefore = ""
+                                    sttBaseAfter = ""
+                                }
                                 // Upload attachments first, then send message with URLs
                                 val hasAttachments = attachments.isNotEmpty()
                                 val hasPreUploaded = preUploadedUrls.isNotEmpty()
@@ -726,28 +735,15 @@ class NativeMainActivity : ComponentActivity() {
                             },
                             onWhisper = {
                                 // Tap-toggle dictation via /ws/stt (Brandon 2026-07-05).
-                                // Tap 1 = start + live-append; tap 2 = stop + AUTO-SEND.
+                                // Tap 1 = start + live-append; tap 2 = just STOP. The
+                                // transcript stays in the box for editing — no auto-send.
+                                // (Tapping send while live stops + sends; see onSend.)
                                 if (sttClient.isStreaming.value) {
-                                    // Tap 2: stop; the trailing stt_final drives the send
-                                    // (see the Final handler). Keep the mic lit until then.
-                                    whisperPendingSend = true
-                                    isWhisperFinalizing = true
                                     sttClient.stop()
-                                    // Fallback: if no trailing final arrives within the
-                                    // client's stop grace, send whatever's in the box.
-                                    scope.launch {
-                                        delay(1600)
-                                        if (whisperPendingSend) {
-                                            whisperPendingSend = false
-                                            isWhisperFinalizing = false
-                                            val toSend = chatViewModel.inputText.value.text.trim()
-                                            sttBaseBefore = ""
-                                            sttBaseAfter = ""
-                                            if (toSend.isNotEmpty()) chatViewModel.sendMessage()
-                                        }
-                                    }
                                 } else {
                                     withMicPermission {
+                                        // Fresh dictation: don't drop the first final.
+                                        sttDiscardTrailingFinal = false
                                         // Capture the caret-anchored base for the
                                         // cumulative-delta applier BEFORE starting.
                                         val cur = chatViewModel.inputText.value
@@ -829,7 +825,7 @@ class NativeMainActivity : ComponentActivity() {
                             // Allow sends during robotics ER missions (prompt injection)
                             isStreaming = (chatState == ChatState.STREAMING || chatState == ChatState.THINKING)
                                 && !(provider == "robotics" && erMissionActive),
-                            isRecording = isWhisperStreaming || isWhisperFinalizing,
+                            isRecording = isWhisperStreaming,
                             isRecordingAudio = isRawAudioRecording,
                             recordingAmplitude = {
                                 if (isWhisperStreaming) sttAmp
