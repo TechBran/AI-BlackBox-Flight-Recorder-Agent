@@ -810,6 +810,14 @@ def list_stores(base_dir) -> list:
             continue
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            # A store's live dir is always named EXACTLY its slug; retained
+            # rollbacks ({slug}.pre-rebuild.<ts>) and interrupted-swap staging
+            # ({slug}.incoming) carry a copied meta.json but a different dir
+            # name — they must never shadow the live store in status/list.
+            # Safe for dotted slugs (e.g. qwen3-embedding-0.6b): compares the
+            # whole dir name, not a prefix.
+            if meta["slug"] != child.name:
+                continue
             stores.append({
                 "slug": meta["slug"],
                 "dims": meta["dims"],

@@ -378,3 +378,17 @@ def test_evict_store_drops_cached_instance(tmp_path, monkeypatch):
 def test_store_dir_resolves_under_base(tmp_path):
     from Orchestrator.embeddings import store as st
     assert st.store_dir("s", base_dir=tmp_path) == tmp_path / "s"
+
+
+def test_list_stores_ignores_backup_and_incoming_dirs(tmp_path):
+    from Orchestrator.embeddings import store as st
+    import numpy as np, shutil
+    dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
+    live = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
+    live.append("SNAP-0", np.zeros(dims))
+    shutil.copytree(tmp_path / "qwen3-embedding-0.6b",
+                    tmp_path / "qwen3-embedding-0.6b.pre-rebuild.20260101T000000Z")
+    shutil.copytree(tmp_path / "qwen3-embedding-0.6b",
+                    tmp_path / "qwen3-embedding-0.6b.incoming")
+    slugs = [s["slug"] for s in st.list_stores(tmp_path)]
+    assert slugs == ["qwen3-embedding-0.6b"]
