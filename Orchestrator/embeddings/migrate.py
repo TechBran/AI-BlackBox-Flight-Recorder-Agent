@@ -62,6 +62,7 @@ below handles both shapes.
 """
 import asyncio
 import json
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -704,6 +705,20 @@ def _build_base_dir() -> Path:
     list_stores does not recurse, so candidates never appear in status/list.
     """
     return Path(config.EMBEDDINGS_STORES_DIR) / BUILD_DIR_NAME
+
+
+# ── re-embed activation helpers (per-card Re-embed feature) ──────────────────
+
+def _clear_build_candidate(target_slug: str) -> None:
+    """Delete {stores}/_build/{slug} + evict its cache so a re-embed is a TRUE
+    full rebuild, never a top-up of a stale candidate (a prior candidate may
+    predate a chunk-config change). Called only on the INITIAL reembed entry —
+    resume tops up the in-progress candidate instead."""
+    from Orchestrator.embeddings.store import evict_store, store_dir
+    evict_store(target_slug, base_dir=_build_base_dir())
+    d = store_dir(target_slug, base_dir=_build_base_dir())
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
 
 
 async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:
