@@ -331,4 +331,8 @@ def semantic_search(query: str, operator: str = "", k: int = 10) -> list[tuple[s
             for snap_id, entry in load_snapshot_index().items()
             if entry.get("operator") == operator
         }
-    return store.search(query_embedding, k, allowed_ids)
+    try:
+        return store.search(query_embedding, k, allowed_ids)
+    except Exception as e:  # noqa: BLE001 — a store mutated under us must not 500 search
+        print(f"[SEMANTIC] search failed ({e}); returning no results")
+        return []

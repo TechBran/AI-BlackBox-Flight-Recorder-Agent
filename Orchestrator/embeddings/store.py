@@ -584,9 +584,13 @@ class VectorStore:
 
     def _get_matrix_locked(self):
         if self._matrix is None and self.vectors_path.exists():
-            self._matrix = np.fromfile(self.vectors_path, dtype="<f4").reshape(
-                -1, self.dims
-            )
+            try:
+                self._matrix = np.fromfile(self.vectors_path, dtype="<f4").reshape(
+                    -1, self.dims
+                )
+            except (OSError, ValueError) as e:
+                print(f"[VECSTORE] {self.slug}: matrix re-read failed ({e}); returning empty")
+                self._matrix = None
         return self._matrix
 
     def search(self, query_vec, k: int, allowed_ids=None) -> list:

@@ -392,3 +392,14 @@ def test_list_stores_ignores_backup_and_incoming_dirs(tmp_path):
                     tmp_path / "qwen3-embedding-0.6b.incoming")
     slugs = [s["slug"] for s in st.list_stores(tmp_path)]
     assert slugs == ["qwen3-embedding-0.6b"]
+
+
+def test_get_matrix_survives_vectors_file_vanishing(tmp_path):
+    from Orchestrator.embeddings import store as st
+    import numpy as np
+    dims = st.EMBEDDING_MODELS["qwen3-embedding-0.6b"]["dims"]
+    s = st.get_store("qwen3-embedding-0.6b", base_dir=tmp_path)
+    s.append("SNAP-0", np.zeros(dims))
+    s._matrix = None                                     # force a re-read
+    (tmp_path / "qwen3-embedding-0.6b" / "vectors.f32").unlink()  # dir moved out
+    assert s.search([0.0] * dims, k=1) == []
