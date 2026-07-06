@@ -117,6 +117,7 @@ class VectorStore:
         self._generation = 0            # v2 only: bumps on every mutation
         self._matrix = None  # lazily loaded; invalidated on append
         self._opened = False
+        self._closed = False
         self._lock = threading.Lock()
 
     # ── paths ────────────────────────────────────────────────────────────────
@@ -379,6 +380,8 @@ class VectorStore:
         writes nothing and returns 0). Returns rows written.
         """
         with self._lock:
+            if self._closed:
+                raise RuntimeError(f"{self.slug}: store instance retired (re-embed activated)")
             self._ensure_open_locked()
             if self._schema != 2:
                 # Fail loud: v1 first-wins dedupe would silently keep only the
@@ -419,6 +422,8 @@ class VectorStore:
             prepared.append((snap_id, vec))
 
         with self._lock:
+            if self._closed:
+                raise RuntimeError(f"{self.slug}: store instance retired (re-embed activated)")
             self._ensure_open_locked()
             if self._schema == 2:
                 return self._append_groups_locked(prepared)
@@ -529,6 +534,14 @@ class VectorStore:
             # so the v1 meta key set stays frozen (status/UI binding contract).
             meta["content_mode"] = self._content_mode
         _atomic_write_json(self.meta_path, meta)
+
+    def close(self) -> None:
+        """Retire this instance (re-embed activation): further appends RAISE so a
+        mint that still holds this handle cannot write stale state into the dir
+        that a same-slug promotion just replaced."""
+        with self._lock:
+            self._closed = True
+            self._matrix = None
 
     # ── read path ────────────────────────────────────────────────────────────
 
