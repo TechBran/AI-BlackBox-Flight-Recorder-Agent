@@ -42,6 +42,9 @@
 // Selected-card highlight is the shared .ob-card-selected class (onboarding.css).
 
 const POLL_MS = 2000;
+// Rough chars-per-snapshot used ONLY for the cloud re-embed cost PREVIEW
+// (clearly labelled an estimate in the confirm copy). Not a billing figure.
+const AVG_CHARS_PER_SNAPSHOT = 4000;
 
 let status = null;        // last GET /embeddings/status payload
 let rerankStatus = null;  // last GET /rerank/status payload (M13; null = hide)
@@ -50,8 +53,9 @@ let placementBusy = null; // slug whose placement POST is in flight (M13)
 let rerankBusy = null;    // slug/provider whose /rerank/select POST is in flight (M10.1)
 let validation = null;    // /embeddings/validate result for selectedSlug
 let validating = false;   // probe in flight
-let migrating = false;    // migrate POST in flight (button debounce)
+let migrating = false;    // migrate/reembed POST in flight (button debounce)
 let pulling = false;      // pull POST in flight (button debounce)
+let reembedConfirm = null; // slug awaiting the cloud re-embed cost confirm (inline)
 let keepAliveBusy = null; // slug whose keep_alive toggle POST is in flight
 let cancelClicked = false; // local echo until job.cancel_requested arrives
 let pollTimer = null;
@@ -71,6 +75,7 @@ export async function render(container, { next, back, skip, sigil }) {
     validating = false;
     migrating = false;
     pulling = false;
+    reembedConfirm = null;
     keepAliveBusy = null;
     cancelClicked = false;
     etaSamples = [];
@@ -626,6 +631,7 @@ function renderCard(m) {
             ${costRow}
             ${placementHint}
             ${freshnessHtml(m)}
+            ${strategyHtml(m)}
             ${blockersHtml}
             ${warmToggleHtml(m)}
             <div class="ob-cli-agent-actions">${cardActionsHtml(m, isActive, isSelected)}</div>
@@ -673,6 +679,21 @@ function freshnessHtml(m) {
     return `<p class="ob-emb-fresh">Store exists &mdash; ${fmtInt(m.missing)} snapshot${m.missing === 1 ? "" : "s"} behind</p>`;
 }
 
+// Per-card embedding STRATEGY line (re-embed UI). status.models[].strategy is
+// derived server-side from the store's schema: "chunked" (schema 2, current),
+// "whole_document" (schema 1, older — re-embed upgrades it in place), or
+// "none" (no readable store yet). whole_document reuses the SAME stale accent
+// (.ob-emb-fresh, the "N snapshots behind" colour) the freshness line uses.
+function strategyHtml(m) {
+    if (m.strategy === "chunked") {
+        return `<p class="ob-emb-fresh ob-emb-fresh-ok">Strategy: chunked (current)</p>`;
+    }
+    if (m.strategy === "whole_document") {
+        return `<p class="ob-emb-fresh">Whole-document (older) &mdash; re-embed to upgrade</p>`;
+    }
+    return `<p class="ob-emb-fresh ob-emb-fresh-subdued">Not built yet.</p>`;
+}
+
 // Backend contract: embeddings_routes._model_preflight emits the
 // "Pull the model from the setup wizard (≈X GB download)" blocker ONLY when
 // the Ollama daemon is up and the weights are absent — exactly the state the
@@ -682,11 +703,15 @@ function pullBlocker(m) {
 }
 
 function cardActionsHtml(m, isActive, isSelected) {
+    // Re-embed is offered on the active card AND any non-active card whose
+    // store already exists (upgrade-in-place, no model switch). reembedHtml
+    // self-gates on store_exists/active, so it renders "" where inapplicable.
+    const reembed = reembedHtml(m);
     if (isActive) {
-        return `<p class="ob-cli-agent-ready-blurb">Currently active &mdash; all snapshot searches use this model.</p>`;
+        return `<p class="ob-cli-agent-ready-blurb">Currently active &mdash; all snapshot searches use this model.</p>${reembed}`;
     }
     if (!isSelected) {
-        return `<p class="ob-cli-agent-auth-blurb">Click to select.</p>`;
+        return `<p class="ob-cli-agent-auth-blurb">Click to select.</p>${reembed}`;
     }
 
     const pull = status.ollama && status.ollama.pull;
@@ -703,10 +728,10 @@ function cardActionsHtml(m, isActive, isSelected) {
     if (!m.ready) {
         // Non-pull blockers (key missing, daemon down, RAM short) — the
         // remediation lines above are the action.
-        return `<p class="ob-cli-agent-auth-blurb">Resolve the items above, then re-select this model.</p>`;
+        return `<p class="ob-cli-agent-auth-blurb">Resolve the items above, then re-select this model.</p>${reembed}`;
     }
 
-    // Ready, selected, not active → validate → migrate.
+    // Ready, selected, not active → validate → migrate (+ re-embed-in-place).
     const parts = [];
     if (validating) {
         parts.push(`<span class="ob-status-pill ob-status-pill-validating">Validating&hellip;</span>`);
@@ -737,7 +762,79 @@ function cardActionsHtml(m, isActive, isSelected) {
                     id="ob-emb-validate">Validate</button>
         `);
     }
+    parts.push(reembed);
     return parts.join("");
+}
+
+// Re-embed control (Task 2.2/2.3). Renders on the active card and any
+// non-active BUILT card; disabled with a short hint while any embed job runs.
+// For a CLOUD model the first click swaps in an inline cost confirm (module
+// state reembedConfirm === m.slug) whose "Confirm" is itself an .ob-emb-reembed
+// button that re-enters startReembed — the POST only fires past that gate.
+function reembedHtml(m) {
+    const built = m.store_exists || m.slug === status.active;
+    if (!built) return "";
+
+    if (reembedConfirm === m.slug) {
+        const n = snapshotCountFor(m.slug);
+        const cost = reembedCostText(m, n);
+        return `
+            <div class="ob-emb-reembed-confirm">
+                <p class="ob-cli-agent-auth-blurb">Re-embed ${fmtInt(n)} snapshot${n === 1 ? "" : "s"}
+                   with ${escapeHtml(m.label)}? ${cost}</p>
+                <button type="button" class="ob-cli-agent-action ob-cli-agent-action-auth ob-emb-reembed"
+                        data-slug="${escapeHtml(m.slug)}">Confirm re-embed</button>
+                <button type="button" class="ob-skip ob-emb-reembed-cancel"
+                        data-slug="${escapeHtml(m.slug)}">Cancel</button>
+            </div>
+        `;
+    }
+
+    const jobRunning = !!(status.job && status.job.state === "running");
+    const hint = jobRunning
+        ? `<p class="ob-cli-agent-auth-blurb">A re-embed or migration is already running.</p>`
+        : "";
+    return `
+        <button type="button" class="ob-cli-agent-action ob-cli-agent-action-auth ob-emb-reembed"
+                data-slug="${escapeHtml(m.slug)}" ${jobRunning ? "disabled" : ""}>
+            Re-embed all snapshots
+        </button>
+        ${hint}
+    `;
+}
+
+// Snapshot count for the cost/confirm copy: the target's own store count
+// (re-embed walks the whole corpus), falling back to the largest known store
+// as a corpus-size proxy when this model has no readable store of its own.
+function snapshotCountFor(slug) {
+    const stores = status.stores || [];
+    const own = stores.find((s) => s.slug === slug);
+    if (own && typeof own.count === "number") return own.count;
+    return stores.reduce((mx, s) => Math.max(mx, s.count || 0), 0);
+}
+
+// Friendly provider name for the "on your <provider> key" confirm line,
+// derived from the slug (the status model dict carries privacy, not provider).
+function reembedProviderLabel(m) {
+    const s = (m.slug || "").toLowerCase();
+    if (s.includes("gemini") || s.includes("google")) return "Google";
+    if (s.includes("openai") || s.includes("text-embedding")) return "OpenAI";
+    if (s.includes("voyage")) return "Voyage";
+    if (s.includes("cohere")) return "Cohere";
+    return "provider";
+}
+
+// Rough, clearly-labelled cloud cost preview (Task 2.3). LOCAL models cost
+// nothing to re-embed, so surface their advisory CPU-slowness note instead.
+function reembedCostText(m, n) {
+    if (m.privacy === "local") {
+        return m.cpu_warning ? escapeHtml(m.cpu_warning) : "Runs locally &mdash; no API cost.";
+    }
+    const dollars =
+        (n * AVG_CHARS_PER_SNAPSHOT / 4 / 1e6) * (m.cost_per_1m_tokens || 0);
+    const money = dollars < 0.01 ? "&lt;$0.01" : `$${dollars.toFixed(2)}`;
+    return `Est. ~${money} on your ${escapeHtml(reembedProviderLabel(m))} key `
+        + `(rough estimate &mdash; assumes &approx;${fmtInt(AVG_CHARS_PER_SNAPSHOT)} chars/snapshot).`;
 }
 
 function migrateLabel(m) {
@@ -769,6 +866,23 @@ function wireCardActions(grid) {
             startPull(selectedSlug);
         });
     }
+    // Re-embed can appear on several cards (active + built non-active) → wire
+    // each by data-slug, like the warm toggles. The inline confirm's "Confirm"
+    // button carries the same .ob-emb-reembed class, so it re-enters
+    // startReembed (which posts once reembedConfirm === slug).
+    grid.querySelectorAll(".ob-emb-reembed").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation(); // card click would re-select
+            startReembed(btn.dataset.slug, btn);
+        });
+    });
+    grid.querySelectorAll(".ob-emb-reembed-cancel").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            reembedConfirm = null; // dismiss the inline cost confirm
+            renderGrid();
+        });
+    });
     // keep_alive toggles can appear on multiple cards → wire each by data-slug.
     grid.querySelectorAll(".ob-emb-warm-toggle").forEach((btn) => {
         btn.addEventListener("click", (e) => {
@@ -964,6 +1078,82 @@ async function startMigrate(target, btn) {
     routeRender(); // job is running → progress panel + polling
 }
 
+// ── Re-embed (in-place upgrade under the current chunk strategy) ──
+// Deliberately mirrors startMigrate's launch/attach idiom (200 → seed
+// status.job then routeRender; 409 → refreshStatus + routeRender to ATTACH to
+// the already-running panel, never an error), changing only the endpoint and,
+// for a CLOUD model, gating the POST behind the inline cost confirm (Task 2.3).
+async function startReembed(slug, btn) {
+    if (migrating || !slug) return;
+    const m = (status.models || []).find((x) => x.slug === slug);
+    // Cloud: first click stages the inline cost confirm and re-renders; the
+    // POST only happens on the second entry (the "Confirm" button). Local: no
+    // confirm — surface the advisory CPU-slowness note (if any) and proceed.
+    if (m && m.privacy !== "local") {
+        if (reembedConfirm !== slug) {
+            reembedConfirm = slug;
+            renderGrid();
+            return;
+        }
+    } else if (m && m.cpu_warning) {
+        showHint(m.cpu_warning, false);
+    }
+    reembedConfirm = null;
+    migrating = true;
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetch("/embeddings/reembed", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: slug }),
+        });
+        if (r.status === 409) {
+            // A job is already running — show its panel instead of an error.
+            migrating = false;
+            await refreshStatus();
+            routeRender();
+            return;
+        }
+        if (!r.ok) {
+            const detail = await safeDetail(r);
+            migrating = false;
+            showHint(`Couldn't start the re-embed: ${detail}`, true);
+            if (btn) btn.disabled = false;
+            return;
+        }
+        // The 200 body IS the freshly-claimed job dict — seed it so the
+        // progress panel renders even if the follow-up refresh hiccups.
+        try {
+            const seeded = await r.json();
+            if (seeded && seeded.state && status) status.job = seeded;
+        } catch (_) {
+            // body optional — the refresh below covers it
+        }
+    } catch (e) {
+        migrating = false;
+        showHint(`Network error starting the re-embed: ${e.message}`, true);
+        if (btn) btn.disabled = false;
+        return;
+    }
+    migrating = false;
+    cancelClicked = false;
+    etaSamples = [];
+    etaJobKey = null;
+    await refreshStatus();
+    // A no-op re-embed (nothing to rebuild) can finish before this first
+    // refresh — show its terminal panel directly.
+    const job = status && status.job;
+    if (job && job.state === "done") {
+        renderJobDone(job);
+        return;
+    }
+    if (job && job.state === "stalled") {
+        renderJobStalled(job);
+        return;
+    }
+    routeRender(); // job is running → progress panel + polling
+}
+
 // ── Running-job panel ────────────────────────────────────────────
 
 function renderJobPanel() {
@@ -987,9 +1177,14 @@ function renderJobPanel() {
     }
 
     const label = modelLabel(job.target);
+    // A re-embed rebuilds the SAME model's store in place (no "to"); a model
+    // switch migrates TO a different model.
+    const title = job.kind === "reembed"
+        ? `Re-embedding <em>${escapeHtml(label)}</em>`
+        : `Re-embedding to <em>${escapeHtml(label)}</em>`;
     contentEl().innerHTML = `
         <div class="ob-emb-jobpanel" id="ob-emb-jobpanel">
-            <h2 class="ob-emb-jobtitle">Re-embedding to <em>${escapeHtml(label)}</em></h2>
+            <h2 class="ob-emb-jobtitle">${title}</h2>
             <div class="ob-emb-progress-track">
                 <div class="ob-emb-progress-fill" id="ob-emb-job-fill" style="width: 0%"></div>
             </div>
@@ -997,6 +1192,7 @@ function renderJobPanel() {
                 <span id="ob-emb-job-count"></span>
                 <span id="ob-emb-job-pct"></span>
                 <span id="ob-emb-job-eta"></span>
+                <span id="ob-emb-job-phase" class="ob-emb-fresh" hidden></span>
                 <span id="ob-emb-job-skipped" hidden></span>
             </div>
             <p class="ob-cli-agent-auth-blurb">
@@ -1019,9 +1215,21 @@ function updateJobPanel(job) {
     const count = c.querySelector("#ob-emb-job-count");
     const pctEl = c.querySelector("#ob-emb-job-pct");
     const eta = c.querySelector("#ob-emb-job-eta");
+    const phaseEl = c.querySelector("#ob-emb-job-phase");
     const skipped = c.querySelector("#ob-emb-job-skipped");
     const cancelBtn = c.querySelector("#ob-emb-cancel");
     if (!fill || !count) return;
+
+    // Re-embed activation (atomic store dir-swap) is past the point of no
+    // return — show an "activating…" sub-label and hide Cancel. Gate on
+    // state==='running' too: a DONE re-embed also carries phase:'done'/etc.,
+    // and must not resurrect a hidden Cancel via this branch.
+    const activating =
+        job.state === "running" && job.phase === "activating";
+    if (phaseEl) {
+        phaseEl.hidden = !activating;
+        phaseEl.textContent = activating ? "activating…" : "";
+    }
 
     // total can GROW mid-job (live mints land in the snapshot index while the
     // backfill walks it) — recompute from scratch every poll, clamp ≤100%.
@@ -1038,10 +1246,14 @@ function updateJobPanel(job) {
         skipped.textContent = n ? `${fmtInt(n)} skipped` : "";
     }
     if (cancelBtn) {
-        if (job.cancel_requested || cancelClicked) {
+        if (activating) {
+            cancelBtn.hidden = true;
+        } else if (job.cancel_requested || cancelClicked) {
+            cancelBtn.hidden = false;
             cancelBtn.disabled = true;
             cancelBtn.textContent = "Cancelling — finishing current batch…";
         } else {
+            cancelBtn.hidden = false;
             cancelBtn.disabled = false;
             cancelBtn.textContent = "Cancel";
         }
@@ -1086,13 +1298,24 @@ function renderJobDone(job) {
         ? `<p class="ob-emb-fresh ob-emb-fresh-subdued">${fmtInt(skippedN)} snapshot${skippedN === 1 ? "" : "s"}
            could not be embedded and ${skippedN === 1 ? "was" : "were"} quarantined (re-run later to retry).</p>`
         : "";
+    // Re-embed rebuilds a store in place (no model switch). "now live" when it
+    // WAS the active model, "ready to switch to" otherwise. A model MIGRATE
+    // keeps its original "Switched to …" copy.
+    let titleHtml, blurbHtml;
+    if (job.kind === "reembed") {
+        const n = job.snapshots != null ? job.snapshots : (job.done || 0);
+        const tail = job.target === status.active ? "now live" : "ready to switch to";
+        titleHtml = `&check; <em>${escapeHtml(label)}</em> re-embedded`;
+        blurbHtml = `${fmtInt(n)} snapshot${n === 1 ? "" : "s"} re-embedded (chunked) &mdash; ${escapeHtml(tail)}.`;
+    } else {
+        titleHtml = `&check; Switched to <em>${escapeHtml(label)}</em>`;
+        blurbHtml = `${fmtInt(job.done || 0)} snapshots embedded. All searches now use `
+            + `<strong>${escapeHtml(status.active || job.target)}</strong>.`;
+    }
     contentEl().innerHTML = `
         <div class="ob-emb-jobpanel">
-            <h2 class="ob-emb-jobtitle">&check; Switched to <em>${escapeHtml(label)}</em></h2>
-            <p class="ob-cli-agent-ready-blurb">
-                ${fmtInt(job.done || 0)} snapshots embedded. All searches now use
-                <strong>${escapeHtml(status.active || job.target)}</strong>.
-            </p>
+            <h2 class="ob-emb-jobtitle">${titleHtml}</h2>
+            <p class="ob-cli-agent-ready-blurb">${blurbHtml}</p>
             ${racedNote}
             ${skippedNote}
             <div class="ob-emb-done-actions">
@@ -1116,14 +1339,19 @@ function renderJobDone(job) {
 
 function renderJobStalled(job) {
     const label = modelLabel(job.target);
+    const isReembed = job.kind === "reembed";
+    const headline = isReembed
+        ? `Re-embed of ${escapeHtml(label)} stalled:`
+        : `Migration to ${escapeHtml(label)} stalled:`;
+    const retryLabel = isReembed ? "Re-run re-embed" : "Re-run migration";
     contentEl().innerHTML = `
         <div class="ob-cli-agent-error">
-            <p><strong>Migration to ${escapeHtml(label)} stalled:</strong>
+            <p><strong>${headline}</strong>
             ${escapeHtml(job.error || "unknown error")}</p>
             <p>Re-run to resume &mdash; progress is kept (already-embedded
             snapshots are not re-embedded).</p>
             <p>
-                <button type="button" class="ob-cta" id="ob-emb-stalled-retry">Re-run migration</button>
+                <button type="button" class="ob-cta" id="ob-emb-stalled-retry">${retryLabel}</button>
                 <button type="button" class="ob-skip" id="ob-emb-stalled-back">
                     Back to model picker <span aria-hidden="true">&rarr;</span>
                 </button>
@@ -1132,7 +1360,8 @@ function renderJobStalled(job) {
         <div id="ob-emb-hint-slot"></div>
     `;
     const retry = contentEl().querySelector("#ob-emb-stalled-retry");
-    retry.addEventListener("click", () => startMigrate(job.target, retry));
+    retry.addEventListener("click", () =>
+        isReembed ? startReembed(job.target, retry) : startMigrate(job.target, retry));
     contentEl().querySelector("#ob-emb-stalled-back").addEventListener("click", async () => {
         await refreshStatus();
         renderPicker();
