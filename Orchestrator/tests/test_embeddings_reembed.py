@@ -1,4 +1,6 @@
 """Re-embed engine + activation seam tests (per-card Re-embed feature)."""
+import json
+
 import numpy as np
 import pytest
 
@@ -243,3 +245,75 @@ async def test_run_reembed_unknown_slug_raises(env):
     with pytest.raises(ValueError, match="no-such-model"):
         await migrate.run_reembed("no-such-model")
     assert migrate.get_job_status() is None
+
+
+# ── boot resume of a re-embed: build-THEN-activate (Task 0.7) ─────────────────
+
+@pytest.mark.asyncio
+async def test_boot_resume_of_reembed_activates(env, fake_provider):
+    """A restart mid-re-embed resumes into the build engine with activate=True:
+    it TOPS UP the in-progress candidate and swaps it live (schema 2), never a
+    silent v1 cutover-downgrade and never stuck build-only."""
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    set_active_slug(TARGET, base_dir=stores_dir)
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / migrate.STATE_FILE).write_text(json.dumps({
+        "target": TARGET, "state": "running", "kind": "reembed", "activate": True,
+        "phase": "building", "done": 0, "total": 3,
+        "started_at": "2026-07-01T00:00:00+00:00", "finished_at": None,
+        "error": None, "skipped": [], "raced": [],
+    }), encoding="utf-8")
+    task = migrate.resume_if_interrupted()
+    assert task is migrate._JOB_TASK
+    await task
+    status = migrate.get_job_status()
+    assert status["state"] == "done" and status["kind"] == "reembed"
+    assert get_store(TARGET, base_dir=stores_dir).schema == 2      # activated, not cutover-downgraded
+    assert get_store(TARGET, base_dir=stores_dir).missing(sorted(bodies)) == []
+
+
+# ── cancel during build is NON-destructive (Task 0.8) ────────────────────────
+
+@pytest.mark.asyncio
+async def test_reembed_cancel_during_build_leaves_active_store_untouched(
+    env, fake_provider, cutover_spies
+):
+    """A cancel mid-build returns BEFORE the activate block: the live store is
+    never swapped and no rollback backup is created (candidate-only work)."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=4)
+    seed = get_store(TARGET, base_dir=stores_dir)
+    seed.append("SNAP-0", np.zeros(TARGET_DIMS))       # a real v1 active store
+    set_active_slug(TARGET, base_dir=stores_dir)
+    fake_provider.hook = lambda _texts: migrate.request_cancel()
+
+    result = await migrate.run_reembed(TARGET)
+
+    assert result["state"] == "cancelled"
+    assert cutover_spies["swap_active"] == []           # never activated
+    assert get_store(TARGET, base_dir=stores_dir).schema == 1   # live store untouched
+    assert not list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
+
+
+# ── activation failure → clean terminal state, resumable (Minor fix) ─────────
+
+@pytest.mark.asyncio
+async def test_reembed_activation_failure_stalls_not_activating(
+    env, fake_provider, monkeypatch
+):
+    """A raising _activate_candidate must park the job stalled/phase='failed',
+    NOT leave the stale phase='activating' the generic except would keep."""
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=3)
+    set_active_slug(TARGET, base_dir=stores_dir)
+
+    async def _boom(slug):
+        raise RuntimeError("swap exploded")
+    monkeypatch.setattr(migrate, "_activate_candidate", _boom)
+
+    result = await migrate.run_reembed(TARGET)
+
+    assert result["state"] == "stalled"
+    assert result["phase"] == "failed"                  # NOT "activating"
+    assert "activation failed" in result["error"]

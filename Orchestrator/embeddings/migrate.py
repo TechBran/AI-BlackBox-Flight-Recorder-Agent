@@ -317,7 +317,9 @@ async def start_reembed(target_slug: str, content_mode: str = "full") -> dict:
         raise ValueError(f"unknown embedding model slug {target_slug!r}; "
                          f"known: {sorted(EMBEDDING_MODELS)}")
     _begin_job(target_slug, kind="reembed", content_mode=content_mode)  # claim FIRST (→409)
-    _clear_build_candidate(target_slug)                 # now safe: we own the singleton
+    # Off-thread: a large stale _build/{slug} dir must not block the event loop
+    # (voice/WS) on rmtree. Claim-before-clear ordering preserved (we own it).
+    await asyncio.to_thread(_clear_build_candidate, target_slug)
     _launch(target_slug, rebuild=True, content_mode=content_mode, activate=True)
     return get_job_status()
 
@@ -331,7 +333,8 @@ async def run_reembed(target_slug: str, content_mode: str = "full") -> dict:
         raise ValueError(f"unknown embedding model slug {target_slug!r}; "
                          f"known: {sorted(EMBEDDING_MODELS)}")
     _begin_job(target_slug, kind="reembed", content_mode=content_mode)  # claim FIRST
-    _clear_build_candidate(target_slug)
+    # Off-thread rmtree so a large stale candidate can't stall the event loop.
+    await asyncio.to_thread(_clear_build_candidate, target_slug)
     return await _run_rebuild_engine(target_slug, content_mode, activate=True)
 
 
@@ -367,6 +370,17 @@ def resume_if_interrupted() -> "asyncio.Task | None":
     # build-only engine — a restart must never turn a candidate build into a
     # cutover. Kind-less state (every pre-6d file + all model-switch jobs)
     # resumes the migration engine exactly as before.
+    if persisted.get("kind") == "reembed":
+        # A re-embed is build-THEN-activate: resume TOPS UP the in-progress
+        # candidate (no _clear_build_candidate — see its docstring) and re-arms
+        # activate=True so the resumed build finishes into the candidate-swap.
+        # _activate_candidate's .incoming roll-forward handles a swap that was
+        # interrupted mid-flight.
+        content_mode = persisted.get("content_mode", "full")
+        print(f"[MIGRATE] resuming interrupted re-embed of {target} "
+              f"(build-then-activate, content_mode={content_mode})")
+        _begin_job(target, kind="reembed", content_mode=content_mode)
+        return _launch(target, rebuild=True, content_mode=content_mode, activate=True)
     if persisted.get("kind") == "rebuild":
         # Resume the SAME (full | body) candidate build (M14.3d): the persisted
         # content_mode decides, absent -> "full" (every pre-14.3 rebuild).
@@ -1014,7 +1028,16 @@ async def _run_rebuild_engine(target_slug: str, content_mode: str = "full",
         cand_rows, cand_snaps = target.rows, target.snapshots
         if activate:
             _update_job(persist=True, phase="activating")   # UI: "activating…" + hide cancel
-            await _activate_candidate(target_slug)
+            try:
+                await _activate_candidate(target_slug)
+            except Exception as e:  # noqa: BLE001 — activation failure is resumable
+                # A failing swap must NOT leave the job parked at phase=
+                # "activating" (the generic except below would keep the stale
+                # phase). Terminal, resumable: the candidate survives at _build
+                # or .incoming, so a re-POST / boot resume re-activates.
+                print(f"[MIGRATE] re-embed activation failed: {type(e).__name__}: {e}")
+                _finish_job("stalled", phase="failed", error=f"activation failed: {e}")
+                return get_job_status()
             _finish_job("done", phase="done", rows=cand_rows, snapshots=cand_snaps)
         else:
             _finish_job("done", rows=cand_rows, snapshots=cand_snaps)
