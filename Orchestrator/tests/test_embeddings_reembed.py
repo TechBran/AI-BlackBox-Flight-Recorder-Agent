@@ -23,3 +23,13 @@ async def test_clear_build_candidate_removes_dir_and_cache(env, fake_provider):
     assert not bdir.exists()
     fresh = get_store(TARGET, base_dir=stores_dir / migrate.BUILD_DIR_NAME, schema=2)
     assert fresh.missing(["SNAP-0", "SNAP-1"]) == ["SNAP-0", "SNAP-1"]
+
+
+def test_prune_old_rollbacks_keeps_newest(env):
+    _, stores_dir, _ = env
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    for ts in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        (stores_dir / f"{TARGET}.pre-rebuild.{ts}").mkdir()
+    migrate._prune_old_rollbacks(TARGET, keep=1)
+    remaining = sorted(p.name for p in stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
+    assert remaining == [f"{TARGET}.pre-rebuild.20260103T000000Z"]

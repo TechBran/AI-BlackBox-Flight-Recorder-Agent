@@ -721,6 +721,15 @@ def _clear_build_candidate(target_slug: str) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _prune_old_rollbacks(target_slug: str, keep: int = 1) -> None:
+    """Retain the newest `keep` {slug}.pre-rebuild.<ts> dirs; delete older ones.
+    Lexical sort works because the suffix is a UTC compact-ISO timestamp."""
+    base = Path(config.EMBEDDINGS_STORES_DIR)
+    backups = sorted(base.glob(f"{target_slug}.pre-rebuild.*"))
+    for old in backups[:-keep] if keep else backups:
+        shutil.rmtree(old, ignore_errors=True)
+
+
 async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:
     """Diff-and-fill a schema-2 chunk store under _build. No cutover, ever.
 
