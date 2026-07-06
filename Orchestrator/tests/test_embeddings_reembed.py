@@ -187,3 +187,59 @@ async def test_activate_candidate_rolls_forward_orphaned_incoming(env, fake_prov
     live = get_store(TARGET, base_dir=stores_dir)
     assert live.schema == 2 and live.missing(sorted(bodies)) == []
     assert not incoming.exists()
+
+
+# ── run_reembed / start_reembed: rebuild THEN activate (the wired seam) ───────
+
+@pytest.mark.asyncio
+async def test_run_reembed_active_model_full_flow(env, fake_provider):
+    import Orchestrator.embeddings.search as search
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=4)
+    seed = get_store(TARGET, base_dir=stores_dir)          # v1 active store (the upgrade case)
+    seed.append_many([(sid, np.zeros(TARGET_DIMS)) for sid in bodies])
+    set_active_slug(TARGET, base_dir=stores_dir)
+    search._active_store = get_store(TARGET, base_dir=stores_dir)
+    assert search._active_store.schema == 1               # starts stale/whole-doc
+
+    result = await migrate.run_reembed(TARGET)
+
+    assert result["state"] == "done"
+    assert result["kind"] == "reembed" and result["activate"] is True
+    assert result.get("phase") == "done"                  # terminal phase cleared
+    live = get_store(TARGET, base_dir=stores_dir)
+    assert live.schema == 2                                # upgraded in place
+    assert live.rows > live.snapshots                      # chunk groups
+    assert live.missing(sorted(bodies)) == []
+    assert search._active_store.schema == 2                # live search on new store
+    assert list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
+
+
+@pytest.mark.asyncio
+async def test_run_reembed_non_active_upgrades_without_switch(env, fake_provider, cutover_spies):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    set_active_slug(OLD_SLUG, base_dir=stores_dir)         # a DIFFERENT active model
+    result = await migrate.run_reembed(TARGET)
+    assert result["state"] == "done"
+    assert cutover_spies["swap_active"] == []              # active model unchanged
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG
+    live = get_store(TARGET, base_dir=stores_dir)
+    assert live.schema == 2 and live.missing(sorted(bodies)) == []
+
+
+@pytest.mark.asyncio
+async def test_run_reembed_empty_corpus_is_done_noop(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=0)            # 0 snapshots
+    set_active_slug(TARGET, base_dir=stores_dir)
+    result = await migrate.run_reembed(TARGET)
+    assert result["state"] == "done"                      # NOT stalled
+    assert not list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
+
+
+@pytest.mark.asyncio
+async def test_run_reembed_unknown_slug_raises(env):
+    with pytest.raises(ValueError, match="no-such-model"):
+        await migrate.run_reembed("no-such-model")
+    assert migrate.get_job_status() is None

@@ -187,9 +187,11 @@ def _begin_job(target_slug: str, kind: "str | None" = None,
             "skipped": [],
             "raced": [],
         }
-        if kind == "rebuild":
-            _JOB["kind"] = "rebuild"
-            _JOB["activate"] = False
+        if kind in ("rebuild", "reembed"):
+            _JOB["kind"] = kind
+            _JOB["activate"] = (kind == "reembed")
+            if kind == "reembed":
+                _JOB["phase"] = "building"
             if content_mode != "full":
                 _JOB["content_mode"] = content_mode
         _persist_locked()
@@ -210,7 +212,7 @@ def _log_engine_task_outcome(task: "asyncio.Task") -> None:
 
 
 def _launch(target_slug: str, rebuild: bool = False,
-            content_mode: str = "full") -> "asyncio.Task":
+            content_mode: str = "full", activate: bool = False) -> "asyncio.Task":
     """Schedule the engine on the running loop and RETAIN the Task.
 
     The event loop holds only WEAK references to tasks: an engine task nobody
@@ -224,7 +226,7 @@ def _launch(target_slug: str, rebuild: bool = False,
     """
     global _JOB_TASK
     if rebuild:
-        coro = _run_rebuild_engine(target_slug, content_mode)
+        coro = _run_rebuild_engine(target_slug, content_mode, activate=activate)
     else:
         coro = _run_engine(target_slug)
     task = asyncio.get_running_loop().create_task(coro)
@@ -305,6 +307,32 @@ async def run_rebuild(target_slug: str, content_mode: str = "full") -> dict:
         )
     _begin_job(target_slug, kind="rebuild", content_mode=content_mode)
     return await _run_rebuild_engine(target_slug, content_mode)
+
+
+async def start_reembed(target_slug: str, content_mode: str = "full") -> dict:
+    """Route entry: full re-embed of target_slug's store under the current chunk
+    strategy, THEN activate it in-service (candidate-swap). Same singleton/404/409
+    semantics as start_rebuild; the claim is synchronous before create_task."""
+    if target_slug not in EMBEDDING_MODELS:
+        raise ValueError(f"unknown embedding model slug {target_slug!r}; "
+                         f"known: {sorted(EMBEDDING_MODELS)}")
+    _begin_job(target_slug, kind="reembed", content_mode=content_mode)  # claim FIRST (→409)
+    _clear_build_candidate(target_slug)                 # now safe: we own the singleton
+    _launch(target_slug, rebuild=True, content_mode=content_mode, activate=True)
+    return get_job_status()
+
+
+async def run_reembed(target_slug: str, content_mode: str = "full") -> dict:
+    """Run a re-embed to completion in this coroutine (resume + tests).
+
+    NOTE: not wired to backfill_embeddings.py — there is no --reembed CLI flag
+    (out of scope). Do not advertise CLI use."""
+    if target_slug not in EMBEDDING_MODELS:
+        raise ValueError(f"unknown embedding model slug {target_slug!r}; "
+                         f"known: {sorted(EMBEDDING_MODELS)}")
+    _begin_job(target_slug, kind="reembed", content_mode=content_mode)  # claim FIRST
+    _clear_build_candidate(target_slug)
+    return await _run_rebuild_engine(target_slug, content_mode, activate=True)
 
 
 def request_cancel() -> bool:
@@ -833,7 +861,8 @@ async def _activate_candidate(target_slug: str) -> None:
           f"(active={is_active})")
 
 
-async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:
+async def _run_rebuild_engine(target_slug: str, content_mode: str = "full",
+                              activate: bool = False) -> dict:
     """Diff-and-fill a schema-2 chunk store under _build. No cutover, ever.
 
     Same convergence shape as _run_engine — re-diff missing() in SNAPSHOT
@@ -982,12 +1011,18 @@ async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> d
 
         # Build-only by design: NO cutover on this path, ever — activation is
         # the explicit M6f dir-swap. Completion records the candidate's counts.
-        _finish_job("done", rows=target.rows, snapshots=target.snapshots)
-        print(
-            f"[MIGRATE] rebuild complete: {target_slug} candidate at "
-            f"{target.dir} ({target.snapshots} snapshots, {target.rows} rows); "
-            f"activation is a separate explicit step"
-        )
+        cand_rows, cand_snaps = target.rows, target.snapshots
+        if activate:
+            _update_job(persist=True, phase="activating")   # UI: "activating…" + hide cancel
+            await _activate_candidate(target_slug)
+            _finish_job("done", phase="done", rows=cand_rows, snapshots=cand_snaps)
+        else:
+            _finish_job("done", rows=cand_rows, snapshots=cand_snaps)
+            print(
+                f"[MIGRATE] rebuild complete: {target_slug} candidate at "
+                f"{target.dir} ({target.snapshots} snapshots, {target.rows} rows); "
+                f"activation is a separate explicit step"
+            )
         return get_job_status()
 
     except asyncio.CancelledError:
