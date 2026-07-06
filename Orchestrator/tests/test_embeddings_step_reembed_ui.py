@@ -129,6 +129,43 @@ def test_startreembed_cloud_confirms_local_does_not():
     assert "cpu_warning" in body
 
 
+def test_stalled_retry_is_preconfirmed():
+    """Important review fix: a stalled-retry re-triggers an ALREADY-confirmed
+    re-embed, and the stalled panel has NO #ob-emb-grid to stage a fresh confirm
+    into (renderGrid would no-op → a second click would POST without ever showing
+    the cost). So the retry must bypass the cloud confirm gate (preConfirmed)."""
+    sig = re.search(r"async function startReembed\s*\(([^)]*)\)", _src())
+    assert sig and "preConfirmed" in sig.group(1), \
+        "startReembed must accept a preConfirmed param"
+    body = _fn("startReembed")
+    assert "!preConfirmed" in body, "the cloud confirm gate must honour preConfirmed"
+    stalled = _fn("renderJobStalled")
+    assert re.search(
+        r"startReembed\(\s*job\.target\s*,\s*retry\s*,\s*true\s*\)", stalled
+    ), "stalled reembed retry must call startReembed(..., true) (pre-confirmed)"
+
+
+def test_reembed_not_offered_on_not_ready_card():
+    """Review fix: a not-ready store would just stall the POST — gate the button
+    on m.ready (the active model stays re-embeddable through a transient dip)."""
+    body = _fn("reembedHtml")
+    assert "m.ready" in body, "reembedHtml must gate the button on readiness"
+
+
+def test_running_panel_clears_staged_confirm():
+    """Review fix: a staged cloud confirm must not survive an unrelated job and
+    reappear on return to the picker — the running panel drops it."""
+    assert "reembedConfirm = null" in _fn("renderJobPanel")
+
+
+def test_cancel_copy_is_kind_aware():
+    """Review fix: the post-cancel hint reads 'Re-embed cancelled …' for a
+    re-embed, 'Migration cancelled …' for a model switch."""
+    src = _src()
+    assert "Re-embed cancelled — progress so far is kept." in src
+    assert "Migration cancelled — progress so far is kept." in src
+
+
 # ── Task 2.4 — progress-panel phase + cancel-hide + kind ─────────────
 
 def test_job_panel_reads_reembed_kind():

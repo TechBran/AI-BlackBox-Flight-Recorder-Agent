@@ -195,7 +195,12 @@ async function tick() {
             renderJobStalled(job);
         } else {
             renderPicker();
-            showHint("Migration cancelled — progress so far is kept.", false);
+            showHint(
+                job.kind === "reembed"
+                    ? "Re-embed cancelled — progress so far is kept."
+                    : "Migration cancelled — progress so far is kept.",
+                false,
+            );
         }
         return;
     }
@@ -774,6 +779,10 @@ function cardActionsHtml(m, isActive, isSelected) {
 function reembedHtml(m) {
     const built = m.store_exists || m.slug === status.active;
     if (!built) return "";
+    // A not-ready model (missing key / daemon down / RAM short) would just
+    // stall the re-embed POST — don't offer it. The already-active model stays
+    // re-embeddable even if a transient readiness probe dips.
+    if (!(m.ready || m.slug === status.active)) return "";
 
     if (reembedConfirm === m.slug) {
         const n = snapshotCountFor(m.slug);
@@ -1083,13 +1092,17 @@ async function startMigrate(target, btn) {
 // status.job then routeRender; 409 → refreshStatus + routeRender to ATTACH to
 // the already-running panel, never an error), changing only the endpoint and,
 // for a CLOUD model, gating the POST behind the inline cost confirm (Task 2.3).
-async function startReembed(slug, btn) {
+async function startReembed(slug, btn, preConfirmed = false) {
     if (migrating || !slug) return;
     const m = (status.models || []).find((x) => x.slug === slug);
     // Cloud: first click stages the inline cost confirm and re-renders; the
     // POST only happens on the second entry (the "Confirm" button). Local: no
     // confirm — surface the advisory CPU-slowness note (if any) and proceed.
-    if (m && m.privacy !== "local") {
+    // preConfirmed (stalled-retry) skips the gate entirely: it re-triggers an
+    // operation the user ALREADY confirmed, and the stalled panel has no grid
+    // to stage a fresh confirm into (renderGrid would no-op → a second click
+    // would POST without ever showing the cost).
+    if (!preConfirmed && m && m.privacy !== "local") {
         if (reembedConfirm !== slug) {
             reembedConfirm = slug;
             renderGrid();
@@ -1159,6 +1172,9 @@ async function startReembed(slug, btn) {
 function renderJobPanel() {
     const job = status.job;
     if (!job) return;
+    // A running job means no per-card cost confirm is valid anymore — drop any
+    // staged one so it can't re-appear when we later return to the picker.
+    reembedConfirm = null;
 
     if (etaJobKey !== job.started_at) {
         etaJobKey = job.started_at;
@@ -1361,7 +1377,9 @@ function renderJobStalled(job) {
     `;
     const retry = contentEl().querySelector("#ob-emb-stalled-retry");
     retry.addEventListener("click", () =>
-        isReembed ? startReembed(job.target, retry) : startMigrate(job.target, retry));
+        isReembed
+            ? startReembed(job.target, retry, true) // pre-confirmed re-trigger
+            : startMigrate(job.target, retry));
     contentEl().querySelector("#ob-emb-stalled-back").addEventListener("click", async () => {
         await refreshStatus();
         renderPicker();
