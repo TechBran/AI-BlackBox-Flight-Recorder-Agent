@@ -1033,8 +1033,9 @@ async def _run_rebuild_engine(target_slug: str, content_mode: str = "full",
             except Exception as e:  # noqa: BLE001 — activation failure is resumable
                 # A failing swap must NOT leave the job parked at phase=
                 # "activating" (the generic except below would keep the stale
-                # phase). Terminal, resumable: the candidate survives at _build
-                # or .incoming, so a re-POST / boot resume re-activates.
+                # phase). Terminal + re-triggerable: re-running a re-embed
+                # rebuilds a fresh candidate and activates; the stalled job is
+                # not auto-resumed on boot.
                 print(f"[MIGRATE] re-embed activation failed: {type(e).__name__}: {e}")
                 _finish_job("stalled", phase="failed", error=f"activation failed: {e}")
                 return get_job_status()

@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 import pytest
+from fastapi.testclient import TestClient
 
 from Orchestrator.embeddings import migrate
 from Orchestrator.embeddings.store import get_store, set_active_slug, get_active_slug
@@ -317,3 +318,35 @@ async def test_reembed_activation_failure_stalls_not_activating(
     assert result["state"] == "stalled"
     assert result["phase"] == "failed"                  # NOT "activating"
     assert "activation failed" in result["error"]
+
+
+# ── POST /embeddings/reembed route (Task 0.9) ────────────────────────────────
+
+def test_route_reembed_starts_and_activates(env, fake_provider, app):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    set_active_slug(TARGET, base_dir=stores_dir)
+    with TestClient(app) as client:
+        resp = client.post("/embeddings/reembed", json={"target": TARGET})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["state"] == "running"
+        assert body["kind"] == "reembed" and body["activate"] is True
+        _wait_for_state("done")
+    assert get_store(TARGET, base_dir=stores_dir).schema == 2
+
+def test_route_reembed_unknown_slug_404(env, app):
+    with TestClient(app) as client:
+        assert client.post("/embeddings/reembed", json={"target": "no-such"}).status_code == 404
+
+def test_route_reembed_409_is_side_effect_free(env, fake_provider, app):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=1)
+    cand = stores_dir / migrate.BUILD_DIR_NAME / TARGET
+    cand.mkdir(parents=True, exist_ok=True)
+    (cand / "in_progress.sentinel").write_text("x")      # stand-in for another job's in-flight _build
+    migrate._begin_job(TARGET, kind="rebuild")           # occupy the singleton
+    with TestClient(app) as client:
+        assert client.post("/embeddings/reembed", json={"target": TARGET}).status_code == 409
+    assert (cand / "in_progress.sentinel").exists()      # NOT wiped by the 409
+    migrate._finish_job("cancelled")

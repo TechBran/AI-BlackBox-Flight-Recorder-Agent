@@ -40,6 +40,7 @@ from Orchestrator.embeddings.migrate import (
     request_cancel,
     start_migration,
     start_rebuild,
+    start_reembed,
 )
 from Orchestrator.embeddings.providers import get_provider
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
@@ -389,6 +390,24 @@ async def embeddings_migrate(req: MigrateRequest):
         if req.rebuild:
             return await start_rebuild(req.target)
         return await start_migration(req.target)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+class ReembedRequest(BaseModel):
+    target: str
+
+
+@router.post("/reembed")
+async def embeddings_reembed(req: ReembedRequest):
+    """Full re-embed of target's store under the current chunk strategy, then
+    activate it in-service (candidate build -> atomic dir-swap -> live). 404
+    unknown slug, 409 when a job is already running; else the running job dict."""
+    if req.target not in EMBEDDING_MODELS:
+        raise HTTPException(status_code=404,
+                            detail=f"Unknown embedding model slug: {req.target!r}")
+    try:
+        return await start_reembed(req.target)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
