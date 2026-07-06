@@ -730,6 +730,31 @@ def _prune_old_rollbacks(target_slug: str, keep: int = 1) -> None:
         shutil.rmtree(old, ignore_errors=True)
 
 
+async def _catch_up_fill(target_slug: str) -> int:
+    """Diff-and-fill any snap_ids missing from the now-active schema-2 store
+    (mints that landed during the rebuild). Returns snapshots filled. Best-
+    effort: provider failure logs + returns partial; the watcher heals the rest."""
+    from Orchestrator.fossils import load_snapshot_index
+    from Orchestrator.embeddings.store import get_store
+    store = get_store(target_slug)                     # live (post-evict) instance
+    index = await asyncio.to_thread(load_snapshot_index)
+    missing = store.missing(sorted(index.keys()))
+    if not missing:
+        return 0
+    vol_bytes = await asyncio.to_thread(read_volume_bytes, Path(config.VOL_PATH))
+    ids_texts = []
+    for sid in missing:
+        text = slice_snapshot_text(sid, index, vol_bytes)
+        if text is not None:
+            ids_texts.append((sid, text))
+    if not ids_texts:
+        return 0
+    provider = get_provider(target_slug)
+    appended, _quarantined = await _fill_v2_batch(store, provider, ids_texts, target_slug)
+    print(f"[MIGRATE] re-embed catch-up filled {len(appended)} gate-window mint(s)")
+    return len(appended)
+
+
 async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:
     """Diff-and-fill a schema-2 chunk store under _build. No cutover, ever.
 

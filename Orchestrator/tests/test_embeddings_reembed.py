@@ -33,3 +33,22 @@ def test_prune_old_rollbacks_keeps_newest(env):
     migrate._prune_old_rollbacks(TARGET, keep=1)
     remaining = sorted(p.name for p in stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
     assert remaining == [f"{TARGET}.pre-rebuild.20260103T000000Z"]
+
+
+@pytest.mark.asyncio
+async def test_catch_up_fill_embeds_only_the_gate_window_mint(env, fake_provider):
+    import Orchestrator.embeddings.search as search
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    store = get_store(TARGET, base_dir=stores_dir, schema=2)   # active v2 store
+    store.append_group("SNAP-0", [np.zeros(TARGET_DIMS)])
+    store.append_group("SNAP-1", [np.zeros(TARGET_DIMS)])
+    assert store.missing(sorted(bodies)) == ["SNAP-2"]
+    set_active_slug(TARGET, base_dir=stores_dir)
+    search._active_store = store
+
+    filled = await migrate._catch_up_fill(TARGET)
+
+    assert filled == 1                        # ONLY the gate-window mint
+    assert store.missing(sorted(bodies)) == []
+    assert "SNAP-2" in store.ids()
