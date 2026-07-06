@@ -30,12 +30,14 @@ STATUS_KEYS = {"active", "health", "job", "stores", "models", "ollama", "hardwar
 # schema + rows are the M6e ADDITIVE contract extension (chunked-store ops
 # currency); placement + recommended_placement are WI-9/M10 (device placement);
 # cpu_warning is the reranker-tiering M9 ADDITIVE advisory (re-embed slowness /
-# LOW-tier cloud steering); every pre-existing key below is unchanged.
+# LOW-tier cloud steering); strategy is the re-embed-UI ADDITIVE label derived
+# from the store schema (chunked / whole_document / none); every pre-existing
+# key below is unchanged.
 MODEL_KEYS = {
     "slug", "label", "dims", "ram_gb", "cost_per_1m_tokens", "privacy",
     "quality_note", "store_exists", "schema", "rows", "missing", "ready",
     "blockers", "keep_alive", "warm", "placement", "recommended_placement",
-    "cpu_warning",
+    "cpu_warning", "strategy",
 }
 STORE_KEYS = {"slug", "dims", "count", "schema", "rows", "missing", "last_updated"}
 
@@ -235,6 +237,45 @@ def test_model_without_store_has_null_schema_and_rows(env, client):
         assert model["store_exists"] is False
         assert model["schema"] is None
         assert model["rows"] is None
+
+
+# ── models[].strategy label (derived from store schema, for the re-embed UI) ──
+
+def test_strategy_whole_document_for_schema1_store(env, client):
+    """A schema-1 (whole-document) store → strategy 'whole_document'; every
+    model without a readable store → strategy 'none' (mirrors the schema-null
+    convention)."""
+    index_path, stores_dir = env
+    _write_index(index_path, ["SNAP-1", "SNAP-2", "SNAP-3"])
+    _populate_store(stores_dir, SLUG, ["SNAP-1", "SNAP-2", "SNAP-3"])
+
+    models = {m["slug"]: m for m in client.get("/embeddings/status").json()["models"]}
+
+    assert models[SLUG]["schema"] == 1
+    assert models[SLUG]["strategy"] == "whole_document"
+    for slug, model in models.items():
+        if slug == SLUG:
+            continue
+        assert model["schema"] is None
+        assert model["strategy"] == "none"
+
+
+def test_strategy_chunked_for_schema2_store(env, client):
+    """A chunked (schema-2) store → strategy 'chunked', derived from the same
+    schema the payload reports."""
+    index_path, stores_dir = env
+    _write_index(index_path, ["SNAP-1", "SNAP-2", "SNAP-3"])
+    store = get_store(SLUG, base_dir=stores_dir, schema=2)
+    rng = np.random.default_rng(7)
+    store.append_group("SNAP-1", [rng.standard_normal(DIMS) for _ in range(3)])
+    store.append_group("SNAP-2", [rng.standard_normal(DIMS) for _ in range(2)])
+
+    model = next(
+        m for m in client.get("/embeddings/status").json()["models"]
+        if m["slug"] == SLUG
+    )
+    assert model["schema"] == 2
+    assert model["strategy"] == "chunked"
 
 
 # ── health.json ──────────────────────────────────────────────────────────────

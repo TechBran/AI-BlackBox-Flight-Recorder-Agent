@@ -284,6 +284,7 @@ def embeddings_status(response: Response):
         # (same currency as the stores[] entries); null when no readable
         # store exists — matching the `missing` null convention.
         smeta = stores_by_slug.get(slug)
+        schema = smeta["schema"] if smeta else None
         models.append({
             "slug": slug,
             "label": entry["label"],
@@ -293,7 +294,14 @@ def embeddings_status(response: Response):
             "privacy": entry["privacy"],
             "quality_note": entry["quality_note"],
             "store_exists": store_exists,
-            "schema": smeta["schema"] if smeta else None,
+            "schema": schema,
+            # ADDITIVE (re-embed UI): human label for the store's embedding
+            # strategy, derived from the SAME schema reported above. schema 2 =
+            # chunked, schema 1 = whole_document, no readable store = none.
+            "strategy": (
+                "chunked" if schema == 2
+                else ("whole_document" if schema == 1 else "none")
+            ),
             "rows": smeta["rows"] if smeta else None,
             "missing": (
                 _safe_missing(slug, entry["dims"], base, index_ids)
