@@ -360,3 +360,21 @@ def test_list_stores_reads_metas_and_skips_malformed(tmp_path):
 
 def test_list_stores_empty_base_dir(tmp_path):
     assert list_stores(tmp_path / "nonexistent") == []
+
+
+# ── evict_store + store_dir (re-embed activation seam, Task 0.1) ──────────────
+
+def test_evict_store_drops_cached_instance(tmp_path, monkeypatch):
+    from Orchestrator.embeddings import store as st
+    monkeypatch.setattr(st.config, "EMBEDDINGS_STORES_DIR", str(tmp_path))
+    a = st.get_store("qwen3-embedding-0.6b")
+    assert st.get_store("qwen3-embedding-0.6b") is a          # cached
+    assert st.evict_store("qwen3-embedding-0.6b") is True
+    assert st.get_store("qwen3-embedding-0.6b") is not a      # fresh instance
+    assert st.evict_store("qwen3-embedding-0.6b") is True     # re-cached by prev line
+    assert st.evict_store("nonexistent-never-cached") is False
+
+
+def test_store_dir_resolves_under_base(tmp_path):
+    from Orchestrator.embeddings import store as st
+    assert st.store_dir("s", base_dir=tmp_path) == tmp_path / "s"

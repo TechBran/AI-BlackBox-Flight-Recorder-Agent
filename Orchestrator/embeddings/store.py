@@ -754,6 +754,25 @@ def get_store(slug: str, dims: int = None, base_dir=None,
         return store
 
 
+def store_dir(slug: str, base_dir=None) -> Path:
+    """Filesystem dir for a model's store: {base_dir or EMBEDDINGS_STORES_DIR}/{slug}."""
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    return base / slug
+
+
+def evict_store(slug: str, base_dir=None) -> bool:
+    """Drop the cached VectorStore for (base_dir, slug); True if one was cached.
+
+    The re-embed activation seam renames a store dir out from under its cached
+    instance; the next get_store must re-open the NEW dir, so the stale
+    (realpath(base), slug) entry has to go. Same realpath keying as get_store.
+    """
+    base = Path(base_dir if base_dir is not None else config.EMBEDDINGS_STORES_DIR)
+    key = (os.path.realpath(base), slug)
+    with _STORES_LOCK:
+        return _STORES.pop(key, None) is not None
+
+
 def store_exists(slug: str, base_dir=None) -> bool:
     """True when slug has ANY store artifact on disk under base_dir.
 
