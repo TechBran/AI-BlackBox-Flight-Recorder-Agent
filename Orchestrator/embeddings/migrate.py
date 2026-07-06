@@ -62,6 +62,7 @@ below handles both shapes.
 """
 import asyncio
 import json
+import os
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -753,6 +754,64 @@ async def _catch_up_fill(target_slug: str) -> int:
     appended, _quarantined = await _fill_v2_batch(store, provider, ids_texts, target_slug)
     print(f"[MIGRATE] re-embed catch-up filled {len(appended)} gate-window mint(s)")
     return len(appended)
+
+
+async def _activate_candidate(target_slug: str) -> None:
+    """Promote {stores}/_build/{slug} into the live store dir, in-service.
+
+    Renames are same-filesystem (both under EMBEDDINGS_STORES_DIR). Reads are
+    protected by the store's matrix-guard (degrades to []), and a same-slug
+    write race is protected by retiring the old instance below so a mint
+    holding it fails safe (fossils drops it → catch-up re-embeds).
+    """
+    from Orchestrator.embeddings.store import (
+        evict_store, get_active_slug, store_dir,
+    )
+    is_active = get_active_slug() == target_slug
+    live = store_dir(target_slug)
+    cand = store_dir(target_slug, base_dir=_build_base_dir())
+    # M4: an empty corpus builds nothing, so the candidate dir never
+    # materialized. That is a successful NO-OP, not a failure — a dead provider
+    # already stalled at the zero-progress guard before reaching here, so a
+    # missing candidate can only mean "nothing to embed". Do NOT raise.
+    if not cand.exists():
+        print(f"[MIGRATE] re-embed {target_slug}: empty corpus — nothing to activate")
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = live.parent / f"{target_slug}.pre-rebuild.{ts}"
+    incoming = live.parent / f"{target_slug}.incoming"
+
+    # M2: capture the pre-swap active instance so we can retire it AFTER the
+    # repoint — a mint that still holds it will then fail its append safely.
+    old_active = search.get_active_store() if is_active else None
+
+    def _swap() -> None:
+        live.parent.mkdir(parents=True, exist_ok=True)
+        # M5: a prior activation may have crashed mid-swap leaving a stale
+        # non-empty {slug}.incoming; os.replace onto a non-empty dir raises
+        # ENOTEMPTY, so clear it first.
+        shutil.rmtree(incoming, ignore_errors=True)
+        os.replace(cand, incoming)          # _build/{slug} -> stores/{slug}.incoming
+        if live.exists():
+            os.replace(live, backup)        # stores/{slug} -> stores/{slug}.pre-rebuild.<ts>
+        os.replace(incoming, live)          # stores/{slug}.incoming -> stores/{slug}
+    await asyncio.to_thread(_swap)
+
+    # Evict BOTH cached instances so the next open reads the promoted dir.
+    evict_store(target_slug)                             # live base
+    evict_store(target_slug, base_dir=_build_base_dir()) # _build base
+
+    if is_active:
+        search.swap_active(target_slug)                 # reopen fresh live handle
+        if old_active is not None:
+            old_active.close()                          # M2: retire -> racing appends fail safe
+        try:
+            await _catch_up_fill(target_slug)
+        except Exception as e:  # noqa: BLE001 — activation must not fail on catch-up
+            print(f"[MIGRATE] re-embed catch-up failed (non-fatal, watcher heals): {e}")
+    _prune_old_rollbacks(target_slug, keep=1)
+    print(f"[MIGRATE] re-embed activated: {target_slug} store is now chunked/live "
+          f"(active={is_active})")
 
 
 async def _run_rebuild_engine(target_slug: str, content_mode: str = "full") -> dict:

@@ -1,6 +1,4 @@
 """Re-embed engine + activation seam tests (per-card Re-embed feature)."""
-import asyncio
-import json
 import numpy as np
 import pytest
 
@@ -52,3 +50,93 @@ async def test_catch_up_fill_embeds_only_the_gate_window_mint(env, fake_provider
     assert filled == 1                        # ONLY the gate-window mint
     assert store.missing(sorted(bodies)) == []
     assert "SNAP-2" in store.ids()
+
+
+# ── _activate_candidate: in-service candidate promotion ──────────────────────
+
+@pytest.mark.asyncio
+async def test_activate_candidate_non_active_swaps_dir_no_search_repoint(
+    env, fake_provider, cutover_spies
+):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    set_active_slug(OLD_SLUG, base_dir=stores_dir)        # a DIFFERENT active model
+    await migrate.run_rebuild(TARGET)                     # candidate under _build
+    assert (stores_dir / migrate.BUILD_DIR_NAME / TARGET).exists()
+
+    await migrate._activate_candidate(TARGET)
+
+    live = stores_dir / TARGET
+    assert (live / "meta.json").exists()
+    assert not (stores_dir / migrate.BUILD_DIR_NAME / TARGET).exists()
+    promoted = get_store(TARGET, base_dir=stores_dir)
+    assert promoted.schema == 2 and promoted.missing(sorted(bodies)) == []
+    assert cutover_spies["swap_active"] == []             # NON-active: no repoint
+    assert get_active_slug(base_dir=stores_dir) == OLD_SLUG
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_active_repoints_search_and_catches_up(
+    env, fake_provider, monkeypatch
+):
+    import Orchestrator.embeddings.search as search
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=3)
+    seed = get_store(TARGET, base_dir=stores_dir)         # live v1 store → a rollback is created
+    seed.append_many([(sid, np.zeros(TARGET_DIMS)) for sid in bodies])
+    set_active_slug(TARGET, base_dir=stores_dir)          # TARGET IS active
+    await migrate.run_rebuild(TARGET)
+    caught = {"n": 0}
+    async def _spy_catch(slug):
+        caught["n"] += 1; return 0
+    monkeypatch.setattr(migrate, "_catch_up_fill", _spy_catch)
+
+    await migrate._activate_candidate(TARGET)
+
+    assert search._active_store is not None
+    assert search._active_store.slug == TARGET
+    assert search._active_store.schema == 2              # live handle is the new store
+    assert caught["n"] == 1                              # catch-up ran for active model
+    assert list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))   # rollback retained
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_empty_corpus_is_noop(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    _build_volume(index_path, volume_path, n=0)           # 0 snapshots
+    set_active_slug(TARGET, base_dir=stores_dir)
+    await migrate.run_rebuild(TARGET)                     # builds nothing → no _build/{slug}
+    await migrate._activate_candidate(TARGET)             # must NOT raise
+    assert not list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_survives_stale_incoming(env, fake_provider):
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    seed = get_store(TARGET, base_dir=stores_dir)
+    seed.append_many([(sid, np.zeros(TARGET_DIMS)) for sid in bodies])
+    set_active_slug(TARGET, base_dir=stores_dir)
+    await migrate.run_rebuild(TARGET)
+    stale = stores_dir / f"{TARGET}.incoming"; stale.mkdir(parents=True, exist_ok=True)
+    (stale / "junk").write_text("x")                      # non-empty stale staging
+    await migrate._activate_candidate(TARGET)             # must clear .incoming, not ENOTEMPTY
+    assert get_store(TARGET, base_dir=stores_dir).schema == 2
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_retires_racing_mint_handle(env, fake_provider):
+    import Orchestrator.embeddings.search as search
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    seed = get_store(TARGET, base_dir=stores_dir)
+    seed.append_many([(sid, np.zeros(TARGET_DIMS)) for sid in bodies])
+    set_active_slug(TARGET, base_dir=stores_dir)
+    search._active_store = seed
+    captured = search.get_active_store()                  # what a mid-flight mint holds
+    await migrate.run_rebuild(TARGET)
+    await migrate._activate_candidate(TARGET)             # promotes + retires `seed`
+    with pytest.raises(RuntimeError, match="retired"):
+        captured.append("SNAP-LATE", np.zeros(TARGET_DIMS))
+    live = get_store(TARGET, base_dir=stores_dir)
+    assert live.schema == 2 and live.missing(sorted(bodies)) == []
