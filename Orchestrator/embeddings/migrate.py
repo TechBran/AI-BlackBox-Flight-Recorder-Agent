@@ -770,6 +770,22 @@ async def _activate_candidate(target_slug: str) -> None:
     is_active = get_active_slug() == target_slug
     live = store_dir(target_slug)
     cand = store_dir(target_slug, base_dir=_build_base_dir())
+    incoming = live.parent / f"{target_slug}.incoming"
+
+    # Roll-forward: a prior activation that died AFTER live->backup but BEFORE
+    # incoming->live left the fully-built store stranded at .incoming with live
+    # absent. Finish that swap before the cand-based empty-corpus guard below
+    # misreads the consumed candidate as a no-op. Only when there is NO fresh
+    # candidate (a resume that re-ran the build takes the normal _swap path).
+    if not cand.exists() and incoming.exists() and not live.exists():
+        await asyncio.to_thread(os.replace, incoming, live)
+        evict_store(target_slug)
+        evict_store(target_slug, base_dir=_build_base_dir())
+        if is_active:
+            search.swap_active(target_slug)
+        print(f"[MIGRATE] re-embed {target_slug}: recovered interrupted swap (.incoming -> live)")
+        return
+
     # M4: an empty corpus builds nothing, so the candidate dir never
     # materialized. That is a successful NO-OP, not a failure — a dead provider
     # already stalled at the zero-progress guard before reaching here, so a
@@ -777,16 +793,16 @@ async def _activate_candidate(target_slug: str) -> None:
     if not cand.exists():
         print(f"[MIGRATE] re-embed {target_slug}: empty corpus — nothing to activate")
         return
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     backup = live.parent / f"{target_slug}.pre-rebuild.{ts}"
-    incoming = live.parent / f"{target_slug}.incoming"
 
-    # M2: capture the pre-swap active instance so we can retire it AFTER the
-    # repoint — a mint that still holds it will then fail its append safely.
+    # M2: capture the pre-swap active instance so we can retire it right after
+    # the swap, BEFORE repointing — a mint that still holds it will then fail
+    # its append safely.
     old_active = search.get_active_store() if is_active else None
 
     def _swap() -> None:
-        live.parent.mkdir(parents=True, exist_ok=True)
+        live.parent.mkdir(parents=True, exist_ok=True)  # defensive; parent (stores dir) always exists via _build
         # M5: a prior activation may have crashed mid-swap leaving a stale
         # non-empty {slug}.incoming; os.replace onto a non-empty dir raises
         # ENOTEMPTY, so clear it first.
@@ -797,14 +813,17 @@ async def _activate_candidate(target_slug: str) -> None:
         os.replace(incoming, live)          # stores/{slug}.incoming -> stores/{slug}
     await asyncio.to_thread(_swap)
 
+    # M2: retire the old instance BEFORE repointing so an in-flight mint holding
+    # it raises on append (caught in update_snapshot_index -> minted vector-less
+    # -> catch-up re-embeds) rather than writing stale state into the promoted dir.
+    if old_active is not None:
+        old_active.close()
     # Evict BOTH cached instances so the next open reads the promoted dir.
     evict_store(target_slug)                             # live base
     evict_store(target_slug, base_dir=_build_base_dir()) # _build base
 
     if is_active:
         search.swap_active(target_slug)                 # reopen fresh live handle
-        if old_active is not None:
-            old_active.close()                          # M2: retire -> racing appends fail safe
         try:
             await _catch_up_fill(target_slug)
         except Exception as e:  # noqa: BLE001 — activation must not fail on catch-up

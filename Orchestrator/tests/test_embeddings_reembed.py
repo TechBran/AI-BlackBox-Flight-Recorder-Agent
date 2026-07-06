@@ -101,12 +101,15 @@ async def test_activate_candidate_active_repoints_search_and_catches_up(
 
 
 @pytest.mark.asyncio
-async def test_activate_candidate_empty_corpus_is_noop(env, fake_provider):
+async def test_activate_candidate_empty_corpus_is_noop(env, fake_provider, cutover_spies):
     index_path, stores_dir, volume_path = env
     _build_volume(index_path, volume_path, n=0)           # 0 snapshots
     set_active_slug(TARGET, base_dir=stores_dir)
     await migrate.run_rebuild(TARGET)                     # builds nothing → no _build/{slug}
     await migrate._activate_candidate(TARGET)             # must NOT raise
+    assert cutover_spies["swap_active"] == []             # took the early no-op path
+    assert not (stores_dir / TARGET).exists()
+    assert not (stores_dir / f"{TARGET}.incoming").exists()
     assert not list(stores_dir.glob(f"{TARGET}.pre-rebuild.*"))
 
 
@@ -140,3 +143,47 @@ async def test_activate_candidate_retires_racing_mint_handle(env, fake_provider)
         captured.append("SNAP-LATE", np.zeros(TARGET_DIMS))
     live = get_store(TARGET, base_dir=stores_dir)
     assert live.schema == 2 and live.missing(sorted(bodies)) == []
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_retires_before_repoint(env, fake_provider, monkeypatch):
+    import Orchestrator.embeddings.search as search
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    seed = get_store(TARGET, base_dir=stores_dir)
+    seed.append_many([(sid, np.zeros(TARGET_DIMS)) for sid in bodies])
+    set_active_slug(TARGET, base_dir=stores_dir)
+    search._active_store = seed
+    captured = search.get_active_store()
+    raised = {"v": None}
+    real_swap = search.swap_active
+    def spy_swap(slug):
+        # by the time repoint runs, the old handle must already be retired
+        try:
+            captured.append("SNAP-LATE", np.zeros(TARGET_DIMS)); raised["v"] = False
+        except RuntimeError:
+            raised["v"] = True
+        return real_swap(slug)
+    monkeypatch.setattr(search, "swap_active", spy_swap)
+    await migrate.run_rebuild(TARGET)
+    await migrate._activate_candidate(TARGET)
+    assert raised["v"] is True                                  # closed BEFORE swap_active
+    live = get_store(TARGET, base_dir=stores_dir)
+    assert live.schema == 2 and live.missing(sorted(bodies)) == []
+
+
+@pytest.mark.asyncio
+async def test_activate_candidate_rolls_forward_orphaned_incoming(env, fake_provider):
+    import os as _os
+    index_path, stores_dir, volume_path = env
+    bodies = _build_volume(index_path, volume_path, n=2)
+    set_active_slug(TARGET, base_dir=stores_dir)
+    await migrate.run_rebuild(TARGET)
+    cand = stores_dir / migrate.BUILD_DIR_NAME / TARGET
+    incoming = stores_dir / f"{TARGET}.incoming"
+    _os.replace(cand, incoming)                                 # crash state: store at .incoming, live absent
+    assert not (stores_dir / TARGET).exists()
+    await migrate._activate_candidate(TARGET)                   # must roll forward, not misread as empty
+    live = get_store(TARGET, base_dir=stores_dir)
+    assert live.schema == 2 and live.missing(sorted(bodies)) == []
+    assert not incoming.exists()
