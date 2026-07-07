@@ -42,6 +42,13 @@ class MeshDeviceViewModel(application: Application) : AndroidViewModel(applicati
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** Persistent error channel for owner mutations (re-home / unassign). SEPARATE from
+     *  [_error] because a re-home whose assign leg fails still triggers a *successful*
+     *  refetch, and `refresh()` clears [_error] on a successful load — which would wipe
+     *  the "Reassign failed" banner in the same frame. `refresh()` NEVER touches this. */
+    private val _actionError = MutableStateFlow<String?>(null)
+    val actionError: StateFlow<String?> = _actionError.asStateFlow()
+
     /** Non-fatal hint surfaced when the operator roster fails to load (so the empty
      *  owner dropdown isn't silently unexplained). Separate from [_error] (device load)
      *  so a roster hiccup never blanks the device list. */
@@ -146,19 +153,23 @@ class MeshDeviceViewModel(application: Application) : AndroidViewModel(applicati
      * A single coroutine (not two independent fire-and-forget calls) so the two POSTs
      * cannot interleave with another action. The unassign requester is the TARGET
      * [newOperator] (guaranteed a live-roster entry, so the backend's live-operator check
-     * passes even when [currentOwner] is a phantom off-roster owner) — mirrors the Portal
-     * re-home. [currentOwner] is passed for the caller's confirmation copy. Failures
-     * surface as a PERSISTENT inline [_error], not just a toast.
+     * passes even when the current owner is a phantom off-roster owner) — mirrors the
+     * Portal re-home. Failures surface as a PERSISTENT [_actionError] (which `refresh()`
+     * never clears), not just a toast.
      */
-    fun rehome(deviceId: String, newOperator: String, currentOwner: String) = viewModelScope.launch {
+    fun rehome(deviceId: String, newOperator: String) = viewModelScope.launch {
         val api = api ?: return@launch
+        _actionError.value = null // clear any stale error on retry
         try {
             api.post("/devices/$deviceId/unassign", buildJsonObject { put("operator", newOperator) }.toString())
             api.post("/devices/$deviceId/operator", buildJsonObject { put("operator", newOperator) }.toString())
             _actionMessage.value = "Reassigned to $newOperator"
             refresh()
         } catch (e: Exception) {
-            _error.value = "Reassign failed: ${e.message}"
+            // Dedicated channel: the refetch below succeeds when only the assign leg
+            // failed, and refresh() clears _error on a successful load — so setting
+            // _error here would be wiped in-frame. _actionError is never cleared by refresh().
+            _actionError.value = "Reassign failed: ${e.message}"
             refresh() // re-render true backend state so a partial re-home isn't left asserting a stale owner
         }
     }
@@ -167,16 +178,17 @@ class MeshDeviceViewModel(application: Application) : AndroidViewModel(applicati
      * Clear a device's owner (and primary flag) so it becomes claimable again. [requester]
      * is a live operator for provenance/logging (the caller supplies the current owner if
      * it's on the live roster, else any live operator as a phantom-owner fallback). Failures
-     * surface as a PERSISTENT inline [_error].
+     * surface as a PERSISTENT [_actionError].
      */
     fun unassign(deviceId: String, requester: String) = viewModelScope.launch {
         val api = api ?: return@launch
+        _actionError.value = null // clear any stale error on retry
         try {
             api.post("/devices/$deviceId/unassign", buildJsonObject { put("operator", requester) }.toString())
             _actionMessage.value = "Unassigned"
             refresh()
         } catch (e: Exception) {
-            _error.value = "Unassign failed: ${e.message}"
+            _actionError.value = "Unassign failed: ${e.message}"
         }
     }
 

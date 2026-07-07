@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -83,6 +84,7 @@ fun MeshDevicesSection(
     val isLoading by viewModel.isLoading.collectAsState()
     val loadedOnce by viewModel.loadedOnce.collectAsState()
     val error by viewModel.error.collectAsState()
+    val actionError by viewModel.actionError.collectAsState()
     val operatorHint by viewModel.operatorHint.collectAsState()
     val filter by viewModel.filter.collectAsState()
     val hideUnassigned by viewModel.hideUnassigned.collectAsState()
@@ -164,9 +166,10 @@ fun MeshDevicesSection(
 
         Spacer(Modifier.height(10.dp))
 
-        // Persistent inline error (load failures AND action failures like a failed
-        // re-home), rendered as a banner ABOVE the list so the list stays visible.
-        error?.let {
+        // Persistent inline error (load failures via [error] AND owner-mutation failures
+        // via [actionError], which refresh() never clears), rendered as a banner ABOVE
+        // the list so the list stays visible on an action failure.
+        (error ?: actionError)?.let {
             MeshInlineNote("⚠️ $it", BbxAccent)
             Spacer(Modifier.height(8.dp))
         }
@@ -176,28 +179,33 @@ fun MeshDevicesSection(
         when {
             !loadedOnce && isLoading -> MeshInlineNote("Loading tailnet…", Neutral500)
             visible.isNotEmpty() -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // key() pins each card's positional remember state (e.g. MeshLabeledPicker's
+                // expanded flag) to the device id, so it can't bleed across cards when list
+                // membership shifts (hide-unassigned toggle / a reordering refresh).
                 visible.forEach { device ->
-                    MeshDeviceCard(
-                        device = device,
-                        operators = operators,
-                        onAssignOperator = { op -> viewModel.assignOperator(device.id, op) },
-                        onRehome = { newOp -> viewModel.rehome(device.id, newOp, device.owner ?: "") },
-                        onUnassign = {
-                            val owner = device.owner ?: ""
-                            // Provenance must be a LIVE operator: use the current owner if
-                            // it's on the roster, else any live operator (phantom-owner
-                            // fallback) so the backend's live-operator check passes.
-                            val requester = if (operators.contains(owner)) owner
-                                else (operators.firstOrNull() ?: owner)
-                            viewModel.unassign(device.id, requester)
-                        },
-                        onSetPrimary = { device.owner?.let { viewModel.setPrimary(device.id, it) } },
-                        onSetProvider = { p -> viewModel.setDefaultProvider(device.id, p, device.owner) },
-                    )
+                    key(device.id) {
+                        MeshDeviceCard(
+                            device = device,
+                            operators = operators,
+                            onAssignOperator = { op -> viewModel.assignOperator(device.id, op) },
+                            onRehome = { newOp -> viewModel.rehome(device.id, newOp) },
+                            onUnassign = {
+                                val owner = device.owner ?: ""
+                                // Provenance must be a LIVE operator: use the current owner
+                                // if it's on the roster, else any live operator (phantom-owner
+                                // fallback) so the backend's live-operator check passes.
+                                val requester = if (operators.contains(owner)) owner
+                                    else (operators.firstOrNull() ?: owner)
+                                viewModel.unassign(device.id, requester)
+                            },
+                            onSetPrimary = { device.owner?.let { viewModel.setPrimary(device.id, it) } },
+                            onSetProvider = { p -> viewModel.setDefaultProvider(device.id, p, device.owner) },
+                        )
+                    }
                 }
             }
             // Empty because a load failed — the error banner above already explains it.
-            error != null -> Unit
+            error != null || actionError != null -> Unit
             hideUnassigned && devices.isNotEmpty() -> MeshInlineNote(
                 "No owned devices. Uncheck “Hide unassigned” to see claimable tailnet nodes.",
                 Neutral500,
