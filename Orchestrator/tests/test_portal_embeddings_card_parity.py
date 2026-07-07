@@ -24,18 +24,15 @@ UPDATES_MANAGER_JS = (
 )
 
 # Every binding the card depends on: endpoints, the wizard deep-link, the
-# health field that gates the [Update] button / carries the migrate target,
-# the WI-9/M10 compute-card bindings (status.hardware block + per-model
-# placement/recommended_placement + the placement toggle endpoint), and the
-# read-only reranker status line (GET /rerank/status → "Reranking:").
+# health field that gates the [Update] button / carries the migrate target, and
+# the read-only reranker status line (GET /rerank/status → "Reranking:"). The
+# compute/placement card and reranker selector were removed (they moved to the
+# onboarding wizard), so their endpoints/fields are NO LONGER required here.
 REQUIRED_LITERALS = [
     "/embeddings/status",
     "/embeddings/migrate",
     "/onboarding/?step=embeddings",
     "successor_slug",
-    "/embeddings/placement",
-    "recommended_placement",
-    "hardware",
     "Reranking:",
     "/rerank/status",
 ]
@@ -44,7 +41,9 @@ REQUIRED_LITERALS = [
 # tokens only — never assert on the bare word "hardware" (it survives in
 # prose/comments, so it would false-fail).
 REMOVED_TOKENS = [
+    "_computeCardHtml",        # the compute/placement card renderer
     "embeddings-rerank-btn",   # the reranker selector's "Use this reranker" button
+    "/embeddings/placement",   # the placement toggle write endpoint
     "/rerank/select",          # the reranker selector's write endpoint
 ]
 
