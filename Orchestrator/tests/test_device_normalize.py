@@ -21,13 +21,17 @@ import Orchestrator.device_registry.registry as reg_mod
 from Orchestrator.device_registry.models import Device, DeviceType, DeviceProtocol
 
 
-def _mk(id, ip, owner="", is_primary=False, dns=None, default_provider=None):
+def _mk(id, ip, owner="", is_primary=False, dns=None, default_provider=None,
+        adb_port=5555, meta=None):
     """A Device whose metadata tailscale_dns defaults to a slug CONSISTENT with its id."""
     dns = f"{id}.tailnet-abc.ts.net." if dns is None else dns
+    metadata = {"tailscale_dns": dns}
+    if meta:
+        metadata.update(meta)
     return Device(id=id, name=id.title(), tailscale_ip=ip,
                   device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
                   owner=owner, is_primary=is_primary, default_provider=default_provider,
-                  metadata={"tailscale_dns": dns})
+                  adb_port=adb_port, metadata=metadata)
 
 
 @pytest.fixture
@@ -74,11 +78,14 @@ def test_normalize_clears_phantom_owner_and_collapses_dup(registry, tmp_path):
 
 
 def test_normalize_carries_forward_ownership_to_keeper(registry):
-    # Keeper is UNCLAIMED but DNS-consistent; the dropped dup carries a real owner +
-    # primary + default_provider → all must survive on the keeper (never silently lost).
+    # Keeper is UNCLAIMED but DNS-consistent; the dropped dup (the SAME physical device)
+    # carries a real owner + primary + default_provider AND real connection state (a
+    # non-default adb_port + a unique pairing metadata key) → ALL must survive on the
+    # keeper. This is exactly the live-Fold case (samsung-sm-f956u-1's adb_port 40321).
     registry.add_device(_mk("keep-me", "100.3.3.3", owner=""))          # consistent, blank
     registry.add_device(_mk("drop-me", "100.3.3.3", owner="Brandon", is_primary=True,
-                            default_provider="gemma",
+                            default_provider="gemma", adb_port=40321,
+                            meta={"adb_pairing_status": "paired"},
                             dns="stale-name.tailnet-abc.ts.net."))       # inconsistent
     summary = registry.normalize({"Brandon"})
 
@@ -87,17 +94,28 @@ def test_normalize_carries_forward_ownership_to_keeper(registry):
     assert keeper.owner == "Brandon"          # carried forward
     assert keeper.is_primary is True          # carried forward
     assert keeper.default_provider == "gemma" # carried forward
+    # I1: connection state from the dropped dup survives on the keeper.
+    assert keeper.adb_port == 40321
+    assert keeper.metadata["adb_pairing_status"] == "paired"
+    # ...but the keeper's OWN metadata keys win (its dns is NOT overwritten by the stale one).
+    assert keeper.metadata["tailscale_dns"] == "keep-me.tailnet-abc.ts.net."
     assert registry.get_device("drop-me") is None
     # An owned/primary dropped row is surfaced, not silently dropped.
     entry = next(e for e in summary["deduped"] if e["kept"] == "keep-me")
     assert entry["dropped_owned_or_primary"] == ["drop-me"]
 
 
-def test_normalize_noop_when_clean(registry):
+def test_normalize_noop_when_clean(registry, monkeypatch):
     registry.add_device(_mk("a", "100.1.1.1", owner="Brandon"))
     registry.add_device(_mk("b", "100.2.2.2", owner="Brandon"))
+    # N2: a clean normalize must perform NO write (guard the no-op write).
+    calls = {"n": 0}
+    orig_save = registry._save_to_file
+    monkeypatch.setattr(registry, "_save_to_file",
+                        lambda: (calls.__setitem__("n", calls["n"] + 1), orig_save())[1])
     summary = registry.normalize({"Brandon"})
     assert summary == {"cleared_owner": [], "deduped": []}
+    assert calls["n"] == 0
     assert len(registry.get_all_devices()) == 2
 
 

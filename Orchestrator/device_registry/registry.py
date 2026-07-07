@@ -81,6 +81,9 @@ class DeviceRegistry:
             if migrating:
                 # Persist the migrated rows to the NEW (configured) path; keeps the
                 # existing malformed-row skip behavior (only parsed rows are re-saved).
+                # FOOTGUN: the legacy file is left in place (not deleted), so later
+                # UNSETTING BLACKBOX_DEVICE_REGISTRY_PATH reverts to the now-stale legacy
+                # store rather than the migrated one.
                 self._save_to_file()
                 print(f"[DEVICE REGISTRY] Migrated {len(self._devices)} devices from "
                       f"legacy {source} -> {DEVICES_FILE}")
@@ -284,6 +287,15 @@ class DeviceRegistry:
                         keeper.is_primary = True
                     if not keeper.default_provider and r.default_provider:
                         keeper.default_provider = r.default_provider
+                    # I1: a dup is the SAME physical device — carry forward real
+                    # connection state (working ports + pairing metadata) the dropped row
+                    # may hold and the keeper lacks. Keeper's own non-default port / its
+                    # existing metadata keys always win; we only FILL what it's missing.
+                    for pf, default in (("adb_port", 5555), ("vnc_port", 5900), ("rdp_port", 3389)):
+                        if getattr(keeper, pf) == default and getattr(r, pf) != default:
+                            setattr(keeper, pf, getattr(r, pf))
+                    for k, v in (r.metadata or {}).items():
+                        keeper.metadata.setdefault(k, v)
                 for r in dropped:
                     del self._devices[r.id]
                 deduped.append({
@@ -296,7 +308,10 @@ class DeviceRegistry:
                 })
                 print(f"[DEVICE REGISTRY] normalize: collapsed {ip} -> kept {keeper.id!r}, "
                       f"dropped {[r.id for r in dropped]}")
-            self._save_to_file()
+            # N2: only persist when something actually changed (mirror _dedupe_primaries'
+            # changed-guard) — a clean registry normalize is a pure no-op read.
+            if cleared or deduped:
+                self._save_to_file()
         if cleared:
             print(f"[DEVICE REGISTRY] normalize: cleared phantom owners on {cleared}")
         return {"cleared_owner": cleared, "deduped": deduped}
@@ -541,6 +556,9 @@ class DeviceRegistry:
                 # liveness — and the collision is surfaced in the results so it is
                 # visible even if the matched row is primary or owned by another operator.
                 # (Collapsing PRE-EXISTING dups is normalize()'s job, not sync's.)
+                # FOOTGUN: if Tailscale RECYCLES an IP to a genuinely-different node, this
+                # merges the new node's liveness onto the stale row; recoverable by
+                # reassigning the device or running normalize() to split/clean it up.
                 ip_match = next(
                     (d for d in self._devices.values() if d.tailscale_ip == ipv4), None)
                 if ip_match is not None:
