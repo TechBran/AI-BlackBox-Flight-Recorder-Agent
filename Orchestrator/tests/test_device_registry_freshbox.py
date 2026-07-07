@@ -154,6 +154,34 @@ COLLISION_STATUS = {
 }
 
 
+# ── M5.1: fresh-box claim (assign owner) persists across a reload ──
+
+def test_freshbox_assign_owner_persists_across_reload(tmp_path, monkeypatch):
+    # Start from an EMPTY (template) registry, discover/add an UNCLAIMED device, then CLAIM
+    # it for an operator via the assign primitive the route uses
+    # (registry.update_device(owner=..., is_primary=False)). Reload a BRAND-NEW
+    # DeviceRegistry from the SAME file → the ownership must survive the "restart".
+    devices_file = tmp_path / "devices.json"
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", devices_file)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
+    monkeypatch.setattr(reg_mod, "_registry", None)
+
+    r = reg_mod.DeviceRegistry()
+    assert r.get_all_devices() == []            # empty template state
+    r.add_device(Device(id="front-desk", name="Front Desk", tailscale_ip="100.71.0.4",
+                        device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
+                        owner=""))              # discovered UNCLAIMED
+    # Claim it — mirrors POST /{id}/operator → registry.update_device(owner=..., is_primary=False).
+    r.update_device("front-desk", owner="Casey", is_primary=False)
+
+    # A fresh registry reading the same file sees the persisted claim (no restart lag).
+    reloaded = reg_mod.DeviceRegistry()
+    got = reloaded.get_device("front-desk")
+    assert got is not None
+    assert got.owner == "Casey"
+    assert got.is_primary is False
+
+
 def test_sync_new_peer_ip_collision_updates_existing_not_minted(fresh_registry, monkeypatch):
     # Existing device A already holds 100.0.0.9, owned + primary.
     fresh_registry.add_device(Device(
