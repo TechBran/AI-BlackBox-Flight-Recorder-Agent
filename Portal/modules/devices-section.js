@@ -119,6 +119,9 @@ function buildCard(d) {
         owned ? '' : '<option value="" selected disabled>— Unassigned —</option>',
         ..._operators.map((op) =>
             `<option value="${escapeHtml(op)}"${owned && op === d.owner ? ' selected' : ''}>${escapeHtml(op)}</option>`),
+        // Sentinel: a distinct non-empty value no operator can equal, so an owned
+        // device can be explicitly unassigned. Only offered for owned devices.
+        owned ? '<option value="__unassign__">— Unassign —</option>' : '',
     ].join('');
 
     const providerOptions = PROVIDERS.map((p) =>
@@ -154,10 +157,58 @@ function buildCard(d) {
             </label>
         </div>`;
 
-    // Owner assignment (claim / reassign). Assigning auto-registers a tailnet node.
+    // Owner assignment (claim / reassign / unassign). Assigning auto-registers a
+    // tailnet node. The sentinel + re-home paths are handled BEFORE the empty-value
+    // guard so an OWNED device can be reassigned or unassigned. Provenance operator
+    // is the TARGET val (re-home, guaranteed a live operator) or the current d.owner
+    // (pure unassign) — NEVER the filter (_filter can be '' = "All operators"). On
+    // ANY failure we refresh() to re-render true backend state, not reset to a stale
+    // owner.
     const ownerSel = card.querySelector('.device-owner-select');
     ownerSel.addEventListener('change', async () => {
         const val = ownerSel.value;
+
+        // Pure unassign (sentinel).
+        if (val === '__unassign__') {
+            if (!confirm(`Unassign ${d.name || d.id} from ${d.owner}?`)) {
+                ownerSel.value = d.owner;
+                return;
+            }
+            ownerSel.disabled = true;
+            try {
+                await postJson(`/devices/${encodeURIComponent(d.id)}/unassign`, { operator: d.owner });
+                toastSuccess(`${d.name || d.id} unassigned`);
+                await refresh();
+            } catch (e) {
+                await refresh();
+                toastError(e.message || 'Failed to unassign device');
+            }
+            return;
+        }
+
+        // Re-home an OWNED device to a DIFFERENT operator: unassign → assign.
+        if (owned && val && val !== d.owner) {
+            if (!confirm(`Re-home ${d.name || d.id} from ${d.owner} to ${val}?`)) {
+                ownerSel.value = d.owner;
+                return;
+            }
+            ownerSel.disabled = true;
+            try {
+                await postJson(`/devices/${encodeURIComponent(d.id)}/unassign`, { operator: val });
+                await assignOperator(d.id, val);
+                toastSuccess(`${d.name || d.id} → ${val}`);
+                await refresh();
+            } catch (e) {
+                await refresh();
+                toastError(e.message || 'Failed to re-home device');
+            }
+            return;
+        }
+
+        // No change (re-picked the current owner).
+        if (owned && val === d.owner) return;
+
+        // UNOWNED device — plain claim/assign (empty-value guard).
         if (!val) return;
         ownerSel.disabled = true;
         try {
