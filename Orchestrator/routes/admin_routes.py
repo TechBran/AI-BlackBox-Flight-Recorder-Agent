@@ -356,7 +356,7 @@ def health():
         "ctx_used": max((s.context_used for s in state_by_op.values()), default=0),
         "ctx_max": CTX_MAX, "latest_manifest": json.loads(MANIFEST.read_text()),
         "audio_engine": AUDIO_ENGINE, "tts_model": TTS_MODEL, "stt_model": STT_MODEL,
-        "users": {"list": USERS_LIST, "default": USERS_DEFAULT}, "pairing": pairing,
+        "users": {"list": USERS_LIST, "default": current_default()}, "pairing": pairing,
         "operator_turns": operator_turns,  # Per-operator turn counts, checkpoint countdown, and cumulative tokens
         "checkpoint_config": {
             "turns_to_compress": CHECKPOINT_TURNS_TO_COMPRESS,
