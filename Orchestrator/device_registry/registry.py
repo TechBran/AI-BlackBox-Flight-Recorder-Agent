@@ -445,6 +445,29 @@ class DeviceRegistry:
                 existing.metadata["tailscale_online"] = online
                 results[device_id] = "updated"
             else:
+                # M2.2: before minting a NEW row, guard against an IP COLLISION — a
+                # DIFFERENT existing device already holding this peer's IPv4 (e.g. the
+                # same physical device renamed in Tailscale). Update that row's liveness
+                # IN PLACE instead of creating a duplicate. Ownership fields
+                # (owner / is_primary / default_provider) are NEVER touched here — only
+                # liveness — and the collision is surfaced in the results so it is
+                # visible even if the matched row is primary or owned by another operator.
+                # (Collapsing PRE-EXISTING dups is normalize()'s job, not sync's.)
+                ip_match = next(
+                    (d for d in self._devices.values() if d.tailscale_ip == ipv4), None)
+                if ip_match is not None:
+                    ip_match.tailscale_ip = ipv4
+                    ip_match.status = DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE
+                    if online:
+                        ip_match.last_seen = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    ip_match.metadata["tailscale_hostname"] = hostname
+                    ip_match.metadata["tailscale_dns"] = dns_name
+                    ip_match.metadata["tailscale_online"] = online
+                    results[ip_match.id] = "ip_collision"
+                    print(f"[DEVICE REGISTRY] IP collision: discovered peer {device_id!r} "
+                          f"shares {ipv4} with existing {ip_match.id!r} — updated in place "
+                          f"(no duplicate row minted)")
+                    continue
                 # Create new device
                 device = Device(
                     id=device_id,

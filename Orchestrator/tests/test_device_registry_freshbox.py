@@ -135,3 +135,41 @@ def test_makedirs_creates_missing_parent_dir_on_save(tmp_path, monkeypatch):
                           device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
                           owner=""))
     assert nested.exists()                     # save succeeded into the created dir
+
+
+# ── M2.2: new-peer IP-collision handling on sync (prevent NEW dups) ──
+
+# A peer at 100.0.0.9 whose DNS first-label → id "renamed-fold" (a DIFFERENT id than the
+# existing device that already holds that IP → the "same physical device renamed" case).
+COLLISION_STATUS = {
+    "Peer": {
+        "nodekey:zzz": {
+            "HostName": "renamed-fold",
+            "DNSName": "renamed-fold.tailnet-abc.ts.net.",
+            "Online": True,
+            "TailscaleIPs": ["100.0.0.9"],
+            "OS": "android",
+        },
+    },
+}
+
+
+def test_sync_new_peer_ip_collision_updates_existing_not_minted(fresh_registry, monkeypatch):
+    # Existing device A already holds 100.0.0.9, owned + primary.
+    fresh_registry.add_device(Device(
+        id="device-a", name="Device A", tailscale_ip="100.0.0.9",
+        device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
+        owner="Brandon", is_primary=True))
+    _mock_tailscale(monkeypatch, COLLISION_STATUS)
+
+    results = asyncio.run(fresh_registry.sync_from_tailscale())
+    # No SECOND row minted for the renamed peer...
+    assert fresh_registry.get_device("renamed-fold") is None
+    assert len(fresh_registry.get_all_devices()) == 1
+    # ...the existing row is updated + the collision surfaced in the results.
+    assert results.get("device-a") == "ip_collision"
+    a = fresh_registry.get_device("device-a")
+    # Ownership PRESERVED (never dropped/overwritten); liveness refreshed in place.
+    assert a.owner == "Brandon"
+    assert a.is_primary is True
+    assert a.metadata["tailscale_dns"] == "renamed-fold.tailnet-abc.ts.net."
