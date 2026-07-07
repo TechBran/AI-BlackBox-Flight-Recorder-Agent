@@ -111,11 +111,15 @@ def test_new_operator_is_live_without_restart(client):
     assert ar.USERS_LIST is cfg.USERS_LIST
 
 
-def test_remove_operator_repoints_dangling_default(client):
-    # roster becomes [Brandon, Anna] with Anna as the box default + current operator.
+def test_remove_operator_repoints_dangling_default(client, monkeypatch):
+    # roster becomes [Brandon, Anna] with Anna as the box default + current operator,
+    # persisted to CFG and captured by admin_routes' by-value USERS_DEFAULT alias (as
+    # at load) — the exact stale-alias condition that produced the phantom default.
     assert client.post("/operator/add", json={"name": "Anna"}).status_code == 200
     cfg.USERS_DEFAULT = "Anna"
     cfg.CURRENT_OPERATOR = "Anna"
+    cfg.CFG.set("users", "default", "Anna")
+    monkeypatch.setattr(ar, "USERS_DEFAULT", "Anna")
 
     r = client.delete("/operator/Anna")
     assert r.status_code == 200, r.text
@@ -128,3 +132,11 @@ def test_remove_operator_repoints_dangling_default(client):
     # the dangling default/current operator is re-pointed to a survivor (no phantom).
     assert cfg.USERS_DEFAULT == "Brandon"
     assert cfg.CURRENT_OPERATOR == "Brandon"
+
+    # GET /operators serves the LIVE default — the phantom "Anna" before this fix.
+    body = client.get("/operators").json()
+    assert body["default"] == "Brandon"
+    assert "Anna" not in body["operators"]
+
+    # persisted for the restart path: CFG's [users] default now names the survivor.
+    assert cfg.CFG.get("users", "default") == "Brandon"

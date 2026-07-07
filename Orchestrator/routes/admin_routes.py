@@ -368,9 +368,13 @@ def health():
 @app.get("/operators")
 def list_operators():
     """List available operators for mobile/overlay dropdown."""
+    import Orchestrator.config as _cfg
+    # Serve the default LIVE: USERS_DEFAULT is a rebindable string, so the top-level
+    # by-value import goes stale after remove_operator re-points the default. USERS_LIST
+    # is fine as-is (same shared list object, mutated in place).
     return {
         "operators": USERS_LIST,
-        "default": USERS_DEFAULT
+        "default": _cfg.USERS_DEFAULT,
     }
 
 @app.get("/tts/status")
@@ -1141,18 +1145,24 @@ def remove_operator(name: str):
 
     current_list.remove(name)
 
+    import Orchestrator.config as _cfg
     config_path = Path("config.ini")
     CFG.set("users", "list", ", ".join(current_list))
+    # If the removed operator was this box's default, re-point it to a surviving
+    # operator and PERSIST that in the SAME write, so a restart reloads the correct
+    # default instead of re-deriving the stale (now-phantom) one.
+    _fallback = current_list[0] if current_list else "Operator"
+    _default_was_removed = _cfg.USERS_DEFAULT == name
+    if _default_was_removed:
+        CFG.set("users", "default", _fallback)
     with open(config_path, "w") as f:
         CFG.write(f)
     CFG.read(config_path)
-    import Orchestrator.config as _cfg
     # In-place mutation of the shared object — seen by every importer with no restart.
     _cfg.USERS_LIST[:] = [u.strip() for u in CFG.get("users", "list", fallback="").split(",") if u.strip()]
-    # Guard a dangling default: if the removed operator was this box's default or the
-    # current operator, re-point at a surviving operator so nothing names a phantom.
-    _fallback = _cfg.USERS_LIST[0] if _cfg.USERS_LIST else "Operator"
-    if _cfg.USERS_DEFAULT == name:
+    # Re-point the LIVE default/current operator too (default persisted above for the
+    # restart path; CURRENT_OPERATOR is runtime-only, updated on each /chat).
+    if _default_was_removed:
         _cfg.USERS_DEFAULT = _fallback
     if _cfg.CURRENT_OPERATOR == name:
         _cfg.CURRENT_OPERATOR = _fallback
