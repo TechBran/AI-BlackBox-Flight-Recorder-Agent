@@ -551,6 +551,16 @@ class NativeMainActivity : ComponentActivity() {
                         onCliAgentTerminalActiveChange = { active ->
                             cliAgentInTerminal = active
                         },
+                        // M2 return-refresh: when the in-app wizard WebView
+                        // (Routes.WIZARD) closes, force-refresh the SHARED
+                        // activity-scoped UpdatesViewModel so a model/reranker
+                        // change made inside the wizard reflects in the top-bar
+                        // badge + Updates screen. This is the same `updatesVm`
+                        // instance the Updates destination uses (a nav-scoped
+                        // WIZARD destination can't reach that VM directly).
+                        onWizardReturn = {
+                            updatesVm.refreshStatus(forceFresh = true)
+                        },
                     )
 
                     // Auto-set provider when on dedicated provider screens

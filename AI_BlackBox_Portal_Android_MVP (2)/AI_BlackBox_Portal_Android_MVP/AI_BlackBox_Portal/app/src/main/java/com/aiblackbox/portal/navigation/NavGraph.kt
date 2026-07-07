@@ -9,9 +9,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import android.net.Uri
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.chat.AgentChatScreen
 import com.aiblackbox.portal.ui.chat.ChatScreen
@@ -37,6 +40,7 @@ import com.aiblackbox.portal.ui.voicelab.VoiceLabScreen
 import com.aiblackbox.portal.ui.updates.UpdatesScreen
 import com.aiblackbox.portal.ui.updates.UpdatesViewModel
 import com.aiblackbox.portal.ui.settings.LocalModelSettingsScreen
+import com.aiblackbox.portal.ui.webview.WizardWebViewScreen
 
 object Routes {
     const val CHAT = "chat"
@@ -64,6 +68,11 @@ object Routes {
     const val CONTACTS = "contacts"
     const val UPDATES = "updates"
     const val LOCAL_MODEL_SETTINGS = "local_model_settings"
+    // In-app onboarding-wizard WebView (M4). Optional `suffix` nav-arg carries
+    // the wizard query string, e.g. "?step=embeddings" or "?mode=manage",
+    // URL-encoded by the caller (Uri.encode). Replaces the external-browser
+    // ACTION_VIEW hand-offs for manage/step deep-links.
+    const val WIZARD = "wizard"
 }
 
 @Composable
@@ -102,6 +111,15 @@ fun BlackBoxNavGraph(
      * close button) so they don't overlap the SessionSwitcherTopBar.
      */
     onCliAgentTerminalActiveChange: (Boolean) -> Unit = {},
+    /**
+     * M4/M2: invoked when the in-app wizard WebView ([Routes.WIZARD]) closes
+     * or is backed out of, so the activity can force-refresh update/embedding
+     * status (a model/reranker change made inside the wizard reflects in the
+     * badge + Updates screen). Wired in [com.aiblackbox.portal.NativeMainActivity]
+     * to the SHARED activity-scoped `updatesVm.refreshStatus(forceFresh = true)`
+     * — a nav-scoped destination can't reach the Updates screen's VM directly.
+     */
+    onWizardReturn: () -> Unit = {},
 ) {
     NavHost(
         navController = navController,
@@ -223,6 +241,27 @@ fun BlackBoxNavGraph(
             // screen share ONE VM (updatesVm is a required param — no fallback,
             // so a second nav-scoped instance can never be minted here).
             UpdatesScreen(viewModel = updatesVm, origin = origin)
+        }
+        composable(
+            route = Routes.WIZARD + "?suffix={suffix}",
+            arguments = listOf(
+                navArgument("suffix") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                }
+            ),
+        ) { backStackEntry ->
+            val suffix = backStackEntry.arguments?.getString("suffix").orEmpty()
+            WizardWebViewScreen(
+                origin = origin,
+                suffix = suffix,
+                // On close/back-out: pop THIS destination, then let the activity
+                // force-refresh the shared UpdatesViewModel (M2 return-refresh).
+                onClose = {
+                    navController.popBackStack()
+                    onWizardReturn()
+                },
+            )
         }
         composable(Routes.LOCAL_MODEL_SETTINGS) {
             // On-device model settings: tune window/sampler, auto-warm, clear,
