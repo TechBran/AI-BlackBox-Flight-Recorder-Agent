@@ -240,7 +240,16 @@ fun BlackBoxNavGraph(
             // B5: use the activity-scoped instance so the top-bar badge and this
             // screen share ONE VM (updatesVm is a required param — no fallback,
             // so a second nav-scoped instance can never be minted here).
-            UpdatesScreen(viewModel = updatesVm, origin = origin)
+            UpdatesScreen(
+                viewModel = updatesVm,
+                origin = origin,
+                // M4: manage/step hand-offs open the in-app wizard WebView
+                // instead of ACTION_VIEW'ing an external browser. The suffix
+                // (e.g. "?step=embeddings") is URL-encoded into the nav-arg.
+                onOpenWizard = { suffix ->
+                    navController.navigate(Routes.WIZARD + "?suffix=" + Uri.encode(suffix))
+                },
+            )
         }
         composable(
             route = Routes.WIZARD + "?suffix={suffix}",

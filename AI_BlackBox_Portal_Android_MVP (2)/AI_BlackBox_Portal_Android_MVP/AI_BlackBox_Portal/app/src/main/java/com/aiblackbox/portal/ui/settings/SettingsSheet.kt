@@ -56,6 +56,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.graphics.Bitmap
 import android.view.HapticFeedbackConstants
 import com.aiblackbox.portal.overlay.isAccessibilityServiceEnabled
@@ -85,6 +86,7 @@ import com.aiblackbox.portal.PairingActivity
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.aiblackbox.portal.data.model.ChatProvider
+import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxDim
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -961,16 +963,13 @@ fun SettingsSheet(
                     )
                 }
 
-                // Manage Setup — opens the onboarding wizard in manage mode for credential edits.
-                // Single source of truth: same UI used at first-run setup, no Android-side reimplementation.
+                // Manage Setup — opens the onboarding wizard (?mode=manage) in the
+                // IN-APP WebView (Routes.WIZARD) instead of an external browser (M4),
+                // so a credential/model/reranker edit stays in-app and refreshes
+                // native state on return. Single source of truth: the same wizard UI
+                // used at first-run setup, no Android-side reimplementation.
                 MenuButton("⚙️ Manage Setup") {
-                    val target = if (origin.isNotBlank()) "$origin/onboarding/?mode=manage"
-                                 else "http://localhost:9091/onboarding/?mode=manage"
-                    try {
-                        val intent = Intent(Intent.ACTION_VIEW, target.toUri())
-                        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        context.startActivity(intent)
-                    } catch (_: Exception) {}
+                    onNavigate(Routes.WIZARD + "?suffix=" + Uri.encode("?mode=manage"))
                     onDismiss()
                 }
             }

@@ -2,8 +2,6 @@
 
 package com.aiblackbox.portal.ui.updates
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -48,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +87,11 @@ fun UpdatesScreen(
     // No `= viewModel()` default: a screen-scoped instance would diverge from
     // the badge's and re-fetch independently.
     viewModel: UpdatesViewModel,
+    // M4: open the onboarding wizard in the IN-APP WebView (Routes.WIZARD)
+    // instead of ACTION_VIEW'ing an external browser. Receives the wizard
+    // query suffix (e.g. "?step=embeddings"); NavGraph URL-encodes it into the
+    // nav-arg and force-refreshes this same VM on return.
+    onOpenWizard: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsState()
@@ -103,7 +105,6 @@ fun UpdatesScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val view = LocalView.current
-    val context = LocalContext.current
 
     // B5: initialize is now driven once at activity scope (NativeMainActivity),
     // so this screen does NOT re-init — the shared VM is already populated.
@@ -218,9 +219,7 @@ fun UpdatesScreen(
                     },
                     onManage = {
                         view.performPressFeedback()
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))
-                        )
+                        onOpenWizard("?step=embeddings")
                     },
                 )
             }
@@ -237,9 +236,7 @@ fun UpdatesScreen(
                     status = rr,
                     onManage = {
                         view.performPressFeedback()
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))
-                        )
+                        onOpenWizard("?step=embeddings")
                     },
                 )
             }
@@ -574,8 +571,8 @@ private fun embeddingsProgressLine(job: EmbeddingsJob): String {
 // preflight-failed reranker reads "not in use" even while `enabled` — the
 // whole reason this renders unconditionally at the top level (a healthy
 // EmbeddingsCard shows no card, so nesting would swallow that signal).
-// [Manage] reuses the same wizard hand-off EmbeddingsManageButton uses; M4
-// converts these onboarding deep-links to an in-app WebView later.
+// [Manage] reuses the same wizard hand-off EmbeddingsManageButton uses; both
+// now open the in-app wizard WebView (Routes.WIZARD) via onOpenWizard (M4).
 
 @Composable
 private fun RerankStatusLine(status: RerankStatus, onManage: () -> Unit) {

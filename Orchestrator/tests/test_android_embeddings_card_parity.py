@@ -35,14 +35,21 @@ KOTLIN_FILES = [
     ANDROID_SRC / "ui" / "updates" / "UpdatesViewModel.kt",
     ANDROID_SRC / "data" / "repository" / "UpdateRepository.kt",
     ANDROID_SRC / "data" / "model" / "EmbeddingsStatus.kt",
+    # M4: the [Manage]/step hand-offs no longer ACTION_VIEW an external browser;
+    # they open the onboarding wizard in this in-app WebView, which builds the
+    # URL as "$origin/onboarding/$suffix" — the greppable "/onboarding/" literal.
+    ANDROID_SRC / "ui" / "webview" / "WizardWebViewScreen.kt",
 ]
 
-# Every binding the card depends on: endpoints, the wizard deep-link, and the
-# snake_case JSON fields the DTO must keep mapping (@SerialName).
+# Every binding the card depends on: endpoints, the in-app wizard hand-off, and
+# the snake_case JSON fields the DTO must keep mapping (@SerialName). The wizard
+# now loads in an in-app WebView (Routes.WIZARD → "$origin/onboarding/$suffix"),
+# so the contract literal is the "/onboarding/" base, not the old contiguous
+# "?step=embeddings" deep-link (that suffix is now a separate nav-arg string).
 REQUIRED_LITERALS = [
     "/embeddings/status",
     "/embeddings/migrate",
-    "/onboarding/?step=embeddings",
+    "/onboarding/",
     '"successor_slug"',
     '"cancel_requested"',
 ]
