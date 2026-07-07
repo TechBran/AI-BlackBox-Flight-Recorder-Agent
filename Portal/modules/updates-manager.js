@@ -368,7 +368,7 @@ function _renderEmbeddingsCard(container, status) {
                 <p class="embeddings-card-copy">${_esc(health.detail || "The active embedding model stopped working. Automatic recovery is migrating your search memory to a working model.")}</p>
                 ${jobRunning ? `<div class="embeddings-card-progress">${_embedProgressLine(job)}</div>` : ""}
                 <div class="embeddings-card-actions">
-                    <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
+                    <button class="btn embeddings-manage-btn">Manage</button>
                 </div>
             </div>`;
     } else if (jobRunning) {
@@ -377,7 +377,7 @@ function _renderEmbeddingsCard(container, status) {
                 <div class="embeddings-card-title">⟳ Search memory update in progress</div>
                 <div class="embeddings-card-progress">${_embedProgressLine(job)}</div>
                 <div class="embeddings-card-actions">
-                    <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
+                    <button class="btn embeddings-manage-btn">Manage</button>
                 </div>
             </div>`;
     } else if (health.state === "superseded") {
@@ -388,7 +388,7 @@ function _renderEmbeddingsCard(container, status) {
                 <p class="embeddings-card-copy">Your system will transfer embeddings to ${_esc(successorLabel)} in the background. Search keeps working the whole time; the switch happens automatically when it finishes and survives restarts.</p>
                 <div class="embeddings-card-actions">
                     ${health.successor_slug ? `<button id="btnEmbeddingsUpdate" class="btn btn-primary">Update</button>` : ""}
-                    <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
+                    <button class="btn embeddings-manage-btn">Manage</button>
                 </div>
             </div>`;
     }
@@ -450,7 +450,7 @@ function _rerankStatusLineHtml(rr) {
         <div class="embeddings-card embeddings-rerank-status">
             <div class="embeddings-card-title">${line}</div>
             <div class="embeddings-card-actions">
-                <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
+                <button class="btn embeddings-manage-btn">Manage</button>
             </div>
         </div>`;
 }
