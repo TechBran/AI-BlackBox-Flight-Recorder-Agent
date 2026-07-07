@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui301"/> <!-- v301: M10 embedding compute card (hardware + placement toggles) -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui302"/> <!-- v302: M3 devices unassign/re-home + hide-unassigned + copy clarify -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui301"></script> <!-- v301: M10 embedding compute card (hardware + placement toggles) -->
+  <script type="module" src="/ui/app-modular.js?v=genui302"></script> <!-- v302: M3 devices unassign/re-home + hide-unassigned + copy clarify -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -467,6 +467,7 @@
               <button id="btnRefreshDevices" class="btn-icon-refresh" title="Refresh device list" type="button" aria-label="Refresh device list">🔄</button>
             </div>
           </div>
+          <p class="devices-helptext">Assign which operator owns each device for AI device-control and chat context. (Text-message routing is configured separately under Telephony.)</p>
           <div id="devicesList" class="devices-list" aria-live="polite">
             <p class="devices-empty">Loading devices…</p>
           </div>

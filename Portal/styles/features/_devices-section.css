@@ -90,6 +90,14 @@
     line-height: 1.4;
 }
 
+/* Helptext clarifying what the owner picker actually governs. */
+.devices-helptext {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+}
+
 /* ── Device card ─────────────────────────────────────────────────────────── */
 .device-card {
     border: 1px solid var(--border);
