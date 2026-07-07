@@ -277,6 +277,21 @@ class NativeMainActivity : ComponentActivity() {
                     }
                 }
 
+                // M3: re-fetch update/embedding status whenever the app returns to the
+                // foreground (e.g. back from the onboarding wizard) so the top-bar
+                // badge stays fresh WITHOUT the user opening Updates. Low-frequency by
+                // design — one fetch per ON_RESUME, no tight loop.
+                val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner, origin) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && origin.isNotBlank()) {
+                            updatesVm.refreshStatus(forceFresh = false)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                }
+
                 // Live STT — collect transcript events and apply the cumulative-delta
                 // applier to the prompt (TextFieldValue). Delta.text is the full
                 // interim so far; replace the interim region. Final.text commits.
@@ -583,6 +598,11 @@ class NativeMainActivity : ComponentActivity() {
                             checkpointTurns = checkpointTurns,
                             isHealthy = isHealthy,
                             onMenuClick = { showSettings = true },
+                            // D1: badged Updates icon — lights when the shared
+                            // UpdatesViewModel says there's something to surface,
+                            // taps straight to the Updates screen.
+                            showUpdatesBadge = updatesVm.attention.collectAsState().value,
+                            onUpdatesClick = { navController.navigate(Routes.UPDATES) },
                             onOperatorChange = { scope.launch { store.setOperator(it) } },
                             onAddOperator = { name ->
                                 scope.launch {

@@ -18,9 +18,15 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -73,6 +79,11 @@ fun BlackBoxTopBar(
     checkpointTurns: Int = 0,
     isHealthy: Boolean = true,
     onMenuClick: () -> Unit = {},
+    // D1: badged Updates affordance. `showUpdatesBadge` lights the dot when the
+    // shared UpdatesViewModel flags something to surface; `onUpdatesClick` opens
+    // the Updates screen. Defaults keep any other caller safe.
+    showUpdatesBadge: Boolean = false,
+    onUpdatesClick: () -> Unit = {},
     onOperatorChange: (String) -> Unit = {},
     onAddOperator: (String) -> Unit = {}
 ) {
@@ -191,6 +202,22 @@ fun BlackBoxTopBar(
                         .clickFeedback { onMenuClick() }
                         .padding(horizontal = 14.dp, vertical = 14.dp)
                 )
+
+                // D1: badged Updates icon beside the hamburger. The badge dot
+                // shows when showUpdatesBadge is true (update available,
+                // embedding health broken/superseded, or a running re-embed job).
+                IconButton(
+                    onClick = onUpdatesClick,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    BadgedBox(badge = { if (showUpdatesBadge) Badge() }) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Updates",
+                            tint = BbxAccent
+                        )
+                    }
+                }
             }
 
             // ── Row 2: Stats (snapshots • checkpoint • health) ──
