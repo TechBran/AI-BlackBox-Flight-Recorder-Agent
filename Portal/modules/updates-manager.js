@@ -366,7 +366,7 @@ function _renderEmbeddingsCard(container, status) {
             <div class="embeddings-card embeddings-card-broken">
                 <div class="embeddings-card-title">⚠ Search memory needs attention</div>
                 <p class="embeddings-card-copy">${_esc(health.detail || "The active embedding model stopped working. Automatic recovery is migrating your search memory to a working model.")}</p>
-                ${jobRunning ? `<p class="embeddings-card-progress">${_embedProgressLine(job)}</p>` : ""}
+                ${jobRunning ? `<div class="embeddings-card-progress">${_embedProgressLine(job)}</div>` : ""}
                 <div class="embeddings-card-actions">
                     <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
                 </div>
@@ -375,7 +375,7 @@ function _renderEmbeddingsCard(container, status) {
         html = `
             <div class="embeddings-card embeddings-card-info">
                 <div class="embeddings-card-title">⟳ Search memory update in progress</div>
-                <p class="embeddings-card-progress">${_embedProgressLine(job)}</p>
+                <div class="embeddings-card-progress">${_embedProgressLine(job)}</div>
                 <div class="embeddings-card-actions">
                     <button id="btnEmbeddingsManage" class="btn embeddings-manage-btn">Manage</button>
                 </div>
@@ -472,7 +472,15 @@ function _embedProgressLine(job) {
     const done = Number(job.done) || 0;
     const total = Number(job.total) || 0;
     const cancelling = job.cancel_requested ? " (cancelling…)" : "";
-    return `Re-embedding ${done}/${total}…${cancelling}`;
+    // Determinate bar; total==0 (unknown yet) → 0% rather than NaN.
+    const pct = total > 0 ? Math.min(100, Math.floor(done / total * 100)) : 0;
+    // NOTE: contains a block-level <div> — the call sites MUST wrap this in a
+    // <div>, not a <p> (a <p> auto-closes at the first block child, orphaning
+    // the bar). See .embeddings-card-progress in _updates.css.
+    return `Re-embedding ${done}/${total}…${cancelling}`
+        + `<div class="embeddings-progress-track">`
+        + `<div class="embeddings-progress-fill" style="width:${pct}%"></div>`
+        + `</div>`;
 }
 
 async function _onEmbeddingsUpdateClick(btn, targetSlug) {

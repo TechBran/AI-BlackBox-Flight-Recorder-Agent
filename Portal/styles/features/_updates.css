@@ -169,6 +169,21 @@
     margin: 0.3rem 0 0.5rem;
     animation: updates-pulse 1.5s ease-in-out infinite;
 }
+/* Determinate progress bar for the re-embed/migrate job (thin track + accent
+   fill; same --color-info accent as the progress text above). */
+.embeddings-progress-track {
+    margin-top: 0.4rem;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+}
+.embeddings-progress-fill {
+    height: 100%;
+    background: var(--color-info, #6ca0dc);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
 .embeddings-card-actions {
     display: flex;
     flex-wrap: wrap;
