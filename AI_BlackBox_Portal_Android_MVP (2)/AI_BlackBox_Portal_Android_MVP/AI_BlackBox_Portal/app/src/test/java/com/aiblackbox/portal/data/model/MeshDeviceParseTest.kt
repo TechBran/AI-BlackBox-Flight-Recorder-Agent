@@ -86,4 +86,31 @@ class MeshDeviceParseTest {
     @Test fun provider_choices_match_backend_contract() {
         assertEquals(listOf("gemma", "gemini", "claude", "openai"), MESH_PROVIDER_CHOICES)
     }
+
+    // --- parseOperators (M4.1: the owner dropdown was permanently empty) ----------
+    // `GET /operators` returns a STRING array, `{"operators":["Brandon","Anna"]}`.
+    // The old code read `it.jsonObject["operator"]`, which throws on a JsonPrimitive,
+    // so the roster silently parsed to []. These pin the real shape + the degrade path.
+
+    @Test fun parses_operators_string_array() {
+        val ops = parseOperators("""{"operators":["Brandon","Anna"]}""")
+        assertEquals(listOf("Brandon", "Anna"), ops)
+    }
+
+    @Test fun parse_operators_drops_blank_entries() {
+        val ops = parseOperators("""{"operators":["Brandon","","  ","Anna"]}""")
+        assertEquals(listOf("Brandon", "Anna"), ops)
+    }
+
+    @Test fun parse_operators_wrong_shape_degrades_to_empty() {
+        // The OLD (incorrect) object-array shape must NOT throw — it degrades to empty.
+        assertTrue(parseOperators("""{"operators":[{"operator":"Brandon"}]}""").isEmpty())
+    }
+
+    @Test fun parse_operators_malformed_or_missing_key_degrades_to_empty() {
+        assertTrue(parseOperators("not json at all").isEmpty())
+        assertTrue(parseOperators("").isEmpty())
+        assertTrue(parseOperators("{}").isEmpty())
+        assertTrue(parseOperators("""{"operators":[]}""").isEmpty())
+    }
 }

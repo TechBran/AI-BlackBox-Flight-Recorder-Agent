@@ -3,6 +3,10 @@ package com.aiblackbox.portal.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * One row of the tailnet mesh join served by `GET /devices/mesh` (M3 §5.5 decision 8):
@@ -52,6 +56,22 @@ private val meshJson = Json {
  */
 fun parseMeshDevices(raw: String): List<MeshDevice> = try {
     meshJson.decodeFromString(MeshDevicesResponse.serializer(), raw).devices
+} catch (_: Exception) {
+    emptyList()
+}
+
+/**
+ * Pure parse of a `GET /operators` response body into the operator roster. The endpoint
+ * returns a STRING array: `{"operators":["Brandon","Anna"]}` — NOT a list of objects, so
+ * the old `it.jsonObject["operator"]` path threw on every `JsonPrimitive` (leaving the
+ * owner dropdown permanently empty). Reads the strings directly, drops blanks, and
+ * tolerates unknown keys / malformed input (returns an empty list rather than throwing).
+ * PURE (JVM-testable) — no Android dependencies.
+ */
+fun parseOperators(raw: String): List<String> = try {
+    meshJson.parseToJsonElement(raw).jsonObject["operators"]
+        ?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+        ?.filter { it.isNotBlank() } ?: emptyList()
 } catch (_: Exception) {
     emptyList()
 }
