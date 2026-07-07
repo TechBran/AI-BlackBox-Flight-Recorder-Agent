@@ -1073,9 +1073,7 @@ def add_operator(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Operator name is required")
 
     try:
-        global USERS_LIST, CFG
-
-        # Read current operators from config
+        # Read current operators from config (module-global read; no rebind — see below)
         current_list = USERS_LIST.copy()
 
         # Check if operator already exists
@@ -1096,14 +1094,18 @@ def add_operator(body: dict = Body(...)):
         with open(config_path, "w") as f:
             CFG.write(f)
 
-        # Reload the config to update the global variable
+        # Reload config, then mutate the SHARED USERS_LIST object IN PLACE so every
+        # importer (device_routes._live_operators, notification_routes, GET /operators)
+        # sees the new operator with NO restart. Rebinding would only update THIS
+        # module's alias and leave config.USERS_LIST stale (the restart-lag bug).
         CFG.read(config_path)
-        USERS_LIST = [u.strip() for u in CFG.get("users","list",fallback="Brandon").split(",") if u.strip()]
+        import Orchestrator.config as _cfg
+        _cfg.USERS_LIST[:] = [u.strip() for u in CFG.get("users", "list", fallback="").split(",") if u.strip()]
 
         return {
             "status": "success",
             "message": f"Operator '{operator_name}' added successfully",
-            "operators": USERS_LIST
+            "operators": _cfg.USERS_LIST,
         }
     except Exception as e:
         import traceback
@@ -1122,7 +1124,6 @@ def remove_operator(name: str):
         raise HTTPException(status_code=400, detail="Operator name required")
     name = name.strip()
 
-    global USERS_LIST, CFG
     current_list = USERS_LIST.copy()
 
     if name not in current_list:
@@ -1145,12 +1146,21 @@ def remove_operator(name: str):
     with open(config_path, "w") as f:
         CFG.write(f)
     CFG.read(config_path)
-    USERS_LIST = [u.strip() for u in CFG.get("users", "list", fallback="Brandon").split(",") if u.strip()]
+    import Orchestrator.config as _cfg
+    # In-place mutation of the shared object — seen by every importer with no restart.
+    _cfg.USERS_LIST[:] = [u.strip() for u in CFG.get("users", "list", fallback="").split(",") if u.strip()]
+    # Guard a dangling default: if the removed operator was this box's default or the
+    # current operator, re-point at a surviving operator so nothing names a phantom.
+    _fallback = _cfg.USERS_LIST[0] if _cfg.USERS_LIST else "Operator"
+    if _cfg.USERS_DEFAULT == name:
+        _cfg.USERS_DEFAULT = _fallback
+    if _cfg.CURRENT_OPERATOR == name:
+        _cfg.CURRENT_OPERATOR = _fallback
 
     return {
         "status": "removed",
         "message": f"Operator '{name}' removed",
-        "operators": USERS_LIST,
+        "operators": _cfg.USERS_LIST,
     }
 
 
