@@ -20,7 +20,17 @@ from .models import (
     VALID_DEFAULT_PROVIDERS, sanitize_default_provider,
 )
 
-DEVICES_FILE = Path(__file__).parent / "devices.json"
+# Portable, self-creating registry location (M2.1).
+#
+# Default is byte-identical to today's in-repo package-dir file (which the systemd
+# unit already writes), so THIS box is unchanged. An operator can relocate the store
+# with BLACKBOX_DEVICE_REGISTRY_PATH — but that override MUST point at a path the
+# service's mount namespace can WRITE: an in-repo data dir, or a dir explicitly added
+# to the unit's ReadWritePaths. A bare "~/…" path can be silently blocked by
+# ProtectHome/ProtectSystem (see memory: mount_ns_bisect / protectsystem_strict_blast_radius),
+# so we never default there.
+_LEGACY_DEVICES_FILE = Path(__file__).parent / "devices.json"   # today's location (testable seam)
+DEVICES_FILE = Path(os.environ.get("BLACKBOX_DEVICE_REGISTRY_PATH", str(_LEGACY_DEVICES_FILE)))
 
 
 class DeviceRegistry:
@@ -32,18 +42,32 @@ class DeviceRegistry:
         # (set_primary_device clears-then-sets across devices — must be atomic).
         # Reentrant so a method may nest a helper that also takes the lock.
         self._lock = threading.RLock()
+        # Self-create the store's parent dir so a fresh / relocated box just works (M2.1).
+        os.makedirs(DEVICES_FILE.parent, exist_ok=True)
         self._load_from_file()
         self._dedupe_primaries()
 
     def _load_from_file(self):
-        """Load devices from devices.json.
+        """Load devices from the configured DEVICES_FILE.
+
+        Legacy migration (M2.1): if the configured path does not exist yet but the
+        LEGACY package-dir file does (a box that predates BLACKBOX_DEVICE_REGISTRY_PATH,
+        or a relocated store), load the rows from the legacy file ONCE and re-save them
+        to the new path so the relocation is transparent.
 
         Each row is parsed in isolation: a malformed / unknown-enum row (e.g. a future
         ``device_type: "tv"`` this build doesn't know) is SKIPPED + logged rather than
         aborting the whole registry load, so one bad row can't strand every device.
         """
+        source = None
+        migrating = False
         if DEVICES_FILE.exists():
-            with open(DEVICES_FILE) as f:
+            source = DEVICES_FILE
+        elif _LEGACY_DEVICES_FILE != DEVICES_FILE and _LEGACY_DEVICES_FILE.exists():
+            source = _LEGACY_DEVICES_FILE
+            migrating = True
+        if source is not None:
+            with open(source) as f:
                 data = json.load(f)
             for row in data.get("devices", []):
                 try:
@@ -54,6 +78,12 @@ class DeviceRegistry:
                           f"{rid!r}: {e}")
                     continue
                 self._devices[device.id] = device
+            if migrating:
+                # Persist the migrated rows to the NEW (configured) path; keeps the
+                # existing malformed-row skip behavior (only parsed rows are re-saved).
+                self._save_to_file()
+                print(f"[DEVICE REGISTRY] Migrated {len(self._devices)} devices from "
+                      f"legacy {source} -> {DEVICES_FILE}")
         print(f"[DEVICE REGISTRY] Loaded {len(self._devices)} devices")
 
     def _dedupe_primaries(self):
@@ -90,6 +120,7 @@ class DeviceRegistry:
         with self._lock:
             data = {"devices": [d.to_dict() for d in self._devices.values()]}
             dir_path = DEVICES_FILE.parent
+            os.makedirs(dir_path, exist_ok=True)  # defensive: dir may not exist yet (M2.1)
             fd, tmp_name = tempfile.mkstemp(
                 dir=str(dir_path), prefix=".devices-", suffix=".json.tmp")
             try:

@@ -62,6 +62,7 @@ def client(tmp_path, monkeypatch):
 
     # --- tmp device registry with one UNCLAIMED device (any live operator may claim) ---
     monkeypatch.setattr(reg_mod, "DEVICES_FILE", tmp_path / "devices.json")
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
     monkeypatch.setattr(reg_mod, "_registry", None)
     registry = reg_mod.get_registry()
     registry.add_device(Device(

@@ -28,6 +28,7 @@ NODES = [
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(reg_mod, "DEVICES_FILE", tmp_path / "devices.json")
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
     monkeypatch.setattr(reg_mod, "_registry", None)
     r = reg_mod.get_registry()
     r.add_device(Device(id="brandon-fold6", name="Fold6", tailscale_ip="100.88.0.7",

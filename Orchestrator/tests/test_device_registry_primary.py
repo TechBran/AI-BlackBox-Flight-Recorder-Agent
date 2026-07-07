@@ -57,6 +57,7 @@ def test_to_dict_from_dict_roundtrip_preserves_new_fields():
 def registry(tmp_path, monkeypatch):
     """A fresh file-backed DeviceRegistry over a tmp devices.json."""
     monkeypatch.setattr(reg_mod, "DEVICES_FILE", tmp_path / "devices.json")
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
     monkeypatch.setattr(reg_mod, "_registry", None)
     r = reg_mod.DeviceRegistry()
     for did in ("phone", "tablet"):

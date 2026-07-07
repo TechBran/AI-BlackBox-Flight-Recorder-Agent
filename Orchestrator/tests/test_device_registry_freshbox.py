@@ -57,6 +57,9 @@ def _mock_tailscale(monkeypatch, status_dict):
 def fresh_registry(tmp_path, monkeypatch):
     """A fresh file-backed DeviceRegistry over an EMPTY tmp devices.json."""
     monkeypatch.setattr(reg_mod, "DEVICES_FILE", tmp_path / "devices.json")
+    # Point the legacy-migration seam at a NON-EXISTENT tmp path so the M2.1 legacy
+    # load never reaches the live package devices.json during tests.
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
     monkeypatch.setattr(reg_mod, "_registry", None)
     return reg_mod.DeviceRegistry()
 
@@ -92,3 +95,43 @@ def test_resync_does_not_overwrite_existing_owner(fresh_registry, monkeypatch):
     # Re-sync updates liveness/IP only — ownership + primary are preserved.
     assert dev.owner == "Anna"
     assert dev.is_primary is True
+
+
+# ── M2.1: portable, self-creating path + legacy migration ──
+
+def test_legacy_migration_loads_and_rewrites_to_new_path(tmp_path, monkeypatch):
+    # Configured path is MISSING; a legacy file at a DIFFERENT path holds one device.
+    new_path = tmp_path / "new" / "devices.json"          # doesn't exist yet
+    legacy_path = tmp_path / "legacy" / "devices.json"
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(json.dumps({"devices": [{
+        "id": "legacy-phone", "name": "Legacy Phone", "tailscale_ip": "100.5.5.5",
+        "device_type": "android", "protocol": "adb", "owner": "Brandon",
+        "status": "online",
+    }]}))
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", new_path)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", legacy_path)
+    monkeypatch.setattr(reg_mod, "_registry", None)
+
+    reg = reg_mod.DeviceRegistry()
+    # The legacy device is loaded (reusing the per-row parse)...
+    dev = reg.get_device("legacy-phone")
+    assert dev is not None and dev.owner == "Brandon"
+    # ...AND migrated (re-saved) to the NEW configured path.
+    assert new_path.exists()
+    saved = json.loads(new_path.read_text())
+    assert [d["id"] for d in saved["devices"]] == ["legacy-phone"]
+
+
+def test_makedirs_creates_missing_parent_dir_on_save(tmp_path, monkeypatch):
+    # Configured path lives under a NON-EXISTENT nested dir; construction + a save must
+    # create the parent (os.makedirs), not crash.
+    nested = tmp_path / "sub" / "dir" / "devices.json"
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", nested)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
+    monkeypatch.setattr(reg_mod, "_registry", None)
+    reg = reg_mod.DeviceRegistry()             # makedirs on init
+    reg.add_device(Device(id="d1", name="D1", tailscale_ip="100.6.6.6",
+                          device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
+                          owner=""))
+    assert nested.exists()                     # save succeeded into the created dir
