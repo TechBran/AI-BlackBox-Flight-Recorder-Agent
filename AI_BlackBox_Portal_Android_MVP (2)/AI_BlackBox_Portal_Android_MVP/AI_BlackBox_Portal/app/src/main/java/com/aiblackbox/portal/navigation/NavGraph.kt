@@ -35,6 +35,7 @@ import com.aiblackbox.portal.ui.contacts.ContactsScreen
 import com.aiblackbox.portal.ui.voice.VoiceScreen
 import com.aiblackbox.portal.ui.voicelab.VoiceLabScreen
 import com.aiblackbox.portal.ui.updates.UpdatesScreen
+import com.aiblackbox.portal.ui.updates.UpdatesViewModel
 import com.aiblackbox.portal.ui.settings.LocalModelSettingsScreen
 
 object Routes {
@@ -72,6 +73,14 @@ fun BlackBoxNavGraph(
     operator: String,
     currentModel: String = "",
     chatViewModel: ChatViewModel? = null,
+    /**
+     * B5: the activity-scoped [UpdatesViewModel] shared with the top-bar
+     * Updates badge (NativeMainActivity owns it). Threaded into the UPDATES
+     * destination so the screen and the badge observe ONE instance. Nullable
+     * (mirroring [chatViewModel]) only for the theoretical no-arg caller; the
+     * real caller always passes it.
+     */
+    updatesVm: UpdatesViewModel? = null,
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onModelChange: (String) -> Unit = {},
@@ -208,7 +217,12 @@ fun BlackBoxNavGraph(
         composable(Routes.VOICE_LAB) { VoiceLabScreen(origin = origin) }
         composable(Routes.SMS_INBOX) { SmsInboxScreen(origin = origin, operator = operator) }
         composable(Routes.CONTACTS) { ContactsScreen(origin = origin, operator = operator) }
-        composable(Routes.UPDATES) { UpdatesScreen(origin = origin) }
+        composable(Routes.UPDATES) {
+            // B5: use the activity-scoped instance so the top-bar badge and this
+            // screen share ONE VM. Fallback `viewModel()` only for the no-arg
+            // NavGraph caller (never hit from NativeMainActivity).
+            UpdatesScreen(viewModel = updatesVm ?: viewModel(), origin = origin)
+        }
         composable(Routes.LOCAL_MODEL_SETTINGS) {
             // On-device model settings: tune window/sampler, auto-warm, clear,
             // status -- wires to the existing ChatViewModel headless seams.

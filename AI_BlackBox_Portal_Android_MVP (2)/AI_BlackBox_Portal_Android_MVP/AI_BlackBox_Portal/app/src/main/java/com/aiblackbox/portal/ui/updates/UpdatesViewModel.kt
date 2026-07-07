@@ -12,8 +12,11 @@ import com.aiblackbox.portal.data.repository.UpdateRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -76,6 +79,25 @@ class UpdatesViewModel(application: Application) : AndroidViewModel(application)
     // absent; a reranker failure can NEVER break the updates panel.
     private val _rerankStatus = MutableStateFlow<RerankStatus?>(null)
     val rerankStatus: StateFlow<RerankStatus?> = _rerankStatus.asStateFlow()
+
+    /**
+     * B5: single "something to surface" signal for the activity-scoped top-bar
+     * Updates badge. TRUE when any of:
+     *   - an update is available (state is [UpdatesUiState.UpdatesAvailable]), OR
+     *   - embedding health is "broken" or "superseded", OR
+     *   - an embeddings migration job is running.
+     * Derived from the same flows the Updates screen renders, so the badge and
+     * the screen can never disagree. Started eagerly so it stays populated for
+     * the badge even while the Updates screen is closed (this VM lives at
+     * activity scope now).
+     */
+    val attention: StateFlow<Boolean> = combine(_state, _embeddings) { state, emb ->
+        val updateAvailable = state is UpdatesUiState.UpdatesAvailable
+        val embHealth = emb?.health?.state
+        val embNeedsAttention = embHealth == "broken" || embHealth == "superseded"
+        val embJobRunning = emb?.job?.state == "running"
+        updateAvailable || embNeedsAttention || embJobRunning
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     private var streamJob: Job? = null
     private var pollJob: Job? = null

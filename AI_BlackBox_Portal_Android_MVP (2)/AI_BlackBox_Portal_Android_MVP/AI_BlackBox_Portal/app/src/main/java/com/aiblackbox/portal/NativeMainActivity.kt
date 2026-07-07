@@ -61,6 +61,7 @@ import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.components.BlackBoxTopBar
 import com.aiblackbox.portal.ui.insets.LocalShowAppChrome
 import com.aiblackbox.portal.ui.settings.SettingsSheet
+import com.aiblackbox.portal.ui.updates.UpdatesViewModel
 import com.aiblackbox.portal.navigation.Routes
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.util.normalizeApiOrigin
@@ -154,6 +155,13 @@ class NativeMainActivity : ComponentActivity() {
                 val currentModel by store.model.collectAsState(initial = "")
 
                 val chatViewModel: ChatViewModel = viewModel()
+                // B5: ONE activity-owned UpdatesViewModel. In a ComponentActivity's
+                // setContent, viewModel() resolves to the activity ViewModelStoreOwner,
+                // so this instance survives navigation and stays alive on the Chat home
+                // — letting the top-bar badge read update/embedding state without the
+                // Updates screen ever being opened. The SAME instance is threaded into
+                // the Updates screen via BlackBoxNavGraph(updatesVm = ...).
+                val updatesVm: UpdatesViewModel = viewModel()
                 val inputText by chatViewModel.inputText.collectAsState()
                 val chatState by chatViewModel.chatState.collectAsState()
                 val erMissionActive by chatViewModel.erMissionActive.collectAsState()
@@ -256,6 +264,16 @@ class NativeMainActivity : ComponentActivity() {
                 LaunchedEffect(origin) {
                     if (origin.isNotBlank()) {
                         chatViewModel.initialize(origin)
+                    }
+                }
+
+                // B5: initialize the activity-scoped UpdatesViewModel once — this
+                // creates its api/repo AND does the first status+embeddings fetch, so
+                // the top-bar badge's `attention` flow is populated as soon as origin
+                // resolves (no need to open the Updates screen first).
+                LaunchedEffect(origin) {
+                    if (origin.isNotBlank()) {
+                        updatesVm.initialize(origin)
                     }
                 }
 
@@ -403,6 +421,7 @@ class NativeMainActivity : ComponentActivity() {
                         operator = operator,
                         currentModel = currentModel,
                         chatViewModel = chatViewModel,
+                        updatesVm = updatesVm,
                         onModelChange = { scope.launch { store.setModel(it) } },
                         onSpeak = { text ->
                             scope.launch {

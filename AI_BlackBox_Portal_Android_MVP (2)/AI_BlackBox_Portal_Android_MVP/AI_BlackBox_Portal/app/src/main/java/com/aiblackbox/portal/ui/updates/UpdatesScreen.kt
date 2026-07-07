@@ -55,7 +55,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.data.model.EmbeddingsJob
@@ -86,8 +85,12 @@ private val InfoBlue = Color(0xFF6CA0DC)
 @Composable
 fun UpdatesScreen(
     origin: String,
+    // B5: passed in from the activity-scoped instance (NativeMainActivity →
+    // BlackBoxNavGraph) so the top-bar badge and this screen share ONE VM.
+    // No `= viewModel()` default: a screen-scoped instance would diverge from
+    // the badge's and re-fetch independently.
+    viewModel: UpdatesViewModel,
     modifier: Modifier = Modifier,
-    viewModel: UpdatesViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     val logLines by viewModel.logLines.collectAsState()
@@ -102,7 +105,8 @@ fun UpdatesScreen(
     val view = LocalView.current
     val context = LocalContext.current
 
-    LaunchedEffect(origin) { viewModel.initialize(origin) }
+    // B5: initialize is now driven once at activity scope (NativeMainActivity),
+    // so this screen does NOT re-init — the shared VM is already populated.
 
     // 5s job-progress poll while a migration runs and this screen is visible
     // (parity with the Portal card's interval). Keyed on the running flag:
