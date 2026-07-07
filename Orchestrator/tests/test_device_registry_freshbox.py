@@ -254,6 +254,20 @@ def test_empty_devices_file_does_not_crash(tmp_path, monkeypatch):
     assert reg.get_all_devices() == []
 
 
+@pytest.mark.parametrize("payload", ["[]", "42", '"x"', "true"])
+def test_non_dict_devices_file_does_not_crash(tmp_path, monkeypatch, payload):
+    # Syntactically VALID JSON but the WRONG shape (list/int/str/bool) parses fine, then
+    # would AttributeError at data.get("devices", ...) — the same boot-brick class the
+    # corrupt-file guard targets. Must normalize to "start empty", not raise.
+    wrong_shape = tmp_path / "devices.json"
+    wrong_shape.write_text(payload)
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", wrong_shape)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
+    monkeypatch.setattr(reg_mod, "_registry", None)
+    reg = reg_mod.DeviceRegistry()          # must NOT raise
+    assert reg.get_all_devices() == []
+
+
 # ── Fix #4: constructor path injection (fail-loud test seam) ──
 
 def test_constructor_path_injection_isolates(tmp_path):

@@ -85,6 +85,14 @@ class DeviceRegistry:
                 print(f"[DEVICE REGISTRY] WARNING: could not parse {source} "
                       f"({e}); starting with an empty registry")
                 self._devices = {}
+            # A syntactically-VALID but wrong-shape file ([], 42, "x", true) parses fine but
+            # would AttributeError at data.get("devices", ...) below — same boot-brick class
+            # this guard targets. Normalize any non-dict result to "start empty".
+            if not isinstance(data, dict):
+                if data is not None:
+                    print(f"[DEVICE REGISTRY] WARNING: {source} is not a device object "
+                          f"(got {type(data).__name__}); starting with an empty registry")
+                data = None
             if data is not None:
                 for row in data.get("devices", []):
                     try:
