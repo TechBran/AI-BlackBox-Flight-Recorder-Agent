@@ -25,7 +25,7 @@ from Orchestrator.config import (
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL_DEFAULT,
     ARC_DIR, ARTIFACTS_DIR, AUDIO_ENGINE, BLACKBOX_TAILNET_HOSTNAME, CFG,
     CHECKPOINT_AUTO_CREATE_INTERVAL, CHECKPOINT_MIN_SNAPSHOTS, CHECKPOINT_TURNS_TO_COMPRESS,
-    CTX_MAX, CU_MODEL_DEFAULT, CU_MODEL_FILTERS, CURRENT_OPERATOR, END_RX,
+    CTX_MAX, CU_MODEL_DEFAULT, CU_MODEL_FILTERS, current_operator, END_RX,
     GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE,
     MANIFEST, OPENAI_API_KEY, OPENAI_MODEL_DEFAULT,
     SNAPSHOT_INDEX, START_RX, STT_MODEL, TTS_MODEL,
@@ -993,7 +993,7 @@ def mint_manual(body: dict = Body(None)):
 
     body = body or {}
     operator = body.get("operator")
-    op = (operator or CURRENT_OPERATOR or current_default()).strip()
+    op = (operator or current_operator() or current_default()).strip()
     content = body.get("content")
     snap_type = body.get("type", "normal")
 
@@ -1050,7 +1050,7 @@ def create_dev_snapshot(body: dict = Body(...)):
 async def create_checkpoint_manual(body: dict = Body(None)):
     """Create a manual checkpoint for the specified operator"""
     operator = (body or {}).get("operator") # Read operator from JSON body
-    op = (operator or CURRENT_OPERATOR or current_default()).strip()
+    op = (operator or current_operator() or current_default()).strip()
     try:
         s = get_state(op)
         # Trigger checkpoint creation in background thread (fire-and-forget)
@@ -1164,8 +1164,8 @@ def remove_operator(name: str):
     # restart path; CURRENT_OPERATOR is runtime-only, updated on each /chat).
     if _default_was_removed:
         _cfg.USERS_DEFAULT = _fallback
-    if _cfg.CURRENT_OPERATOR == name:
-        _cfg.CURRENT_OPERATOR = _fallback
+    if _cfg.current_operator() == name:
+        _cfg.set_current_operator(_fallback)
 
     return {
         "status": "removed",

@@ -228,6 +228,19 @@ EMBEDDINGS_QUERY_FAIL_THRESHOLD = CFG.getint("embeddings", "query_fail_threshold
 
 CURRENT_OPERATOR = USERS_DEFAULT   # updated on each /chat
 
+
+def set_current_operator(op: str) -> None:
+    """Canonical writer for the most-recent-active-operator fallback (updated per turn).
+    Writers MUST call this (updates the config module global) instead of rebinding a
+    per-module CURRENT_OPERATOR copy, so all readers see it live."""
+    global CURRENT_OPERATOR
+    CURRENT_OPERATOR = op
+
+
+def current_operator() -> str:
+    """Live read of the most-recent-active-operator fallback."""
+    return CURRENT_OPERATOR
+
 # Auto-mint policy
 AUTO_ENABLE      = CFG.getboolean("auto_mint", "enable", fallback=True)
 TURNS_THRESHOLD  = CFG.getint("auto_mint", "turns_threshold", fallback=10)
