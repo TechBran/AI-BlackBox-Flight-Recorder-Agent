@@ -32,6 +32,8 @@ const TYPE_ICON = { android: '📱', windows: '🖥️', macos: '💻', linux: '
 // -----------------------------------------------------------------------------
 let _operators = [];       // live operator roster (from /operators)
 let _filter = '';          // '' = all operators; else filter mesh to one operator
+let _hideUnassigned = false; // when true, render() hides devices with no owner (default OFF)
+let _lastDevices = [];     // last-fetched, deduped device set (for re-render without refetch)
 let _loading = false;
 let _lastMenuVisible = false;
 
@@ -260,12 +262,16 @@ function buildCard(d) {
 function render(devices) {
     const list = $('devicesList');
     if (!list) return;
-    if (!devices.length) {
-        list.innerHTML = `<p class="devices-empty">No devices found on your Tailscale network${_filter ? ` for ${escapeHtml(_filter)}` : ''}.</p>`;
+    // Hide-unassigned is a client-side view filter (default OFF so a fresh box's
+    // unclaimed — hence claimable — devices stay visible).
+    const shown = _hideUnassigned ? devices.filter((d) => d.owner) : devices;
+    if (!shown.length) {
+        const scope = _hideUnassigned ? ' owned' : '';
+        list.innerHTML = `<p class="devices-empty">No${scope} devices found on your Tailscale network${_filter ? ` for ${escapeHtml(_filter)}` : ''}.</p>`;
         return;
     }
     const frag = document.createDocumentFragment();
-    devices.forEach((d) => frag.appendChild(buildCard(d)));
+    shown.forEach((d) => frag.appendChild(buildCard(d)));
     list.innerHTML = '';
     list.appendChild(frag);
 }
@@ -283,13 +289,17 @@ async function refresh() {
     _loading = true;
     const list = $('devicesList');
     try {
+        // Always refetch the roster (no lifetime cache) so a newly-added operator
+        // appears without reload. This section refreshes only on open / filter-change
+        // / manual refresh — it does NOT poll — so always-fetch is cheap.
         const [ops, devices] = await Promise.all([
-            _operators.length ? Promise.resolve(_operators) : fetchOperators(),
+            fetchOperators(),
             fetchMesh(_filter),
         ]);
         _operators = ops;
         syncOperatorFilter();
-        render(dedupById(devices));
+        _lastDevices = dedupById(devices);
+        render(_lastDevices);
     } catch (e) {
         if (list) {
             list.innerHTML = `<p class="devices-empty devices-error">Could not load devices (${escapeHtml(e.message || 'error')}). Is Tailscale running?</p>`;
@@ -311,6 +321,17 @@ export function initDevicesSection() {
         filterSel.addEventListener('change', () => {
             _filter = filterSel.value;
             refresh();
+        });
+    }
+
+    // Hide-unassigned view filter (default OFF). Re-render the last-fetched set on
+    // change — no refetch needed since it's a pure client-side view filter.
+    const hideChk = $('devicesHideUnassigned');
+    if (hideChk) {
+        _hideUnassigned = hideChk.checked;
+        hideChk.addEventListener('change', () => {
+            _hideUnassigned = hideChk.checked;
+            render(_lastDevices);
         });
     }
 

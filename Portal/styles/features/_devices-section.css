@@ -22,7 +22,22 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
+
+/* Hide-unassigned view toggle (default OFF). */
+.devices-hide-unassigned {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.devices-hide-unassigned input { margin: 0; cursor: pointer; }
+.devices-hide-unassigned:hover { color: var(--text); }
 
 .devices-filter-select {
     background: var(--neutral-150);
