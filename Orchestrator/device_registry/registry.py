@@ -213,6 +213,94 @@ class DeviceRegistry:
             print(f"[DEVICE REGISTRY] Unassigned {device_id} by {by}")
             return d
 
+    # ── M2.3: data-hygiene normalize (dedupe + drop phantom-operator ownership) ──
+
+    @staticmethod
+    def _dns_slug_consistent(d: Device) -> bool:
+        """True if the device id equals the first label of its metadata ``tailscale_dns``
+        — i.e. the row's DNS metadata is current, not stale from a prior name."""
+        dns = (d.metadata or {}).get("tailscale_dns", "") or ""
+        slug = dns.split(".")[0].strip().lower()
+        return bool(slug) and slug == (d.id or "").strip().lower()
+
+    def _choose_dedupe_keeper(self, rows: List[Device]) -> Device:
+        """Pick the survivor of a same-IP group: prefer a row whose DNS slug matches its
+        own id (non-stale metadata), then primary, then owned, then most-recently-seen,
+        with id as a final deterministic tiebreak."""
+        consistent = [r for r in rows if self._dns_slug_consistent(r)]
+        pool = consistent or rows
+        return sorted(pool, key=lambda r: (
+            r.is_primary,
+            bool((r.owner or "").strip()),
+            r.last_seen or "",
+            r.id,
+        ), reverse=True)[0]
+
+    def normalize(self, valid_owners) -> dict:
+        """One-shot data-hygiene pass — OPT-IN via POST /devices/normalize, NEVER auto-run.
+
+        (a) PHANTOM OWNERS: clear the owner (and demote ``is_primary``) of any device whose
+            current owner is non-empty and NOT in ``valid_owners`` (case-insensitive) — e.g.
+            an operator carried over from a prior box that doesn't exist on this one.
+        (b) DUPLICATE IPs: collapse pre-existing rows that share a ``tailscale_ip`` into a
+            single surviving row (this is what fixes this box's renamed-Fold dup pair). The
+            keeper is preferred by DNS-slug consistency, then primary/owned/most-recently-seen.
+            A non-empty owner / is_primary / default_provider from a dropped row is carried
+            FORWARD onto the keeper (never silently dropped); every dropped row — especially
+            an owned/primary one — is listed in the summary.
+
+        Phantom-owner clearing runs FIRST so a carried-forward owner can never re-introduce a
+        phantom. Persists ONCE. Returns ``{"cleared_owner": [...], "deduped": [...]}``.
+        """
+        valid = {(o or "").strip().lower()
+                 for o in (valid_owners or set()) if (o or "").strip()}
+        cleared: List[str] = []
+        deduped: List[dict] = []
+        with self._lock:
+            # (a) phantom-owner cleanup
+            for d in self._devices.values():
+                owner = (d.owner or "").strip()
+                if owner and owner.lower() not in valid:
+                    d.owner = ""
+                    d.is_primary = False
+                    cleared.append(d.id)
+
+            # (b) same-tailscale_ip dedupe
+            groups: Dict[str, List[Device]] = {}
+            for d in self._devices.values():
+                ip = (d.tailscale_ip or "").strip()
+                if ip:
+                    groups.setdefault(ip, []).append(d)
+            for ip, rows in groups.items():
+                if len(rows) < 2:
+                    continue
+                keeper = self._choose_dedupe_keeper(rows)
+                dropped = [r for r in rows if r.id != keeper.id]
+                for r in dropped:
+                    # Carry forward ownership/routing state so a re-home isn't lost.
+                    if not (keeper.owner or "").strip() and (r.owner or "").strip():
+                        keeper.owner = r.owner
+                    if not keeper.is_primary and r.is_primary:
+                        keeper.is_primary = True
+                    if not keeper.default_provider and r.default_provider:
+                        keeper.default_provider = r.default_provider
+                for r in dropped:
+                    del self._devices[r.id]
+                deduped.append({
+                    "tailscale_ip": ip,
+                    "kept": keeper.id,
+                    "dropped": [r.id for r in dropped],
+                    "dropped_owned_or_primary": [
+                        r.id for r in dropped
+                        if (r.owner or "").strip() or r.is_primary],
+                })
+                print(f"[DEVICE REGISTRY] normalize: collapsed {ip} -> kept {keeper.id!r}, "
+                      f"dropped {[r.id for r in dropped]}")
+            self._save_to_file()
+        if cleared:
+            print(f"[DEVICE REGISTRY] normalize: cleared phantom owners on {cleared}")
+        return {"cleared_owner": cleared, "deduped": deduped}
+
     # ── M3: primary-device + default-provider (origin-aware routing support) ──
 
     def get_primary_device(self, owner: str) -> Optional[Device]:

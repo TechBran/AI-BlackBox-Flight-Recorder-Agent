@@ -315,6 +315,21 @@ async def unassign_operator(device_id: str, body: OperatorBody):
     return {"status": "unassigned", "device": device.to_dict()}
 
 
+@router.post("/normalize")
+async def normalize_registry():
+    """Opt-in data-hygiene pass (M2.3): clear ownership held by operators NOT on this
+    box's live roster (phantom owners carried over from a prior box) and collapse any
+    pre-existing duplicate rows that share a tailscale_ip (e.g. a device renamed in
+    Tailscale). NOT auto-run — this is the path that fixes an already-poisoned registry
+    (including this box's duplicate-IP Fold rows). The registry stays decoupled from
+    config: the live roster is computed here and passed in as ``valid_owners``.
+
+    Declared BEFORE GET /{device_id} so "normalize" is never captured as a device id."""
+    registry = get_registry()
+    summary = registry.normalize(set(_live_operators()))
+    return {"status": "normalized", **summary}
+
+
 @router.get("/{device_id}")
 async def get_device(device_id: str):
     registry = get_registry()
