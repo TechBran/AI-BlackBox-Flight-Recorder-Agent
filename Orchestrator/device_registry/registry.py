@@ -403,7 +403,7 @@ class DeviceRegistry:
                     tailscale_ip=ipv4,
                     device_type=device_type,
                     protocol=protocol,
-                    owner="Brandon",  # Default owner
+                    owner="",  # I2: discovery is UNCLAIMED — ownership set only via POST /{id}/operator
                     description=f"Auto-discovered from Tailscale ({os_name})",
                     status=DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE,
                     last_seen=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if online else None,

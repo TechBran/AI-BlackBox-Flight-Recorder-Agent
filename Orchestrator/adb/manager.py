@@ -391,7 +391,7 @@ class ADBManager:
                 tailscale_ip=tailscale_ip,
                 device_type=DeviceType.ANDROID,
                 protocol=DeviceProtocol.ADB,
-                owner="Brandon"
+                owner="",  # I2: discovery is UNCLAIMED — ownership set only via POST /{id}/operator
             )
             registry.add_device(device)
             log.info(f"[ADB] Created placeholder device {device_id} for IP {tailscale_ip}")
