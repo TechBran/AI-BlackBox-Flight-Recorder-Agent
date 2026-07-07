@@ -101,7 +101,13 @@ def pin_retrieval(**extra):
     base = dict(candidate_n="40", rrf_c=str(RRF_C), recency_weight=str(W),
                 recency_half_life_days="90", mmr_lambda="0.85",
                 mmr_protect_top="3", junk_floor="0.40",
-                registry_floor_enabled="false", debug_log="false")
+                registry_floor_enabled="false", debug_log="false",
+                # These tests pin the LEGACY rankspace rerank path; pin the
+                # precision-lever knobs to their inert defaults so they stay
+                # green regardless of the live config.ini default (M6 flipped
+                # rerank_relevance=preserve / rerank_floor=0.03 on this box).
+                keyword_mode="fused", rerank_relevance="rankspace",
+                rerank_floor="0.0", output_cos_floor="0.0", min_results="0")
     base.update(extra)
     return pin_cfg("retrieval", **base)
 

@@ -1,0 +1,24 @@
+{"query": "how do I clone someone's voice with their consent", "topic": "voice_clone", "gold_sids": ["SNAP-GT0001", "SNAP-GT0002", "SNAP-GT0003", "SNAP-GT0004"], "hard_negative_sids": []}
+{"query": "design a synthetic voice from a description and save it", "topic": "voice_clone", "gold_sids": ["SNAP-GT0001", "SNAP-GT0002", "SNAP-GT0003", "SNAP-GT0004"], "hard_negative_sids": []}
+{"query": "create a recurring weekly calendar event", "topic": "calendar", "gold_sids": ["SNAP-GT0005", "SNAP-GT0006", "SNAP-GT0007", "SNAP-GT0008"], "hard_negative_sids": ["SNAP-GT0060"]}
+{"query": "list google calendar events for next week", "topic": "calendar", "gold_sids": ["SNAP-GT0005", "SNAP-GT0006", "SNAP-GT0007", "SNAP-GT0008"], "hard_negative_sids": ["SNAP-GT0060"]}
+{"query": "keep android foreground service alive in doze mode", "topic": "android_battery", "gold_sids": ["SNAP-GT0009", "SNAP-GT0010", "SNAP-GT0011", "SNAP-GT0012"], "hard_negative_sids": ["SNAP-GT0053"]}
+{"query": "stop the OS from killing my background download service", "topic": "android_battery", "gold_sids": ["SNAP-GT0009", "SNAP-GT0010", "SNAP-GT0011", "SNAP-GT0012"], "hard_negative_sids": ["SNAP-GT0053"]}
+{"query": "generate a multi page pdf report with a table", "topic": "pdf_export", "gold_sids": ["SNAP-GT0013", "SNAP-GT0014", "SNAP-GT0015", "SNAP-GT0016"], "hard_negative_sids": ["SNAP-GT0050", "SNAP-GT0054"]}
+{"query": "embed a chart into a pdf export", "topic": "pdf_export", "gold_sids": ["SNAP-GT0013", "SNAP-GT0014", "SNAP-GT0015", "SNAP-GT0016"], "hard_negative_sids": ["SNAP-GT0050", "SNAP-GT0054"]}
+{"query": "reconnect a websocket with exponential backoff", "topic": "ws_reconnect", "gold_sids": ["SNAP-GT0017", "SNAP-GT0018", "SNAP-GT0019", "SNAP-GT0020"], "hard_negative_sids": []}
+{"query": "resume my socket subscription after a dropped connection", "topic": "ws_reconnect", "gold_sids": ["SNAP-GT0017", "SNAP-GT0018", "SNAP-GT0019", "SNAP-GT0020"], "hard_negative_sids": []}
+{"query": "generate an image with grok from a prompt", "topic": "grok_image", "gold_sids": ["SNAP-GT0021", "SNAP-GT0022", "SNAP-GT0023", "SNAP-GT0024"], "hard_negative_sids": ["SNAP-GT0059"]}
+{"query": "fix grok image resolution and api key handling", "topic": "grok_image", "gold_sids": ["SNAP-GT0021", "SNAP-GT0022", "SNAP-GT0023", "SNAP-GT0024"], "hard_negative_sids": ["SNAP-GT0059"]}
+{"query": "safely add a not null column via migration", "topic": "sql_migration", "gold_sids": ["SNAP-GT0025", "SNAP-GT0026", "SNAP-GT0027", "SNAP-GT0028"], "hard_negative_sids": []}
+{"query": "reversible database schema migration with rollback", "topic": "sql_migration", "gold_sids": ["SNAP-GT0025", "SNAP-GT0026", "SNAP-GT0027", "SNAP-GT0028"], "hard_negative_sids": []}
+{"query": "create a circular geofence with enter and exit events", "topic": "geofence", "gold_sids": ["SNAP-GT0029", "SNAP-GT0030", "SNAP-GT0031", "SNAP-GT0032"], "hard_negative_sids": []}
+{"query": "draw a geofence radius on a map", "topic": "geofence", "gold_sids": ["SNAP-GT0029", "SNAP-GT0030", "SNAP-GT0031", "SNAP-GT0032"], "hard_negative_sids": []}
+{"query": "implement oauth pkce authorization code flow", "topic": "oauth_pkce", "gold_sids": ["SNAP-GT0033", "SNAP-GT0034", "SNAP-GT0035", "SNAP-GT0036"], "hard_negative_sids": ["SNAP-GT0051", "SNAP-GT0052", "SNAP-GT0057"]}
+{"query": "refresh an oauth access token with pkce", "topic": "oauth_pkce", "gold_sids": ["SNAP-GT0033", "SNAP-GT0034", "SNAP-GT0035", "SNAP-GT0036"], "hard_negative_sids": ["SNAP-GT0051", "SNAP-GT0052", "SNAP-GT0057"]}
+{"query": "parse an uploaded csv with a custom delimiter", "topic": "csv_import", "gold_sids": ["SNAP-GT0037", "SNAP-GT0038", "SNAP-GT0039", "SNAP-GT0040"], "hard_negative_sids": ["SNAP-GT0056"]}
+{"query": "stream a large csv import and report row errors", "topic": "csv_import", "gold_sids": ["SNAP-GT0037", "SNAP-GT0038", "SNAP-GT0039", "SNAP-GT0040"], "hard_negative_sids": ["SNAP-GT0056"]}
+{"query": "implement dark mode with design tokens", "topic": "dark_theme", "gold_sids": ["SNAP-GT0041", "SNAP-GT0042", "SNAP-GT0043", "SNAP-GT0044"], "hard_negative_sids": ["SNAP-GT0058"]}
+{"query": "add a light dark theme toggle that overrides the system", "topic": "dark_theme", "gold_sids": ["SNAP-GT0041", "SNAP-GT0042", "SNAP-GT0043", "SNAP-GT0044"], "hard_negative_sids": ["SNAP-GT0058"]}
+{"query": "handle a 429 rate limit with retry after backoff", "topic": "rate_limit", "gold_sids": ["SNAP-GT0045", "SNAP-GT0046", "SNAP-GT0047", "SNAP-GT0048"], "hard_negative_sids": ["SNAP-GT0049", "SNAP-GT0055"]}
+{"query": "throttle outbound api calls with a token bucket", "topic": "rate_limit", "gold_sids": ["SNAP-GT0045", "SNAP-GT0046", "SNAP-GT0047", "SNAP-GT0048"], "hard_negative_sids": ["SNAP-GT0049", "SNAP-GT0055"]}

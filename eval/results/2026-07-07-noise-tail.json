@@ -1,0 +1,2468 @@
+{
+  "date": "2026-07-07",
+  "active_model": "gemini-embedding-2",
+  "k": 10,
+  "junk_floor": 0.4,
+  "candidate_n": 40,
+  "rerank_available": true,
+  "aggregate": {
+    "queries": 15,
+    "delivered_slots": 150,
+    "keyword_only_delivered": 100,
+    "keyword_only_frac_overall": 0.667,
+    "keyword_only_frac_mean": 0.667,
+    "semantic_hits_evicted": 115
+  },
+  "queries_detail": [
+    {
+      "query": "NSA checkpoint Fort Meade Officer Nguyen ticket",
+      "operator": "Brandon",
+      "relevant": [
+        "SNAP-20260312-4326",
+        "SNAP-20260313-4358",
+        "SNAP-20260707-8064"
+      ],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260707-8064",
+          "channel": "both",
+          "cosine": 0.7517,
+          "rerank": 0.1394,
+          "final_score": 0.02113,
+          "relevant": true,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-07T14:22:10Z operator=Brandon user: Can you tell me about the whole arc I had with the NSA checkpoint? Where d"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260416-5953",
+          "channel": "both",
+          "cosine": 0.7232,
+          "rerank": 0.404,
+          "final_score": 0.01932,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-16T11:02:01Z operator=Brandon user: No, I was just looking at it. But now that I'm thinking about it, remember"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260707-8065",
+          "channel": "both",
+          "cosine": 0.581,
+          "rerank": 0.0166,
+          "final_score": 0.01928,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-07T14:29:09Z operator=Brandon user: Yeah, looking at that past turn, it seems like the context that you receiv"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260619-7181",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0156,
+          "final_score": 0.01845,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260314-4385",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0254,
+          "final_score": 0.01699,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 2534-2560 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260425-6268",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0135,
+          "final_score": 0.01653,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-25T01:46:59Z operator=Brandon user: Brandon's Opus 4.7 test now shows recent/semantic/keyword arriving but rep"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260425-6272",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0095,
+          "final_score": 0.01635,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-25T02:18:22Z operator=Brandon user: okay so that worked pretty well for Google now I get it the differences be"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260323-4743",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.014,
+          "final_score": 0.0161,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 2801-2827 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260425-6267",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0087,
+          "final_score": 0.01599,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-25T01:36:28Z operator=Brandon user: Okay, hopefully it was last time I'll ask, but I want you to now tell me e"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260425-6265",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0087,
+          "final_score": 0.01582,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-25T01:22:56Z operator=Brandon user: Brandon's Opus 4.7 test still reported only 2 recent + 0 relevant + 2 chec"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260306-4127",
+        "SNAP-20260428-6335",
+        "SNAP-20260416-5963",
+        "SNAP-20251219-1950",
+        "SNAP-20260416-5955",
+        "SNAP-20260312-4326",
+        "SNAP-20260312-4329"
+      ],
+      "evicted_count": 7,
+      "semantic_only_topk": [
+        "SNAP-20260707-8064",
+        "SNAP-20260306-4127",
+        "SNAP-20260428-6335",
+        "SNAP-20260416-5963",
+        "SNAP-20251219-1950",
+        "SNAP-20260416-5955",
+        "SNAP-20260707-8065",
+        "SNAP-20260312-4326",
+        "SNAP-20260312-4329",
+        "SNAP-20260416-5953"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 27
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0156,
+        0.0254,
+        0.0135,
+        0.0095,
+        0.014,
+        0.0087,
+        0.0087
+      ],
+      "rerank_sem_scores": [
+        0.1394,
+        0.404,
+        0.0166
+      ]
+    },
+    {
+      "query": "semantic search returns irrelevant snapshots noise floor reranker",
+      "operator": "Brandon-DEV",
+      "relevant": [
+        "SNAP-20260613-7031",
+        "SNAP-20260621-7209",
+        "SNAP-20260707-8065",
+        "SNAP-20260707-8066",
+        "SNAP-20260707-8067"
+      ],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260707-8067",
+          "channel": "both",
+          "cosine": 0.7943,
+          "rerank": 0.2396,
+          "final_score": 0.02166,
+          "relevant": true,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-07-07T14:54:07Z operator=Brandon-DEV user: Okay. So for the recent work that we did on the semantic search, the e"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260707-8057",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0517,
+          "final_score": 0.02086,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns -2-24 - [3] [CHECKPOINT] Operat"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260621-7209",
+          "channel": "both",
+          "cosine": 0.7267,
+          "rerank": 0.1588,
+          "final_score": 0.02082,
+          "relevant": true,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-06-21T23:41:09Z operator=Brandon-DEV user: Memory retrieval hardening: 'semantic search only returns old snapshot"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260620-7201",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.027,
+          "final_score": 0.01868,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-06-20T21:48:24Z operator=Brandon-DEV user: Build production-grade multi-provider web search: an onboarding sectio"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260623-7647",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0139,
+          "final_score": 0.01669,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-06-23T23:09:08Z operator=Brandon-DEV user: Android TTS waveform now driven by decoded PCM envelope (smooth + word"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260622-7595",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0099,
+          "final_score": 0.01609,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-06-22T20:25:49Z operator=Brandon-DEV user: /goal see the pure-production reply/snapshot parsing plan all the way "
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20251201-1483",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.032,
+          "final_score": 0.01563,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 0-26 - [3] [CHECKPOINT] Operato"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260706-8043",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0031,
+          "final_score": 0.01549,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-07-06T20:42:14Z operator=Brandon-DEV user: Per-card Re-embed feature: full build (backend + wizard) via superpowe"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260703-7945",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0035,
+          "final_score": 0.01549,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-07-03T16:34:19Z operator=Brandon-DEV user: M7 retrieval-upgrade (WI-10): delivery-cap removal + transport hardeni"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260705-8000",
+          "channel": "both",
+          "cosine": 0.6446,
+          "rerank": 0.0248,
+          "final_score": 0.01881,
+          "relevant": false,
+          "operator": "Brandon-DEV",
+          "snippet": "Raw Session Log - [1] 2026-07-05T17:58:31Z operator=Brandon-DEV user: STT mic reliability marathon (CLI + chat dictation never cuts off) + r"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260622-7601",
+        "SNAP-20260506-6482",
+        "SNAP-20260116-2370",
+        "SNAP-20251207-1646",
+        "SNAP-20251124-1332",
+        "SNAP-20260621-7202",
+        "SNAP-20260622-7390",
+        "SNAP-20251116-984"
+      ],
+      "evicted_count": 8,
+      "semantic_only_topk": [
+        "SNAP-20260707-8067",
+        "SNAP-20260622-7601",
+        "SNAP-20260506-6482",
+        "SNAP-20260705-8000",
+        "SNAP-20260116-2370",
+        "SNAP-20251207-1646",
+        "SNAP-20251124-1332",
+        "SNAP-20260621-7202",
+        "SNAP-20260622-7390",
+        "SNAP-20251116-984"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 23
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0517,
+        0.027,
+        0.0139,
+        0.0099,
+        0.032,
+        0.0031,
+        0.0035
+      ],
+      "rerank_sem_scores": [
+        0.2396,
+        0.1588,
+        0.0248
+      ]
+    },
+    {
+      "query": "ElevenLabs API key onboarding wizard environment variable",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260613-7030",
+          "channel": "both",
+          "cosine": 0.6652,
+          "rerank": 0.155,
+          "final_score": 0.02056,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-13T21:27:06Z operator=Brandon user: ElevenLabs full-platform integration: subagent-driven execution of all 7 p"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260520-6724",
+          "channel": "semantic",
+          "cosine": 0.6413,
+          "rerank": 0.1869,
+          "final_score": 0.02011,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3940-3966 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260613-7014",
+          "channel": "both",
+          "cosine": 0.6564,
+          "rerank": 0.0399,
+          "final_score": 0.01976,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-13T00:22:24Z operator=Brandon user: ElevenLabs full-platform integration: research sweep + validated design + "
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260517-6698",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.034,
+          "final_score": 0.0183,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3914-3940 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260517-6702",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0303,
+          "final_score": 0.01809,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-17T20:50:53Z operator=Brandon user: ONBOARDING WIZARD V1 COMPLETE \u2014 fully validated end-to-end on MSO2 Ultra. "
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260704-7959",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0181,
+          "final_score": 0.01753,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-04T06:03:17Z operator=Brandon user: Yeah, that's what we'll do, because there have to be options. Local, GPU, "
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260512-6591",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0288,
+          "final_score": 0.01752,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-12T01:17:58Z operator=Brandon user: Track 2 linear wizard COMPLETE end-to-end \u2014 7 step components shipped, des"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260512-6592",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0277,
+          "final_score": 0.01732,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-12T02:09:22Z operator=Brandon user: Brandon live-tested the wizard, surfaced 5 UX gaps. Easy wins (tailnet URL"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260512-6602",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.027,
+          "final_score": 0.01714,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-12T18:59:57Z operator=Brandon user: Wizard foundation refinements ALL 3 tasks complete (T2.4.2 + T2.5.2 + T2.7"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260511-6583",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0265,
+          "final_score": 0.01692,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-11T18:52:24Z operator=Brandon user: all right so track one has shipped we got that fully committed can you sum"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260317-4492",
+        "SNAP-20260514-6608",
+        "SNAP-20260623-7609",
+        "SNAP-20260124-2661",
+        "SNAP-20260617-7111",
+        "SNAP-20260517-6699",
+        "SNAP-20260510-6558",
+        "SNAP-20260226-3833",
+        "SNAP-20260422-6177"
+      ],
+      "evicted_count": 9,
+      "semantic_only_topk": [
+        "SNAP-20260613-7030",
+        "SNAP-20260317-4492",
+        "SNAP-20260514-6608",
+        "SNAP-20260623-7609",
+        "SNAP-20260124-2661",
+        "SNAP-20260617-7111",
+        "SNAP-20260517-6699",
+        "SNAP-20260510-6558",
+        "SNAP-20260226-3833",
+        "SNAP-20260422-6177"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 30
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.034,
+        0.0303,
+        0.0181,
+        0.0288,
+        0.0277,
+        0.027,
+        0.0265
+      ],
+      "rerank_sem_scores": [
+        0.155,
+        0.1869,
+        0.0399
+      ]
+    },
+    {
+      "query": "frontier model device control phone tablet over Tailscale",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260702-7920",
+          "channel": "both",
+          "cosine": 0.7077,
+          "rerank": 0.288,
+          "final_score": 0.02148,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T18:35:47Z operator=Brandon user: Frontier-driven Android/tablet/XR device control \u2014 PLAN COMPLETE (all 8 mi"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260701-7890",
+          "channel": "both",
+          "cosine": 0.6939,
+          "rerank": 0.2482,
+          "final_score": 0.02114,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-01T01:28:00Z operator=Brandon user: Frontier-driven Android/tablet/XR device control \u2014 research + design brain"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260619-7181",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.2253,
+          "final_score": 0.02049,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260619-7185",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1707,
+          "final_score": 0.02024,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260619-7188",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1559,
+          "final_score": 0.01999,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260619-7191",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1004,
+          "final_score": 0.01907,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260619-7184",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0556,
+          "final_score": 0.01752,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260619-7182",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0466,
+          "final_score": 0.01735,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260628-7825",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0435,
+          "final_score": 0.01733,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T21:58:26Z operator=Brandon user: And exactly. It seems like that's the way that the market is going. Everyo"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260619-7189",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0454,
+          "final_score": 0.01718,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        }
+      ],
+      "keyword_only_count": 8,
+      "keyword_only_frac": 0.8,
+      "semantic_delivered_count": 2,
+      "evicted_semantic_hits": [
+        "SNAP-20260405-5592",
+        "SNAP-20260221-3691",
+        "SNAP-20260217-3522",
+        "SNAP-20260619-7186",
+        "SNAP-20260702-7926",
+        "SNAP-20260327-4926",
+        "SNAP-20260702-7929",
+        "SNAP-20260314-4388",
+        "SNAP-20260220-3642"
+      ],
+      "evicted_count": 9,
+      "semantic_only_topk": [
+        "SNAP-20260702-7920",
+        "SNAP-20260405-5592",
+        "SNAP-20260221-3691",
+        "SNAP-20260217-3522",
+        "SNAP-20260619-7186",
+        "SNAP-20260702-7926",
+        "SNAP-20260327-4926",
+        "SNAP-20260702-7929",
+        "SNAP-20260314-4388",
+        "SNAP-20260220-3642"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 32
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.2253,
+        0.1707,
+        0.1559,
+        0.1004,
+        0.0556,
+        0.0466,
+        0.0435,
+        0.0454
+      ],
+      "rerank_sem_scores": [
+        0.288,
+        0.2482
+      ]
+    },
+    {
+      "query": "cron scheduler restart catch-up validation exec safety",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260508-6519",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0362,
+          "final_score": 0.01854,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-08T19:22:55Z operator=Brandon user: DEVELOPMENT SESSION LOG \u2014 CHECKPOINT (systemd-installed) Follow-on to SNAP"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260402-5413",
+          "channel": "both",
+          "cosine": 0.6596,
+          "rerank": 0.0514,
+          "final_score": 0.01826,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-02T15:00:07Z operator=Brandon user: So, what's the difference between running just cron jobs versus this heart"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260206-3144",
+          "channel": "both",
+          "cosine": 0.6363,
+          "rerank": 0.0941,
+          "final_score": 0.01823,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-02-06T18:47:29Z operator=Brandon user: [Scheduled Task: Session Update - Cron Fixes] Summarize the changes made i"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260520-6724",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0123,
+          "final_score": 0.01715,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3940-3966 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260517-6697",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0087,
+          "final_score": 0.01636,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-17T15:44:38Z operator=Brandon user: API keys onboarding arc COMPLETE on MSO2 Ultra. E8 (wizard reads .env fres"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260625-7726",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0041,
+          "final_score": 0.01633,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-25T21:31:48Z operator=Brandon user: Uh, I see with that cron job, it seems like the model does not have access"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260607-6931",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0054,
+          "final_score": 0.01615,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-07T06:52:45Z operator=Brandon user: Rebuild ToolVault to be bulletproof: per-tool JSON+Python modules as the s"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260514-6608",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0055,
+          "final_score": 0.01578,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-14T00:35:32Z operator=Brandon user: Track 4 (install.sh) FULL HARDWARE VALIDATION COMPLETE on Brandon's MSO5 m"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260630-7864",
+          "channel": "semantic",
+          "cosine": 0.6184,
+          "rerank": 0.0105,
+          "final_score": 0.01805,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-30T01:27:32Z operator=Brandon user: ElevenLabs reliability: TTS streaming/idle-timeout + STT server reconnect-"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260514-6609",
+          "channel": "semantic",
+          "cosine": 0.6319,
+          "rerank": 0.0105,
+          "final_score": 0.0168,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-14T02:10:20Z operator=Brandon user: Very cool. The installer works. I watched it end-to-end myself on the MSO2"
+        }
+      ],
+      "keyword_only_count": 6,
+      "keyword_only_frac": 0.6,
+      "semantic_delivered_count": 4,
+      "evicted_semantic_hits": [
+        "SNAP-20260529-6856",
+        "SNAP-20260518-6707",
+        "SNAP-20260207-3162",
+        "SNAP-20260517-6696",
+        "SNAP-20260513-6606",
+        "SNAP-20260706-8009",
+        "SNAP-20260206-3127"
+      ],
+      "evicted_count": 7,
+      "semantic_only_topk": [
+        "SNAP-20260630-7864",
+        "SNAP-20260529-6856",
+        "SNAP-20260518-6707",
+        "SNAP-20260207-3162",
+        "SNAP-20260517-6696",
+        "SNAP-20260206-3144",
+        "SNAP-20260513-6606",
+        "SNAP-20260706-8009",
+        "SNAP-20260514-6609",
+        "SNAP-20260206-3127"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 25
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0362,
+        0.0123,
+        0.0087,
+        0.0041,
+        0.0054,
+        0.0055
+      ],
+      "rerank_sem_scores": [
+        0.0514,
+        0.0941,
+        0.0105,
+        0.0105
+      ]
+    },
+    {
+      "query": "reranker tiering body-only Cohere Vertex hardware",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260705-7983",
+          "channel": "both",
+          "cosine": 0.7025,
+          "rerank": 0.0603,
+          "final_score": 0.02156,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-05T00:25:30Z operator=Brandon user: Use the search_snapshots tool to search your BlackBox memory for \"reranker"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260705-7992",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.034,
+          "final_score": 0.0213,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 70-96 - [3] [CHECKPOINT] Operat"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260705-7990",
+          "channel": "both",
+          "cosine": 0.6863,
+          "rerank": 0.0304,
+          "final_score": 0.02104,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-05T06:03:08Z operator=Brandon user: No, that was good. And, and that was actually a test for the re-ranker sys"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260628-7825",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0105,
+          "final_score": 0.01856,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T21:58:26Z operator=Brandon user: And exactly. It seems like that's the way that the market is going. Everyo"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260619-7183",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0109,
+          "final_score": 0.01845,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260329-5098",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0113,
+          "final_score": 0.01659,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3019-3045 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260506-6476",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0067,
+          "final_score": 0.01626,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-06T19:04:36Z operator=Brandon user: yeah I foresee in the future you know maybe a year maybe maybe two you kno"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260218-3579",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0113,
+          "final_score": 0.01621,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 1864-1890 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260417-5990",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0085,
+          "final_score": 0.016,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3527-3553 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260627-7782",
+          "channel": "semantic",
+          "cosine": 0.6744,
+          "rerank": 0.0088,
+          "final_score": 0.01814,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T16:32:44Z operator=Brandon user: Comprehensive revamp of the aiblackboxfc.com marketing site: two-tier pric"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260423-6210",
+        "SNAP-20260704-7958",
+        "SNAP-20260628-7823",
+        "SNAP-20260703-7949",
+        "SNAP-20260127-2762",
+        "SNAP-20260707-8065",
+        "SNAP-20260303-4033"
+      ],
+      "evicted_count": 7,
+      "semantic_only_topk": [
+        "SNAP-20260705-7983",
+        "SNAP-20260423-6210",
+        "SNAP-20260627-7782",
+        "SNAP-20260704-7958",
+        "SNAP-20260628-7823",
+        "SNAP-20260703-7949",
+        "SNAP-20260127-2762",
+        "SNAP-20260707-8065",
+        "SNAP-20260303-4033",
+        "SNAP-20260705-7990"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 30
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.034,
+        0.0105,
+        0.0109,
+        0.0113,
+        0.0067,
+        0.0113,
+        0.0085
+      ],
+      "rerank_sem_scores": [
+        0.0603,
+        0.0304,
+        0.0088
+      ]
+    },
+    {
+      "query": "on-device Gemma phone litertlm native tool loop",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260630-7888",
+          "channel": "both",
+          "cosine": 0.7613,
+          "rerank": 0.2683,
+          "final_score": 0.02142,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-30T23:45:41Z operator=Brandon user: On-device Gemma must not call phone-control tools (control_phone) that rec"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260619-7187",
+          "channel": "both",
+          "cosine": 0.7252,
+          "rerank": 0.2498,
+          "final_score": 0.02076,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260619-7185",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.213,
+          "final_score": 0.02049,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260619-7181",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1599,
+          "final_score": 0.01907,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260701-7890",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1483,
+          "final_score": 0.01884,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-01T01:28:00Z operator=Brandon user: Frontier-driven Android/tablet/XR device control \u2014 research + design brain"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260616-7093",
+          "channel": "both",
+          "cosine": 0.7481,
+          "rerank": 0.2055,
+          "final_score": 0.02011,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-16T01:13:42Z operator=Brandon user: Checkpoint: on-device Gemma `local` provider \u2014 Task 2.6a COMPLETE (real Li"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260616-7095",
+          "channel": "semantic",
+          "cosine": 0.7385,
+          "rerank": 0.1529,
+          "final_score": 0.01875,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-16T22:06:39Z operator=Brandon user: Say hi and name one planet. - [2] 2026-06-16T22:06:39Z operator=Brandon as"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260619-7182",
+          "channel": "both",
+          "cosine": 0.7351,
+          "rerank": 0.1486,
+          "final_score": 0.01865,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260614-7066",
+          "channel": "both",
+          "cosine": 0.7644,
+          "rerank": 0.2037,
+          "final_score": 0.01982,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-14T19:05:52Z operator=Brandon user: Design + plan the on-device Gemma 4 `local` model provider (Android-reside"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260619-7190",
+          "channel": "both",
+          "cosine": 0.7255,
+          "rerank": 0.1354,
+          "final_score": 0.01788,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        }
+      ],
+      "keyword_only_count": 3,
+      "keyword_only_frac": 0.3,
+      "semantic_delivered_count": 7,
+      "evicted_semantic_hits": [
+        "SNAP-20260617-7149",
+        "SNAP-20260619-7186",
+        "SNAP-20260615-7085",
+        "SNAP-20260702-7917",
+        "SNAP-20260619-7183"
+      ],
+      "evicted_count": 5,
+      "semantic_only_topk": [
+        "SNAP-20260630-7888",
+        "SNAP-20260616-7093",
+        "SNAP-20260619-7190",
+        "SNAP-20260617-7149",
+        "SNAP-20260619-7186",
+        "SNAP-20260615-7085",
+        "SNAP-20260702-7917",
+        "SNAP-20260619-7182",
+        "SNAP-20260619-7183",
+        "SNAP-20260614-7066"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 17
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.213,
+        0.1599,
+        0.1483
+      ],
+      "rerank_sem_scores": [
+        0.2683,
+        0.2498,
+        0.2055,
+        0.1529,
+        0.1486,
+        0.2037,
+        0.1354
+      ]
+    },
+    {
+      "query": "website revamp landing page Firebase pricing Stripe",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260627-7782",
+          "channel": "both",
+          "cosine": 0.7356,
+          "rerank": 0.0948,
+          "final_score": 0.02102,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T16:32:44Z operator=Brandon user: Comprehensive revamp of the aiblackboxfc.com marketing site: two-tier pric"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260617-7147",
+          "channel": "both",
+          "cosine": 0.6523,
+          "rerank": 0.0208,
+          "final_score": 0.019,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-17T18:43:50Z operator=Brandon user: Yeah. So I have a revamp coming for the Storybox app. We haven't talked ab"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260213-3430",
+          "channel": "both",
+          "cosine": 0.6503,
+          "rerank": 0.1128,
+          "final_score": 0.01832,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-02-13T22:25:13Z operator=Brandon user: DEVELOPMENT SESSION LOG \u2014 Google Cloud for Startups Website Update SUMMARY"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260629-7845",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0164,
+          "final_score": 0.01802,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-29T09:34:17Z operator=Brandon user: ET, phone home. - [2] 2026-06-29T09:34:17Z operator=Brandon assistant: [RE"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260517-6703",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0203,
+          "final_score": 0.01787,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-17T22:06:26Z operator=Brandon user: E18 \u2014 Computer Use Wayland input via ydotool 1.x + dynamic resolution dete"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260628-7820",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0142,
+          "final_score": 0.01733,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T18:51:51Z operator=Brandon user: Yeah, fix the stripe link buttons. I probably didn't meant to snapshot for"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260509-6532",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0125,
+          "final_score": 0.01523,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-09T19:31:10Z operator=Brandon user: Snapshot Phase 12 \u2014 Track C cleanup + Track B.1 (insets CompositionLocal) "
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260517-6704",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0073,
+          "final_score": 0.01488,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-17T22:54:15Z operator=Brandon user: COMPUTER USE ARC COMPLETE \u2014 validated pinpoint-accurate on MSO2 Ultra at 1"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260208-3216",
+          "channel": "both",
+          "cosine": 0.6593,
+          "rerank": 0.0265,
+          "final_score": 0.01697,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-02-08T22:33:47Z operator=Brandon user: I want you to go to and navigate to the AIBlackBoxFC.com and scroll throug"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260119-2409",
+          "channel": "both",
+          "cosine": 0.6259,
+          "rerank": 0.0354,
+          "final_score": 0.01724,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-01-19T22:36:57Z operator=Brandon user: DEVELOPMENT SESSION LOG SESSION: Custom Domain DNS Configuration for AI Bl"
+        }
+      ],
+      "keyword_only_count": 5,
+      "keyword_only_frac": 0.5,
+      "semantic_delivered_count": 5,
+      "evicted_semantic_hits": [
+        "SNAP-20260118-2390",
+        "SNAP-20260213-3414",
+        "SNAP-20260318-4542",
+        "SNAP-20260628-7819",
+        "SNAP-20260208-3218",
+        "SNAP-20260318-4538"
+      ],
+      "evicted_count": 6,
+      "semantic_only_topk": [
+        "SNAP-20260627-7782",
+        "SNAP-20260118-2390",
+        "SNAP-20260119-2409",
+        "SNAP-20260213-3414",
+        "SNAP-20260318-4542",
+        "SNAP-20260208-3216",
+        "SNAP-20260617-7147",
+        "SNAP-20260628-7819",
+        "SNAP-20260208-3218",
+        "SNAP-20260318-4538"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 29
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0164,
+        0.0203,
+        0.0142,
+        0.0125,
+        0.0073
+      ],
+      "rerank_sem_scores": [
+        0.0948,
+        0.0208,
+        0.1128,
+        0.0265,
+        0.0354
+      ]
+    },
+    {
+      "query": "SMS inbound routing thread memory peer takeover",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260626-7743",
+          "channel": "both",
+          "cosine": 0.6959,
+          "rerank": 0.0324,
+          "final_score": 0.0207,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-26T02:29:29Z operator=Brandon user: [SMS from Brandon (+14108166914)]: Et phone home - [2] 2026-06-26T02:29:29"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260626-7741",
+          "channel": "semantic",
+          "cosine": 0.6784,
+          "rerank": 0.026,
+          "final_score": 0.0195,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-26T00:41:38Z operator=Brandon content: [NOTIFY:sms] SMS from Me hi me Release Notes - Hybrid context window in"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260327-4925",
+          "channel": "both",
+          "cosine": 0.7015,
+          "rerank": 0.0524,
+          "final_score": 0.01894,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-03-27T10:45:17Z operator=Brandon user: DEVELOPMENT SESSION LOG \u2014 WebSocket Pipeline Deep Audit & Optimization + S"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260704-7963",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0161,
+          "final_score": 0.01821,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-04T11:01:40Z operator=Brandon user: [Scheduled Task: Daily AI News Briefing] Search the web for the latest bre"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260530-6870",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0179,
+          "final_score": 0.01762,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-30T17:54:36Z operator=Brandon user: now that I'm thinking about it here I guess is the real question even if i"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260702-7908",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0131,
+          "final_score": 0.01746,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T11:01:48Z operator=Brandon user: [Scheduled Task: Daily AI News Briefing] Search the web for the latest bre"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260625-7726",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0135,
+          "final_score": 0.01739,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-25T21:31:48Z operator=Brandon user: Uh, I see with that cron job, it seems like the model does not have access"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260217-3564",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0298,
+          "final_score": 0.01733,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-02-17T23:26:56Z operator=Brandon user: DEVELOPMENT SESSION LOG \u2014 Sovereign SIM: Complete Software Implementation "
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260701-7897",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0127,
+          "final_score": 0.01727,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-01T11:01:58Z operator=Brandon user: [Scheduled Task: Daily AI News Briefing] Search the web for the latest bre"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260209-3240",
+          "channel": "both",
+          "cosine": 0.6854,
+          "rerank": 0.0235,
+          "final_score": 0.01588,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-02-09T10:51:00Z operator=Brandon user: yeah well I'm thinking more about the Twilio integration you know how we c"
+        }
+      ],
+      "keyword_only_count": 6,
+      "keyword_only_frac": 0.6,
+      "semantic_delivered_count": 4,
+      "evicted_semantic_hits": [
+        "SNAP-20260609-6961",
+        "SNAP-20260203-2959",
+        "SNAP-20260203-2956",
+        "SNAP-20260530-6868",
+        "SNAP-20260626-7742",
+        "SNAP-20260326-4862",
+        "SNAP-20260630-7883",
+        "SNAP-20260328-5040"
+      ],
+      "evicted_count": 8,
+      "semantic_only_topk": [
+        "SNAP-20260626-7743",
+        "SNAP-20260609-6961",
+        "SNAP-20260203-2959",
+        "SNAP-20260203-2956",
+        "SNAP-20260530-6868",
+        "SNAP-20260327-4925",
+        "SNAP-20260626-7742",
+        "SNAP-20260326-4862",
+        "SNAP-20260630-7883",
+        "SNAP-20260328-5040"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 29
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0161,
+        0.0179,
+        0.0131,
+        0.0135,
+        0.0298,
+        0.0127
+      ],
+      "rerank_sem_scores": [
+        0.0324,
+        0.026,
+        0.0524,
+        0.0235
+      ]
+    },
+    {
+      "query": "per-card re-embed chunked store schema upgrade",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260703-7941",
+          "channel": "both",
+          "cosine": 0.6824,
+          "rerank": 0.081,
+          "final_score": 0.02151,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-03T13:44:55Z operator=Brandon user: Retrieval upgrade M6 shipped: chunk-for-scoring store schema v2 built, gat"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260702-7907",
+          "channel": "both",
+          "cosine": 0.6294,
+          "rerank": 0.0364,
+          "final_score": 0.02092,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T02:57:07Z operator=Brandon user: Scope additions (WI-7b/9/10/11) + implementation plan written for the retr"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260702-7906",
+          "channel": "both",
+          "cosine": 0.6609,
+          "rerank": 0.0321,
+          "final_score": 0.02066,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T02:26:50Z operator=Brandon user: Audit the NAS blackbox_retrieval_upgrade_spec.md (chunk-for-scoring retrie"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260605-6912",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0236,
+          "final_score": 0.01929,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4012-4038 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260612-7013",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0188,
+          "final_score": 0.01862,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4036-4062 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260630-7864",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0131,
+          "final_score": 0.0177,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-30T01:27:32Z operator=Brandon user: ElevenLabs reliability: TTS streaming/idle-timeout + STT server reconnect-"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260702-7927",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0066,
+          "final_score": 0.01593,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T20:07:51Z operator=Brandon user: [Voice Session Transcript] === Gemini Live Voice Session === Session ID: 7"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260623-7609",
+          "channel": "semantic",
+          "cosine": 0.6369,
+          "rerank": 0.0101,
+          "final_score": 0.01638,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-23T10:30:33Z operator=Brandon user: Okay. Yeah, we had a pretty good development session. It's still going too"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260628-7820",
+          "channel": "semantic",
+          "cosine": 0.6366,
+          "rerank": 0.0104,
+          "final_score": 0.01672,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T18:51:51Z operator=Brandon user: Yeah, fix the stripe link buttons. I probably didn't meant to snapshot for"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260704-7952",
+          "channel": "both",
+          "cosine": 0.6367,
+          "rerank": 0.0138,
+          "final_score": 0.01857,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-04T04:35:16Z operator=Brandon user: All right. So we got the re-ranking arc, the re-ranker model with the new "
+        }
+      ],
+      "keyword_only_count": 4,
+      "keyword_only_frac": 0.4,
+      "semantic_delivered_count": 6,
+      "evicted_semantic_hits": [
+        "SNAP-20260612-7011",
+        "SNAP-20260628-7823",
+        "SNAP-20260617-7149",
+        "SNAP-20260613-7031",
+        "SNAP-20260211-3369",
+        "SNAP-20260614-7060"
+      ],
+      "evicted_count": 6,
+      "semantic_only_topk": [
+        "SNAP-20260703-7941",
+        "SNAP-20260623-7609",
+        "SNAP-20260612-7011",
+        "SNAP-20260628-7820",
+        "SNAP-20260628-7823",
+        "SNAP-20260617-7149",
+        "SNAP-20260613-7031",
+        "SNAP-20260211-3369",
+        "SNAP-20260704-7952",
+        "SNAP-20260614-7060"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 28
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0236,
+        0.0188,
+        0.0131,
+        0.0066
+      ],
+      "rerank_sem_scores": [
+        0.081,
+        0.0364,
+        0.0321,
+        0.0101,
+        0.0104,
+        0.0138
+      ]
+    },
+    {
+      "query": "Android terminal mic live speech to text partials",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260629-7834",
+          "channel": "both",
+          "cosine": 0.7078,
+          "rerank": 0.2662,
+          "final_score": 0.02135,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-29T02:29:51Z operator=Brandon user: Android CLI-agent terminal mic \u2014 live STT partials + remove 60s cap + prov"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260606-6930",
+          "channel": "both",
+          "cosine": 0.6837,
+          "rerank": 0.1295,
+          "final_score": 0.02032,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-06T05:11:13Z operator=Brandon user: CLI agent mic + Android voice agent both verified working. Merged the CLI "
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260629-7845",
+          "channel": "both",
+          "cosine": 0.6522,
+          "rerank": 0.0959,
+          "final_score": 0.02032,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-29T09:34:17Z operator=Brandon user: ET, phone home. - [2] 2026-06-29T09:34:17Z operator=Brandon assistant: [RE"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260630-7864",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.076,
+          "final_score": 0.01987,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-30T01:27:32Z operator=Brandon user: ElevenLabs reliability: TTS streaming/idle-timeout + STT server reconnect-"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260604-6900",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0466,
+          "final_score": 0.01777,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-04T18:56:35Z operator=Brandon user: Research + design + Superpowers plan for multi-provider live-streaming STT"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260605-6912",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0466,
+          "final_score": 0.0176,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4012-4038 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260613-7030",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0373,
+          "final_score": 0.01715,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-13T21:27:06Z operator=Brandon user: ElevenLabs full-platform integration: subagent-driven execution of all 7 p"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260531-6872",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0368,
+          "final_score": 0.01656,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-31T01:43:38Z operator=Brandon user: Android voice-agent UI upgrade \u2014 HD flowing-ribbon waveform, collapsible d"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260530-6868",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0338,
+          "final_score": 0.01623,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-30T14:43:26Z operator=Brandon user: So, here's a question, is it possible to actually use, like right now we h"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260425-6254",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0411,
+          "final_score": 0.01599,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-04-25T00:26:14Z operator=Brandon user: Plan complete: Android Context Retrieval Pipeline Fix (docs/plans/2026-04-"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260410-5871",
+        "SNAP-20260429-6342",
+        "SNAP-20251217-1914",
+        "SNAP-20260316-4463",
+        "SNAP-20251010-177",
+        "SNAP-20260605-6914",
+        "SNAP-20260501-6370",
+        "SNAP-20251008-165"
+      ],
+      "evicted_count": 8,
+      "semantic_only_topk": [
+        "SNAP-20260629-7834",
+        "SNAP-20260410-5871",
+        "SNAP-20260429-6342",
+        "SNAP-20251217-1914",
+        "SNAP-20260316-4463",
+        "SNAP-20251010-177",
+        "SNAP-20260629-7845",
+        "SNAP-20260605-6914",
+        "SNAP-20260501-6370",
+        "SNAP-20251008-165"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 31
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.076,
+        0.0466,
+        0.0466,
+        0.0373,
+        0.0368,
+        0.0338,
+        0.0411
+      ],
+      "rerank_sem_scores": [
+        0.2662,
+        0.1295,
+        0.0959
+      ]
+    },
+    {
+      "query": "operator picker device unassign owner reassign",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260702-7920",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0248,
+          "final_score": 0.02094,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T18:35:47Z operator=Brandon user: Frontier-driven Android/tablet/XR device control \u2014 PLAN COMPLETE (all 8 mi"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260531-6875",
+          "channel": "semantic",
+          "cosine": 0.6357,
+          "rerank": 0.0262,
+          "final_score": 0.02016,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-31T22:34:46Z operator=Brandon user: Dynamic operator resolution \u2014 MCP tools + /snapshot-dev resolve the operat"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260702-7926",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0152,
+          "final_score": 0.01974,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-02T19:54:22Z operator=Brandon user: Galaxy XR on-device validation of M6 + intent-layer-first fix (open_app/ho"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260701-7890",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0138,
+          "final_score": 0.01924,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-01T01:28:00Z operator=Brandon user: Frontier-driven Android/tablet/XR device control \u2014 research + design brain"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260619-7181",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0143,
+          "final_score": 0.01907,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260705-7999",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0112,
+          "final_score": 0.01808,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-05T17:35:32Z operator=Brandon user: This is the one we have that works great. It has none of these issues of 3"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260614-7066",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0104,
+          "final_score": 0.01701,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-14T19:05:52Z operator=Brandon user: Design + plan the on-device Gemma 4 `local` model provider (Android-reside"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260617-7109",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0099,
+          "final_score": 0.01693,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-17T04:51:27Z operator=Brandon user: On-device Gemma `local` provider \u2014 PRODUCTION-HARDENING COMPLETE (8 workst"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260619-7190",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0098,
+          "final_score": 0.01686,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 4118-4144 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260628-7805",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0073,
+          "final_score": 0.01669,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T01:02:01Z operator=Brandon user: Fix on-device Gemma E4B/E2B downloads stuck at 0%/1% \u2014 redesign to direct "
+        }
+      ],
+      "keyword_only_count": 9,
+      "keyword_only_frac": 0.9,
+      "semantic_delivered_count": 1,
+      "evicted_semantic_hits": [
+        "SNAP-20260209-3240",
+        "SNAP-20260614-7062",
+        "SNAP-20251018-583",
+        "SNAP-20260408-5782",
+        "SNAP-20260205-3098",
+        "SNAP-20260622-7597",
+        "SNAP-20260321-4679",
+        "SNAP-20260224-3753",
+        "SNAP-20260331-5264"
+      ],
+      "evicted_count": 9,
+      "semantic_only_topk": [
+        "SNAP-20260531-6875",
+        "SNAP-20260209-3240",
+        "SNAP-20260614-7062",
+        "SNAP-20251018-583",
+        "SNAP-20260408-5782",
+        "SNAP-20260205-3098",
+        "SNAP-20260622-7597",
+        "SNAP-20260321-4679",
+        "SNAP-20260224-3753",
+        "SNAP-20260331-5264"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 39
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0248,
+        0.0152,
+        0.0138,
+        0.0143,
+        0.0112,
+        0.0104,
+        0.0099,
+        0.0098,
+        0.0073
+      ],
+      "rerank_sem_scores": [
+        0.0262
+      ]
+    },
+    {
+      "query": "MCP remote tool server OAuth Tailscale funnel bearer",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260627-7777",
+          "channel": "both",
+          "cosine": 0.7755,
+          "rerank": 0.3153,
+          "final_score": 0.02128,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T07:07:38Z operator=Brandon user: Build a production remote MCP tool server exposing the BlackBox 74-tool ca"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260627-7783",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.1063,
+          "final_score": 0.02102,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns -2-24 - [3] [CHECKPOINT] Operat"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260627-7780",
+          "channel": "both",
+          "cosine": 0.7091,
+          "rerank": 0.0543,
+          "final_score": 0.02025,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T14:20:46Z operator=Brandon user: Make the remote MCP server's operator scoping production-quality for a fre"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260531-6875",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0448,
+          "final_score": 0.01892,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-31T22:34:46Z operator=Brandon user: Dynamic operator resolution \u2014 MCP tools + /snapshot-dev resolve the operat"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260630-7888",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0147,
+          "final_score": 0.01725,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-30T23:45:41Z operator=Brandon user: On-device Gemma must not call phone-control tools (control_phone) that rec"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260329-5135",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0387,
+          "final_score": 0.01701,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3043-3069 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260627-7782",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0146,
+          "final_score": 0.01697,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T16:32:44Z operator=Brandon user: Comprehensive revamp of the aiblackboxfc.com marketing site: two-tier pric"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260607-6931",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0148,
+          "final_score": 0.01661,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-07T06:52:45Z operator=Brandon user: Rebuild ToolVault to be bulletproof: per-tool JSON+Python modules as the s"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260521-6752",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0166,
+          "final_score": 0.01647,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-21T14:39:11Z operator=Brandon user: okay so here's a challenge if I was to share the black box github repo in "
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260622-7588",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0115,
+          "final_score": 0.01608,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-22T16:14:18Z operator=Brandon user: Okay. So here's a question. I'm still thinking about doing this, uh, OpenA"
+        }
+      ],
+      "keyword_only_count": 8,
+      "keyword_only_frac": 0.8,
+      "semantic_delivered_count": 2,
+      "evicted_semantic_hits": [
+        "SNAP-20251206-1593",
+        "SNAP-20260429-6342",
+        "SNAP-20260217-3544",
+        "SNAP-20260516-6664",
+        "SNAP-20251012-228",
+        "SNAP-20260329-5132",
+        "SNAP-20251006-152",
+        "SNAP-20260218-3583"
+      ],
+      "evicted_count": 8,
+      "semantic_only_topk": [
+        "SNAP-20260627-7777",
+        "SNAP-20251206-1593",
+        "SNAP-20260429-6342",
+        "SNAP-20260627-7780",
+        "SNAP-20260217-3544",
+        "SNAP-20260516-6664",
+        "SNAP-20251012-228",
+        "SNAP-20260329-5132",
+        "SNAP-20251006-152",
+        "SNAP-20260218-3583"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 29
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.1063,
+        0.0448,
+        0.0147,
+        0.0387,
+        0.0146,
+        0.0148,
+        0.0166,
+        0.0115
+      ],
+      "rerank_sem_scores": [
+        0.3153,
+        0.0543
+      ]
+    },
+    {
+      "query": "generation ember backdrop particles setting portal android",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260521-6748",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0755,
+          "final_score": 0.02013,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-21T00:14:06Z operator=Brandon user: Hamburger Menu Polish + Tailscale Copy Button shipped 2026-05-20 (later sa"
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260521-6749",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0547,
+          "final_score": 0.01986,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-21T00:41:31Z operator=Brandon user: End-of-day closeout snapshot 2026-05-20 \u2014 covers the final 2 commits of th"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260520-6741",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0454,
+          "final_score": 0.01959,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-20T21:22:04Z operator=Brandon user: Portal Tools Section Alignment shipped 2026-05-20. 8 commits on origin/mai"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260531-6872",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0129,
+          "final_score": 0.01913,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-31T01:43:38Z operator=Brandon user: Android voice-agent UI upgrade \u2014 HD flowing-ribbon waveform, collapsible d"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260705-7999",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0082,
+          "final_score": 0.01862,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-05T17:35:32Z operator=Brandon user: This is the one we have that works great. It has none of these issues of 3"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260316-4445",
+          "channel": "semantic",
+          "cosine": 0.621,
+          "rerank": 0.0358,
+          "final_score": 0.01797,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-03-16T21:40:56Z operator=Brandon user: DEVELOPMENT SESSION LOG \u2014 Android Jetpack Compose Full Portal Alignment SE"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260512-6603",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0117,
+          "final_score": 0.01796,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-12T21:55:55Z operator=Brandon user: Phase 2.10 manage-mode entry points complete. Both Web (Advanced Settings)"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260531-6873",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0096,
+          "final_score": 0.01785,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-31T19:53:24Z operator=Brandon user: TTS voice catalog single source of truth \u2014 backend /tts/catalog (OpenAI 11"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260501-6370",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0099,
+          "final_score": 0.01747,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-01T11:32:35Z operator=Brandon user: Continue the CLI Agent Android MVP implementation through to install-and-t"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260530-6868",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0066,
+          "final_score": 0.01655,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-30T14:43:26Z operator=Brandon user: So, here's a question, is it possible to actually use, like right now we h"
+        }
+      ],
+      "keyword_only_count": 9,
+      "keyword_only_frac": 0.9,
+      "semantic_delivered_count": 1,
+      "evicted_semantic_hits": [
+        "SNAP-20260118-2386",
+        "SNAP-20251010-170",
+        "SNAP-20260317-4492",
+        "SNAP-20260209-3228",
+        "SNAP-20260209-3229",
+        "SNAP-20260411-5892",
+        "SNAP-20260316-4432",
+        "SNAP-20251220-1962",
+        "SNAP-20260119-2397"
+      ],
+      "evicted_count": 9,
+      "semantic_only_topk": [
+        "SNAP-20260316-4445",
+        "SNAP-20260118-2386",
+        "SNAP-20251010-170",
+        "SNAP-20260317-4492",
+        "SNAP-20260209-3228",
+        "SNAP-20260209-3229",
+        "SNAP-20260411-5892",
+        "SNAP-20260316-4432",
+        "SNAP-20251220-1962",
+        "SNAP-20260119-2397"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 35
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0755,
+        0.0547,
+        0.0454,
+        0.0129,
+        0.0082,
+        0.0117,
+        0.0096,
+        0.0099,
+        0.0066
+      ],
+      "rerank_sem_scores": [
+        0.0358
+      ]
+    },
+    {
+      "query": "Google Workspace Docs Sheets Slides Drive Calendar tools",
+      "operator": "Brandon",
+      "relevant": [],
+      "delivered": [
+        {
+          "rank": 1,
+          "snap_id": "SNAP-20260622-7586",
+          "channel": "both",
+          "cosine": 0.641,
+          "rerank": 0.0871,
+          "final_score": 0.02112,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-22T14:11:11Z operator=Brandon user: Okay. Yeah, I've taken your email and passed it along to the CLI agent to "
+        },
+        {
+          "rank": 2,
+          "snap_id": "SNAP-20260622-7584",
+          "channel": "both",
+          "cosine": 0.6877,
+          "rerank": 0.065,
+          "final_score": 0.02084,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-22T10:37:22Z operator=Brandon user: Got it. So, yeah, we will circle back to this memory evaluation testing af"
+        },
+        {
+          "rank": 3,
+          "snap_id": "SNAP-20260628-7829",
+          "channel": "both",
+          "cosine": 0.642,
+          "rerank": 0.0299,
+          "final_score": 0.0203,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-28T22:29:33Z operator=Brandon user: Okay, I'll fix that. Yeah, I always forget to re-auth with Google, but eve"
+        },
+        {
+          "rank": 4,
+          "snap_id": "SNAP-20260706-8008",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0245,
+          "final_score": 0.01943,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-07-06T00:25:29Z operator=Brandon user: Looks like that Wednesday through Fri- Friday job didn't get into my calen"
+        },
+        {
+          "rank": 5,
+          "snap_id": "SNAP-20260627-7782",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0204,
+          "final_score": 0.01814,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-27T16:32:44Z operator=Brandon user: Comprehensive revamp of the aiblackboxfc.com marketing site: two-tier pric"
+        },
+        {
+          "rank": 6,
+          "snap_id": "SNAP-20260329-5097",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0267,
+          "final_score": 0.01746,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3019-3045 - [3] [CHECKPOINT] Op"
+        },
+        {
+          "rank": 7,
+          "snap_id": "SNAP-20260304-4058",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0285,
+          "final_score": 0.01729,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-03-04T15:24:39Z operator=Brandon user: Yeah, those are awesome additions and we will save these for later for sur"
+        },
+        {
+          "rank": 8,
+          "snap_id": "SNAP-20260607-6931",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.019,
+          "final_score": 0.01694,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-06-07T06:52:45Z operator=Brandon user: Rebuild ToolVault to be bulletproof: per-tool JSON+Python modules as the s"
+        },
+        {
+          "rank": 9,
+          "snap_id": "SNAP-20260517-6703",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0191,
+          "final_score": 0.01654,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] 2026-05-17T22:06:26Z operator=Brandon user: E18 \u2014 Computer Use Wayland input via ydotool 1.x + dynamic resolution dete"
+        },
+        {
+          "rank": 10,
+          "snap_id": "SNAP-20260329-5098",
+          "channel": "keyword",
+          "cosine": null,
+          "rerank": 0.0236,
+          "final_score": 0.01639,
+          "relevant": false,
+          "operator": "Brandon",
+          "snippet": "Raw Session Log - [1] [CHECKPOINT] Compressed summary of 26 snapshots - [2] [CHECKPOINT] Source range: turns 3019-3045 - [3] [CHECKPOINT] Op"
+        }
+      ],
+      "keyword_only_count": 7,
+      "keyword_only_frac": 0.7,
+      "semantic_delivered_count": 3,
+      "evicted_semantic_hits": [
+        "SNAP-20260423-6212",
+        "SNAP-20260124-2665",
+        "SNAP-20260629-7846",
+        "SNAP-20260628-7828",
+        "SNAP-20260302-4016",
+        "SNAP-20260422-6187",
+        "SNAP-20250919-107",
+        "SNAP-20260323-4731",
+        "SNAP-20260321-4678"
+      ],
+      "evicted_count": 9,
+      "semantic_only_topk": [
+        "SNAP-20260622-7586",
+        "SNAP-20260423-6212",
+        "SNAP-20260124-2665",
+        "SNAP-20260629-7846",
+        "SNAP-20260628-7828",
+        "SNAP-20260302-4016",
+        "SNAP-20260422-6187",
+        "SNAP-20250919-107",
+        "SNAP-20260323-4731",
+        "SNAP-20260321-4678"
+      ],
+      "candidate_counts": {
+        "semantic_after_floor": 40,
+        "keyword": 40,
+        "keyword_only": 33
+      },
+      "rerank_available": true,
+      "rerank_kwonly_scores": [
+        0.0245,
+        0.0204,
+        0.0267,
+        0.0285,
+        0.019,
+        0.0191,
+        0.0236
+      ],
+      "rerank_sem_scores": [
+        0.0871,
+        0.065,
+        0.0299
+      ]
+    }
+  ]
+}

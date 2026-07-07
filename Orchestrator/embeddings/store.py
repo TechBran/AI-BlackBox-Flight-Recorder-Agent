@@ -724,6 +724,38 @@ class VectorStore:
                     break
             return results
 
+    def max_cosine_for(self, query_vec, sids) -> dict:
+        """Max cosine (over a snapshot's chunk rows) for each requested snap_id.
+
+        One mat-vec over the whole pre-normalized matrix (same cost as
+        :meth:`search`, NOT a per-id lookup loop) -> {sid: max_cosine} for the
+        requested sids that exist in the store; absent sids are omitted. Used by
+        the gated-keyword lever (retrieval.py) to gate keyword-only candidates on
+        their TRUE semantic cosine — a candidate that only matched lexically
+        (cosine below the model's floor) is dropped instead of RRF-injected.
+        """
+        want = set(sids)
+        if not want:
+            return {}
+        with self._lock:
+            self._ensure_open_locked()
+            matrix = self._get_matrix_locked()
+            ids = list(self._ids)
+        if matrix is None or matrix.shape[0] == 0:
+            return {}
+        q = np.asarray(query_vec, dtype=np.float32)
+        norm = float(np.linalg.norm(q))
+        if norm > 0:
+            q = q / norm
+        scores = matrix @ q
+        out: dict = {}
+        for i, sid in enumerate(ids):
+            if sid in want:
+                s = float(scores[i])
+                if s > out.get(sid, -2.0):
+                    out[sid] = s
+        return out
+
 
 # ── module-level helpers ─────────────────────────────────────────────────────
 

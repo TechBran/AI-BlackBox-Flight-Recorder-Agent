@@ -279,3 +279,8 @@ typescript
 
 # secrets dir / worktree convenience symlink — must never be committed
 credentials
+
+# retrieval eval: DERIVED ground-truth artifacts (rebuildable via
+# eval/build_ground_truth.py); corpus.jsonl + queries.jsonl ARE tracked.
+eval/ground_truth/_store/
+eval/ground_truth/_body_cache.json

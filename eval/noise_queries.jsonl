@@ -1,0 +1,15 @@
+{"query": "NSA checkpoint Fort Meade Officer Nguyen ticket", "operator": "Brandon", "relevant": ["SNAP-20260312-4326", "SNAP-20260313-4358", "SNAP-20260707-8064"], "note": "known good semantic cluster; historical leak claim"}
+{"query": "semantic search returns irrelevant snapshots noise floor reranker", "operator": "Brandon-DEV", "relevant": ["SNAP-20260707-8065", "SNAP-20260707-8066", "SNAP-20260707-8067", "SNAP-20260621-7209", "SNAP-20260613-7031"], "note": "the problem statement itself"}
+{"query": "ElevenLabs API key onboarding wizard environment variable", "operator": "Brandon", "relevant": [], "note": "narrow factual"}
+{"query": "frontier model device control phone tablet over Tailscale", "operator": "Brandon", "relevant": [], "note": "device control feature"}
+{"query": "cron scheduler restart catch-up validation exec safety", "operator": "Brandon", "relevant": [], "note": "scheduler uplift"}
+{"query": "reranker tiering body-only Cohere Vertex hardware", "operator": "Brandon", "relevant": [], "note": "reranker work"}
+{"query": "on-device Gemma phone litertlm native tool loop", "operator": "Brandon", "relevant": [], "note": "on-device"}
+{"query": "website revamp landing page Firebase pricing Stripe", "operator": "Brandon", "relevant": [], "note": "website"}
+{"query": "SMS inbound routing thread memory peer takeover", "operator": "Brandon", "relevant": [], "note": "sms pipeline"}
+{"query": "per-card re-embed chunked store schema upgrade", "operator": "Brandon", "relevant": [], "note": "embeddings"}
+{"query": "Android terminal mic live speech to text partials", "operator": "Brandon", "relevant": [], "note": "android stt"}
+{"query": "operator picker device unassign owner reassign", "operator": "Brandon", "relevant": [], "note": "devices"}
+{"query": "MCP remote tool server OAuth Tailscale funnel bearer", "operator": "Brandon", "relevant": [], "note": "mcp remote"}
+{"query": "generation ember backdrop particles setting portal android", "operator": "Brandon", "relevant": [], "note": "ui feature"}
+{"query": "Google Workspace Docs Sheets Slides Drive Calendar tools", "operator": "Brandon", "relevant": [], "note": "workspace integration"}

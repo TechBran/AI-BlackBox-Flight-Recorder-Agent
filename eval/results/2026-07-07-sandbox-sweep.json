@@ -1,0 +1,240 @@
+{
+  "slug": "gemini-embedding-2",
+  "k": 10,
+  "results": [
+    {
+      "config": "baseline (production)",
+      "cfg": {},
+      "precision": 0.20416666666666672,
+      "recall": 0.5104166666666666,
+      "ndcg": 0.5734196769691032,
+      "noise_per_q": 7.958333333333333,
+      "decoy_per_q": 0.25,
+      "avg_delivered": 10.0,
+      "noise_by_channel": {
+        "both": 119,
+        "keyword": 38,
+        "semantic": 34
+      }
+    },
+    {
+      "config": "A: keyword=dedup",
+      "cfg": {
+        "keyword_mode": "dedup"
+      },
+      "precision": 0.20416666666666672,
+      "recall": 0.5104166666666666,
+      "ndcg": 0.5734196769691032,
+      "noise_per_q": 7.958333333333333,
+      "decoy_per_q": 0.08333333333333333,
+      "avg_delivered": 10.0,
+      "noise_by_channel": {
+        "both": 124,
+        "semantic": 67
+      }
+    },
+    {
+      "config": "A: keyword=gated@.55",
+      "cfg": {
+        "keyword_mode": "gated",
+        "keyword_gate": 0.55
+      },
+      "precision": 0.20416666666666672,
+      "recall": 0.5104166666666666,
+      "ndcg": 0.5734196769691032,
+      "noise_per_q": 7.958333333333333,
+      "decoy_per_q": 0.08333333333333333,
+      "avg_delivered": 10.0,
+      "noise_by_channel": {
+        "both": 58,
+        "semantic": 133
+      }
+    },
+    {
+      "config": "D: semantic_floor=.60",
+      "cfg": {
+        "semantic_floor": 0.6
+      },
+      "precision": 0.20000000000000007,
+      "recall": 0.5,
+      "ndcg": 0.5687177960795642,
+      "noise_per_q": 8.0,
+      "decoy_per_q": 0.25,
+      "avg_delivered": 10.0,
+      "noise_by_channel": {
+        "both": 26,
+        "keyword": 166
+      }
+    },
+    {
+      "config": "C: rerank preserve+floor.02 +varK",
+      "cfg": {
+        "rerank": "preserve",
+        "rerank_floor": 0.02,
+        "variable_k": true
+      },
+      "precision": 0.3976851851851854,
+      "recall": 0.9895833333333334,
+      "ndcg": 0.8764431170509904,
+      "noise_per_q": 6.0,
+      "decoy_per_q": 0.2916666666666667,
+      "avg_delivered": 9.958333333333334,
+      "noise_by_channel": {
+        "both": 80,
+        "keyword": 36,
+        "semantic": 28
+      }
+    },
+    {
+      "config": "C: rerank preserve+floor.03 +varK",
+      "cfg": {
+        "rerank": "preserve",
+        "rerank_floor": 0.03,
+        "variable_k": true
+      },
+      "precision": 0.41111111111111126,
+      "recall": 1.0,
+      "ndcg": 0.8822872467348937,
+      "noise_per_q": 5.833333333333333,
+      "decoy_per_q": 0.2916666666666667,
+      "avg_delivered": 9.833333333333334,
+      "noise_by_channel": {
+        "both": 57,
+        "keyword": 49,
+        "semantic": 34
+      }
+    },
+    {
+      "config": "A+B+C gated+floor.02+varK",
+      "cfg": {
+        "keyword_mode": "gated",
+        "keyword_gate": 0.55,
+        "rerank": "preserve",
+        "rerank_floor": 0.02,
+        "variable_k": true
+      },
+      "precision": 0.49351851851851863,
+      "recall": 1.0,
+      "ndcg": 0.8818380980290511,
+      "noise_per_q": 4.416666666666667,
+      "decoy_per_q": 0.2916666666666667,
+      "avg_delivered": 8.416666666666666,
+      "noise_by_channel": {
+        "both": 69,
+        "semantic": 37
+      }
+    },
+    {
+      "config": "A+B+C dedup+floor.02+varK",
+      "cfg": {
+        "keyword_mode": "dedup",
+        "rerank": "preserve",
+        "rerank_floor": 0.02,
+        "variable_k": true
+      },
+      "precision": 0.4976851851851853,
+      "recall": 1.0,
+      "ndcg": 0.8818380980290511,
+      "noise_per_q": 4.333333333333333,
+      "decoy_per_q": 0.2916666666666667,
+      "avg_delivered": 8.333333333333334,
+      "noise_by_channel": {
+        "both": 93,
+        "semantic": 11
+      }
+    },
+    {
+      "config": "FULL gated+floor.03+semfloor.55+varK",
+      "cfg": {
+        "keyword_mode": "gated",
+        "keyword_gate": 0.55,
+        "semantic_floor": 0.55,
+        "rerank": "preserve",
+        "rerank_floor": 0.03,
+        "variable_k": true
+      },
+      "precision": 0.6470238095238096,
+      "recall": 1.0,
+      "ndcg": 0.8839469076754966,
+      "noise_per_q": 2.4166666666666665,
+      "decoy_per_q": 0.16666666666666666,
+      "avg_delivered": 6.416666666666667,
+      "noise_by_channel": {
+        "both": 55,
+        "semantic": 3
+      }
+    },
+    {
+      "config": "noRerank baseline (fused)",
+      "cfg": {
+        "rerank": "off"
+      },
+      "precision": 0.21250000000000002,
+      "recall": 0.53125,
+      "ndcg": 0.5931165492040706,
+      "noise_per_q": 7.875,
+      "decoy_per_q": 0.5416666666666666,
+      "avg_delivered": 10.0,
+      "noise_by_channel": {
+        "both": 189
+      }
+    },
+    {
+      "config": "noRerank A+D gated+semfloor.62",
+      "cfg": {
+        "rerank": "off",
+        "keyword_mode": "gated",
+        "keyword_gate": 0.62,
+        "semantic_floor": 0.62
+      },
+      "precision": 0.6378637566137565,
+      "recall": 0.9375,
+      "ndcg": 0.8320913231238571,
+      "noise_per_q": 2.1666666666666665,
+      "decoy_per_q": 0.08333333333333333,
+      "avg_delivered": 5.916666666666667,
+      "noise_by_channel": {
+        "both": 52
+      }
+    },
+    {
+      "config": "noRerank A+B+D gated+cosfloor.65+varK",
+      "cfg": {
+        "rerank": "off",
+        "keyword_mode": "gated",
+        "keyword_gate": 0.62,
+        "semantic_floor": 0.62,
+        "output_cos_floor": 0.65,
+        "variable_k": true
+      },
+      "precision": 0.6508928571428568,
+      "recall": 0.8333333333333334,
+      "ndcg": 0.7707202653635569,
+      "noise_per_q": 1.8333333333333333,
+      "decoy_per_q": 0.0,
+      "avg_delivered": 5.166666666666667,
+      "noise_by_channel": {
+        "both": 44
+      }
+    },
+    {
+      "config": "noRerank dedup+cosfloor.65+varK",
+      "cfg": {
+        "rerank": "off",
+        "keyword_mode": "dedup",
+        "semantic_floor": 0.55,
+        "output_cos_floor": 0.65,
+        "variable_k": true
+      },
+      "precision": 0.6508928571428568,
+      "recall": 0.8333333333333334,
+      "ndcg": 0.7728499471862519,
+      "noise_per_q": 1.8333333333333333,
+      "decoy_per_q": 0.0,
+      "avg_delivered": 5.166666666666667,
+      "noise_by_channel": {
+        "both": 44
+      }
+    }
+  ]
+}

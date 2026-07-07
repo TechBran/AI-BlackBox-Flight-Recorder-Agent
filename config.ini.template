@@ -116,6 +116,27 @@ registry_floor_enabled = false
 rerank_enabled = false
 rerank_candidate_n = 40
 final_k = 10
+# ── Precision levers (plan 2026-07-07, validated: real-corpus precision 30%->55%,
+#    noise 45%->15%, recall not hurt). keyword_mode: fused (legacy — lexical-only
+#    ids RRF-injected) | dedup (agreement-only) | gated (keyword-only must clear
+#    cos_floor) | off. rerank_relevance: rankspace (legacy, order-only, absolute
+#    score discarded) | preserve (keep the 0-1 score AS relevance so rerank_floor
+#    can DROP junk instead of only reordering). rerank_floor: absolute cross-
+#    encoder-score floor (>0 = the reranker becomes a bouncer; drops sub-floor
+#    results AND the un-reranked tail). output_cos_floor: reranker-ABSENT relevance
+#    gate + gated-keyword gate (>0 lets a thin query return fewer than k). min_results:
+#    floor-underflow guard (a valid query always returns at least this many).
+#    Calibrate rerank_floor / cos_floor per (embedding model, reranker) with
+#    scripts/calibrate_retrieval.py. On a DENSE corpus cosine can't separate
+#    recoveries from noise (keep output_cos_floor=0, rely on the reranker); on a
+#    SPARSE corpus or a reranker-ABSENT (on-device) box, set output_cos_floor>0.
+#    Shipped default = the reranker-floor path (needs a live reranker; inert without
+#    one). rerank_floor 0.03 is the balanced Vertex operating point (0.02 recall-safe).
+keyword_mode = fused
+rerank_relevance = preserve
+rerank_floor = 0.03
+output_cos_floor = 0.0
+min_results = 1
 # OPT-IN provenance logging: when true, retrieve() prints one [RETRIEVAL] line
 # per final result (rrf relevance, age_days, recency_boost, final score, which
 # channels surfaced it). Observability only — does NOT change ranking. Off by
