@@ -36,14 +36,20 @@ DEVICES_FILE = Path(os.environ.get("BLACKBOX_DEVICE_REGISTRY_PATH", str(_LEGACY_
 class DeviceRegistry:
     """Singleton registry of all controllable devices on the Tailscale mesh."""
 
-    def __init__(self):
+    def __init__(self, path=None, legacy_path=None):
+        # Path injection is a fail-LOUD test seam (Fix #4): a test that forgets a path just
+        # gets an empty tmp store, never the live registry. Defaults resolve the env-derived
+        # module globals AT CONSTRUCTION time, so get_registry()/the live singleton and the
+        # existing global-monkeypatch tests are unchanged.
+        self._devices_file = path or DEVICES_FILE
+        self._legacy_file = legacy_path or _LEGACY_DEVICES_FILE
         self._devices: Dict[str, Device] = {}
         # Guards the in-memory map + the file write against concurrent mutation
         # (set_primary_device clears-then-sets across devices — must be atomic).
         # Reentrant so a method may nest a helper that also takes the lock.
         self._lock = threading.RLock()
         # Self-create the store's parent dir so a fresh / relocated box just works (M2.1).
-        os.makedirs(DEVICES_FILE.parent, exist_ok=True)
+        os.makedirs(self._devices_file.parent, exist_ok=True)
         self._load_from_file()
         self._dedupe_primaries()
 
@@ -61,32 +67,43 @@ class DeviceRegistry:
         """
         source = None
         migrating = False
-        if DEVICES_FILE.exists():
-            source = DEVICES_FILE
-        elif _LEGACY_DEVICES_FILE != DEVICES_FILE and _LEGACY_DEVICES_FILE.exists():
-            source = _LEGACY_DEVICES_FILE
+        if self._devices_file.exists():
+            source = self._devices_file
+        elif self._legacy_file != self._devices_file and self._legacy_file.exists():
+            source = self._legacy_file
             migrating = True
         if source is not None:
-            with open(source) as f:
-                data = json.load(f)
-            for row in data.get("devices", []):
-                try:
-                    device = Device.from_dict(row)
-                except Exception as e:
-                    rid = row.get("id", "?") if isinstance(row, dict) else "?"
-                    print(f"[DEVICE REGISTRY] Skipping malformed/unknown device row "
-                          f"{rid!r}: {e}")
-                    continue
-                self._devices[device.id] = device
-            if migrating:
-                # Persist the migrated rows to the NEW (configured) path; keeps the
-                # existing malformed-row skip behavior (only parsed rows are re-saved).
-                # FOOTGUN: the legacy file is left in place (not deleted), so later
-                # UNSETTING BLACKBOX_DEVICE_REGISTRY_PATH reverts to the now-stale legacy
-                # store rather than the migrated one.
-                self._save_to_file()
-                print(f"[DEVICE REGISTRY] Migrated {len(self._devices)} devices from "
-                      f"legacy {source} -> {DEVICES_FILE}")
+            # Fix #2: a truncated / malformed TOP-LEVEL file must not abort registry
+            # construction (→ service won't boot). Guard the open+parse: on a JSON/OS
+            # error, log + start empty rather than raise. The PER-ROW malformed-row skip
+            # below is a SEPARATE concern (one bad row can't strand the rest).
+            data = None
+            try:
+                with open(source) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[DEVICE REGISTRY] WARNING: could not parse {source} "
+                      f"({e}); starting with an empty registry")
+                self._devices = {}
+            if data is not None:
+                for row in data.get("devices", []):
+                    try:
+                        device = Device.from_dict(row)
+                    except Exception as e:
+                        rid = row.get("id", "?") if isinstance(row, dict) else "?"
+                        print(f"[DEVICE REGISTRY] Skipping malformed/unknown device row "
+                              f"{rid!r}: {e}")
+                        continue
+                    self._devices[device.id] = device
+                if migrating:
+                    # Persist the migrated rows to the NEW (configured) path; keeps the
+                    # existing malformed-row skip behavior (only parsed rows are re-saved).
+                    # FOOTGUN: the legacy file is left in place (not deleted), so later
+                    # UNSETTING BLACKBOX_DEVICE_REGISTRY_PATH reverts to the now-stale legacy
+                    # store rather than the migrated one.
+                    self._save_to_file()
+                    print(f"[DEVICE REGISTRY] Migrated {len(self._devices)} devices from "
+                          f"legacy {source} -> {self._devices_file}")
         print(f"[DEVICE REGISTRY] Loaded {len(self._devices)} devices")
 
     def _dedupe_primaries(self):
@@ -122,7 +139,7 @@ class DeviceRegistry:
         """
         with self._lock:
             data = {"devices": [d.to_dict() for d in self._devices.values()]}
-            dir_path = DEVICES_FILE.parent
+            dir_path = self._devices_file.parent
             os.makedirs(dir_path, exist_ok=True)  # defensive: dir may not exist yet (M2.1)
             fd, tmp_name = tempfile.mkstemp(
                 dir=str(dir_path), prefix=".devices-", suffix=".json.tmp")
@@ -131,7 +148,7 @@ class DeviceRegistry:
                     json.dump(data, f, indent=2)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(tmp_name, DEVICES_FILE)
+                os.replace(tmp_name, self._devices_file)
                 # fsync the directory so the rename (not just the file bytes) survives
                 # a crash. Best-effort — some filesystems reject a dir fsync.
                 try:
@@ -559,8 +576,19 @@ class DeviceRegistry:
                 # FOOTGUN: if Tailscale RECYCLES an IP to a genuinely-different node, this
                 # merges the new node's liveness onto the stale row; recoverable by
                 # reassigning the device or running normalize() to split/clean it up.
+                # Fix #5: when SEVERAL existing rows share this peer's IP, prefer the row
+                # whose stored DNS slug matches the peer's CURRENT dns_name (the row that
+                # already represents this — possibly renamed — device); fall back to the
+                # first match if none is DNS-consistent. Ownership handling is unchanged
+                # (liveness-only update below; collision surfaced in results).
+                same_ip = [d for d in self._devices.values() if d.tailscale_ip == ipv4]
+                incoming_slug = (dns_slug or "").strip().lower()
                 ip_match = next(
-                    (d for d in self._devices.values() if d.tailscale_ip == ipv4), None)
+                    (d for d in same_ip
+                     if incoming_slug and (
+                         ((d.metadata or {}).get("tailscale_dns", "") or "")
+                         .split(".")[0].strip().lower() == incoming_slug)),
+                    same_ip[0] if same_ip else None)
                 if ip_match is not None:
                     ip_match.tailscale_ip = ipv4
                     ip_match.status = DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE

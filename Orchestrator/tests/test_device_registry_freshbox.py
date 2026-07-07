@@ -201,3 +201,74 @@ def test_sync_new_peer_ip_collision_updates_existing_not_minted(fresh_registry, 
     assert a.owner == "Brandon"
     assert a.is_primary is True
     assert a.metadata["tailscale_dns"] == "renamed-fold.tailnet-abc.ts.net."
+
+
+# ── Fix #5: DNS-preferred same-IP collision on sync ──
+
+def test_sync_ip_collision_prefers_dns_consistent_row(fresh_registry, monkeypatch):
+    # TWO existing rows share the incoming peer's IP (100.0.0.9) under DIFFERENT ids —
+    # neither id is the incoming slug "renamed-fold", so the new-peer IP-collision branch
+    # fires. Row B's stored tailscale_dns matches the incoming peer's dns_name; row A's
+    # does not. The DNS-consistent row (B) must be the one updated, not the first match (A).
+    fresh_registry.add_device(Device(
+        id="fold-first", name="Fold First", tailscale_ip="100.0.0.9",
+        device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB, owner="Brandon",
+        metadata={"tailscale_dns": "fold-first.tailnet-abc.ts.net."}))
+    fresh_registry.add_device(Device(
+        id="fold-second", name="Fold Second", tailscale_ip="100.0.0.9",
+        device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB, owner="Brandon",
+        metadata={"tailscale_dns": "renamed-fold.tailnet-abc.ts.net."}))
+    _mock_tailscale(monkeypatch, COLLISION_STATUS)
+
+    results = asyncio.run(fresh_registry.sync_from_tailscale())
+    # No NEW row minted for the renamed peer.
+    assert fresh_registry.get_device("renamed-fold") is None
+    assert len(fresh_registry.get_all_devices()) == 2
+    # The DNS-consistent row (fold-second) is the one updated in place...
+    assert results.get("fold-second") == "ip_collision"
+    # ...NOT the first-inserted match (fold-first), which stays untouched.
+    assert results.get("fold-first") != "ip_collision"
+    assert (fresh_registry.get_device("fold-first").metadata["tailscale_dns"]
+            == "fold-first.tailnet-abc.ts.net.")
+
+
+# ── Fix #2: corrupt / empty devices.json must not crash boot ──
+
+def test_corrupt_devices_file_does_not_crash(tmp_path, monkeypatch):
+    corrupt = tmp_path / "devices.json"
+    corrupt.write_text("{ not json")
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", corrupt)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
+    monkeypatch.setattr(reg_mod, "_registry", None)
+    reg = reg_mod.DeviceRegistry()          # must NOT raise on a malformed top-level file
+    assert reg.get_all_devices() == []      # started with an empty registry
+
+
+def test_empty_devices_file_does_not_crash(tmp_path, monkeypatch):
+    empty = tmp_path / "devices.json"
+    empty.write_text("")                    # 0-byte file → json.load raises
+    monkeypatch.setattr(reg_mod, "DEVICES_FILE", empty)
+    monkeypatch.setattr(reg_mod, "_LEGACY_DEVICES_FILE", tmp_path / "legacy-devices.json")
+    monkeypatch.setattr(reg_mod, "_registry", None)
+    reg = reg_mod.DeviceRegistry()          # must NOT raise
+    assert reg.get_all_devices() == []
+
+
+# ── Fix #4: constructor path injection (fail-loud test seam) ──
+
+def test_constructor_path_injection_isolates(tmp_path):
+    # No global monkeypatching at all — inject BOTH paths directly. Proves writes land in
+    # the injected path (not the module default / live store) and the seam is self-contained.
+    tmp_a = tmp_path / "a" / "devices.json"
+    tmp_b = tmp_path / "b" / "legacy-devices.json"
+    reg = reg_mod.DeviceRegistry(path=tmp_a, legacy_path=tmp_b)
+    assert reg.get_all_devices() == []      # neither injected path exists yet → empty
+    reg.add_device(Device(id="inj", name="Inj", tailscale_ip="100.9.9.9",
+                          device_type=DeviceType.ANDROID, protocol=DeviceProtocol.ADB,
+                          owner=""))
+    assert tmp_a.exists()                   # write went to the INJECTED path
+    saved = json.loads(tmp_a.read_text())
+    assert [d["id"] for d in saved["devices"]] == ["inj"]
+    # A fresh registry over the SAME injected paths sees the persisted device.
+    reloaded = reg_mod.DeviceRegistry(path=tmp_a, legacy_path=tmp_b)
+    assert reloaded.get_device("inj") is not None
