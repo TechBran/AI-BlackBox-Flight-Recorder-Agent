@@ -222,10 +222,21 @@ fun UpdatesScreen(
 
             // Read-only reranker status line — the selector moved to the
             // onboarding wizard; this only surfaces the current reranker state.
-            // Absent unless /rerank/status is reachable; a failed fetch leaves
-            // rerankStatus null and never breaks this screen. Body filled in 2.2.
+            // Rendered at the TOP LEVEL (a standalone card, NOT nested in
+            // EmbeddingsCard — which renders nothing on a healthy box and would
+            // hide a silent reranker preflight failure exactly when it needs
+            // surfacing). A failed /rerank/status fetch leaves rerankStatus null
+            // → the line is simply absent and never breaks this screen.
             rerankStatus?.let { rr ->
-                // RerankStatusLine(rr, onManage) added in Task 2.2.
+                RerankStatusLine(
+                    status = rr,
+                    onManage = {
+                        view.performPressFeedback()
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=embeddings"))
+                        )
+                    },
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -539,6 +550,41 @@ private fun EmbeddingsManageButton(onManage: () -> Unit) {
 private fun embeddingsProgressLine(job: EmbeddingsJob): String {
     val cancelling = if (job.cancelRequested) " (cancelling…)" else ""
     return "Re-embedding ${job.done}/${job.total}…$cancelling"
+}
+
+// ── Reranker status line (read-only) ───────────────────────────────────
+//
+// The tier/key-gated selector moved to the onboarding wizard; the updates
+// panel now only *reports* the reranker's state. Keyed on `available` so a
+// preflight-failed reranker reads "not in use" even while `enabled` — the
+// whole reason this renders unconditionally at the top level (a healthy
+// EmbeddingsCard shows no card, so nesting would swallow that signal).
+// [Manage] reuses the same wizard hand-off EmbeddingsManageButton uses; M4
+// converts these onboarding deep-links to an in-app WebView later.
+
+@Composable
+private fun RerankStatusLine(status: RerankStatus, onManage: () -> Unit) {
+    val (text, accent) = when {
+        status.enabled && status.available ->
+            "Reranking: ON — ${status.provider}/${status.model}" to OkGreen
+        status.enabled && !status.available ->
+            "Reranking: ON — not in use" to WarnAmber
+        else -> "Reranking: OFF" to Neutral500
+    }
+    Spacer(Modifier.height(16.dp))
+    Card(accent) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text,
+                color = BbxWhite,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = onManage) { Text("Manage", color = BbxAccent) }
+        }
+    }
 }
 
 // ── Card primitives ────────────────────────────────────────────────────

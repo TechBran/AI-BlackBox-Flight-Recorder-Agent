@@ -47,6 +47,24 @@ REQUIRED_LITERALS = [
     '"cancel_requested"',
 ]
 
+# The read-only reranker status line replaced the deleted selector card: the
+# status endpoint, the composable that renders it, and the "Reranking:" copy
+# must stay greppable in the Kotlin sources.
+RERANK_STATUS_LINE_LITERALS = [
+    "/rerank/status",       # the read-only status endpoint (UpdateRepository)
+    "RerankStatusLine",     # the composable that renders the line
+    "Reranking:",           # the status-line copy
+]
+
+# The reranker SELECTOR write path moved to the onboarding wizard — none of
+# these selector symbols may survive in the updates-screen sources.
+REMOVED_RERANK_SELECTOR_SYMBOLS = [
+    "selectRerank",         # the selector write call (ViewModel/Repository)
+    "/rerank/select",       # the selector write endpoint
+    "RerankCard",           # the deleted selector composable
+    "RerankOptionRow",      # the deleted per-model selector row
+]
+
 # Copy the spec requires VERBATIM in both the Portal card and the Android
 # card: the superseded-state explanation, minus the interpolated successor
 # label ("...transfer embeddings to <successor label> in the background...").
@@ -69,6 +87,32 @@ def test_android_card_references_embeddings_contract(literal):
         f"Android updates screen no longer references {literal!r} — the "
         "embeddings card has drifted from the backend contract "
         "(Orchestrator/routes/embeddings_routes.py / the wizard deep-link). "
+        f"Checked: {[p.name for p in KOTLIN_FILES]}"
+    )
+
+
+@pytest.mark.parametrize("literal", RERANK_STATUS_LINE_LITERALS)
+def test_android_renders_readonly_rerank_status_line(literal):
+    """The updates screen keeps a read-only reranker status line (fed by
+    GET /rerank/status) after the selector moved to the wizard."""
+    blob = _kotlin_blob()
+    assert literal in blob, (
+        f"Android updates screen no longer references {literal!r} — the "
+        "read-only reranker status line (RerankStatusLine, fed by "
+        "GET /rerank/status) has drifted or was removed. "
+        f"Checked: {[p.name for p in KOTLIN_FILES]}"
+    )
+
+
+@pytest.mark.parametrize("symbol", REMOVED_RERANK_SELECTOR_SYMBOLS)
+def test_android_reranker_selector_is_gone(symbol):
+    """The tier/key-gated reranker SELECTOR was removed from the updates screen
+    (selection lives in the onboarding wizard); only the status line remains."""
+    blob = _kotlin_blob()
+    assert symbol not in blob, (
+        f"Android updates screen still references {symbol!r} — the reranker "
+        "SELECTOR was removed (selection lives in the onboarding wizard); keep "
+        "only the read-only status line. "
         f"Checked: {[p.name for p in KOTLIN_FILES]}"
     )
 
