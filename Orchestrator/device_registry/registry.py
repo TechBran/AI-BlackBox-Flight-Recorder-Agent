@@ -130,6 +130,10 @@ class DeviceRegistry:
         return [d for d in self._devices.values() if d.protocol == protocol]
 
     def get_devices_by_owner(self, owner: str) -> List[Device]:
+        # Blank owner is the UNCLAIMED sentinel, not a query key — a blank-owner
+        # lookup must never return ALL unclaimed devices.
+        if not owner:
+            return []
         return [d for d in self._devices.values()
                 if d.owner.lower() == owner.lower()]
 
@@ -164,9 +168,10 @@ class DeviceRegistry:
         self._save_to_file()
         return device
 
-    def clear_owner(self, device_id: str) -> Optional[Device]:
+    def clear_owner(self, device_id: str, by: str = "") -> Optional[Device]:
         """Unclaim a device: blank its owner AND demote it as primary (a primary
-        must always have an owner), then persist. Returns the device or None."""
+        must always have an owner), then persist. ``by`` records WHO re-homed it
+        (provenance/logging). Returns the device or None."""
         with self._lock:
             d = self._devices.get(device_id)
             if not d:
@@ -174,7 +179,7 @@ class DeviceRegistry:
             d.owner = ""
             d.is_primary = False
             self._save_to_file()
-            print(f"[DEVICE REGISTRY] Unassigned {device_id}")
+            print(f"[DEVICE REGISTRY] Unassigned {device_id} by {by}")
             return d
 
     # ── M3: primary-device + default-provider (origin-aware routing support) ──

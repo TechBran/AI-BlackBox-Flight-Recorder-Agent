@@ -49,6 +49,16 @@ def test_clear_owner_unknown_device_returns_none(registry):
     assert registry.clear_owner("ghost") is None
 
 
+def test_clear_owner_already_unclaimed_is_idempotent_noop(registry):
+    # Unassigning an already-UNCLAIMED device is a harmless no-op: still returns the
+    # device, still owner=="" / is_primary False (no error, no state churn).
+    registry.clear_owner("brandon-fold6")          # first unassign
+    dev = registry.clear_owner("brandon-fold6")     # second unassign — idempotent
+    assert dev is not None
+    assert dev.owner == ""
+    assert dev.is_primary is False
+
+
 # ── M1.3: POST /devices/{id}/unassign route ──
 
 @pytest.fixture
@@ -85,6 +95,16 @@ def test_unassign_then_rehome_to_another_operator(client):
 def test_unassign_unknown_device_is_404(client):
     resp = client.post("/devices/ghost/unassign", json={"operator": "Brandon"})
     assert resp.status_code == 404
+
+
+def test_unassign_already_unclaimed_is_idempotent_200(client):
+    # Re-home Brandon's device away, then unassign the now-UNCLAIMED device again:
+    # still 200, still owner "" (idempotent no-op through the route).
+    client.post("/devices/brandon-fold6/unassign", json={"operator": "Brandon"})
+    resp = client.post("/devices/brandon-fold6/unassign", json={"operator": "Alice"})
+    assert resp.status_code == 200
+    assert resp.json()["device"]["owner"] in (None, "")
+    assert resp.json()["device"]["is_primary"] is False
 
 
 def test_unassign_requires_live_operator(client):
