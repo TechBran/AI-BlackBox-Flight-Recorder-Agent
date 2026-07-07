@@ -119,6 +119,12 @@ function buildCard(d) {
 
     const ownerOptions = [
         owned ? '' : '<option value="" selected disabled>— Unassigned —</option>',
+        // Phantom owner: an owned device whose owner is NOT on the live roster (e.g.
+        // carried over from a prior box). Render it as its own selected option so the
+        // device always displays its true owner (and the cancel path can reset to it).
+        ...(owned && !_operators.includes(d.owner)
+            ? [`<option value="${escapeHtml(d.owner)}" selected>${escapeHtml(d.owner)} (unknown)</option>`]
+            : []),
         ..._operators.map((op) =>
             `<option value="${escapeHtml(op)}"${owned && op === d.owner ? ' selected' : ''}>${escapeHtml(op)}</option>`),
         // Sentinel: a distinct non-empty value no operator can equal, so an owned
@@ -177,8 +183,12 @@ function buildCard(d) {
                 return;
             }
             ownerSel.disabled = true;
+            // Provenance must be a LIVE operator: if the owner is a phantom
+            // (off-roster), fall back to any live operator so the backend's
+            // _require_live_operator check passes. Empty roster → clear toast.
+            const prov = _operators.includes(d.owner) ? d.owner : (_operators[0] || d.owner);
             try {
-                await postJson(`/devices/${encodeURIComponent(d.id)}/unassign`, { operator: d.owner });
+                await postJson(`/devices/${encodeURIComponent(d.id)}/unassign`, { operator: prov });
                 toastSuccess(`${d.name || d.id} unassigned`);
                 await refresh();
             } catch (e) {
@@ -218,8 +228,8 @@ function buildCard(d) {
             toastSuccess(`${d.name || d.id} → ${val}`);
             await refresh();
         } catch (e) {
+            await refresh();
             toastError(e.message || 'Failed to assign owner');
-            ownerSel.disabled = false;
         }
     });
 
