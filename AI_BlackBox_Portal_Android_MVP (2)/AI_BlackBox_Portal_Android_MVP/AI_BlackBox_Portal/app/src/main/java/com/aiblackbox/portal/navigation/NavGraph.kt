@@ -76,11 +76,12 @@ fun BlackBoxNavGraph(
     /**
      * B5: the activity-scoped [UpdatesViewModel] shared with the top-bar
      * Updates badge (NativeMainActivity owns it). Threaded into the UPDATES
-     * destination so the screen and the badge observe ONE instance. Nullable
-     * (mirroring [chatViewModel]) only for the theoretical no-arg caller; the
-     * real caller always passes it.
+     * destination so the screen and the badge observe ONE instance. REQUIRED
+     * (non-null) on purpose: a caller that forgets to thread it would otherwise
+     * let the UPDATES composable mint a second, nav-scoped VM and desync the
+     * badge from the screen with NO compile error — so this is a hard param.
      */
-    updatesVm: UpdatesViewModel? = null,
+    updatesVm: UpdatesViewModel,
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onModelChange: (String) -> Unit = {},
@@ -219,9 +220,9 @@ fun BlackBoxNavGraph(
         composable(Routes.CONTACTS) { ContactsScreen(origin = origin, operator = operator) }
         composable(Routes.UPDATES) {
             // B5: use the activity-scoped instance so the top-bar badge and this
-            // screen share ONE VM. Fallback `viewModel()` only for the no-arg
-            // NavGraph caller (never hit from NativeMainActivity).
-            UpdatesScreen(viewModel = updatesVm ?: viewModel(), origin = origin)
+            // screen share ONE VM (updatesVm is a required param — no fallback,
+            // so a second nav-scoped instance can never be minted here).
+            UpdatesScreen(viewModel = updatesVm, origin = origin)
         }
         composable(Routes.LOCAL_MODEL_SETTINGS) {
             // On-device model settings: tune window/sampler, auto-warm, clear,
