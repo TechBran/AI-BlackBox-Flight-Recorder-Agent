@@ -137,6 +137,10 @@ rerank_relevance = preserve
 rerank_floor = 0.03
 output_cos_floor = 0.0
 min_results = 1
+# rerank passage source (M4): head (body head-cut) | window (the query-richest
+# body window — reranker judges each snapshot's most-relevant span, not just its
+# head; helps long snapshots whose relevant turn is past the head-cut). head = byte-identical.
+rerank_passage_mode = head
 # OPT-IN provenance logging: when true, retrieve() prints one [RETRIEVAL] line
 # per final result (rrf relevance, age_days, recency_boost, final score, which
 # channels surfaced it). Observability only — does NOT change ranking. Off by

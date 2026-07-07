@@ -21,6 +21,7 @@ surface (hybrid_retrieve / /fossil/hybrid / context_builder) — that is Phase 3
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -226,8 +227,37 @@ def _decode_snapshot_text(meta) -> "str | None":
         return None
 
 
+def _best_passage_window(body: str, query: str, width: int) -> str:
+    """Pick the `width`-char window of `body` richest in the query's terms (M4).
+
+    The default rerank passage is a blind head-cut (body[:width]); on a long
+    snapshot that clips the relevant turn before the reranker sees it. This
+    slides a window (half-width stride, cheap: O(len(body)/stride * n_terms))
+    and returns the span with the most query-term hits, so the cross-encoder
+    judges each snapshot's MOST-relevant body window instead of its head.
+    Falls back to the head-cut when the body already fits or the query has no
+    usable terms (byte-identical to head mode in those cases)."""
+    if len(body) <= width:
+        return body
+    terms = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2]
+    if not terms:
+        return body[:width]
+    low = body.lower()
+    stride = max(1, width // 2)
+    best_start, best_score = 0, -1
+    for start in range(0, len(body), stride):
+        win = low[start:start + width]
+        score = sum(win.count(t) for t in terms)
+        if score > best_score:
+            best_score, best_start = score, start
+    # A zero-hit body (only envelope/generic text matched) keeps the head — no
+    # window is more representative than another, so don't drift off the head.
+    return body[best_start:best_start + width] if best_score > 0 else body[:width]
+
+
 def _apply_rerank(query, ranked, index, rrf_c,
-                  rerank_relevance: str = "rankspace", rerank_floor: float = 0.0):
+                  rerank_relevance: str = "rankspace", rerank_floor: float = 0.0,
+                  passage_mode: str = "head"):
     """Cross-encoder rerank of the post-recency pool -> new relevance dict, or
     None to fall through un-reranked (never raises).
 
@@ -298,7 +328,9 @@ def _apply_rerank(query, ranked, index, rrf_c,
             # store are no longer consulted for passage building (M13: dropped
             # from this signature); the ordinal fetch is kept upstream in
             # retrieve() for provenance mode.
-            passages.append(extract_snapshot_content(text)[:passage_chars])
+            body = extract_snapshot_content(text)
+            passages.append(_best_passage_window(body, query, passage_chars)
+                            if passage_mode == "window" else body[:passage_chars])
         scores = _rerank.score(query, passages)
         if scores is None or len(scores) != len(passages):
             _log_rerank_fallthrough("scorer returned no usable scores")
@@ -392,6 +424,7 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     keyword_mode = CFG.get("retrieval", "keyword_mode", fallback="fused").strip().lower()
     rerank_relevance = CFG.get("retrieval", "rerank_relevance", fallback="rankspace").strip().lower()
     rerank_floor = _resolve_rerank_floor()
+    rerank_passage_mode = CFG.get("retrieval", "rerank_passage_mode", fallback="head").strip().lower()
     min_results = CFG.getint("retrieval", "min_results", fallback=0)
     # Rerank gate resolves sidecar > config (M8): a wizard/Portal selection
     # (POST /rerank/select) that flips `enabled` in rerank.json turns the rerank
@@ -542,7 +575,8 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     #     silently (logged once) to the un-reranked ranking above.
     if rerank_enabled:
         reranked_rel = _apply_rerank(query, ranked, index, rrf_c,
-                                     rerank_relevance, rerank_floor)
+                                     rerank_relevance, rerank_floor,
+                                     rerank_passage_mode)
         if reranked_rel is not None:
             relevance = reranked_rel
             ranked = apply_recency_tiebreak(

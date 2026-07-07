@@ -171,6 +171,29 @@ def test_rerank_preserve_floor_drops_low_score(world, monkeypatch):
     assert "C" not in got
 
 
+# ── M4: best-window rerank passage ────────────────────────────────────────────
+
+def test_best_window_returns_body_when_short():
+    assert retrieval._best_passage_window("short body", "anything", 100) == "short body"
+
+
+def test_best_window_head_when_no_query_terms():
+    b = "a" * 500
+    assert retrieval._best_passage_window(b, "  ??  ", 100) == b[:100]
+
+
+def test_best_window_finds_deep_relevant_span_not_head():
+    body = ("generic intro text " * 30) + " THE_ANSWER quorptext marker " + ("filler " * 30)
+    win = retrieval._best_passage_window(body, "quorptext answer", width=60)
+    assert "quorptext" in win.lower()          # picked the deep span…
+    assert not win.startswith("generic intro")  # …not the head-cut
+
+
+def test_best_window_stays_on_head_when_no_term_hits():
+    body = "aaaa " * 200  # body has none of the query terms anywhere
+    assert retrieval._best_passage_window(body, "zzzz yyyy", 80) == body[:80]
+
+
 def retrieve_hermetic():
     return retrieval.retrieve("q", operator="alice", k=10, store=store(),
                               query_vector=[1.0, 0.0, 0.0, 0.0])
