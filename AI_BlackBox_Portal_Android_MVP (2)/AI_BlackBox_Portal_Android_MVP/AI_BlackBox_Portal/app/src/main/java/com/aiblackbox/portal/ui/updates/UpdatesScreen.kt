@@ -6,7 +6,6 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,7 +32,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -44,9 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,13 +59,9 @@ import com.aiblackbox.portal.ui.feedback.performPressFeedback
 import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import com.aiblackbox.portal.data.model.EmbeddingsJob
 import com.aiblackbox.portal.data.model.EmbeddingsStatus
-import com.aiblackbox.portal.data.model.RerankAction
-import com.aiblackbox.portal.data.model.RerankModel
 import com.aiblackbox.portal.data.model.RerankStatus
 import com.aiblackbox.portal.data.model.UpdateCommit
 import com.aiblackbox.portal.data.model.UpdateStatus
-import com.aiblackbox.portal.data.model.rerankActionFor
-import com.aiblackbox.portal.data.model.tierModels
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxDim
@@ -104,8 +96,6 @@ fun UpdatesScreen(
     val embeddingsUpdateInFlight by viewModel.embeddingsUpdateInFlight.collectAsState()
     val embeddingsError by viewModel.embeddingsError.collectAsState()
     val rerankStatus by viewModel.rerankStatus.collectAsState()
-    val rerankBusy by viewModel.rerankBusy.collectAsState()
-    val rerankError by viewModel.rerankError.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val view = LocalView.current
@@ -130,14 +120,6 @@ fun UpdatesScreen(
         embeddingsError?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearEmbeddingsError()
-        }
-    }
-
-    // One-shot error surface for the /rerank/select POST.
-    LaunchedEffect(rerankError) {
-        rerankError?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.clearRerankError()
         }
     }
 
@@ -238,40 +220,12 @@ fun UpdatesScreen(
                 )
             }
 
-            // Reranker selector card — surface 3/3 (parity with the M11 Portal
-            // card + the M10.1 wizard selector). Absent unless /rerank/status is
-            // reachable; a failed fetch leaves rerankStatus null and never
-            // breaks this screen.
+            // Read-only reranker status line — the selector moved to the
+            // onboarding wizard; this only surfaces the current reranker state.
+            // Absent unless /rerank/status is reachable; a failed fetch leaves
+            // rerankStatus null and never breaks this screen. Body filled in 2.2.
             rerankStatus?.let { rr ->
-                RerankCard(
-                    status = rr,
-                    busy = rerankBusy,
-                    onSelect = { provider, model, apiKey ->
-                        view.performPressFeedback()
-                        viewModel.selectRerank(provider, model, enabled = true, apiKey = apiKey)
-                    },
-                    onTurnOff = {
-                        view.performPressFeedback()
-                        viewModel.selectRerank(
-                            provider = rr.provider ?: return@RerankCard,
-                            model = rr.model ?: return@RerankCard,
-                            enabled = false,
-                        )
-                    },
-                    onOpenApiKeys = {
-                        view.performPressFeedback()
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("$origin/onboarding/?step=api_keys"))
-                        )
-                    },
-                    onOpenVertexSetup = {
-                        view.performPressFeedback()
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW,
-                                Uri.parse("$origin/onboarding/?step=optional_integrations"))
-                        )
-                    },
-                )
+                // RerankStatusLine(rr, onManage) added in Task 2.2.
             }
 
             Spacer(Modifier.height(16.dp))
@@ -585,201 +539,6 @@ private fun EmbeddingsManageButton(onManage: () -> Unit) {
 private fun embeddingsProgressLine(job: EmbeddingsJob): String {
     val cancelling = if (job.cancelRequested) " (cancelling…)" else ""
     return "Re-embedding ${job.done}/${job.total}…$cancelling"
-}
-
-// ── Reranker selector card (M12: surface 3/3) ─────────────────────────
-//
-// Mirrors the M11 Portal card (_rerankCardHtml/_onRerankSelect in
-// updates-manager.js) and the M10.1 wizard selector: a tier-driven picker
-// over status.model_catalog. Tier-gate to this box's hardware tier; gate
-// cloud/LLM selectability on each model's key_present. Android's one addition
-// over the Portal: an un-keyed Voyage/Cohere entry offers an inline paste
-// field → POST /rerank/select WITH api_key (the endpoint writes it to .env).
-// Un-keyed LLM entries deep-link the API-Keys step (frontier keys live there),
-// and Vertex (GCP service account) deep-links the Portal — SA JSON upload on
-// mobile is disproportionate. Selecting a keyed provider POSTs NO api_key.
-
-@Composable
-private fun RerankCard(
-    status: RerankStatus,
-    busy: Boolean,
-    onSelect: (provider: String, model: String, apiKey: String?) -> Unit,
-    onTurnOff: () -> Unit,
-    onOpenApiKeys: () -> Unit,
-    onOpenVertexSetup: () -> Unit,
-) {
-    Spacer(Modifier.height(16.dp))
-    Card(BbxAccent) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Reranker", color = BbxWhite, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Spacer(Modifier.width(8.dp))
-            ShaChip("${status.tier ?: "?"} tier")
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Optional cross-encoder that re-orders search results for sharper " +
-                "recall. Your memory works without it.",
-            color = BbxDim,
-            fontSize = 13.sp,
-        )
-        // Tier-aware "which should I pick?" guidance (free-first; leads with the
-        // local reranker on capable hardware). Parity with the web selectors.
-        status.tierGuidance?.let { guidance ->
-            Spacer(Modifier.height(6.dp))
-            Text(
-                guidance,
-                color = Color(0xFFBEDCFF),
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
-            )
-        }
-
-        val models = status.tierModels()
-        if (models.isEmpty()) {
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "No reranker options for this hardware tier yet — add a Voyage or " +
-                    "Cohere key in the API Keys step to unlock the cloud reranker.",
-                color = Neutral500,
-                fontSize = 13.sp,
-            )
-        } else {
-            models.forEach { m ->
-                Spacer(Modifier.height(14.dp))
-                RerankOptionRow(
-                    model = m,
-                    status = status,
-                    busy = busy,
-                    onSelect = onSelect,
-                    onOpenApiKeys = onOpenApiKeys,
-                    onOpenVertexSetup = onOpenVertexSetup,
-                )
-            }
-        }
-
-        if (status.enabled) {
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = onTurnOff,
-                enabled = !busy,
-                colors = ButtonDefaults.buttonColors(containerColor = Neutral200, contentColor = BbxWhite),
-                shape = RoundedCornerShape(RadiusSm),
-            ) { Text("Turn reranking off") }
-        }
-    }
-}
-
-@Composable
-private fun RerankOptionRow(
-    model: RerankModel,
-    status: RerankStatus,
-    busy: Boolean,
-    onSelect: (provider: String, model: String, apiKey: String?) -> Unit,
-    onOpenApiKeys: () -> Unit,
-    onOpenVertexSetup: () -> Unit,
-) {
-    val action = rerankActionFor(model, status)
-
-    // Label + optional "Active" badge.
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(model.label.ifBlank { model.slug }, color = BbxWhite, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        if (action == RerankAction.ACTIVE) {
-            Spacer(Modifier.width(8.dp))
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(OkGreen.copy(alpha = 0.18f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            ) { Text("Active", color = OkGreen, fontSize = 10.sp, fontWeight = FontWeight.SemiBold) }
-        }
-    }
-
-    // Cost / quality note (+ preflight latency when this is the active model).
-    val notes = buildList {
-        if (model.costNote.isNotBlank()) add(model.costNote)
-        if (model.qualityNote.isNotBlank()) add(model.qualityNote)
-        if (action == RerankAction.ACTIVE) {
-            status.preflight?.latencyMs?.let { add("preflight ${it.toInt()} ms") }
-        }
-    }
-    if (notes.isNotEmpty()) {
-        Spacer(Modifier.height(2.dp))
-        Text(notes.joinToString(" · "), color = Neutral500, fontSize = 12.sp)
-    }
-
-    Spacer(Modifier.height(6.dp))
-    when (action) {
-        RerankAction.ACTIVE -> Text("Selected", color = OkGreen, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-
-        RerankAction.SELECTABLE -> Button(
-            onClick = { onSelect(model.provider, model.slug, null) },
-            enabled = !busy,
-            colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
-            shape = RoundedCornerShape(RadiusSm),
-        ) { Text("Use this reranker", color = BbxWhite, fontWeight = FontWeight.SemiBold) }
-
-        RerankAction.NEEDS_KEY_PASTE -> {
-            var key by remember(model.slug) { mutableStateOf("") }
-            OutlinedTextField(
-                value = key,
-                onValueChange = { key = it },
-                singleLine = true,
-                label = { Text("Paste ${rerankKeyLabel(model)} API key") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            Button(
-                onClick = { onSelect(model.provider, model.slug, key.trim()) },
-                enabled = !busy && key.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = BbxAccent),
-                shape = RoundedCornerShape(RadiusSm),
-            ) { Text("Add key & use", color = BbxWhite, fontWeight = FontWeight.SemiBold) }
-        }
-
-        RerankAction.NEEDS_KEY_LINK -> RerankLink(
-            "Uses your ${rerankKeyLabel(model)} key — add it in the API Keys step ↗",
-            onOpenApiKeys,
-        )
-
-        RerankAction.VERTEX_ADVANCED -> RerankLink(
-            "Advanced — set up a Google service account in the Portal ↗",
-            onOpenVertexSetup,
-        )
-
-        RerankAction.LOCAL_UNAVAILABLE -> Text(
-            "Run the installer's reranker step to enable the local GPU reranker.",
-            color = Neutral500,
-            fontSize = 12.sp,
-        )
-    }
-}
-
-@Composable
-private fun RerankLink(text: String, onClick: () -> Unit) {
-    Text(
-        text,
-        color = InfoBlue,
-        fontSize = 13.sp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(RadiusSm))
-            .background(InfoBlue.copy(alpha = 0.10f))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-    )
-}
-
-/** Friendly provider-key name for the "add your <X> key" copy. */
-private fun rerankKeyLabel(m: RerankModel): String = when (m.provider) {
-    "voyage" -> "Voyage"
-    "cohere" -> "Cohere"
-    else -> when (m.keyEnv) {
-        "GOOGLE_API_KEY" -> "Google"
-        "OPENAI_API_KEY" -> "OpenAI"
-        "ANTHROPIC_API_KEY" -> "Anthropic"
-        "XAI_API_KEY" -> "xAI"
-        else -> "provider"
-    }
 }
 
 // ── Card primitives ────────────────────────────────────────────────────
