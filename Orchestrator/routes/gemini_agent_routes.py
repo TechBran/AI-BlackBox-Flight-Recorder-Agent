@@ -28,7 +28,7 @@ from Orchestrator.agent_context import (
     retrieve_for_agent,
 )
 from Orchestrator.checkpoint import app
-from Orchestrator.config import GEMINI_API_KEY, USERS_DEFAULT
+from Orchestrator.config import GEMINI_API_KEY, current_default
 from Orchestrator.utils.paths import blackbox_root
 from Orchestrator.volume import now_utc_iso
 
@@ -471,7 +471,7 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
             print(f"[GEMINI-AGENT] Received: {msg_type}")
 
             if msg_type == "prompt":
-                operator = data.get("operator", USERS_DEFAULT)
+                operator = data.get("operator", current_default())
                 default_dir = str(blackbox_root())
                 working_dir = data.get("working_dir") or default_dir
                 prompt_text = data.get("text", "")
@@ -640,7 +640,7 @@ async def gemini_agent_websocket(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"type": "session_ended", "data": "Session ended"})
 
             elif msg_type == "reconnect":
-                operator = data.get("operator", USERS_DEFAULT)
+                operator = data.get("operator", current_default())
 
                 with gemini_agent_lock:
                     session = GEMINI_AGENT_SESSIONS.get(session_id)

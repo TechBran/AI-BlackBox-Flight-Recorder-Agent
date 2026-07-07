@@ -40,7 +40,7 @@ from Orchestrator.agent_context import (
     resolve_operator,
     retrieve_for_agent,
 )
-from Orchestrator.config import USERS_DEFAULT
+from Orchestrator.config import current_default
 from Orchestrator.models import AGENT_AUTO_APPROVE_PATTERNS, AGENT_PERMISSION_PATTERNS, AgentSession, RegisteredApp
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.state import save_app_registry, save_operator_state, agent_lock, APP_REGISTRY, PERSISTED_AGENT_SESSIONS, AGENT_SESSIONS
@@ -819,7 +819,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             print(f"[AGENT] Received message type: {data.get('type')}")
 
             if data["type"] == "prompt":
-                operator = data.get("operator", USERS_DEFAULT)
+                operator = data.get("operator", current_default())
                 # Default to blackbox_poc folder instead of home directory
                 default_dir = str(blackbox_root())
                 working_dir = data.get("working_dir") or default_dir
@@ -1083,7 +1083,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
 
             elif data["type"] == "reconnect":
                 # Reconnect to existing session to resume streaming
-                operator = data.get("operator", USERS_DEFAULT)
+                operator = data.get("operator", current_default())
                 print(f"[AGENT] Reconnect request from operator: {operator}")
 
                 with agent_lock:

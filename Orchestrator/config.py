@@ -139,6 +139,15 @@ TTS_FORMAT    = CFG.get("audio","format",fallback="mp3").strip()
 TTS_TIMEOUT   = CFG.getint("audio","timeout_ms",fallback=120000)
 USERS_LIST     = [u.strip() for u in CFG.get("users","list",fallback="Brandon").split(",") if u.strip()]
 USERS_DEFAULT  = CFG.get("users","default",fallback=(USERS_LIST[0] if USERS_LIST else "Operator")).strip()
+
+
+def current_default() -> str:
+    """The live default operator. Reflects admin add/remove_operator updates to
+    USERS_DEFAULT without a restart (top-level `from config import USERS_DEFAULT`
+    captures a stale value; call this instead for request-time default resolution)."""
+    return USERS_DEFAULT
+
+
 INCLUDE_OTHERS = CFG.getboolean("context","include_other_operators",fallback=False)
 
 # Generative Model Config

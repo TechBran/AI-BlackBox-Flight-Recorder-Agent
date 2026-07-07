@@ -29,7 +29,7 @@ from Orchestrator.config import (
     GEMINI_MODEL_DEFAULT, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_AUTH_AVAILABLE,
     MANIFEST, OPENAI_API_KEY, OPENAI_MODEL_DEFAULT,
     SNAPSHOT_INDEX, START_RX, STT_MODEL, TTS_MODEL,
-    UPLOADS_DIR, USERS_DEFAULT, USERS_LIST, USE_CLOUD_TTS, VOL_PATH,
+    UPLOADS_DIR, USERS_DEFAULT, USERS_LIST, USE_CLOUD_TTS, VOL_PATH, current_default,
     XAI_API_KEY, XAI_MODEL_DEFAULT,
 )
 from Orchestrator.utils.models_cache import get_cached_or_fetch as _models_cache_get
@@ -993,7 +993,7 @@ def mint_manual(body: dict = Body(None)):
 
     body = body or {}
     operator = body.get("operator")
-    op = (operator or CURRENT_OPERATOR or USERS_DEFAULT).strip()
+    op = (operator or CURRENT_OPERATOR or current_default()).strip()
     content = body.get("content")
     snap_type = body.get("type", "normal")
 
@@ -1050,7 +1050,7 @@ def create_dev_snapshot(body: dict = Body(...)):
 async def create_checkpoint_manual(body: dict = Body(None)):
     """Create a manual checkpoint for the specified operator"""
     operator = (body or {}).get("operator") # Read operator from JSON body
-    op = (operator or CURRENT_OPERATOR or USERS_DEFAULT).strip()
+    op = (operator or CURRENT_OPERATOR or current_default()).strip()
     try:
         s = get_state(op)
         # Trigger checkpoint creation in background thread (fire-and-forget)

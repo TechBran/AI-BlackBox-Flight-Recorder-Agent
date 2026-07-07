@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from Orchestrator.config import USERS_DEFAULT
+from Orchestrator.config import current_default
 from Orchestrator.context_builder import build_fossil_context
 
 # Fence delimiters — single source of truth so all agent paths inject
@@ -44,11 +44,12 @@ def normalize_provenance(prov: Optional[Dict]) -> Dict[str, List[str]]:
 
 
 def resolve_operator(raw: Optional[str], log_prefix: str) -> str:
-    """Strip + fallback to USERS_DEFAULT with a loud warning if empty."""
+    """Strip + fallback to the live default operator with a loud warning if empty."""
     op = (raw or "").strip()
     if not op:
-        print(f"{log_prefix} WARNING: empty operator, falling back to USERS_DEFAULT={USERS_DEFAULT}")
-        return USERS_DEFAULT
+        default = current_default()
+        print(f"{log_prefix} WARNING: empty operator, falling back to default operator '{default}'")
+        return default
     return op
 
 
