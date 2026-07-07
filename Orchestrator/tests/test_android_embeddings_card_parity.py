@@ -147,3 +147,15 @@ def test_progress_line_copy_matches_portal():
     for needle in ("Re-embedding ", "(cancelling…)"):
         assert needle in portal_src, f"Portal lost progress copy {needle!r}"
         assert needle in blob, f"Android lost progress copy {needle!r}"
+
+
+def test_android_embeddings_job_has_progress_bar():
+    """The running embeddings job renders a visual progress bar (not just the
+    'Re-embedding N/M…' text) beside the progress line."""
+    kotlin_src = (
+        ANDROID_SRC / "ui" / "updates" / "UpdatesScreen.kt"
+    ).read_text(encoding="utf-8")
+    assert "LinearProgressIndicator" in kotlin_src, (
+        "UpdatesScreen.kt no longer renders a LinearProgressIndicator for the "
+        "embeddings migration job — the visual progress bar was removed."
+    )

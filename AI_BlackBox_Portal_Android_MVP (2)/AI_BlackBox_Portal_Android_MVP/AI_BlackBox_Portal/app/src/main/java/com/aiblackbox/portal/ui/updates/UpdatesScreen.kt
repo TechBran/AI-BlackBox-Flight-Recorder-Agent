@@ -30,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -474,6 +475,11 @@ private fun EmbeddingsCard(
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
                     )
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { if (job.total > 0) job.done.toFloat() / job.total else 0f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
                 Spacer(Modifier.height(12.dp))
                 EmbeddingsManageButton(onManage)
@@ -494,6 +500,11 @@ private fun EmbeddingsCard(
                     color = BbxDim,
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = { if (job.total > 0) job.done.toFloat() / job.total else 0f },
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(12.dp))
                 EmbeddingsManageButton(onManage)
