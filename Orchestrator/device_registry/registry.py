@@ -164,6 +164,19 @@ class DeviceRegistry:
         self._save_to_file()
         return device
 
+    def clear_owner(self, device_id: str) -> Optional[Device]:
+        """Unclaim a device: blank its owner AND demote it as primary (a primary
+        must always have an owner), then persist. Returns the device or None."""
+        with self._lock:
+            d = self._devices.get(device_id)
+            if not d:
+                return None
+            d.owner = ""
+            d.is_primary = False
+            self._save_to_file()
+            print(f"[DEVICE REGISTRY] Unassigned {device_id}")
+            return d
+
     # ── M3: primary-device + default-provider (origin-aware routing support) ──
 
     def get_primary_device(self, owner: str) -> Optional[Device]:

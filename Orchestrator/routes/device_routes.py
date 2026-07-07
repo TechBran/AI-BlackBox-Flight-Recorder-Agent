@@ -302,6 +302,19 @@ async def set_default_provider(device_id: str, body: DefaultProviderBody):
     return {"status": "provider_set", "device": device.to_dict()}
 
 
+@router.post("/{device_id}/unassign")
+async def unassign_operator(device_id: str, body: OperatorBody):
+    """Clear a device's owner (and primary flag) so it can be re-homed. Requires a
+    live operator in the body for provenance/logging; permitted within the
+    cooperative tailnet trust model (the UI confirms cross-operator re-homes)."""
+    _require_live_operator(body.operator)  # provenance; 400 on blank/system/unknown
+    registry = get_registry()
+    device = registry.clear_owner(device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail=f"Device not found: {device_id}")
+    return {"status": "unassigned", "device": device.to_dict()}
+
+
 @router.get("/{device_id}")
 async def get_device(device_id: str):
     registry = get_registry()
