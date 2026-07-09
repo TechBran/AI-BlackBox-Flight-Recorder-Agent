@@ -718,6 +718,96 @@ def _fetch_xai_models() -> dict | None:
     return _wrap("xai", models, "live") if models else None
 
 
+def _fetch_custom_models() -> dict:
+    """Live-merged catalog for user-registered OpenAI-compatible servers.
+
+    One GET {base_url}/models per ENABLED server, probed concurrently — a
+    dead LAN box must not serialize a 5s stall per server. Raw httpx on
+    purpose: the openai SDK's pydantic models silently DROP llama-swap's
+    additive data[].status extension ({"value": "loaded"|"unloaded"}), which
+    feeds the warm-dot UI in both frontends. Ids are alias-qualified
+    ("alias::model", custom_servers.qualify) so the chat router can resolve
+    the target server; per-model `server` + `status` fields are additive on
+    the locked _wrap envelope.
+
+    NEVER cached (get_available_models dispatches here BEFORE the
+    _models_cache_get call, by design): newly downloaded models must appear
+    immediately and the warm dot must be honest; the probe is an instant LAN
+    call. A dead server backfills its cached last_models (status None).
+    source = "live" iff at least one probe succeeded. Always returns an
+    envelope — an empty registry is an empty catalog, not an error.
+    """
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor
+    from Orchestrator.onboarding import custom_servers
+
+    servers = custom_servers.list_servers(enabled_only=True)
+
+    def _probe(srv: dict) -> list[tuple[str, str | None]] | None:
+        """[(model_id, status)] on success, None on any failure."""
+        try:
+            headers = {}
+            if srv.get("api_key"):
+                headers["Authorization"] = f"Bearer {srv['api_key']}"
+            resp = httpx.get(f"{srv['base_url']}/models",
+                             headers=headers, timeout=5.0)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as e:
+            print(f"[CUSTOM-MODELS] {srv.get('alias', '?')} probe failed: {e}")
+            return None
+        entries: list[tuple[str, str | None]] = []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        for item in data if isinstance(data, list) else []:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            # llama-swap extension; plain OpenAI payloads have no `status`.
+            status = item.get("status")
+            value = status.get("value") if isinstance(status, dict) else None
+            entries.append((model_id, value if isinstance(value, str) else None))
+        return entries
+
+    probed: list[list | None] = []
+    if servers:
+        with ThreadPoolExecutor(max_workers=min(8, len(servers))) as pool:
+            probed = list(pool.map(_probe, servers))
+
+    models: list[dict] = []
+    any_live = False
+    for srv, entries in zip(servers, probed):
+        alias = srv.get("alias", "")
+        if entries is None:
+            # Dead box: serve its cached last_models; warm status unknown.
+            cached_ids = srv.get("last_models")
+            entries = ([(m, None) for m in cached_ids if isinstance(m, str)]
+                       if isinstance(cached_ids, list) else [])
+        else:
+            any_live = True
+            try:
+                custom_servers.update_server(
+                    srv["id"], {"last_models": [mid for mid, _ in entries]})
+            except Exception as e:  # e.g. deleted mid-probe — just don't persist
+                print(f"[CUSTOM-MODELS] {alias} last_models persist skipped: {e}")
+        for model_id, status in entries:
+            models.append({
+                "id": custom_servers.qualify(alias, model_id),
+                "name": f"{model_id} ({alias})",
+                "server": alias,
+                "status": status,
+            })
+
+    out = _wrap("custom", models, "live" if any_live else "fallback")
+    # _wrap hardcodes default_id from the static _DEFAULT_MODEL map ("" for
+    # custom) and `cached` is normally stamped by the cache layer this
+    # provider bypasses — post-assign both to keep the envelope contract.
+    out["default_id"] = models[0]["id"] if models else ""
+    out["cached"] = False
+    return out
+
+
 def _fetch_cu_models() -> dict | None:
     """Merge the three vendor catalogs, filtered to CU-capable models.
 
@@ -826,6 +916,13 @@ def get_available_models(provider: str, operator: Optional[str] = None):
     if provider == "local":
         from Orchestrator.routes.local_routes import build_local_models_response
         return build_local_models_response(operator)
+
+    # `custom` (user-registered OpenAI-compatible servers) dispatches here for
+    # the same shadowing reason as `local` above, and BYPASSES models_cache
+    # entirely: fresh registry read + LAN probe on every call so newly
+    # downloaded models and the llama-swap warm status are always honest.
+    if provider == "custom":
+        return _fetch_custom_models()
 
     if provider not in _FALLBACK_MODELS:
         raise HTTPException(404, f"Unknown provider: {provider}")
