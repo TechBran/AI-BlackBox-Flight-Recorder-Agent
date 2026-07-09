@@ -534,6 +534,20 @@ export function updateModelDropdown(provider) {
         }
     });
 
+    // Empty catalog — today only reachable for custom (every other entry
+    // has a non-empty offline fallback), but the guard is generic so any
+    // future empty catalog degrades to a labeled placeholder instead of a
+    // zero-option <select>.
+    if (config.models.length === 0) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.disabled = true;
+        option.textContent = provider === "custom"
+            ? "(no custom servers configured)"
+            : "(no models available)";
+        modelEl.appendChild(option);
+    }
+
     console.log(`[ModelSelect] Dropdown now has ${modelEl.options.length} options`);
 
     // Restore selection if it exists for this provider, otherwise use default (Auto)
@@ -593,6 +607,10 @@ function buildHydratedModels(provider, rawModels, defaultId) {
         ];
     }
     if (provider === "custom") {
+        // No servers/models at all → no Auto entry either (nothing for the
+        // backend to resolve "" to); updateModelDropdown renders a disabled
+        // "(no custom servers configured)" placeholder for the empty array.
+        if (rawModels.length === 0) return [];
         const def = rawModels.find(m => m.id === defaultId);
         const defaultName = def ? (def.name || def.id) : (defaultId || "Latest");
         return [
@@ -632,33 +650,43 @@ export async function fetchAvailableModels(provider) {
     const skipCache = provider === "custom";  // always live — see docstring
 
     // Try sessionStorage cache first
-    if (!skipCache) try {
-        const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
-        if (cached && Date.now() - cached.ts < CACHE_TTL_MS && Array.isArray(cached.models)) {
-            MODEL_CONFIG[provider].models = buildHydratedModels(provider, cached.models, cached.default_id);
-            console.log(`[ModelSelect] Cache hit for ${provider} (${cached.models.length} models, age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
-            return true;
-        }
-    } catch (_) { /* corrupted cache — fall through to live fetch */ }
+    if (!skipCache) {
+        try {
+            const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
+            if (cached && Date.now() - cached.ts < CACHE_TTL_MS && Array.isArray(cached.models)) {
+                MODEL_CONFIG[provider].models = buildHydratedModels(provider, cached.models, cached.default_id);
+                console.log(`[ModelSelect] Cache hit for ${provider} (${cached.models.length} models, age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
+                return true;
+            }
+        } catch (_) { /* corrupted cache — fall through to live fetch */ }
+    }
 
     // Live fetch via backend (which itself has 10-min upstream cache)
     try {
         const response = await fetch(`/models/${provider}`);
         if (response.ok) {
             const data = await response.json();
-            if (data.models && data.models.length > 0) {
+            // Custom hydrates unconditionally: an EMPTY models list is real
+            // state (all servers removed in the wizard) and must clear the
+            // previously-hydrated roster — otherwise switching away and back
+            // would re-render deleted models forever (custom has no cache to
+            // expire). Other providers keep the >0 guard exactly: empty
+            // there means a degraded catalog, so the fallback is preserved.
+            if (Array.isArray(data.models) && (data.models.length > 0 || skipCache)) {
                 MODEL_CONFIG[provider].models = buildHydratedModels(provider, data.models, data.default_id);
                 // Cache the live result for 5 min (default_id rides along so
                 // cache-hit hydration can rebuild the CU Auto label). Custom
                 // is never cached — its status/roster must stay live.
-                if (!skipCache) try {
-                    sessionStorage.setItem(cacheKey, JSON.stringify({
-                        ts: Date.now(),
-                        models: data.models,
-                        default_id: data.default_id,
-                        source: data.source || "live"
-                    }));
-                } catch (_) { /* sessionStorage full or disabled — ignore */ }
+                if (!skipCache) {
+                    try {
+                        sessionStorage.setItem(cacheKey, JSON.stringify({
+                            ts: Date.now(),
+                            models: data.models,
+                            default_id: data.default_id,
+                            source: data.source || "live"
+                        }));
+                    } catch (_) { /* sessionStorage full or disabled — ignore */ }
+                }
                 console.log(`[ModelSelect] Fetched ${data.models.length} models for ${provider} (source=${data.source || "unknown"})`);
                 return true;
             }
@@ -675,7 +703,11 @@ export async function fetchAvailableModels(provider) {
  * fetchAvailableModels) so callers outside this module — e.g. the cron picker —
  * can populate their own <select> and resolve friendly names WITHOUT
  * reimplementing the fetch/cache. Each entry is { id, name, backend? }; the
- * first entry is always the `(Auto - …)` placeholder (id "").
+ * first entry is always the `(Auto - …)` placeholder (id "") — except for
+ * custom with zero configured servers, where the array is empty. Custom
+ * model names may carry a transient `🟠 ` load-status prefix: it reflects
+ * the load state at fetch time and is DISPLAY-ONLY — never parse or
+ * persist names; ids are the contract.
  *
  * @param {string} provider - canonical catalog key ("google"|"anthropic"|"openai"|"xai"|"custom"|"computer-use")
  * @returns {Array<{id: string, name: string, backend?: string}>} (empty array for unknown provider)
