@@ -428,6 +428,14 @@ def _model_to_provider(model: str) -> str:
     """Map a model name to the provider string expected by /chat."""
     m = model.lower()
 
+    # Task 5.2: an alias-qualified custom id ("alias::model") can only come
+    # from the custom-server registry — '::' appears in no other provider's
+    # ids — so derive "custom" instead of falling through to google (which
+    # would run the job on the wrong provider entirely). Checked FIRST: the
+    # alias/bare-model halves may contain any vendor substring (e.g.
+    # "mybox::computer-use-preview" is still a custom-server model).
+    if "::" in m:
+        return "custom"
     # M4.1c: CU sub-model ids map to "computer-use" so provider derivation of a
     # CU job stays correct even from the bare model. The "computer-use"
     # substring catches the gemini ("gemini-...computer-use") and openai
@@ -436,12 +444,6 @@ def _model_to_provider(model: str) -> str:
     # stored provider, not the model string.)
     if m in ("computer-use", "cu") or "computer-use" in m:
         return "computer-use"
-    # Task 5.2: an alias-qualified custom id ("alias::model") can only come
-    # from the custom-server registry — '::' appears in no other provider's
-    # ids — so derive "custom" instead of falling through to google (which
-    # would run the job on the wrong provider entirely).
-    if "::" in m:
-        return "custom"
     if any(tok in m for tok in ("claude", "anthropic", "sonnet", "opus", "haiku")):
         return "anthropic"
     if any(tok in m for tok in ("gpt", "openai", "o1", "o3", "o4")):
@@ -461,15 +463,15 @@ def _custom_default_model() -> str:
     config default (the registry is the only source and can change between
     fires), so an unusable registry RAISES RuntimeError with the same
     customer-facing wizard message the chat routes use. The manager's
-    _attempt_once catches it and records an error history row — the visible
-    skip-with-reason — instead of silently running the job on Gemini.
+    _attempt_once catches it and records an error history row (a failed run,
+    with the reason) instead of silently running the job on Gemini.
     """
     from Orchestrator.onboarding import custom_servers
 
     servers = custom_servers.list_servers(enabled_only=True)
     if not servers:
         msg = (
-            "cron job skipped: provider 'custom' has no resolvable default model — "
+            "cron job failed: provider 'custom' has no resolvable default model — "
             "No custom model servers configured — add one in the onboarding wizard"
         )
         logger.warning(msg)
@@ -479,7 +481,7 @@ def _custom_default_model() -> str:
     models = first.get("last_models") or []
     if not models:
         msg = (
-            "cron job skipped: provider 'custom' has no resolvable default model — "
+            "cron job failed: provider 'custom' has no resolvable default model — "
             f"Server '{first.get('alias', '')}' has no discovered models — "
             "validate it in the wizard"
         )

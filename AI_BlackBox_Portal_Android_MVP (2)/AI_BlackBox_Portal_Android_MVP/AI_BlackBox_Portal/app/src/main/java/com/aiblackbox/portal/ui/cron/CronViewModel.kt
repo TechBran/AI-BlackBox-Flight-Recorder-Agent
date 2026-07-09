@@ -534,9 +534,9 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         providerForCurrentList = key
 
         // Cache hit — instant, no network. EXCEPTION: "custom" never touches
-        // the cache (bypass-all-caches rule, mirrors Portal fetchAvailableModels):
-        // new downloads must appear immediately and the 🟠 warm-model prefix
-        // must reflect live load state, so every switch hits the network.
+        // the cache (bypass-all-caches rule): every switch hits the network so
+        // the roster is always fresh — new downloads appear immediately;
+        // mirrors the server-side never-cache design for /models/custom.
         val skipCache = key == "custom"
         val cached = modelsCache[key]
         val now = System.currentTimeMillis()
@@ -581,7 +581,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                     if (providerForCurrentList == key) {
                         _modelsForProvider.value = withAuto
                     }
-                    // Custom is never cached — its roster/warm-status must stay live.
+                    // Custom is never cached — its roster must stay live.
                     if (!skipCache) {
                         modelsCache[key] = System.currentTimeMillis() to withAuto
                     }

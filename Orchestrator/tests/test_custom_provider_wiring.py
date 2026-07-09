@@ -721,7 +721,7 @@ def test_worker_unknown_provider_still_raises(custom_registry, monkeypatch):
 # lazily at fire time: first enabled server's first discovered model,
 # alias-qualified (the exact /chat/stream + call_custom Auto semantics). An
 # unusable registry RAISES RuntimeError — the manager's _attempt_once records
-# it as an error history row (the visible skip-with-reason) — NEVER Gemini.
+# it as an error history row (a failed run, with the reason) — NEVER Gemini.
 
 
 def test_cron_provider_default_custom_resolves_registry_default(custom_registry):
@@ -782,6 +782,11 @@ def test_cron_model_to_provider_qualified_custom_id():
     create_cron_job tool validation both consume this)."""
     from Orchestrator.scheduler.executor import _model_to_provider
     assert _model_to_provider("lab::qwen-2") == "custom"
+    # The '::' check runs FIRST: a vendor substring inside the alias or bare
+    # model half (e.g. a CU-looking model served from a custom box) must not
+    # win the derivation.
+    assert _model_to_provider("mybox::computer-use-preview") == "custom"
     # No regression on the existing derivations.
     assert _model_to_provider("claude-opus-4-8") == "anthropic"
     assert _model_to_provider("gemini-3.1-pro-preview") == "google"
+    assert _model_to_provider("computer-use-preview") == "computer-use"
