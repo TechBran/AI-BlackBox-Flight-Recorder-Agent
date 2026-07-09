@@ -26,11 +26,15 @@ filter swallows a stop-path final, the bridge first sends an authoritative
 EMPTY stt_final ({"text":""} — or the carried rotation prefix on ElevenLabs) so
 the client discards, rather than resurrects, the filtered interim; a session
 that ends with NO stt_final at all means "the server never finalized" and the
-client may commit its newest partial as a fallback.
+client may commit its newest partial as a fallback. One narrow exception to
+"always the last frame": a Google worker stalled past the bounded post-stop
+flush (_GOOGLE_STOP_FLUSH_TIMEOUT_S) can emit a trailing final AFTER stt_done —
+the client has torn down by then, so that send fails and is logged, never
+double-applied.
 
-Providers
-stream interim text with opposite semantics (OpenAI incremental, Google
-cumulative), so InterimAccumulator normalizes both to this uniform contract.
+Providers stream interim text with opposite semantics (OpenAI incremental,
+Google cumulative), so InterimAccumulator normalizes both to this uniform
+contract.
 
 The endpoint resolves a provider via resolve_stt_provider() and bridges to either
 OpenAI's realtime transcription WS (gRPC-free, websockets lib) or Google Cloud
@@ -291,6 +295,13 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 try:
                     await asyncio.wait_for(relay, timeout=5.0)
                 except asyncio.TimeoutError:
+                    # Stop-path telemetry (parity with the elevenlabs/google
+                    # bridges): the drain expired, so NO final was delivered for
+                    # this stop. stt_done still goes out and the client commits
+                    # its newest partial as the fallback final.
+                    print(f"[STT/WS] openai stop ended WITHOUT a final "
+                          f"(relay drain expired, "
+                          f"stop_to_end_ms={_stop_latency_ms(stop_ts)})")
                     relay.cancel()
                     try:
                         await relay
@@ -624,10 +635,14 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
 # Bounded post-stop flush: after the client's stt_stop we half-close the gRPC
 # stream and Google flushes the trailing final — usually <2s, but the API has
 # NO deadline (journal-proven multi-second stalls, 2026-07-08). The Android
-# client waits up to 10s for stt_done, so cap the server-side drain safely
-# under that; on expiry the terminal marker still goes out and the client
-# commits its newest partial as the fallback final.
-_GOOGLE_STOP_FLUSH_TIMEOUT_S = 8.0
+# client waits up to 10s for stt_done, so the layered backstops must be
+# STRICTLY ordered: 7s flush + 1s emit-drain = 8s worst case server-side,
+# leaving a 2s margin under the client's 10s. On expiry the terminal marker
+# still goes out and the client commits its newest partial as the fallback.
+_GOOGLE_STOP_FLUSH_TIMEOUT_S = 7.0
+# Cap on draining already-scheduled cross-thread emits after the flush (part of
+# the 8s worst case above; normally instantaneous).
+_GOOGLE_EMIT_DRAIN_TIMEOUT_S = 1.0
 
 
 async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
@@ -811,7 +826,8 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         if pending:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True), timeout=2.0
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=_GOOGLE_EMIT_DRAIN_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
                 pass

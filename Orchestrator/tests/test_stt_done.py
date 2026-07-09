@@ -25,6 +25,7 @@ the bridges directly (pytest-asyncio is not in auto mode here).
 import asyncio
 import json
 import sys
+import time
 import types
 
 from fastapi import WebSocketDisconnect
@@ -417,13 +418,18 @@ def test_elevenlabs_dead_commit_surfaces_and_returns_promptly(monkeypatch):
 # =============================================================================
 
 
-def _fake_google_sdk(monkeypatch, final_text):
+def _fake_google_sdk(monkeypatch, final_text, stall_s=0.0):
     """Install sys.modules fakes for the lazy imports inside _google_bridge.
 
     The fake SpeechClient consumes the request generator to EXHAUSTION (i.e. it
     waits for the half-close that stt_stop triggers) and only then yields the
     trailing final — modeling the journal-proven incident where Google flushes
     the final after the client used to hang up.
+
+    `stall_s` sleeps in the worker thread AFTER the half-close before ending
+    the stream (models a stalled gRPC flush); `final_text=None` produces NO
+    trailing final at all. The stall must stay short: asyncio.run's loop
+    shutdown waits for lingering executor threads.
     """
 
     class _AudioEncoding:
@@ -451,7 +457,10 @@ def _fake_google_sdk(monkeypatch, final_text):
             def _gen():
                 for _ in requests:
                     pass  # block until the bridge half-closes (None sentinel)
-                yield _response(final_text, True)
+                if stall_s:
+                    time.sleep(stall_s)  # stalled provider flush (worker thread)
+                if final_text is not None:
+                    yield _response(final_text, True)
             return _gen()
 
     co_mod = types.ModuleType("google.api_core.client_options")
@@ -470,12 +479,12 @@ def _fake_google_sdk(monkeypatch, final_text):
     monkeypatch.setitem(sys.modules, "google.cloud.speech_v2.types", types_mod)
 
 
-def _run_google_bridge(monkeypatch, tmp_path, final_text):
+def _run_google_bridge(monkeypatch, tmp_path, final_text, stall_s=0.0):
     creds = tmp_path / "creds.json"
     creds.write_text(json.dumps({"project_id": "test-proj"}))
     monkeypatch.setattr(stt_ws_routes.config, "GOOGLE_APPLICATION_CREDENTIALS",
                         str(creds))
-    _fake_google_sdk(monkeypatch, final_text)
+    _fake_google_sdk(monkeypatch, final_text, stall_s=stall_s)
 
     async def scenario():
         client = _ScriptClient([
@@ -513,3 +522,28 @@ def test_google_filtered_post_stop_final_emits_empty_final(monkeypatch, tmp_path
         f"a hallucination-filtered post-stop final must become an authoritative "
         f"EMPTY final; sent={client.sent}"
     )
+
+
+def test_google_flush_expiry_returns_promptly_without_final(monkeypatch, tmp_path):
+    """A Google worker stalled past _GOOGLE_STOP_FLUSH_TIMEOUT_S must NOT hang
+    the bridge: it returns (without a trailing final) so the endpoint's stt_done
+    still reaches the client, which then commits its newest partial. The flush
+    timeout is patched to 0.2s and the worker stalls for 1.2s — well past it —
+    while the overall wait_for proves the bridge did not ride out the stall."""
+
+    monkeypatch.setattr(stt_ws_routes, "_GOOGLE_STOP_FLUSH_TIMEOUT_S", 0.2)
+    start_ts = time.monotonic()
+    client = _run_google_bridge(monkeypatch, tmp_path, final_text=None, stall_s=1.2)
+    elapsed = time.monotonic() - start_ts
+
+    assert not _finals(client), (
+        f"no final exists on the flush-expiry path; sent={client.sent}"
+    )
+    assert not any(m.get("type") == "stt_error" for m in client.sent), (
+        f"a stalled flush is a bounded-drain case, not a client-facing error; "
+        f"sent={client.sent}"
+    )
+    # The bridge itself returned at ~0.2s; the remaining elapsed time is
+    # asyncio.run's loop shutdown waiting out the lingering 1.2s worker thread.
+    # Anything near/over the stall duration + margin means the bridge hung.
+    assert elapsed < 3.0, f"bridge rode out the stalled flush ({elapsed:.2f}s)"
