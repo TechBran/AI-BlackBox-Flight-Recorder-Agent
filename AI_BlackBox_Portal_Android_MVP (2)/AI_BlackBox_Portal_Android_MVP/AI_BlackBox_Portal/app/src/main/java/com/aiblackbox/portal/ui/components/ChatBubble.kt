@@ -42,8 +42,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.semantics.onLongClick
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -108,8 +106,9 @@ fun ChatBubble(
         }
     }
 
-    // Long-press-to-copy (any bubble). Shared by the pointer path (haptic) and
-    // the TalkBack semantics action below.
+    // Long-press-to-copy (any bubble) — invoked by the combinedClickable below
+    // (pointer long-press with haptic, and the TalkBack long-click action it
+    // exposes via onLongClickLabel).
     val copyMessage = {
         clipboardManager.setText(AnnotatedString(message.content))
         isCopied = true
@@ -149,25 +148,20 @@ fun ChatBubble(
                 // clickable — so child clickables (TTS/copy buttons, media cards)
                 // still win hit-testing inside their own bounds. onClick is a
                 // required no-op; indication=null so plain taps don't ripple.
+                // a11y: onLongClickLabel has combinedClickable expose the
+                // long-press action to TalkBack under this label.
                 .then(
                     if (message.content.isNotBlank()) Modifier
                         .combinedClickable(
                             interactionSource = bubbleInteractions,
                             indication = null,
                             onClick = {},
+                            onLongClickLabel = "Copy message",
                             onLongClick = {
                                 view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                                 copyMessage()
                             },
                         )
-                        // a11y: combinedClickable doesn't expose long-press to
-                        // TalkBack by default — declare it explicitly.
-                        .semantics {
-                            onLongClick(label = "Copy message") {
-                                copyMessage()
-                                true
-                            }
-                        }
                     else Modifier
                 )
                 // Flat solid fill - no shadow rim (HD/production look)
@@ -184,10 +178,12 @@ fun ChatBubble(
             // Matches Portal: gap: 8px
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Content column — NO pointerInput here.
-            // Long-press-to-copy was causing persistent touch blocking on child
-            // clickables (TTS button, copy button, AudioPlayerBar play button).
-            // The dedicated copy button provides the same functionality reliably.
+            // Content column — still NO pointerInput here: a raw pointerInput
+            // long-press on THIS column once caused persistent touch blocking on
+            // child clickables (TTS button, copy button, AudioPlayerBar play
+            // button) and was removed. Long-press-to-copy now exists again, but
+            // SAFELY — as the combinedClickable on the bubble background Column
+            // above, which loses hit-testing to child clickables in their bounds.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // ── Thinking/reasoning section (collapsible) ──
             if (!message.reasoning.isNullOrBlank()) {

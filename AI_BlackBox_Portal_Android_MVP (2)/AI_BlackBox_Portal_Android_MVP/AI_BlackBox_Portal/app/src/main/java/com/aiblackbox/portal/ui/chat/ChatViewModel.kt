@@ -828,11 +828,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * saveConversation/mint only runs on stream SUCCESS, so replace-not-append
      * guarantees at most one mint for the logical turn.
      *
-     * Guarded by the same [shouldBlockSend] predicate as sendMessage (ERROR does
-     * not block — a failed turn is exactly the state retry exists for).
+     * Guarded by [shouldBlockRetry] — STREAMING *and* THINKING block (the same
+     * in-flight pair ChatScreen's send affordance uses): a stale chip tapped
+     * while a newer turn is still THINKING must not fire a concurrent stream
+     * (both would race updateLastMessage and could double-mint). ERROR does not
+     * block — a failed turn is exactly the state retry exists for.
      */
     fun retryMessage(messageId: String) {
-        if (shouldBlockSend(_chatState.value)) return
+        if (shouldBlockRetry(_chatState.value)) return
         val (remaining, userMsg) = retryRemoval(_messages.value, messageId)
         if (userMsg == null) return
         _messages.value = remaining
@@ -855,7 +858,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ChatRoute.AGENT -> _agentPromptEvent.tryEmit(text)
             ChatRoute.VOICE -> Log.w(TAG, "Voice provider $currentProvider — use Voice screen")
             ChatRoute.ER_INJECT -> injectErPrompt(text)
-            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text)
+            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text, clearInput = false)
             ChatRoute.SSE -> sendViaSSE(text, imageUrls, repo, clearInput = false)
         }
     }
@@ -887,7 +890,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * The streaming + error handling lives in the pure [streamLocalTurn] so it is
      * unit-testable without the AndroidViewModel; this method is the wiring shim.
      */
-    private fun sendViaLocalEngine(text: String) {
+    private fun sendViaLocalEngine(text: String, clearInput: Boolean = true) {
         // VISION TRIGGER (W4 follow-up, v1): if the user is asking the model to LOOK
         // AT THE SCREEN, route to the direct multimodal vision path instead of the
         // normal text/agent turn. Conservative so it never hijacks a normal message
@@ -911,10 +914,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val provider = localProviderOrWire()
             if (provider == null) {
                 // No installed model (or api not ready) → 1.6 placeholder, unchanged.
-                sendViaLocalPlaceholder(text)
+                sendViaLocalPlaceholder(text, clearInput)
                 return@launch
             }
-            runLocalEngineTurn(text, provider)
+            runLocalEngineTurn(text, provider, clearInput)
         }
     }
 
@@ -926,7 +929,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * [LiteRtEngine] this also LOADS the engine (idempotent ~10s on the first turn,
      * instant after) on [Dispatchers.IO] before streaming.
      */
-    private suspend fun runLocalEngineTurn(text: String, provider: () -> LocalLlm) {
+    private suspend fun runLocalEngineTurn(text: String, provider: () -> LocalLlm, clearInput: Boolean = true) {
         // The double-send guard is hoisted to sendMessage's LOCAL_PLACEHOLDER arm
         // (mirrors the SSE arm), so this path is already guarded by the time we get here.
 
@@ -946,7 +949,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             model = currentModel,
         )
         _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
-        _inputText.value = TextFieldValue()
+        // clearInput=false on the retry path — don't wipe a draft typed since the failure.
+        if (clearInput) _inputText.value = TextFieldValue()
 
         // 2. History for the prompt (SL-2). The on-device session is STATEFUL:
         //    carry recent turns so the model remembers the conversation, but
@@ -1829,7 +1833,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * call — selecting LOCAL must never reach the cloud SSE path. Used as the
      * fallback by [sendViaLocalEngine] until the concrete engine lands (Task 2.6).
      */
-    private fun sendViaLocalPlaceholder(text: String) {
+    private fun sendViaLocalPlaceholder(text: String, clearInput: Boolean = true) {
         val userMsg = UiMessage(
             role = "user",
             content = text,
@@ -1838,7 +1842,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
         val placeholder = buildLocalPlaceholder(currentProvider, currentModel)
         _messages.value = (_messages.value + userMsg + placeholder).takeLast(MAX_CHAT_MESSAGES)
-        _inputText.value = TextFieldValue()
+        // clearInput=false on the retry path — don't wipe a draft typed since the failure.
+        if (clearInput) _inputText.value = TextFieldValue()
         persistHistory()
     }
 
@@ -1942,6 +1947,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         streamJob = viewModelScope.launch {
             val content = StringBuilder()
             val reasoning = StringBuilder()
+            // SSE "error" events accumulate here, NOT in content — see the "error"
+            // case in processSSEEvent and the failure branch in the finalize below.
+            val errors = StringBuilder()
             var tokenCount: TokenCount? = null
             var streamModel: String? = null
             var provenance: Provenance? = null
@@ -1974,16 +1982,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 flow.collect { event ->
                     processSSEEvent(
-                        event, content, reasoning, mediaTasks
+                        event, content, reasoning, mediaTasks, errors
                     ) { model, tokens, prov ->
                         if (model != null) streamModel = model
                         if (tokens != null) tokenCount = tokens
                         if (prov != null) provenance = prov
                     }
 
-                    // Update the streaming assistant message
+                    // Update the streaming assistant message — the user still sees
+                    // error-event text as it arrives (rendered after real content).
                     updateLastMessage(
-                        content = content.toString(),
+                        content = combineContentAndErrors(content.toString(), errors.toString()),
                         reasoning = reasoning.toString().ifBlank { null },
                         isStreaming = true,
                         isThinking = _chatState.value == ChatState.THINKING,
@@ -1992,14 +2001,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                // Stream complete — finalize
-                _chatState.value = ChatState.IDLE
-                stopBackgroundService()
-                if (isCuProvider && _cuStatus.value == "running") {
-                    _cuStatus.value = "complete"
+                // Stream complete — finalize. An ERROR-ONLY stream (no real content,
+                // only SSE "error" events) is a FAILURE outcome: the ERROR state set
+                // by the error event must NOT be stomped to IDLE, the raw error text
+                // must NOT be minted into the ledger via saveConversation, and the
+                // user turn gets the retry affordance. Real-content-also-arrived
+                // keeps the previous behavior (protects mid-stream transient errors).
+                val realContent = content.toString()
+                val errorText = errors.toString()
+                val display = combineContentAndErrors(realContent, errorText)
+                val failedOutcome = streamOutcomeIsFailure(realContent, errorText)
+
+                if (!failedOutcome) {
+                    _chatState.value = ChatState.IDLE
+                    if (isCuProvider && _cuStatus.value == "running") {
+                        _cuStatus.value = "complete"
+                    }
                 }
+                stopBackgroundService()
                 updateLastMessage(
-                    content = content.toString(),
+                    content = display,
                     reasoning = reasoning.toString().ifBlank { null },
                     isStreaming = false,
                     isThinking = false,
@@ -2013,20 +2034,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // completed, pending, and failed tasks in one sweep
                 resolveUnresolvedMediaTasks()
 
-                // Save conversation for snapshot (matches Portal /chat/save).
-                // provenance is forwarded so backend auto-mint records context lineage.
-                // assistantMessageId pins the artifacts[] from the /chat/save response
-                // (Phase 6a) onto THIS streamed assistant turn (the last message).
-                saveConversation(text, content.toString(), reasoning.toString(), streamModel, tokenCount, provenance,
-                    assistantMessageId = _messages.value.lastOrNull()?.id)
+                if (failedOutcome) {
+                    // Error-only stream: flag the user turn for retry, persist so the
+                    // error bubble + chip survive a reload. NO saveConversation — raw
+                    // error text must never mint a ledger snapshot. State stays ERROR
+                    // (set by the error event; never IDLE here).
+                    _messages.value = markSendFailedOnUserTurn(
+                        _messages.value,
+                        userMsgId,
+                        usableContentArrived = false,
+                    )
+                    persistHistory()
+                } else {
+                    // Save conversation for snapshot (matches Portal /chat/save).
+                    // provenance is forwarded so backend auto-mint records context lineage.
+                    // assistantMessageId pins the artifacts[] from the /chat/save response
+                    // (Phase 6a) onto THIS streamed assistant turn (the last message).
+                    saveConversation(text, display, reasoning.toString(), streamModel, tokenCount, provenance,
+                        assistantMessageId = _messages.value.lastOrNull()?.id)
 
-                // Persist to local storage
-                persistHistory()
+                    // Persist to local storage
+                    persistHistory()
 
-                // Auto-TTS: speak the response if enabled
-                // Matches Portal window.triggerAutoTTS() called after full response
-                if (autoTtsEnabled && content.isNotBlank()) {
-                    _autoTtsEvent.tryEmit(content.toString())
+                    // Auto-TTS: speak the response if enabled
+                    // Matches Portal window.triggerAutoTTS() called after full response
+                    if (autoTtsEnabled && content.isNotBlank()) {
+                        _autoTtsEvent.tryEmit(content.toString())
+                    }
                 }
 
             } catch (e: Exception) {
@@ -2034,13 +2068,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _chatState.value = ChatState.ERROR
                 stopBackgroundService()
                 updateLastMessage(
-                    content = content.toString().ifBlank { "Error: ${e.message}" },
+                    content = combineContentAndErrors(content.toString(), errors.toString())
+                        .ifBlank { "Error: ${e.message}" },
                     isStreaming = false,
                     isThinking = false
                 )
-                // Retry affordance: when NOTHING usable arrived (assistant content
-                // blank → the bubble above is a pure error bubble), flag the user
-                // turn so ChatBubble renders a retry chip. A user-initiated STOP
+                // Retry affordance: when NOTHING usable arrived (REAL content blank —
+                // accumulated error-event text does not count as usable, so an
+                // error-then-exception stream still gets the retry chip), flag the
+                // user turn so ChatBubble renders it. A user-initiated STOP
                 // (streamJob.cancel → CancellationException) is NOT a send failure.
                 if (e !is kotlinx.coroutines.CancellationException) {
                     _messages.value = markSendFailedOnUserTurn(
@@ -2063,6 +2099,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         content: StringBuilder,
         reasoning: StringBuilder,
         mediaTasks: MutableList<String>,
+        errors: StringBuilder,
         onMeta: (model: String?, tokens: TokenCount?, provenance: Provenance?) -> Unit
     ) {
         when (event.event) {
@@ -2353,7 +2390,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // ── Error ──
             "error" -> {
-                content.append("\n\n${event.data}")
+                // Accumulated SEPARATELY from real content: the bubble still renders
+                // content+errors (combineContentAndErrors), but an error-only stream
+                // must finalize as a FAILURE — never stomped to IDLE, never minted
+                // into the ledger via saveConversation, and it must not defeat the
+                // usableContentArrived check that drives the retry affordance.
+                if (errors.isNotEmpty()) errors.append("\n\n")
+                errors.append(event.data)
                 _chatState.value = ChatState.ERROR
             }
 
@@ -3006,6 +3049,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * cover the placeholder path too) is unit-testable without the ViewModel.
          */
         fun shouldBlockSend(state: ChatState): Boolean = state == ChatState.STREAMING
+
+        /**
+         * The retry-specific in-flight guard: STREAMING *and* THINKING both block
+         * (the same pair ChatScreen's send affordance treats as in-flight). A new
+         * send flips THINKING→STREAMING almost immediately, but a stale retry chip
+         * tapped inside that window would otherwise fire a CONCURRENT stream —
+         * both racing updateLastMessage and potentially double-minting. Pure so
+         * the race guard is unit-testable without the ViewModel.
+         */
+        fun shouldBlockRetry(state: ChatState): Boolean =
+            state == ChatState.STREAMING || state == ChatState.THINKING
+
+        /**
+         * Did a COMPLETED stream end in failure? True when NO real content arrived
+         * and at least one SSE "error" event did — the bubble is a pure error
+         * bubble. Drives the finalize branch in [sendViaSSE]: failure keeps
+         * ChatState.ERROR (no IDLE stomp), SKIPS saveConversation (raw error text
+         * must never mint a ledger snapshot), and flags the user turn for retry.
+         * Real-content-also-arrived is NOT a failure (mid-stream transient errors
+         * keep the delivered reply). Pure for unit tests.
+         */
+        fun streamOutcomeIsFailure(realContent: String, errorText: String): Boolean =
+            realContent.isBlank() && errorText.isNotBlank()
+
+        /**
+         * The display string for a bubble that may carry both real streamed
+         * content and separately-accumulated SSE error-event text — the user
+         * always still sees the error message, it just never pollutes the REAL
+         * content used for save/usable-content decisions. Pure for unit tests.
+         */
+        fun combineContentAndErrors(realContent: String, errorText: String): String =
+            when {
+                errorText.isBlank() -> realContent
+                realContent.isBlank() -> errorText
+                else -> "$realContent\n\n$errorText"
+            }
 
         /**
          * Flag the user turn [userMessageId] as sendFailed when a send died with

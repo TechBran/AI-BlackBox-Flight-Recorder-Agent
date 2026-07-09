@@ -140,6 +140,78 @@ class ChatViewModelRetryTest {
     }
 
     // =========================================================================
+    // shouldBlockRetry — the THINKING race guard
+    // =========================================================================
+
+    @Test
+    fun `retry is blocked while a newer turn is THINKING`() {
+        // A stale chip tapped while a newer turn thinks must NOT fire a concurrent
+        // stream (both would race updateLastMessage and could double-mint).
+        assertTrue(ChatViewModel.shouldBlockRetry(ChatState.THINKING))
+        assertTrue(ChatViewModel.shouldBlockRetry(ChatState.STREAMING))
+    }
+
+    @Test
+    fun `retry is allowed from terminal states`() {
+        assertFalse(ChatViewModel.shouldBlockRetry(ChatState.ERROR)) // the state retry exists for
+        assertFalse(ChatViewModel.shouldBlockRetry(ChatState.IDLE))
+    }
+
+    // =========================================================================
+    // Error-event stream outcomes — error text must never mint / defeat retry
+    // =========================================================================
+
+    @Test
+    fun `error-only stream is a failure outcome - no mint, retry offered`() {
+        // SSE error events accumulate SEPARATELY from content; with no real
+        // content the finalize must keep ERROR, skip saveConversation, and flag
+        // the user turn.
+        assertTrue(ChatViewModel.streamOutcomeIsFailure(realContent = "", errorText = "Error: upstream 500"))
+    }
+
+    @Test
+    fun `real content plus transient error is NOT a failure outcome`() {
+        // Mid-stream transient errors with a delivered reply keep today's
+        // behavior (finalize IDLE + save).
+        assertFalse(ChatViewModel.streamOutcomeIsFailure(realContent = "partial answer", errorText = "Error: hiccup"))
+    }
+
+    @Test
+    fun `clean stream with no errors is NOT a failure outcome`() {
+        assertFalse(ChatViewModel.streamOutcomeIsFailure(realContent = "answer", errorText = ""))
+        assertFalse(ChatViewModel.streamOutcomeIsFailure(realContent = "", errorText = ""))
+    }
+
+    @Test
+    fun `combineContentAndErrors renders both without polluting real content`() {
+        assertEquals("answer", ChatViewModel.combineContentAndErrors("answer", ""))
+        assertEquals("Error: boom", ChatViewModel.combineContentAndErrors("", "Error: boom"))
+        assertEquals(
+            "answer\n\nError: boom",
+            ChatViewModel.combineContentAndErrors("answer", "Error: boom"),
+        )
+    }
+
+    @Test
+    fun `error-then-exception stream still flags the user turn for retry`() {
+        // Previously error-event text was appended INTO content, so the exception
+        // catch's usableContentArrived = content.isNotBlank() was defeated (error
+        // text counted as usable). With errors accumulated separately, REAL
+        // content stays blank and the user turn is flagged.
+        val realContentAfterErrorEvent = "" // error text no longer lands in content
+        val msgs = listOf(
+            user("u1", "hello"),
+            assistant("a1", "Error: upstream died"),
+        )
+        val out = ChatViewModel.markSendFailedOnUserTurn(
+            msgs,
+            "u1",
+            usableContentArrived = realContentAfterErrorEvent.isNotBlank(),
+        )
+        assertTrue(out.first { it.id == "u1" }.sendFailed)
+    }
+
+    // =========================================================================
     // Persistence compatibility — old history without the field deserializes
     // =========================================================================
 
