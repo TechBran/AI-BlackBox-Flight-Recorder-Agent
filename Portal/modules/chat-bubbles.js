@@ -237,8 +237,22 @@ export function appendBubble(role, content) {
     }
     wrap.appendChild(span);
 
+    // The RAW text a copy action must yield. Aligns appendBubble's assistant copy
+    // with streaming bubbles (chat-send.js setupBubbleControls copies the raw
+    // markdown string): for markdown-rendered assistant content copy the raw
+    // content string we were given; for media/pre-rendered-HTML content fall back
+    // to the plain-text extraction (raw markup on the clipboard would be worse).
+    // User bubbles render via textContent, so their content string IS raw.
+    const rawCopyText = (role === 'assistant' && (containsMedia || isAlreadyHtml))
+        ? textContentForActions
+        : contentString;
+    // Long-press-to-copy (touch) reads this — see initLongPressCopy below.
+    wrap._bbxCopyText = rawCopyText;
+
+    // Controls bar: assistant bubbles get speak + copy; user bubbles get copy
+    // (speak stays assistant-only).
     let controlsBar = null;
-    if (role === "assistant") {
+    if ((role === "assistant" || role === "user") && (role === "assistant" || rawCopyText)) {
         controlsBar = document.createElement("div");
         controlsBar.className = "bubble-controls";
         wrap.appendChild(controlsBar);
@@ -250,8 +264,8 @@ export function appendBubble(role, content) {
         }, 0);
     }
 
-    if (role === "assistant" && controlsBar) {
-        if (textContentForActions) {
+    if (controlsBar) {
+        if (role === "assistant" && textContentForActions) {
             const spk = document.createElement("button");
             spk.className = "bubble-btn speak-btn";
             spk.title = "Generate audio playback";
@@ -264,7 +278,7 @@ export function appendBubble(role, content) {
             controlsBar.appendChild(spk);
         }
 
-        if (textContentForActions) {
+        if (rawCopyText) {
             const cpy = document.createElement("button");
             cpy.className = "bubble-btn copy-btn";
             cpy.title = "Copy text";
@@ -272,7 +286,7 @@ export function appendBubble(role, content) {
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
             </svg>`;
-            cpy.onclick = () => copyToClipboard(textContentForActions);
+            cpy.onclick = () => copyToClipboard(rawCopyText);
             controlsBar.appendChild(cpy);
         }
     }
@@ -286,6 +300,110 @@ export function appendBubble(role, content) {
         updateHintsVisibility();
     }
     return wrap;
+}
+
+// =============================================================================
+// Retry-on-failed-send (chip under a failed user bubble)
+// =============================================================================
+
+/**
+ * Attach a retry chip under a FAILED user bubble. Clicking clears the failed
+ * state, removes the error assistant bubble, and re-fires the same text via
+ * chat-send.js retryFailedTurn (dynamic import — chat-send already imports this
+ * module, so a static import here would be circular).
+ *
+ * v1 limitation: attachments are NOT re-sent (File objects are gone after
+ * clearAttachedFiles) — noted in the title attribute.
+ *
+ * XSS: chip content is set via textContent only.
+ *
+ * @param {HTMLElement} bubbleEl - The failed user bubble
+ * @param {string} retryText - The raw prompt text to re-send
+ */
+export function attachRetryChip(bubbleEl, retryText) {
+    if (!bubbleEl || !retryText) return;
+    if (bubbleEl.querySelector('.bubble-retry')) return; // already attached
+
+    const btn = document.createElement("button");
+    btn.className = "bubble-retry";
+    btn.type = "button";
+    btn.textContent = "↻ Retry";
+    btn.title = "Message failed to send — retry (attachments are not re-sent)";
+    btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+            const { retryFailedTurn } = await import('./chat-send.js');
+            await retryFailedTurn(bubbleEl, retryText);
+        } catch (e) {
+            console.error('[Retry] Failed to retry turn:', e);
+            btn.disabled = false;
+            toast('Retry failed: ' + (e?.message || String(e)));
+        }
+    };
+    bubbleEl.appendChild(btn);
+}
+
+// =============================================================================
+// Long-press-to-copy (touch parity with the copy button)
+// =============================================================================
+
+/**
+ * Delegated long-press (~500ms) on any .bubble copies its raw text.
+ * - Touch pointers ONLY — desktop mouse text selection is untouched.
+ * - Cancelled by movement beyond a small threshold (scrolling) or pointerup.
+ * - Skips presses that start on interactive children (buttons, links, media).
+ * No user-select changes; native selection behavior is left as-is.
+ */
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_MOVE_PX = 10;
+let _lpTimer = null;
+let _lpStartX = 0;
+let _lpStartY = 0;
+
+function _lpCancel() {
+    if (_lpTimer) {
+        clearTimeout(_lpTimer);
+        _lpTimer = null;
+    }
+}
+
+function initLongPressCopy() {
+    document.addEventListener('pointerdown', (e) => {
+        if (e.pointerType !== 'touch') return; // touch parity only — never mouse
+        if (!e.target || !e.target.closest) return;
+        if (e.target.closest('button, a, audio, video, input, textarea, select')) return;
+        const bubble = e.target.closest('.bubble');
+        if (!bubble) return;
+
+        _lpStartX = e.clientX;
+        _lpStartY = e.clientY;
+        _lpCancel();
+        _lpTimer = setTimeout(() => {
+            _lpTimer = null;
+            const text = bubble._bbxCopyText ||
+                (bubble.querySelector('.bubble-text')?.textContent || '').trim();
+            if (!text) return;
+            copyToClipboard(text);
+            toast('Copied');
+            // Brief visual cue on the bubble itself
+            bubble.classList.add('bubble-copied-flash');
+            setTimeout(() => bubble.classList.remove('bubble-copied-flash'), 1200);
+        }, LONG_PRESS_MS);
+    }, { passive: true });
+
+    document.addEventListener('pointermove', (e) => {
+        if (!_lpTimer) return;
+        const dx = e.clientX - _lpStartX;
+        const dy = e.clientY - _lpStartY;
+        if ((dx * dx + dy * dy) > LONG_PRESS_MOVE_PX * LONG_PRESS_MOVE_PX) _lpCancel();
+    }, { passive: true });
+
+    document.addEventListener('pointerup', _lpCancel, { passive: true });
+    document.addEventListener('pointercancel', _lpCancel, { passive: true });
+}
+
+if (typeof document !== 'undefined') {
+    initLongPressCopy();
 }
 
 /**
@@ -484,7 +602,12 @@ export function renderHistory() {
 
     const historyData = getHistoryData();
     historyData.forEach(item => {
-        appendBubble(item.role, item.content);
+        const bubble = appendBubble(item.role, item.content);
+        // Restore the retry affordance on user turns whose send failed
+        if (item.role === 'user' && item.failed && bubble) {
+            if (item.failedAt) bubble.dataset.failedAt = String(item.failedAt);
+            attachRetryChip(bubble, item.content);
+        }
     });
 
     // Scroll to bottom after restoring history

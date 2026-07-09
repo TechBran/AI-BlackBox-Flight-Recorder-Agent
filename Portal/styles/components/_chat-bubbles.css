@@ -476,6 +476,39 @@
     border-color: rgba(102, 187, 106, 0.4);
 }
 
+/* --- Retry chip (failed user sends) --- */
+/* Appended under the failed user prompt (inside the .bubble.user flex column) */
+.bubble-retry {
+    align-self: flex-start;
+    margin-top: 8px;
+    padding: 6px 14px;
+    background: rgba(255, 74, 74, 0.12);
+    border: 1px solid rgba(255, 74, 74, 0.4);
+    border-radius: var(--radius-md);
+    color: #ff4a4a;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: all var(--transition-base);
+}
+
+.bubble-retry:hover {
+    background: rgba(255, 74, 74, 0.2);
+    border-color: rgba(255, 74, 74, 0.6);
+}
+
+.bubble-retry:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* --- Long-press copy confirmation flash (touch long-press on any bubble) --- */
+.bubble-copied-flash {
+    outline: 1px solid rgba(102, 187, 106, 0.6);
+    box-shadow: 0 0 10px rgba(102, 187, 106, 0.35);
+}
+
 /* TTS button loading state - Red glow while generating */
 .bubble-btn.bubble-btn-loading {
     background: rgba(255, 74, 74, 0.25);

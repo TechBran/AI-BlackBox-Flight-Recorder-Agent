@@ -69,6 +69,7 @@ import { taskManager } from './task-manager.js';
 import {
     appendBubble,
     addBubble,
+    attachRetryChip,
     createAnimatedThinkingBubble,
     startThinkingAnimation,
     renderHistory
@@ -331,7 +332,12 @@ function initHistory() {
             const bubbleWithThinking = createBubbleWithThinking(b.content, b.thinking, b.cuLog);
             hist.appendChild(bubbleWithThinking);
         } else {
-            appendBubble(b.role, b.content);
+            const bubble = appendBubble(b.role, b.content);
+            // Restore the retry affordance on user turns whose send failed
+            if (b.role === 'user' && b.failed && bubble) {
+                if (b.failedAt) bubble.dataset.failedAt = String(b.failedAt);
+                attachRetryChip(bubble, b.content);
+            }
         }
     }
 

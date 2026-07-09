@@ -11,7 +11,7 @@ import { $, toast } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { addBubble, createAnimatedThinkingBubble, startThinkingAnimation, stopThinkingAnimation, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
+import { addBubble, attachRetryChip, createAnimatedThinkingBubble, startThinkingAnimation, stopThinkingAnimation, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
 import { openVideoExtensionModal } from './generation-modals.js';
@@ -975,6 +975,10 @@ export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
  * @param {string} text - Text content for buttons
  */
 function setupBubbleControls(bubble, text) {
+    // Long-press-to-copy (chat-bubbles.js) reads this — keeps the raw markdown
+    // available to the touch path exactly like the copy button below.
+    bubble._bbxCopyText = text;
+
     const copyBtn = bubble.querySelector('.copy-btn');
     if (copyBtn) {
         copyBtn.onclick = () => {
@@ -2152,6 +2156,13 @@ export async function send() {
     // =========================================================================
     let streamingCompleted = false;
 
+    // The user turn's bubble for this logical send. Set by whichever mode appends
+    // it FIRST — the standard-mode fallback must NOT re-append the user bubble /
+    // history entry when streaming already did (that duplicated the user turn on
+    // every streaming→standard fallback). Also the anchor for the retry chip when
+    // the FINAL outcome is failure.
+    let userTurnBubble = null;
+
     if (STREAMING_ENABLED && window.__provider !== 'agents' && window.__provider !== 'gemini-agents') {
         try {
             let userContent = [];
@@ -2192,7 +2203,7 @@ export async function send() {
                 }
             }
 
-            addBubble("user", bubbleContent);
+            userTurnBubble = addBubble("user", bubbleContent);
             if ($("prompt")) $("prompt").value = "";
             clearAttachedFiles();
             renderPreviews();
@@ -2369,7 +2380,12 @@ export async function send() {
 
         payload.messages.push({ role: "user", content: userContent });
 
-        addBubble("user", bubbleContent);
+        // Append the user bubble exactly ONCE per logical send: when we got here
+        // via the streaming→standard fallback, streaming already appended it
+        // (userTurnBubble set) — re-appending duplicated the user turn.
+        if (!userTurnBubble) {
+            userTurnBubble = addBubble("user", bubbleContent);
+        }
         if ($("prompt")) $("prompt").value = "";
         clearAttachedFiles();
         renderPreviews();
@@ -2531,7 +2547,116 @@ export async function send() {
         } else {
             addBubble("assistant", "Chat error: " + (e?.message || String(e)));
         }
+        // FINAL outcome is failure (streaming already fell back here, or standard
+        // mode failed directly): flag the user turn + offer retry under its bubble.
+        markSendFailed(userTurnBubble, txt);
     }
+}
+
+// =============================================================================
+// Retry-on-failed-send
+// =============================================================================
+
+/**
+ * Mark the just-sent user turn as FAILED: flag its historyData entry
+ * ({failed: true, failedAt}) so the state survives reload (state-management owns
+ * historyData/saveHistory), stamp the DOM bubble so retry can find the exact
+ * entry, and attach the retry chip under the bubble.
+ *
+ * @param {HTMLElement|null} userBubbleEl - The user turn's bubble (may be null
+ *   if the send failed before the bubble was appended — then there is nothing
+ *   to retry from and this is a no-op).
+ * @param {string} retryText - The raw prompt text to re-send. Empty (e.g. an
+ *   attachment-only send — Files are gone after clearAttachedFiles) → no retry.
+ */
+function markSendFailed(userBubbleEl, retryText) {
+    if (!userBubbleEl || !retryText) return;
+
+    const failedAt = Date.now();
+    const hd = getHistoryData();
+    for (let i = hd.length - 1; i >= 0; i--) {
+        if (hd[i].role === 'user') {
+            hd[i].failed = true;
+            hd[i].failedAt = failedAt;
+            break;
+        }
+    }
+    setHistoryData(hd);
+    saveHistory();
+
+    userBubbleEl.dataset.failedAt = String(failedAt);
+    attachRetryChip(userBubbleEl, retryText);
+}
+
+/**
+ * Retry a failed user turn (the .bubble-retry chip's action — invoked via
+ * dynamic import from chat-bubbles.js attachRetryChip).
+ *
+ * REPLACES the failed turn — never duplicates it:
+ *  1. remove the error assistant bubble that follows the failed user bubble
+ *     (DOM) and its historyData entry;
+ *  2. remove the failed user bubble + its historyData entry;
+ *  3. re-fire the SAME text through send() (the one true send path), which
+ *     appends the user turn exactly once. /chat/save only runs on success, so
+ *     replace-not-append also guarantees no double-mint.
+ *
+ * Re-fire mechanism: rather than extracting a core from the ~800-line send()
+ * (4 provider branches all reading shared UI state — high regression risk),
+ * the retry sets $("prompt").value = retryText and calls send(); send() reads
+ * the prompt synchronously at entry, and any draft the user typed since the
+ * failure is restored right after (send clears the prompt in its synchronous
+ * prefix when no attachments are pending — the retry path never has any).
+ *
+ * @param {HTMLElement} userBubbleEl - The failed user bubble
+ * @param {string} retryText - The raw prompt text to re-send
+ */
+export async function retryFailedTurn(userBubbleEl, retryText) {
+    // 1. Error assistant bubble(s) (DOM): everything the failed turn produced
+    //    after the user bubble — the error bubble itself plus any stale partial
+    //    streaming bubble left by a mid-stream death before the fallback ran.
+    //    Stops at the next user bubble (never touches other turns).
+    let next = userBubbleEl.nextElementSibling;
+    while (next && next.classList.contains('bubble') && next.classList.contains('assistant')) {
+        const toRemove = next;
+        next = next.nextElementSibling;
+        toRemove.remove();
+    }
+
+    // 2. History: drop the failed user entry (matched by the failedAt stamp,
+    //    falling back to the last failed user entry) + its trailing assistant
+    //    error entry.
+    const stamp = Number(userBubbleEl.dataset.failedAt || 0);
+    const hd = getHistoryData();
+    let idx = -1;
+    for (let i = hd.length - 1; i >= 0; i--) {
+        if (hd[i].role === 'user' && hd[i].failed && (!stamp || hd[i].failedAt === stamp)) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx === -1) {
+        for (let i = hd.length - 1; i >= 0; i--) {
+            if (hd[i].role === 'user' && hd[i].failed) { idx = i; break; }
+        }
+    }
+    if (idx !== -1) {
+        if (idx + 1 < hd.length && hd[idx + 1].role === 'assistant') {
+            hd.splice(idx + 1, 1);
+        }
+        hd.splice(idx, 1);
+        setHistoryData(hd);
+        saveHistory();
+    }
+
+    // 3. Remove the failed user bubble and re-fire the same prompt.
+    userBubbleEl.remove();
+
+    const promptEl = $("prompt");
+    const draft = promptEl ? promptEl.value : "";
+    if (promptEl) promptEl.value = retryText;
+    const sending = send(); // reads the prompt synchronously at entry
+    if (promptEl && draft && !promptEl.value) promptEl.value = draft; // restore draft typed since the failure
+    await sending;
 }
 
 // =============================================================================
