@@ -36,11 +36,11 @@
       },
       "model": {
         "type": "string",
-        "description": "A provider word (gemini/openai/claude/grok/computer-use) for that provider's default, OR a specific model id from GET /models/{provider}. Empty = the provider's configured default (Auto). Use 'computer-use' for tasks needing desktop/browser/GUI interaction."
+        "description": "A provider word (gemini/openai/claude/grok/custom/computer-use) for that provider's default, OR a specific model id from GET /models/{provider}. Empty = the provider's configured default (Auto). Use 'computer-use' for tasks needing desktop/browser/GUI interaction. 'custom' = user-registered OpenAI-compatible servers from the onboarding wizard."
       },
       "provider": {
         "type": "string",
-        "description": "Which provider routes this job: one of gemini, openai, claude, grok, computer-use. Optional; if omitted it is derived from the model. The interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope."
+        "description": "Which provider routes this job: one of gemini, openai, claude, grok, custom, computer-use. Optional; if omitted it is derived from the model. 'custom' routes to user-registered OpenAI-compatible servers. The interactive/device-bound providers (agents, gemini-agents, realtime, local) are OUT of cron scope."
       },
       "delivery": {
         "type": "string",

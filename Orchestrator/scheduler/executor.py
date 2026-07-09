@@ -472,7 +472,7 @@ def _custom_default_model() -> str:
     if not servers:
         msg = (
             "cron job failed: provider 'custom' has no resolvable default model — "
-            "No custom model servers configured — add one in the onboarding wizard"
+            + custom_servers.MSG_NO_SERVERS
         )
         logger.warning(msg)
         raise RuntimeError(msg)
@@ -482,8 +482,7 @@ def _custom_default_model() -> str:
     if not models:
         msg = (
             "cron job failed: provider 'custom' has no resolvable default model — "
-            f"Server '{first.get('alias', '')}' has no discovered models — "
-            "validate it in the wizard"
+            + custom_servers.MSG_NO_MODELS.format(alias=first.get("alias", ""))
         )
         logger.warning(msg)
         raise RuntimeError(msg)

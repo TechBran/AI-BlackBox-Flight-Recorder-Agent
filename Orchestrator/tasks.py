@@ -1514,33 +1514,34 @@ def process_chat_task(task: Task):
         # measured worst case is ≈119k floor-tokens). Provider "custom" binds
         # the SAME metric as the stream-path guard (context_builder):
         # estimate_tokens(assembled fossils) vs custom_servers.
-        # window_guard_tokens(server), dropping whole snapshots lowest-value-
-        # first — keyword, then semantic, then recent oldest-first, then
-        # checkpoints — never mid-snapshot truncation; every drop logged. The
-        # media-artifacts block: parity on never-dropping; NOT counted
-        # (bounded ≤ ~2k chars). Other providers are untouched.
+        # window_guard_tokens(server), and the SAME shared drop ladder
+        # (context_builder.drop_snapshots_to_budget): whole snapshots,
+        # lowest-value-first — keyword, then semantic, then recent
+        # oldest-first, then checkpoints — never mid-snapshot truncation;
+        # every drop logged. The media-artifacts block: parity on
+        # never-dropping; NOT counted (bounded ≤ ~2k chars) and never handed
+        # to the ladder. Other providers are untouched.
         if _is_custom:
             from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
+            from Orchestrator.context_builder import drop_snapshots_to_budget  # shared drop ladder
             _budget = custom_servers.window_guard_tokens(_custom_server)
             _est = estimate_tokens("\n\n".join(_fossil_sections()))
-            _guard_dropped = []
-            while _est > _budget:
-                if keyword_snaps:
-                    victim, section = keyword_snaps.pop(), "keyword"
-                elif semantic_snaps:
-                    victim, section = semantic_snaps.pop(), "semantic"
-                elif recent_snaps:
-                    victim, section = recent_snaps.pop(0), "recent"
-                elif checkpoint_snaps:
-                    victim, section = checkpoint_snaps.pop(0), "checkpoint"
-                else:
-                    break  # nothing droppable left
-                vid = (extract_snap_ids([victim]) or ["?"])[0]
-                _guard_dropped.append(f"{vid}({section})")
+
+            def _over_budget():
+                nonlocal _est
+                _est = estimate_tokens("\n\n".join(_fossil_sections()))
+                return _est > _budget
+
+            def _log_drop(vid, section, victim):
                 print(f"[TASKS] custom window guard dropped {vid} ({section}, whole snapshot, "
                       f"{len(victim):,} chars): est {_est:,} > budget {_budget:,} tokens "
                       f"(server '{(_custom_server or {}).get('alias', '?')}')")
-                _est = estimate_tokens("\n\n".join(_fossil_sections()))
+
+            _guard_dropped = drop_snapshots_to_budget(
+                {"keyword": keyword_snaps, "semantic": semantic_snaps,
+                 "recent": recent_snaps, "checkpoint": checkpoint_snaps},
+                _over_budget, _log_drop,
+            )
             if _guard_dropped:
                 print(f"[TASKS] custom window guard summary: dropped {len(_guard_dropped)} whole "
                       f"snapshot(s) to fit budget {_budget:,} tokens: {_guard_dropped}")

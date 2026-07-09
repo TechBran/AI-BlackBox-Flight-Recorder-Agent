@@ -30,6 +30,12 @@ _LOCK = threading.Lock()
 SEP = "::"
 DEFAULT_CONTEXT_TOKENS = 32768
 
+# Customer-facing wizard-guidance messages -- single source shared by the chat
+# routes (stream + non-stream) and the cron executor (previously triplicated
+# inline). MSG_NO_MODELS is a .format template: MSG_NO_MODELS.format(alias=...).
+MSG_NO_SERVERS = "No custom model servers configured — add one in the onboarding wizard"
+MSG_NO_MODELS = "Server '{alias}' has no discovered models — validate it in the wizard"
+
 _PATCHABLE_FIELDS = {
     "alias", "base_url", "api_key", "enabled",
     "context_tokens", "validated_at", "last_models",

@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Provider WORD (what the AI/schema uses) -> the canonical stored provider key
 # (what the cron executor sends to /chat and what /models/{key} is keyed on).
-# gemini->google, claude->anthropic, grok->xai; openai/computer-use unchanged.
-# The catalog keys are also accepted verbatim (idempotent normalization).
+# gemini->google, claude->anthropic, grok->xai; openai/computer-use/custom
+# unchanged. The catalog keys are also accepted verbatim (idempotent
+# normalization).
 _PROVIDER_WORD_TO_KEY = {
     "gemini": "google",
     "google": "google",
@@ -27,6 +28,7 @@ _PROVIDER_WORD_TO_KEY = {
     "xai": "xai",
     "computer-use": "computer-use",
     "cu": "computer-use",
+    "custom": "custom",
 }
 
 # Bare provider words that are a DEFAULT selector (not a specific id) -- these

@@ -1880,12 +1880,12 @@ def call_custom(messages: List[Dict], model: str, operator: str):
             # Enabled servers exist -> the model was qualified with an alias
             # matching no ENABLED server (resolve_model fails fast by design).
             raise HTTPException(400, f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard")
-        raise HTTPException(400, "No custom model servers configured — add one in the onboarding wizard")
+        raise HTTPException(400, custom_servers.MSG_NO_SERVERS)
 
     if not bare_model or bare_model.strip().lower() == "auto":
         last_models = server.get("last_models") or []
         if not last_models:
-            raise HTTPException(400, f"Server '{server.get('alias', '')}' has no discovered models — validate it in the wizard")
+            raise HTTPException(400, custom_servers.MSG_NO_MODELS.format(alias=server.get("alias", "")))
         bare_model = last_models[0]
 
     # Process messages to handle images (multimodal llama.cpp/vLLM servers
@@ -2019,8 +2019,8 @@ def call_custom(messages: List[Dict], model: str, operator: str):
     if server.get("api_key"):
         headers["Authorization"] = f"Bearer {server['api_key']}"
 
-    # base_url already ends in /v1 (normalized by the registry). Distinct local
-    # name (chat_url) so the tool loop can't clobber a shared URL constant.
+    # base_url already ends in /v1 (normalized by the registry).
+    # NOT 'url': the web_fetch/vision branches assign a local 'url' inside the loop.
     chat_url = f"{server['base_url']}/chat/completions"
 
     payload = {
@@ -2043,7 +2043,8 @@ def call_custom(messages: List[Dict], model: str, operator: str):
     for iteration in range(max_tool_calls):
         r = requests.post(chat_url, headers=headers, json=payload, timeout=200)
         if r.status_code != 200:
-            raise HTTPException(r.status_code, r.text)
+            # Alias-prefixed so multi-server fleets can tell WHICH box failed.
+            raise HTTPException(r.status_code, f"Custom server '{server.get('alias', '')}' API error: {r.text}")
 
         data = r.json()
         message = data["choices"][0]["message"]
@@ -2161,7 +2162,7 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
         # GPT-5 streams normally but doesn't expose reasoning/thinking
         print(f"[OPENAI] GPT-5 model: {model} - no reasoning parameter (not supported)")
 
-    # Tool execution loop (max 5 iterations)
+    # Tool execution loop (bounded by max_tool_iterations below)
     max_tool_iterations = 30
     for iteration in range(max_tool_iterations):
         try:
@@ -4813,7 +4814,7 @@ async def stream_gemini_with_thinking(messages: List[Dict], model: str, operator
 
     url = f"{GEMINI_BASE_URL}/{model}:streamGenerateContent?key={GOOGLE_API_KEY}&alt=sse"
 
-    # Tool execution loop (max 5 iterations)
+    # Tool execution loop (bounded by max_tool_iterations below)
     # Buffers persist across iterations so thinking from round 1 isn't lost
     thinking_buffer = ""
     content_buffer = ""
@@ -5521,7 +5522,7 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
     else:
         print(f"[XAI] Model {model} - no visible reasoning (only grok-3-mini exposes thinking)")
 
-    # Tool execution loop (max 5 iterations)
+    # Tool execution loop (bounded by max_tool_iterations below)
     max_tool_iterations = 30
     for iteration in range(max_tool_iterations):
         try:
@@ -5979,13 +5980,13 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
             # matching no ENABLED server (resolve_model fails fast by design).
             yield {"type": "error", "data": f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard"}
         else:
-            yield {"type": "error", "data": "No custom model servers configured — add one in the onboarding wizard"}
+            yield {"type": "error", "data": custom_servers.MSG_NO_SERVERS}
         return
 
     if not bare_model or bare_model.strip().lower() == "auto":
         last_models = server.get("last_models") or []
         if not last_models:
-            yield {"type": "error", "data": f"Server '{server.get('alias', '')}' has no discovered models — validate it in the wizard"}
+            yield {"type": "error", "data": custom_servers.MSG_NO_MODELS.format(alias=server.get("alias", ""))}
             return
         bare_model = last_models[0]
 
@@ -6059,6 +6060,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
         headers["Authorization"] = f"Bearer {server['api_key']}"
 
     # base_url already ends in /v1 (normalized by the registry).
+    # NOT 'url': the web_fetch/vision branches assign a local 'url' inside the loop.
     chat_url = f"{server['base_url']}/chat/completions"
 
     payload = {
@@ -6077,7 +6079,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
     # with a body mentioning stream_options, drop the key and retry ONCE.
     stream_options_retried = False
 
-    # Tool execution loop (max 5 iterations)
+    # Tool execution loop (bounded by max_tool_iterations below)
     max_tool_iterations = 30
     for iteration in range(max_tool_iterations):
         try:
@@ -6094,10 +6096,11 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                                 and not stream_options_retried):
                             stream_options_retried = True
                             payload.pop("stream_options", None)
-                            print(f"[CUSTOM] 400 mentions stream_options — retrying once without it")
+                            print("[CUSTOM] 400 mentions stream_options — retrying once without it")
                             continue
                         print(f"[CUSTOM] API Error: {error_msg}")
-                        yield {"type": "error", "data": f"Custom server API error ({response.status_code}): {error_msg}"}
+                        # Alias-prefixed so multi-server fleets can tell WHICH box failed.
+                        yield {"type": "error", "data": f"Custom server '{server.get('alias', '')}' API error ({response.status_code}): {error_msg}"}
                         return
 
                     reasoning_buffer = ""

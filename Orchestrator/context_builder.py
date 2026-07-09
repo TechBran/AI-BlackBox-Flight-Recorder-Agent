@@ -155,6 +155,43 @@ def fill_unseen(ranked_snaps: list[str], k: int, seen_ids: set[str]) -> list[str
     return filled
 
 
+def drop_snapshots_to_budget(sections: dict, over_budget, log_drop) -> list:
+    """Shared window-guard drop ladder: pop whole snapshots until the caller's
+    budget check passes or nothing droppable remains.
+
+    Drop precedence = reverse of section value: keyword (lowest rank first),
+    then semantic (lowest rank first), then recent (oldest first), then
+    checkpoint (oldest first, last resort). NEVER mid-snapshot truncation.
+
+    `sections` maps the four section names to the LIVE lists — mutated in
+    place so the caller's re-assembly sees each drop. `over_budget()` is
+    re-evaluated before every pop (the caller re-assembles + re-estimates
+    inside it, so its per-drop metric is the PRE-drop estimate). `log_drop(vid,
+    section, victim)` emits the caller's own per-drop line. Returns
+    ["SNAP-…(section)", …] for the caller's summary log.
+
+    The two custom-capable window guards share this ladder: the stream path
+    (build_fossil_context below) and the non-stream worker's custom guard
+    (tasks.process_chat_task).
+    """
+    dropped: list = []
+    while over_budget():
+        if sections.get("keyword"):
+            victim, section = sections["keyword"].pop(), "keyword"
+        elif sections.get("semantic"):
+            victim, section = sections["semantic"].pop(), "semantic"
+        elif sections.get("recent"):
+            victim, section = sections["recent"].pop(0), "recent"
+        elif sections.get("checkpoint"):
+            victim, section = sections["checkpoint"].pop(0), "checkpoint"
+        else:
+            break  # nothing droppable left
+        vid = (extract_snap_ids([victim]) or ["?"])[0]
+        dropped.append(f"{vid}({section})")
+        log_drop(vid, section, victim)
+    return dropped
+
+
 def build_fossil_context(
     user_text: str,
     operator: str,
@@ -403,30 +440,30 @@ def build_fossil_context(
             else window_guard_budget_tokens(provider)
         )
         est = estimate_tokens(fossil_context)
-        dropped: list = []
-        while est > budget:
-            # Drop order = reverse of section value: keyword (lowest rank
-            # first), then semantic (lowest rank first), then recent (oldest
-            # first), then checkpoints (oldest first, last resort).
-            if keyword_snaps:
-                victim, section = keyword_snaps.pop(), "keyword"
-            elif semantic_snaps:
-                victim, section = semantic_snaps.pop(), "semantic"
-            elif recent_snaps:
-                victim, section = recent_snaps.pop(0), "recent"
-            elif checkpoint_snaps:
-                victim, section = checkpoint_snaps.pop(0), "checkpoint"
-            else:
-                break  # nothing droppable left (media block only)
-            vid = (extract_snap_ids([victim]) or ["?"])[0]
-            dropped.append(f"{vid}({section})")
+
+        # Drop order lives in drop_snapshots_to_budget (shared with the
+        # non-stream custom guard in tasks.process_chat_task): keyword →
+        # semantic → recent (oldest first) → checkpoint (last resort). The
+        # media block is never droppable here (only snapshot sections are
+        # handed to the ladder).
+        def _over_budget() -> bool:
+            nonlocal fossil_context, est
+            fossil_context = _assemble()
+            est = estimate_tokens(fossil_context)
+            return est > budget
+
+        def _log_drop(vid: str, section: str, victim: str) -> None:
             print(
                 f"{log_prefix} window guard dropped {vid} ({section}, whole snapshot, "
                 f"{len(victim):,} chars): est {est:,} > budget {budget:,} tokens "
                 f"(provider={provider!r})"
             )
-            fossil_context = _assemble()
-            est = estimate_tokens(fossil_context)
+
+        dropped = drop_snapshots_to_budget(
+            {"keyword": keyword_snaps, "semantic": semantic_snaps,
+             "recent": recent_snaps, "checkpoint": checkpoint_snaps},
+            _over_budget, _log_drop,
+        )
         if dropped:
             # Provenance reflects what is DELIVERED, not what was retrieved.
             provenance = {
