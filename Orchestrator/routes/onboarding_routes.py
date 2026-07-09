@@ -504,6 +504,12 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                     custom_servers.update_server(server_id, {
                         "validated_at": datetime.now(timezone.utc).isoformat(),
                         "last_models": list((result.detail or {}).get("models") or []),
+                        # Re-validate = "the server config may have changed":
+                        # clear auto-learned per-model windows so a RAISED -c
+                        # isn't silently under-budgeted forever (auto-learn only
+                        # corrects downward — an under-budget never errors).
+                        # Still-smaller windows re-learn on the next overflow.
+                        "model_context": {},
                     })
                     _state.record_validation(f"custom:{server_id}")
                 except (KeyError, ValueError):

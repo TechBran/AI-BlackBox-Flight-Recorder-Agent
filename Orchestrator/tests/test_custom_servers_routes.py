@@ -235,3 +235,21 @@ def test_validate_custom_server_deleted_mid_probe_ok_but_unstamped(tmp_registry,
     assert resp.ok is True            # the probe itself succeeded
     assert stamped == []              # but a vanished server is never stamped
     assert cs.list_servers() == []
+
+
+def test_validate_custom_success_clears_learned_model_context(tmp_registry, monkeypatch):
+    """Re-validate = 'the server config may have changed': a successful
+    validate-by-server_id clears auto-learned per-model windows so a RAISED
+    server-side -c isn't silently under-budgeted forever (auto-learn only
+    corrects downward). Still-smaller windows re-learn on the next overflow."""
+    srv = cs.add_server(alias="box", base_url="http://10.0.0.2:8080/v1", api_key="k")
+    sid = srv["id"]
+    cs.update_server(sid, {"model_context": {"m-old": 16384}})
+    monkeypatch.setattr(ob.validators, "validate_custom", _fake_ok({}))
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: None)
+
+    resp = ob.validate(ob.ValidateRequest(provider="custom",
+                                          credentials={"server_id": sid}))
+
+    assert resp.ok is True
+    assert cs.get_server(sid)["model_context"] == {}   # learned windows reset
