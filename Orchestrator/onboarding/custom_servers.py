@@ -32,9 +32,10 @@ DEFAULT_CONTEXT_TOKENS = 32768
 
 # Customer-facing wizard-guidance messages -- single source shared by the chat
 # routes (stream + non-stream) and the cron executor (previously triplicated
-# inline). MSG_NO_MODELS is a .format template: MSG_NO_MODELS.format(alias=...).
+# inline). MSG_NO_MODELS / MSG_UNKNOWN_ALIAS are .format templates.
 MSG_NO_SERVERS = "No custom model servers configured — add one in the onboarding wizard"
 MSG_NO_MODELS = "Server '{alias}' has no discovered models — validate it in the wizard"
+MSG_UNKNOWN_ALIAS = "Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard"
 
 _PATCHABLE_FIELDS = {
     "alias", "base_url", "api_key", "enabled",

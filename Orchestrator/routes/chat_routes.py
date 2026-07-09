@@ -1879,7 +1879,7 @@ def call_custom(messages: List[Dict], model: str, operator: str):
         if custom_servers.list_servers(enabled_only=True):
             # Enabled servers exist -> the model was qualified with an alias
             # matching no ENABLED server (resolve_model fails fast by design).
-            raise HTTPException(400, f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard")
+            raise HTTPException(400, custom_servers.MSG_UNKNOWN_ALIAS.format(model=model))
         raise HTTPException(400, custom_servers.MSG_NO_SERVERS)
 
     if not bare_model or bare_model.strip().lower() == "auto":
@@ -5978,7 +5978,7 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
         if custom_servers.list_servers(enabled_only=True):
             # Enabled servers exist -> the model was qualified with an alias
             # matching no ENABLED server (resolve_model fails fast by design).
-            yield {"type": "error", "data": f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard"}
+            yield {"type": "error", "data": custom_servers.MSG_UNKNOWN_ALIAS.format(model=model)}
         else:
             yield {"type": "error", "data": custom_servers.MSG_NO_SERVERS}
         return

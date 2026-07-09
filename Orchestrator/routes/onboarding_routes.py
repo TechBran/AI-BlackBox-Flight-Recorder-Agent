@@ -471,6 +471,15 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                     base_url = stored.get("base_url") or ""
                     if not api_key:
                         api_key = stored.get("api_key") or ""
+            elif server_id and base_url:
+                # Both supplied: stamp the stored server only if the probed URL
+                # IS its stored URL — otherwise a foreign URL's model list would
+                # be persisted onto the record (stamps must match the stored
+                # base_url; PATCH clears them on re-point for the same reason).
+                # The probe itself still runs; it just doesn't stamp.
+                stored = custom_servers.get_server(server_id)
+                if not stored or (stored.get("base_url") or "") != base_url.rstrip("/"):
+                    server_id = ""
             if not base_url:
                 raise HTTPException(status_code=400, detail="missing credential field: base_url")
             result = validators.validate_custom(base_url, api_key)
