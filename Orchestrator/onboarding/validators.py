@@ -133,6 +133,35 @@ def validate_perplexity(api_key: str) -> ValidationResult:
     return _measure(_fn)
 
 
+def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
+    """Validate a user-registered OpenAI-compatible server via models.list.
+
+    Custom-model onboarding (llama.cpp / llama-swap / vLLM on the LAN).
+    models.list is zero token cost and instant even on a cold llama-swap box
+    (/v1/models never loads a model). Success detail doubles as model
+    discovery: the wizard renders detail["models"] and the register route
+    persists them. api_key falls back to "none" because the openai SDK
+    refuses empty keys and many LAN servers run keyless.
+    """
+    def _fn():
+        from openai import APIConnectionError, AuthenticationError, OpenAI
+        try:
+            with OpenAI(
+                api_key=api_key or "none",
+                base_url=base_url,
+                timeout=10.0,
+                max_retries=0,
+            ) as client:
+                models = client.models.list()
+        except AuthenticationError as e:
+            raise RuntimeError(f"API key rejected (401) by {base_url}") from e
+        except APIConnectionError as e:
+            raise RuntimeError(f"Server unreachable at {base_url}") from e
+        ids = [m.id for m in models.data]
+        return {"model_count": len(ids), "models": ids[:50]}
+    return _measure(_fn)
+
+
 def validate_elevenlabs(api_key: str) -> ValidationResult:
     """GET /v1/user - cheap metadata call. Surfaces plan tier + feature gates
     (IVC needs Starter+, PVC Creator+) so the wizard tells the customer what
