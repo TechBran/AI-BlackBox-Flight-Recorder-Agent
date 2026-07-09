@@ -1973,6 +1973,18 @@ def call_custom(messages: List[Dict], model: str, operator: str):
                             "type": "text",
                             "text": f"[Note: Video file attached: {url}. This model doesn't support direct video analysis.]"
                         })
+                    elif part.get("type") == "audio_url":
+                        # No audio path either — custom is the ONLY provider
+                        # whose call_* ever receives audio parts (tasks.py's
+                        # media auto-route exempts custom from the google
+                        # switch); forwarding the raw part 500s llama.cpp
+                        # far-end, the exact hard-fail that exemption exists
+                        # to prevent.
+                        url = part["audio_url"]["url"]
+                        new_content.append({
+                            "type": "text",
+                            "text": f"[Note: Audio file attached: {url}. This model doesn't support audio input.]"
+                        })
                     elif part.get("type") == "document_url":
                         # Extract text from documents and append as text
                         url = part["document_url"]["url"]

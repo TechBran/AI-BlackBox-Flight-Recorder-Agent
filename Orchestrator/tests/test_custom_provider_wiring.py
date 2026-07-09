@@ -312,8 +312,9 @@ def test_get_stream_custom_no_servers_floor_guard_model_untouched(tmp_path, monk
 # the streaming clone's server-resolution deltas. tasks.process_chat_task gains:
 # provider normalization + registry-default-model resolution + dispatch for
 # "custom", a media auto-route exemption (audio/video must NOT switch custom ->
-# google), and a fossil window guard (window_guard_tokens x 4 chars, whole
-# oldest-first snapshot drops) on the otherwise-uncapped inline fossil block.
+# google), and a fossil window guard — the stream guard's exact metric,
+# estimate_tokens(assembled) vs window_guard_tokens(server), whole oldest-first
+# snapshot drops — on the otherwise-uncapped inline fossil block.
 
 ANSWER_51 = "Port 9091 serves the Orchestrator."
 REASONING_51 = "Thinking hard about ports and orchestration."
@@ -416,6 +417,27 @@ def test_call_custom_bearer_only_when_key(tmp_path, monkeypatch, call_custom_env
 
     cr.call_custom([{"role": "user", "content": "hi"}], "keyed::m1", operator="TestOp")
     assert recorded["headers"].get("Authorization") == "Bearer sk-test-123"
+
+
+def test_call_custom_audio_part_becomes_text_note(custom_registry, call_custom_env):
+    """audio_url parts are converted to a text note at the message-processing
+    seam (mirrors the video_url branch) — NEVER forwarded raw. llama.cpp 500s
+    on raw audio parts, and custom is the only provider whose call_* ever
+    receives them (the tasks.py media exemption keeps audio turns on custom)."""
+    cr, recorded = call_custom_env
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "what does this say?"},
+        {"type": "audio_url", "audio_url": {"url": "/ui/uploads/clip.mp3"}},
+    ]}]
+    cr.call_custom(msgs, "lab::qwen-2", operator="TestOp")
+
+    sent = recorded["payload"]["messages"][0]["content"]
+    assert all(p.get("type") != "audio_url" for p in sent)  # nothing raw
+    note = next((p["text"] for p in sent
+                 if p.get("type") == "text" and "Audio file attached" in p.get("text", "")), None)
+    assert note is not None
+    assert "/ui/uploads/clip.mp3" in note
+    assert "doesn't support audio input" in note
 
 
 def test_call_custom_error_cases(tmp_path, monkeypatch, custom_registry, call_custom_env):
@@ -637,11 +659,13 @@ def _big_blk(i: int, size: int = 10000) -> str:
 
 
 def test_worker_custom_fossil_guard_trims_oldest_first(custom_registry, monkeypatch, capsys):
-    """provider custom + huge fossil corpus: the delivered context block is
-    capped at window_guard_tokens(server) x 4 chars (lab = 16,384-token window
-    -> 9,830 x 4 = 39,320), dropping OLDEST whole recent snapshots first, and
-    the drops are logged."""
+    """provider custom + huge fossil corpus: the delivered fossil block obeys
+    the STREAM guard's exact metric — estimate_tokens(assembled) <=
+    window_guard_tokens(server) (lab = 16,384-token window -> 9,830 tokens;
+    tokenization floor = 2 chars/token) — dropping OLDEST whole recent
+    snapshots first, with the est/budget overage logged per drop."""
     from Orchestrator.models import TaskStatus
+    from Orchestrator.tokenization import estimate_tokens
     blocks = [_big_blk(i) for i in range(1, 11)]  # oldest (0001) -> newest (0010)
     final, recorded, _ = _run_chat_worker(
         monkeypatch, provider="custom", model="", task_id="t51-guard",
@@ -650,12 +674,13 @@ def test_worker_custom_fossil_guard_trims_oldest_first(custom_registry, monkeypa
     assert final.status == TaskStatus.COMPLETED, final.result_data
     # msg_list = [core system, fossil context, *user messages]
     context = recorded["messages"][1]["content"]
-    cap = cs.window_guard_tokens({"context_tokens": 16384}) * 4  # 39,320
-    assert len(context) <= cap
+    budget = cs.window_guard_tokens({"context_tokens": 16384})  # 9,830 tokens
+    assert estimate_tokens(context) <= budget
     assert "SNAP-20260709-0010" in context  # newest survives
     assert "SNAP-20260709-0001" not in context  # oldest dropped whole
     out = capsys.readouterr().out
     assert "custom window guard dropped" in out
+    assert "> budget" in out  # overage logged per drop (context_builder style)
 
 
 def test_worker_fossil_guard_other_providers_untouched(custom_registry, monkeypatch):

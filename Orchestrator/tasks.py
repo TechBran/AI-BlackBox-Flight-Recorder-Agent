@@ -1457,54 +1457,15 @@ def process_chat_task(task: Task):
         print(f"[CONTEXT] Semantic snapshots ({len(semantic_snaps)}): {semantic_ids}")
         print(f"[CONTEXT] Query: {user_text[:100]}...")
 
-        # --- Custom-provider window guard (non-stream path) -------------------
-        # The inline fossil assembly below is uncapped (CAP=None, WI-10) — fine
-        # for 200K+ cloud windows, fatal for e.g. a 32K llama.cpp window (the
-        # measured worst case is ≈119k floor-tokens). When the turn targets
-        # provider "custom", resolve the server ONCE here (the default-model
-        # block below reuses this resolve) and cap the fossil sections at
-        # window_guard_tokens(server) × 4 chars (≈4 chars/floor-token), dropping
-        # whole snapshots lowest-value-first — keyword, then semantic, then
-        # recent oldest-first, then checkpoints — mirroring context_builder's
-        # stream-path guard (never mid-snapshot truncation; every drop logged).
-        # Other providers are untouched.
+        # --- Custom server resolution (Task 5.1) -------------------------------
+        # Resolve ONCE per turn; reused by the window guard below (its
+        # context_tokens sizes the budget) and by the default-model block.
         _custom_server = None
         _custom_resolved_bare = ""
         _is_custom = (inp.provider or DEFAULT_PROVIDER).lower() == "custom"
         if _is_custom:
             from Orchestrator.onboarding import custom_servers  # lazy: worker-path only
             _custom_server, _custom_resolved_bare = custom_servers.resolve_model(inp.model or "")
-            _cap_chars = custom_servers.window_guard_tokens(_custom_server) * 4
-
-            def _fossil_chars() -> int:
-                # Conservative superset of the assembled fossil block below:
-                # +2/snap for the "\n\n" joins, +256 flat for section labels and
-                # checkpoint fences, so the cap can never be exceeded by header
-                # overhead. The media-artifacts block (bounded, ~10 URL lines)
-                # is never dropped — stream-path parity.
-                snaps = checkpoint_snaps + recent_snaps + keyword_snaps + semantic_snaps
-                return sum(len(s) + 2 for s in snaps) + (256 if snaps else 0)
-
-            _guard_dropped = []
-            while _fossil_chars() > _cap_chars:
-                if keyword_snaps:
-                    victim, section = keyword_snaps.pop(), "keyword"
-                elif semantic_snaps:
-                    victim, section = semantic_snaps.pop(), "semantic"
-                elif recent_snaps:
-                    victim, section = recent_snaps.pop(0), "recent"
-                elif checkpoint_snaps:
-                    victim, section = checkpoint_snaps.pop(0), "checkpoint"
-                else:
-                    break  # nothing droppable left
-                vid = (extract_snap_ids([victim]) or ["?"])[0]
-                _guard_dropped.append(f"{vid}({section})")
-                print(f"[TASKS] custom window guard dropped {vid} ({section}, whole snapshot, "
-                      f"{len(victim):,} chars): fossils exceed cap {_cap_chars:,} chars "
-                      f"(window_guard_tokens × 4, server '{(_custom_server or {}).get('alias', '?')}')")
-            if _guard_dropped:
-                print(f"[TASKS] custom window guard summary: dropped {len(_guard_dropped)} whole "
-                      f"snapshot(s) to fit {_cap_chars:,} chars: {_guard_dropped}")
 
         update_task(task.task_id, progress=30)
 
@@ -1528,19 +1489,63 @@ def process_chat_task(task: Task):
             context_parts.append("\n".join(media_lines))
             print(f"[CONTEXT] Media artifacts ({len(media_artifacts)}): {[a.get('url') for a in media_artifacts[:3]]}")
 
-        if checkpoint_snaps:
-            if len(checkpoint_snaps) == 1:
-                context_parts.append("=== CHECKPOINT SUMMARY (Compressed Memory) ===\n" + checkpoint_snaps[0])
-            else:
-                checkpoint_blocks = []
-                for i, checkpoint in enumerate(checkpoint_snaps, 1):
-                    checkpoint_blocks.append(f"=== CHECKPOINT #{i} (Older) ===" if i == 1 else f"=== CHECKPOINT #{i} ===" if i < len(checkpoint_snaps) else f"=== CHECKPOINT #{i} (Most Recent) ===")
-                    checkpoint_blocks.append(checkpoint)
-                context_parts.append("\n\n".join(checkpoint_blocks))
-        if recent_snaps: context_parts.append("Recent snapshots:\n" + "\n\n".join(recent_snaps))
-        if keyword_snaps: context_parts.append("Keyword-matched snapshots:\n" + "\n\n".join(keyword_snaps))
-        if semantic_snaps: context_parts.append("Semantically relevant snapshots:\n" + "\n\n".join(semantic_snaps))
-        hybrid_context_block = "\n\n".join(context_parts)
+        def _fossil_sections() -> list:
+            """Assemble the four fossil sections. Single source for BOTH the
+            delivered block below and the custom window guard's re-assembly
+            loop (identical strings for every provider)."""
+            parts = []
+            if checkpoint_snaps:
+                if len(checkpoint_snaps) == 1:
+                    parts.append("=== CHECKPOINT SUMMARY (Compressed Memory) ===\n" + checkpoint_snaps[0])
+                else:
+                    checkpoint_blocks = []
+                    for i, checkpoint in enumerate(checkpoint_snaps, 1):
+                        checkpoint_blocks.append(f"=== CHECKPOINT #{i} (Older) ===" if i == 1 else f"=== CHECKPOINT #{i} ===" if i < len(checkpoint_snaps) else f"=== CHECKPOINT #{i} (Most Recent) ===")
+                        checkpoint_blocks.append(checkpoint)
+                    parts.append("\n\n".join(checkpoint_blocks))
+            if recent_snaps: parts.append("Recent snapshots:\n" + "\n\n".join(recent_snaps))
+            if keyword_snaps: parts.append("Keyword-matched snapshots:\n" + "\n\n".join(keyword_snaps))
+            if semantic_snaps: parts.append("Semantically relevant snapshots:\n" + "\n\n".join(semantic_snaps))
+            return parts
+
+        # --- Custom-provider window guard (non-stream path) -------------------
+        # The fossil assembly here is uncapped (CAP=None, WI-10) — fine for
+        # 200K+ cloud windows, fatal for e.g. a 32K llama.cpp window (the
+        # measured worst case is ≈119k floor-tokens). Provider "custom" binds
+        # the SAME metric as the stream-path guard (context_builder):
+        # estimate_tokens(assembled fossils) vs custom_servers.
+        # window_guard_tokens(server), dropping whole snapshots lowest-value-
+        # first — keyword, then semantic, then recent oldest-first, then
+        # checkpoints — never mid-snapshot truncation; every drop logged. The
+        # media-artifacts block: parity on never-dropping; NOT counted
+        # (bounded ≤ ~2k chars). Other providers are untouched.
+        if _is_custom:
+            from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
+            _budget = custom_servers.window_guard_tokens(_custom_server)
+            _est = estimate_tokens("\n\n".join(_fossil_sections()))
+            _guard_dropped = []
+            while _est > _budget:
+                if keyword_snaps:
+                    victim, section = keyword_snaps.pop(), "keyword"
+                elif semantic_snaps:
+                    victim, section = semantic_snaps.pop(), "semantic"
+                elif recent_snaps:
+                    victim, section = recent_snaps.pop(0), "recent"
+                elif checkpoint_snaps:
+                    victim, section = checkpoint_snaps.pop(0), "checkpoint"
+                else:
+                    break  # nothing droppable left
+                vid = (extract_snap_ids([victim]) or ["?"])[0]
+                _guard_dropped.append(f"{vid}({section})")
+                print(f"[TASKS] custom window guard dropped {vid} ({section}, whole snapshot, "
+                      f"{len(victim):,} chars): est {_est:,} > budget {_budget:,} tokens "
+                      f"(server '{(_custom_server or {}).get('alias', '?')}')")
+                _est = estimate_tokens("\n\n".join(_fossil_sections()))
+            if _guard_dropped:
+                print(f"[TASKS] custom window guard summary: dropped {len(_guard_dropped)} whole "
+                      f"snapshot(s) to fit budget {_budget:,} tokens: {_guard_dropped}")
+
+        hybrid_context_block = "\n\n".join(context_parts + _fossil_sections())
 
         # SMS mode: inject SMS-specific system prompt
         sms_mode = inp_dict.get("sms_mode", False)
@@ -1660,7 +1665,9 @@ def process_chat_task(task: Task):
 
         with state_lock:
             s.last_context_meta.update({
-                "recent_ids": list(recent_ids),
+                # Post-guard re-extraction: provenance reflects what is DELIVERED
+                # (the custom window guard may have dropped whole snapshots).
+                "recent_ids": extract_snap_ids(recent_snaps),
                 "relevant_ids": extract_snap_ids(keyword_snaps), "gm_excerpt": True,
                 "provider": provider, "model": selected_model, "operator": active_operator,
                 "usage_last": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
