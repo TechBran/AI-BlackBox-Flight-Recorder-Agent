@@ -39,7 +39,7 @@ MSG_UNKNOWN_ALIAS = "Custom model '{model}' names an unknown or disabled server 
 
 _PATCHABLE_FIELDS = {
     "alias", "base_url", "api_key", "enabled",
-    "context_tokens", "validated_at", "last_models",
+    "context_tokens", "validated_at", "last_models", "model_context",
 }
 _EMPTY = {"version": 1, "servers": []}
 
@@ -162,6 +162,16 @@ def _validate_field_types(fields: dict) -> None:
         v = fields["last_models"]
         if not isinstance(v, list) or not all(isinstance(m, str) for m in v):
             raise ValueError("last_models must be a list of strings")
+    if "model_context" in fields:
+        v = fields["model_context"]
+        if not isinstance(v, dict) or not all(
+            isinstance(k, str)
+            and not isinstance(val, bool) and isinstance(val, int) and val > 0
+            for k, val in v.items()
+        ):
+            raise ValueError(
+                "model_context must be a dict of {model_id: positive int tokens}"
+            )
 
 
 # ------------------------------------------------------------------ read API
@@ -215,6 +225,11 @@ def add_server(alias: str, base_url: str, api_key: str = "",
             "base_url": _normalize_base_url(base_url),
             "api_key": api_key,
             "context_tokens": context_tokens,
+            # Per-model overrides (bare model id -> real context tokens) for
+            # multi-model hosts (llama-swap) whose models have DIFFERENT
+            # windows; auto-learned from llama.cpp exceed_context_size_error
+            # 400s (chat_routes) or hand-patched. Kept by redact() — not a secret.
+            "model_context": {},
             "enabled": True,
             "added_at": datetime.now(timezone.utc).isoformat(),
             "validated_at": None,
@@ -305,14 +320,29 @@ def resolve_model(model: str) -> tuple[dict | None, str]:
     return enabled[0], model
 
 
-def window_guard_tokens(server: dict | None) -> int:
+def window_guard_tokens(server: dict | None, model: str | None = None) -> int:
     """Floor-token window-guard budget for a resolved custom server.
 
-    0.6 x the server's context_tokens (the other 40% stays reserved for the
+    0.6 x the effective context window (the other 40% stays reserved for the
     system prompt, user history, and the reply), floored at 4,000 tokens so a
     tiny window can't starve retrieval entirely. None / a record missing the
     key derive from DEFAULT_CONTEXT_TOKENS. The ONE live formula shared by
-    both /chat/stream routes; context_builder's static "custom" entry is a
-    rounded-down snapshot of the None case (see PROVIDER_WINDOW_GUARD_TOKENS).
+    both /chat/stream routes and the tasks.py non-stream guard;
+    context_builder's static "custom" entry is a rounded-down snapshot of the
+    None case (see PROVIDER_WINDOW_GUARD_TOKENS).
+
+    `model` (the FINAL dispatched BARE id) selects a per-model override from
+    the server's model_context map — multi-model hosts (llama-swap) serve
+    models with DIFFERENT real windows behind one record, and the server-wide
+    context_tokens over-budgets the smaller ones (llama.cpp then 400s the
+    whole turn). Absent/None model, a model not in the map, or junk map
+    values all fall back to context_tokens (backward compatible).
     """
-    return max(4000, int((server or {}).get("context_tokens", DEFAULT_CONTEXT_TOKENS) * 0.6))
+    srv = server or {}
+    ctx = srv.get("context_tokens", DEFAULT_CONTEXT_TOKENS)
+    per_model = srv.get("model_context")
+    if model and isinstance(per_model, dict):
+        learned = per_model.get(model)
+        if isinstance(learned, int) and not isinstance(learned, bool) and learned > 0:
+            ctx = learned
+    return max(4000, int(ctx * 0.6))

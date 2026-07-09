@@ -105,8 +105,12 @@ let busy = false;  // prevents save-button double-fire
 // Module-level (like `busy`) so updateSaveButton can read it without
 // threading a parameter through every existing call site; reset on render().
 //   servers: [{server, mode:"view"|"edit", confirmingRemove, busy,
-//              statusKind, statusHtml, edit:{alias,base_url,api_key}|null}]
-//   adding:  [{id, alias, base_url, api_key, busy, statusKind, statusHtml}]
+//              statusKind, statusHtml,
+//              edit:{alias,base_url,api_key,context_tokens}|null}]
+//   adding:  [{id, alias, base_url, api_key, context_tokens, busy,
+//              statusKind, statusHtml}]
+// context_tokens is held as a STRING in form state (input value) and coerced
+// with parseInt on submit; blank = server default (add) / unchanged (edit).
 let customState = { servers: [], adding: [] };
 let nextCustomAddId = 1;  // monotonically increasing across re-renders
 
@@ -179,7 +183,8 @@ export async function render(container, { next, back, skip, sigil }) {
                     <p class="ob-provider-desc">
                         OpenAI-compatible servers on your network (llama.cpp,
                         llama-swap, vLLM, Ollama). Models are discovered
-                        automatically.
+                        automatically; per-model context limits are learned
+                        automatically when a model reports a smaller window.
                     </p>
                     <div class="ob-providers" id="ob-custom-rows" style="margin: var(--ob-space-4) 0;"></div>
                     <button type="button" class="ob-add-row" id="ob-custom-add">
@@ -566,6 +571,11 @@ function renderCustomViewCard(row) {
     const sv = row.server;
     const sid = escapeHtml(sv.id);
     const keyPreview = sv.key_present ? "••••" + (sv.key_last4 || "") : "no key";
+    // Numbers only in the detail line — coerce, never interpolate raw strings.
+    const ctxNum = parseInt(sv.context_tokens, 10);
+    const ctxText = Number.isFinite(ctxNum) && ctxNum > 0
+        ? ` &middot; ${ctxNum.toLocaleString()} tok`
+        : "";
     const pill = sv.validated_at
         ? `<span class="ob-status-pill ob-status-pill-ok"><span class="ob-status-pill-glyph" aria-hidden="true">&check;</span> Validated</span>`
         : `<span class="ob-status-pill">Not validated</span>`;
@@ -583,7 +593,7 @@ function renderCustomViewCard(row) {
                 <div class="ob-provider-label">${escapeHtml(sv.alias)}</div>
                 ${pill}
             </div>
-            <p class="ob-provider-desc">${escapeHtml(sv.base_url)} &middot; ${escapeHtml(keyPreview)}</p>
+            <p class="ob-provider-desc">${escapeHtml(sv.base_url)} &middot; ${escapeHtml(keyPreview)}${ctxText}</p>
             <div class="ob-provider-configured-row">
                 <span style="${CUSTOM_BTN_GROUP_STYLE}">
                     <button type="button" class="ob-validate-btn" data-action="revalidate" data-server-id="${sid}" ${dis}>Re-validate</button>
@@ -627,6 +637,12 @@ function renderCustomEditCard(row) {
                     data-field="api_key" data-server-id="${sid}"
                     value="${escapeHtml(row.edit.api_key)}" placeholder="${sv.key_present ? "unchanged" : "no key"}"
                     autocomplete="off" autocapitalize="off" spellcheck="false" ${dis} />
+                <label class="ob-field-label" for="ob-custom-ctx-${sid}" style="${CUSTOM_LABEL_GAP_STYLE}">Context window (tokens) &mdash; blank to keep current</label>
+                <input type="number" class="ob-provider-input" id="ob-custom-ctx-${sid}"
+                    data-field="context_tokens" data-server-id="${sid}"
+                    value="${escapeHtml(row.edit.context_tokens)}" placeholder="32768" min="1" step="1"
+                    title="Server-wide window. Per-model limits are learned automatically when a model reports a smaller window."
+                    autocomplete="off" ${dis} />
             </div>
             <div class="ob-provider-configured-row">
                 <span style="${CUSTOM_BTN_GROUP_STYLE}">
@@ -667,6 +683,12 @@ function renderCustomAddCard(row) {
                     data-field="api_key" data-add-id="${rid}"
                     value="${escapeHtml(row.api_key)}" placeholder="sk-&hellip;"
                     autocomplete="off" autocapitalize="off" spellcheck="false" ${dis} />
+                <label class="ob-field-label" for="ob-custom-new-ctx-${rid}" style="${CUSTOM_LABEL_GAP_STYLE}">Context window (tokens) &mdash; optional (blank = 32768 default)</label>
+                <input type="number" class="ob-provider-input" id="ob-custom-new-ctx-${rid}"
+                    data-field="context_tokens" data-add-id="${rid}"
+                    value="${escapeHtml(row.context_tokens)}" placeholder="32768" min="1" step="1"
+                    title="Server-wide window. Per-model limits are learned automatically when a model reports a smaller window."
+                    autocomplete="off" ${dis} />
             </div>
             <div class="ob-provider-configured-row">
                 <button type="button" class="ob-validate-btn" data-action="add-validate" data-add-id="${rid}" ${canSubmit ? "" : "disabled"}>Validate &amp; Add</button>
@@ -759,7 +781,7 @@ function wireCustomRows(container, state) {
 function addCustomRow(container, state) {
     const id = nextCustomAddId++;
     customState.adding.push({
-        id, alias: "", base_url: "", api_key: "",
+        id, alias: "", base_url: "", api_key: "", context_tokens: "",
         busy: false, statusKind: "idle", statusHtml: "",
     });
     rerenderCustom(container, state);
@@ -848,7 +870,13 @@ function startCustomEdit(row, container, state) {
     if (row.busy) return;
     row.mode = "edit";
     row.confirmingRemove = false;
-    row.edit = { alias: row.server.alias, base_url: row.server.base_url, api_key: "" };
+    row.edit = {
+        alias: row.server.alias,
+        base_url: row.server.base_url,
+        api_key: "",
+        // Prefill so the current window is visible; blank means "unchanged".
+        context_tokens: row.server.context_tokens != null ? String(row.server.context_tokens) : "",
+    };
     setCustomStatus(row, "idle", "");
     rerenderCustom(container, state);
     const input = container.querySelector(`.ob-provider-input[data-field="alias"][data-server-id="${row.server.id}"]`);
@@ -863,10 +891,23 @@ async function saveCustomEdit(row, container, state) {
     const alias = (row.edit.alias || "").trim();
     const baseUrl = (row.edit.base_url || "").trim();
     const apiKey = (row.edit.api_key || "").trim();
+    // Context window: numbers only (parseInt + NaN reject with the field's
+    // own error pill); blank = unchanged.
+    const ctxRaw = String(row.edit.context_tokens == null ? "" : row.edit.context_tokens).trim();
+    let ctxTokens = null;
+    if (ctxRaw) {
+        ctxTokens = parseInt(ctxRaw, 10);
+        if (!Number.isFinite(ctxTokens) || ctxTokens <= 0) {
+            setCustomStatus(row, "error", customErrorPill("Context window must be a positive whole number of tokens"));
+            rerenderCustom(container, state);
+            return;
+        }
+    }
     const body = {};
     if (alias && alias !== sv.alias) body.alias = alias;
     if (baseUrl && baseUrl !== sv.base_url) body.base_url = baseUrl;
     if (apiKey) body.api_key = apiKey;
+    if (ctxTokens !== null && ctxTokens !== Number(sv.context_tokens)) body.context_tokens = ctxTokens;
 
     if (Object.keys(body).length === 0) {
         // Nothing changed — just close the editor.
@@ -950,6 +991,19 @@ async function validateAndAddCustomServer(row, container, state) {
     const apiKey = (row.api_key || "").trim();
     if (!alias || !baseUrl) return;
 
+    // Context window: numbers only (parseInt + NaN reject with the field's
+    // own error pill); blank = server default (32768).
+    const ctxRaw = String(row.context_tokens == null ? "" : row.context_tokens).trim();
+    let ctxTokens = null;
+    if (ctxRaw) {
+        ctxTokens = parseInt(ctxRaw, 10);
+        if (!Number.isFinite(ctxTokens) || ctxTokens <= 0) {
+            setCustomStatus(row, "error", customErrorPill("Context window must be a positive whole number of tokens"));
+            rerenderCustom(container, state);
+            return;
+        }
+    }
+
     row.busy = true;
     setCustomStatus(row, "validating", customValidatingPill("Adding"));
     rerenderCustom(container, state);
@@ -959,6 +1013,7 @@ async function validateAndAddCustomServer(row, container, state) {
     try {
         const body = { alias, base_url: baseUrl };
         if (apiKey) body.api_key = apiKey;  // keyless servers: omit entirely
+        if (ctxTokens !== null) body.context_tokens = ctxTokens;  // blank: backend default
         const r = await fetch("/onboarding/custom-servers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

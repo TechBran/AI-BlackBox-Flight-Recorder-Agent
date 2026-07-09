@@ -1858,6 +1858,64 @@ def call_xai(messages: List[Dict], model: str, operator: str):
     return text, total_usage, reasoning, media_tasks
 
 
+def _parse_exceed_context(body: str) -> int | None:
+    """Extract a model's REAL context window from a llama.cpp over-window 400.
+
+    llama.cpp rejects a too-long prompt with a 400 whose JSON body carries the
+    model's true window:
+      {"error": {"code": 400, "message": "request (18079 tokens) exceeds the
+        available context size (16384 tokens), try increasing it",
+        "type": "exceed_context_size_error", "n_prompt_tokens": 18079,
+        "n_ctx": 16384}}
+    Happens on multi-model hosts (llama-swap) where one server-wide
+    context_tokens over-budgets a smaller model. Returns n_ctx as a positive
+    int when the body parses to that shape; None otherwise (caller keeps
+    today's raw-error behavior).
+    """
+    if not body:
+        return None
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    err = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(err, dict):
+        return None
+    if err.get("type") != "exceed_context_size_error" and "n_ctx" not in err:
+        return None
+    n_ctx = err.get("n_ctx")
+    if isinstance(n_ctx, bool) or not isinstance(n_ctx, int) or n_ctx <= 0:
+        return None
+    return n_ctx
+
+
+def _learn_model_context(server: dict, bare_model: str, n_ctx: int) -> None:
+    """Fail-soft persist a model's learned real window into the registry's
+    model_context map so every subsequent window-guard computation fits it.
+    A server that vanished between resolve and learn just doesn't learn —
+    never masks the (friendly) error the caller is about to surface."""
+    try:
+        existing = server.get("model_context") or {}
+        custom_servers.update_server(
+            server["id"], {"model_context": {**existing, bare_model: n_ctx}})
+        print(f"[CUSTOM] learned model_context: '{bare_model}' -> {n_ctx} tokens "
+              f"on server '{server.get('alias', '')}'")
+    except Exception as exc:
+        print(f"[CUSTOM] could not persist learned context for '{bare_model}': {exc}")
+
+
+def _exceed_context_reply(server: dict, bare_model: str, n_ctx: int) -> str:
+    """Customer-facing replacement for the raw llama.cpp exceed-context JSON
+    (shared by the stream + non-stream custom paths; raw body goes to the LOG)."""
+    return (
+        f"Model '{bare_model}' on server '{server.get('alias', '')}' has a "
+        f"{n_ctx:,}-token context window (smaller than configured). I've learned "
+        f"this limit — please resend your message; the context will now fit. "
+        f"(To raise the window itself, increase -c for this model in the "
+        f"llama-swap config on the server box.)"
+    )
+
+
 def call_custom(messages: List[Dict], model: str, operator: str):
     """Call a user-registered OpenAI-compatible server (provider 'custom') — non-stream.
 
@@ -2043,6 +2101,15 @@ def call_custom(messages: List[Dict], model: str, operator: str):
     for iteration in range(max_tool_calls):
         r = requests.post(chat_url, headers=headers, json=payload, timeout=200)
         if r.status_code != 200:
+            # Over-window 400 (llama.cpp exceed_context_size_error): learn the
+            # model's REAL window, then surface a friendly actionable error —
+            # the raw JSON body stays in the log line only.
+            n_ctx = _parse_exceed_context(r.text) if r.status_code == 400 else None
+            if n_ctx:
+                _learn_model_context(server, bare_model, n_ctx)
+                print(f"[CUSTOM-CALL] exceed_context 400 (model {bare_model}, "
+                      f"n_ctx {n_ctx}): {r.text}")
+                raise HTTPException(400, _exceed_context_reply(server, bare_model, n_ctx))
             # Alias-prefixed so multi-server fleets can tell WHICH box failed.
             raise HTTPException(r.status_code, f"Custom server '{server.get('alias', '')}' API error: {r.text}")
 
@@ -6098,6 +6165,19 @@ async def stream_custom_with_reasoning(messages: List[Dict], model: str, operato
                             payload.pop("stream_options", None)
                             print("[CUSTOM] 400 mentions stream_options — retrying once without it")
                             continue
+                        # Over-window 400 (llama.cpp exceed_context_size_error):
+                        # AFTER the stream_options check (a 400 mentioning
+                        # stream_options is not a context error) and does NOT
+                        # touch the retry flag. Learn the model's REAL window,
+                        # surface a friendly error; raw body stays in the log.
+                        n_ctx = (_parse_exceed_context(error_msg)
+                                 if response.status_code == 400 else None)
+                        if n_ctx:
+                            _learn_model_context(server, bare_model, n_ctx)
+                            print(f"[CUSTOM] exceed_context 400 (model {bare_model}, "
+                                  f"n_ctx {n_ctx}): {error_msg}")
+                            yield {"type": "error", "data": _exceed_context_reply(server, bare_model, n_ctx)}
+                            return
                         print(f"[CUSTOM] API Error: {error_msg}")
                         # Alias-prefixed so multi-server fleets can tell WHICH box failed.
                         yield {"type": "error", "data": f"Custom server '{server.get('alias', '')}' API error ({response.status_code}): {error_msg}"}
@@ -6969,16 +7049,19 @@ async def chat_stream(request: Request):
         guard = None  # non-custom providers use context_builder's provider window table
         if provider == "custom":
             # Resolve the server BEFORE build_streaming_context (order matters:
-            # its context_tokens sizes the window guard). Empty/Auto model ->
+            # its context window sizes the window guard). Empty/Auto model ->
             # the server's first discovered model, alias-qualified; unresolved
             # server / no discovered models stay as-is — stream_custom_with_reasoning
-            # emits the clean error event.
+            # emits the clean error event. The guard budgets from the FINAL
+            # dispatched bare model (per-model model_context override on
+            # multi-model llama-swap hosts), falling back to context_tokens.
             _srv, _bare = custom_servers.resolve_model(model or "")
             if _srv is not None and (not model or _bare.strip().lower() == "auto"):
                 _discovered = _srv.get("last_models") or []
                 if _discovered:
-                    model = custom_servers.qualify(_srv.get("alias", ""), _discovered[0])
-            guard = custom_servers.window_guard_tokens(_srv)
+                    _bare = _discovered[0]
+                    model = custom_servers.qualify(_srv.get("alias", ""), _bare)
+            guard = custom_servers.window_guard_tokens(_srv, _bare)
         elif not model:
             if provider == "openai":
                 model = "gpt-5.1"  # Latest OpenAI with reasoning
@@ -7079,16 +7162,19 @@ async def chat_stream_post(request: Request):
         guard = None  # non-custom providers use context_builder's provider window table
         if provider == "custom":
             # Resolve the server BEFORE build_streaming_context (order matters:
-            # its context_tokens sizes the window guard). Empty/Auto model ->
+            # its context window sizes the window guard). Empty/Auto model ->
             # the server's first discovered model, alias-qualified; unresolved
             # server / no discovered models stay as-is — stream_custom_with_reasoning
-            # emits the clean error event.
+            # emits the clean error event. The guard budgets from the FINAL
+            # dispatched bare model (per-model model_context override on
+            # multi-model llama-swap hosts), falling back to context_tokens.
             _srv, _bare = custom_servers.resolve_model(model or "")
             if _srv is not None and (not model or _bare.strip().lower() == "auto"):
                 _discovered = _srv.get("last_models") or []
                 if _discovered:
-                    model = custom_servers.qualify(_srv.get("alias", ""), _discovered[0])
-            guard = custom_servers.window_guard_tokens(_srv)
+                    _bare = _discovered[0]
+                    model = custom_servers.qualify(_srv.get("alias", ""), _bare)
+            guard = custom_servers.window_guard_tokens(_srv, _bare)
         elif not model:
             if provider == "openai":
                 model = "gpt-5.1"

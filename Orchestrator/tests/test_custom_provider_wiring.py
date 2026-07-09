@@ -304,6 +304,77 @@ def test_get_stream_custom_no_servers_floor_guard_model_untouched(tmp_path, monk
     assert route_fakes["dispatch_model"] is None
 
 
+# --- per-model context windows (model_context) route threading -------------------
+# A llama-swap server hosts models with DIFFERENT real windows behind one
+# record; the guard must budget from the DISPATCHED model's window, not the
+# server-wide context_tokens (which over-budgets the smaller models and gets
+# the whole turn 400'd far-end by llama.cpp).
+
+@pytest.fixture
+def per_model_registry(tmp_path, monkeypatch):
+    """One enabled llama-swap-style server: 128K server-wide window, first
+    discovered model 'm-small' learned at 16K, 'm-big' not in the map."""
+    reg = tmp_path / "custom_models.json"
+    reg.write_text(json.dumps({"version": 1, "servers": [{
+        "id": "srv-permodel1",
+        "alias": "swap",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "api_key": "",
+        "context_tokens": 131072,
+        "model_context": {"m-small": 16384},
+        "enabled": True,
+        "added_at": "2026-07-09T00:00:00+00:00",
+        "validated_at": None,
+        "last_models": ["m-small", "m-big"],
+    }]}))
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(reg))
+    return reg
+
+
+def test_post_stream_custom_per_model_guard_override(per_model_registry, route_fakes):
+    """Dispatching a model with a learned window budgets from THAT window:
+    int(0.6 x 16,384) = 9,830 — not the server-wide 78,643."""
+    r = _client().post("/chat/stream", json={
+        "messages": _MSGS, "provider": "custom", "model": "swap::m-small", "operator": "TestOp",
+    })
+    assert r.status_code == 200
+    assert route_fakes["window_guard_tokens"] == 9830
+    assert route_fakes["dispatch_model"] == "swap::m-small"
+
+
+def test_post_stream_custom_model_not_in_map_uses_server_window(per_model_registry, route_fakes):
+    """A model absent from model_context keeps the server-wide budget:
+    int(0.6 x 131,072) = 78,643."""
+    r = _client().post("/chat/stream", json={
+        "messages": _MSGS, "provider": "custom", "model": "swap::m-big", "operator": "TestOp",
+    })
+    assert r.status_code == 200
+    assert route_fakes["window_guard_tokens"] == 78643
+    assert route_fakes["dispatch_model"] == "swap::m-big"
+
+
+def test_get_stream_custom_per_model_guard_override(per_model_registry, route_fakes):
+    """GET route symmetric with POST for the per-model override."""
+    r = _client().get("/chat/stream", params={
+        "messages": json.dumps(_MSGS), "provider": "custom",
+        "model": "swap::m-small", "operator": "TestOp",
+    })
+    assert r.status_code == 200
+    assert route_fakes["window_guard_tokens"] == 9830
+
+
+def test_post_stream_custom_default_model_uses_final_bare_for_guard(per_model_registry, route_fakes):
+    """Empty model defaults to the FIRST discovered model ('m-small') — the
+    guard must budget from that FINAL dispatched bare id's learned window,
+    not from the pre-default empty model."""
+    r = _client().post("/chat/stream", json={
+        "messages": _MSGS, "provider": "custom", "operator": "TestOp",
+    })
+    assert r.status_code == 200
+    assert route_fakes["dispatch_model"] == "swap::m-small"
+    assert route_fakes["window_guard_tokens"] == 9830
+
+
 # =================================================================================
 # Task 5.1: call_custom (non-stream) + tasks.py dispatch + guard exemptions
 # =================================================================================
@@ -438,6 +509,87 @@ def test_call_custom_audio_part_becomes_text_note(custom_registry, call_custom_e
     assert note is not None
     assert "/ui/uploads/clip.mp3" in note
     assert "doesn't support audio input" in note
+
+
+def test_call_custom_exceed_context_learns_and_raises_friendly(custom_registry, call_custom_env, monkeypatch):
+    """llama.cpp's exceed_context_size_error 400 carries the model's REAL
+    window (n_ctx). call_custom must (a) persist it into the server's
+    model_context map so every subsequent guard fits, and (b) raise a
+    FRIENDLY actionable error — never the raw JSON body."""
+    from fastapi import HTTPException
+    cr, _ = call_custom_env
+    exceed_body = {"error": {
+        "code": 400,
+        "message": "request (18079 tokens) exceeds the available context size (16384 tokens), try increasing it",
+        "type": "exceed_context_size_error",
+        "n_prompt_tokens": 18079, "n_ctx": 16384,
+    }}
+    monkeypatch.setattr(cr.requests, "post",
+                        lambda *a, **k: _FakeResp(exceed_body, status_code=400))
+
+    with pytest.raises(HTTPException) as ei:
+        cr.call_custom([{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+
+    assert ei.value.status_code == 400
+    assert "learned this limit" in ei.value.detail
+    assert "16,384-token context window" in ei.value.detail
+    assert "qwen-2" in ei.value.detail and "lab" in ei.value.detail
+    assert "exceed_context_size_error" not in ei.value.detail  # raw body stays in the LOG only
+    # learned limit persisted (legacy record had no model_context field at all)
+    srv = cs.list_servers()[0]
+    assert srv["model_context"] == {"qwen-2": 16384}
+
+
+def test_call_custom_exceed_context_merges_existing_map(custom_registry, call_custom_env, monkeypatch):
+    """Learning a second model's window must MERGE, not clobber, the map."""
+    from fastapi import HTTPException
+    cr, _ = call_custom_env
+    srv_id = cs.list_servers()[0]["id"]
+    cs.update_server(srv_id, {"model_context": {"llama-3-8b": 8192}})
+    exceed_body = {"error": {"type": "exceed_context_size_error",
+                             "n_prompt_tokens": 18079, "n_ctx": 16384, "code": 400,
+                             "message": "request (18079 tokens) exceeds the available context size (16384 tokens), try increasing it"}}
+    monkeypatch.setattr(cr.requests, "post",
+                        lambda *a, **k: _FakeResp(exceed_body, status_code=400))
+    with pytest.raises(HTTPException):
+        cr.call_custom([{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+    assert cs.list_servers()[0]["model_context"] == {"llama-3-8b": 8192, "qwen-2": 16384}
+
+
+def test_call_custom_exceed_context_learn_is_fail_soft(custom_registry, call_custom_env, monkeypatch):
+    """A server vanishing between resolve and learn must not mask the
+    friendly error — the learn is fail-soft, the raise still happens."""
+    from fastapi import HTTPException
+    cr, _ = call_custom_env
+    exceed_body = {"error": {"type": "exceed_context_size_error", "n_ctx": 16384,
+                             "code": 400, "message": "exceeds the available context size"}}
+    monkeypatch.setattr(cr.requests, "post",
+                        lambda *a, **k: _FakeResp(exceed_body, status_code=400))
+
+    def _vanished(*a, **k):
+        raise KeyError("No custom server with id 'srv-test0001'")
+    monkeypatch.setattr(cs, "update_server", _vanished)
+
+    with pytest.raises(HTTPException) as ei:
+        cr.call_custom([{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+    assert "learned this limit" in ei.value.detail
+
+
+def test_call_custom_non_context_400_keeps_raw_error(custom_registry, call_custom_env, monkeypatch):
+    """Any other 400 keeps today's alias-prefixed raw error and learns
+    NOTHING — the exceed branch must not swallow unrelated failures."""
+    from fastapi import HTTPException
+    cr, _ = call_custom_env
+    other_body = {"error": {"code": 400, "message": "unknown field 'tools'",
+                            "type": "invalid_request_error"}}
+    monkeypatch.setattr(cr.requests, "post",
+                        lambda *a, **k: _FakeResp(other_body, status_code=400))
+    with pytest.raises(HTTPException) as ei:
+        cr.call_custom([{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+    assert "API error" in ei.value.detail
+    assert "unknown field 'tools'" in ei.value.detail
+    assert "learned this limit" not in ei.value.detail
+    assert cs.list_servers()[0].get("model_context", {}) == {}
 
 
 def test_call_custom_error_cases(tmp_path, monkeypatch, custom_registry, call_custom_env):
@@ -681,6 +833,41 @@ def test_worker_custom_fossil_guard_trims_oldest_first(custom_registry, monkeypa
     out = capsys.readouterr().out
     assert "custom window guard dropped" in out
     assert "> budget" in out  # overage logged per drop (context_builder style)
+
+
+def test_worker_custom_fossil_guard_uses_per_model_window(per_model_registry, monkeypatch, capsys):
+    """Empty model on the llama-swap registry defaults to 'm-small' (first
+    discovered) whose LEARNED 16K window must size the guard (9,830 tokens) —
+    the server-wide 131,072 (78,643 budget) would deliver the whole ~50k-token
+    corpus and get the turn 400'd far-end."""
+    from Orchestrator.models import TaskStatus
+    from Orchestrator.tokenization import estimate_tokens
+    blocks = [_big_blk(i) for i in range(1, 11)]  # ~100k chars ≈ 50k tokens
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="custom", model="", task_id="t-permodel-guard",
+        messages=_TEXT_MSGS, recent_blocks=blocks)
+
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    assert recorded["model"] == "swap::m-small"
+    context = recorded["messages"][1]["content"]
+    assert estimate_tokens(context) <= 9830  # per-model budget, NOT 78,643
+    assert "SNAP-20260709-0001" not in context  # oldest dropped whole
+    assert "custom window guard dropped" in capsys.readouterr().out
+
+
+def test_worker_custom_fossil_guard_model_not_in_map_server_window(per_model_registry, monkeypatch):
+    """'m-big' has no learned window: the server-wide 78,643-token budget
+    holds and the ~50k-token corpus is delivered WHOLE (nothing dropped)."""
+    from Orchestrator.models import TaskStatus
+    blocks = [_big_blk(i) for i in range(1, 11)]
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="custom", model="swap::m-big",
+        task_id="t-permodel-big", messages=_TEXT_MSGS, recent_blocks=blocks)
+
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    context = recorded["messages"][1]["content"]
+    for i in range(1, 11):
+        assert f"SNAP-20260709-{i:04d}" in context  # ALL delivered
 
 
 def test_worker_fossil_guard_other_providers_untouched(custom_registry, monkeypatch):

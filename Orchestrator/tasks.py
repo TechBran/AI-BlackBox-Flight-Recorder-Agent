@@ -1462,10 +1462,22 @@ def process_chat_task(task: Task):
         # context_tokens sizes the budget) and by the default-model block.
         _custom_server = None
         _custom_resolved_bare = ""
+        _custom_bare_final = ""
         _is_custom = (inp.provider or DEFAULT_PROVIDER).lower() == "custom"
         if _is_custom:
             from Orchestrator.onboarding import custom_servers  # lazy: worker-path only
             _custom_server, _custom_resolved_bare = custom_servers.resolve_model(inp.model or "")
+            # FINAL dispatched BARE model (empty/Auto -> first discovered):
+            # feeds the per-model window guard below (model_context override —
+            # multi-model llama-swap hosts serve different real windows). The
+            # default-model block later derives the alias-qualified
+            # selected_model from the same rule.
+            _custom_bare_final = _custom_resolved_bare
+            if _custom_server is not None and (
+                    not _custom_bare_final or _custom_bare_final.strip().lower() == "auto"):
+                _discovered = _custom_server.get("last_models") or []
+                if _discovered:
+                    _custom_bare_final = _discovered[0]
 
         update_task(task.task_id, progress=30)
 
@@ -1524,7 +1536,7 @@ def process_chat_task(task: Task):
         if _is_custom:
             from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
             from Orchestrator.context_builder import drop_snapshots_to_budget  # shared drop ladder
-            _budget = custom_servers.window_guard_tokens(_custom_server)
+            _budget = custom_servers.window_guard_tokens(_custom_server, _custom_bare_final)
             _est = estimate_tokens("\n\n".join(_fossil_sections()))
 
             def _over_budget():

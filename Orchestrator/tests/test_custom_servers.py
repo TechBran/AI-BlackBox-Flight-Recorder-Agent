@@ -181,3 +181,76 @@ def test_corrupt_registry_quarantined_not_destroyed(registry):
 def test_wrong_shape_json_fail_soft(registry):
     registry.write_text(json.dumps([1, 2, 3]))
     assert cs.list_servers() == []
+
+
+# ── per-model context map (model_context) ─────────────────────────────────
+# A llama-swap box hosts models with DIFFERENT real windows behind ONE
+# server record; model_context maps bare model id -> real context tokens
+# (auto-learned from llama.cpp exceed_context_size_error 400s).
+
+
+def test_add_server_defaults_model_context_empty(registry):
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    assert srv["model_context"] == {}
+    on_disk = json.loads(registry.read_text())
+    assert on_disk["servers"][0]["model_context"] == {}
+
+
+def test_model_context_patchable_and_persisted(registry):
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    cs.update_server(srv["id"], {"model_context": {"gemma-31b": 16384, "gemma-26b": 32768}})
+    assert cs.get_server(srv["id"])["model_context"] == {"gemma-31b": 16384, "gemma-26b": 32768}
+
+
+def test_model_context_rejects_bad_shapes(registry):
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    cs.update_server(srv["id"], {"model_context": {"good": 16384}})
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": {"m": "16384"}})  # str value
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": {"m": True}})  # bool (int subclass)
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": {1: 16384}})  # int key
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": {"m": 0}})  # non-positive
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": {"m": -5}})
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": [("m", 16384)]})  # not a dict
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"model_context": None})
+    # nothing above persisted — the last good value survives every rejection
+    assert cs.get_server(srv["id"])["model_context"] == {"good": 16384}
+
+
+def test_model_context_kept_by_redact(registry):
+    """model_context is NOT a secret — redact() keeps it for the wizard UI."""
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="sk-secret-1234")
+    cs.update_server(srv["id"], {"model_context": {"m": 16384}})
+    red = cs.list_servers_redacted()[0]
+    assert "api_key" not in red
+    assert red["model_context"] == {"m": 16384}
+
+
+def test_window_guard_tokens_per_model_override():
+    """A model present in model_context feeds ITS window into the guard
+    formula; absent models (and model=None) use the server-wide value."""
+    server = {"context_tokens": 131072, "model_context": {"gemma-31b": 16384}}
+    assert cs.window_guard_tokens(server, "gemma-31b") == 9830   # int(0.6 x 16,384)
+    assert cs.window_guard_tokens(server, "gemma-12b") == 78643  # int(0.6 x 131,072)
+    assert cs.window_guard_tokens(server, None) == 78643
+    assert cs.window_guard_tokens(server) == 78643               # backward compatible
+
+
+def test_window_guard_tokens_per_model_legacy_and_junk_safe():
+    """Records predating the field, non-dict junk, and junk values inside the
+    map all fall back to context_tokens — never crash, never a junk budget."""
+    assert cs.window_guard_tokens({"context_tokens": 32768}, "m") == 19660
+    assert cs.window_guard_tokens({"context_tokens": 32768, "model_context": None}, "m") == 19660
+    assert cs.window_guard_tokens({"context_tokens": 32768, "model_context": "x"}, "m") == 19660
+    # hand-edited junk value inside the map: ignored, server value wins
+    assert cs.window_guard_tokens({"context_tokens": 32768, "model_context": {"m": "big"}}, "m") == 19660
+    assert cs.window_guard_tokens({"context_tokens": 32768, "model_context": {"m": True}}, "m") == 19660
+    # the 4,000 floor still binds on a learned tiny window
+    assert cs.window_guard_tokens({"context_tokens": 131072, "model_context": {"m": 2048}}, "m") == 4000
+    assert cs.window_guard_tokens(None, "m") == 19660
