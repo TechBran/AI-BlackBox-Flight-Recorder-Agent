@@ -528,6 +528,14 @@ const CUSTOM_LABEL_GAP_STYLE = "margin-top: var(--ob-space-2);";
 function rerenderCustom(container, state) {
     const rowsEl = container.querySelector("#ob-custom-rows");
     if (!rowsEl) return;
+
+    // Preserve focus across the innerHTML swap: a user typing in add-row B
+    // must not lose their caret because row A's async op settled and forced
+    // a section rerender. Capture the focused element's id (inputs all have
+    // stable ids) and re-focus its replacement after rewire.
+    const active = document.activeElement;
+    const refocusId = active && rowsEl.contains(active) ? active.id : null;
+
     let html = "";
     for (const row of customState.servers) {
         html += row.mode === "edit" ? renderCustomEditCard(row) : renderCustomViewCard(row);
@@ -538,6 +546,18 @@ function rerenderCustom(container, state) {
     rowsEl.innerHTML = html;
     wireCustomRows(container, state);
     updateSaveButton(container, state);
+
+    if (refocusId) {
+        const el = document.getElementById(refocusId);
+        if (el) {
+            el.focus();
+            // Restore the caret to the end for text-like inputs.
+            if (typeof el.setSelectionRange === "function" && typeof el.value === "string") {
+                const end = el.value.length;
+                try { el.setSelectionRange(end, end); } catch (_e) { /* non-text input type */ }
+            }
+        }
+    }
 }
 
 // Configured server — read-only row: alias, base_url · key preview,
@@ -794,8 +814,11 @@ function applyCustomValidateResult(row, result) {
     } else {
         // Error strings are already user-actionable ("Server unreachable at
         // …", "API key rejected (401) …") — strip the exception-class prefix
-        // like the provider cards do.
-        const errMsg = ((result && result.error) || "validation failed").replace(/^\w+Error:\s*/, "");
+        // like the provider cards do. A validate on a server deleted in
+        // another tab comes back as a plain 400 {"detail": "..."} with no
+        // error field, so fall through to detail before the generic message.
+        const raw = (result && (result.error || result.detail)) || "validation failed";
+        const errMsg = String(raw).replace(/^\w+Error:\s*/, "");
         setCustomStatus(row, "error", customErrorPill(errMsg.slice(0, 160)));
     }
 }
@@ -897,7 +920,9 @@ async function removeCustomServer(row, container, state) {
         const r = await fetch(`/onboarding/custom-servers/${encodeURIComponent(row.server.id)}`, {
             method: "DELETE",
         });
-        if (r.ok) {
+        // Idempotent delete: 404 means the server was already removed (e.g.
+        // in another tab) — the row must not stick around as a ghost.
+        if (r.ok || r.status === 404) {
             customState.servers = customState.servers.filter(x => x !== row);
         } else {
             const data = await r.json().catch(() => ({}));
