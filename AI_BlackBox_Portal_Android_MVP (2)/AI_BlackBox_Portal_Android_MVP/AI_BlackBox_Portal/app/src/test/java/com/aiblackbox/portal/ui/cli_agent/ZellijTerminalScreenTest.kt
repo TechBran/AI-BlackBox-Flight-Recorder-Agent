@@ -294,20 +294,47 @@ class ZellijTerminalScreenTest {
     }
 
     @Test
-    fun `wheel pacer caps sustained emission near the configured rate`() {
-        val pacer = WheelNotchPacer()
-        val frameNs = 16_666_667L // 60fps
-        var emitted = 0
-        repeat(60) { // ~1 simulated second
-            pacer.add(10) // the finger keeps producing far beyond the cap
-            emitted += kotlin.math.abs(pacer.drain(frameNs))
+    fun `wheel pacer caps sustained emission near the configured rate at 60, 90 and 120Hz`() {
+        // The Fold runs 120Hz: the truncation-based budget math at the 8.33ms
+        // frame dt is exactly where an off-by-one would hide (0.25 notch of
+        // budget per frame). The ~30/s cap must hold at every common refresh
+        // rate — neither exceeding it nor starving real scrolling.
+        val rates = listOf(
+            60 to 16_666_667L,
+            90 to 11_111_111L,
+            120 to 8_333_333L,
+        )
+        for ((hz, frameNs) in rates) {
+            val pacer = WheelNotchPacer()
+            var emitted = 0
+            repeat(hz) { // ~1 simulated second of frames at this rate
+                pacer.add(10) // the finger keeps producing far beyond the cap
+                emitted += kotlin.math.abs(pacer.drain(frameNs))
+            }
+            // Budget math: the burst allowance up-front, then ~30/s accrual →
+            // ≈ 33 notches over the second. NEVER the ~hz*10 requested.
+            val upperBound = (WHEEL_MAX_NOTCHES_PER_SEC + WHEEL_BURST_BUDGET + 1f).toInt()
+            assertTrue("${hz}Hz: emitted=$emitted > $upperBound", emitted <= upperBound)
+            assertTrue(
+                "${hz}Hz: emitted=$emitted too low (cap starving scroll)",
+                emitted >= (WHEEL_MAX_NOTCHES_PER_SEC * 0.8f).toInt(),
+            )
         }
-        // Budget math: the burst allowance up-front, then ~30/s accrual →
-        // ≈ 33 notches over the second. NEVER the ~600 requested.
-        val upperBound = (WHEEL_MAX_NOTCHES_PER_SEC + WHEEL_BURST_BUDGET + 1f).toInt()
-        assertTrue("emitted=$emitted > $upperBound", emitted <= upperBound)
-        // And the cap must still let real scrolling through (not starve).
-        assertTrue("emitted=$emitted too low", emitted >= (WHEEL_MAX_NOTCHES_PER_SEC * 0.8f).toInt())
+    }
+
+    @Test
+    fun `queued wheel notches clear instead of emitting once mouse tracking drops`() {
+        // Drain-time branch guard: if the TUI exits mouse tracking mid-fling
+        // (claude quitting on its own), the queued notches are STALE —
+        // emitting them would land as literal ESC[<6x;1;1M text on the shell
+        // prompt. The drain tick must clear the backlog and emit NOTHING.
+        val pacer = WheelNotchPacer()
+        pacer.add(6)
+        assertEquals(0, drainWheelTick(pacer, mouseTrackingNow = false, frameDtNanos = 16_666_667L))
+        assertEquals(false, pacer.hasPending)
+        // With tracking still on, the same tick emits normally (rate budget).
+        pacer.add(2)
+        assertEquals(2, drainWheelTick(pacer, mouseTrackingNow = true, frameDtNanos = 16_666_667L))
     }
 
     @Test

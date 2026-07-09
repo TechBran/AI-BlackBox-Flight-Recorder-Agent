@@ -442,6 +442,14 @@ fun ZellijTerminalScreen(
                             val change = event.changes.firstOrNull { it.id == pointerId }
                                 ?: event.changes.firstOrNull()
                                 ?: continue
+                            if (change.id != pointerId) {
+                                // Pointer swap (tracked finger left, fallback
+                                // retargeted another): the position jump
+                                // between two fingers is not motion — reset so
+                                // the tracker can't synthesize a violent fling
+                                // from it.
+                                velocityTracker.resetTracking()
+                            }
                             pointerId = change.id
                             velocityTracker.addPointerInputChange(change)
                             val dy = change.position.y - change.previousPosition.y
@@ -1011,10 +1019,40 @@ internal class WheelNotchPacer(
         return emit
     }
 
-    /** Drop the backlog (touch-to-stop / programmatic reset). Budget keeps accruing. */
+    /**
+     * Drop the backlog (touch-to-stop / programmatic reset / mouse-tracking
+     * lost at drain time). NOTE: budget does NOT accrue here — it only
+     * accrues inside [drain], so once the drainer exits (backlog empty or
+     * cleared) the budget is FROZEN at its last value. After a fling that
+     * exhausted the budget, the next scroll's first notch can therefore wait
+     * up to ~2 drain frames (60Hz) for budget to accrue — don't "fix" a
+     * perceived first-notch lag by raising [burstBudget] without checking
+     * this path first.
+     */
     fun clear() {
         pendingNotches = 0
     }
+}
+
+/**
+ * One wheel drain tick, decided purely: notches queued for the WHEEL may only
+ * hit the wire while mouse tracking is STILL on at DRAIN time (the file's
+ * "live state, never cached" rule applies to the queue too). If the TUI
+ * dropped mouse tracking mid-fling (e.g. claude exiting on its own), the
+ * queued notches are STALE — emitting them would print literal
+ * `ESC[<6x;1;1M` text on the shell prompt — so the backlog clears and
+ * nothing emits. Otherwise emit per the pacer's rate budget.
+ */
+internal fun drainWheelTick(
+    pacer: WheelNotchPacer,
+    mouseTrackingNow: Boolean,
+    frameDtNanos: Long,
+): Int {
+    if (!mouseTrackingNow) {
+        pacer.clear()
+        return 0
+    }
+    return pacer.drain(frameDtNanos)
 }
 
 // =========================================================================
@@ -1148,7 +1186,14 @@ internal class ZellijScrollEngine(
                         if (lastFrameNanos == 0L) DEFAULT_FRAME_NANOS
                         else frameNanos - lastFrameNanos
                     lastFrameNanos = frameNanos
-                    val emit = pacer.drain(dt)
+                    // LIVE branch re-check at DRAIN time, not just enqueue
+                    // time: mouse tracking can drop mid-fling (the TUI
+                    // exiting on its own) — [drainWheelTick] then clears the
+                    // stale backlog instead of printing literal wheel
+                    // reports on the shell prompt.
+                    val mouseTrackingNow =
+                        viewProvider()?.mEmulator?.isMouseTrackingActive == true
+                    val emit = drainWheelTick(pacer, mouseTrackingNow, dt)
                     if (emit != 0) {
                         clientProvider()?.let { client ->
                             val seq = sgrWheelBytes(scrollUp = emit > 0)
