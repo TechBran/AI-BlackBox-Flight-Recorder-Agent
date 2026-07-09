@@ -131,7 +131,9 @@ def test_api_keys_validated_enabled_custom_server_satisfies_llm_key():
     sec = _section(rollup, "api_keys")
     assert sec["state"] == sr.READY
     assert not any(a["section"] == "api_keys" for a in rollup["attention"])
-    assert "1 custom server" in sec["summary"]
+    # EQUALITY: pins no stray " · " prefix on a server-only box (Task 2.1's
+    # Chrome contract asserts this tile text).
+    assert sec["summary"] == "1 custom server"
     item = next(i for i in sec["items"] if i["key"] == "custom:srv-abc")
     assert item == {
         "key": "custom:srv-abc",
@@ -169,6 +171,19 @@ def test_api_keys_disabled_custom_server_does_not_satisfy_llm_key():
                for a in rollup["attention"])
     item = next(i for i in sec["items"] if i["key"] == "custom:srv-abc")
     assert item["configured"] is False
+
+
+def test_api_keys_plural_unvalidated_servers_summary():
+    """Two enabled-but-unvalidated servers, no env keys → plural segment with
+    the unvalidated count (equality pins the exact tile text)."""
+    inp = _empty_inputs()
+    inp["custom_servers"] = [
+        _custom_server(validated_at=None),
+        _custom_server(id="srv-def", alias="ollama-box", validated_at=None),
+    ]
+    sec = _section(sr.build_status(**inp), "api_keys")
+    assert sec["state"] == sr.ATTENTION
+    assert sec["summary"] == "2 custom servers; 2 unvalidated"
 
 
 def test_api_keys_validated_key_plus_unvalidated_server_summary_is_precise():

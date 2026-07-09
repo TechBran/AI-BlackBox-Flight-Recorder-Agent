@@ -6,7 +6,8 @@ Single source of truth for:
   * The provider->section join + attention-derivation rules.
 
 build_status(*, env, state, embeddings, cli, web_search, image, paired,
-operators, restart, is_complete=False) is PURE (keyword-only): it takes
+operators, restart, mcp=None, rerank=None, custom_servers=None,
+is_complete=False) is PURE (keyword-only): it takes
 already-read snapshots and derives state from PERSISTED data only — zero
 subprocess/provider/tailscale probes. The route layer
 (onboarding_routes.py) reads those snapshots cheaply (dotenv_values + persisted
@@ -77,9 +78,9 @@ def _present_keys(env: dict) -> list[str]:
 def _derive_api_keys(env, state, custom_servers=None):
     present = _present_keys(env)
     validated = state.get("validated_at", {}) or {}
-    # Full registry records (custom_servers.list_servers()) — the rollup needs
-    # enabled/validated_at, but items are built from SPECIFIC fields only:
-    # api_key must never reach the status payload.
+    # Registry records — the route layer passes REDACTED records (no api_key);
+    # items are still built from SPECIFIC fields only as the second layer, so
+    # a secret can never reach the status payload even from a raw record.
     servers = [s for s in (custom_servers or []) if isinstance(s, dict)]
     items = [
         {"key": prov, "label": prov,
@@ -127,16 +128,13 @@ def _derive_api_keys(env, state, custom_servers=None):
                           for s in unvalidated_srv)
         atts.append({"severity": "warn",
                      "message": f"Custom server enabled but never validated: {names}"})
-    if atts:
-        if unvalidated:
-            base = f"{len(present)} key(s); {len(unvalidated)} unvalidated"
-        elif present:
-            base = f"{len(present)} key(s) validated"
-        else:
-            base = ""
-        return ATTENTION, _with_servers(base), items, atts
-    base = f"{len(present)} key(s) validated" if present else ""
-    return READY, _with_servers(base), items, []
+    if unvalidated:
+        base = f"{len(present)} key(s); {len(unvalidated)} unvalidated"
+    elif present:
+        base = f"{len(present)} key(s) validated"
+    else:
+        base = ""
+    return (ATTENTION if atts else READY), _with_servers(base), items, atts
 
 
 def _derive_operator(operators):

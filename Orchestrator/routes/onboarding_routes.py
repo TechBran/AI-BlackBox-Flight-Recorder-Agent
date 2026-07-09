@@ -812,12 +812,13 @@ def _collect_status_inputs() -> dict:
     except Exception:
         mcp = {"tokens_present": False}
 
-    # Custom model servers (provider 'custom') -- FULL records (not redacted):
-    # the rollup needs enabled/validated_at and builds items from specific
-    # fields only, never api_key. Cheap local JSON read; fail-soft to [].
+    # Custom model servers (provider 'custom') -- REDACTED records: redact()
+    # preserves everything the rollup needs (id/alias/enabled/validated_at)
+    # while making api_key leakage structurally impossible on both wire-bound
+    # paths; _derive_api_keys field-picks as the second layer. Cheap local
+    # JSON read; fail-soft to [].
     try:
-        from Orchestrator.onboarding import custom_servers as _custom
-        custom = _custom.list_servers()
+        custom = custom_servers.list_servers_redacted()
     except Exception:
         logger.exception("status rollup: custom_servers read failed")
         custom = []
