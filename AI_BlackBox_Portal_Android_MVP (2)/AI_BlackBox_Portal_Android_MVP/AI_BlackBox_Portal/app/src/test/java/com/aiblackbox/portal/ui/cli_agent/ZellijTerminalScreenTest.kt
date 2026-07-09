@@ -173,6 +173,194 @@ class ZellijTerminalScreenTest {
         assertArrayEquals(expectedDown, down)
     }
 
+    // ── Swipe physics: gain derivation (row height vs fallback) ──────────
+
+    @Test
+    fun `row height derives from the live view metrics`() {
+        // A 1520px-tall view showing 38 rows → 40px per row. This replaces
+        // the hardcoded 20f that made every swipe scroll ~2x the finger.
+        assertEquals(40f, terminalRowHeightPx(viewHeightPx = 1520, rows = 38), 0.001f)
+        assertEquals(37.5f, terminalRowHeightPx(viewHeightPx = 1500, rows = 40), 0.001f)
+    }
+
+    @Test
+    fun `row height falls back pre-layout and on a zero-row emulator`() {
+        // view.height == 0 before the first layout pass; emu.mRows can be 0
+        // transiently. Both must yield the safe fallback, never divide by zero.
+        assertEquals(FALLBACK_ROW_HEIGHT_PX, terminalRowHeightPx(viewHeightPx = 0, rows = 38), 0.001f)
+        assertEquals(FALLBACK_ROW_HEIGHT_PX, terminalRowHeightPx(viewHeightPx = 1520, rows = 0), 0.001f)
+        assertEquals(FALLBACK_ROW_HEIGHT_PX, terminalRowHeightPx(viewHeightPx = -5, rows = -1), 0.001f)
+    }
+
+    @Test
+    fun `wheel step honors the notch-per-row tuning knob`() {
+        // Default 1.0 → one notch per row-height of travel (same px as a row).
+        assertEquals(40f, pixelsPerScrollStep(40f, ScrollBranch.WHEEL, wheelNotchPerRow = 1.0f), 0.001f)
+        // 2.0 → two notches per row (half the px per notch): faster wheel.
+        assertEquals(20f, pixelsPerScrollStep(40f, ScrollBranch.WHEEL, wheelNotchPerRow = 2.0f), 0.001f)
+        // PAGE and LOCAL are strictly 1:1 with the row height.
+        assertEquals(40f, pixelsPerScrollStep(40f, ScrollBranch.PAGE), 0.001f)
+        assertEquals(40f, pixelsPerScrollStep(40f, ScrollBranch.LOCAL), 0.001f)
+    }
+
+    // ── Swipe physics: px→step accumulator ───────────────────────────────
+
+    @Test
+    fun `accumulator emits whole steps and keeps the remainder`() {
+        val acc = ScrollLineAccumulator()
+        assertEquals(0, acc.add(30f, 40f)) // 30px of a 40px row: nothing yet
+        assertEquals(1, acc.add(30f, 40f)) // 60px total → 1 step, 20px kept
+        assertEquals(0, acc.add(15f, 40f)) // 35px remainder
+        assertEquals(1, acc.add(5f, 40f))  // exactly 40px → second step
+    }
+
+    @Test
+    fun `accumulator handles downward travel symmetrically`() {
+        val acc = ScrollLineAccumulator()
+        assertEquals(-2, acc.add(-85f, 40f)) // trunc toward zero, -5px kept
+        assertEquals(0, acc.add(-30f, 40f))  // -35px remainder
+        assertEquals(-1, acc.add(-10f, 40f)) // -45px → one more step
+    }
+
+    @Test
+    fun `accumulator reset drops the remainder`() {
+        val acc = ScrollLineAccumulator()
+        assertEquals(0, acc.add(39f, 40f))
+        acc.reset()
+        // Post-reset the 39px are gone: another 39px still yields nothing.
+        assertEquals(0, acc.add(39f, 40f))
+    }
+
+    @Test
+    fun `accumulator guards a non-positive step size`() {
+        val acc = ScrollLineAccumulator()
+        assertEquals(0, acc.add(100f, 0f))
+        assertEquals(0, acc.add(100f, -40f))
+    }
+
+    @Test
+    fun `decaying fling deltas through the accumulator deliver the full travel`() {
+        // The fling feeds per-frame pixel DELTAS through the same accumulator
+        // as the finger. A synthetic decay series (geometric, like
+        // splineBasedDecay's tail) must integrate to the same whole-step count
+        // as the raw travel — chunking must never lose or invent rows.
+        val acc = ScrollLineAccumulator()
+        var delta = 120f
+        var totalPx = 0f
+        var steps = 0
+        while (delta > 1f) {
+            totalPx += delta
+            steps += acc.add(delta, 40f)
+            delta *= 0.85f
+        }
+        assertEquals((totalPx / 40f).toInt(), steps)
+    }
+
+    // ── Swipe physics: PAGE→arrows conversion + per-tick coalesce ────────
+
+    @Test
+    fun `arrow key bytes are ESC-bracket-A up and ESC-bracket-B down`() {
+        // PAGE branch now emits per-LINE arrows (upstream Termux parity), not
+        // a full PgUp/PgDn per notch (the old 100px-drag = 5-pages lurch).
+        assertArrayEquals(
+            byteArrayOf(0x1b, '['.code.toByte(), 'A'.code.toByte()),
+            arrowKeyBytes(scrollUp = true),
+        )
+        assertArrayEquals(
+            byteArrayOf(0x1b, '['.code.toByte(), 'B'.code.toByte()),
+            arrowKeyBytes(scrollUp = false),
+        )
+    }
+
+    @Test
+    fun `PAGE steps coalesce to the per-tick arrow cap`() {
+        assertEquals(1, coalescedArrowCount(1))
+        assertEquals(PAGE_MAX_ARROWS_PER_TICK, coalescedArrowCount(5))
+        assertEquals(-PAGE_MAX_ARROWS_PER_TICK, coalescedArrowCount(-9))
+        assertEquals(0, coalescedArrowCount(0))
+        // Excess beyond the cap is DROPPED (collapsed), never queued.
+        assertEquals(2, coalescedArrowCount(100, maxPerTick = 2))
+    }
+
+    // ── Swipe physics: WHEEL rate-cap + coalescing pacer ─────────────────
+
+    @Test
+    fun `wheel pacer emits the first notches immediately from burst budget`() {
+        // A slow deliberate one-row scroll must not lag a frame waiting for
+        // budget: the budget STARTS full at the burst allowance.
+        val pacer = WheelNotchPacer()
+        pacer.add(2)
+        assertEquals(2, pacer.drain(16_666_667L))
+    }
+
+    @Test
+    fun `wheel pacer caps sustained emission near the configured rate`() {
+        val pacer = WheelNotchPacer()
+        val frameNs = 16_666_667L // 60fps
+        var emitted = 0
+        repeat(60) { // ~1 simulated second
+            pacer.add(10) // the finger keeps producing far beyond the cap
+            emitted += kotlin.math.abs(pacer.drain(frameNs))
+        }
+        // Budget math: the burst allowance up-front, then ~30/s accrual →
+        // ≈ 33 notches over the second. NEVER the ~600 requested.
+        val upperBound = (WHEEL_MAX_NOTCHES_PER_SEC + WHEEL_BURST_BUDGET + 1f).toInt()
+        assertTrue("emitted=$emitted > $upperBound", emitted <= upperBound)
+        // And the cap must still let real scrolling through (not starve).
+        assertTrue("emitted=$emitted too low", emitted >= (WHEEL_MAX_NOTCHES_PER_SEC * 0.8f).toInt())
+    }
+
+    @Test
+    fun `wheel pacer collapses backlog beyond the cap instead of queueing`() {
+        // A monster swipe requests 500 notches; only the clamped backlog may
+        // ever reach the wire — the rest collapses (never hundreds of queued
+        // Tailscale round-trips scrolling on long after the finger stopped).
+        val pacer = WheelNotchPacer()
+        pacer.add(500)
+        var total = 0
+        var frames = 0
+        while (pacer.hasPending && frames < 1_000) {
+            total += kotlin.math.abs(pacer.drain(16_666_667L))
+            frames++
+        }
+        assertEquals(WHEEL_MAX_BACKLOG_NOTCHES, total)
+    }
+
+    @Test
+    fun `wheel pacer preserves direction sign`() {
+        val pacer = WheelNotchPacer()
+        pacer.add(-5)
+        val first = pacer.drain(16_666_667L)
+        assertTrue("expected negative emission, got $first", first < 0)
+        // Opposite directions cancel in the backlog (coalescing).
+        val cancelling = WheelNotchPacer()
+        cancelling.add(3)
+        cancelling.add(-3)
+        assertEquals(false, cancelling.hasPending)
+    }
+
+    @Test
+    fun `wheel pacer clear drops the backlog`() {
+        // Touch-to-stop / programmatic reset (setTopRow(0) paths) must kill
+        // pending notches instantly — no ghost scrolling under fresh input.
+        val pacer = WheelNotchPacer()
+        pacer.add(6)
+        pacer.clear()
+        assertEquals(false, pacer.hasPending)
+        assertEquals(0, pacer.drain(16_666_667L))
+    }
+
+    // ── Swipe physics: fling threshold ───────────────────────────────────
+
+    @Test
+    fun `fling starts only beyond the velocity threshold in either direction`() {
+        assertEquals(false, shouldFling(0f))
+        assertEquals(false, shouldFling(FLING_MIN_VELOCITY_PX_PER_S - 1f))
+        assertTrue(shouldFling(FLING_MIN_VELOCITY_PX_PER_S))
+        assertTrue(shouldFling(2_000f))
+        assertTrue(shouldFling(-2_000f))
+    }
+
     // ── CliAgentInternalState.Terminal tuple ─────────────────────────────
 
     @Test
