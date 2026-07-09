@@ -1,6 +1,6 @@
 """Operator scoping for chat/CU tool-loop memory search (WI-8, Task 1.1).
 
-Seven `hybrid_retrieve` call sites live inside provider tool-loops and must pass
+Eight `hybrid_retrieve` call sites live inside provider tool-loops and must pass
 the session operator (with `operator=""` the semantic channel is UNSCOPED —
 every operator's snapshots are visible — and the keyword channel is silently
 EMPTY because no index entry has operator ""):
@@ -12,8 +12,9 @@ EMPTY because no index entry has operator ""):
     4. stream_anthropic_with_thinking  (search_snapshots branch)
     5. stream_gemini_with_thinking     (search_snapshots branch)
     6. stream_xai_with_reasoning       (search_snapshots branch)
+    7. stream_custom_with_reasoning    (search_snapshots branch)
   Orchestrator/browser/driver_anthropic.py
-    7. run_anthropic_cu_loop           (search_snapshots branch)
+    8. run_anthropic_cu_loop           (search_snapshots branch)
 
 Test seams (each loop INLINES the dispatch — there is no shared helper):
 
@@ -23,8 +24,8 @@ Test seams (each loop INLINES the dispatch — there is no shared helper):
     hybrid_retrieve records its kwargs, and we assert the session operator
     arrives (not the "" default).
 
-  * The four STREAMING loops consume provider-specific httpx SSE streams;
-    faking four SSE wire formats would exercise the fakes, not the plumbing.
+  * The five STREAMING loops consume provider-specific httpx SSE streams;
+    faking five SSE wire formats would exercise the fakes, not the plumbing.
     Their dispatch blocks are byte-for-byte the same shape as the non-stream
     ones, so they (and the CU loop, which additionally needs a live session
     object) are covered by the AST structural test below: EVERY
@@ -154,7 +155,7 @@ def test_call_gemini_scopes_retrieval_to_session_operator(monkeypatch, _cr, _rec
 
 
 # --------------------------------------------------------------------------- #
-# AST structural test: ALL 7 call sites (covers the 4 SSE loops + CU driver)   #
+# AST structural test: ALL 8 call sites (covers the 5 SSE loops + CU driver)   #
 # --------------------------------------------------------------------------- #
 
 def _refs_hybrid_retrieve(node: ast.AST) -> bool:
@@ -184,7 +185,7 @@ def _hybrid_retrieve_call_sites(path: Path):
 
 
 @pytest.mark.parametrize("path,expected_count", [
-    (_CHAT_ROUTES, 6),   # the six provider tool-loops
+    (_CHAT_ROUTES, 7),   # the seven provider tool-loops (incl. custom)
     (_CU_DRIVER, 1),     # run_anthropic_cu_loop
 ])
 def test_every_hybrid_retrieval_site_passes_operator(path, expected_count):
