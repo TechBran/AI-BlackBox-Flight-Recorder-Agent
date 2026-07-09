@@ -46,6 +46,7 @@ from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
 from Orchestrator.browser.dispatch import resolve_backend
+from Orchestrator.onboarding import custom_servers
 
 # =============================================================================
 # Tool Definitions — Generated from tool_registry.py (single source of truth)
@@ -5693,6 +5694,570 @@ async def stream_xai_with_reasoning(messages: List[Dict], model: str, operator: 
             import traceback
             print(f"[XAI] Stream exception: {str(e)}")
             print(f"[XAI] Traceback: {traceback.format_exc()}")
+            yield {"type": "error", "data": f"Stream error: {str(e)}"}
+            return
+
+    # If we exhaust iterations
+    yield {"type": "done", "data": {"reasoning": reasoning_buffer, "content": content_buffer}}
+
+
+async def stream_custom_with_reasoning(messages: List[Dict], model: str, operator: str):
+    """Stream responses from a user-registered OpenAI-compatible server (provider 'custom').
+
+    Servers (llama.cpp / llama-swap / vLLM ...) come from the onboarding-wizard
+    registry; `model` may be alias-qualified ("alias::model") or bare.
+    llama.cpp surfaces reasoning via `reasoning_content` (first in the priority list).
+
+    Yields SSE events: {"type": "thinking"|"content"|"done"|"error", "data": "..."}
+    """
+    # Resolve the target server FRESH on every call (registry is read from disk;
+    # no import-time constants). The routes also resolve before context building
+    # (Task 4.3) — this in-function resolve is the defensive backstop for direct
+    # callers.
+    server, bare_model = custom_servers.resolve_model(model or "")
+    if server is None:
+        if custom_servers.list_servers(enabled_only=True):
+            # Enabled servers exist -> the model was qualified with an alias
+            # matching no ENABLED server (resolve_model fails fast by design).
+            yield {"type": "error", "data": f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard"}
+        else:
+            yield {"type": "error", "data": "No custom model servers configured — add one in the onboarding wizard"}
+        return
+
+    if not bare_model or bare_model.strip().lower() == "auto":
+        last_models = server.get("last_models") or []
+        if not last_models:
+            yield {"type": "error", "data": f"Server '{server.get('alias', '')}' has no discovered models — validate it in the wizard"}
+            return
+        bare_model = last_models[0]
+
+    # Process messages to convert local image paths to base64
+    processed_messages = []
+    for m in messages:
+        if m.get("role") in ("user", "assistant", "system"):
+            content = m.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for part in content:
+                    # Handle direct base64 images (from Android app - Anthropic format)
+                    if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+                        source = part.get("source", {})
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        if data:
+                            print(f"[CUSTOM-STREAM] Converting Anthropic-format base64 image ({len(data)} chars)")
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{media_type};base64,{data}"}
+                            })
+                    elif part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        print(f"[CUSTOM-STREAM] Processing image_url: {url[:80]}...")
+
+                        # Already a data URL - pass through
+                        if url.startswith("data:"):
+                            print(f"[CUSTOM-STREAM] Image already base64")
+                            new_content.append(part)
+                        else:
+                            # Try to load and convert to base64
+                            local_path = None
+                            try:
+                                if "/ui/" in url:
+                                    relative_path = url.split("/ui/", 1)[-1]
+                                    local_path = Path("Portal") / relative_path
+                                elif url.startswith("/"):
+                                    local_path = Path(url)
+
+                                if local_path and local_path.exists():
+                                    suffix = local_path.suffix.lower()
+                                    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
+                                    mime_type = mime_map.get(suffix, "image/jpeg")
+                                    img_bytes = local_path.read_bytes()
+                                    base64_image = base64.b64encode(img_bytes).decode("utf-8")
+                                    print(f"[CUSTOM-STREAM] Converted to base64 ({len(base64_image)} chars, {mime_type})")
+                                    new_content.append({
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
+                                    })
+                                else:
+                                    print(f"[CUSTOM-STREAM] WARNING: File not found: {local_path}")
+                                    new_content.append({"type": "text", "text": "[Image could not be loaded]"})
+                            except Exception as e:
+                                print(f"[CUSTOM-STREAM] ERROR: {e}")
+                                new_content.append({"type": "text", "text": f"[Image error: {e}]"})
+                    else:
+                        new_content.append(part)
+                processed_messages.append({"role": m["role"], "content": new_content})
+            else:
+                processed_messages.append(m)
+        else:
+            processed_messages.append(m)
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+    # Keyless LAN servers exist — only send the bearer when a key is set.
+    if server.get("api_key"):
+        headers["Authorization"] = f"Bearer {server['api_key']}"
+
+    # base_url already ends in /v1 (normalized by the registry).
+    chat_url = f"{server['base_url']}/chat/completions"
+
+    payload = {
+        "model": bare_model,
+        "messages": processed_messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "tools": _get_tools("custom", _last_user_msg(messages))
+    }
+    # NOTE: no max_tokens — llama-server generates until EOS/ctx; reasoning
+    # models need the headroom (INTEGRATION.md §6).
+
+    print(f"[CUSTOM] Server '{server.get('alias')}' at {server['base_url']}, model {bare_model}")
+
+    # Compatibility knob for older llama.cpp builds: if the FIRST attempt 400s
+    # with a body mentioning stream_options, drop the key and retry ONCE.
+    stream_options_retried = False
+
+    # Tool execution loop (max 5 iterations)
+    max_tool_iterations = 30
+    for iteration in range(max_tool_iterations):
+        try:
+            print(f"[CUSTOM] Starting stream request to {chat_url} with model {bare_model}")
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream("POST", chat_url, headers=headers, json=payload) as response:
+                    print(f"[CUSTOM] Response status: {response.status_code}")
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        error_msg = error_text.decode()
+                        if (response.status_code == 400
+                                and "stream_options" in error_msg
+                                and "stream_options" in payload
+                                and not stream_options_retried):
+                            stream_options_retried = True
+                            payload.pop("stream_options", None)
+                            print(f"[CUSTOM] 400 mentions stream_options — retrying once without it")
+                            continue
+                        print(f"[CUSTOM] API Error: {error_msg}")
+                        yield {"type": "error", "data": f"Custom server API error ({response.status_code}): {error_msg}"}
+                        return
+
+                    reasoning_buffer = ""
+                    content_buffer = ""
+                    tool_calls = []
+                    current_tool_call = None
+                    finish_reason = None
+
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+
+                        data_str = line[6:]  # Remove "data: " prefix
+                        if data_str == "[DONE]":
+                            break
+
+                        try:
+                            chunk = json.loads(data_str)
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                if "usage" in chunk:
+                                    yield {"type": "usage", "data": chunk["usage"]}
+                                continue
+
+                            choice = choices[0]
+                            delta = choice.get("delta", {})
+                            finish_reason = choice.get("finish_reason")
+
+                            # Handle reasoning content
+                            reasoning_text = None
+                            for field in ["reasoning_content", "reasoning", "thinking", "thought"]:
+                                if field in delta and delta[field]:
+                                    reasoning_text = delta[field]
+                                    break
+
+                            if reasoning_text:
+                                reasoning_buffer += reasoning_text
+                                yield {"type": "thinking", "data": reasoning_text}
+
+                            # Handle regular content
+                            if "content" in delta:
+                                content_text = delta["content"]
+                                if content_text:
+                                    content_buffer += content_text
+                                    yield {"type": "content", "data": content_text}
+
+                            # Handle tool calls
+                            if "tool_calls" in delta:
+                                for tc_delta in delta["tool_calls"]:
+                                    index = tc_delta.get("index", 0)
+
+                                    # Initialize tool call if new
+                                    if len(tool_calls) <= index:
+                                        tool_calls.append({
+                                            "id": "",
+                                            "type": "function",
+                                            "function": {"name": "", "arguments": ""}
+                                        })
+                                        current_tool_call = tool_calls[index]
+                                    else:
+                                        current_tool_call = tool_calls[index]
+
+                                    # Update tool call fields
+                                    if "id" in tc_delta:
+                                        current_tool_call["id"] = tc_delta["id"]
+                                    if "type" in tc_delta:
+                                        current_tool_call["type"] = tc_delta["type"]
+                                    if "function" in tc_delta:
+                                        func_delta = tc_delta["function"]
+                                        if "name" in func_delta:
+                                            current_tool_call["function"]["name"] = func_delta["name"]
+                                            yield {"type": "tool_start", "data": func_delta["name"]}
+                                        if "arguments" in func_delta:
+                                            current_tool_call["function"]["arguments"] += func_delta["arguments"]
+
+                            # Handle usage info
+                            if "usage" in chunk:
+                                yield {"type": "usage", "data": chunk["usage"]}
+
+                        except json.JSONDecodeError:
+                            continue
+
+                    # Check if we need to execute tools
+                    if finish_reason == "tool_calls" and tool_calls:
+                        yield {"type": "tool_executing", "data": "Executing tools..."}
+
+                        # Add assistant message with tool calls
+                        assistant_message = {"role": "assistant", "content": content_buffer or None}
+                        if tool_calls:
+                            assistant_message["tool_calls"] = tool_calls
+                        payload["messages"].append(assistant_message)
+
+                        # Execute each tool call
+                        for tool_call in tool_calls:
+                            func_name = tool_call["function"]["name"]
+                            func_args_str = tool_call["function"]["arguments"]
+
+                            try:
+                                func_args = json.loads(func_args_str)
+                            except json.JSONDecodeError:
+                                func_args = {}
+
+                            tool_result = ""
+                            if func_name == "web_fetch":
+                                url = func_args.get("url", "")
+                                max_chars = func_args.get("max_chars", 80000)
+                                print(f"[CUSTOM-STREAM] Executing web fetch: {url}")
+                                tool_result = await run_blocking(perform_web_fetch, url, max_chars)
+                                yield {"type": "tool_result", "data": f"Fetched content from: {url}"}
+
+                            elif func_name in IMAGE_TOOL_PROVIDERS:
+                                provider = IMAGE_TOOL_PROVIDERS[func_name]
+                                prompt = func_args.get("prompt", "")
+                                aspect_ratio = func_args.get("aspectRatio", "16:9")
+                                resolution = func_args.get("resolution", "1K")
+                                num_images = func_args.get("numberOfImages", 1)
+                                reference_images = func_args.get("reference_images", [])
+                                mode = "image-to-image" if reference_images else "text-to-image"
+                                print(f"[CUSTOM-STREAM] Executing {mode} generation: {prompt[:100]}... ({num_images} @ {resolution}, {len(reference_images)} refs)")
+
+                                # Create image generation task
+                                image_options = {
+                                    "aspectRatio": aspect_ratio,
+                                    "resolution": resolution,
+                                    "numberOfImages": num_images,
+                                    "provider": provider,
+                                }
+
+                                # Process reference images for image-to-image generation
+                                reference_image_data = []
+                                if reference_images:
+                                    import base64 as b64
+                                    from pathlib import Path as P
+                                    for img_url in reference_images[:14]:  # Max 14 images
+                                        clean_url = img_url.replace("/ui/", "") if img_url.startswith("/ui/") else img_url
+                                        file_path = P("Portal") / clean_url
+                                        if file_path.exists():
+                                            with open(file_path, "rb") as f:
+                                                img_b64 = b64.b64encode(f.read()).decode()
+                                            ext = file_path.suffix.lower()
+                                            mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
+                                            reference_image_data.append({
+                                                "data": img_b64,
+                                                "mimeType": mime_map.get(ext, "image/jpeg")
+                                            })
+                                    if reference_image_data:
+                                        image_options["referenceImages"] = reference_image_data
+
+                                task = create_task(
+                                    TaskType.IMAGE_GENERATION,
+                                    operator="system",
+                                    prompt=prompt,
+                                    result_data={"options": image_options}
+                                )
+
+                                # Generate predicted URL
+                                slug = generate_prompt_slug(prompt)
+                                if num_images == 1:
+                                    predicted_url = f"/ui/uploads/{slug}_{task.task_id}.png"
+                                    url_info = f"Image will be saved to: {predicted_url}"
+                                else:
+                                    predicted_urls = [f"/ui/uploads/{slug}_{task.task_id}_{i+1}.png" for i in range(num_images)]
+                                    url_info = f"Images will be saved to: {', '.join(predicted_urls)}"
+
+                                img_count = num_images
+                                ref_info = f" Using {len(reference_image_data)} reference image(s) for style guidance." if reference_image_data else ""
+                                tool_result = f"Image generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {img_count} image{'s' if img_count > 1 else ''} at {resolution} resolution ({aspect_ratio} aspect ratio).{ref_info} {url_info}. To use this image for video generation later, pass the URL to generate_video with image_url parameter."
+
+                                yield {"type": "tool_result", "data": f"Image generation task created: {task.task_id}"}
+                                print(f"[STREAM] Sending image_task event: task_id={task.task_id}, prompt={prompt[:50]}, count={num_images}")
+                                yield {"type": "image_task", "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images, "predicted_url": predicted_url if num_images == 1 else predicted_urls[0]}}
+
+                            elif func_name == "generate_video":
+                                prompt = func_args.get("prompt", "")
+                                aspect_ratio = func_args.get("aspectRatio", "16:9")
+                                duration = func_args.get("duration", 8)
+                                resolution = func_args.get("resolution", "720p")
+                                negative_prompt = func_args.get("negativePrompt", "")
+                                image_url = func_args.get("image_url", "")
+                                video_url = func_args.get("video_url", "")
+
+                                # Determine mode: video extension takes priority
+                                if video_url:
+                                    mode_str = "video-extension"
+                                elif image_url:
+                                    mode_str = "image-to-video"
+                                else:
+                                    mode_str = "text-to-video"
+                                print(f"[CUSTOM-STREAM] Executing {mode_str} generation: {prompt[:100]}... ({duration}s @ {resolution})")
+
+                                # Generate predicted URL for the video
+                                video_slug = generate_prompt_slug(prompt) if prompt else "video"
+
+                                if video_url:
+                                    # Video extension mode - create task with url for extension
+                                    video_data = {
+                                        "url": video_url,
+                                        "prompt": prompt
+                                    }
+                                    task = create_task(
+                                        TaskType.VIDEO_GENERATION,
+                                        operator="system",
+                                        prompt=prompt or "Extend video",
+                                        result_data=video_data
+                                    )
+                                    predicted_video_url = f"/ui/uploads/{video_slug}_{task.task_id}.mp4"
+                                    tool_result = f"Video EXTENSION started. Extending video at {video_url} with prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. The new clip will continue from where the original ended. Video generation takes 5-20 minutes. When complete, the extended video will be available at: {predicted_video_url}"
+                                else:
+                                    # Create video generation task (text-to-video or image-to-video)
+                                    video_options = {
+                                        "aspectRatio": aspect_ratio,
+                                        "duration": duration,
+                                        "resolution": resolution,
+                                    }
+                                    if negative_prompt:
+                                        video_options["negativePrompt"] = negative_prompt
+                                    if image_url:
+                                        video_options["image_url"] = image_url
+
+                                    task = create_task(
+                                        TaskType.VIDEO_GENERATION,
+                                        operator="system",
+                                        prompt=prompt,
+                                        result_data={"options": video_options}
+                                    )
+                                    predicted_video_url = f"/ui/uploads/{video_slug}_{task.task_id}.mp4"
+
+                                    if image_url:
+                                        tool_result = f"Image-to-video generation started. Animating image at {image_url} with prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution} resolution ({aspect_ratio} aspect ratio). Video generation takes 5-20 minutes. When complete, the video will be available at: {predicted_video_url}"
+                                    else:
+                                        tool_result = f"Video generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}. Creating {duration}s video at {resolution} resolution ({aspect_ratio} aspect ratio). Video generation takes 5-20 minutes. When complete, the video will be available at: {predicted_video_url}"
+
+                                yield {"type": "tool_result", "data": f"Video generation task created: {task.task_id}"}
+                                print(f"[STREAM] Sending video_task event: task_id={task.task_id}, prompt={prompt[:50]}, mode={mode_str}, predicted_url={predicted_video_url}")
+                                yield {"type": "video_task", "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration, "resolution": resolution, "mode": mode_str, "predicted_url": predicted_video_url}}
+
+                            elif func_name == "get_media":
+                                media_url = func_args.get("url", "")
+                                media_task_id = func_args.get("task_id", "")
+                                include_base64 = func_args.get("include_base64", True)
+                                print(f"[CUSTOM-STREAM] Executing get_media: url={media_url}, task_id={media_task_id}")
+
+                                result = execute_get_media(url=media_url, task_id=media_task_id)
+                                tool_result = json.dumps(result, indent=2)
+                                yield {"type": "tool_result", "data": f"Retrieved media: {media_url or media_task_id}"}
+
+                            elif func_name == "list_media":
+                                media_type = func_args.get("media_type")
+                                limit = func_args.get("limit", 20)
+                                print(f"[CUSTOM-STREAM] Executing list_media: type={media_type}, limit={limit}")
+
+                                result = execute_list_media(media_type=media_type, limit=limit)
+                                tool_result = json.dumps(result, indent=2)
+                                yield {"type": "tool_result", "data": f"Listed {result.get('count', 0)} media files"}
+
+                            elif func_name == "search_media":
+                                query = func_args.get("query", "")
+                                media_type = func_args.get("media_type")
+                                limit = func_args.get("limit", 10)
+                                print(f"[CUSTOM-STREAM] Executing search_media: query='{query}', type={media_type}")
+
+                                result = execute_search_media(query=query, media_type=media_type, limit=limit)
+                                tool_result = json.dumps(result, indent=2)
+                                yield {"type": "tool_result", "data": f"Found {result.get('count', 0)} matching media"}
+
+                            elif func_name == "lyria_music":
+                                prompt = func_args.get("prompt", "")
+                                negative_prompt = func_args.get("negativePrompt", "")
+                                sample_count = func_args.get("sampleCount", 1)
+                                print(f"[CUSTOM-STREAM] Executing music generation: {prompt[:100]}... ({sample_count} variation(s))")
+
+                                # Create music generation task
+                                music_options = {
+                                    "prompt": prompt,
+                                    "operator": "system",
+                                }
+                                if negative_prompt:
+                                    music_options["negative_prompt"] = negative_prompt
+                                if sample_count and sample_count > 1:
+                                    music_options["sample_count"] = sample_count
+
+                                task = create_task(
+                                    TaskType.LYRIA_MUSIC,
+                                    operator="system",
+                                    prompt=prompt,
+                                    result_data=music_options
+                                )
+
+                                variations_text = f" ({sample_count} variations)" if sample_count > 1 else ""
+                                tool_result = f"Music generation started for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}{variations_text}. 30-second track will be ready in 20-60 seconds."
+
+                                yield {"type": "tool_result", "data": f"Music generation task created: {task.task_id}"}
+                                print(f"[STREAM] Sending music_task event: task_id={task.task_id}, prompt={prompt[:50]}")
+                                yield {"type": "music_task", "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}}
+
+                            elif func_name == "search_snapshots":
+                                query = func_args.get("query", "")
+                                k = min(func_args.get("k", 3), 5)
+                                print(f"[CUSTOM-STREAM] Executing snapshot search: '{query}' (k={k})")
+
+                                if not query:
+                                    tool_result = "Error: No search query provided."
+                                else:
+                                    try:
+                                        vol_txt = read_text_safe(VOL_PATH)
+                                        search_results = await run_blocking(hybrid_retrieve, vol_txt, query, k=k, operator=operator)
+
+                                        if not search_results:
+                                            tool_result = f"No snapshots found matching: {query}"
+                                        else:
+                                            output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
+                                            for i, snap_text in enumerate(search_results, 1):
+                                                # WI-10 (M7): deliver retrieved snapshots WHOLE — no delivery truncation
+                                                output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
+                                            tool_result = "\n\n".join(output_parts)
+                                            print(f"[CUSTOM-STREAM] Snapshot search returned {len(search_results)} results")
+                                    except Exception as e:
+                                        print(f"[CUSTOM-STREAM] Snapshot search error: {e}")
+                                        tool_result = f"Search failed: {str(e)}"
+
+                                yield {"type": "tool_result", "data": "Snapshot search completed"}
+
+                            elif func_name == "search_contacts":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                search_result = await executor.execute("search_contacts", func_args)
+                                tool_result = search_result.result
+                                print(f"[CUSTOM-STREAM] Contact search: {tool_result[:100]}")
+                                yield {"type": "tool_result", "data": "Contact search completed"}
+                            elif func_name == "save_contact":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                save_result = await executor.execute("save_contact", func_args)
+                                tool_result = save_result.result
+                                print(f"[CUSTOM-STREAM] Save contact: {tool_result}")
+                                yield {"type": "tool_result", "data": f"Contact: {tool_result[:100]}"}
+                            elif func_name == "create_cron_job":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                cron_result = await executor.execute("create_cron_job", func_args)
+                                tool_result = cron_result.result
+                                print(f"[CUSTOM-STREAM] Create cron job: {tool_result}")
+                                yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
+                            elif func_name == "edit_cron_job":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                cron_result = await executor.execute("edit_cron_job", func_args)
+                                tool_result = cron_result.result
+                                print(f"[CUSTOM-STREAM] Edit cron job: {tool_result}")
+                                yield {"type": "tool_result", "data": f"Cron job: {tool_result[:100]}"}
+                            elif func_name == "search_cron_jobs":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                cron_result = await executor.execute("search_cron_jobs", func_args)
+                                tool_result = cron_result.result
+                                print(f"[CUSTOM-STREAM] Search cron jobs: {tool_result}")
+                                yield {"type": "tool_result", "data": f"Cron jobs: {tool_result[:100]}"}
+
+                            elif func_name == "use_computer":
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                cu_result = await executor.execute("use_computer", func_args)
+                                tool_result = cu_result.result
+                                print(f"[CUSTOM-STREAM] use_computer: {tool_result[:100]}")
+                                yield {"type": "tool_result", "data": f"Computer Use: {tool_result[:80]}"}
+
+                            elif func_name in ("list_devices", "control_android_device",
+                                               "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                tool_exec_result = await executor.execute(func_name, func_args)
+                                tool_result = tool_exec_result.result
+                                print(f"[CUSTOM-STREAM] {func_name}: {tool_result[:100]}")
+                                yield {"type": "tool_result", "data": f"{func_name}: {tool_result[:80]}"}
+                            else:
+                                # Catch-all: route any other tool (dynamically-injected ToolVault
+                                # tools like control_phone) through BlackBoxToolExecutor. Without it
+                                # an unknown func_name left tool_result stale/undefined and we told
+                                # the model "Tool executed successfully" WITHOUT running it (silent
+                                # false success). Mirrors the Anthropic/Gemini catch-all.
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                tool_exec_result = await executor.execute(func_name, func_args)
+                                tool_result = tool_exec_result.result if hasattr(tool_exec_result, 'result') else str(tool_exec_result)
+                                print(f"[CUSTOM-STREAM] {func_name} (catch-all): {(tool_result or '')[:100]}")
+                                yield {"type": "tool_result", "data": f"{func_name}: {(tool_result or '')[:80]}"}
+                                _mkind = _media_kind(func_name)
+                                if _mkind and getattr(tool_exec_result, "data", None):
+                                    _mtid = tool_exec_result.data.get("task_id")
+                                    if _mtid:
+                                        # Blanket media placeholder: a media tool reaching the
+                                        # catch-all (e.g. elevenlabs_music) emits the same SSE
+                                        # media-task event as the explicit native branches, so
+                                        # the UI shows + fills a placeholder. _mkind is
+                                        # image|video|music -> {kind}_task, the event clients handle.
+                                        print(f"[CUSTOM-STREAM] Sending {_mkind}_task (catch-all): task_id={_mtid}")
+                                        yield {"type": f"{_mkind}_task", "data": {"task_id": str(_mtid), "prompt": func_args.get("prompt", "")}}
+
+                            # Add tool result message
+                            payload["messages"].append({
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "content": tool_result or "Tool executed successfully"
+                            })
+
+                        print(f"[CUSTOM-STREAM] Tool iteration {iteration + 1}, continuing...")
+                        # Continue to next iteration
+                        continue
+                    else:
+                        # No tool calls, we're done
+                        yield {"type": "done", "data": {"reasoning": reasoning_buffer, "content": content_buffer}}
+                        print(f"[CUSTOM] Stream complete. Reasoning: {len(reasoning_buffer)} chars, Content: {len(content_buffer)} chars")
+                        return
+
+        except Exception as e:
+            import traceback
+            print(f"[CUSTOM] Stream exception: {str(e)}")
+            print(f"[CUSTOM] Traceback: {traceback.format_exc()}")
             yield {"type": "error", "data": f"Stream error: {str(e)}"}
             return
 
