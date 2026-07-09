@@ -123,7 +123,10 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         // 1200ms grace, which raced providers with NO flush deadline (Google
         // gRPC — journal-proven lost finals). The server bounds its own drains
         // at 5-8s, so this is the disaster backstop, not the expected wait.
-        private const val STOP_BACKSTOP_MS = 10_000L
+        // `internal` so UI backstops layered ABOVE it (CliMicButton's
+        // TRANSCRIBING_TIMEOUT_MS) can assert their ordering against the real
+        // constant in unit tests.
+        internal const val STOP_BACKSTOP_MS = 10_000L
         private const val TAG = "SttStreamClient"
     }
 
@@ -194,6 +197,11 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                 // User stop(), a newer session, or a clean end after our stt_stop →
                 // end the logical session WITHOUT reconnecting.
                 if (userStopped || !_isStreaming.value || epoch != sessionEpoch) break
+                // FOLLOW-UP (not implemented): a received stt_done with NO stop
+                // pending marks a DELIBERATE server-side session end — it could
+                // discriminate that from a transport drop here and skip the
+                // reconnect. Today doneSignal is simply re-armed below and the
+                // drop heuristics decide.
                 // Unexpected mid-recording drop → reconnect + resume.
                 reconnectAttempts++
                 if (reconnectAttempts > maxReconnects) {
