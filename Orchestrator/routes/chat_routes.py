@@ -6716,7 +6716,7 @@ async def chat_stream(request: Request):
             if _srv is not None and (not model or _bare.strip().lower() == "auto"):
                 _discovered = _srv.get("last_models") or []
                 if _discovered:
-                    model = custom_servers.qualify(_srv["alias"], _discovered[0])
+                    model = custom_servers.qualify(_srv.get("alias", ""), _discovered[0])
             guard = custom_servers.window_guard_tokens(_srv)
         elif not model:
             if provider == "openai":
@@ -6826,7 +6826,7 @@ async def chat_stream_post(request: Request):
             if _srv is not None and (not model or _bare.strip().lower() == "auto"):
                 _discovered = _srv.get("last_models") or []
                 if _discovered:
-                    model = custom_servers.qualify(_srv["alias"], _discovered[0])
+                    model = custom_servers.qualify(_srv.get("alias", ""), _discovered[0])
             guard = custom_servers.window_guard_tokens(_srv)
         elif not model:
             if provider == "openai":
