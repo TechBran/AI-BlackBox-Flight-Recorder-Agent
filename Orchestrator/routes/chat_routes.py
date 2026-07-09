@@ -214,7 +214,7 @@ def _get_tools(provider: str, prompt: str = "", group: str = "chat") -> list:
     # Static fallback
     if provider == "anthropic":
         tools = CHAT_TOOLS_ANTHROPIC_CU if group == "chat_cu" else CHAT_TOOLS_ANTHROPIC
-    elif provider in ("openai", "openai_rest", "xai", "grok"):
+    elif provider in ("openai", "openai_rest", "xai", "grok", "custom"):
         tools = CHAT_TOOLS_OPENAI
     elif provider in ("gemini", "gemini_rest", "google"):
         tools = CHAT_TOOLS_GEMINI
@@ -6545,7 +6545,8 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
     return cu_context, provenance
 
 
-def build_streaming_context(messages: list, operator: str, provider: str = "openai") -> Tuple[list, dict]:
+def build_streaming_context(messages: list, operator: str, provider: str = "openai",
+                            window_guard_tokens: int | None = None) -> Tuple[list, dict]:
     """Build context-enriched messages for streaming chat with fossil retrieval.
 
     Delegates fossil retrieval to `Orchestrator.context_builder.build_fossil_context`
@@ -6581,6 +6582,9 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
         operator=operator,
         log_prefix="[STREAM CONTEXT]",
         provider=provider,
+        # None = today's behavior (provider window table). provider="custom"
+        # callers thread the resolved server's context_tokens here (Task 4.3).
+        window_guard_tokens=window_guard_tokens,
     )
 
     # Add device registry context (transport/route-specific: only chat_stream uses this)

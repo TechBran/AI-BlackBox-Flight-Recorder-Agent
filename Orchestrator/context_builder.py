@@ -84,6 +84,13 @@ PROVIDER_WINDOW_GUARD_TOKENS = {
     "xai": 840_000,
     "grok": 840_000,
     "computer-use": 49_152,
+    # custom = user-registered OpenAI-compatible servers (llama.cpp/vLLM/
+    # Ollama). Windows vary per server, so callers thread the resolved
+    # server's context_tokens via build_fossil_context(window_guard_tokens=…);
+    # this static entry is the NO-OVERRIDE FLOOR (0.6 × the 32,768-token
+    # default context_tokens) so any path that misses the thread never
+    # inherits the 240K default and overflows a 32K window on turn one.
+    "custom": 19_200,
 }
 # Unknown/absent provider (voice session-open, CLI agent transports): the most
 # conservative CLOUD chat budget. Voice routes additionally apply their own
@@ -156,6 +163,7 @@ def build_fossil_context(
     include_recent: bool = True,
     include_keyword: bool = True,
     include_media: bool = True,
+    window_guard_tokens: int | None = None,
 ) -> Tuple[str, dict]:
     """Retrieve fossils for `operator` and build the fossil-context string.
 
@@ -168,6 +176,12 @@ def build_fossil_context(
         log_prefix: Prefix for the debug print lines so voice/agent callers
             can tag their own logs. Pass "[STREAM CONTEXT]" from chat_routes.py
             to preserve the existing log format byte-for-byte.
+        window_guard_tokens: Optional per-call override for the cloud window
+            safety guard budget. None (default) = today's behavior:
+            window_guard_budget_tokens(provider). Used by provider="custom"
+            callers to thread the resolved server's actual context_tokens
+            (windows vary per registered server; the static table entry is
+            only the no-override floor).
 
     Returns:
         (fossil_context_str, provenance_dict)
@@ -381,7 +395,11 @@ def build_fossil_context(
         # ever would, whole LOWEST-RANKED snapshots are dropped — NEVER a
         # mid-snapshot truncation — and every drop is logged.
         from Orchestrator.tokenization import estimate_tokens  # lazy: avoid startup cycle
-        budget = window_guard_budget_tokens(provider)
+        budget = (
+            window_guard_tokens
+            if window_guard_tokens is not None
+            else window_guard_budget_tokens(provider)
+        )
         est = estimate_tokens(fossil_context)
         dropped: list = []
         while est > budget:

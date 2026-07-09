@@ -56,6 +56,7 @@ PROVIDER_FORMATS = {
     "gemini_live": "gemini_live",
     "grok": "openai_rest",       # Grok REST uses OpenAI format
     "grok_live": "openai_realtime",  # Grok Live uses OpenAI Realtime format
+    "custom": "openai_rest",     # Custom OpenAI-compatible servers (llama.cpp/vLLM/Ollama)
     "mcp": "mcp",
 }
 
@@ -71,6 +72,7 @@ PROVIDER_DEFAULT_GROUP = {
     "gemini_live": "gemini_live",
     "grok": "chat",
     "grok_live": "grok_live",
+    "custom": "chat",
     "mcp": "mcp",
 }
 
