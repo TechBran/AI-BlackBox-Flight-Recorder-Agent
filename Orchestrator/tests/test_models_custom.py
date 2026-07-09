@@ -231,6 +231,57 @@ def test_models_custom_bearer_only_when_key_present(tmp_registry, monkeypatch):
     assert "Authorization" not in by_url["http://10.0.1.2:8080/v1/models"]["headers"]
 
 
+def test_models_custom_persist_skipped_when_last_models_unchanged(tmp_registry, monkeypatch):
+    """This endpoint is polled (never cached); update_server is a full
+    fsync+rename of the registry. An unchanged model list must not write."""
+    srv = cs.add_server(alias="one", base_url="http://10.0.2.1:8080/v1")
+    _route_by_url(monkeypatch, {
+        "http://10.0.2.1:8080/v1": _openai_payload(["m1", "m2"]),
+    })
+
+    admin_routes.get_available_models("custom")           # first fetch persists
+    assert cs.get_server(srv["id"])["last_models"] == ["m1", "m2"]
+
+    calls = []
+    real_update = cs.update_server
+
+    def spy(server_id, patch):
+        calls.append((server_id, patch))
+        return real_update(server_id, patch)
+
+    monkeypatch.setattr(cs, "update_server", spy)
+
+    admin_routes.get_available_models("custom")           # identical payload
+    assert calls == []                                    # dirty-check: no write
+
+    # Positive companion (proves the spy is live): a CHANGED list persists.
+    _route_by_url(monkeypatch, {
+        "http://10.0.2.1:8080/v1": _openai_payload(["m1", "m2", "m3"]),
+    })
+    admin_routes.get_available_models("custom")
+    assert calls == [(srv["id"], {"last_models": ["m1", "m2", "m3"]})]
+
+
+@pytest.mark.parametrize("payload,expected_ids", [
+    ("not-a-dict", []),                                     # payload not a dict
+    ({"object": "list"}, []),                               # data missing
+    ({"data": "nope"}, []),                                 # data not a list
+    ({"data": ["str", 42, {"id": "ok"}]}, ["shape::ok"]),   # non-dict items
+    ({"data": [{"id": 123}, {"id": ""}, {"id": "ok"}]},     # non-string/empty ids
+     ["shape::ok"]),
+])
+def test_models_custom_payload_shapes_degrade_gracefully(
+        tmp_registry, monkeypatch, payload, expected_ids):
+    """Odd payload shapes must skip/None gracefully — the endpoint never 500s."""
+    cs.add_server(alias="shape", base_url="http://10.0.3.1:8080/v1")
+    _route_by_url(monkeypatch, {"http://10.0.3.1:8080/v1": payload})
+
+    out = admin_routes.get_available_models("custom")     # must not raise
+
+    assert [m["id"] for m in out["models"]] == expected_ids
+    assert all(m["status"] in ("loaded", "unloaded", None) for m in out["models"])
+
+
 def test_models_custom_server_vanished_mid_probe_does_not_crash(tmp_registry, monkeypatch):
     """update_server raises KeyError if the server was deleted between
     list_servers and the last_models persist — the catalog must still return."""

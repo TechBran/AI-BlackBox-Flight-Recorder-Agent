@@ -744,7 +744,12 @@ def _fetch_custom_models() -> dict:
     servers = custom_servers.list_servers(enabled_only=True)
 
     def _probe(srv: dict) -> list[tuple[str, str | None]] | None:
-        """[(model_id, status)] on success, None on any failure."""
+        """[(model_id, status)] on success, None on any failure.
+
+        The ENTIRE body (fetch + parse) is guarded: the endpoint must never
+        500 on a hostile/odd payload shape or a future unguarded edit — a
+        probe that can't produce entries is just a dead server (None).
+        """
         try:
             headers = {}
             if srv.get("api_key"):
@@ -753,22 +758,22 @@ def _fetch_custom_models() -> dict:
                              headers=headers, timeout=5.0)
             resp.raise_for_status()
             payload = resp.json()
+            entries: list[tuple[str, str | None]] = []
+            data = payload.get("data") if isinstance(payload, dict) else None
+            for item in data if isinstance(data, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if not isinstance(model_id, str) or not model_id:
+                    continue
+                # llama-swap extension; plain OpenAI payloads have no `status`.
+                status = item.get("status")
+                value = status.get("value") if isinstance(status, dict) else None
+                entries.append((model_id, value if isinstance(value, str) else None))
+            return entries
         except Exception as e:
             print(f"[CUSTOM-MODELS] {srv.get('alias', '?')} probe failed: {e}")
             return None
-        entries: list[tuple[str, str | None]] = []
-        data = payload.get("data") if isinstance(payload, dict) else None
-        for item in data if isinstance(data, list) else []:
-            if not isinstance(item, dict):
-                continue
-            model_id = item.get("id")
-            if not isinstance(model_id, str) or not model_id:
-                continue
-            # llama-swap extension; plain OpenAI payloads have no `status`.
-            status = item.get("status")
-            value = status.get("value") if isinstance(status, dict) else None
-            entries.append((model_id, value if isinstance(value, str) else None))
-        return entries
 
     probed: list[list | None] = []
     if servers:
@@ -786,11 +791,16 @@ def _fetch_custom_models() -> dict:
                        if isinstance(cached_ids, list) else [])
         else:
             any_live = True
-            try:
-                custom_servers.update_server(
-                    srv["id"], {"last_models": [mid for mid, _ in entries]})
-            except Exception as e:  # e.g. deleted mid-probe — just don't persist
-                print(f"[CUSTOM-MODELS] {alias} last_models persist skipped: {e}")
+            fresh_ids = [mid for mid, _ in entries]
+            # Dirty-check: this endpoint is polled (never cached) and every
+            # update_server is a full fsync+rename of the registry — only
+            # persist when the model list actually changed.
+            if srv.get("last_models") != fresh_ids:
+                try:
+                    custom_servers.update_server(
+                        srv["id"], {"last_models": fresh_ids})
+                except Exception as e:  # e.g. deleted mid-probe — don't persist
+                    print(f"[CUSTOM-MODELS] {alias} last_models persist skipped: {e}")
         for model_id, status in entries:
             models.append({
                 "id": custom_servers.qualify(alias, model_id),
