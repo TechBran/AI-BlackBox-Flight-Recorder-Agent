@@ -329,13 +329,36 @@ def call_openai(messages: List[Dict], model: str, operator: str):
         "tools": _get_tools("openai", _last_user_msg(messages))
     }
 
+    # gpt-5.6 chat/completions rejects function tools unless reasoning_effort
+    # is explicitly 'none' (OpenAI applies a non-none server-side default);
+    # reasoning+tools requires the /v1/responses API — future migration.
+    model_lower = model.lower()
+    if "gpt-5.6" in model_lower:
+        payload["reasoning_effort"] = "none"
+
+    # Compatibility retry (the stream_options idiom): if the FIRST attempt
+    # 400s with a body mentioning reasoning_effort and we sent none, the
+    # server-side default rejected our function tools — retry ONCE with
+    # an explicit 'none'. Self-heals future families before the proactive
+    # gate above learns their name.
+    reasoning_effort_retried = False
+
     # Tool calling loop
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     max_tool_calls = 30
 
     for iteration in range(max_tool_calls):
         r = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=200)
-        if r.status_code != 200: raise HTTPException(r.status_code, r.text)
+        if r.status_code != 200:
+            if (r.status_code == 400
+                    and "reasoning_effort" in r.text
+                    and "reasoning_effort" not in payload
+                    and not reasoning_effort_retried):
+                reasoning_effort_retried = True
+                payload["reasoning_effort"] = "none"
+                print("[OPENAI] 400 mentions reasoning_effort — retrying once with reasoning_effort='none'")
+                continue
+            raise HTTPException(r.status_code, r.text)
 
         data = r.json()
         message = data["choices"][0]["message"]
@@ -2229,6 +2252,20 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
         # GPT-5 streams normally but doesn't expose reasoning/thinking
         print(f"[OPENAI] GPT-5 model: {model} - no reasoning parameter (not supported)")
 
+    # gpt-5.6 chat/completions rejects function tools unless reasoning_effort
+    # is explicitly 'none' (OpenAI applies a non-none server-side default);
+    # reasoning+tools requires the /v1/responses API — future migration.
+    if "gpt-5.6" in model_lower:
+        payload["reasoning_effort"] = "none"
+        print(f"[OPENAI] gpt-5.6 family ({model}): sending reasoning_effort='none' (function-tool compat)")
+
+    # Compatibility retry (the stream_options idiom): if the FIRST attempt
+    # 400s with a body mentioning reasoning_effort and we sent none, the
+    # server-side default rejected our function tools — retry ONCE with an
+    # explicit 'none'. Self-heals future families before the gate above
+    # learns their name.
+    reasoning_effort_retried = False
+
     # Tool execution loop (bounded by max_tool_iterations below)
     max_tool_iterations = 30
     for iteration in range(max_tool_iterations):
@@ -2241,6 +2278,14 @@ async def stream_openai_with_reasoning(messages: List[Dict], model: str, operato
                     if response.status_code != 200:
                         error_text = await response.aread()
                         error_msg = error_text.decode()
+                        if (response.status_code == 400
+                                and "reasoning_effort" in error_msg
+                                and "reasoning_effort" not in payload
+                                and not reasoning_effort_retried):
+                            reasoning_effort_retried = True
+                            payload["reasoning_effort"] = "none"
+                            print("[OPENAI] 400 mentions reasoning_effort — retrying once with reasoning_effort='none'")
+                            continue
                         print(f"[OPENAI] API Error: {error_msg}")
                         yield {"type": "error", "data": f"OpenAI API error ({response.status_code}): {error_msg}"}
                         return
