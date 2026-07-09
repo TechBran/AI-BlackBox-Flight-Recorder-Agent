@@ -110,6 +110,11 @@ fun Composer(
     // (and fires a best-effort re-attest) so a just-installed model shows up.
     onProviderMenuOpen: () -> Unit = {},
     liveModels: List<Pair<String, String>> = emptyList(),
+    // Task 7.1: custom-provider model load status (id → "loaded"/"unloaded",
+    // from GET /models/custom via ChatViewModel.customModelStatus). Rows whose
+    // status is "loaded" get a warm dot — the model is resident in the server's
+    // RAM, so the first token is instant. Empty for every other provider.
+    customModelStatus: Map<String, String> = emptyMap(),
     attachments: List<AttachmentItem> = emptyList(),
     onRemoveAttachment: (Int) -> Unit = {},
     modifier: Modifier = Modifier
@@ -365,11 +370,27 @@ fun Composer(
                         models.forEach { (id, name) ->
                             DropdownMenuItem(
                                 text = {
-                                    Text(
-                                        name,
-                                        color = if (id == model) BbxAccent else BbxWhite,
-                                        fontWeight = if (id == model) FontWeight.Bold else FontWeight.Normal
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        // Task 7.1: warm dot — this custom model is
+                                        // resident in its server's RAM ("loaded"), so
+                                        // picking it means an instant first token.
+                                        if (customModelStatus[id] == "loaded") {
+                                            Box(
+                                                Modifier
+                                                    .size(8.dp)
+                                                    .background(
+                                                        androidx.compose.ui.graphics.Color(0xFFFF9800),
+                                                        CircleShape
+                                                    )
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                        }
+                                        Text(
+                                            name,
+                                            color = if (id == model) BbxAccent else BbxWhite,
+                                            fontWeight = if (id == model) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
                                 },
                                 onClick = {
                                     view.performPressFeedback()

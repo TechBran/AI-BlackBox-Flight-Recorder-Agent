@@ -917,6 +917,9 @@ class NativeMainActivity : ComponentActivity() {
                             localEngineState = chatViewModel.localEngineState.collectAsState().value,
                             onProviderMenuOpen = { chatViewModel.refreshLocalAvailability() },
                             liveModels = chatViewModel.liveModels.collectAsState().value,
+                            // Task 7.1: custom-provider warm dots (id → load status
+                            // from GET /models/custom; empty for other providers).
+                            customModelStatus = chatViewModel.customModelStatus.collectAsState().value,
                             attachments = attachments,
                             onRemoveAttachment = { index ->
                                 if (index in attachments.indices) attachments.removeAt(index)

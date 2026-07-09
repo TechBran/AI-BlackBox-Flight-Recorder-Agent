@@ -12,7 +12,13 @@ enum class ChatProvider(val id: String, val displayName: String) {
     GROK_LIVE("grok-live", "Grok Live"),
     ROBOTICS("robotics", "Robotics (ER)"),
     COMPUTER_USE("computer-use", "Computer Use"),
-    LOCAL("local", "On-Device (Gemma)");
+    LOCAL("local", "On-Device (Gemma)"),
+
+    // User-registered OpenAI-compatible servers on the BOX (llama.cpp, Ollama,
+    // vLLM… — Task 7.1). Deliberately NOT isLocal: "local" means the turn runs
+    // on the PHONE; a custom turn goes over the normal cloud SSE path and the
+    // box dispatches it to the registered server — so isStreaming must be true.
+    CUSTOM("custom", "Custom (Local)");
 
     companion object {
         fun fromId(id: String): ChatProvider = entries.find { it.id == id } ?: GEMINI

@@ -374,6 +374,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _cuModelBackends = MutableStateFlow<Map<String, String>>(emptyMap())
     val cuModelBackends: StateFlow<Map<String, String>> = _cuModelBackends.asStateFlow()
 
+    // ── Custom model load status (id → "loaded" | "unloaded") ──
+    // Populated only when fetching /models/custom (Task 7.1: the custom catalog
+    // entries carry an additive `status` field — the registry's last probe of
+    // whether the server has that model warm in RAM). Parsed tolerantly: an
+    // absent/null status simply isn't in the map. Cleared on leaving custom AND
+    // whenever the custom catalog comes back empty/failed — mirrors the
+    // _cuModelBackends multi-origin pattern above, minus the cache (the custom
+    // roster/status is never cached; see [fetchLiveModels]).
+    private val _customModelStatus = MutableStateFlow<Map<String, String>>(emptyMap())
+    val customModelStatus: StateFlow<Map<String, String>> = _customModelStatus.asStateFlow()
+
     // ── Computer Use state ──
     // SSE-driven screenshot URL (from CU agent loop)
     private val _cuScreenshotUrl = MutableStateFlow<String?>(null)
@@ -2648,23 +2659,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Dynamic model fetching — matches Portal fetchAvailableModels()
     // =========================================================================
 
-    /** Map provider IDs to the backend's expected provider key.
-     *  Note: Android uses "gemini" as provider key but backend uses "google".
-     *  T3 (2026-05-18) added xai mapping — previously a gap that left
-     *  the xai dropdown stuck on the malformed Constants.MODEL_CONFIG
-     *  fallback (which had IDs like "grok-4.1-fast" that don't exist
-     *  in the xAI API). */
-    private fun mapProviderForApi(provider: String): String? = when (provider) {
-        "gemini" -> "google"
-        "anthropic" -> "anthropic"
-        "openai" -> "openai"
-        "xai" -> "xai"
-        // CU production pass 2026-06: the backend exposes GET /models/computer-use
-        // (merged live Anthropic/Google/OpenAI CU catalogs with `backend` field).
-        "computer-use" -> "computer-use"
-        else -> null // Voice/agent providers don't have model endpoints
-    }
-
     // In-memory cache for fetched model lists (5min TTL — same as web sessionStorage).
     // Survives provider-switching within a session but NOT app restart (intentional —
     // restart implies operator may have switched API keys).
@@ -2685,22 +2679,46 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // survive into another provider's model list.
             _cuModelBackends.value = emptyMap()
         }
+        if (provider != "custom") {
+            // Same hygiene for the custom load-status map (Task 7.1).
+            _customModelStatus.value = emptyMap()
+        }
         if (apiProvider == null) {
             // No live models for this provider — clear so Constants fallback is used
             _liveModels.value = emptyList()
             return
         }
 
+        // Custom never touches the 5-min cache — read OR write: servers are
+        // added/removed in the wizard and models load/unload between switches,
+        // so the roster+status must stay live (mirrors the Portal's skipCache
+        // and CronViewModel.selectProvider, bypass-all-caches rule).
+        val skipCache = apiProvider == "custom"
+
         // Cache hit — instant population, no network
         val cached = modelsCache[apiProvider]
         val now = System.currentTimeMillis()
-        if (cached != null && now - cached.first < MODELS_CACHE_TTL_MS) {
+        if (!skipCache && cached != null && now - cached.first < MODELS_CACHE_TTL_MS) {
             _liveModels.value = cached.second
             if (apiProvider == "computer-use") {
                 _cuModelBackends.value = cuBackendsCache[apiProvider] ?: emptyMap()
             }
             Log.d(TAG, "Models cache hit for $provider (age ${(now - cached.first) / 1000}s)")
             return
+        }
+
+        if (skipCache) {
+            // Empty-catalog staleness fix (Portal parity, commit 4240459):
+            // _liveModels still holds the PREVIOUS provider's list here, and —
+            // unlike the other providers, where keeping it during the fetch is
+            // the intended fallback — those ids are meaningless as custom
+            // models. Clear eagerly so the pill falls back to Constants' Auto
+            // entry until the live roster arrives, and STAYS clear if the
+            // registry is empty or the box is unreachable (before this fix an
+            // empty/dead registry kept the previous provider's models
+            // selectable as "custom" models forever).
+            _liveModels.value = emptyList()
+            _customModelStatus.value = emptyMap()
         }
 
         viewModelScope.launch {
@@ -2716,7 +2734,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         id to name
                     } catch (_: Exception) { null }
                 }
-                if (models.isNotEmpty()) {
+                if (apiProvider == "custom") {
+                    // Custom hydrates UNCONDITIONALLY on a 200 (Portal parity,
+                    // 4240459): an EMPTY models list is real state (all servers
+                    // removed in the wizard) and must clear the roster. Zero
+                    // models → no Auto entry either (nothing for the backend to
+                    // resolve "" to); the Composer then shows Constants' seed.
+                    val statuses = modelsArr.mapNotNull { el ->
+                        try {
+                            val m = el.jsonObject
+                            val id = m["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                            // Tolerant: absent OR null status → not in the map
+                            // (contentOrNull turns JsonNull into null).
+                            val status = m["status"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                            id to status
+                        } catch (_: Exception) { null }
+                    }.toMap()
+                    val withAuto = if (models.isEmpty()) emptyList() else {
+                        // Auto ("") resolves server-side to the registry default —
+                        // label it with the default model's name when known
+                        // (mirrors CronViewModel.selectProvider + the CU branch).
+                        val defaultId = obj["default_id"]?.jsonPrimitive?.contentOrNull
+                        val defaultName = models.firstOrNull { it.first == defaultId }?.second
+                        listOf("" to (defaultName?.let { "Auto - $it" } ?: "Auto - Latest")) + models
+                    }
+                    // Adjacent writes, no suspension point between them — same
+                    // atomic-w.r.t.-composition rationale as the CU branch below.
+                    _liveModels.value = withAuto
+                    _customModelStatus.value = statuses
+                    // Never cached — roster/status must stay live (see skipCache).
+                    Log.d(TAG, "Fetched ${models.size} live custom models (${statuses.count { it.value == "loaded" }} loaded)")
+                } else if (models.isNotEmpty()) {
                     if (apiProvider == "computer-use") {
                         // CU: backend partition map + default-aware Auto label
                         // (mirrors Portal buildHydratedModels, state-management.js)
@@ -2753,7 +2801,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "Model fetch failed for $provider, using defaults: ${e.message}")
-                // Keep whatever's in liveModels (could be from Constants fallback)
+                // Keep whatever's in liveModels (could be from Constants fallback).
+                // For custom that is the EMPTY list published eagerly above —
+                // never a stale roster; the Composer shows Constants' Auto seed.
             }
         }
     }
@@ -2813,6 +2863,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        /** Map provider IDs to the backend's expected provider key.
+         *  Note: Android uses "gemini" as provider key but backend uses "google".
+         *  T3 (2026-05-18) added xai mapping — previously a gap that left
+         *  the xai dropdown stuck on the malformed Constants.MODEL_CONFIG
+         *  fallback (which had IDs like "grok-4.1-fast" that don't exist
+         *  in the xAI API). Pure (companion) so the mapping is unit-testable
+         *  without the ViewModel — the same unknown→null trap would otherwise
+         *  silently no-op a new provider's hydration (it did for custom). */
+        fun mapProviderForApi(provider: String): String? = when (provider) {
+            "gemini" -> "google"
+            "anthropic" -> "anthropic"
+            "openai" -> "openai"
+            "xai" -> "xai"
+            // CU production pass 2026-06: the backend exposes GET /models/computer-use
+            // (merged live Anthropic/Google/OpenAI CU catalogs with `backend` field).
+            "computer-use" -> "computer-use"
+            // Task 7.1: user-registered OpenAI-compatible servers — the backend
+            // exposes GET /models/custom (registry roster + `status` field).
+            "custom" -> "custom"
+            else -> null // Voice/agent providers don't have model endpoints
+        }
+
         /**
          * The on-device placeholder copy shown until the Phase 2 engine lands.
          * Centralised so the UI test can assert it.

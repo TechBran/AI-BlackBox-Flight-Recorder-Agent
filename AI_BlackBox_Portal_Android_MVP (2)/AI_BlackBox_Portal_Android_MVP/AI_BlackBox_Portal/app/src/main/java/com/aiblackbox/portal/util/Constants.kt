@@ -140,6 +140,16 @@ object Constants {
             "gemini-2.5-computer-use-preview-10-2025" to "Gemini CU Preview",
             "gpt-5.5" to "GPT-5.5 (Computer Use)"
         ),
+        // Custom (Local) — user-registered OpenAI-compatible servers (Task 7.1).
+        // Auto-only OFFLINE seed: the real roster lives ONLY in the box's server
+        // registry — GET /models/custom hydrates the Composer pill live on every
+        // switch (never cached; see ChatViewModel.fetchLiveModels). This entry
+        // exists so SettingsSheet's Constants-only Model section still renders
+        // (showing Auto) instead of hiding entirely; hydrating THAT sheet from
+        // liveModels is a future rework.
+        "custom" to listOf(
+            "" to "Auto - Latest"
+        ),
         "robotics" to listOf(
             "gemini-robotics-er-1.5-preview" to "Gemini Robotics-ER 1.5"
         )
