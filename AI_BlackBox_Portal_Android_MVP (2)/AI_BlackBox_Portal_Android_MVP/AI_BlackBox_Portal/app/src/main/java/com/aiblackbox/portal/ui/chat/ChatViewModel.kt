@@ -2724,6 +2724,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val response = currentApi.get("/models/$apiProvider")
+                // Stale-response guard (CronViewModel's providerForCurrentList
+                // is the in-repo precedent): a late-arriving 200 from a previous
+                // provider's in-flight fetch must not clobber the list a newer
+                // switch owns — and with custom never cache-hitting, every
+                // visit-then-leave of custom opens that window. Both
+                // currentProvider writes (store.provider collector) and this
+                // coroutine run on Main, so the check is race-free.
+                if (provider != currentProvider) return@launch // stale response; a newer switch owns the UI
                 val obj = json.parseToJsonElement(response).jsonObject
                 val modelsArr = obj["models"]?.jsonArray ?: return@launch
                 val models = modelsArr.mapNotNull { el ->
@@ -2871,7 +2879,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *  in the xAI API). Pure (companion) so the mapping is unit-testable
          *  without the ViewModel — the same unknown→null trap would otherwise
          *  silently no-op a new provider's hydration (it did for custom). */
-        fun mapProviderForApi(provider: String): String? = when (provider) {
+        @VisibleForTesting
+        internal fun mapProviderForApi(provider: String): String? = when (provider) {
             "gemini" -> "google"
             "anthropic" -> "anthropic"
             "openai" -> "openai"

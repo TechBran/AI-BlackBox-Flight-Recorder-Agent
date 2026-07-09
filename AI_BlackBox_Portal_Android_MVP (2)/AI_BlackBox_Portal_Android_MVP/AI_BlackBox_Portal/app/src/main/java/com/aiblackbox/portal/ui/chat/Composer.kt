@@ -37,6 +37,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -382,6 +384,10 @@ fun Composer(
                                                         androidx.compose.ui.graphics.Color(0xFFFF9800),
                                                         CircleShape
                                                     )
+                                                    // A11y: DropdownMenuItem merges child
+                                                    // semantics → TalkBack reads
+                                                    // "loaded, <model name>".
+                                                    .semantics { contentDescription = "loaded" }
                                             )
                                             Spacer(Modifier.width(6.dp))
                                         }
