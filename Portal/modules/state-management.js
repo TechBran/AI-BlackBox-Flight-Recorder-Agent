@@ -394,6 +394,13 @@ export async function blobToDataURL(blob) {
  * ("anthropic" | "google" | "openai") used for <optgroup> rendering and
  * the window.__cuModelBackends lookup consumed by cu-drawer.js.
  *
+ * The custom entry (local-network model servers) hydrates from
+ * /models/custom with an EMPTY offline fallback — its models are
+ * inherently dynamic (whatever each configured box serves right now).
+ * The catalog's per-model `server` alias is mapped into `backend` so
+ * the same <optgroup> code groups models per box, and models with
+ * status "loaded" get a 🟠 warm-model prefix on their name.
+ *
  * Remaining non-chat entries (agents, gemini-agents, realtime) are NOT
  * centralized — they're subsystem-pinned model lists with different
  * lifecycles than chat models, so they remain hardcoded here.
@@ -435,6 +442,10 @@ const MODEL_CONFIG = {
             { id: "grok-4.20-multi-agent-0309", name: "Grok 4.20 Multi-Agent" },
             { id: "grok-3-mini-beta", name: "Grok 3 Mini (legacy, cheap)" }
         ]
+    },
+    custom: {
+        name: "Custom (Local Network)",
+        models: []  // No offline fallback — inherently dynamic, hydrated from /models/custom
     },
     "computer-use": {
         name: "Computer Use",
@@ -493,10 +504,13 @@ export function updateModelDropdown(provider) {
     // Clear and rebuild dropdown
     modelEl.innerHTML = "";
 
-    // Models carrying a `backend` field (computer-use catalog) are grouped
-    // under <optgroup> by vendor. Models without `backend` render flat,
-    // exactly as before — the 4 chat providers are unaffected. The Auto
-    // entry (id "") always renders flat BEFORE the groups.
+    // Models carrying a `backend` field are grouped under <optgroup>:
+    // computer-use models by vendor, custom models by server alias (the
+    // alias is mapped into `backend` by buildHydratedModels and falls
+    // through BACKEND_LABELS as the raw group label). Models without
+    // `backend` render flat, exactly as before — the 4 chat providers
+    // are unaffected. The Auto entry (id "") always renders flat BEFORE
+    // the groups.
     const BACKEND_LABELS = { anthropic: "Anthropic", google: "Google", openai: "OpenAI" };
     const backendGroups = {};
     config.models.forEach((model, index) => {
@@ -553,9 +567,18 @@ export function updateModelDropdown(provider) {
  * when id "" is sent — CU_MODEL_DEFAULT). All other providers keep the
  * exact pre-existing mapping: { id, name } with a generic Auto label.
  *
+ * For custom the catalog entries carry `server` (box alias) + `status`
+ * ("loaded" | "unloaded" | null). The alias is mapped INTO `backend` so
+ * updateModelDropdown's existing backend-keyed <optgroup> code groups
+ * models per box (BACKEND_LABELS falls back to the raw alias as the
+ * group label), and status "loaded" prefixes 🟠 to the name — native
+ * <option> elements can't carry CSS dots, and the emoji renders
+ * everywhere including the Android WebView. The Auto label names the
+ * catalog's default_id (resolved server-side when id "" is sent).
+ *
  * @param {string} provider - provider key
- * @param {Array<{id: string, name?: string, backend?: string}>} rawModels
- * @param {string} [defaultId] - the catalog's default_id (CU only)
+ * @param {Array<{id: string, name?: string, backend?: string, server?: string, status?: string|null}>} rawModels
+ * @param {string} [defaultId] - the catalog's default_id (CU + custom)
  * @returns {Array<object>} hydrated models array
  */
 function buildHydratedModels(provider, rawModels, defaultId) {
@@ -567,6 +590,18 @@ function buildHydratedModels(provider, rawModels, defaultId) {
         return [
             auto,
             ...rawModels.map(m => ({ id: m.id, name: m.name || m.id, backend: m.backend }))
+        ];
+    }
+    if (provider === "custom") {
+        const def = rawModels.find(m => m.id === defaultId);
+        const defaultName = def ? (def.name || def.id) : (defaultId || "Latest");
+        return [
+            { id: "", name: `(Auto - ${defaultName})`, default: true },
+            ...rawModels.map(m => ({
+                id: m.id,
+                name: (m.status === "loaded" ? "🟠 " : "") + (m.name || m.id),
+                backend: m.server  // server alias → backend field → per-box <optgroup>
+            }))
         ];
     }
     return [
@@ -584,17 +619,20 @@ function buildHydratedModels(provider, rawModels, defaultId) {
  * Caches successful fetches in sessionStorage for 5 minutes to avoid
  * hammering the backend (which has its own 10-minute upstream cache,
  * but sessionStorage lets us skip the round-trip entirely on
- * provider-switch within a tab).
+ * provider-switch within a tab). EXCEPTION: "custom" never touches the
+ * cache — new downloads must appear immediately and the 🟠 warm-model
+ * dot must reflect live load state, so every switch hits the network.
  *
- * @param {string} provider - one of "google" | "anthropic" | "openai" | "xai" | "computer-use"
+ * @param {string} provider - one of "google" | "anthropic" | "openai" | "xai" | "custom" | "computer-use"
  * @returns {Promise<boolean>} true if MODEL_CONFIG was updated (from cache or fetch)
  */
 export async function fetchAvailableModels(provider) {
     const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
     const cacheKey = `bb_models:${provider}`;
+    const skipCache = provider === "custom";  // always live — see docstring
 
     // Try sessionStorage cache first
-    try {
+    if (!skipCache) try {
         const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
         if (cached && Date.now() - cached.ts < CACHE_TTL_MS && Array.isArray(cached.models)) {
             MODEL_CONFIG[provider].models = buildHydratedModels(provider, cached.models, cached.default_id);
@@ -611,8 +649,9 @@ export async function fetchAvailableModels(provider) {
             if (data.models && data.models.length > 0) {
                 MODEL_CONFIG[provider].models = buildHydratedModels(provider, data.models, data.default_id);
                 // Cache the live result for 5 min (default_id rides along so
-                // cache-hit hydration can rebuild the CU Auto label)
-                try {
+                // cache-hit hydration can rebuild the CU Auto label). Custom
+                // is never cached — its status/roster must stay live.
+                if (!skipCache) try {
                     sessionStorage.setItem(cacheKey, JSON.stringify({
                         ts: Date.now(),
                         models: data.models,
@@ -638,7 +677,7 @@ export async function fetchAvailableModels(provider) {
  * reimplementing the fetch/cache. Each entry is { id, name, backend? }; the
  * first entry is always the `(Auto - …)` placeholder (id "").
  *
- * @param {string} provider - canonical catalog key ("google"|"anthropic"|"openai"|"xai"|"computer-use")
+ * @param {string} provider - canonical catalog key ("google"|"anthropic"|"openai"|"xai"|"custom"|"computer-use")
  * @returns {Array<{id: string, name: string, backend?: string}>} (empty array for unknown provider)
  */
 export function getHydratedModels(provider) {
