@@ -6705,7 +6705,20 @@ async def chat_stream(request: Request):
             return JSONResponse(status_code=400, content={"error": "Invalid messages JSON"})
 
         # Default models with thinking support
-        if not model:
+        guard = None  # non-custom providers use context_builder's provider window table
+        if provider == "custom":
+            # Resolve the server BEFORE build_streaming_context (order matters:
+            # its context_tokens sizes the window guard). Empty/Auto model ->
+            # the server's first discovered model, alias-qualified; unresolved
+            # server / no discovered models stay as-is — stream_custom_with_reasoning
+            # emits the clean error event.
+            _srv, _bare = custom_servers.resolve_model(model or "")
+            if _srv is not None and (not model or _bare.strip().lower() == "auto"):
+                _discovered = _srv.get("last_models") or []
+                if _discovered:
+                    model = custom_servers.qualify(_srv["alias"], _discovered[0])
+            guard = custom_servers.window_guard_tokens(_srv)
+        elif not model:
             if provider == "openai":
                 model = "gpt-5.1"  # Latest OpenAI with reasoning
             elif provider == "anthropic":
@@ -6718,7 +6731,8 @@ async def chat_stream(request: Request):
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
         # Build context-enriched messages with fossil retrieval
-        context_messages, provenance = build_streaming_context(messages, operator, provider)
+        context_messages, provenance = build_streaming_context(messages, operator, provider,
+                                                               window_guard_tokens=guard)
 
         async def generate_sse():
             """Generate SSE events from provider stream."""
@@ -6731,6 +6745,8 @@ async def chat_stream(request: Request):
                 stream = stream_anthropic_with_thinking(context_messages, model, operator=operator)
             elif provider == "xai":
                 stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
+            elif provider == "custom":
+                stream = stream_custom_with_reasoning(context_messages, model, operator=operator)
             elif provider == "computer-use":
                 _get_device_id = request.query_params.get("device_id", "blackbox")
                 backend = resolve_backend(model)
@@ -6799,7 +6815,20 @@ async def chat_stream_post(request: Request):
             return JSONResponse(status_code=400, content={"error": "messages required"})
 
         # Default models with thinking support
-        if not model:
+        guard = None  # non-custom providers use context_builder's provider window table
+        if provider == "custom":
+            # Resolve the server BEFORE build_streaming_context (order matters:
+            # its context_tokens sizes the window guard). Empty/Auto model ->
+            # the server's first discovered model, alias-qualified; unresolved
+            # server / no discovered models stay as-is — stream_custom_with_reasoning
+            # emits the clean error event.
+            _srv, _bare = custom_servers.resolve_model(model or "")
+            if _srv is not None and (not model or _bare.strip().lower() == "auto"):
+                _discovered = _srv.get("last_models") or []
+                if _discovered:
+                    model = custom_servers.qualify(_srv["alias"], _discovered[0])
+            guard = custom_servers.window_guard_tokens(_srv)
+        elif not model:
             if provider == "openai":
                 model = "gpt-5.1"
             elif provider == "anthropic":
@@ -6812,7 +6841,8 @@ async def chat_stream_post(request: Request):
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
         # Build context-enriched messages with fossil retrieval
-        context_messages, provenance = build_streaming_context(messages, operator, provider)
+        context_messages, provenance = build_streaming_context(messages, operator, provider,
+                                                               window_guard_tokens=guard)
 
         async def generate_sse():
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
@@ -6823,6 +6853,8 @@ async def chat_stream_post(request: Request):
                 stream = stream_anthropic_with_thinking(context_messages, model, operator=operator)
             elif provider == "xai":
                 stream = stream_xai_with_reasoning(context_messages, model, operator=operator)
+            elif provider == "custom":
+                stream = stream_custom_with_reasoning(context_messages, model, operator=operator)
             elif provider == "computer-use":
                 backend = resolve_backend(model)
                 if backend == "google":

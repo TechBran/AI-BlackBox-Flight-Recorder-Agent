@@ -86,10 +86,12 @@ PROVIDER_WINDOW_GUARD_TOKENS = {
     "computer-use": 49_152,
     # custom = user-registered OpenAI-compatible servers (llama.cpp/vLLM/
     # Ollama). Windows vary per server, so callers thread the resolved
-    # server's context_tokens via build_fossil_context(window_guard_tokens=…);
-    # this static entry is the NO-OVERRIDE FLOOR (0.6 × the 32,768-token
-    # default context_tokens) so any path that misses the thread never
-    # inherits the 240K default and overflows a 32K window on turn one.
+    # server's context_tokens via build_fossil_context(window_guard_tokens=…) —
+    # the live formula is custom_servers.window_guard_tokens (0.6 × the
+    # server's context_tokens, 4,000-token floor). This static entry is the
+    # NO-OVERRIDE FLOOR, a conservative round-down from 0.6 × the 32,768-token
+    # default context_tokens ≈ 19,660, so any path that misses the thread
+    # never inherits the 240K default and overflows a 32K window on turn one.
     "custom": 19_200,
 }
 # Unknown/absent provider (voice session-open, CLI agent transports): the most

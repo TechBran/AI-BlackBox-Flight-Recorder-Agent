@@ -296,3 +296,16 @@ def resolve_model(model: str) -> tuple[dict | None, str]:
         if isinstance(models, list) and model in models:
             return srv, model
     return enabled[0], model
+
+
+def window_guard_tokens(server: dict | None) -> int:
+    """Floor-token window-guard budget for a resolved custom server.
+
+    0.6 x the server's context_tokens (the other 40% stays reserved for the
+    system prompt, user history, and the reply), floored at 4,000 tokens so a
+    tiny window can't starve retrieval entirely. None / a record missing the
+    key derive from DEFAULT_CONTEXT_TOKENS. The ONE live formula shared by
+    both /chat/stream routes; context_builder's static "custom" entry is a
+    rounded-down snapshot of the None case (see PROVIDER_WINDOW_GUARD_TOKENS).
+    """
+    return max(4000, int((server or {}).get("context_tokens", DEFAULT_CONTEXT_TOKENS) * 0.6))
