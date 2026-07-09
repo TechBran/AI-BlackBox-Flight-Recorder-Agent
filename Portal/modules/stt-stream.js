@@ -14,10 +14,20 @@
  *     {type:"stt_delta", text:"<CUMULATIVE interim so far>", target:...}
  *     {type:"stt_final", text:"<full final>", target:...}
  *     {type:"stt_error", message:...}
+ *     {type:"stt_done"}                    (terminal — always the last frame)
  *
  * KEY: stt_delta.text is CUMULATIVE and already normalized backend-side, so the
  * client simply REPLACES the interim region with `text` on each delta and
  * COMMITS on stt_final. No per-provider logic lives here.
+ *
+ * Stop handshake (2026-07-09, mirrors the Android client): stop() keys the
+ * close on the server's terminal stt_done — which arrives right after the
+ * trailing stt_final — instead of a blind grace timer. If the stop window
+ * closes with NO final having landed (backstop expiry / dead socket / server
+ * close without stt_done), the newest interim is fallback-committed so the
+ * words the user watched appear are not dropped. The server's authoritative
+ * EMPTY final for hallucination-filtered stops clears the pending interim
+ * first, so filtered interims are discarded, not resurrected.
  *
  * Audio capture mechanics (resampling, PCM16 encoding, native Android path) are
  * mirrored from Portal/modules/gemini-live.js — the proven voice-agent capture
@@ -55,9 +65,16 @@ let baseBefore = '';            // committed text before the insertion point
 let baseAfter = '';             // text after the insertion point (untouched)
 let interimLen = 0;             // length of the current interim region
 
-// Graceful-close timer (so a trailing stt_final still applies)
+// Stop-handshake state (2026-07-09): stop() waits for the server's terminal
+// stt_done (arrives right after the trailing stt_final) — closeTimer is now the
+// disaster BACKSTOP, not the expected wait (the server bounds its own provider
+// drains at 5-8s; see stt_ws_routes.py). lastInterim is the newest cumulative
+// interim, fallback-committed if the stop window ends with no final (any real
+// final — including the authoritative EMPTY one for filtered stops — clears it).
 let closeTimer = null;
-const CLOSE_GRACE_MS = 1500;
+let stopping = false;
+let lastInterim = '';
+const STOP_BACKSTOP_MS = 10000;
 
 // Fast-failure / fallback support.
 // onUnavailable() fires exactly once when streaming can't get going (ws fails to
@@ -216,6 +233,7 @@ function setButtonRecording(on) {
 function applyDelta(text) {
     gotTranscript = true;
     onUnavailable = null;  // streaming is working — no fallback offer anymore
+    lastInterim = text || '';  // newest partial — fallback-committed on a lost final
     const el = $(targetId);
     if (!el) return;
     const interim = text || '';
@@ -234,6 +252,7 @@ function applyDelta(text) {
 function applyFinal(text) {
     gotTranscript = true;
     onUnavailable = null;  // streaming is working — no fallback offer anymore
+    lastInterim = '';      // committed — nothing pending for the stop fallback
     const el = $(targetId);
     if (!el) return;
     let committed = text || '';
@@ -274,6 +293,13 @@ function handleMessage(msg) {
                 // Stop capture and tear down; do not leave the mic open.
                 cleanup();
             }
+            break;
+        case 'stt_done':
+            // Terminal marker (2026-07-09): ALWAYS the server's last frame —
+            // finalize the stop the moment the session is truly over instead of
+            // waiting out the backstop. Outside a stop (server-initiated end),
+            // the socket close that follows drives the existing onclose path.
+            if (stopping) finalizeStop();
             break;
         default:
             // Ignore unknown message types (forward-compatible).
@@ -435,10 +461,40 @@ function stopNativeCapture() {
 // =============================================================================
 
 /**
+ * Finalize a user stop: idempotent terminal step reached via the server's
+ * stt_done, the backstop timer, a dead socket, or an onclose during the stop.
+ * If no stt_final absorbed the interim (lastInterim is only cleared by a real
+ * final — including the authoritative EMPTY final of a hallucination-filtered
+ * stop), fallback-commit the newest partial so the utterance isn't dropped —
+ * then close the socket and end the session. Mirrors the Android client.
+ */
+function finalizeStop() {
+    if (!stopping) return;   // idempotence: stt_done + backstop + onclose race
+    stopping = false;
+    if (closeTimer) {
+        clearTimeout(closeTimer);
+        closeTimer = null;
+    }
+    if (lastInterim) {
+        console.warn('[STT-STREAM] stop ended without a final — committing newest interim');
+        applyFinal(lastInterim);
+        lastInterim = '';
+    }
+    if (ws) {
+        try { ws.close(); } catch (e) {}
+        ws = null;
+    }
+    wsReady = false;
+    streaming = false;
+}
+
+/**
  * Full teardown: stop capture, close ws, clear button state. Idempotent.
- * Used by both the normal stop() (after a grace period) and the error path.
+ * Used by both the error path and any non-stop termination.
  */
 function cleanup(opts = {}) {
+    stopping = false;
+    lastInterim = '';
     if (closeTimer) {
         clearTimeout(closeTimer);
         closeTimer = null;
@@ -482,9 +538,11 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
         // Already streaming — ignore (caller should stop() first to retarget).
         return;
     }
-    // Reset fast-failure state for this invocation.
+    // Reset fast-failure + stop-handshake state for this invocation.
     onUnavailable = typeof opts.onUnavailable === 'function' ? opts.onUnavailable : null;
     gotTranscript = false;
+    stopping = false;
+    lastInterim = '';
 
     if (!hasMic()) {
         // No mic at all — let the caller decide (fallback shares the same gate).
@@ -585,6 +643,14 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
         // If the socket closes for any reason, ensure capture is torn down so
         // the mic never outlives the connection.
         wsReady = false;
+        if (stopping) {
+            // Socket ended during a stop BEFORE stt_done arrived (server died /
+            // hard-closed after a stalled flush): nothing further can arrive —
+            // finalize now (fallback-commits the interim) instead of waiting
+            // out the backstop.
+            finalizeStop();
+            return;
+        }
         if (streaming) {
             // Closed before any transcript with a pending fallback offer → fall back.
             if (!gotTranscript && onUnavailable) {
@@ -599,14 +665,22 @@ async function start(targetIdArg, buttonIdArg, opts = {}) {
 
 /**
  * Stop streaming and finalize. Sends stt_stop, stops the mic immediately, then
- * closes the ws after a short grace so a trailing stt_final still applies.
+ * keys the close on the server's terminal stt_done (which arrives right after
+ * the trailing stt_final). The backstop timer only fires if the server wedges;
+ * on expiry — or on a dead socket — the newest interim is fallback-committed
+ * so the utterance isn't dropped (mirrors the Android client's stop handshake).
  */
 function stop() {
-    if (!streaming) return;
+    if (!streaming || stopping) return;
+    stopping = true;
 
     // Send stop signal while the socket is still open.
+    let sentStop = false;
     if (ws && ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'stt_stop' })); } catch (e) {}
+        try {
+            ws.send(JSON.stringify({ type: 'stt_stop' }));
+            sentStop = true;
+        } catch (e) {}
     }
 
     // Stop the mic immediately — no more audio after the user releases.
@@ -619,17 +693,21 @@ function stop() {
     // Clear the recording visual now; transcription may still trickle in.
     setButtonRecording(false);
 
-    // Keep the ws open briefly so a trailing stt_final lands, then close.
+    if (!sentStop) {
+        // Socket already dead — no stt_final/stt_done can arrive on it; commit
+        // the newest partial and tear down immediately.
+        finalizeStop();
+        return;
+    }
+
+    // Disaster backstop: the server bounds its own provider drains at 5-8s, so
+    // stt_done normally lands well before this (and finalizes immediately).
     if (closeTimer) clearTimeout(closeTimer);
     closeTimer = setTimeout(() => {
         closeTimer = null;
-        if (ws) {
-            try { ws.close(); } catch (e) {}
-            ws = null;
-        }
-        wsReady = false;
-        streaming = false;
-    }, CLOSE_GRACE_MS);
+        console.warn('[STT-STREAM] stt_done backstop expired — finalizing stop');
+        finalizeStop();
+    }, STOP_BACKSTOP_MS);
 }
 
 /**
