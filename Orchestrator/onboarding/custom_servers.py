@@ -175,15 +175,20 @@ def get_server(server_id: str) -> dict | None:
     return None
 
 
+def redact(server: dict) -> dict:
+    """Return a copy of a server record safe for API responses: api_key is
+    dropped and replaced by key_present / key_last4. Single source of truth
+    for the redacted shape (routes must never hand-roll their own masking)."""
+    srv = dict(server)
+    key = srv.pop("api_key", "") or ""
+    srv["key_present"] = bool(key)
+    srv["key_last4"] = key[-4:] if key else ""
+    return srv
+
+
 def list_servers_redacted() -> list[dict]:
     """Servers without api_key, plus key_present / key_last4 for UI display."""
-    redacted = []
-    for srv in list_servers():
-        key = srv.pop("api_key", "") or ""
-        srv["key_present"] = bool(key)
-        srv["key_last4"] = key[-4:] if key else ""
-        redacted.append(srv)
-    return redacted
+    return [redact(srv) for srv in list_servers()]
 
 
 # -------------------------------------------------------------- mutation API

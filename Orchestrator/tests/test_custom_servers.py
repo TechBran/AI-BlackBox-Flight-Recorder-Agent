@@ -83,6 +83,22 @@ def test_redacted_listing_masks_keys(registry):
     assert red["key_present"] is True
 
 
+def test_redact_single_record():
+    """redact() is the single source of truth for the API-safe shape —
+    routes call it directly on created/patched records."""
+    original = {"id": "srv-1", "alias": "a", "api_key": "sk-secret-1234"}
+    red = cs.redact(original)
+    assert "api_key" not in red
+    assert red["key_present"] is True
+    assert red["key_last4"] == "1234"
+    assert original["api_key"] == "sk-secret-1234"  # input not mutated
+
+    keyless = cs.redact({"id": "srv-2", "alias": "b", "api_key": ""})
+    assert keyless["key_present"] is False and keyless["key_last4"] == ""
+    no_field = cs.redact({"id": "srv-3", "alias": "c"})  # api_key absent entirely
+    assert no_field["key_present"] is False and no_field["key_last4"] == ""
+
+
 def test_update_server_unknown_field_raises(registry):
     srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
     with pytest.raises(ValueError):

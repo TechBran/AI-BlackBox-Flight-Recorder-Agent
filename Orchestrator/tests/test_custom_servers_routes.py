@@ -93,6 +93,26 @@ def test_delete_unknown_id_404(client, tmp_registry):
     assert client.delete("/onboarding/custom-servers/srv-nope").status_code == 404
 
 
+def test_patch_base_url_invalidates_validation_stamps(client, tmp_registry):
+    """Re-pointing a server must clear validated_at/last_models — the old
+    URL's model list must not survive, or resolve_model could route
+    unqualified ids to a server that no longer hosts them."""
+    sid = client.post("/onboarding/custom-servers", json={
+        "alias": "box", "base_url": "http://x/v1"}).json()["server"]["id"]
+    cs.update_server(sid, {"validated_at": "2026-07-08T00:00:00+00:00",
+                           "last_models": ["old-model"]})
+
+    r = client.patch(f"/onboarding/custom-servers/{sid}",
+                     json={"base_url": "http://y:8080/v1"})
+    assert r.status_code == 200
+
+    listing = client.get("/onboarding/custom-servers").json()["servers"]
+    assert listing[0]["validated_at"] is None
+    stored = cs.get_server(sid)
+    assert stored["validated_at"] is None
+    assert stored["last_models"] == []
+
+
 # ------------------------------------------------- /validate dispatch tier
 
 def _fake_ok(called, models=("m1", "m2")):
@@ -191,3 +211,27 @@ def test_validate_custom_missing_base_url_and_unknown_server_400(tmp_registry, m
             provider="custom", credentials={"server_id": "srv-nope"}))
     assert exc.value.status_code == 400
     assert "base_url" in str(exc.value.detail)
+
+
+def test_validate_custom_server_deleted_mid_probe_ok_but_unstamped(tmp_registry, monkeypatch):
+    """TOCTOU seam: the server vanishes between dispatch and stamping.
+    Contract: probe result still returned (ok True), but nothing is stamped —
+    update_server is attempted BEFORE record_validation and its KeyError is
+    swallowed fail-soft, so a deleted server can never leave a stale stamp."""
+    srv = cs.add_server(alias="box", base_url="http://x/v1", api_key="k")
+
+    def _fake(base_url, api_key=""):
+        cs.delete_server(srv["id"])   # deleted while the probe is in flight
+        return ValidationResult(ok=True, latency_ms=5,
+                                detail={"model_count": 1, "models": ["m"]})
+
+    monkeypatch.setattr(ob.validators, "validate_custom", _fake)
+    stamped = []
+    monkeypatch.setattr(ob._state, "record_validation", lambda p: stamped.append(p))
+
+    resp = ob.validate(ob.ValidateRequest(
+        provider="custom", credentials={"server_id": srv["id"]}))
+
+    assert resp.ok is True            # the probe itself succeeded
+    assert stamped == []              # but a vanished server is never stamped
+    assert cs.list_servers() == []

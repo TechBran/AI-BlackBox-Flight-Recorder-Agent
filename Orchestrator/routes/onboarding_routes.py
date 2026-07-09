@@ -326,7 +326,7 @@ class CustomServerCreate(BaseModel):
     alias: str
     base_url: str
     api_key: str = ""          # default "" — custom_servers.add_server rejects None
-    context_tokens: int = 32768
+    context_tokens: int = custom_servers.DEFAULT_CONTEXT_TOKENS
 
 
 class CustomServerPatch(BaseModel):
@@ -336,16 +336,6 @@ class CustomServerPatch(BaseModel):
     api_key: str | None = None
     enabled: bool | None = None
     context_tokens: int | None = None
-
-
-def _redact_server(srv: dict) -> dict:
-    """Drop api_key, add key_present/key_last4 — same shape as
-    custom_servers.list_servers_redacted(). Never echo the secret back."""
-    srv = dict(srv)
-    key = srv.pop("api_key", "") or ""
-    srv["key_present"] = bool(key)
-    srv["key_last4"] = key[-4:] if key else ""
-    return srv
 
 
 @router.get("/custom-servers")
@@ -370,20 +360,29 @@ def add_custom_server(req: CustomServerCreate) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     logger.info("custom-servers add: id=%s alias=%s", srv["id"], srv["alias"])
-    return {"server": _redact_server(srv)}
+    return {"server": custom_servers.redact(srv)}
 
 
 @router.patch("/custom-servers/{server_id}")
 def patch_custom_server(server_id: str, req: CustomServerPatch) -> dict:
-    """Partially update a registered server; omitted fields are unchanged."""
+    """Partially update a registered server; omitted fields are unchanged.
+
+    A base_url change invalidates the server's validation stamps
+    (validated_at/last_models): the old URL's model list must not survive a
+    re-point, or resolve_model could route unqualified ids to a server that
+    no longer hosts them. Re-validate to re-stamp.
+    """
     patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "base_url" in patch:
+        patch.update({"validated_at": None, "last_models": []})
     try:
         srv = custom_servers.update_server(server_id, patch)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e.args[0]) if e.args else "not found")
-    return {"server": _redact_server(srv)}
+    logger.info("custom-servers patch: id=%s fields=%s", server_id, sorted(patch))
+    return {"server": custom_servers.redact(srv)}
 
 
 @router.delete("/custom-servers/{server_id}")
@@ -489,7 +488,8 @@ def validate(req: ValidateRequest) -> ValidateResponse:
             # Per-server stamping: "custom:{server_id}", NOT bare "custom" —
             # one server's validation must not mark all custom servers valid.
             # Ad-hoc probes (no server_id) validate but stamp/persist nothing.
-            server_id = (req.credentials or {}).get("server_id") or ""
+            # server_id was set at the top of the custom dispatch branch (the
+            # single source — do not re-derive it from req.credentials here).
             if server_id:
                 try:
                     custom_servers.update_server(server_id, {
