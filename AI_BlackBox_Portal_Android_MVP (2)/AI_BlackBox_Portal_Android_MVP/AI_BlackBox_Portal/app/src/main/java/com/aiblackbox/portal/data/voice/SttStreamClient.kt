@@ -8,12 +8,14 @@ import com.aiblackbox.portal.data.api.WebSocketClient
 import com.aiblackbox.portal.data.api.WsMessage
 import com.aiblackbox.portal.ui.voice.rmsAmplitude
 import com.aiblackbox.portal.util.Constants
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -44,10 +46,23 @@ import okhttp3.OkHttpClient
  *     then repeated `{"type":"stt_audio","pcm":"<base64 PCM16>"}` then `{"type":"stt_stop"}`.
  *   - Server → client: `{"type":"stt_delta","text":"<CUMULATIVE interim>","target":...}`,
  *     `{"type":"stt_final","text":"<full final>","target":...}`,
- *     `{"type":"stt_error","message":...}`.
+ *     `{"type":"stt_error","message":...}`,
+ *     `{"type":"stt_done"}` — TERMINAL, always the server's last frame (2026-07-09).
  *
  * The `stt_delta.text` is CUMULATIVE (full interim so far); this client emits it
  * verbatim — the applier that replaces the interim region lives downstream.
+ *
+ * Stop handshake (2026-07-09, fixes the intermittent lost-final/stuck-spinner
+ * bug): stop() sends stt_stop and then WAITS (bounded) for the server's
+ * terminal `stt_done` — which arrives right after the trailing `stt_final` —
+ * instead of sleeping a blind grace. Happy path tears down as soon as the
+ * final lands (usually faster than the old 1200ms). If the socket is already
+ * dead (send fails) or the server never terminates, the newest partial is
+ * committed as a fallback [SttEvent.Final] (the reconnect path's mechanism)
+ * so the words the user watched appear are not dropped. [SttEvent.SessionEnded]
+ * is then emitted so UI state machines (CLI mic spinner, composer) always exit.
+ * A server-side hallucination-filtered stop sends an authoritative EMPTY final
+ * first, which clears the pending interim — the fallback then correctly no-ops.
  *
  * Requires RECORD_AUDIO permission; the CALLER is expected to gate that (existing
  * mic handlers use withMicPermission). This client does not request permission.
@@ -89,6 +104,13 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
     @Volatile private var lastInterim = ""
     private val maxReconnects = 40  // ~1 per 30s cap → ~20 min continuous dictation
 
+    // Terminal-marker coordination (2026-07-09): completed when the server's
+    // {"type":"stt_done"} arrives (or when the socket + reconnect loop are fully
+    // over, so a server that died without one can't park stop() until its
+    // backstop). Re-armed per start() AND per reconnect leg, so a stale
+    // completion can never satisfy a future stop() instantly.
+    @Volatile private var doneSignal = CompletableDeferred<Unit>()
+
     @Volatile
     private var audioRecord: AudioRecord? = null
 
@@ -96,8 +118,12 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         // FIXED — do NOT branch by backend. OpenAI realtime transcription rejects
         // anything < 24000; Google accepts 24000; the web client uses 24000.
         private const val SAMPLE_RATE = 24000
-        // Grace period after stt_stop so a trailing stt_final still arrives before close.
-        private const val STOP_GRACE_MS = 1200L
+        // Max wait after stt_stop for the server's terminal stt_done (which
+        // arrives right after the trailing stt_final). Replaces the old blind
+        // 1200ms grace, which raced providers with NO flush deadline (Google
+        // gRPC — journal-proven lost finals). The server bounds its own drains
+        // at 5-8s, so this is the disaster backstop, not the expected wait.
+        private const val STOP_BACKSTOP_MS = 10_000L
         private const val TAG = "SttStreamClient"
     }
 
@@ -119,6 +145,7 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         userStopped = false
         reconnectAttempts = 0
         lastInterim = ""
+        doneSignal = CompletableDeferred()
 
         val newScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = newScope
@@ -181,23 +208,38 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                     _events.emit(SttEvent.Final(lastInterim))
                     lastInterim = ""
                 }
+                // A fresh server session begins on the next socket — re-arm the
+                // terminal signal so a stale stt_done from THIS leg can't satisfy
+                // a future stop() instantly.
+                if (epoch == sessionEpoch) doneSignal = CompletableDeferred()
                 android.util.Log.w(TAG, "STT WS dropped mid-session — reconnecting & resuming (attempt $reconnectAttempts)")
                 delay(200)  // brief backoff; _isStreaming stays TRUE so the mic stays lit
             }
             // Logical session over — flip to idle ONCE (do not cancel our own job here).
             releaseAudioRecord()
             _amplitude.value = 0f
-            if (epoch == sessionEpoch) _isStreaming.value = false
+            if (epoch == sessionEpoch) {
+                // Socket + reconnect loop are done: nothing further can arrive, so
+                // a stop() waiting on stt_done must not park until its backstop.
+                doneSignal.complete(Unit)
+                _isStreaming.value = false
+            }
         }
     }
 
     /**
      * Stop capture and end the session: send stt_stop, release the mic, then
-     * close the WS after a short grace so a trailing stt_final can arrive.
-     * Idempotent and leak-safe.
+     * wait (bounded by [STOP_BACKSTOP_MS]) for the server's terminal `stt_done`
+     * — which arrives right after the trailing stt_final — before tearing the
+     * WS down. If stt_stop can't be delivered (socket dead) the wait is skipped
+     * entirely. If the stop window closes with NO stt_final having arrived, the
+     * newest partial is committed as a fallback [SttEvent.Final] (the reconnect
+     * path's mechanism) so the utterance isn't dropped. [SttEvent.SessionEnded]
+     * always follows. Idempotent and leak-safe.
      */
     fun stop() {
         if (!_isStreaming.value && audioRecord == null && connectionJob == null) return
+        if (graceJob?.isActive == true) return  // a stop is already in flight
         // Mark user-initiated so the reconnect loop exits instead of resuming when
         // its socket closes after the stt_stop below.
         userStopped = true
@@ -213,12 +255,39 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
         val sCap = captureJob
         if (s != null) {
             val epoch = sessionEpoch
+            val done = doneSignal
             graceJob = s.launch {
+                var sent = false
                 try {
-                    sWs.send(buildJsonObject { put("type", "stt_stop") }.toString())
-                    android.util.Log.d(TAG, "Sent stt_stop")
+                    sent = sWs.send(buildJsonObject { put("type", "stt_stop") }.toString())
                 } catch (_: Exception) {}
-                delay(STOP_GRACE_MS)
+                android.util.Log.d(TAG, "Sent stt_stop (delivered=$sent)")
+                if (sent) {
+                    // Bounded wait for the terminal stt_done. Happy path: the
+                    // server sends final+done as soon as the provider flushes
+                    // (typically well under the old blind 1200ms grace). The
+                    // connection collector stays alive through this window, so a
+                    // late trailing final still delivers. Backstop only fires if
+                    // the server/provider wedges (its own drains cap at 5-8s).
+                    withTimeoutOrNull(STOP_BACKSTOP_MS) { done.await() }
+                } else {
+                    android.util.Log.w(TAG, "stt_stop send failed — socket dead, skipping stt_done wait")
+                }
+                // No stt_final made it home (dead socket / server timeout / done
+                // without a final): commit the newest partial so the words the
+                // user watched appear aren't dropped — the exact mechanism the
+                // reconnect path uses. parseMessage clears lastInterim on every
+                // real final (including the authoritative EMPTY final a
+                // hallucination-filtered stop sends), so this no-ops whenever a
+                // final DID arrive.
+                if (epoch == sessionEpoch && lastInterim.isNotBlank()) {
+                    android.util.Log.w(TAG, "stop window closed without a final — committing newest partial")
+                    _events.emit(SttEvent.Final(lastInterim))
+                    lastInterim = ""
+                }
+                // Terminal event for UI state machines (CLI mic spinner exit,
+                // composer cleanup) — the session is over, nothing follows.
+                if (epoch == sessionEpoch) _events.emit(SttEvent.SessionEnded)
                 teardownSession(epoch, s, sConn, sCap, sWs)
             }
         } else {
@@ -325,6 +394,13 @@ class SttStreamClient(private val client: OkHttpClient, private val baseWsUrl: S
                     _events.emit(SttEvent.Error(msg))
                     android.util.Log.e(TAG, "Server error: $msg")
                 }
+                "stt_done" -> {
+                    // Terminal marker — ALWAYS the server's last frame (after any
+                    // trailing final / error). Wakes the stop() coordinator so
+                    // teardown happens the moment the session is truly over.
+                    android.util.Log.d(TAG, "Received stt_done (terminal)")
+                    doneSignal.complete(Unit)
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Parse error: ${e.message}")
@@ -399,4 +475,11 @@ sealed class SttEvent {
     data class Delta(val text: String) : SttEvent()   // cumulative interim
     data class Final(val text: String) : SttEvent()
     data class Error(val message: String) : SttEvent()
+
+    /**
+     * Terminal (2026-07-09): the stop window is over and NOTHING further will be
+     * emitted for this session — any trailing/fallback [Final] has already been
+     * delivered. UI state machines key their exit on this (never on a timer).
+     */
+    object SessionEnded : SttEvent()
 }

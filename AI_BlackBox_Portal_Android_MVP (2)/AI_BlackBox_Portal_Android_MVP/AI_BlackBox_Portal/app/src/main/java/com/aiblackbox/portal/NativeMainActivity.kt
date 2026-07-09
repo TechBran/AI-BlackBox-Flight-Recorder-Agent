@@ -330,6 +330,14 @@ class NativeMainActivity : ComponentActivity() {
                                 Toast.makeText(applicationContext, event.message, Toast.LENGTH_SHORT).show()
                                 sttClient.stop()
                             }
+                            is SttEvent.SessionEnded -> {
+                                // Terminal marker from stop(): nothing further will
+                                // arrive for this session. If a send-while-live armed
+                                // the trailing-final discard but that final never came
+                                // (server produced nothing), disarm it here so it can't
+                                // eat the NEXT session's first final.
+                                sttDiscardTrailingFinal = false
+                            }
                         }
                     }
                 }

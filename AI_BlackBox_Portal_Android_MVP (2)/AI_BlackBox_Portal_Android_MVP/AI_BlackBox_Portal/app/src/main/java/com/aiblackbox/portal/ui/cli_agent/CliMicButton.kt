@@ -78,13 +78,16 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.voice.SttEvent
 import com.aiblackbox.portal.data.voice.SttStreamClient
 import com.aiblackbox.portal.ui.components.MicIcon
+import kotlinx.coroutines.delay
 
 /**
  * Mic-button state for the CliMicButton state machine.
  *
  *   Idle         — tap to begin streaming capture.
  *   Recording    — red icon w/ pulse; tap to stop, long-press to cancel.
- *   Transcribing — spinner while the trailing stt_final is awaited.
+ *   Transcribing — spinner while the trailing stt_final is awaited; exits on
+ *                  Final/SessionEnded/Error, a local timeout backstop, or a
+ *                  tap (escape hatch, pastes best-effort). Never stranded.
  */
 private enum class MicState { Idle, Recording, Transcribing }
 
@@ -103,6 +106,26 @@ internal fun joinTranscript(a: String, b: String): String = when {
     a.last().isWhitespace() || b.first().isWhitespace() -> a + b
     else -> "$a $b"
 }
+
+/**
+ * Terminal-paste decision for the CLI mic's stop exits (SessionEnded, the local
+ * transcribe timeout, and the tap-to-escape while Transcribing): paste only when
+ * the user actually stopped (not long-press cancelled) and there is accumulated
+ * transcript to paste. Pure/non-composable so it is unit-testable.
+ */
+internal fun shouldPasteOnTerminal(
+    stopping: Boolean,
+    cancelRequested: Boolean,
+    committed: String,
+): Boolean = stopping && !cancelRequested && committed.isNotBlank()
+
+/**
+ * Defensive UI backstop while ⏳ Transcribing — strictly LONGER than
+ * SttStreamClient's 10s stop backstop, so the client's own fallback-final +
+ * SessionEnded path always gets to run first; this only fires if the stop
+ * pipeline wedges entirely (2026-07-09 stuck-spinner fix, third safety layer).
+ */
+internal const val TRANSCRIBING_TIMEOUT_MS = 12_000L
 
 @Composable
 fun CliMicButton(
@@ -197,7 +220,44 @@ fun CliMicButton(
                     interimText = ""
                     state = MicState.Idle
                 }
+                is SttEvent.SessionEnded -> {
+                    // Terminal: the stop window is over (server stt_done, client
+                    // backstop, or dead socket) and nothing further will arrive.
+                    // Normally the trailing/fallback Final already exited the
+                    // Transcribing state (stopping=false → no-op here); if it
+                    // never came (e.g. hallucination-filtered with no partials),
+                    // paste the accumulated transcript best-effort and reset so
+                    // the spinner can NEVER be stranded.
+                    if (stopping) {
+                        if (shouldPasteOnTerminal(stopping, cancelRequested, committed)) {
+                            currentOnTranscript(committed)
+                        }
+                        cancelRequested = false
+                        stopping = false
+                        committed = ""
+                        interimText = ""
+                        state = MicState.Idle
+                    }
+                }
             }
+        }
+    }
+
+    // Third safety layer: if no Final/Error/SessionEnded ever exits the spinner
+    // (stop pipeline wedged end-to-end), paste what we have and go Idle. Keyed on
+    // `state`, so leaving Transcribing for ANY reason cancels the timer.
+    LaunchedEffect(state) {
+        if (state == MicState.Transcribing) {
+            delay(TRANSCRIBING_TIMEOUT_MS)
+            if (shouldPasteOnTerminal(stopping, cancelRequested, committed)) {
+                currentOnTranscript(committed)
+            }
+            cancelRequested = false
+            stopping = false
+            committed = ""
+            interimText = ""
+            state = MicState.Idle
+            Toast.makeText(context, "Transcription timed out", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -288,7 +348,18 @@ fun CliMicButton(
                                 sttClient.stop()
                             }
                             MicState.Transcribing -> {
-                                // Ignore taps while awaiting the final transcript.
+                                // Escape hatch: don't strand the user behind the
+                                // spinner — commit what we have and return to Idle.
+                                // (A late trailing final is then ignored because
+                                // stopping=false, so it can't double-paste.)
+                                if (shouldPasteOnTerminal(stopping, cancelRequested, committed)) {
+                                    currentOnTranscript(committed)
+                                }
+                                cancelRequested = false
+                                stopping = false
+                                committed = ""
+                                interimText = ""
+                                state = MicState.Idle
                             }
                         }
                     },
