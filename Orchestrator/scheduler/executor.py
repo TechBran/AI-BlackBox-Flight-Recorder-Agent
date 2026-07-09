@@ -436,6 +436,12 @@ def _model_to_provider(model: str) -> str:
     # stored provider, not the model string.)
     if m in ("computer-use", "cu") or "computer-use" in m:
         return "computer-use"
+    # Task 5.2: an alias-qualified custom id ("alias::model") can only come
+    # from the custom-server registry — '::' appears in no other provider's
+    # ids — so derive "custom" instead of falling through to google (which
+    # would run the job on the wrong provider entirely).
+    if "::" in m:
+        return "custom"
     if any(tok in m for tok in ("claude", "anthropic", "sonnet", "opus", "haiku")):
         return "anthropic"
     if any(tok in m for tok in ("gpt", "openai", "o1", "o3", "o4")):
@@ -446,13 +452,55 @@ def _model_to_provider(model: str) -> str:
     return "google"
 
 
+def _custom_default_model() -> str:
+    """Registry default for the ``custom`` provider, resolved at fire time.
+
+    Task 5.2: mirrors the /chat/stream + call_custom Auto semantics — the
+    FIRST enabled server's first discovered model, alias-qualified via
+    custom_servers.qualify. Unlike every other provider there is no static
+    config default (the registry is the only source and can change between
+    fires), so an unusable registry RAISES RuntimeError with the same
+    customer-facing wizard message the chat routes use. The manager's
+    _attempt_once catches it and records an error history row — the visible
+    skip-with-reason — instead of silently running the job on Gemini.
+    """
+    from Orchestrator.onboarding import custom_servers
+
+    servers = custom_servers.list_servers(enabled_only=True)
+    if not servers:
+        msg = (
+            "cron job skipped: provider 'custom' has no resolvable default model — "
+            "No custom model servers configured — add one in the onboarding wizard"
+        )
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
+    first = servers[0]
+    models = first.get("last_models") or []
+    if not models:
+        msg = (
+            "cron job skipped: provider 'custom' has no resolvable default model — "
+            f"Server '{first.get('alias', '')}' has no discovered models — "
+            "validate it in the wizard"
+        )
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
+    return custom_servers.qualify(first.get("alias", ""), models[0])
+
+
 def _provider_default_model(provider: str) -> str:
     """Return the configured *_MODEL_DEFAULT for a provider string.
 
     The single map from a provider to its flagship default, used both for the
     bare-alias aliasing below and for the Auto (empty model) resolution. An
     unknown provider falls back to the Gemini default (same fallthrough the
-    legacy alias map used)."""
+    legacy alias map used).
+
+    Task 5.2: ``custom`` branches BEFORE the static map — its default is not a
+    config constant but a live registry read (see _custom_default_model),
+    which raises instead of Gemini-fallthrough when the registry is unusable.
+    """
     from Orchestrator.config import (
         CU_MODEL_DEFAULT,
         GEMINI_MODEL_DEFAULT,
@@ -460,6 +508,9 @@ def _provider_default_model(provider: str) -> str:
         OPENAI_MODEL_DEFAULT,
         XAI_MODEL_DEFAULT,
     )
+
+    if provider == "custom":
+        return _custom_default_model()
 
     return {
         "computer-use": CU_MODEL_DEFAULT,
@@ -498,5 +549,7 @@ def _resolve_model_name(model: str, provider: Optional[str] = None) -> str:
         return _provider_default_model("openai")
     if m in ("xai", "grok"):
         return _provider_default_model("xai")
+    if m == "custom":
+        return _provider_default_model("custom")
 
     return model

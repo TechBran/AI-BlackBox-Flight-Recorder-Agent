@@ -12,7 +12,7 @@ let _operatorList = null;
 // Provider catalog keys offered in the cron picker — the SAME canonical keys
 // the chat composer uses (and that the M4.1 backend stores in job.provider).
 // Order matches the index.html <select id="cronProvider"> options.
-const CRON_PROVIDERS = ['google', 'openai', 'anthropic', 'xai', 'computer-use'];
+const CRON_PROVIDERS = ['google', 'openai', 'anthropic', 'xai', 'custom', 'computer-use'];
 const CRON_DEFAULT_PROVIDER = 'google';
 
 // Legacy jobs (pre-M4.1) stored a coarse word in `model` and had no `provider`

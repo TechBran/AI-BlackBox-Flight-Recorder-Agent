@@ -436,7 +436,7 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
      *  backend M4.1 column + Portal M4.3 + chat composer. NOT the words
      *  gemini/claude/grok. */
     val cronProviders: List<String> =
-        listOf("google", "openai", "anthropic", "xai", "computer-use")
+        listOf("google", "openai", "anthropic", "xai", "custom", "computer-use")
 
     val defaultCronProvider: String = "google"
 
@@ -457,6 +457,9 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
 
     // Constants.MODEL_CONFIG is keyed by Android's WORD provider keys, so the
     // offline fallback needs the canonical key → MODEL_CONFIG word bridge.
+    // "custom" is deliberately ABSENT: it has no static offline catalog
+    // (models live only in the box's server registry), so offlineModels()'s
+    // null-fallback Auto-only seed is the correct offline behavior.
     private val canonicalToConfigKey = mapOf(
         "google" to "gemini",
         "openai" to "openai",
@@ -530,10 +533,14 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
         val key = canonicalProviderKey(provider)
         providerForCurrentList = key
 
-        // Cache hit — instant, no network.
+        // Cache hit — instant, no network. EXCEPTION: "custom" never touches
+        // the cache (bypass-all-caches rule, mirrors Portal fetchAvailableModels):
+        // new downloads must appear immediately and the 🟠 warm-model prefix
+        // must reflect live load state, so every switch hits the network.
+        val skipCache = key == "custom"
         val cached = modelsCache[key]
         val now = System.currentTimeMillis()
-        if (cached != null && now - cached.first < modelsCacheTtlMs) {
+        if (!skipCache && cached != null && now - cached.first < modelsCacheTtlMs) {
             _modelsForProvider.value = cached.second
             return
         }
@@ -558,9 +565,10 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (models.isNotEmpty()) {
                     // Auto ("") first — resolves server-side to the provider default.
-                    // For computer-use, label Auto with the default model name when
-                    // known (mirrors chat + Portal); otherwise a plain "Auto - Latest".
-                    val autoLabel = if (key == "computer-use") {
+                    // For computer-use and custom, label Auto with the default model
+                    // name when known (mirrors chat + Portal — both catalogs carry
+                    // default_id); otherwise a plain "Auto - Latest".
+                    val autoLabel = if (key == "computer-use" || key == "custom") {
                         val defaultId = obj["default_id"]?.jsonPrimitive?.content
                         val defaultName = models.firstOrNull { it.first == defaultId }?.second
                         if (defaultName != null) "Auto - $defaultName" else "Auto - Latest"
@@ -573,7 +581,10 @@ class CronViewModel(application: Application) : AndroidViewModel(application) {
                     if (providerForCurrentList == key) {
                         _modelsForProvider.value = withAuto
                     }
-                    modelsCache[key] = System.currentTimeMillis() to withAuto
+                    // Custom is never cached — its roster/warm-status must stay live.
+                    if (!skipCache) {
+                        modelsCache[key] = System.currentTimeMillis() to withAuto
+                    }
                     Log.d(TAG, "Fetched ${models.size} models for $key")
                 }
             } catch (e: Exception) {

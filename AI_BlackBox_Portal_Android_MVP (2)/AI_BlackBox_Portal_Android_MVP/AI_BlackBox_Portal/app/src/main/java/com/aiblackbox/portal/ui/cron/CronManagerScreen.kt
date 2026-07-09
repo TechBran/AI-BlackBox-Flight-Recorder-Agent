@@ -1165,6 +1165,7 @@ private val CRON_PROVIDER_LABELS = mapOf(
     "openai" to "OpenAI",
     "anthropic" to "Anthropic (Claude)",
     "xai" to "xAI (Grok)",
+    "custom" to "Custom (Local)",
     "computer-use" to "Computer Use"
 )
 

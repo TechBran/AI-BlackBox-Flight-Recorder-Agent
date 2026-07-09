@@ -709,3 +709,79 @@ def test_worker_unknown_provider_still_raises(custom_registry, monkeypatch):
         messages=_TEXT_MSGS)
     assert final.status == TaskStatus.FAILED
     assert "unknown provider: mystery" in (final.result_data or {}).get("error", "")
+
+
+# =================================================================================
+# Task 5.2: cron scheduler — executor default-model resolution for "custom"
+# =================================================================================
+# _provider_default_model held only static config strings and .get(provider,
+# GEMINI_MODEL_DEFAULT)-fell-through for anything unknown — a custom cron job
+# with an Auto model would SILENTLY run on Gemini. Custom's default lives in
+# the customer's server registry (can change between fires), so it is resolved
+# lazily at fire time: first enabled server's first discovered model,
+# alias-qualified (the exact /chat/stream + call_custom Auto semantics). An
+# unusable registry RAISES RuntimeError — the manager's _attempt_once records
+# it as an error history row (the visible skip-with-reason) — NEVER Gemini.
+
+
+def test_cron_provider_default_custom_resolves_registry_default(custom_registry):
+    from Orchestrator.scheduler.executor import _provider_default_model
+    assert _provider_default_model("custom") == "lab::llama-3-8b"
+
+
+def test_cron_resolve_model_name_custom_auto_and_bare_word(custom_registry):
+    """Auto (empty model) + provider custom resolves the registry default; the
+    bare provider word 'custom' behaves like every other bare alias; a specific
+    qualified id passes through verbatim."""
+    from Orchestrator.scheduler.executor import _resolve_model_name
+    assert _resolve_model_name("", "custom") == "lab::llama-3-8b"
+    assert _resolve_model_name("custom", "custom") == "lab::llama-3-8b"
+    assert _resolve_model_name("lab::qwen-2", "custom") == "lab::qwen-2"
+
+
+def test_cron_custom_no_servers_raises_never_gemini(tmp_path, monkeypatch):
+    """Empty registry: RAISE with the customer-facing wizard message — the
+    silent Gemini fallthrough is dead for custom."""
+    from Orchestrator.scheduler.executor import _resolve_model_name
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(tmp_path / "absent.json"))
+    with pytest.raises(RuntimeError, match="No custom model servers configured"):
+        _resolve_model_name("", "custom")
+
+
+def test_cron_custom_no_discovered_models_raises(tmp_path, monkeypatch):
+    """Enabled server with zero discovered models: same failure contract as
+    call_custom — raise naming the server, never fall back to Gemini."""
+    from Orchestrator.scheduler.executor import _provider_default_model
+    reg = tmp_path / "custom_models.json"
+    reg.write_text(json.dumps({"version": 1, "servers": [{
+        "id": "srv-nomodels", "alias": "bare",
+        "base_url": "http://127.0.0.1:8082/v1", "api_key": "",
+        "context_tokens": 32768, "enabled": True,
+        "added_at": "2026-07-09T00:00:00+00:00", "validated_at": None,
+        "last_models": [],
+    }]}))
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(reg))
+    with pytest.raises(RuntimeError, match="no discovered models"):
+        _provider_default_model("custom")
+
+
+def test_cron_other_provider_defaults_untouched():
+    """Every other provider (and the unknown-provider Gemini fallthrough)
+    keeps today's static-map behavior byte-identical."""
+    from Orchestrator.config import GEMINI_MODEL_DEFAULT, ANTHROPIC_MODEL_DEFAULT
+    from Orchestrator.scheduler.executor import _provider_default_model
+    assert _provider_default_model("google") == GEMINI_MODEL_DEFAULT
+    assert _provider_default_model("anthropic") == ANTHROPIC_MODEL_DEFAULT
+    assert _provider_default_model("mystery") == GEMINI_MODEL_DEFAULT
+
+
+def test_cron_model_to_provider_qualified_custom_id():
+    """An alias-qualified custom id ('alias::model') must derive provider
+    'custom' — only custom ids ever contain '::', and the google fallthrough
+    would run the job on the wrong provider (blank-provider legacy path +
+    create_cron_job tool validation both consume this)."""
+    from Orchestrator.scheduler.executor import _model_to_provider
+    assert _model_to_provider("lab::qwen-2") == "custom"
+    # No regression on the existing derivations.
+    assert _model_to_provider("claude-opus-4-8") == "anthropic"
+    assert _model_to_provider("gemini-3.1-pro-preview") == "google"
