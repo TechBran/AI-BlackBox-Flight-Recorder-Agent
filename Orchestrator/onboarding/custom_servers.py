@@ -24,6 +24,8 @@ from Orchestrator.utils.paths import resolve  # canonical root resolver: honors
 logger = logging.getLogger(__name__)
 REGISTRY_PATH = resolve("credentials", "custom_models.json")
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,31}$")  # no '::' possible
+# Serializes read-modify-write within THIS process; the Orchestrator is assumed
+# to be the registry's single writer process (no cross-process locking).
 _LOCK = threading.Lock()
 SEP = "::"
 DEFAULT_CONTEXT_TOKENS = 32768
@@ -37,10 +39,25 @@ _EMPTY = {"version": 1, "servers": []}
 
 # ---------------------------------------------------------------- persistence
 
+def _quarantine(path: str) -> str | None:
+    """Best-effort rename of a corrupt registry so the next _write can't destroy it.
+
+    Returns the quarantine path, or None if the rename failed (fail-soft).
+    """
+    dest = f"{path}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    try:
+        os.replace(path, dest)
+        return dest
+    except OSError:
+        return None
+
+
 def _read() -> dict:
     """Load the registry from disk. Fail-soft: NEVER raises.
 
     Absent file, corrupt JSON, or wrong shape all return an empty registry.
+    Corrupt/wrong-shape files are quarantined (renamed *.corrupt-<ts>) first so
+    a subsequent add_server can't permanently overwrite stored servers/keys.
     """
     path = str(REGISTRY_PATH)
     try:
@@ -48,12 +65,25 @@ def _read() -> dict:
             data = json.load(f)
     except FileNotFoundError:
         return copy.deepcopy(_EMPTY)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-        logger.warning("custom_servers: corrupt/unreadable registry at %s (%s) -- treating as empty", path, exc)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        quarantined = _quarantine(path)
+        logger.warning(
+            "custom_servers: corrupt registry at %s (%s) -- quarantined to %s, treating as empty",
+            path, exc, quarantined or "<quarantine failed>",
+        )
+        return copy.deepcopy(_EMPTY)
+    except OSError as exc:
+        logger.warning("custom_servers: unreadable registry at %s (%s) -- treating as empty", path, exc)
         return copy.deepcopy(_EMPTY)
     if not isinstance(data, dict) or not isinstance(data.get("servers"), list):
-        logger.warning("custom_servers: registry at %s has wrong shape -- treating as empty", path)
+        quarantined = _quarantine(path)
+        logger.warning(
+            "custom_servers: registry at %s has wrong shape -- quarantined to %s, treating as empty",
+            path, quarantined or "<quarantine failed>",
+        )
         return copy.deepcopy(_EMPTY)
+    # A hand-edited file with stray non-dict entries must not crash readers.
+    data["servers"] = [s for s in data["servers"] if isinstance(s, dict)]
     return data
 
 
@@ -105,9 +135,31 @@ def _normalize_base_url(base_url: str) -> str:
     return normalized
 
 
+def _validate_field_types(fields: dict) -> None:
+    """ValueError on wrong-typed values. (alias/base_url are covered by
+    _validate_alias/_normalize_base_url; bool is checked before int because
+    bool is an int subclass.)"""
+    if "api_key" in fields and not isinstance(fields["api_key"], str):
+        raise ValueError("api_key must be a string")
+    if "enabled" in fields and not isinstance(fields["enabled"], bool):
+        raise ValueError("enabled must be a bool")
+    if "context_tokens" in fields:
+        v = fields["context_tokens"]
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            raise ValueError("context_tokens must be a positive int")
+    if "validated_at" in fields:
+        v = fields["validated_at"]
+        if v is not None and not isinstance(v, str):
+            raise ValueError("validated_at must be a string or None")
+    if "last_models" in fields:
+        v = fields["last_models"]
+        if not isinstance(v, list) or not all(isinstance(m, str) for m in v):
+            raise ValueError("last_models must be a list of strings")
+
+
 # ------------------------------------------------------------------ read API
 
-def list_servers(enabled_only: bool = False) -> list:
+def list_servers(enabled_only: bool = False) -> list[dict]:
     """Return all registered servers (copies -- safe to mutate)."""
     servers = _read()["servers"]
     if enabled_only:
@@ -123,7 +175,7 @@ def get_server(server_id: str) -> dict | None:
     return None
 
 
-def list_servers_redacted() -> list:
+def list_servers_redacted() -> list[dict]:
     """Servers without api_key, plus key_present / key_last4 for UI display."""
     redacted = []
     for srv in list_servers():
@@ -139,6 +191,9 @@ def list_servers_redacted() -> list:
 def add_server(alias: str, base_url: str, api_key: str = "",
                context_tokens: int = DEFAULT_CONTEXT_TOKENS) -> dict:
     """Register a new server. Returns the created record (a copy)."""
+    if isinstance(alias, str):
+        alias = alias.strip()
+    _validate_field_types({"api_key": api_key, "context_tokens": context_tokens})
     with _LOCK:
         data = _read()
         _validate_alias(alias, data["servers"])
@@ -146,7 +201,7 @@ def add_server(alias: str, base_url: str, api_key: str = "",
             "id": f"srv-{uuid.uuid4().hex[:8]}",
             "alias": alias,
             "base_url": _normalize_base_url(base_url),
-            "api_key": api_key or "",
+            "api_key": api_key,
             "context_tokens": context_tokens,
             "enabled": True,
             "added_at": datetime.now(timezone.utc).isoformat(),
@@ -159,18 +214,25 @@ def add_server(alias: str, base_url: str, api_key: str = "",
 
 
 def update_server(server_id: str, patch: dict) -> dict:
-    """Patch an existing server (allowlisted fields only). Returns the updated record."""
+    """Patch an existing server (allowlisted, type-checked fields only).
+
+    Returns the updated record. Unknown field or bad value -> ValueError;
+    unknown id -> KeyError.
+    """
     unknown = set(patch) - _PATCHABLE_FIELDS
     if unknown:
         raise ValueError(f"Unpatchable field(s): {sorted(unknown)}")
+    _validate_field_types(patch)
     with _LOCK:
         data = _read()
         for srv in data["servers"]:
             if srv.get("id") == server_id:
+                patch = dict(patch)
                 if "alias" in patch:
+                    if isinstance(patch["alias"], str):
+                        patch["alias"] = patch["alias"].strip()
                     _validate_alias(patch["alias"], data["servers"], exclude_id=server_id)
                 if "base_url" in patch:
-                    patch = dict(patch)
                     patch["base_url"] = _normalize_base_url(patch["base_url"])
                 srv.update(patch)
                 _write(data)
@@ -196,13 +258,17 @@ def qualify(alias: str, model_id: str) -> str:
     return f"{alias}{SEP}{model_id}"
 
 
-def resolve_model(model: str) -> tuple:
+def resolve_model(model: str) -> tuple[dict | None, str]:
     """Map a (possibly alias-qualified) model name to (server, bare_model).
 
     'alias::model' -> the enabled server with that alias (case-insensitive).
+    A syntactically valid alias that matches no ENABLED server fails fast with
+    (None, model) -- never silently rerouted to a different server. A prefix
+    that cannot be an alias (e.g. 'org/name::tag') is treated as part of an
+    unqualified model id.
     Unqualified    -> first enabled server that listed it in last_models,
                       else the first enabled server.
-    No enabled servers (or unknown alias with no fallback) -> (None, model).
+    No enabled servers -> (None, model).
     """
     enabled = list_servers(enabled_only=True)
 
@@ -212,11 +278,16 @@ def resolve_model(model: str) -> tuple:
         for srv in enabled:
             if srv.get("alias", "").lower() == lowered:
                 return srv, bare
-        # Unknown alias: treat the whole string as an unqualified model name.
+        if _ALIAS_RE.match(alias):
+            # Valid alias with no enabled match: fail fast rather than routing
+            # the request to some other server with a confusing far-end error.
+            return None, model
+        # Prefix can't be an alias -> whole string is an unqualified model id.
 
     if not enabled:
         return None, model
     for srv in enabled:
-        if model in (srv.get("last_models") or []):
+        models = srv.get("last_models")
+        if isinstance(models, list) and model in models:
             return srv, model
     return enabled[0], model

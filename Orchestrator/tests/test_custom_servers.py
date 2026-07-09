@@ -81,3 +81,87 @@ def test_redacted_listing_masks_keys(registry):
     assert "api_key" not in red
     assert red["key_last4"] == "1234"
     assert red["key_present"] is True
+
+
+def test_update_server_unknown_field_raises(registry):
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"id": "srv-hijack"})
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"bogus_field": 1})
+
+
+def test_update_and_delete_unknown_id_raise_keyerror(registry):
+    with pytest.raises(KeyError):
+        cs.update_server("srv-missing", {"alias": "z"})
+    with pytest.raises(KeyError):
+        cs.delete_server("srv-missing")
+
+
+def test_list_servers_enabled_only_filters(registry):
+    s1 = cs.add_server(alias="on", base_url="http://x/v1", api_key="k")
+    s2 = cs.add_server(alias="off", base_url="http://y/v1", api_key="k")
+    cs.update_server(s2["id"], {"enabled": False})
+    assert [s["id"] for s in cs.list_servers(enabled_only=True)] == [s1["id"]]
+    assert len(cs.list_servers()) == 2
+
+
+def test_resolve_model_excludes_disabled_servers(registry):
+    s1 = cs.add_server(alias="one", base_url="http://x/v1", api_key="k")
+    s2 = cs.add_server(alias="two", base_url="http://y/v1", api_key="k")
+    cs.update_server(s2["id"], {"last_models": ["gemma-26b"], "enabled": False})
+    # qualified alias of a disabled server: fail fast, never reroute elsewhere
+    assert cs.resolve_model("two::gemma-26b") == (None, "two::gemma-26b")
+    # unqualified: disabled server's last_models must not match -> first enabled
+    srv, bare = cs.resolve_model("gemma-26b")
+    assert srv["id"] == s1["id"] and bare == "gemma-26b"
+    # a prefix that can't be an alias is part of the model id, not a routing key
+    srv, bare = cs.resolve_model("org/name::tag")
+    assert srv["id"] == s1["id"] and bare == "org/name::tag"
+
+
+def test_mutation_rejects_wrong_types(registry):
+    srv = cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"last_models": "gemma-26b"})  # string, not list
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"last_models": ["m1", 2]})  # non-str element
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"enabled": "no"})  # truthy string
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"context_tokens": "lots"})
+    with pytest.raises(ValueError):
+        cs.update_server(srv["id"], {"validated_at": 12345})
+    with pytest.raises(ValueError):
+        cs.add_server(alias="b", base_url="http://y/v1", api_key="k", context_tokens=0)
+    with pytest.raises(ValueError):
+        cs.add_server(alias="c", base_url="http://z/v1", api_key=None)
+    # nothing above should have persisted
+    assert cs.get_server(srv["id"])["last_models"] == []
+    assert len(cs.list_servers()) == 1
+
+
+def test_alias_stripped_before_validation(registry):
+    cs.add_server(alias="box", base_url="http://x/v1", api_key="k")
+    with pytest.raises(ValueError):
+        cs.add_server(alias="box ", base_url="http://y/v1", api_key="k")
+    srv = cs.add_server(alias="  edge  ", base_url="http://z/v1", api_key="k")
+    assert srv["alias"] == "edge"
+
+
+def test_corrupt_registry_quarantined_not_destroyed(registry):
+    registry.write_text("{not json")
+    assert cs.list_servers() == []
+    quarantined = list(registry.parent.glob("custom_models.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == "{not json"
+    assert not registry.exists()
+    # subsequent writes start a fresh registry without touching the quarantine
+    cs.add_server(alias="a", base_url="http://x/v1", api_key="k")
+    assert len(cs.list_servers()) == 1
+    assert quarantined[0].exists()
+
+
+def test_wrong_shape_json_fail_soft(registry):
+    registry.write_text(json.dumps([1, 2, 3]))
+    assert cs.list_servers() == []
