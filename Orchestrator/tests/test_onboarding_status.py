@@ -50,7 +50,26 @@ def _empty_inputs():
         paired=[],
         operators=[],
         restart={"needs_restart": False, "drifted_keys": []},
+        custom_servers=[],
     )
+
+
+def _custom_server(**over):
+    """A full registry record as custom_servers.list_servers() returns it —
+    including api_key, which the rollup must NEVER emit."""
+    srv = {
+        "id": "srv-abc",
+        "alias": "gemma-box",
+        "base_url": "http://gemma.local:8000/v1",
+        "api_key": "sk-SECRET-NEVER-EMIT",
+        "context_tokens": 32768,
+        "enabled": True,
+        "added_at": "2026-07-08T00:00:00+00:00",
+        "validated_at": "2026-07-08T01:00:00+00:00",
+        "last_models": ["gemma-3-27b"],
+    }
+    srv.update(over)
+    return srv
 
 
 def _section(rollup, key):
@@ -98,6 +117,86 @@ def test_api_keys_reranker_providers_are_tracked_items(monkeypatch):
     assert sec["state"] == sr.ATTENTION
     assert any("voyage" in a["message"] for a in rollup["attention"]
                if a["section"] == "api_keys")
+
+
+# ── Custom model servers in the api_keys rollup (custom-model-providers) ──
+
+def test_api_keys_validated_enabled_custom_server_satisfies_llm_key():
+    """A validated+enabled custom server with ZERO env keys is a valid
+    production configuration — no 'No API keys' attention, section READY,
+    server surfaced in the summary (the hub tile renders only state+summary)."""
+    inp = _empty_inputs()
+    inp["custom_servers"] = [_custom_server()]
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "api_keys")
+    assert sec["state"] == sr.READY
+    assert not any(a["section"] == "api_keys" for a in rollup["attention"])
+    assert "1 custom server" in sec["summary"]
+    item = next(i for i in sec["items"] if i["key"] == "custom:srv-abc")
+    assert item == {
+        "key": "custom:srv-abc",
+        "label": "Custom: gemma-box",
+        "configured": True,
+        "validated_at": "2026-07-08T01:00:00+00:00",
+    }
+    # The api_key must never leak into ANY emitted item.
+    assert "sk-SECRET" not in repr(sec["items"])
+
+
+def test_api_keys_unvalidated_custom_server_nudges_like_unvalidated_key():
+    """Enabled-but-unvalidated custom server = present-but-unvalidated key
+    semantics: escapes the 'No API keys' state but flags a validate nudge."""
+    inp = _empty_inputs()
+    inp["custom_servers"] = [_custom_server(validated_at=None)]
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "api_keys")
+    assert sec["state"] == sr.ATTENTION
+    assert sec["summary"] != "No API keys configured"
+    assert any(a["section"] == "api_keys" and a["severity"] == "warn"
+               and "gemma-box" in a["message"] for a in rollup["attention"])
+
+
+def test_api_keys_disabled_custom_server_does_not_satisfy_llm_key():
+    """Disabled servers don't count toward the LLM-key requirement (still the
+    'No API keys' attention) but remain visible as unconfigured items."""
+    inp = _empty_inputs()
+    inp["custom_servers"] = [_custom_server(enabled=False)]
+    rollup = sr.build_status(**inp)
+    sec = _section(rollup, "api_keys")
+    assert sec["state"] == sr.ATTENTION
+    assert sec["summary"] == "No API keys configured"
+    assert any(a["section"] == "api_keys" and "No LLM API key" in a["message"]
+               for a in rollup["attention"])
+    item = next(i for i in sec["items"] if i["key"] == "custom:srv-abc")
+    assert item["configured"] is False
+
+
+def test_api_keys_validated_key_plus_unvalidated_server_summary_is_precise():
+    """Env keys all validated + server unvalidated → the keys text must not
+    claim '0 unvalidated'; the unvalidated count belongs to the server segment."""
+    inp = _empty_inputs()
+    inp["env"] = {"OPENAI_API_KEY": "sk-xxx"}
+    inp["state"]["validated_at"] = {"openai": 1.0}
+    inp["custom_servers"] = [_custom_server(validated_at=None)]
+    sec = _section(sr.build_status(**inp), "api_keys")
+    assert sec["state"] == sr.ATTENTION
+    assert sec["summary"] == "1 key(s) validated · 1 custom server; 1 unvalidated"
+
+
+def test_api_keys_summary_composes_keys_and_servers_plural():
+    """Summary composes the existing keys text with the server count,
+    singular/plural correct."""
+    inp = _empty_inputs()
+    inp["env"] = {"OPENAI_API_KEY": "sk-xxx", "ANTHROPIC_API_KEY": "sk-ant"}
+    inp["state"]["validated_at"] = {"openai": 1.0, "anthropic": 1.0}
+    inp["custom_servers"] = [
+        _custom_server(),
+        _custom_server(id="srv-def", alias="ollama-box"),
+    ]
+    sec = _section(sr.build_status(**inp), "api_keys")
+    assert sec["state"] == sr.READY
+    assert "2 key(s) validated" in sec["summary"]
+    assert "2 custom servers" in sec["summary"]
 
 
 def test_operator_required_attention_when_none():
@@ -380,6 +479,34 @@ def test_status_route_fail_soft_when_rerank_status_raises():
     assert r.status_code == 200
     body = r.json()
     assert body["rerank"] is None
+    assert {s["key"] for s in body["sections"]} == {s["key"] for s in sr.SECTIONS}
+
+
+# ── Custom servers flow through the route layer (fail-soft registry read) ──
+
+
+def test_status_route_surfaces_custom_servers_and_never_leaks_api_key():
+    """_collect_status_inputs reads the registry and the rollup surfaces the
+    server count in the api_keys summary; the api_key never reaches the wire."""
+    c = _client()
+    with patch("Orchestrator.onboarding.custom_servers.list_servers",
+               return_value=[_custom_server()]):
+        r = c.get("/onboarding/status")
+    assert r.status_code == 200
+    sec = next(s for s in r.json()["sections"] if s["key"] == "api_keys")
+    assert "1 custom server" in sec["summary"]
+    assert "sk-SECRET" not in r.text
+
+
+def test_status_route_fail_soft_when_custom_registry_read_raises():
+    """A broken registry read must never take /onboarding/status down —
+    custom servers degrade to [], everything else intact."""
+    c = _client()
+    with patch("Orchestrator.onboarding.custom_servers.list_servers",
+               side_effect=OSError("registry unreadable")):
+        r = c.get("/onboarding/status")
+    assert r.status_code == 200
+    body = r.json()
     assert {s["key"] for s in body["sections"]} == {s["key"] for s in sr.SECTIONS}
 
 

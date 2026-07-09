@@ -74,26 +74,69 @@ def _present_keys(env: dict) -> list[str]:
     return [k for k in _LLM_KEY_ENV if (env.get(k) or "").strip()]
 
 
-def _derive_api_keys(env, state):
+def _derive_api_keys(env, state, custom_servers=None):
     present = _present_keys(env)
     validated = state.get("validated_at", {}) or {}
+    # Full registry records (custom_servers.list_servers()) — the rollup needs
+    # enabled/validated_at, but items are built from SPECIFIC fields only:
+    # api_key must never reach the status payload.
+    servers = [s for s in (custom_servers or []) if isinstance(s, dict)]
     items = [
         {"key": prov, "label": prov,
          "configured": bool((env.get(var) or "").strip()),
          "validated_at": validated.get(prov)}
         for prov, var in _PROVIDER_KEY.items()
     ]
-    if not present:
+    items += [
+        {"key": f"custom:{srv.get('id')}",
+         "label": f"Custom: {srv.get('alias') or srv.get('id')}",
+         "configured": bool(srv.get("enabled")),
+         "validated_at": srv.get("validated_at")}
+        for srv in servers
+    ]
+    enabled_srv = [s for s in servers if s.get("enabled")]
+    unvalidated_srv = [s for s in enabled_srv if not s.get("validated_at")]
+
+    def _with_servers(base):
+        """Compose the keys text with the enabled-server count. The hub tile
+        renders only state+summary (never items), so servers surface HERE."""
+        if not enabled_srv:
+            return base
+        n = len(enabled_srv)
+        seg = f"{n} custom server" + ("" if n == 1 else "s")
+        if unvalidated_srv:
+            seg += f"; {len(unvalidated_srv)} unvalidated"
+        return f"{base} · {seg}" if base else seg
+
+    # An ENABLED custom server satisfies "has at least one LLM key" (a
+    # custom-only fresh box is a valid production configuration). Validated →
+    # ready path; enabled-but-unvalidated gets the same validate nudge as a
+    # present-but-unvalidated env key below. Disabled servers never count.
+    if not present and not enabled_srv:
         return ATTENTION, "No API keys configured", items, [
             {"severity": "warn", "message": "No LLM API key configured — chat will not work"}]
     # present-but-unvalidated: any present key whose provider has no validated_at stamp
     unvalidated = [prov for prov, var in _PROVIDER_KEY.items()
                    if (env.get(var) or "").strip() and prov not in validated]
+    atts = []
     if unvalidated:
-        return ATTENTION, f"{len(present)} key(s); {len(unvalidated)} unvalidated", items, [
-            {"severity": "warn",
-             "message": f"Key present but never validated: {', '.join(unvalidated)}"}]
-    return READY, f"{len(present)} key(s) validated", items, []
+        atts.append({"severity": "warn",
+                     "message": f"Key present but never validated: {', '.join(unvalidated)}"})
+    if unvalidated_srv:
+        names = ", ".join(s.get("alias") or s.get("id") or "custom"
+                          for s in unvalidated_srv)
+        atts.append({"severity": "warn",
+                     "message": f"Custom server enabled but never validated: {names}"})
+    if atts:
+        if unvalidated:
+            base = f"{len(present)} key(s); {len(unvalidated)} unvalidated"
+        elif present:
+            base = f"{len(present)} key(s) validated"
+        else:
+            base = ""
+        return ATTENTION, _with_servers(base), items, atts
+    base = f"{len(present)} key(s) validated" if present else ""
+    return READY, _with_servers(base), items, []
 
 
 def _derive_operator(operators):
@@ -226,7 +269,7 @@ def _derive_mcp(mcp):
 
 def build_status(*, env, state, embeddings, cli, web_search, image,
                  paired, operators, restart, mcp=None, rerank=None,
-                 is_complete=False):
+                 custom_servers=None, is_complete=False):
     """PURE rollup from persisted snapshots. No probes. See module docstring."""
     sections_out = []
     attention_out = []
@@ -236,7 +279,7 @@ def build_status(*, env, state, embeddings, cli, web_search, image,
         if key == "tailscale":
             st, summary, items, atts = _derive_tailscale(env, state)
         elif key == "api_keys":
-            st, summary, items, atts = _derive_api_keys(env, state)
+            st, summary, items, atts = _derive_api_keys(env, state, custom_servers)
         elif key == "operator":
             st, summary, items, atts = _derive_operator(operators)
         elif key == "embeddings":

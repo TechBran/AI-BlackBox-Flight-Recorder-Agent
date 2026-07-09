@@ -812,10 +812,20 @@ def _collect_status_inputs() -> dict:
     except Exception:
         mcp = {"tokens_present": False}
 
+    # Custom model servers (provider 'custom') -- FULL records (not redacted):
+    # the rollup needs enabled/validated_at and builds items from specific
+    # fields only, never api_key. Cheap local JSON read; fail-soft to [].
+    try:
+        from Orchestrator.onboarding import custom_servers as _custom
+        custom = _custom.list_servers()
+    except Exception:
+        logger.exception("status rollup: custom_servers read failed")
+        custom = []
+
     return dict(
         env=env, state=state, embeddings=embeddings, cli=cli,
         web_search=web_search, image=image, paired=paired, operators=operators,
-        restart=restart, mcp=mcp, rerank=rerank_block,
+        restart=restart, mcp=mcp, rerank=rerank_block, custom_servers=custom,
         is_complete=_state.is_complete(),
     )
 
