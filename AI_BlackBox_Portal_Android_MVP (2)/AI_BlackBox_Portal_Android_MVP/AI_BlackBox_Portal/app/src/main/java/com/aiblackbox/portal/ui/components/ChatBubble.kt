@@ -4,9 +4,12 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import android.view.HapticFeedbackConstants
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import com.aiblackbox.portal.ui.feedback.clickFeedback
 import com.aiblackbox.portal.ui.feedback.rememberPressFeedback
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +42,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -78,12 +83,14 @@ import kotlinx.coroutines.delay
 // Assistant bubble: --bubble (#000000), asymmetric (sharp top-start), full width
 // =============================================================================
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatBubble(
     message: UiMessage,
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onSnapshotClick: ((String) -> Unit)? = null,
+    onRetry: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
@@ -101,6 +108,14 @@ fun ChatBubble(
         }
     }
 
+    // Long-press-to-copy (any bubble). Shared by the pointer path (haptic) and
+    // the TalkBack semantics action below.
+    val copyMessage = {
+        clipboardManager.setText(AnnotatedString(message.content))
+        isCopied = true
+    }
+    val bubbleInteractions = remember { MutableInteractionSource() }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -112,11 +127,48 @@ fun ChatBubble(
             ),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
+        // Outer layout column: bubble + (for a failed user send) the retry chip
+        // UNDER the bubble. Pure layout — carries NO pointer handlers, so it can't
+        // reintroduce the touch-blocking history noted on the content column below.
+        Column(
+            modifier = Modifier.then(
+                if (isUser) Modifier.widthIn(max = maxUserBubbleWidth)
+                else Modifier.fillMaxWidth()
+            ),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        ) {
         Column(
             modifier = Modifier
                 .then(
-                    if (isUser) Modifier.widthIn(max = maxUserBubbleWidth)
+                    if (isUser) Modifier
                     else Modifier.fillMaxWidth()
+                )
+                // Long-press anywhere on the bubble copies its text. SAFE pattern
+                // (CliAgentEmptyState precedent): combinedClickable is the SOLE
+                // clickable on the bubble background — NOT layered over another
+                // clickable — so child clickables (TTS/copy buttons, media cards)
+                // still win hit-testing inside their own bounds. onClick is a
+                // required no-op; indication=null so plain taps don't ripple.
+                .then(
+                    if (message.content.isNotBlank()) Modifier
+                        .combinedClickable(
+                            interactionSource = bubbleInteractions,
+                            indication = null,
+                            onClick = {},
+                            onLongClick = {
+                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                copyMessage()
+                            },
+                        )
+                        // a11y: combinedClickable doesn't expose long-press to
+                        // TalkBack by default — declare it explicitly.
+                        .semantics {
+                            onLongClick(label = "Copy message") {
+                                copyMessage()
+                                true
+                            }
+                        }
+                    else Modifier
                 )
                 // Flat solid fill - no shadow rim (HD/production look)
                 // Use background(shape) instead of clip+background — applies visual rounding
@@ -357,6 +409,17 @@ fun ChatBubble(
                 }
             }
 
+            // \u2500\u2500 Long-press copy confirmation (USER bubbles) \u2500\u2500
+            // User bubbles have no controls row, so the isCopied state surfaces as
+            // a transient inline label instead of the copy-button checkmark.
+            if (isUser && isCopied) {
+                Text(
+                    text = "\u2713 Copied",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = HighlightKeyword
+                )
+            }
+
             } // end content Column
 
             // ── Action buttons ──
@@ -471,6 +534,30 @@ fun ChatBubble(
                 }
             }
         }
+
+        // ── Retry chip (failed user sends) ──
+        // Rendered UNDER the bubble when the send failed with nothing usable
+        // arrived. Tapping REPLACES the failed turn via onRetry (retryMessage).
+        if (isUser && message.sendFailed) {
+            Row(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .clip(RoundedCornerShape(RadiusMd))
+                    .background(BbxAccent.copy(alpha = 0.12f))
+                    .border(1.dp, BbxAccent.copy(alpha = 0.4f), RoundedCornerShape(RadiusMd))
+                    .clickFeedback(onClickLabel = "Retry sending message") { onRetry(message.id) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "↻ Retry",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = BbxAccent,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+        } // end outer layout Column
     }
 }
 

@@ -134,7 +134,10 @@ fun ChatScreen(
                         message = message,
                         onSpeak = onSpeak,
                         onSpeakWithId = onSpeakWithId,
-                        onSnapshotClick = { peekSnapId = it }
+                        onSnapshotClick = { peekSnapId = it },
+                        // Retry a failed send: REPLACES the failed turn (removes the
+                        // error bubble + failed user msg, re-fires same text+images).
+                        onRetry = viewModel::retryMessage
                     )
                 }
             }

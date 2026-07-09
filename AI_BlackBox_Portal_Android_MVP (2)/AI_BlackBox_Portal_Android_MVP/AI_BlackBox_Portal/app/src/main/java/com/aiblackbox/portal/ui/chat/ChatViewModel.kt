@@ -817,6 +817,50 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Retry a FAILED user turn (the retry chip under a `sendFailed` user bubble).
+     *
+     * REPLACES the failed turn — never duplicates it and never double-mints:
+     *  1. the pure [retryRemoval] drops the error assistant bubble that followed
+     *     the failed user turn AND the failed user message itself;
+     *  2. the turn is re-fired through the SAME route sendMessage uses, with the
+     *     SAME text + image URLs (both retained on the original UiMessage), which
+     *     re-appends a fresh user turn exactly once (sendFailed defaults false).
+     * saveConversation/mint only runs on stream SUCCESS, so replace-not-append
+     * guarantees at most one mint for the logical turn.
+     *
+     * Guarded by the same [shouldBlockSend] predicate as sendMessage (ERROR does
+     * not block — a failed turn is exactly the state retry exists for).
+     */
+    fun retryMessage(messageId: String) {
+        if (shouldBlockSend(_chatState.value)) return
+        val (remaining, userMsg) = retryRemoval(_messages.value, messageId)
+        if (userMsg == null) return
+        _messages.value = remaining
+        fireSend(userMsg.content, userMsg.images)
+    }
+
+    /**
+     * Route an EXPLICIT text through the same branch logic as [sendMessage]
+     * without reading (or clearing) `_inputText` — the retry path. Mirrors
+     * sendMessage's when-block exactly; the SSE arm passes clearInput=false so a
+     * draft typed after the failure survives the retry.
+     */
+    private fun fireSend(text: String, imageUrls: List<String>) {
+        if (text.isBlank()) return
+        val repo = repository ?: run {
+            Log.e(TAG, "Repository not initialized")
+            return
+        }
+        when (routeFor(ChatProvider.fromId(currentProvider), _erMissionActive.value)) {
+            ChatRoute.AGENT -> _agentPromptEvent.tryEmit(text)
+            ChatRoute.VOICE -> Log.w(TAG, "Voice provider $currentProvider — use Voice screen")
+            ChatRoute.ER_INJECT -> injectErPrompt(text)
+            ChatRoute.LOCAL_PLACEHOLDER -> sendViaLocalEngine(text)
+            ChatRoute.SSE -> sendViaSSE(text, imageUrls, repo, clearInput = false)
+        }
+    }
+
+    /**
      * Run a turn on the on-device (`local`) engine — the Phase 2 replacement for
      * [sendViaLocalPlaceholder]. NEVER touches the cloud SSE path.
      *
@@ -1138,6 +1182,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             // terminal state already set by the stream). Mapping is the pure
             // stateAfterLocalTurn so it is unit-testable.
             _chatState.value = stateAfterLocalTurn(faulted, _chatState.value)
+            if (faulted) {
+                // Retry affordance (parity with the SSE catch): when nothing usable
+                // arrived — the assistant bubble holds only the friendly error text,
+                // no partial content — flag the user turn so the UI offers retry.
+                val lastAssistant = _messages.value.lastOrNull()?.takeIf { it.role == "assistant" }
+                val usable = (lastAssistant?.content ?: "")
+                    .replace(LOCAL_ENGINE_ERROR_TEXT, "").isNotBlank()
+                _messages.value = markSendFailedOnUserTurn(
+                    _messages.value,
+                    userMsg.id,
+                    usableContentArrived = usable,
+                )
+            }
             stopBackgroundService()
             persistHistory()
             // I1 (W5): the turn is done -> apply any model switch that arrived
@@ -1831,7 +1888,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     // SSE Streaming — handles all 30+ event types from Portal chat-send.js
     // =========================================================================
-    private fun sendViaSSE(text: String, imageUrls: List<String>, repo: ChatRepository) {
+    private fun sendViaSSE(
+        text: String,
+        imageUrls: List<String>,
+        repo: ChatRepository,
+        clearInput: Boolean = true,
+    ) {
         // Append user message
         val userMsg = UiMessage(
             role = "user",
@@ -1840,8 +1902,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             provider = currentProvider,
             model = currentModel
         )
+        // Captured for the failure path: when the stream dies with NOTHING usable
+        // arrived, THIS user turn gets sendFailed=true so the UI offers a retry chip.
+        val userMsgId = userMsg.id
         _messages.value = _messages.value + userMsg
-        _inputText.value = TextFieldValue()
+        // clearInput=false on the retry path (retryMessage) — a retried turn must
+        // not wipe whatever draft the user has typed since the failure.
+        if (clearInput) _inputText.value = TextFieldValue()
 
         // Create placeholder assistant message
         val assistantMsg = UiMessage(
@@ -1971,6 +2038,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     isStreaming = false,
                     isThinking = false
                 )
+                // Retry affordance: when NOTHING usable arrived (assistant content
+                // blank → the bubble above is a pure error bubble), flag the user
+                // turn so ChatBubble renders a retry chip. A user-initiated STOP
+                // (streamJob.cancel → CancellationException) is NOT a send failure.
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    _messages.value = markSendFailedOnUserTurn(
+                        _messages.value,
+                        userMsgId,
+                        usableContentArrived = content.isNotBlank(),
+                    )
+                    // Persist so the error bubble + retry affordance survive a reload.
+                    persistHistory()
+                }
             }
         }
     }
@@ -2926,6 +3006,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * cover the placeholder path too) is unit-testable without the ViewModel.
          */
         fun shouldBlockSend(state: ChatState): Boolean = state == ChatState.STREAMING
+
+        /**
+         * Flag the user turn [userMessageId] as sendFailed when a send died with
+         * NOTHING usable arrived ([usableContentArrived] false). Pure so the
+         * failure→retry-affordance rule is unit-testable without the ViewModel
+         * (same strategy as [routeFor]/[shouldBlockSend]). Partial-content
+         * failures keep the turn unflagged — the user got something readable.
+         */
+        fun markSendFailedOnUserTurn(
+            messages: List<UiMessage>,
+            userMessageId: String,
+            usableContentArrived: Boolean,
+        ): List<UiMessage> =
+            if (usableContentArrived) messages
+            else messages.map {
+                if (it.id == userMessageId && it.role == "user") it.copy(sendFailed = true) else it
+            }
+
+        /**
+         * The pure REPLACE step of [retryMessage]: given the failed user turn's
+         * [userMessageId], drop the error assistant bubble that immediately
+         * follows it AND the failed user message itself, returning the remaining
+         * list plus the removed user message (text + images retained, ready to
+         * re-fire). Unknown id → (unchanged list, null). The error bubble is
+         * always the immediate next message because both send paths append the
+         * assistant placeholder right after the user turn.
+         */
+        fun retryRemoval(
+            messages: List<UiMessage>,
+            userMessageId: String,
+        ): Pair<List<UiMessage>, UiMessage?> {
+            val idx = messages.indexOfLast { it.id == userMessageId && it.role == "user" }
+            if (idx < 0) return messages to null
+            val userMsg = messages[idx]
+            val out = messages.toMutableList()
+            if (idx + 1 <= out.lastIndex && out[idx + 1].role == "assistant") out.removeAt(idx + 1)
+            out.removeAt(idx)
+            return out to userMsg
+        }
 
         /**
          * The v1 VISION TRIGGER (W4 follow-up): does this on-device message ask the

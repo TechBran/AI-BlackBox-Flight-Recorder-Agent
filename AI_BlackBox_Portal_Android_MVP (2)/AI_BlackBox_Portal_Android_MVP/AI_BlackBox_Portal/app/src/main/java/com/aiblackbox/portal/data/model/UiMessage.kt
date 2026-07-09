@@ -22,7 +22,8 @@ data class UiMessage(
     val artifacts: List<ArtifactRef> = emptyList(), // downloadable artifacts from /chat/save (Phase 6b)
     val provenance: Provenance? = null,            // typed retrieval provenance (recent/keyword/semantic/checkpoint)
     val ttsAudioUrl: String? = null,              // URL of generated TTS audio for inline player
-    val ttsGenerating: Boolean = false             // true while TTS is being generated
+    val ttsGenerating: Boolean = false,            // true while TTS is being generated
+    val sendFailed: Boolean = false                // user turn whose send failed with nothing usable arrived — UI offers retry (default keeps old persisted history loading)
 )
 
 /**
