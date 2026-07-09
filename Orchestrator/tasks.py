@@ -1457,6 +1457,55 @@ def process_chat_task(task: Task):
         print(f"[CONTEXT] Semantic snapshots ({len(semantic_snaps)}): {semantic_ids}")
         print(f"[CONTEXT] Query: {user_text[:100]}...")
 
+        # --- Custom-provider window guard (non-stream path) -------------------
+        # The inline fossil assembly below is uncapped (CAP=None, WI-10) — fine
+        # for 200K+ cloud windows, fatal for e.g. a 32K llama.cpp window (the
+        # measured worst case is ≈119k floor-tokens). When the turn targets
+        # provider "custom", resolve the server ONCE here (the default-model
+        # block below reuses this resolve) and cap the fossil sections at
+        # window_guard_tokens(server) × 4 chars (≈4 chars/floor-token), dropping
+        # whole snapshots lowest-value-first — keyword, then semantic, then
+        # recent oldest-first, then checkpoints — mirroring context_builder's
+        # stream-path guard (never mid-snapshot truncation; every drop logged).
+        # Other providers are untouched.
+        _custom_server = None
+        _custom_resolved_bare = ""
+        _is_custom = (inp.provider or DEFAULT_PROVIDER).lower() == "custom"
+        if _is_custom:
+            from Orchestrator.onboarding import custom_servers  # lazy: worker-path only
+            _custom_server, _custom_resolved_bare = custom_servers.resolve_model(inp.model or "")
+            _cap_chars = custom_servers.window_guard_tokens(_custom_server) * 4
+
+            def _fossil_chars() -> int:
+                # Conservative superset of the assembled fossil block below:
+                # +2/snap for the "\n\n" joins, +256 flat for section labels and
+                # checkpoint fences, so the cap can never be exceeded by header
+                # overhead. The media-artifacts block (bounded, ~10 URL lines)
+                # is never dropped — stream-path parity.
+                snaps = checkpoint_snaps + recent_snaps + keyword_snaps + semantic_snaps
+                return sum(len(s) + 2 for s in snaps) + (256 if snaps else 0)
+
+            _guard_dropped = []
+            while _fossil_chars() > _cap_chars:
+                if keyword_snaps:
+                    victim, section = keyword_snaps.pop(), "keyword"
+                elif semantic_snaps:
+                    victim, section = semantic_snaps.pop(), "semantic"
+                elif recent_snaps:
+                    victim, section = recent_snaps.pop(0), "recent"
+                elif checkpoint_snaps:
+                    victim, section = checkpoint_snaps.pop(0), "checkpoint"
+                else:
+                    break  # nothing droppable left
+                vid = (extract_snap_ids([victim]) or ["?"])[0]
+                _guard_dropped.append(f"{vid}({section})")
+                print(f"[TASKS] custom window guard dropped {vid} ({section}, whole snapshot, "
+                      f"{len(victim):,} chars): fossils exceed cap {_cap_chars:,} chars "
+                      f"(window_guard_tokens × 4, server '{(_custom_server or {}).get('alias', '?')}')")
+            if _guard_dropped:
+                print(f"[TASKS] custom window guard summary: dropped {len(_guard_dropped)} whole "
+                      f"snapshot(s) to fit {_cap_chars:,} chars: {_guard_dropped}")
+
         update_task(task.task_id, progress=30)
 
         context_parts = []
@@ -1571,7 +1620,13 @@ def process_chat_task(task: Task):
         provider_switched = False
 
         if has_video or has_audio:
-            if provider != "google":
+            # provider "custom" is EXEMPT from the google auto-route: llama.cpp
+            # servers have no audio/video path (INTEGRATION.md §7), and a
+            # custom-only box has no Google key — the switch would hard-fail
+            # the task instead of replying. Audio/video attachments on custom
+            # get a normal text reply. Every other provider keeps today's
+            # behavior byte-identically.
+            if provider not in ("google", "custom"):
                 provider = "google"
                 provider_switched = True
                 print(f"[AUTO-ROUTE] Switched from {original_provider} to google (video/audio detected)")
@@ -1589,6 +1644,18 @@ def process_chat_task(task: Task):
         elif provider == "google": selected_model = inp.model or GEMINI_MODEL_DEFAULT
         elif provider == "openai": selected_model = inp.model or OPENAI_MODEL_DEFAULT
         elif provider == "xai": selected_model = inp.model or XAI_MODEL_DEFAULT
+        elif provider == "custom":
+            # Registry-derived default — never a hardcoded literal: an empty or
+            # "Auto" model resolves to the server's first discovered model,
+            # alias-qualified (mirrors the /chat/stream routes; reuses the
+            # window-guard block's resolve above). An unresolved server / no
+            # discovered models pass through unchanged — call_custom owns the
+            # clean error for those cases.
+            selected_model = inp.model or ""
+            if _custom_server is not None and (not selected_model or _custom_resolved_bare.strip().lower() == "auto"):
+                _discovered = _custom_server.get("last_models") or []
+                if _discovered:
+                    selected_model = custom_servers.qualify(_custom_server.get("alias", ""), _discovered[0])
         else: raise Exception(f"unknown provider: {provider}")
 
         with state_lock:
@@ -1602,7 +1669,7 @@ def process_chat_task(task: Task):
         update_task(task.task_id, progress=40)
 
         # Call provider API (lazy imports to avoid circular dependency)
-        from Orchestrator.routes.chat_routes import call_anthropic, call_gemini, call_openai, call_xai
+        from Orchestrator.routes.chat_routes import call_anthropic, call_gemini, call_openai, call_xai, call_custom
         media_parts = []
         # `reasoning` is the model's native chain-of-thought, separated from the
         # answer by the sync call_* functions (anthropic thinking blocks / gemini
@@ -1622,6 +1689,8 @@ def process_chat_task(task: Task):
             raw, usage, media_parts, reasoning, media_tasks = _unpack_call(call_gemini(msg_list, selected_model, operator=active_operator), media=True)
         elif provider == "xai":
             raw, usage, reasoning, media_tasks = _unpack_call(call_xai(msg_list, selected_model, operator=active_operator))
+        elif provider == "custom":
+            raw, usage, reasoning, media_tasks = _unpack_call(call_custom(msg_list, selected_model, operator=active_operator))
         else:
             raw, usage = call_openai(msg_list, selected_model, operator=active_operator)
 

@@ -1858,6 +1858,252 @@ def call_xai(messages: List[Dict], model: str, operator: str):
     return text, total_usage, reasoning, media_tasks
 
 
+def call_custom(messages: List[Dict], model: str, operator: str):
+    """Call a user-registered OpenAI-compatible server (provider 'custom') — non-stream.
+
+    Clone of call_xai (same OpenAI-compatible wire shape, tool loop, and the
+    4-field reasoning probe — llama.cpp surfaces `reasoning_content` on every
+    reasoning model, so the response-only call_openai shape would silently drop
+    it) with the server-resolution deltas established by
+    stream_custom_with_reasoning: fresh registry resolve per call, bare model in
+    the payload, bearer only when a key is set, NO max_tokens. Serves POST
+    /chat, the MCP chat_with_context tool, and the cron executor via
+    tasks.process_chat_task. Returns (text, usage, reasoning, media_tasks).
+    """
+    # Resolve the target server FRESH on every call (registry is read from
+    # disk; no import-time constants). Same three error cases as the streaming
+    # clone, raised in this non-stream context (call_xai's error surface)
+    # instead of yielded as events.
+    server, bare_model = custom_servers.resolve_model(model or "")
+    if server is None:
+        if custom_servers.list_servers(enabled_only=True):
+            # Enabled servers exist -> the model was qualified with an alias
+            # matching no ENABLED server (resolve_model fails fast by design).
+            raise HTTPException(400, f"Custom model '{model}' names an unknown or disabled server alias — check the alias in the onboarding wizard")
+        raise HTTPException(400, "No custom model servers configured — add one in the onboarding wizard")
+
+    if not bare_model or bare_model.strip().lower() == "auto":
+        last_models = server.get("last_models") or []
+        if not last_models:
+            raise HTTPException(400, f"Server '{server.get('alias', '')}' has no discovered models — validate it in the wizard")
+        bare_model = last_models[0]
+
+    # Process messages to handle images (multimodal llama.cpp/vLLM servers
+    # accept OpenAI-format data URLs; text-only servers ignore/reject them far-end)
+    processed_messages = []
+    for m in messages:
+        if m.get("role") in ("user", "assistant", "system"):
+            content = m.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for part in content:
+                    # Handle direct base64 images (from Android app - Anthropic format)
+                    if part.get("type") == "image" and part.get("source", {}).get("type") == "base64":
+                        source = part.get("source", {})
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        if data:
+                            print(f"[CUSTOM-CALL] Processing direct base64 image ({len(data)} chars, {media_type})")
+                            # OpenAI format: data URL
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}"
+                                }
+                            })
+                    elif part.get("type") == "image_url":
+                        # Handle images - convert local paths to base64 data URLs
+                        url = part.get("image_url", {}).get("url", "")
+                        print(f"[CUSTOM-CALL] Processing image_url: {url[:100]}...")
+
+                        # Already a data URL - pass through
+                        if url.startswith("data:"):
+                            print(f"[CUSTOM-CALL] Image already base64 data URL")
+                            new_content.append(part)
+                            continue
+
+                        # Try to load and convert to base64
+                        local_path = None
+                        try:
+                            # Handle /ui/ paths
+                            if "/ui/" in url:
+                                relative_path = url.split("/ui/", 1)[-1]
+                                local_path = Path("Portal") / relative_path
+                            # Handle absolute paths
+                            elif url.startswith("/"):
+                                local_path = Path(url)
+
+                            if local_path and local_path.exists():
+                                suffix = local_path.suffix.lower()
+                                if suffix in [".jpg", ".jpeg"]:
+                                    mime_type = "image/jpeg"
+                                elif suffix == ".png":
+                                    mime_type = "image/png"
+                                elif suffix == ".webp":
+                                    mime_type = "image/webp"
+                                elif suffix == ".gif":
+                                    mime_type = "image/gif"
+                                else:
+                                    mime_type = "image/jpeg"
+                                img_bytes = local_path.read_bytes()
+                                base64_image = base64.b64encode(img_bytes).decode("utf-8")
+                                print(f"[CUSTOM-CALL] Converted image to base64 ({len(base64_image)} chars, {mime_type})")
+                                new_content.append({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime_type};base64,{base64_image}"
+                                    }
+                                })
+                            else:
+                                print(f"[CUSTOM-CALL] WARNING: Image file not found: {local_path}, skipping image")
+                                new_content.append({
+                                    "type": "text",
+                                    "text": "[Image could not be loaded]"
+                                })
+                        except Exception as e:
+                            print(f"[CUSTOM-CALL] ERROR processing image: {e}")
+                            new_content.append({
+                                "type": "text",
+                                "text": f"[Image processing error: {e}]"
+                            })
+                    elif part.get("type") == "video_url":
+                        # Custom OpenAI-compatible servers have no video path
+                        url = part["video_url"]["url"]
+                        new_content.append({
+                            "type": "text",
+                            "text": f"[Note: Video file attached: {url}. This model doesn't support direct video analysis.]"
+                        })
+                    elif part.get("type") == "document_url":
+                        # Extract text from documents and append as text
+                        url = part["document_url"]["url"]
+                        try:
+                            relative_path = url.split("/ui/", 1)[-1]
+                            local_path = Path("Portal") / relative_path
+                            if local_path.exists():
+                                suffix = local_path.suffix.lower()
+                                if suffix == ".txt":
+                                    text_content = local_path.read_text(encoding='utf-8')
+                                    new_content.append({
+                                        "type": "text",
+                                        "text": f"[Document content: {local_path.name}]\n\n{text_content}"
+                                    })
+                                else:
+                                    new_content.append({
+                                        "type": "text",
+                                        "text": f"[Note: Document {local_path.name} attached but content extraction not supported for this file type on custom servers]"
+                                    })
+                        except Exception as e:
+                            print(f"Could not process document for custom server: {e}")
+                    else:
+                        new_content.append(part)
+                processed_messages.append({"role": m["role"], "content": new_content})
+            else:
+                processed_messages.append(m)
+        else:
+            processed_messages.append(m)
+
+    headers = {"Content-Type": "application/json"}
+    # Keyless LAN servers exist — only send the bearer when a key is set.
+    if server.get("api_key"):
+        headers["Authorization"] = f"Bearer {server['api_key']}"
+
+    # base_url already ends in /v1 (normalized by the registry). Distinct local
+    # name (chat_url) so the tool loop can't clobber a shared URL constant.
+    chat_url = f"{server['base_url']}/chat/completions"
+
+    payload = {
+        "model": bare_model,
+        "messages": processed_messages,
+        "tools": _get_tools("custom", _last_user_msg(messages))
+    }
+    # NOTE: no max_tokens — llama-server generates until EOS/ctx; reasoning
+    # models need the headroom (INTEGRATION.md §6). No stream/stream_options
+    # either — this is the non-stream payload (call_xai parity; the
+    # stream_options 400-retry knob is a streaming-only concern).
+
+    print(f"[CUSTOM-CALL] Server '{server.get('alias')}' at {server['base_url']}, model {bare_model}")
+
+    # Tool calling loop
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    media_tasks = []  # 2-media: created (task_id,type,prompt) for the worker
+    max_tool_calls = 30
+
+    for iteration in range(max_tool_calls):
+        r = requests.post(chat_url, headers=headers, json=payload, timeout=200)
+        if r.status_code != 200:
+            raise HTTPException(r.status_code, r.text)
+
+        data = r.json()
+        message = data["choices"][0]["message"]
+        finish_reason = data["choices"][0].get("finish_reason", "")
+
+        # Accumulate usage
+        u = data.get("usage", {})
+        total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+        total_usage["completion_tokens"] += u.get("completion_tokens", 0)
+        total_usage["total_tokens"] = total_usage["prompt_tokens"] + total_usage["completion_tokens"]
+
+        # Check if model wants to use tools
+        if finish_reason == "tool_calls" and message.get("tool_calls"):
+            # Add assistant message to conversation
+            payload["messages"].append(message)
+
+            # Execute each tool call
+            for tool_call in message["tool_calls"]:
+                func = tool_call["function"]
+                tool_name = func["name"]
+                tool_id = tool_call["id"]
+                args = json.loads(func["arguments"])
+
+                if tool_name == "web_fetch":
+                    url_arg = args.get("url", "")
+                    max_chars = args.get("max_chars", 80000)
+                    print(f"[CUSTOM-CALL] Executing web fetch: {url_arg}")
+                    result = perform_web_fetch(url_arg, max_chars)
+                else:
+                    # Catch-all: route ANY other tool (incl. the per-provider web
+                    # search tools and dynamically-injected ToolVault tools) through
+                    # BlackBoxToolExecutor instead of reporting "Unknown tool".
+                    from Orchestrator.tools import BlackBoxToolExecutor
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                    import asyncio
+                    tool_result = asyncio.run(executor.execute(tool_name, args))
+                    result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+                    if not result:
+                        result = f"Tool '{tool_name}' executed successfully (no output)."
+                    # 2-media: custom-server media (image/video/music) all reach this
+                    # catch-all; the ToolVault executor surfaces task_id in .data -> surface it.
+                    _kind = _media_kind(tool_name)
+                    if _kind and getattr(tool_result, "data", None):
+                        _record_media_task(media_tasks, tool_result.data.get("task_id"),
+                                           _kind, args.get("prompt", ""))
+                    print(f"[CUSTOM-CALL] {tool_name} (catch-all): {result[:100]}")
+
+                # Add tool result to messages
+                payload["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "content": result
+                })
+
+            print(f"[CUSTOM-CALL] Tool iteration {iteration + 1}, continuing...")
+        else:
+            # No more tool calls, extract final text
+            break
+
+    # OpenAI-compatible: `content` is the answer, `reasoning_content` (or its
+    # aliases) carries native reasoning. Keep them separate (2-reasoning);
+    # llama.cpp reasoning models ALWAYS populate reasoning_content.
+    text = message.get("content", "") or ""
+    reasoning = ""
+    for field in ("reasoning_content", "reasoning", "thinking", "thought"):
+        val = message.get(field)
+        if val:
+            reasoning = val if isinstance(val, str) else str(val)
+            break
+    return text, total_usage, reasoning, media_tasks
+
+
 # -----------------------------------------------------------------------------
 # Streaming Chat with Thinking/Reasoning Support
 # -----------------------------------------------------------------------------

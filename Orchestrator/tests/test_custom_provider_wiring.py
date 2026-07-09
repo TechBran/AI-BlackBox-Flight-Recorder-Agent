@@ -302,3 +302,385 @@ def test_get_stream_custom_no_servers_floor_guard_model_untouched(tmp_path, monk
     assert r.status_code == 200
     assert route_fakes["window_guard_tokens"] == 19660
     assert route_fakes["dispatch_model"] is None
+
+
+# =================================================================================
+# Task 5.1: call_custom (non-stream) + tasks.py dispatch + guard exemptions
+# =================================================================================
+# call_custom is a clone of call_xai (same OpenAI-compatible wire shape + the
+# 4-field reasoning probe + (text, usage, reasoning, media_tasks) 4-tuple) with
+# the streaming clone's server-resolution deltas. tasks.process_chat_task gains:
+# provider normalization + registry-default-model resolution + dispatch for
+# "custom", a media auto-route exemption (audio/video must NOT switch custom ->
+# google), and a fossil window guard (window_guard_tokens x 4 chars, whole
+# oldest-first snapshot drops) on the otherwise-uncapped inline fossil block.
+
+ANSWER_51 = "Port 9091 serves the Orchestrator."
+REASONING_51 = "Thinking hard about ports and orchestration."
+
+
+class _FakeResp:
+    """Minimal stand-in for a requests.Response (test_phase2_reasoning pattern)."""
+
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
+def _compat_payload():
+    """OpenAI-compatible non-stream body the way llama.cpp emits it
+    (reasoning_content always present on reasoning models)."""
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": ANSWER_51,
+                        "reasoning_content": REASONING_51},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 9, "total_tokens": 16},
+    }
+
+
+@pytest.fixture
+def call_custom_env(monkeypatch):
+    """chat_routes with _get_tools stubbed and a recording requests.post."""
+    from Orchestrator.routes import chat_routes as cr
+    recorded = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        recorded["url"] = url
+        recorded["headers"] = headers or {}
+        recorded["payload"] = json
+        recorded["timeout"] = timeout
+        return _FakeResp(_compat_payload())
+
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(cr.requests, "post", fake_post)
+    return cr, recorded
+
+
+# --- call_custom unit tests -------------------------------------------------------
+
+def test_call_custom_returns_xai_shape_and_separates_reasoning(custom_registry, call_custom_env):
+    """4-tuple return (call_xai parity), reasoning probed out of
+    reasoning_content, answer never contaminated."""
+    cr, recorded = call_custom_env
+    text, usage, reasoning, media_tasks = cr.call_custom(
+        [{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+
+    assert text == ANSWER_51
+    assert REASONING_51 not in text
+    assert reasoning == REASONING_51
+    assert media_tasks == []
+    assert usage["total_tokens"] == 16
+    assert recorded["timeout"] == 200  # call_xai parity
+
+
+def test_call_custom_payload_shape(custom_registry, call_custom_env):
+    """Bare model in the payload, no stream/stream_options (non-stream), no
+    max_tokens (INTEGRATION.md §6), keyless server -> no Authorization header,
+    endpoint = <base_url>/chat/completions."""
+    cr, recorded = call_custom_env
+    cr.call_custom([{"role": "user", "content": "hi"}], "lab::qwen-2", operator="TestOp")
+
+    assert recorded["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert recorded["payload"]["model"] == "qwen-2"  # bare, never alias-qualified
+    assert "stream" not in recorded["payload"]
+    assert "stream_options" not in recorded["payload"]
+    assert "max_tokens" not in recorded["payload"]
+    assert "Authorization" not in recorded["headers"]
+
+
+def test_call_custom_empty_model_uses_first_discovered(custom_registry, call_custom_env):
+    """Empty model resolves to the first enabled server's first discovered
+    model (same fallback as the stream clone)."""
+    cr, recorded = call_custom_env
+    cr.call_custom([{"role": "user", "content": "hi"}], "", operator="TestOp")
+    assert recorded["payload"]["model"] == "llama-3-8b"
+
+
+def test_call_custom_bearer_only_when_key(tmp_path, monkeypatch, call_custom_env):
+    cr, recorded = call_custom_env
+    reg = tmp_path / "custom_models.json"
+    reg.write_text(json.dumps({"version": 1, "servers": [{
+        "id": "srv-key00001", "alias": "keyed",
+        "base_url": "http://127.0.0.1:8081/v1", "api_key": "sk-test-123",
+        "context_tokens": 32768, "enabled": True,
+        "added_at": "2026-07-09T00:00:00+00:00", "validated_at": None,
+        "last_models": ["m1"],
+    }]}))
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(reg))
+
+    cr.call_custom([{"role": "user", "content": "hi"}], "keyed::m1", operator="TestOp")
+    assert recorded["headers"].get("Authorization") == "Bearer sk-test-123"
+
+
+def test_call_custom_error_cases(tmp_path, monkeypatch, custom_registry, call_custom_env):
+    """The stream clone's three resolution error cases, raised (non-stream
+    context) instead of yielded."""
+    cr, _ = call_custom_env
+
+    # (1) qualified alias matching no ENABLED server (servers DO exist)
+    with pytest.raises(Exception, match="unknown or disabled server alias"):
+        cr.call_custom([{"role": "user", "content": "hi"}], "ghost::m", operator="TestOp")
+
+    # (2) enabled server but zero discovered models, empty model requested
+    reg = tmp_path / "empty_models.json"
+    reg.write_text(json.dumps({"version": 1, "servers": [{
+        "id": "srv-nomodels", "alias": "bare",
+        "base_url": "http://127.0.0.1:8082/v1", "api_key": "",
+        "context_tokens": 32768, "enabled": True,
+        "added_at": "2026-07-09T00:00:00+00:00", "validated_at": None,
+        "last_models": [],
+    }]}))
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(reg))
+    with pytest.raises(Exception, match="no discovered models"):
+        cr.call_custom([{"role": "user", "content": "hi"}], "", operator="TestOp")
+
+    # (3) no servers configured at all
+    monkeypatch.setattr(cs, "REGISTRY_PATH", str(tmp_path / "absent.json"))
+    with pytest.raises(Exception, match="No custom model servers configured"):
+        cr.call_custom([{"role": "user", "content": "hi"}], "", operator="TestOp")
+
+
+# --- process_chat_task dispatch + guards (house _run_worker pattern) ---------------
+
+class _TasksCFG:
+    """Wrap the real CFG, pinning the [context] retrieval counts so the worker
+    tests don't depend on this box's config.ini values. Everything else
+    delegates to the real object."""
+
+    _ints = {"recent_fossils_per_user": 10, "keyword_fossils_per_user": 0,
+             "semantic_fossils_per_user": 0, "checkpoint_snapshots": 0}
+
+    def __init__(self, real):
+        self._real = real
+
+    def getint(self, section, key, fallback=0):
+        if section == "context" and key in self._ints:
+            return self._ints[key]
+        return self._real.getint(section, key, fallback=fallback)
+
+    def getfloat(self, section, key, fallback=0.0):
+        return self._real.getfloat(section, key, fallback=fallback)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _run_chat_worker(monkeypatch, *, provider, model, task_id, messages,
+                     recent_blocks=(), forbidden_calls=()):
+    """Drive process_chat_task hermetically (test_phase2_reasoning pattern) with
+    a recording fake call_custom at the chat_routes seam. Returns
+    (final_task, recorded, captured_turns)."""
+    import Orchestrator.tasks as tasks
+    import Orchestrator.routes.chat_routes as cr
+    from Orchestrator.models import Task, TaskStatus, TaskType, task_db
+    from Orchestrator.volume import now_utc_iso
+
+    monkeypatch.setattr(tasks, "CFG", _TasksCFG(tasks.CFG))
+
+    recorded = {}
+    captured = {"turns": []}
+
+    def fake_call_custom(msgs, mdl, operator="?"):
+        recorded["messages"] = msgs
+        recorded["model"] = mdl
+        recorded["operator"] = operator
+        return (ANSWER_51,
+                {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                REASONING_51, [])
+
+    def fake_call_anthropic(msgs, mdl, operator="?"):
+        recorded["messages"] = msgs
+        recorded["model"] = mdl
+        return (ANSWER_51,
+                {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                "", [])
+
+    # raising=False: red-phase, call_custom may not exist yet on chat_routes.
+    monkeypatch.setattr(cr, "call_custom", fake_call_custom, raising=False)
+    monkeypatch.setattr(cr, "call_anthropic", fake_call_anthropic)
+    for name in forbidden_calls:
+        def _boom(*a, _n=name, **k):
+            raise AssertionError(f"{_n} must not be called for provider {provider!r}")
+        monkeypatch.setattr(cr, name, _boom)
+
+    monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
+    monkeypatch.setattr(tasks, "read_text_safe", lambda *a, **k: "")
+    monkeypatch.setattr(tasks, "get_recent_fossils_for_operator",
+                        lambda vol, op, n, cap: list(recent_blocks)[:n])
+    monkeypatch.setattr(tasks, "keyword_retrieve_for_operator", lambda *a, **k: [])
+    monkeypatch.setattr(tasks, "semantic_retrieve", lambda *a, **k: [])
+    monkeypatch.setattr(tasks, "get_recent_checkpoints_for_operator", lambda *a, **k: [])
+    monkeypatch.setattr(tasks, "get_recent_media_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(tasks, "AUTO_ENABLE", False)
+    monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
+    monkeypatch.setattr(tasks, "perform_mint", lambda *a, **k: {"snap_id": "SNAP-TEST"})
+    monkeypatch.setattr(tasks, "save_operator_state", lambda *a, **k: None)
+
+    orig_get_state = tasks.get_state
+
+    def spy_get_state(op):
+        st = orig_get_state(op)
+        real_add = st.add_conversation_turn
+
+        def capturing_add(turn, max_turns=100):
+            captured["turns"].append(dict(turn))
+            return real_add(turn, max_turns)
+
+        st.add_conversation_turn = capturing_add
+        return st
+
+    monkeypatch.setattr(tasks, "get_state", spy_get_state)
+
+    task = Task(
+        task_id=task_id,
+        task_type=TaskType.CHAT,
+        status=TaskStatus.PENDING,
+        created_at=now_utc_iso(),
+        updated_at=now_utc_iso(),
+        operator="CustomTester",
+        result_data={
+            "messages": messages,
+            "operator": "CustomTester",
+            "provider": provider,
+            "model": model,
+        },
+    )
+    task_db.save_task(task)
+    tasks.process_chat_task(task)
+    return task_db.get_task(task_id), recorded, captured["turns"]
+
+
+_TEXT_MSGS = [{"role": "user", "content": "How does the Orchestrator work?"}]
+_AUDIO_MSGS = [{"role": "user", "content": [
+    {"type": "text", "text": "What does this recording say?"},
+    {"type": "audio_url", "audio_url": {"url": "/ui/uploads/clip.mp3"}},
+]}]
+
+
+def test_worker_custom_dispatch_registry_default_model(custom_registry, monkeypatch):
+    """provider 'custom' routes to call_custom; empty model resolves to the
+    registry default (alias-qualified first discovered model — no hardcoded
+    literal); the 4-tuple unpacks via _unpack_call so reasoning lands in the
+    reasoning slot (snap_text) and NEVER in the user-facing reply."""
+    from Orchestrator.models import TaskStatus
+    final, recorded, turns = _run_chat_worker(
+        monkeypatch, provider="custom", model="", task_id="t51-dispatch",
+        messages=_TEXT_MSGS)
+
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    assert recorded["model"] == "lab::llama-3-8b"
+    assert recorded["operator"] == "CustomTester"
+    rd = final.result_data
+    assert rd["reply"] == ANSWER_51
+    assert REASONING_51 not in rd["reply"]
+    assistant = next((t for t in turns if t.get("role") == "assistant"), None)
+    assert assistant is not None
+    assert "[REASONING]" in assistant["snap_text"]
+    assert REASONING_51 in assistant["snap_text"]
+
+
+def test_worker_custom_explicit_model_passes_through(custom_registry, monkeypatch):
+    from Orchestrator.models import TaskStatus
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="custom", model="lab::qwen-2",
+        task_id="t51-explicit", messages=_TEXT_MSGS)
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    assert recorded["model"] == "lab::qwen-2"
+
+
+def test_worker_custom_audio_skips_media_autoroute(custom_registry, monkeypatch):
+    """has_audio + provider custom must NOT switch to google (a custom-only box
+    has no Google key — the switch would hard-fail instead of replying)."""
+    from Orchestrator.models import TaskStatus
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="custom", model="", task_id="t51-audio",
+        messages=_AUDIO_MSGS, forbidden_calls=("call_gemini",))
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    assert recorded["model"] == "lab::llama-3-8b"  # still call_custom
+    assert final.result_data["reply"] == ANSWER_51
+
+
+def test_worker_audio_autoroute_untouched_for_other_providers(custom_registry, monkeypatch):
+    """The exemption is custom-ONLY: audio on any other provider still switches
+    to google (byte-identical existing behavior)."""
+    import Orchestrator.routes.chat_routes as cr
+    from Orchestrator.models import TaskStatus
+
+    hit = {}
+
+    def fake_call_gemini(msgs, mdl, operator="?"):
+        hit["model"] = mdl
+        return (ANSWER_51,
+                {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                [], "", [])
+
+    monkeypatch.setattr(cr, "call_gemini", fake_call_gemini)
+    final, _, _ = _run_chat_worker(
+        monkeypatch, provider="xai", model="", task_id="t51-audio-xai",
+        messages=_AUDIO_MSGS, forbidden_calls=("call_xai",))
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    assert "model" in hit  # google took the turn
+
+
+# --- fossil window guard (non-stream inline block) ---------------------------------
+
+def _big_blk(i: int, size: int = 10000) -> str:
+    sid = f"SNAP-20260709-{i:04d}"
+    body = "x" * (size - 60)
+    return f"=== START SNAPSHOT — UTC 2026-07-09T00:00:00Z — {sid} ===\n{body}\n"
+
+
+def test_worker_custom_fossil_guard_trims_oldest_first(custom_registry, monkeypatch, capsys):
+    """provider custom + huge fossil corpus: the delivered context block is
+    capped at window_guard_tokens(server) x 4 chars (lab = 16,384-token window
+    -> 9,830 x 4 = 39,320), dropping OLDEST whole recent snapshots first, and
+    the drops are logged."""
+    from Orchestrator.models import TaskStatus
+    blocks = [_big_blk(i) for i in range(1, 11)]  # oldest (0001) -> newest (0010)
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="custom", model="", task_id="t51-guard",
+        messages=_TEXT_MSGS, recent_blocks=blocks)
+
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    # msg_list = [core system, fossil context, *user messages]
+    context = recorded["messages"][1]["content"]
+    cap = cs.window_guard_tokens({"context_tokens": 16384}) * 4  # 39,320
+    assert len(context) <= cap
+    assert "SNAP-20260709-0010" in context  # newest survives
+    assert "SNAP-20260709-0001" not in context  # oldest dropped whole
+    out = capsys.readouterr().out
+    assert "custom window guard dropped" in out
+
+
+def test_worker_fossil_guard_other_providers_untouched(custom_registry, monkeypatch):
+    """Same huge corpus on a non-custom provider: nothing is trimmed (the
+    cloud non-stream path stays cap-free, WI-10)."""
+    from Orchestrator.models import TaskStatus
+    blocks = [_big_blk(i) for i in range(1, 11)]
+    final, recorded, _ = _run_chat_worker(
+        monkeypatch, provider="anthropic", model="claude-test",
+        task_id="t51-guard-anthropic", messages=_TEXT_MSGS, recent_blocks=blocks)
+
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    context = recorded["messages"][1]["content"]
+    for i in range(1, 11):
+        assert f"SNAP-20260709-{i:04d}" in context  # ALL delivered, none dropped
+
+
+# --- unknown provider contract ------------------------------------------------------
+
+def test_worker_unknown_provider_still_raises(custom_registry, monkeypatch):
+    """Genuinely unknown provider strings keep the 'unknown provider' failure
+    contract — accepting 'custom' must not open the floodgates."""
+    from Orchestrator.models import TaskStatus
+    final, _, _ = _run_chat_worker(
+        monkeypatch, provider="mystery", model="", task_id="t51-unknown",
+        messages=_TEXT_MSGS)
+    assert final.status == TaskStatus.FAILED
+    assert "unknown provider: mystery" in (final.result_data or {}).get("error", "")
