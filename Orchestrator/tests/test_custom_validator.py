@@ -120,6 +120,27 @@ def test_validate_custom_auth_error(monkeypatch):
     assert "API key rejected (401)" in res.error
 
 
+def test_validate_custom_http_status_error_hints_at_v1_path(monkeypatch):
+    """Real NotFoundError (APIStatusError subclass, 404) -> ok False with the
+    classic missing-/v1 hint. AuthenticationError (401) must still win — its
+    except clause is ordered first (it's also an APIStatusError subclass)."""
+    req = httpx.Request("GET", "http://192.168.1.50:8080/models")
+    err = openai.NotFoundError(
+        "Error code: 404 - not found",
+        response=httpx.Response(404, request=req),
+        body=None,
+    )
+    monkeypatch.setattr("openai.OpenAI", _fake_client_factory(error=err))
+
+    # base_url deliberately missing /v1 — the hint must come from the error text.
+    res = validators.validate_custom(base_url="http://192.168.1.50:8080", api_key="k")
+    assert res.ok is False
+    assert res.detail is None
+    assert res.error is not None
+    assert "404" in res.error
+    assert "/v1" in res.error
+
+
 def test_validate_custom_unreachable(monkeypatch):
     """Real APIConnectionError -> ok False, error names the unreachable base_url."""
     req = httpx.Request("GET", "http://192.168.1.99:8080/v1/models")

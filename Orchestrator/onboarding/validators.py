@@ -6,6 +6,7 @@ ok/error/latency_ms so the wizard can show clean per-provider feedback.
 
 Tier-1 (v1 wizard): OpenAI, Anthropic, Google, xAI, Perplexity, Tailscale, Gmail.
 Wizard-active (Tier-1): ElevenLabs (key validator below — surfaces plan tier + cloning gate).
+Custom (user-registered): OpenAI-compatible LAN servers via validate_custom (models.list doubles as model discovery).
 Tier-2 (v1.1): Twilio, Asterisk.
 """
 from __future__ import annotations
@@ -144,7 +145,7 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
     refuses empty keys and many LAN servers run keyless.
     """
     def _fn():
-        from openai import APIConnectionError, AuthenticationError, OpenAI
+        from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI
         try:
             with OpenAI(
                 api_key=api_key or "none",
@@ -153,12 +154,16 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
                 max_retries=0,
             ) as client:
                 models = client.models.list()
+                ids = [m.id for m in models.data]
+                return {"model_count": len(ids), "models": ids[:50]}
         except AuthenticationError as e:
             raise RuntimeError(f"API key rejected (401) by {base_url}") from e
+        except APIStatusError as e:
+            raise RuntimeError(
+                f"HTTP {e.status_code} from {base_url} (is the path /v1 correct?)"
+            ) from e
         except APIConnectionError as e:
             raise RuntimeError(f"Server unreachable at {base_url}") from e
-        ids = [m.id for m in models.data]
-        return {"model_count": len(ids), "models": ids[:50]}
     return _measure(_fn)
 
 
