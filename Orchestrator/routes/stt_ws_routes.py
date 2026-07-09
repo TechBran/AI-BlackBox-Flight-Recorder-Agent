@@ -12,9 +12,23 @@ clients. The client contract is provider-agnostic:
     DOWN: {"type":"stt_delta","text":...,"target":...}
           {"type":"stt_final","text":...,"target":...}
           {"type":"stt_error","message":...}
+          {"type":"stt_done"}                  (terminal — ALWAYS the last frame)
 
 stt_delta.text is the CUMULATIVE interim transcript so far (client replaces the
-interim region); stt_final.text is the full final (client commits). Providers
+interim region); stt_final.text is the full final (client commits).
+
+stt_done (added 2026-07-09, additive — old clients ignore unknown types) is the
+TERMINAL marker: sent best-effort as the last frame of every session — after the
+trailing stt_final on a normal stop, after an stt_error on failures, and even
+when finalization produced NOTHING (empty/filtered/failed). Clients key their
+stop-teardown on it instead of a blind grace timer. When the hallucination
+filter swallows a stop-path final, the bridge first sends an authoritative
+EMPTY stt_final ({"text":""} — or the carried rotation prefix on ElevenLabs) so
+the client discards, rather than resurrects, the filtered interim; a session
+that ends with NO stt_final at all means "the server never finalized" and the
+client may commit its newest partial as a fallback.
+
+Providers
 stream interim text with opposite semantics (OpenAI incremental, Google
 cumulative), so InterimAccumulator normalizes both to this uniform contract.
 
@@ -37,6 +51,7 @@ the test suite can monkeypatch them.
 import asyncio
 import base64
 import json
+import time
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
@@ -70,6 +85,30 @@ def _normalize_google_lang(lang):
     return _GOOGLE_LANG.get(code.lower(), code)
 
 
+def _stop_latency_ms(stop_ts: dict):
+    """stop→now latency in whole ms, or None if the client hasn't stopped yet.
+    `stop_ts` is a {"v": monotonic-or-None} holder shared with the bridge."""
+    if stop_ts.get("v") is None:
+        return None
+    return int((time.monotonic() - stop_ts["v"]) * 1000)
+
+
+async def _send_final(websocket: WebSocket, provider: str, m: dict, stop_ts: dict):
+    """Deliver an stt_final with delivery telemetry (2026-07-09 stop-bug audit):
+    EVERY delivery attempt logs the stop→final latency, and a failed delivery
+    logs loudly before re-raising instead of vanishing silently."""
+    lat = _stop_latency_ms(stop_ts)
+    lat_s = f"{lat}" if lat is not None else "pre-stop"
+    try:
+        await websocket.send_json(m)
+        print(f"[STT/WS] {provider} stt_final delivered "
+              f"text_len={len(m.get('text') or '')} stop_to_final_ms={lat_s}")
+    except Exception as e:
+        print(f"[STT/WS] {provider} stt_final delivery FAILED "
+              f"(text_len={len(m.get('text') or '')}, stop_to_final_ms={lat_s}): {e!r}")
+        raise
+
+
 @app.websocket("/ws/stt")
 async def ws_stt(websocket: WebSocket):
     await websocket.accept()
@@ -84,12 +123,27 @@ async def ws_stt(websocket: WebSocket):
             return
         print(f"[STT/WS] start provider={provider} sample_rate={start.get('sample_rate')} "
               f"lang={start.get('lang')} target={start.get('target')}")
-        await run_stt_bridge(websocket, provider, start)
+        try:
+            await run_stt_bridge(websocket, provider, start)
+        except WebSocketDisconnect:
+            raise
+        except Exception as e:
+            # Surface the failure BEFORE the terminal marker so clients observe
+            # stt_error -> stt_done in order.
+            try:
+                await websocket.send_json({"type": "stt_error", "message": str(e)})
+            except Exception:
+                pass
     except WebSocketDisconnect:
         pass
-    except Exception as e:
+    finally:
+        # Terminal marker (2026-07-09): {"type":"stt_done"} is ALWAYS the last
+        # frame of a session — after the trailing stt_final, after an stt_error,
+        # and even when finalization produced NOTHING (empty/filtered/failed) —
+        # so clients key their stop-teardown on it instead of a blind grace
+        # timer. Best-effort: the client may already be gone, and that's fine.
         try:
-            await websocket.send_json({"type": "stt_error", "message": str(e)})
+            await websocket.send_json({"type": "stt_done"})
         except Exception:
             pass
 
@@ -154,6 +208,7 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         # then exits — so a normal push-to-talk stop never drops the last
         # utterance's stt_final.
         stop_evt = asyncio.Event()
+        stop_ts = {"v": None}  # monotonic time of the stop-commit (telemetry)
 
         # Normalize OpenAI's incremental deltas into a cumulative interim
         # transcript so stt_delta.text is uniform across providers.
@@ -173,6 +228,7 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                         }))
                 elif mtype == "stt_stop":
                     await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    stop_ts["v"] = time.monotonic()
                     stop_evt.set()
                     return
 
@@ -198,9 +254,24 @@ async def _openai_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 if not m:
                     continue
                 if m["type"] == "stt_final" and is_whisper_hallucination(m.get("text", "")):
+                    print(f"[STT/WS] openai stt_final FILTERED (hallucination) "
+                          f"text_len={len(m.get('text', ''))}")
+                    if stop_evt.is_set():
+                        # This WAS the trailing final for the manual stop — nothing
+                        # more is coming. Send an authoritative EMPTY final (so the
+                        # client discards, not resurrects, the filtered interim)
+                        # and exit; the endpoint's stt_done then follows at once
+                        # instead of the client parking on the 5s drain backstop.
+                        await _send_final(websocket, "openai",
+                                          {"type": "stt_final", "text": "", "target": target},
+                                          stop_ts)
+                        return
                     continue
                 m["target"] = target
-                await websocket.send_json(m)
+                if m["type"] == "stt_final":
+                    await _send_final(websocket, "openai", m, stop_ts)
+                else:
+                    await websocket.send_json(m)
                 # On a manual stop, the final for the committed audio is the last
                 # thing we need — stop draining once it's delivered.
                 if m["type"] == "stt_final" and stop_evt.is_set():
@@ -312,6 +383,9 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
     stop_evt = asyncio.Event()
     disconnect_evt = asyncio.Event()  # set when the CLIENT socket drops/ends
     prefix = ""
+    stop_ts = {"v": None}          # monotonic time of the client's stt_stop (telemetry)
+    commit_failed = {"v": False}   # the stop-commit never reached Scribe (socket died)
+    final_sent = {"v": False}      # an stt_final (incl. an authoritative empty) was delivered
 
     async def client_pump():
         """Runs ONCE for the whole logical session: client -> queue. ALWAYS sets
@@ -325,6 +399,7 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                     if pcm:
                         await audio_q.put(("audio", pcm))
                 elif mtype == "stt_stop":
+                    stop_ts["v"] = time.monotonic()
                     await audio_q.put(("stop", None))
                     stop_evt.set()
                     return
@@ -353,11 +428,21 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                     else:  # stop
                         await el_ws.send(_el_audio_msg("", sample_rate, commit=True))
                         return
-                except Exception:
+                except Exception as e:
                     # Scribe closed the socket under us (its ~30s cap closes with a
                     # clean 1000 mid-stream). Stop feeding and return cleanly — the
                     # reader's rotate fingerprint drives the reconnect; raising here
                     # would instead crash the epoch and tear down the client WS.
+                    if kind == "stop":
+                        # The stop-commit never reached Scribe → NO final is coming
+                        # on this socket (cap seam at exactly the stop). Do NOT
+                        # swallow that silently: flag it so the epoch skips the
+                        # pointless 5s final-drain and the endpoint's stt_done
+                        # reaches the client promptly (the client then commits its
+                        # newest partial as the fallback final).
+                        commit_failed["v"] = True
+                        print(f"[STT/WS] elevenlabs stop-commit send FAILED "
+                              f"(scribe socket dead): {e!r}")
                     return
 
         async def reader():
@@ -378,6 +463,19 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 if not m:
                     continue
                 if m["type"] == "stt_final" and is_whisper_hallucination(m.get("text", "")):
+                    print(f"[STT/WS] elevenlabs stt_final FILTERED (hallucination) "
+                          f"text_len={len(m.get('text', ''))}")
+                    if stop_evt.is_set():
+                        # The committed (stop) final was hallucination-filtered —
+                        # nothing more is coming. Deliver what is REAL: the carried
+                        # prefix from earlier session rotations (speech the user
+                        # actually produced), or an authoritative EMPTY final when
+                        # there is none, so the client discards rather than
+                        # resurrects the filtered interim. stt_done follows.
+                        fm = {"type": "stt_final", "text": prefix, "target": target}
+                        await _send_final(websocket, "elevenlabs", fm, stop_ts)
+                        final_sent["v"] = True
+                        return
                     continue
                 progressed["v"] = True
                 if m["type"] == "stt_delta":
@@ -386,7 +484,11 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 else:
                     m = {"type": "stt_final", "text": join_transcript_segments(prefix, m["text"])}
                 m["target"] = target
-                await websocket.send_json(m)
+                if m["type"] == "stt_final":
+                    await _send_final(websocket, "elevenlabs", m, stop_ts)
+                    final_sent["v"] = True
+                else:
+                    await websocket.send_json(m)
                 if m["type"] == "stt_final" and stop_evt.is_set():
                     return
             # Fell out of `async for` = Scribe ended the frame stream ITSELF
@@ -420,8 +522,11 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
             # stt_final is dropped while the reader still awaits it from the network).
             if disconnect_evt.is_set() and not stop_evt.is_set():
                 return "done"
-            if feeder_task.done() and not reader_task.done() and not rotate["v"]:
+            if (feeder_task.done() and not reader_task.done() and not rotate["v"]
+                    and not commit_failed["v"]):
                 # client committed (stop): drain for the single final, 5s backstop.
+                # (Skipped when the commit never reached Scribe — no final can
+                # come, so waiting would only delay the terminal stt_done.)
                 try:
                     await asyncio.wait_for(asyncio.shield(reader_task), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -493,6 +598,14 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
                 await asyncio.sleep(min(0.2 * rotations, 1.0))  # small backoff against a flapping provider
                 continue
             break
+        if stop_evt.is_set() and not final_sent["v"]:
+            # Stop-path telemetry (2026-07-09): the stop window closed with NO
+            # stt_final delivered (cap seam ate it / commit never landed). The
+            # endpoint's stt_done still goes out, and the client commits its
+            # newest partial as the fallback final.
+            print(f"[STT/WS] elevenlabs stop ended WITHOUT a final "
+                  f"(commit_failed={commit_failed['v']}, "
+                  f"stop_to_end_ms={_stop_latency_ms(stop_ts)})")
     finally:
         if not pump_task.done():
             pump_task.cancel()
@@ -507,6 +620,15 @@ async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate)
 # =============================================================================
 # Google Cloud Speech-to-Text v2 streaming bridge (gRPC, off-loop)
 # =============================================================================
+
+# Bounded post-stop flush: after the client's stt_stop we half-close the gRPC
+# stream and Google flushes the trailing final — usually <2s, but the API has
+# NO deadline (journal-proven multi-second stalls, 2026-07-08). The Android
+# client waits up to 10s for stt_done, so cap the server-side drain safely
+# under that; on expiry the terminal marker still goes out and the client
+# commits its newest partial as the fallback final.
+_GOOGLE_STOP_FLUSH_TIMEOUT_S = 8.0
+
 
 async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     """Bridge client PCM -> Google STT v2 streaming -> client deltas/finals.
@@ -582,11 +704,20 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                 return
             yield StreamingRecognizeRequest(audio=chunk)
 
+    # Set when the client sends stt_stop (telemetry: stop→final latency). The
+    # worker thread only reads it; the receive loop only writes it once.
+    stop_ts = {"v": None}
+    # Every cross-thread emit future, so the bridge can DRAIN in-flight sends
+    # before returning — the endpoint's terminal stt_done must never overtake a
+    # trailing final still scheduled from the worker thread.
+    emit_futs = []
+
     def _emit(payload: dict):
         # Thread -> loop. Schedule the send_json coroutine on the event loop.
         # Observe the returned future so a failed cross-thread send surfaces as
         # a log line instead of vanishing silently (telemetry-before-silent).
         fut = asyncio.run_coroutine_threadsafe(websocket.send_json(payload), loop)
+        emit_futs.append(fut)
 
         def _log_emit_error(f):
             try:
@@ -613,9 +744,22 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     text = result.alternatives[0].transcript or ""
                     is_final = bool(result.is_final)
                     if is_final and is_whisper_hallucination(text):
+                        lat = _stop_latency_ms(stop_ts)
+                        print(f"[STT/WS] google stt_final FILTERED (hallucination) "
+                              f"text_len={len(text)} "
+                              f"stop_to_final_ms={lat if lat is not None else 'pre-stop'}")
+                        if stop_ts["v"] is not None:
+                            # The trailing (post-stop) final was filtered: send an
+                            # authoritative EMPTY final so the client discards, not
+                            # resurrects, the filtered interim. stt_done follows.
+                            _emit({"type": "stt_final", "text": "", "target": target})
                         continue
                     m = acc.google(text, is_final)
                     m["target"] = target
+                    if is_final:
+                        lat = _stop_latency_ms(stop_ts)
+                        print(f"[STT/WS] google stt_final delivering text_len={len(text)} "
+                              f"stop_to_final_ms={lat if lat is not None else 'pre-stop'}")
                     _emit(m)
             print("[STT/WS] google stream ended")
         except Exception as e:  # surface gRPC/auth errors to the client
@@ -636,6 +780,7 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                     except Exception:
                         pass
             elif mtype == "stt_stop":
+                stop_ts["v"] = time.monotonic()
                 break
             # If the worker thread died early (e.g. gRPC/auth error -> stt_error),
             # stop queueing audio against an abandoned generator.
@@ -644,9 +789,29 @@ async def _google_bridge(websocket: WebSocket, *, target, lang, sample_rate):
     except WebSocketDisconnect:
         pass
     finally:
-        # Signal the request generator to finish, then await the worker.
+        # Signal the request generator to finish, then await the worker — BOUNDED:
+        # gRPC has no deadline on the trailing flush and the client only waits
+        # ~10s for the terminal stt_done, so cap the drain rather than hanging
+        # the terminal marker behind a stalled provider. (On expiry the worker
+        # thread lingers; its late emits fail against the closed socket and are
+        # logged by _log_emit_error.)
         audio_q.put(None)
         try:
-            await worker
+            await asyncio.wait_for(asyncio.shield(worker), timeout=_GOOGLE_STOP_FLUSH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            print(f"[STT/WS] google post-stop flush exceeded "
+                  f"{_GOOGLE_STOP_FLUSH_TIMEOUT_S}s — proceeding to stt_done "
+                  f"WITHOUT the trailing final "
+                  f"(stop_to_now_ms={_stop_latency_ms(stop_ts)})")
         except Exception:
             pass
+        # Drain in-flight cross-thread emits so the endpoint's stt_done is ALWAYS
+        # sent AFTER any final the worker already scheduled onto the loop.
+        pending = [asyncio.wrap_future(f) for f in list(emit_futs) if not f.done()]
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                pass
