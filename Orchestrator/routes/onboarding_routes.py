@@ -8,13 +8,14 @@ import dataclasses
 import logging
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from Orchestrator.onboarding import validators
+from Orchestrator.onboarding import custom_servers, validators
 from Orchestrator.onboarding.secrets_writer import update_env
 from Orchestrator.onboarding.state import (
     StepName,
@@ -90,7 +91,7 @@ class CurrentConfigResponse(BaseModel):
 
 
 class ValidateRequest(BaseModel):
-    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "voyage", "cohere", "tailscale", "gmail", "elevenlabs"]
+    provider: Literal["openai", "anthropic", "google", "xai", "perplexity", "voyage", "cohere", "tailscale", "gmail", "elevenlabs", "custom"]
     credentials: dict[str, str] = {}  # provider-specific shape; tailscale needs none
 
 
@@ -319,6 +320,83 @@ def delete_config_value(key: str) -> dict:
     return {"ok": True, **result}
 
 
+# ── Custom model servers (provider "custom") — registry CRUD ──
+
+class CustomServerCreate(BaseModel):
+    alias: str
+    base_url: str
+    api_key: str = ""          # default "" — custom_servers.add_server rejects None
+    context_tokens: int = 32768
+
+
+class CustomServerPatch(BaseModel):
+    """Partial update — omitted (None) fields are left unchanged."""
+    alias: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    enabled: bool | None = None
+    context_tokens: int | None = None
+
+
+def _redact_server(srv: dict) -> dict:
+    """Drop api_key, add key_present/key_last4 — same shape as
+    custom_servers.list_servers_redacted(). Never echo the secret back."""
+    srv = dict(srv)
+    key = srv.pop("api_key", "") or ""
+    srv["key_present"] = bool(key)
+    srv["key_last4"] = key[-4:] if key else ""
+    return srv
+
+
+@router.get("/custom-servers")
+def list_custom_servers() -> dict:
+    """List registered custom model servers (api_key redacted to last-4)."""
+    return {"servers": custom_servers.list_servers_redacted()}
+
+
+@router.post("/custom-servers")
+def add_custom_server(req: CustomServerCreate) -> dict:
+    """Register an OpenAI-compatible LAN server (llama.cpp / llama-swap / vLLM).
+
+    LAN-trust stance: the user-supplied base_url will later be probed by
+    POST /onboarding/validate — that is SSRF-shaped BY DESIGN. Tailscale/LAN
+    is the security perimeter; do not add auth or URL allowlisting here.
+    """
+    try:
+        srv = custom_servers.add_server(
+            alias=req.alias, base_url=req.base_url,
+            api_key=req.api_key, context_tokens=req.context_tokens,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("custom-servers add: id=%s alias=%s", srv["id"], srv["alias"])
+    return {"server": _redact_server(srv)}
+
+
+@router.patch("/custom-servers/{server_id}")
+def patch_custom_server(server_id: str, req: CustomServerPatch) -> dict:
+    """Partially update a registered server; omitted fields are unchanged."""
+    patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    try:
+        srv = custom_servers.update_server(server_id, patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]) if e.args else "not found")
+    return {"server": _redact_server(srv)}
+
+
+@router.delete("/custom-servers/{server_id}")
+def delete_custom_server(server_id: str) -> dict:
+    """Remove a server from the registry."""
+    try:
+        custom_servers.delete_server(server_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]) if e.args else "not found")
+    logger.info("custom-servers delete: id=%s", server_id)
+    return {"ok": True}
+
+
 # Provider -> the .env var holding its API key. Lets an ALREADY-CONFIGURED key
 # be re-validated (a troubleshooting affordance) WITHOUT the client re-sending
 # it: POST /validate {provider} with no credentials reads the stored value
@@ -378,6 +456,25 @@ def validate(req: ValidateRequest) -> ValidateResponse:
             result = validators.validate_gmail_oauth(creds["client_id"], creds["client_secret"])
         elif req.provider == "elevenlabs":
             result = validators.validate_elevenlabs(creds["api_key"])
+        elif req.provider == "custom":
+            # Custom OpenAI-compatible server probe. LAN-trust stance: probing
+            # a user-supplied base_url is SSRF-shaped BY DESIGN — Tailscale/LAN
+            # is the security perimeter; do not add auth or URL allowlisting.
+            # Stored-server re-validation: credentials may carry ONLY server_id,
+            # in which case base_url/api_key resolve from the registry
+            # (mirrors _resolve_stored_creds for .env-backed providers).
+            server_id = creds.get("server_id") or ""
+            base_url = creds.get("base_url") or ""
+            api_key = creds.get("api_key") or ""
+            if server_id and not base_url:
+                stored = custom_servers.get_server(server_id)
+                if stored:
+                    base_url = stored.get("base_url") or ""
+                    if not api_key:
+                        api_key = stored.get("api_key") or ""
+            if not base_url:
+                raise HTTPException(status_code=400, detail="missing credential field: base_url")
+            result = validators.validate_custom(base_url, api_key)
         else:
             raise HTTPException(status_code=400, detail=f"unknown provider {req.provider}")
     except KeyError as e:
@@ -388,7 +485,25 @@ def validate(req: ValidateRequest) -> ValidateResponse:
         logger.exception("validator dispatch failed for provider=%s", req.provider)
         return ValidateResponse(ok=False, latency_ms=0, error=f"{type(e).__name__}: {str(e)[:200]}")
     if result.ok:
-        _state.record_validation(req.provider)
+        if req.provider == "custom":
+            # Per-server stamping: "custom:{server_id}", NOT bare "custom" —
+            # one server's validation must not mark all custom servers valid.
+            # Ad-hoc probes (no server_id) validate but stamp/persist nothing.
+            server_id = (req.credentials or {}).get("server_id") or ""
+            if server_id:
+                try:
+                    custom_servers.update_server(server_id, {
+                        "validated_at": datetime.now(timezone.utc).isoformat(),
+                        "last_models": list((result.detail or {}).get("models") or []),
+                    })
+                    _state.record_validation(f"custom:{server_id}")
+                except (KeyError, ValueError):
+                    logger.warning(
+                        "validate custom: could not persist result for server_id=%r",
+                        server_id, exc_info=True,
+                    )
+        else:
+            _state.record_validation(req.provider)
     return ValidateResponse(**dataclasses.asdict(result))
 
 
