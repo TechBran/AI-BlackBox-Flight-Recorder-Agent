@@ -493,7 +493,7 @@
     transition: all var(--transition-base);
 }
 
-.bubble-retry:hover {
+.bubble-retry:hover:not(:disabled) {
     background: rgba(255, 74, 74, 0.2);
     border-color: rgba(255, 74, 74, 0.6);
 }
@@ -504,9 +504,21 @@
 }
 
 /* --- Long-press copy confirmation flash (touch long-press on any bubble) --- */
+/* Keyframe fade: flashes green then eases out over the class's 1.2s lifetime
+   (chat-bubbles.js removes the class when the animation ends). */
 .bubble-copied-flash {
-    outline: 1px solid rgba(102, 187, 106, 0.6);
-    box-shadow: 0 0 10px rgba(102, 187, 106, 0.35);
+    animation: bubble-copied-fade 1.2s ease-out forwards;
+}
+
+@keyframes bubble-copied-fade {
+    0% {
+        outline: 1px solid rgba(102, 187, 106, 0.7);
+        box-shadow: 0 0 12px rgba(102, 187, 106, 0.45);
+    }
+    100% {
+        outline: 1px solid rgba(102, 187, 106, 0);
+        box-shadow: 0 0 12px rgba(102, 187, 106, 0);
+    }
 }
 
 /* TTS button loading state - Red glow while generating */

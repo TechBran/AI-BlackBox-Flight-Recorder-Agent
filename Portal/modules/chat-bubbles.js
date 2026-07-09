@@ -252,7 +252,7 @@ export function appendBubble(role, content) {
     // Controls bar: assistant bubbles get speak + copy; user bubbles get copy
     // (speak stays assistant-only).
     let controlsBar = null;
-    if ((role === "assistant" || role === "user") && (role === "assistant" || rawCopyText)) {
+    if (role === "assistant" || (role === "user" && rawCopyText)) {
         controlsBar = document.createElement("div");
         controlsBar.className = "bubble-controls";
         wrap.appendChild(controlsBar);
@@ -311,6 +311,12 @@ export function appendBubble(role, content) {
  * state, removes the error assistant bubble, and re-fires the same text via
  * chat-send.js retryFailedTurn (dynamic import — chat-send already imports this
  * module, so a static import here would be circular).
+ *
+ * STRUCTURAL CHOICE (deliberate): the chip is appended INSIDE the .bubble
+ * element, NOT as a sibling in #history. Several code paths assume one
+ * #history child per historyData entry (e.g. updateThinkingBubble maps a
+ * bubble's DOM index straight to its historyData index) — a sibling chip
+ * element would shift every index after it and corrupt those mappings.
  *
  * v1 limitation: attachments are NOT re-sent (File objects are gone after
  * clearAttachedFiles) — noted in the title attribute.
@@ -526,6 +532,11 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
         }, 0);
     }
 
+    // Raw-copy parity for polling-mode bubbles: the long-press path reads this
+    // (same rule as appendBubble — raw string for markdown content, plain-text
+    // extraction only for media content).
+    thinkingBubble._bbxCopyText = containsMedia ? textContentForActions : newContentString;
+
     const controlsBar = document.createElement("div");
     controlsBar.className = "bubble-controls";
     thinkingBubble.appendChild(controlsBar);
@@ -605,6 +616,7 @@ export function renderHistory() {
         const bubble = appendBubble(item.role, item.content);
         // Restore the retry affordance on user turns whose send failed
         if (item.role === 'user' && item.failed && bubble) {
+            if (item.sendKey) bubble.dataset.sendKey = item.sendKey;
             if (item.failedAt) bubble.dataset.failedAt = String(item.failedAt);
             attachRetryChip(bubble, item.content);
         }

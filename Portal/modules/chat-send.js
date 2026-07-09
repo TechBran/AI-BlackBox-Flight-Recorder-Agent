@@ -1031,6 +1031,9 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         let thinkingStarted = false;
         let provenance = null;
         let cuLog = [];  // Computer Use session log for persistence
+        // SSE 'error' event text — accumulated so send() can detect an ERROR-ONLY
+        // stream (transport OK, no reply) and surface the failure + retry chip.
+        let streamErrorText = "";
 
         // NOTE: We no longer use streaming TTS (real-time sentence-by-sentence).
         // Auto-TTS now waits for the complete response and generates a single TTS call.
@@ -1117,7 +1120,14 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                         window.triggerAutoTTS(fullResponse, bubble);
                     }
 
-                    resolve({ thinking: fullThinking, response: fullResponse, provenance: provenance, cuLog: cuLog });
+                    resolve({
+                        thinking: fullThinking,
+                        response: fullResponse,
+                        provenance: provenance,
+                        cuLog: cuLog,
+                        errorText: streamErrorText,
+                        bubbleEl: bubble  // lets send() remove/convert an error-only stream's empty bubble
+                    });
                     return;
                 }
 
@@ -1469,6 +1479,11 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                             case 'error':
                                 console.error('[STREAM] Error:', data);
                                 toast('Stream error: ' + data);
+                                // Accumulate — an error-only stream (no response)
+                                // must reach send()'s failure/retry handling instead
+                                // of leaving a dangling empty streaming bubble.
+                                streamErrorText += (streamErrorText ? '\n\n' : '') +
+                                    (typeof data === 'string' ? data : JSON.stringify(data));
                                 break;
 
                             case 'stream_end':
@@ -2160,7 +2175,9 @@ export async function send() {
     // it FIRST — the standard-mode fallback must NOT re-append the user bubble /
     // history entry when streaming already did (that duplicated the user turn on
     // every streaming→standard fallback). Also the anchor for the retry chip when
-    // the FINAL outcome is failure.
+    // the FINAL outcome is failure. tagUserTurn stamps a per-send key onto the
+    // history entry + bubble so failure marking / retry removal target exactly
+    // THIS send even when sends overlap.
     let userTurnBubble = null;
 
     if (STREAMING_ENABLED && window.__provider !== 'agents' && window.__provider !== 'gemini-agents') {
@@ -2204,6 +2221,7 @@ export async function send() {
             }
 
             userTurnBubble = addBubble("user", bubbleContent);
+            tagUserTurn(userTurnBubble);
             if ($("prompt")) $("prompt").value = "";
             clearAttachedFiles();
             renderPreviews();
@@ -2224,6 +2242,21 @@ export async function send() {
                 window.__model || "",
                 getOperator()
             );
+
+            // ERROR-ONLY stream: the transport completed but the server delivered
+            // only SSE 'error' events — no reply. Previously this left a dangling
+            // empty streaming bubble and a user turn with no reply and NO retry
+            // chip. Convert it into the standard failure outcome. Guarded on
+            // !result.response so partial/CU-queue flows keep today's behavior.
+            if (!result.queued && !result.response && result.errorText) {
+                if (result.bubbleEl && result.bubbleEl.parentNode) {
+                    result.bubbleEl.remove(); // drop the empty streaming bubble (not in historyData)
+                }
+                addBubble("assistant", "Chat error: " + result.errorText);
+                markSendFailed(userTurnBubble, txt);
+                streamingCompleted = true;
+                return;
+            }
 
             if (result.queued) {
                 console.log('[STREAM] Queued request — response will appear in original bubble');
@@ -2385,6 +2418,7 @@ export async function send() {
         // (userTurnBubble set) — re-appending duplicated the user turn.
         if (!userTurnBubble) {
             userTurnBubble = addBubble("user", bubbleContent);
+            tagUserTurn(userTurnBubble);
         }
         if ($("prompt")) $("prompt").value = "";
         clearAttachedFiles();
@@ -2558,10 +2592,50 @@ export async function send() {
 // =============================================================================
 
 /**
+ * Stamp a unique per-send key onto the JUST-APPENDED user history entry (the
+ * last entry — addBubble pushed it synchronously) and the DOM bubble. The key
+ * decouples failure marking / retry removal from "last user entry" heuristics,
+ * which overlapping sends could race onto the WRONG entry. Persisted with the
+ * entry (saveHistory), restored onto the bubble by the history-restore paths.
+ *
+ * @param {HTMLElement|null} userBubbleEl - The bubble addBubble just returned
+ * @returns {string|null} The key, or null when there was nothing to stamp
+ */
+function tagUserTurn(userBubbleEl) {
+    const hd = getHistoryData();
+    const entry = hd[hd.length - 1];
+    if (!entry || entry.role !== 'user') return null;
+    const key = 'send-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9);
+    entry.sendKey = key;
+    saveHistory();
+    if (userBubbleEl) userBubbleEl.dataset.sendKey = key;
+    return key;
+}
+
+/**
+ * Pure: index of the user history entry carrying sendKey (searched from the
+ * end); -1 when the key is falsy or absent. Extracted so the keying logic is
+ * testable and shared by markSendFailed + retryFailedTurn.
+ *
+ * @param {Array<{role: string, sendKey?: string}>} historyData
+ * @param {string|undefined} sendKey
+ * @returns {number}
+ */
+export function findUserTurnIndex(historyData, sendKey) {
+    if (!sendKey) return -1;
+    for (let i = historyData.length - 1; i >= 0; i--) {
+        if (historyData[i].role === 'user' && historyData[i].sendKey === sendKey) return i;
+    }
+    return -1;
+}
+
+/**
  * Mark the just-sent user turn as FAILED: flag its historyData entry
  * ({failed: true, failedAt}) so the state survives reload (state-management owns
  * historyData/saveHistory), stamp the DOM bubble so retry can find the exact
- * entry, and attach the retry chip under the bubble.
+ * entry, and attach the retry chip under the bubble. The entry is targeted by
+ * the per-send key stamped at addBubble time (tagUserTurn); the last-user-entry
+ * fallback only covers an untagged bubble (shouldn't happen in practice).
  *
  * @param {HTMLElement|null} userBubbleEl - The user turn's bubble (may be null
  *   if the send failed before the bubble was appended — then there is nothing
@@ -2574,12 +2648,15 @@ function markSendFailed(userBubbleEl, retryText) {
 
     const failedAt = Date.now();
     const hd = getHistoryData();
-    for (let i = hd.length - 1; i >= 0; i--) {
-        if (hd[i].role === 'user') {
-            hd[i].failed = true;
-            hd[i].failedAt = failedAt;
-            break;
+    let idx = findUserTurnIndex(hd, userBubbleEl.dataset.sendKey);
+    if (idx === -1) {
+        for (let i = hd.length - 1; i >= 0; i--) {
+            if (hd[i].role === 'user') { idx = i; break; }
         }
+    }
+    if (idx !== -1) {
+        hd[idx].failed = true;
+        hd[idx].failedAt = failedAt;
     }
     setHistoryData(hd);
     saveHistory();
@@ -2622,16 +2699,19 @@ export async function retryFailedTurn(userBubbleEl, retryText) {
         toRemove.remove();
     }
 
-    // 2. History: drop the failed user entry (matched by the failedAt stamp,
-    //    falling back to the last failed user entry) + its trailing assistant
-    //    error entry.
+    // 2. History: drop the failed user entry + its trailing assistant error
+    //    entry. Keyed by the per-send sendKey stamped at addBubble time
+    //    (findUserTurnIndex); legacy fallbacks (failedAt stamp, then last
+    //    failed user entry) cover entries persisted before keying existed.
     const stamp = Number(userBubbleEl.dataset.failedAt || 0);
     const hd = getHistoryData();
-    let idx = -1;
-    for (let i = hd.length - 1; i >= 0; i--) {
-        if (hd[i].role === 'user' && hd[i].failed && (!stamp || hd[i].failedAt === stamp)) {
-            idx = i;
-            break;
+    let idx = findUserTurnIndex(hd, userBubbleEl.dataset.sendKey);
+    if (idx === -1) {
+        for (let i = hd.length - 1; i >= 0; i--) {
+            if (hd[i].role === 'user' && hd[i].failed && (!stamp || hd[i].failedAt === stamp)) {
+                idx = i;
+                break;
+            }
         }
     }
     if (idx === -1) {

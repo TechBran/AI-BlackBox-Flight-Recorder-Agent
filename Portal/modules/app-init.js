@@ -335,6 +335,7 @@ function initHistory() {
             const bubble = appendBubble(b.role, b.content);
             // Restore the retry affordance on user turns whose send failed
             if (b.role === 'user' && b.failed && bubble) {
+                if (b.sendKey) bubble.dataset.sendKey = b.sendKey;
                 if (b.failedAt) bubble.dataset.failedAt = String(b.failedAt);
                 attachRetryChip(bubble, b.content);
             }
