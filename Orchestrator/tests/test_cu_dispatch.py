@@ -37,10 +37,28 @@ def _gate(model_id: str):
     ("gpt-5.12", "openai"),                # future double-digit minor
     ("computer-use-preview", "openai"),    # legacy, kept
     ("computer-use-preview-2025-03-11", "openai"),
+    # Future MAJORS are assumed CU-capable (fail-loud-at-runtime beats a silent
+    # gate gap that needs a regex edit months later).
+    ("gpt-6", "openai"),                   # bare major, no minor
+    ("gpt-6.0", "openai"),
+    ("gpt-6.5", "openai"),
+    ("gpt-7.1", "openai"),
+    ("gpt-12.3", "openai"),                # double-digit major
+    ("gpt-6-2027-01-01", "openai"),        # future-major dated snapshot
+    # Known-incapable / excluded.
     ("gpt-5.5-pro", None),                 # -pro excluded (undocumented for CU)
+    ("gpt-5.5-pro-2026-01-01", None),      # dated -pro still excluded
+    ("gpt-6-pro", None),                   # -pro excluded on future majors too
     ("gpt-5.6-pro", None),                 # -pro excluded at any minor
     ("gpt-5.1", None),                     # minor < 5.5: no built-in computer tool
+    ("gpt-5.4", None),
     ("gpt-4o", None),
+    ("gpt-4", None),                       # major < 5
+    # Issue 2: -pro must be BOUNDARY-anchored — only the exact -pro segment is
+    # rejected; longer words that merely start with "pro" still match.
+    ("gpt-5.5-professional", "openai"),
+    ("gpt-5.5-prometheus", "openai"),
+    ("gpt-5.5-proto", "openai"),
     # Anthropic: class + open version tail (the GOOD pattern, unchanged).
     ("claude-opus-4-8", "anthropic"),
     ("claude-sonnet-4-6", "anthropic"),
@@ -162,6 +180,62 @@ def test_ga_preferred_over_newer_preview():
     assert resolve_model_class("gpt", catalog=mixed) == "gpt-5.5"
 
 
+def test_future_major_class_resolves_newest():
+    """A future gpt major outranks a current 5.x minor within the gpt class."""
+    from Orchestrator.browser.dispatch import resolve_model_class
+    cat = [
+        {"id": "gpt-5.6", "backend": "openai"},
+        {"id": "gpt-6.0", "backend": "openai"},
+    ]
+    assert resolve_model_class("gpt", catalog=cat) == "gpt-6.0"
+
+
+# ---------------------------------------------------------------------------
+# Issue 3 — 'newest' precedence is DETERMINISTIC (never depends on catalog
+# order). Precedence: rolling alias (evergreen production pointer) outranks a
+# pinned dated/named snapshot of the SAME version.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("order", [
+    ["gpt-5.5", "gpt-5.5-2026-04-23"],
+    ["gpt-5.5-2026-04-23", "gpt-5.5"],   # reversed: result must not change
+])
+def test_rolling_alias_beats_dated_snapshot_regardless_of_order(order):
+    from Orchestrator.browser.dispatch import resolve_model_class
+    cat = [{"id": i, "backend": "openai"} for i in order]
+    assert resolve_model_class("gpt", catalog=cat) == "gpt-5.5"
+
+
+@pytest.mark.parametrize("order", [
+    ["gpt-5.6", "gpt-5.6-sol"],
+    ["gpt-5.6-sol", "gpt-5.6"],          # reversed: result must not change
+])
+def test_rolling_alias_beats_named_snapshot_regardless_of_order(order):
+    from Orchestrator.browser.dispatch import resolve_model_class
+    cat = [{"id": i, "backend": "openai"} for i in order]
+    assert resolve_model_class("gpt", catalog=cat) == "gpt-5.6"
+
+
+def test_version_key_total_order_no_ties():
+    """Distinct ids must never produce equal keys (else max() is order-dependent)."""
+    from Orchestrator.browser.dispatch import _version_key
+    ids = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-abc", "gpt-5.5",
+           "gpt-5.5-2026-04-23", "gpt-6.0"]
+    keys = [_version_key(i) for i in ids]
+    assert len(set(keys)) == len(ids), "version keys must be unique per id"
+
+
+def test_higher_version_still_wins_over_rolling_preference():
+    """The rolling-alias tie-break only applies WITHIN a version; a higher
+    version always wins first (5.6 > a dated 5.5)."""
+    from Orchestrator.browser.dispatch import resolve_model_class
+    cat = [
+        {"id": "gpt-5.5", "backend": "openai"},
+        {"id": "gpt-5.6-2027-01-01", "backend": "openai"},
+    ]
+    assert resolve_model_class("gpt", catalog=cat) == "gpt-5.6-2027-01-01"
+
+
 def test_haiku_is_not_cu_capable_raises():
     """A haiku id passes no gate and is no class alias -> hard error."""
     from Orchestrator.browser.dispatch import resolve_model_class
@@ -207,24 +281,24 @@ def test_resolve_model_class_uses_live_catalog_when_not_injected(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _resolve_cu_model now lives in dispatch (hoisted from scheduler/executor).
-# Scheduler still imports it; behavior is unchanged.
+# resolve_cu_model now lives in dispatch (hoisted from scheduler/executor,
+# renamed public). Scheduler still imports it; behavior is unchanged.
 # ---------------------------------------------------------------------------
 
 def test_resolve_cu_model_hoisted_to_dispatch():
-    from Orchestrator.browser.dispatch import _resolve_cu_model
+    from Orchestrator.browser.dispatch import resolve_cu_model
     from Orchestrator.config import CU_MODEL_DEFAULT, CU_GEMINI_MODEL_DEFAULT
-    assert _resolve_cu_model("") == CU_MODEL_DEFAULT
-    assert _resolve_cu_model(None) == CU_MODEL_DEFAULT
-    assert _resolve_cu_model("computer-use") == CU_MODEL_DEFAULT
-    assert _resolve_cu_model("cu") == CU_MODEL_DEFAULT
-    assert _resolve_cu_model("totally-not-a-cu-model") == CU_MODEL_DEFAULT
-    assert _resolve_cu_model(CU_GEMINI_MODEL_DEFAULT) == CU_GEMINI_MODEL_DEFAULT
-    assert _resolve_cu_model("gpt-5.6") == "gpt-5.6"  # now gate-passing
+    assert resolve_cu_model("") == CU_MODEL_DEFAULT
+    assert resolve_cu_model(None) == CU_MODEL_DEFAULT
+    assert resolve_cu_model("computer-use") == CU_MODEL_DEFAULT
+    assert resolve_cu_model("cu") == CU_MODEL_DEFAULT
+    assert resolve_cu_model("totally-not-a-cu-model") == CU_MODEL_DEFAULT
+    assert resolve_cu_model(CU_GEMINI_MODEL_DEFAULT) == CU_GEMINI_MODEL_DEFAULT
+    assert resolve_cu_model("gpt-5.6") == "gpt-5.6"  # now gate-passing
 
 
 def test_scheduler_reexports_resolve_cu_model():
     """executor must import the hoisted helper (no divergent copy)."""
     from Orchestrator.scheduler import executor
-    from Orchestrator.browser.dispatch import _resolve_cu_model as canonical
-    assert executor._resolve_cu_model is canonical
+    from Orchestrator.browser.dispatch import resolve_cu_model as canonical
+    assert executor.resolve_cu_model is canonical

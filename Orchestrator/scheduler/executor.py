@@ -19,10 +19,10 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-# _resolve_cu_model was hoisted to browser/dispatch.py (M1-T1) — it is a pure
+# resolve_cu_model was hoisted to browser/dispatch.py (M1-T1) — it is a pure
 # function of the model string + CU_MODEL_FILTERS, shared with the CU dispatch
-# path. Imported into this namespace so _execute_cu_job's call site is unchanged.
-from Orchestrator.browser.dispatch import _resolve_cu_model
+# path. Imported into this namespace so _execute_cu_job's call site stays local.
+from Orchestrator.browser.dispatch import resolve_cu_model
 
 logger = logging.getLogger(__name__)
 
@@ -195,10 +195,10 @@ async def _execute_cu_job(
 
     M4.1c: the chosen CU ``model`` is threaded through and honored when it
     passes the capability filters; empty/Auto or an unfilterable id falls back
-    to CU_MODEL_DEFAULT (see _resolve_cu_model) so a bad id can never break the
+    to CU_MODEL_DEFAULT (see resolve_cu_model) so a bad id can never break the
     CU streaming path.
     """
-    cu_model = _resolve_cu_model(model)
+    cu_model = resolve_cu_model(model)
 
     payload = {
         "messages": [{"role": "user", "content": content}],

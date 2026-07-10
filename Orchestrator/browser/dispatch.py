@@ -6,12 +6,13 @@ execution time against the live /models/computer-use catalog and the per-vendor
 CU_MODEL_FILTERS capability gates.
 
 Public API:
-  * resolve_backend(model)          — id  -> driver backend (anthropic default).
+  * resolve_backend(model)           — id -> driver backend (anthropic default).
   * resolve_model_class(class_or_id) — stable class name (or concrete id) -> id.
-  * _resolve_cu_model(model)        — cron/CU-stream helper (gate-or-default).
+  * resolve_cu_model(model)          — cron/CU-stream helper (gate-or-default).
 """
 import logging
 import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from Orchestrator.config import CU_MODEL_FILTERS, CU_MODEL_DEFAULT
 
@@ -62,22 +63,57 @@ def _is_preview(model_id: str) -> bool:
     return "-preview-" in model_id
 
 
-def _version_key(model_id: str):
-    """Sort key for 'newest in class': GA outranks preview; within a tier, the
-    larger numeric tuple (parsed left-to-right from the id) wins."""
-    nums = tuple(int(n) for n in re.findall(r"\d+", model_id))
-    return (0 if _is_preview(model_id) else 1, nums)
+def _version_core(model_id: str) -> Tuple[int, ...]:
+    """The VERSION portion of an id, as an int tuple, stopping before any date.
+
+    A numeric run of >= 4 digits is a date/year component (`2026`, `20251101`),
+    not a version — collecting stops there so a dated snapshot and its rolling
+    alias share the SAME core (`gpt-5.5-2026-04-23` and `gpt-5.5` -> (5, 5)).
+    Two- and three-digit runs are real version parts and are kept (`gpt-5.12`
+    -> (5, 12)).
+    """
+    core: List[int] = []
+    for run in re.findall(r"\d+", model_id):
+        if len(run) >= 4:  # date/year — end of the version core
+            break
+        core.append(int(run))
+    return tuple(core)
 
 
-def resolve_model_class(class_or_id, catalog=None) -> str:
+def _version_key(model_id: str) -> Tuple[int, Tuple[int, ...], int, str]:
+    """Total, catalog-order-independent sort key for 'newest in class' (max wins):
+
+      1. GA (not a dated preview) outranks a preview.
+      2. Higher version CORE wins (dates excluded, so they never inflate it).
+      3. Same version -> the ROLLING alias (evergreen production pointer) beats a
+         pinned dated/named snapshot; the shorter id is the rolling one, so a
+         larger `-len` wins (`gpt-5.6` over `gpt-5.6-sol`; `gpt-5.5` over
+         `gpt-5.5-2026-04-23`).
+      4. Final absolute tie-break on the id string itself, so DISTINCT ids never
+         collide and the result never depends on the catalog's ordering.
+    """
+    return (
+        0 if _is_preview(model_id) else 1,
+        _version_core(model_id),
+        -len(model_id),
+        model_id,
+    )
+
+
+def resolve_model_class(
+    class_or_id: Optional[str],
+    catalog: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Resolve a stable CU model CLASS name (or a concrete id) to a concrete id.
 
     Rules, in order:
       1. A concrete id that passes its vendor capability gate is returned
          verbatim (works even when the catalog is briefly unavailable).
       2. A class alias (opus/sonnet/fable/gemini/gpt) -> the newest id of that
-         class in the live catalog (GA preferred over a dated preview; a
-         preview-only class still resolves to its preview).
+         class in the live catalog. "Newest" is deterministic (see _version_key):
+         GA preferred over a dated preview; among the same version the rolling
+         alias (gpt-5.6) is preferred over a pinned snapshot (gpt-5.6-sol,
+         gpt-5.5-2026-04-23); a preview-only class still resolves to its preview.
       3. Empty / omitted -> the default class (opus).
       4. Anything else (unknown alias, or a known class with no catalog member)
          -> ValueError naming the classes the catalog can currently satisfy, so
@@ -122,7 +158,7 @@ def resolve_model_class(class_or_id, catalog=None) -> str:
     )
 
 
-def _resolve_cu_model(model) -> str:
+def resolve_cu_model(model: Optional[str]) -> str:
     """Resolve the CU model id for a CU cron job / CU stream (M4.1c).
 
     A chosen CU model is honored only when it passes the SAME capability gates

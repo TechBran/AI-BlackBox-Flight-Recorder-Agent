@@ -192,23 +192,43 @@ CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallba
 # drive the computer tool. These answer "can this model CLASS do CU at all?" —
 # never "which version." Regex anchored at start (re.match). Data, not code —
 # when a vendor ships a new CU-capable family, extend the pattern here.
+#
+# The three vendors deliberately use DIFFERENT shapes because their capability
+# facts differ — a gate must encode what is KNOWN, and fail loud (not silent)
+# on what is not:
 #   anthropic: opus/sonnet/fable/mythos at major version >= 4
-#              (computer_20251124 tool; haiku excluded — no CU support).
-#              Open version tail: Opus 4.8 / a future Opus 5 match with zero
-#              edits. THIS IS THE GOOD PATTERN — the others mirror its shape.
-#   google:    any Gemini id containing "computer-use" (the capability lives in
-#              the family, not the version; -pro / flash carry no computer tool).
-#   openai:    CU capability lives in the built-in `computer` tool, which
-#              gpt-5.5 introduced and every later 5.x minor carries — so the
-#              gate is gpt-5.<minor> with minor >= 5 (5.5, 5.6, ... 5.12), NOT a
-#              version pin. Dated/named snapshots (gpt-5.6-sol, gpt-5.5-2026-04-23)
-#              pass; -pro is excluded (undocumented for computer use);
-#              gpt-5.1..5.4 lack the tool. computer-use-preview kept for orgs
-#              still on the deprecated, access-gated preview model.
+#              (computer_20251124 tool; haiku excluded — no CU support). The
+#              version tail is fully open (`[4-9]|\d{2,}`): Opus 4.8 and a
+#              future Opus 5 match with zero edits. Gates on CLASS, not version.
+#   google:    any Gemini id containing "computer-use" — the capability lives
+#              in the family name, not the version (-pro / flash carry no
+#              computer tool, so a plain gemini-*-pro is correctly excluded).
+#   openai:    CU capability lives in the built-in `computer` tool. Two facts,
+#              two clauses:
+#                (1) KNOWN minor floor within major 5: gpt-5.5 introduced the
+#                    tool and every later 5.x minor carries it, but 5.1–5.4
+#                    demonstrably lack it -> `gpt-5\.([5-9]|\d{2,})`.
+#                (2) UNKNOWN future majors (gpt-6, gpt-7, ...): whether they
+#                    carry the tool is unknowable today. We assume YES
+#                    (`gpt-([6-9]|\d{2,})(\.\d+)?`, minor optional). Guessing
+#                    "excluded" would reproduce the exact silent-gap bug this
+#                    gate exists to fix (a capability that needs a regex edit
+#                    months later); guessing "included" means that IF a future
+#                    major lacks the tool the API call fails LOUDLY at runtime
+#                    and surfaces our structured retryable error, which the
+#                    calling model can act on. A loud runtime failure beats a
+#                    silent gate. (The 5.x floor is a KNOWN fact, not a guess,
+#                    so it stays pinned.)
+#              Shared tail `($|-(?!pro($|-)))`: dated/named snapshots pass
+#              (gpt-5.6-sol, gpt-5.5-2026-04-23, gpt-6-2027-01-01) while the
+#              exact `-pro` segment is excluded (undocumented for computer use)
+#              — boundary-anchored, so gpt-5.5-professional still MATCHES.
+#              computer-use-preview kept for orgs still on the deprecated,
+#              access-gated preview model.
 CU_MODEL_FILTERS = {
     "anthropic": r"claude-(opus|sonnet|fable|mythos)-([4-9]|\d{2,})",
     "google":    r"gemini-.*computer-use",
-    "openai":    r"(computer-use-preview|gpt-5\.([5-9]|\d{2,})($|-(?!pro)))",
+    "openai":    r"(computer-use-preview|gpt-(5\.([5-9]|\d{2,})|([6-9]|\d{2,})(\.\d+)?)($|-(?!pro($|-))))",
 }
 
 # ── Embeddings — pluggable snapshot-embedding layer (2026-06-11) ─────────────
