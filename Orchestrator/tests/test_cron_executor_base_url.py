@@ -33,16 +33,26 @@ def test_base_url_not_a_bare_hardcoded_literal():
 def test_base_url_follows_overridden_port(monkeypatch):
     """When the configured port differs from the default, a freshly-imported
     executor's BASE_URL follows it (fresh-box portability) — proving the value
-    is computed from config, not frozen at 9091."""
-    monkeypatch.setenv("ORCHESTRATOR_PORT", "8123")
-    # Re-import config + executor so the env override is picked up.
-    importlib.reload(config_mod)
+    is computed from config, not frozen at 9091.
+
+    Sets config.ORCHESTRATOR_PORT via monkeypatch.setattr rather than
+    importlib.reload(config_mod). Reloading the config module re-binds its
+    module-level objects (CFG / USERS_LIST / USERS_DEFAULT / the retrieval flags)
+    to FRESH instances, which orphans every `from Orchestrator.config import X`
+    consumer that captured them by reference at import time (retrieval.py, the
+    route modules). Those consumers then keep reading the stale pre-reload objects
+    while later tests' helpers mutate the new ones — deterministically breaking
+    the alphabetically-later retrieval_* and operator_roster tests in a full-suite
+    run. A single auto-restored attr patch recomputes exactly what the executor
+    needs (the port) with none of that global side effect."""
+    monkeypatch.setattr(config_mod, "ORCHESTRATOR_PORT", 8123)
+    # Re-import ONLY the executor so it recomputes BASE_URL from the patched port.
+    reloaded_executor = importlib.reload(executor_mod)
     try:
-        reloaded_executor = importlib.reload(executor_mod)
         assert config_mod.ORCHESTRATOR_PORT == 8123
         assert reloaded_executor.BASE_URL == "http://localhost:8123"
     finally:
-        # Restore the default-config modules for the rest of the suite.
-        monkeypatch.delenv("ORCHESTRATOR_PORT", raising=False)
-        importlib.reload(config_mod)
+        # monkeypatch restores config.ORCHESTRATOR_PORT; reload the executor once
+        # more so its BASE_URL is rebuilt from the restored port for the rest of
+        # the suite. No config reload — nothing to un-orphan.
         importlib.reload(executor_mod)
