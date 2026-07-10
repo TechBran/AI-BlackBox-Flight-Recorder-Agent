@@ -565,34 +565,43 @@ async def test_openai_headless_injects_fossils(runner_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypatch):
-    """Issue 2: a same-operator Gemini DESKTOP task must not run while that
+    """Issue 2 / M1-T6: a same-operator Gemini DESKTOP task must not run while that
     operator's Anthropic/OpenAI CU task (both use the browser ComputerUseSession)
-    is driving the one physical display — parity with the chat path's
-    desktop-conflict guard. The Gemini driver must never launch."""
+    is driving the one physical display. Now routed through the shared display
+    arbiter: register a REAL running browser session (not a get_operator_session
+    mock) and prove the arbiter refuses the Gemini task before its driver launches."""
     import Orchestrator.browser.session_manager as bsm
-    from types import SimpleNamespace
+    from Orchestrator.browser.session_manager import ComputerUseSession
 
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+
+    # A REAL running browser CU session holds the local display.
+    browser_sess = ComputerUseSession("system", device_id="blackbox")
+    browser_sess.status = "running"
+    bsm._sessions[browser_sess.session_id] = browser_sess
+    bsm._operator_sessions["system"] = browser_sess.session_id
 
     def _no_gemini_session(*a, **k):
         raise AssertionError("Gemini session created despite desktop conflict")
 
     monkeypatch.setattr(headless, "gemini_create_task_session", _no_gemini_session)
-    monkeypatch.setattr(bsm, "get_operator_session",
-                        lambda operator: SimpleNamespace(status="running"))
 
     def _boom(*a, **k):
         raise AssertionError("Gemini driver launched despite desktop conflict")
 
     monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
 
-    result = await headless.run_cu_task(
-        "t-gem-conflict", "system", "hi",
-        model="gemini-2.5-computer-use-preview-10-2025")
+    try:
+        result = await headless.run_cu_task(
+            "t-gem-conflict", "system", "hi",
+            model="gemini-2.5-computer-use-preview-10-2025")
 
-    assert result["success"] is False
-    assert "running" in result["result_text"].lower()
-    assert "Computer Use" in result["result_text"]
+        assert result["success"] is False
+        assert "running" in result["result_text"].lower()
+        assert "Computer Use" in result["result_text"]
+    finally:
+        bsm._sessions.pop(browser_sess.session_id, None)
+        bsm._operator_sessions.pop("system", None)
 
 
 def test_driver_signatures_match_runner_call():

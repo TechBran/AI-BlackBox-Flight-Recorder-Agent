@@ -285,18 +285,17 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     else:
         environment = "desktop"
 
-    # ── Desktop-conflict guard (ported from stream_gemini_computer_use) ──
-    # The browser ComputerUseSession is shared by the Anthropic AND OpenAI CU
-    # paths, so get_operator_session covers both. A running one owns the local
-    # display; refuse rather than corrupt it with concurrent input.
+    # ── Desktop-conflict guard (shared display arbiter — M1-T6) ──
+    # Consult BOTH registries so this Gemini task refuses to co-drive the one
+    # physical display with a browser CU task OR another Gemini desktop session
+    # (chat or task), regardless of operator. No self to exclude: this task's own
+    # session is created AFTER this check (below). Failure SHAPE unchanged
+    # (_failure dict — the task path is fire-and-forget).
     if environment == "desktop":
-        from Orchestrator.browser.session_manager import get_operator_session
-        busy = get_operator_session(operator)
-        if busy and busy.status == "running":
-            return _failure(
-                "Cannot start Gemini CU — an Anthropic/OpenAI Computer Use task "
-                "is running on this desktop. Stop it first."
-            )
+        from Orchestrator.browser.display_arbiter import local_display_owner
+        owner = local_display_owner()
+        if owner is not None:
+            return _failure(f"Cannot start Gemini CU — {owner.describe()}. Stop it first.")
 
     # OWN, isolated session (see ISOLATION above) — never the operator-cached
     # chat session. Fresh: own queue, empty history, requested device/env.

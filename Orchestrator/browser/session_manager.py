@@ -200,18 +200,34 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None, devic
             else:
                 _cleanup_session(existing_sid)
 
-    # ── Enforce single-display constraint (local device only) ──
+    # ── Reclaim other operators' non-running sessions (one browser session lives
+    #    on the display at a time; running ones are left for the arbiter below).
+    #    Condition matches the pre-M1-T6 loop exactly (it destroyed every
+    #    other-operator session that was not "running"). ──
     for sid, s in list(_sessions.items()):
-        if s.operator != operator:
-            if s.status == "running":
-                # Only block if BOTH sessions target the local device
-                if s.device_id == "blackbox" and device_id == "blackbox":
-                    print(f"[CU-SESSION] Cannot create local session for {operator} — {s.operator} has running local task")
-                    raise RuntimeError(f"Cannot start session: {s.operator} has a running Computer Use task on the local display")
-                # Remote devices are independent — allow concurrent sessions
-                continue
+        if s.operator != operator and s.status != "running":
             print(f"[CU-SESSION] Destroying {s.operator}'s idle session for new session: {operator}")
             _cleanup_session(sid)
+
+    # ── Single-display arbitration (local device only) ──
+    # Delegate to the shared arbiter (M1-T6): it consults BOTH this browser
+    # registry AND the Gemini registry, so a new browser CU session now also
+    # refuses to start while a Gemini DESKTOP session (chat or task) is driving
+    # the one physical display — the previously-unguarded reverse direction.
+    # Only the local display contends; a remote (non-"blackbox") request is
+    # independent. We reach here only when creating a NEW session for `operator`
+    # (an alive session is returned above, before this point), so `operator` has
+    # no running browser session to self-block on; excluding its own session id
+    # is belt-and-suspenders. Failure SHAPE is unchanged: RuntimeError.
+    if device_id == "blackbox":
+        from Orchestrator.browser.display_arbiter import local_display_owner
+        own_sid = _operator_sessions.get(operator)
+        owner = local_display_owner(
+            exclude_session_ids=frozenset({own_sid}) if own_sid else frozenset()
+        )
+        if owner is not None:
+            print(f"[CU-SESSION] Cannot create local session for {operator} — {owner.describe()}")
+            raise RuntimeError(f"Cannot start session: {owner.describe()}")
 
     # ── Create fresh session ──
     session = ComputerUseSession(operator, session_id=session_id, device_id=device_id)

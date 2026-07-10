@@ -4381,12 +4381,18 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
     else:
         environment = "desktop"
 
-    # ── Desktop conflict guard ──
+    # ── Desktop conflict guard (shared display arbiter — M1-T6) ──
+    # Consult BOTH registries (browser CU + other Gemini sessions), excluding
+    # THIS operator's own cached chat session so a reconnect/queue to a running
+    # task of their own is never self-blocked (get_or_create below returns it).
     if environment == "desktop":
-        from Orchestrator.browser.session_manager import get_operator_session as get_anthropic_session
-        anthropic_session = get_anthropic_session(operator)
-        if anthropic_session and anthropic_session.status == "running":
-            yield {"type": "error", "data": "Cannot start Gemini CU — Anthropic CU task running on this desktop. Stop it first."}
+        from Orchestrator.browser.display_arbiter import local_display_owner
+        from Orchestrator.gemini_cu import session_manager as _gsm
+        _own = _gsm._operator_sessions.get(operator)
+        owner = local_display_owner(
+            exclude_session_ids=frozenset({_own}) if _own else frozenset())
+        if owner is not None:
+            yield {"type": "error", "data": f"Cannot start Gemini CU — {owner.describe()}. Stop it first."}
             return
 
     # ── Get/create persistent session ──
