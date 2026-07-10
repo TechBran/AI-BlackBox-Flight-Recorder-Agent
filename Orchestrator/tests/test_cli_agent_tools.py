@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import re
+import stat
 
 import pytest
 
@@ -85,7 +86,9 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def captured(monkeypatch):
-    """Capture whatever create_task() would build; create no real task."""
+    """Capture whatever create_task() would build; create no real task. Also
+    captures the workspace belt's update_task() so `result_data` reflects the
+    EFFECTIVE row (create + the belt's resolved-cwd persist)."""
     calls = []
 
     class _FakeTask:
@@ -93,11 +96,17 @@ def captured(monkeypatch):
 
     def fake_create_task(task_type, operator=None, prompt=None, result_data=None, **kw):
         calls.append({"task_type": task_type, "operator": operator,
-                      "prompt": prompt, "result_data": result_data})
+                      "prompt": prompt, "result_data": dict(result_data or {})})
         return _FakeTask()
+
+    def fake_update_task(task_id, **kw):
+        rd = kw.get("result_data")
+        if calls and rd is not None:
+            calls[-1]["result_data"] = dict(rd)
 
     from Orchestrator import tasks as tasks_mod
     monkeypatch.setattr(tasks_mod, "create_task", fake_create_task)
+    monkeypatch.setattr(tasks_mod, "update_task", fake_update_task)
     return calls
 
 
@@ -166,6 +175,16 @@ def test_description_states_permissions_async_poll_cancel(tool):
     d = registry.get_tool(tool)["description"].lower()
     for token in ("permission", "asynchron", "task id", "get_task_status", "cancel"):
         assert token in d, f"{tool} description must mention {token!r}"
+
+
+@pytest.mark.parametrize("tool", _ALL)
+def test_cwd_description_signals_isolated_workspace_not_server_cwd(tool):
+    """The old wording ('the server's current working directory') is accurate but
+    dangerously understated for a voice model — it must signal the isolated
+    scratch default instead."""
+    d = registry.get_tool(tool)["parameters"]["properties"]["cwd"]["description"].lower()
+    assert "current working directory" not in d
+    assert any(k in d for k in ("isolated", "scratch", "workspace"))
 
 
 def test_claude_model_desc_names_the_class_set():
@@ -369,10 +388,59 @@ def test_cwd_threaded_and_permission_mode_yolo(home, captured):
     assert set(rd) == {"provider", "model", "cwd", "permission_mode"}
 
 
-def test_cwd_omitted_is_none(home, captured):
+def test_explicit_cwd_is_forwarded_verbatim_including_repo(home, captured):
+    """An explicit cwd — even the service's own source tree — remains legal: a
+    caller who means 'work in my repo' still gets exactly that."""
+    home("claude")
+    repo = os.getcwd()
+    res = _run("claude_code_task", {"prompt": "x", "cwd": repo})
+    assert res.success is True
+    assert captured[0]["result_data"]["cwd"] == repo
+
+
+def test_omitted_cwd_belt_resolves_isolated_workspace_and_persists(home, captured):
+    """Belt (tool layer): omitting cwd resolves the per-task workspace and PERSISTS
+    it — result_data["cwd"] is the workspace (NOT None, NOT the repo), created 0700."""
     home("claude")
     res = _run("claude_code_task", {"prompt": "x"})
-    assert captured[0]["result_data"]["cwd"] is None
+    assert res.success is True
+    rd = captured[0]["result_data"]
+    expected = os.path.join(os.environ["HOME"], "agent-workspaces", "task-cli-fake-001")
+    assert rd["cwd"] == expected
+    assert rd["cwd"] is not None and rd["cwd"] != os.getcwd()
+    assert stat.S_IMODE(os.stat(expected).st_mode) == 0o700
+
+
+def test_worker_omitted_cwd_uses_isolated_workspace_not_service_source_tree(tmp_path, monkeypatch):
+    """SECURITY (G2-T10) — the authoritative layer. A CLI_AGENT task with NO cwd
+    must run in an isolated per-task workspace, NEVER os.getcwd(). The service's
+    cwd is the live source tree it imports from, so a fully-open (YOLO) agent
+    defaulting there could rewrite tasks.py / headless.py / tool_support.py WHILE
+    the service is executing them. DO NOT 'simplify' the fallback back to
+    os.getcwd() — this test exists to stop exactly that."""
+    from Orchestrator import tasks as tasks_mod
+    from Orchestrator.cli_agent import headless
+    from Orchestrator.models import TaskType
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen = {}
+
+    def fake_run(**kw):
+        seen["cwd"] = kw["cwd"]
+        return {"cancelled": True}  # short-circuit before any spawn/mint
+
+    monkeypatch.setattr(headless, "run_cli_agent", fake_run)
+
+    task = tasks_mod.create_task(
+        TaskType.CLI_AGENT, operator="system", prompt="do work",
+        result_data={"provider": "claude", "model": None, "cwd": None,
+                     "permission_mode": "yolo"})
+    tasks_mod.process_cli_agent(task)
+
+    expected = str(tmp_path / "agent-workspaces" / task.task_id)
+    assert seen["cwd"] == expected, "worker must resolve omitted cwd to the workspace"
+    assert seen["cwd"] != os.getcwd(), "worker must NOT default to the service source tree"
+    assert stat.S_IMODE(os.stat(expected).st_mode) == 0o700
 
 
 def test_missing_prompt_short_circuits_before_auth(tmp_path, monkeypatch, captured):

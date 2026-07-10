@@ -50,6 +50,31 @@ def _home() -> str:
     return os.path.expanduser("~")
 
 
+def cli_agent_workspace(task_id: str) -> str:
+    """The default working directory for a fully-open CLI agent when the caller
+    omits ``cwd``: an isolated, per-task scratch dir ``~/agent-workspaces/<task_id>``,
+    created 0700. Single source of truth shared by the tool-layer belt (below) and
+    the worker fallback (tasks.py) so the two can never drift.
+
+    Brandon accepted YOLO command execution — NOT "start in the production tree".
+    The fallback must be isolated by default because:
+      * NOT os.getcwd(): that is the live source tree the running service imports
+        from; a runaway YOLO agent defaulting there could rewrite the very modules
+        being executed (tasks.py / headless.py / tool_support.py) mid-run.
+      * NOT ~ (the operator home): it holds the very CLI credentials these tools
+        authenticate against (~/.claude/.credentials.json, ~/.codex/auth.json).
+      * NOT a hard error: a voice model will routinely omit cwd; a sane sandbox is
+        better UX than a failure. A caller who means "work in my repo" passes an
+        absolute cwd explicitly, which is forwarded verbatim.
+    The dir is NOT cleaned up — the agent's artifacts live there and the operator
+    will want them. Created 0700 so it is created before Popen (which fails on a
+    missing cwd) and locked to the owner. Idempotent (exist_ok + re-chmod)."""
+    path = os.path.join(_home(), "agent-workspaces", task_id)
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)  # guarantee 0700 regardless of umask
+    return path
+
+
 def _claude_authenticated() -> bool:
     return os.path.exists(os.path.join(_home(), ".claude", ".credentials.json"))
 
@@ -161,6 +186,20 @@ async def launch(provider: str, params: dict, ctx: ToolContext) -> ToolResult:
             prompt=prompt,
             result_data=result_data,
         )
+        # Belt (defense-in-depth): when the model omits cwd, resolve the isolated
+        # per-task workspace NOW that we have the task_id and PERSIST it, so the
+        # recorded cwd is the real scratch dir and the tool layer never relies on
+        # the worker's fallback. Non-fatal on failure — the worker resolves the
+        # SAME deterministic path (cli_agent_workspace is a pure function of the
+        # task_id), so the safety net still holds.
+        if cwd is None:
+            try:
+                from Orchestrator.tasks import update_task
+                result_data["cwd"] = cli_agent_workspace(task.task_id)
+                update_task(task.task_id, result_data=dict(result_data))
+            except Exception as e:
+                print(f"[CLI-AGENT] workspace belt failed "
+                      f"(worker fallback covers it): {e}")
         return ToolResult(
             True,
             (f"{provider} CLI agent task started. Task ID: {task.task_id}. "

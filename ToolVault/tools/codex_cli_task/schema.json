@@ -22,7 +22,7 @@
       },
       "cwd": {
         "type": "string",
-        "description": "Optional. Absolute path of the working directory to run in. Omit to use the server's current working directory."
+        "description": "Optional. Absolute path of a real project directory to run the agent in (e.g. a repo you want it to work on). Omit to run in an isolated per-task scratch workspace created just for this run."
       }
     },
     "required": [
