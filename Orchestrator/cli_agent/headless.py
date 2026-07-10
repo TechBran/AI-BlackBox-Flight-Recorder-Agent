@@ -14,20 +14,49 @@ things and no more (T11 owns progress_text; T10 owns the tools):
                          bounded poll-visible tail, honor cancel + timeout via a
                          process-GROUP kill so the agent's children die too.
 
+Model handling — only ONE of the three CLIs resolves a model *class* (verified
+on this box 2026-07-10). We hold the invariant "we never name a version"
+regardless, but honestly:
+  * claude — GENUINE resolver. `--model`'s own help: "Provide an alias for the
+    latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name."
+    We validate the class against CLAUDE_MODEL_CLASSES and pass it through.
+  * gemini / codex — NOT resolvers. codex accepts `-m zzz-not-a-real-model`
+    literally and fails server-side; gemini's `-m` wants a concrete id. So we
+    OMIT `--model` by default and let each CLI use its own configured default
+    (its newest/best). A caller who knows exactly what it wants may pass a
+    concrete model id, which we forward verbatim after a non-empty-string check
+    only.
+
 Auth routing (why the strip matters — verified on this box 2026-07-10):
   * claude reads ANTHROPIC_API_KEY; if the server's key leaks into the child it
     triggers claude's "both a token and an API key are set" ambiguity and can
     bill the key instead of the cached OAuth token. Strip it.
   * gemini reads GOOGLE_API_KEY / GEMINI_API_KEY; with either present it bills
-    the API key instead of the operator's OAuth (Code Assist) login. Strip both.
-    GOOGLE_APPLICATION_CREDENTIALS is deliberately KEPT — it is a distinct
-    Vertex/ADC service-account path, not the pay-per-call key we are avoiding,
-    and the zellij denylist keeps it for the same reason.
+    the API key. Strip both. GOOGLE_APPLICATION_CREDENTIALS is deliberately KEPT
+    — a distinct Vertex/ADC service-account path, not the pay-per-call key we
+    avoid; the zellij denylist keeps it for the same reason. NOTE: on this box
+    gemini is NOT OAuth-authenticated (no ~/.gemini/oauth_creds.json), so with
+    the keys stripped it does NOT fall back to a subscription — it errors:
+    "When using Gemini API, you must specify the GEMINI_API_KEY ...". That is
+    the CORRECT failure: silently billing the API key while the operator
+    believes he is on a subscription is the worse outcome and is exactly what
+    this task exists to prevent. run_cli_agent folds stderr into the JSONL
+    stream so the CLI's own auth error surfaces in the tail / result_text /
+    FAILED error_message rather than being swallowed. T10 owns executor-level
+    fail-fast + a "authenticate the gemini CLI" message.
   * codex is logged in via ChatGPT (`~/.codex/auth.json` auth_mode=chatgpt), but
     `codex doctor` proves a live OPENAI_API_KEY in the env flips HTTP reachability
     to "API key auth" — overriding the ChatGPT subscription and billing the key.
     Strip OPENAI_API_KEY; the ChatGPT OAuth tokens live in auth.json (not the
     env) and are untouched.
+
+WARNING for T10 (auth gating): do NOT trust the wizard's marker-file lists in
+onboarding_routes.py — `.gemini/settings.json` and `.codex/config.toml` are
+created by merely RUNNING the CLI once (signed in or not), so they
+false-positive "authenticated". Correct checks: claude ->
+`.claude/.credentials.json`; gemini -> `.gemini/oauth_creds.json` specifically;
+codex -> read `auth_mode` from `.codex/auth.json` (presence != mode). This
+runner depends on NONE of those markers.
 
 Cancel contract (pairs with G2-T8 in tasks.py):
   * Spawn with start_new_session=True → the child is its own process-group
@@ -56,15 +85,13 @@ _PROVIDER_BINARY_NAMES = {
     "codex": "codex",
 }
 
-# Model CLASS -> passed verbatim to the CLI's OWN --model flag. The CLI is the
-# resolver: we name a *class*, it picks the newest concrete version. We never
-# pin a version here (that would break subscription routing and violate the
-# "never name a version" rule). Validated against this set in build_argv.
-MODEL_CLASSES: dict[str, tuple[str, ...]] = {
-    "claude": ("fable", "opus", "sonnet", "haiku"),
-    "gemini": ("pro", "flash"),
-    "codex": ("gpt", "gpt-sol"),
-}
+# claude is the ONLY genuine model-CLASS resolver of the three (see the module
+# docstring). Its --model accepts these documented aliases (or a full name); it
+# picks the newest concrete version. We validate against this set and pass it
+# through — never a version pin. gemini/codex do NOT resolve classes, so they
+# have no class set here: build_argv OMITS --model for them by default and
+# forwards an optional concrete model id verbatim.
+CLAUDE_MODEL_CLASSES: tuple[str, ...] = ("fable", "opus", "sonnet", "haiku")
 
 # Per-provider env strip. Each provider strips ONLY the key(s) IT reads and would
 # bill on — minimal blast radius (mirrors the zellij denylist philosophy).
@@ -107,9 +134,18 @@ def _resolve_bin(provider: str) -> str:
     return found or bin_name
 
 
-def build_argv(provider: str, prompt: str, model_class: str, cwd: str,
+def build_argv(provider: str, prompt: str, model: Optional[str], cwd: str,
                permission_mode: str = "yolo", bin_path: Optional[str] = None) -> list[str]:
     """Build the exact argv for a headless, non-interactive agent run.
+
+    `model` semantics are provider-dependent (see the module docstring):
+      * claude — a model CLASS from CLAUDE_MODEL_CLASSES (validated), passed to
+        --model; the CLI resolves the newest version. Empty/None -> omit --model
+        (claude uses its own default).
+      * gemini / codex — NOT class resolvers. Empty/None (the default) -> OMIT
+        --model so the CLI uses its configured default (newest/best). A non-empty
+        string is treated as a concrete model id and forwarded VERBATIM (no
+        validation beyond "is a non-empty string" — we never invent a version).
 
     permission_mode == "yolo" adds the provider's fully-open flag (the mode T10
     launches in). Any other value = default (no dangerous flag added).
@@ -118,37 +154,48 @@ def build_argv(provider: str, prompt: str, model_class: str, cwd: str,
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported CLI-agent provider: {provider!r} "
                          f"(supported: {', '.join(SUPPORTED_PROVIDERS)})")
-    allowed = MODEL_CLASSES[provider]
-    if model_class not in allowed:
-        raise ValueError(f"Unknown model class {model_class!r} for {provider!r} "
-                         f"(allowed: {', '.join(allowed)}). We pass a class, never "
-                         f"a version — the CLI resolves the newest.")
+    if model is not None and not isinstance(model, str):
+        raise ValueError(f"model must be a string or None, got {type(model).__name__}")
+
+    if provider == "claude":
+        # claude is a genuine class resolver: validate the alias when supplied.
+        if model and model not in CLAUDE_MODEL_CLASSES:
+            raise ValueError(
+                f"Unknown claude model class {model!r} "
+                f"(allowed: {', '.join(CLAUDE_MODEL_CLASSES)}). claude resolves a "
+                f"class to the newest version — we never name a version.")
+    # gemini/codex: no validation — any non-empty string is a concrete id.
+
     yolo = (permission_mode == "yolo")
     binp = bin_path or _resolve_bin(provider)
 
     if provider == "claude":
         # claude -p --output-format stream-json --verbose (--verbose REQUIRED for
-        # stream-json) --model <class> [--dangerously-skip-permissions] <prompt>
-        argv = [binp, "-p", "--output-format", "stream-json", "--verbose",
-                "--model", model_class]
+        # stream-json) [--model <class>] [--dangerously-skip-permissions] <prompt>
+        argv = [binp, "-p", "--output-format", "stream-json", "--verbose"]
+        if model:
+            argv.extend(["--model", model])
         if yolo:
             argv.append("--dangerously-skip-permissions")
         argv.append(prompt)
         return argv
 
     if provider == "gemini":
-        # gemini --output-format stream-json --model <class>
+        # gemini --output-format stream-json [--model <concrete-id>]
         #        [--approval-mode yolo] -p <prompt>
-        argv = [binp, "--output-format", "stream-json", "--model", model_class]
+        argv = [binp, "--output-format", "stream-json"]
+        if model:
+            argv.extend(["--model", model])
         if yolo:
             argv.extend(["--approval-mode", "yolo"])
         argv.extend(["-p", prompt])
         return argv
 
-    # codex exec --json --skip-git-repo-check -C <cwd> --model <class>
+    # codex exec --json --skip-git-repo-check -C <cwd> [--model <concrete-id>]
     #            [--dangerously-bypass-approvals-and-sandbox] <prompt>
-    argv = [binp, "exec", "--json", "--skip-git-repo-check", "-C", cwd,
-            "--model", model_class]
+    argv = [binp, "exec", "--json", "--skip-git-repo-check", "-C", cwd]
+    if model:
+        argv.extend(["--model", model])
     if yolo:
         argv.append("--dangerously-bypass-approvals-and-sandbox")
     argv.append(prompt)
@@ -207,13 +254,16 @@ def _read_stream(stream, raw_lines: collections.deque, events: collections.deque
         pass  # pipe closed under us (kill) — expected
 
 
-def run_cli_agent(provider: str, prompt: str, model_class: str, cwd: str,
+def run_cli_agent(provider: str, prompt: str, model: Optional[str], cwd: str,
                   permission_mode: str = "yolo", task_id: Optional[str] = None,
                   timeout: float = _DEFAULT_TIMEOUT,
                   bin_path: Optional[str] = None) -> dict:
     """Spawn a headless CLI agent, stream its JSONL stdout, and return a result
     dict. Registers a T8 "process" cancel handle so /tasks/{id}/cancel does a
     process-group kill. Completion = process exit + drained stdout.
+
+    `model` is provider-dependent (claude class vs gemini/codex optional concrete
+    id; None/empty -> the CLI's own default). See build_argv.
 
     Returns: {success, exit_code, cancelled, timed_out, result_text, tail,
               events, provider}.
@@ -222,10 +272,10 @@ def run_cli_agent(provider: str, prompt: str, model_class: str, cwd: str,
     from Orchestrator.tasks import (register_cancel_handle, unregister_cancel_handle,
                                     is_cancel_requested, update_task, _kill_process_group)
 
-    argv = build_argv(provider, prompt, model_class, cwd, permission_mode, bin_path)
+    argv = build_argv(provider, prompt, model, cwd, permission_mode, bin_path)
     env = build_child_env(provider)
 
-    print(f"[CLI-AGENT] spawn provider={provider} model_class={model_class} "
+    print(f"[CLI-AGENT] spawn provider={provider} model={model or '(default)'} "
           f"cwd={cwd} mode={permission_mode} task={task_id}")
 
     proc = subprocess.Popen(
@@ -280,7 +330,7 @@ def run_cli_agent(provider: str, prompt: str, model_class: str, cwd: str,
         if task_id and now - last_flush >= _TAIL_FLUSH_SECONDS:
             last_flush = now
             update_task(task_id, result_data={
-                **(_result_data_for(task_id, provider, model_class)),
+                **(_result_data_for(task_id, provider, model)),
                 "tail": _current_tail(),
             })
         time.sleep(_POLL_INTERVAL)
@@ -320,9 +370,9 @@ def run_cli_agent(provider: str, prompt: str, model_class: str, cwd: str,
     }
 
 
-def _result_data_for(task_id: str, provider: str, model_class: str) -> dict:
+def _result_data_for(task_id: str, provider: str, model: Optional[str]) -> dict:
     """Preserve any pre-existing result_data fields when flushing the tail so we
-    don't clobber provider/model_class the launch site stored."""
+    don't clobber provider/model the launch site stored."""
     try:
         from Orchestrator.tasks import task_db
         t = task_db.get_task(task_id)
@@ -330,5 +380,6 @@ def _result_data_for(task_id: str, provider: str, model_class: str) -> dict:
     except Exception:
         rd = {}
     rd.setdefault("provider", provider)
-    rd.setdefault("model_class", model_class)
+    if model:
+        rd.setdefault("model", model)
     return rd

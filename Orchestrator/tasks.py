@@ -1659,7 +1659,9 @@ def process_cli_agent(task: Task):
 
     task_rd = task.result_data or {}
     provider = (task_rd.get("provider") or "").strip()
-    model_class = (task_rd.get("model_class") or "").strip()
+    # `model` is provider-dependent: a claude CLASS, or an optional concrete id
+    # for gemini/codex. Empty -> the CLI's own default (see headless.build_argv).
+    model = (task_rd.get("model") or "").strip() or None
     cwd = task_rd.get("cwd") or os.getcwd()
     permission_mode = task_rd.get("permission_mode") or "yolo"
     operator = task.operator or "system"
@@ -1667,13 +1669,13 @@ def process_cli_agent(task: Task):
 
     update_task(task.task_id, progress=20)
     print(f"[WORKER] Starting CLI-agent task {task.task_id} "
-          f"(provider={provider}, model_class={model_class})")
+          f"(provider={provider}, model={model or '(default)'})")
 
     try:
         result = headless.run_cli_agent(
             provider=provider,
             prompt=prompt,
-            model_class=model_class,
+            model=model,
             cwd=cwd,
             permission_mode=permission_mode,
             task_id=task.task_id,
@@ -1701,12 +1703,22 @@ def process_cli_agent(task: Task):
     if not result.get("success"):
         err = "timed out" if result.get("timed_out") else (
             f"exit code {result.get('exit_code')}")
+        # SURFACE the CLI's own error text (Finding 2) — e.g. gemini with its API
+        # keys stripped and no OAuth prints "you must specify the GEMINI_API_KEY".
+        # stderr was folded into the stream, so the tail carries it. Do NOT
+        # swallow it: put a bounded snippet in error_message so it is visible
+        # without digging into result_data.
+        tail = result.get("tail", "") or ""
+        snippet = tail[-500:].strip()
+        msg = f"CLI agent {provider} failed ({err})"
+        if snippet:
+            msg = f"{msg}: {snippet}"
         update_task(
             task.task_id,
             status=TaskStatus.FAILED,
-            error_message=f"CLI agent {provider} failed ({err})",
+            error_message=msg,
             result_data={**task_rd,
-                         "tail": result.get("tail", "")[:headless.TAIL_MAX_CHARS],
+                         "tail": tail[:headless.TAIL_MAX_CHARS],
                          "exit_code": result.get("exit_code"),
                          "timed_out": result.get("timed_out", False)},
             progress=0,
@@ -1733,7 +1745,7 @@ def process_cli_agent(task: Task):
         summary = (
             f"CLI AGENT — TASK RESULT\n\n"
             f"Task ID: {task.task_id}\n"
-            f"Provider: {provider}  Model class: {model_class}\n"
+            f"Provider: {provider}  Model: {model or '(CLI default)'}\n"
             f"Prompt: {prompt[:300]}\n"
             f"Exit code: {result.get('exit_code')}\n\n"
             f"Result:\n{result_text[:1000]}"
