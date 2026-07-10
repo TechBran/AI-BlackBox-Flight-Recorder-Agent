@@ -561,9 +561,14 @@ function updateTaskMonitor(tasks) {
         updateTaskItem(node, task);
     }
 
-    // Drop nodes for tasks that are no longer active
+    // Drop nodes for tasks that are no longer active. Clear any pending
+    // armed-STOP disarm timer first so it can't fire on a detached node.
     for (const [id, child] of existing) {
-        if (!seen.has(id)) child.remove();
+        if (!seen.has(id)) {
+            const b = child._refs && child._refs.stopBtn;
+            if (b && b._disarmTimer) clearTimeout(b._disarmTimer);
+            child.remove();
+        }
     }
 }
 

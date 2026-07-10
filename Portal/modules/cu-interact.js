@@ -137,6 +137,12 @@ function createModal() {
 }
 
 export function open(initialScreenshotUrl, deviceId) {
+    // Re-entry guard, symmetric with close()'s `if (!isOpen) return;`. Without it
+    // a second open() before a close() would leak a second 1.5s screenshot
+    // pollingInterval (the first is never cleared) and leave a stale
+    // _activeDeviceId override in place. Idempotent open/close is the module's
+    // discipline.
+    if (isOpen) return;
     createModal();
     // T12: optional device override (backward compatible — existing open(url)
     // calls pass no deviceId and keep using the drawer selection).
