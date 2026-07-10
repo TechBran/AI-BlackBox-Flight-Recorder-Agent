@@ -232,6 +232,12 @@ class Task:
     operator: Optional[str] = None
     image_data: Optional[Dict] = None  # For image-to-video (stores base64 + mime_type)
     google_video_uri: Optional[str] = None  # Original Google video URI for extensions
+    # G3-T11 (M3.1): a bounded, poll-visible latest-progress LINE (e.g.
+    # "step 7/15 — left_click([243, 118])"). The only mutable-during-run text
+    # scalar. Written lightweight (single column, see update_progress_text /
+    # tasks.append_task_progress) by the CU runner, the CLI-agent flush, and the
+    # video poll loop. EPHEMERAL UI state — never minted into the ledger.
+    progress_text: Optional[str] = None
 
 class TaskDatabase:
     """SQLite-based task persistence"""
@@ -268,7 +274,8 @@ class TaskDatabase:
                 progress INTEGER DEFAULT 0,
                 operator TEXT,
                 image_data TEXT,
-                google_video_uri TEXT
+                google_video_uri TEXT,
+                progress_text TEXT
             )
         """)
 
@@ -282,6 +289,21 @@ class TaskDatabase:
         # Add google_video_uri column if it doesn't exist (for existing databases)
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN google_video_uri TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # G3-T11: add progress_text column if it doesn't exist (existing DBs).
+        # Idempotent — mirrors the image_data / google_video_uri precedent above:
+        # ADD COLUMN on a pre-existing tasks.db, catch OperationalError when the
+        # column is already there. The CREATE TABLE above covers a brand-new DB.
+        # G3-T11: add progress_text column if it doesn't exist (existing DBs).
+        # Idempotent — mirrors the image_data / google_video_uri precedent above:
+        # ADD COLUMN on a pre-existing tasks.db, catch OperationalError when the
+        # column is already there. The CREATE TABLE above covers a brand-new DB.
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN progress_text TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             # Column already exists
@@ -314,16 +336,37 @@ class TaskDatabase:
         cursor.execute("""
             INSERT OR REPLACE INTO tasks
             (task_id, task_type, status, created_at, updated_at, prompt, input_file,
-             result_url, result_data, error_message, progress, operator, image_data, google_video_uri)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             result_url, result_data, error_message, progress, operator, image_data,
+             google_video_uri, progress_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.task_id, task.task_type, task.status, task.created_at, task.updated_at,
             task.prompt, task.input_file, task.result_url,
             json.dumps(task.result_data) if task.result_data else None,
             task.error_message, task.progress, task.operator,
             json.dumps(task.image_data) if task.image_data else None,
-            task.google_video_uri
+            task.google_video_uri,
+            task.progress_text
         ))
+        conn.commit()
+        conn.close()
+
+    def update_progress_text(self, task_id: str, text: str):
+        """G3-T11: LIGHTWEIGHT mid-run write of the latest progress line.
+
+        Updates ONLY the progress_text column (plus updated_at for honesty) via a
+        targeted UPDATE — deliberately NOT the whole-row INSERT OR REPLACE of
+        save_task. A CU run emits dozens of these per task and they are polled,
+        not archived, so rewriting result_data / re-serializing every column per
+        step would be wasteful. A no-op if the row is gone (WHERE matches nothing).
+        The public entry point is tasks.append_task_progress (bounding + guard).
+        """
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE tasks SET progress_text = ?, updated_at = ? WHERE task_id = ?",
+            (text, now_utc_iso(), task_id),
+        )
         conn.commit()
         conn.close()
     
@@ -351,9 +394,10 @@ class TaskDatabase:
             progress=row[10],
             operator=row[11],
             image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
-            google_video_uri=row[13] if len(row) > 13 else None
+            google_video_uri=row[13] if len(row) > 13 else None,
+            progress_text=row[14] if len(row) > 14 else None
         )
-    
+
     def get_all_tasks(self, operator: Optional[str] = None) -> List[Task]:
         conn = self._connect()
         cursor = conn.cursor()
@@ -380,7 +424,8 @@ class TaskDatabase:
                 progress=row[10],
                 operator=row[11],
                 image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
-                google_video_uri=row[13] if len(row) > 13 else None
+                google_video_uri=row[13] if len(row) > 13 else None,
+                progress_text=row[14] if len(row) > 14 else None
             ))
         return tasks
 

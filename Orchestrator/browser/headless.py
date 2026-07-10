@@ -124,9 +124,37 @@ async def _pump_generator(session, agen):
                 pass
 
 
-async def _drain_and_fold(session, agent_task, screenshots) -> dict:
+def _format_cu_params(params) -> str:
+    """Compact, bounded rendering of a CU action's params for the live pill line
+    (G3-T11). Drops the redundant `action` key and clamps any long value (a data:
+    URL, a big text block) so the one-line "step N/M — action(...)" preview stays
+    short. Best-effort cosmetics — never raises."""
+    if not isinstance(params, dict):
+        return ""
+    parts = []
+    for k, v in params.items():
+        if k == "action":
+            continue
+        sv = str(v)
+        if len(sv) > 60:
+            sv = sv[:57] + "..."
+        parts.append(sv)
+    return ", ".join(parts)
+
+
+async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None) -> dict:
     """Drain session.event_queue to the None sentinel and fold events into the
     pinned task-result contract dict. Shared by all three backends.
+
+    G3-T11 SIDE EFFECT (not part of the returned contract): when `task_id` is
+    given, the per-step narration that the drivers already push (cu_step,
+    cu_action, thinking) is folded into a single human line — "step 7/15 —
+    left_click([243, 118])" — and written to the task row's progress_text via
+    tasks.append_task_progress, so a /tasks poll can render a LIVE preview
+    mid-run. This is deduped (a repeated line is not re-written) and bounded, and
+    it does NOT change the {success, result_text, screenshots, final_screenshot,
+    steps, tokens} dict this returns (the golden contract). `task_id=None` (a
+    direct unit call) simply skips the writes.
 
     Two normalizations make it correct across drivers (the Anthropic-only
     original silently mis-recorded both for Gemini/OpenAI):
@@ -151,6 +179,33 @@ async def _drain_and_fold(session, agent_task, screenshots) -> dict:
     done_seen = False
     tokens = {"input": 0, "output": 0}
 
+    # G3-T11 live-progress fold. Lazy import so a driver import of this module can
+    # never depend on tasks.py's import graph (tasks.py imports headless lazily
+    # too — see tasks.process_browser_use). Guarded so a missing symbol degrades
+    # to "no live progress", never a broken CU run.
+    if task_id:
+        try:
+            from Orchestrator.tasks import append_task_progress
+        except Exception:
+            append_task_progress = None
+    else:
+        append_task_progress = None
+    _last_step = None
+    _last_total = None
+    _last_progress_line = None
+
+    def _emit_progress(line: str):
+        nonlocal _last_progress_line
+        if not append_task_progress or not line or line == _last_progress_line:
+            return
+        _last_progress_line = line
+        append_task_progress(task_id, line)
+
+    def _step_prefix(step) -> str:
+        if step is None:
+            return ""
+        return f"step {step}/{_last_total} — " if _last_total else f"step {step} — "
+
     try:
         while True:
             event = await session.event_queue.get()
@@ -158,6 +213,33 @@ async def _drain_and_fold(session, agent_task, screenshots) -> dict:
                 break  # sentinel — driver finished
             etype = event.get("type")
             data = event.get("data")
+            if etype == "cu_step":
+                # {"step": N, "total": M} — the per-iteration heartbeat. Track both
+                # so a later cu_action can render "step N/M — action(...)".
+                d = data or {}
+                if d.get("step") is not None:
+                    _last_step = d["step"]
+                if d.get("total") is not None:
+                    _last_total = d["total"]
+                if _last_step is not None:
+                    _emit_progress(
+                        f"step {_last_step}/{_last_total}" if _last_total
+                        else f"step {_last_step}"
+                    )
+            elif etype == "cu_action":
+                # {"action", "params", "step"} — the concrete tool call. THE line
+                # the pill wants: "step 7/15 — left_click([243, 118])".
+                d = data or {}
+                s = d.get("step", _last_step)
+                action = d.get("action") or "action"
+                inner = _format_cu_params(d.get("params"))
+                _emit_progress(f"{_step_prefix(s)}{action}({inner})")
+            elif etype == "thinking":
+                # Per-delta while the model reasons; dedupe collapses the burst to a
+                # single "thinking…" so the pill isn't blank before step 1. (content
+                # is intentionally NOT folded here — it is per-token and IS the final
+                # answer, already surfaced via result_text/done below.)
+                _emit_progress("thinking…")
             if etype == "cu_screenshot":
                 ss_url = (data or {}).get("url")
                 if ss_url:
@@ -184,9 +266,10 @@ async def _drain_and_fold(session, agent_task, screenshots) -> dict:
                     error_msg = data if isinstance(data, str) else str(data)
             elif etype == "cu_stopped":
                 stopped_reason = (data or {}).get("reason", "stopped")
-            # all other event types (thinking, content_start, cu_step,
-            # cu_action, cu_bash_output, provenance, cu_safety, ...) are
-            # streaming-UI concerns — ignored here
+            # cu_step / cu_action / thinking are folded into progress_text at the
+            # top of the loop (G3-T11 live pill). The remaining streaming-UI event
+            # types (content_start, cu_bash_output, provenance, cu_safety, ...) are
+            # not needed for either the contract dict or the live line — ignored.
 
         try:
             await agent_task  # surface any unexpected driver exception
@@ -312,7 +395,7 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
         session.agent_task = asyncio.create_task(_pump_generator(session, agen))
         print(f"[CU-HEADLESS] Gemini driver launched for task {task_id} "
               f"({operator}, env={environment})")
-        return await _drain_and_fold(session, session.agent_task, screenshots)
+        return await _drain_and_fold(session, session.agent_task, screenshots, task_id=task_id)
     finally:
         # Release the display reservation (idempotent; a no-op for android, which
         # never claimed) and tear down ONLY this task's own session — never
@@ -489,7 +572,7 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
             agen = run_openai_cu_loop(session, prompt, model or None, oai_sys, None)
             session.agent_task = asyncio.create_task(_pump_generator(session, agen))
             print(f"[CU-HEADLESS] OpenAI driver launched for task {task_id} ({operator})")
-            return await _drain_and_fold(session, session.agent_task, screenshots)
+            return await _drain_and_fold(session, session.agent_task, screenshots, task_id=task_id)
 
         # ── Anthropic path (unchanged from the pre-T5 runner): build the initial
         #    screenshot / system prompt / history / tool array / headers, launch the
@@ -583,7 +666,7 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         )
         print(f"[CU-HEADLESS] Driver launched for task {task_id} ({operator})")
 
-        return await _drain_and_fold(session, session.agent_task, screenshots)
+        return await _drain_and_fold(session, session.agent_task, screenshots, task_id=task_id)
     finally:
         # Release THIS launch's display claim (per-launch key = task_id). Every
         # exit path passes through here (invariant 4); idempotent, so a no-op for

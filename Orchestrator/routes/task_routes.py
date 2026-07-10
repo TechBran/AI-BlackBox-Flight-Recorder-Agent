@@ -79,7 +79,13 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
             "updated_at": t.updated_at,
             "result_url": t.result_url,
             "operator": t.operator,
-            "prompt": t.prompt[:100] if t.prompt else None
+            "prompt": t.prompt[:100] if t.prompt else None,
+            # G3-T11 (additive): live poll-visible progress line for the pill, and
+            # the CU target device. device_id has no top-level column — it lives in
+            # result_data (mirror tasks.process_browser_use: `.get("device_id") or
+            # "blackbox"`) so the Portal "Live" button (T12) can address it.
+            "progress_text": t.progress_text,
+            "device_id": (t.result_data or {}).get("device_id") or "blackbox",
         } for t in filtered_tasks],
         "total_tasks": len(all_tasks),
         "filtered_count": len(filtered_tasks)
@@ -102,7 +108,10 @@ def get_task_status(task_id: str):
         "updated_at": task.updated_at,
         "result_url": task.result_url,
         "result_data": task.result_data,
-        "error_message": task.error_message
+        "error_message": task.error_message,
+        # G3-T11 (additive): the live pill line. device_id stays reachable via the
+        # already-returned result_data, so it is not re-surfaced as a top-level key.
+        "progress_text": task.progress_text
     }
 
 @app.post("/tasks/{task_id}/cancel")

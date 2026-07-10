@@ -576,6 +576,39 @@ def update_task(task_id: str, **kwargs):
             _emit_task_notification(task, kwargs["status"])
 
 
+# G3-T11 (M3.1): bound for the poll-visible progress line. A CU/CLI/video step
+# line is a short single line ("step 7/15 — left_click([243, 118])"); this is a
+# hard clamp so an untrusted/unbounded producer (raw CLI stdout) can never blow
+# up the row that every /tasks poll then ships to the Portal/Android pill.
+PROGRESS_TEXT_MAX_CHARS = 500
+
+
+def append_task_progress(task_id: str, line: str):
+    """G3-T11: set a task's latest poll-visible progress LINE (single column).
+
+    LATEST-LINE semantics — replaces, does not accumulate (the pill shows the
+    current step, and a rolling buffer would only grow a polled column). BOUNDED
+    to PROGRESS_TEXT_MAX_CHARS. Lightweight: routes to task_db.update_progress_text
+    (a targeted single-column UPDATE), NOT a whole-row save_task. Blank lines are
+    ignored so a producer's empty delta never clears a good line.
+
+    BEST-EFFORT: progress_text is ephemeral UI state (never minted). A DB hiccup
+    here (e.g. WAL contention) must NEVER take down the CU/CLI/video run that is
+    producing it — so every failure is swallowed.
+    """
+    if not line:
+        return
+    text = str(line).strip()
+    if not text:
+        return
+    if len(text) > PROGRESS_TEXT_MAX_CHARS:
+        text = text[:PROGRESS_TEXT_MAX_CHARS]
+    try:
+        task_db.update_progress_text(task_id, text)
+    except Exception as e:  # noqa: BLE001 — UI state, never fatal to the producer
+        print(f"[PROGRESS] append_task_progress({task_id}) failed (non-fatal): {e}")
+
+
 def background_worker():
     """Process tasks from the queue using a thread pool for concurrency.
 
@@ -1082,7 +1115,11 @@ def process_video_generation(task: Task):
         # Update progress gradually
         progress = min(30 + (attempt * 0.5), 80)
         update_task(task.task_id, progress=int(progress))
-        
+        # T11: the poll count is a natural live line for the task pill.
+        append_task_progress(
+            task.task_id,
+            f"generating video — polling ({attempt}/{max_attempts})")
+
         poll_response = requests.get(
             poll_url,
             headers={"x-goog-api-key": GOOGLE_API_KEY},

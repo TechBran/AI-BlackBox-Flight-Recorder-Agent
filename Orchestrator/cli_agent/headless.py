@@ -111,11 +111,24 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = tuple(_PROVIDER_BINARY_NAMES.keys())
 
 # Tail / result bounds. Raw agent stdout is untrusted and unbounded; every path
 # that surfaces it (poll-visible tail, returned result_text, and — downstream —
-# the immutable ledger) must clamp it. T11 will replace `tail` with a nicer
-# progress_text; do NOT build that here.
+# the immutable ledger) must clamp it.
 TAIL_MAX_CHARS = 4000
 TAIL_MAX_LINES = 400
 RESULT_TEXT_MAX_CHARS = 8000
+
+
+def _progress_line_from_tail(tail: str) -> str:
+    """G3-T11: the CLI-agent producer. Distil the bounded stdout tail into the
+    single latest line for progress_text, so a CLI-agent task exposes the SAME
+    one field the CU/video tasks do and the UI reads one thing for all types.
+    Latest non-blank line, clamped short (the pill is one line)."""
+    if not tail:
+        return ""
+    for ln in reversed(tail.splitlines()):
+        ln = ln.strip()
+        if ln:
+            return ln[:500]
+    return ""
 
 _TAIL_FLUSH_SECONDS = 2.0   # roughly how often the DB tail is refreshed
 _POLL_INTERVAL = 0.2
@@ -350,10 +363,14 @@ def run_cli_agent(provider: str, prompt: str, model: Optional[str], cwd: str,
             now = time.monotonic()
             if task_id and now - last_flush >= _TAIL_FLUSH_SECONDS:
                 last_flush = now
+                _tail = _current_tail()
+                # T11: this flush already writes the whole row every ~2s, so
+                # routing the tail's latest line into progress_text costs no extra
+                # write — one field for the UI across CU / CLI / video tasks.
                 update_task(task_id, result_data={
                     **(_result_data_for(task_id, provider, model)),
-                    "tail": _current_tail(),
-                })
+                    "tail": _tail,
+                }, progress_text=_progress_line_from_tail(_tail))
             time.sleep(_POLL_INTERVAL)
 
         # Drain the reader (the pipe is at EOF after exit, or closed by the kill).
