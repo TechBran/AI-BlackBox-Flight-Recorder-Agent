@@ -34,7 +34,9 @@ class TaskRepository(private val api: BlackBoxApi) {
                 resultUrl = obj["result_url"]?.jsonPrimitive?.contentOrNull,
                 error = obj["error_message"]?.jsonPrimitive?.contentOrNull,
                 // G3-T13 (M3.3): live pill line — top-level on /tasks/status/{id}.
-                progressText = obj["progress_text"]?.jsonPrimitive?.contentOrNull
+                progressText = obj["progress_text"]?.jsonPrimitive?.contentOrNull,
+                // CU reasoning-narration transcript — top-level (parity with auto-parse).
+                reasoningText = obj["reasoning_text"]?.jsonPrimitive?.contentOrNull
             )
         }
     }

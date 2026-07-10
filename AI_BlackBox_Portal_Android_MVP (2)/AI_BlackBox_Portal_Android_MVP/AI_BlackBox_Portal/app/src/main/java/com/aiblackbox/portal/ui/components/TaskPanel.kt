@@ -23,7 +23,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -33,6 +36,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -348,7 +354,8 @@ private fun TaskItem(
         }
 
         // Live agent-step line (G3-T13) \u2014 mirrors the Portal `.task-live-line`.
-        // Single-line ellipsized; the existing poll refreshes progressText.
+        // Single-line ellipsized; the existing poll refreshes progressText. This
+        // stays the compact SUMMARY line even when the reasoning window is shown.
         if (liveLine.isNotEmpty()) {
             Spacer(Modifier.height(3.dp))
             Text(
@@ -359,6 +366,49 @@ private fun TaskItem(
                 overflow = TextOverflow.Ellipsis,
                 fontSize = 10.sp
             )
+        }
+
+        // CU reasoning-narration window: the LIVE, accumulating model narration
+        // (reasoning_text) for a Computer-Use task. Rendered FULL, newlines
+        // preserved \u2014 NOT through TaskUi.truncateText (which would flatten the
+        // multi-line transcript to one 140-char line). Collapsed = a few lines in a
+        // small scrollable window; TAP the region to expand to a taller scrollable
+        // window (independent of the panel-level isExpanded). Auto-scrolls to the
+        // bottom on new content so the latest step shows as it streams. Only shown
+        // when reasoning_text is non-blank (null/absent for non-CU tasks).
+        val reasoningText = task.reasoningText
+        if (!reasoningText.isNullOrBlank()) {
+            Spacer(Modifier.height(4.dp))
+            var stepsExpanded by remember { mutableStateOf(false) }
+            val reasoningScroll = rememberScrollState()
+            // Tail-follow: auto-scroll to the newest narration as it streams. Watch
+            // maxValue via snapshotFlow rather than reading it once — a one-shot read
+            // on reasoningText change sees the PRE-layout maxValue, so the freshly
+            // appended line would lag one poll below the fold. Keyed on the (stable)
+            // scroll state so it re-fires whenever layout recomputes maxValue (new
+            // text OR expand), keeping the latest line in view live.
+            LaunchedEffect(reasoningScroll) {
+                snapshotFlow { reasoningScroll.maxValue }
+                    .collect { max -> reasoningScroll.animateScrollTo(max) }
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(RadiusMd))
+                    .background(Neutral300.copy(alpha = 0.35f))
+                    .clickFeedback { stepsExpanded = !stepsExpanded }
+                    .heightIn(max = if (stepsExpanded) 180.dp else 48.dp)
+                    .verticalScroll(reasoningScroll)
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = reasoningText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Neutral500,
+                    fontSize = 10.sp,
+                    softWrap = true
+                )
+            }
         }
 
         // Actions (G3-T13): STOP on any active pill; "Live" only on a processing

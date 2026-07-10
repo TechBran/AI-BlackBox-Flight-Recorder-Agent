@@ -736,6 +736,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 // these fields. Thread them HERE or they never surface.
                                 // /tasks/list carries progress_text AND device_id top-level.
                                 progressText = t["progress_text"]?.jsonPrimitive?.contentOrNull,
+                                // CU reasoning narration (accumulating, multi-line). Same
+                                // rationale as progressText: /tasks/list is the SOLE panel
+                                // feed, so thread it HERE or the reasoning window stays empty.
+                                reasoningText = t["reasoning_text"]?.jsonPrimitive?.contentOrNull,
                                 deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull
                             )
                         } catch (_: Exception) { null }

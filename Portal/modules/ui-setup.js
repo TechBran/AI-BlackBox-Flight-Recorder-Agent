@@ -602,6 +602,10 @@ function createTaskItem(task) {
     descEl.className = 'task-description';
     const liveEl = document.createElement('div');
     liveEl.className = 'task-live-line';
+    // CU reasoning-narration transcript (reasoning_text). Multi-line, scrollable;
+    // collapsed = a few lines, expanded (via .expanded on the item) = taller box.
+    const reasoningEl = document.createElement('div');
+    reasoningEl.className = 'task-reasoning';
     const progWrap = document.createElement('div');
     progWrap.className = 'task-progress';
     const progBar = document.createElement('div');
@@ -622,8 +626,8 @@ function createTaskItem(task) {
     liveBtn.textContent = 'Live';
     actions.append(stopBtn, liveBtn);
 
-    item.append(header, descEl, liveEl, progWrap, timeEl, actions);
-    item._refs = { iconEl, nameEl, statusEl, descEl, liveEl, progWrap, progBar, timeEl, actions, stopBtn, liveBtn };
+    item.append(header, descEl, liveEl, reasoningEl, progWrap, timeEl, actions);
+    item._refs = { iconEl, nameEl, statusEl, descEl, liveEl, reasoningEl, progWrap, progBar, timeEl, actions, stopBtn, liveBtn };
 
     // Click-to-expand (agent pills only) — reveals the full progress_text. Clicks
     // on a button never toggle expansion.
@@ -632,6 +636,7 @@ function createTaskItem(task) {
         if (!item.classList.contains('task-expandable')) return;
         item.classList.toggle('expanded');
         renderLiveLine(item);
+        renderReasoning(item);
     });
 
     // STOP — inline two-click confirm (NO confirm() dialog).
@@ -668,6 +673,45 @@ function renderLiveLine(item) {
 }
 
 /**
+ * Render the CU reasoning-narration transcript (reasoning_text) into the pill's
+ * scrollable region. Unlike the progress_text summary line, this preserves
+ * newlines (no truncate/whitespace-flatten) and auto-scrolls to the bottom as
+ * new narration streams in. reasoning_text is UNTRUSTED CU/model output, so it
+ * is written via textContent — NEVER innerHTML. Renders nothing for non-CU
+ * tasks (reasoning_text null/absent). The collapsed vs expanded height is driven
+ * purely by CSS off the item's `.expanded` class.
+ */
+function renderReasoning(item) {
+    const { reasoningEl } = item._refs;
+    if (!reasoningEl) return;
+    const t = item._task || {};
+    const full = (t.reasoning_text == null) ? '' : String(t.reasoning_text);
+    if (!full.trim()) {
+        if (reasoningEl._lastText !== '') reasoningEl.textContent = '';
+        reasoningEl.style.display = 'none';
+        reasoningEl._lastText = '';
+        return;
+    }
+    reasoningEl.style.display = '';
+    const expanded = item.classList.contains('expanded');
+    reasoningEl.classList.toggle('expanded', expanded);
+    // Only rewrite (and thus reset scroll) when the transcript actually grew —
+    // rewriting every poll would fight the user and reset scrollTop to the top.
+    const changed = reasoningEl._lastText !== full;
+    if (changed) {
+        reasoningEl.textContent = full;   // full multi-line text, newlines preserved
+        reasoningEl._lastText = full;
+    }
+    // Auto-scroll to the newest narration when content arrives or the box just
+    // grew/shrank on an expand toggle. Reading scrollHeight forces the reflow
+    // needed for an accurate value after the textContent write.
+    if (changed || reasoningEl._lastExpanded !== expanded) {
+        reasoningEl.scrollTop = reasoningEl.scrollHeight;
+        reasoningEl._lastExpanded = expanded;
+    }
+}
+
+/**
  * Update a task-item node's mutable content for the current poll.
  * @param {HTMLElement} item
  * @param {Object} task
@@ -686,11 +730,15 @@ function updateTaskItem(item, task) {
     // Prompt (agent/model output) → textContent, 60-char cap.
     r.descEl.textContent = truncateText(task.prompt, 60) || 'Processing…';
 
-    // Expandable + live line: only agent (CU/CLI) tasks that actually have text.
+    // Expandable + live line: agent (CU/CLI) tasks that have a progress line OR a
+    // reasoning-narration transcript (CU). Either is enough to make the pill
+    // tap-to-expand.
     const hasLive = !!(task.progress_text && String(task.progress_text).trim());
-    item.classList.toggle('task-expandable', isAgentTaskType(task.task_type) && hasLive);
+    const hasReasoning = !!(task.reasoning_text && String(task.reasoning_text).trim());
+    item.classList.toggle('task-expandable', isAgentTaskType(task.task_type) && (hasLive || hasReasoning));
     if (!item.classList.contains('task-expandable')) item.classList.remove('expanded');
     renderLiveLine(item);
+    renderReasoning(item);
 
     // Progress bar (never for a terminal status).
     const progress = task.progress || 0;

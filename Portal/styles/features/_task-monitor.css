@@ -256,6 +256,34 @@
     word-break: break-word;
 }
 
+/* CU reasoning-narration transcript (reasoning_text). Multi-line: newlines are
+   preserved (pre-wrap) and NOT run through the whitespace-flattening truncate.
+   Collapsed = a short scrollable window (~3-4 lines); expanded = a taller
+   scrollable window (~12 lines). The JS auto-scrolls to the bottom on new
+   content. Renders nothing when empty (display:none set inline by the JS). */
+.task-reasoning {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--muted);
+    margin-bottom: 6px;
+    padding: 5px 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-height: 5.5em;          /* ~3-4 lines collapsed */
+    overflow-y: auto;
+    opacity: 0.9;
+    border-left: 2px solid var(--neutral-300);
+    background: rgba(30, 64, 175, 0.06);
+    border-radius: 4px;
+    overscroll-behavior: contain;   /* keep scroll inside the box, not the pill */
+}
+
+.task-reasoning.expanded {
+    max-height: 17.5em;         /* ~12 lines expanded */
+    border-left-color: #1e40af;
+}
+
 /* Agent (CU/CLI) pills are clickable to expand. */
 .task-item.task-expandable {
     cursor: pointer;

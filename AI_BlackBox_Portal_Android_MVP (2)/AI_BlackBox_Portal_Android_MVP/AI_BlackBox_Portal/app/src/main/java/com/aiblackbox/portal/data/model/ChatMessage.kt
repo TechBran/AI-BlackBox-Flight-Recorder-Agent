@@ -91,6 +91,14 @@ data class TaskStatus(
     // path — but the /tasks/list DISCOVERY loop builds TaskStatus by hand
     // (ChatViewModel.startTaskDiscoveryLoop), so it is ALSO threaded there.
     @SerialName("progress_text") val progressText: String? = null,
+    // CU reasoning-narration: the ACCUMULATING model-narration transcript for a
+    // computer-use task ("[step 1] clicking…\n[step 2] typing…"). Bounded (~8000
+    // char rolling tail), MAY contain newlines, and grows across polls (each poll
+    // returns the latest cumulative value — the frontend does NOT accumulate).
+    // null/absent for non-CU tasks. Top-level on /tasks/list; the DISCOVERY loop
+    // (ChatViewModel.startTaskDiscoveryLoop) builds TaskStatus by hand and is the
+    // SOLE panel feed, so this is threaded THERE too, not just via auto-parse.
+    @SerialName("reasoning_text") val reasoningText: String? = null,
     // G3-T13: the CU target device for the "Live" button. Top-level ONLY on
     // /tasks/list; on /tasks/status/{id} it lives inside result_data. Prefer the
     // top-level field, else fall back to result_data — see effectiveDeviceId().

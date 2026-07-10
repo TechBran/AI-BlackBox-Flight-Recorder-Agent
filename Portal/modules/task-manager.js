@@ -327,6 +327,26 @@ export class TaskManager {
             liveEl.textContent = line;
             liveEl.style.display = line ? '' : 'none';
         }
+        // CU reasoning-narration transcript. reasoning_text is UNTRUSTED CU/model
+        // output → textContent, NEVER innerHTML. Full multi-line text, NOT run
+        // through truncateText (newlines preserved). Only rewrite when it grew so
+        // the scroll position isn't reset every poll; auto-scroll to the newest.
+        const reasoningEl = document.getElementById(`task-reasoning-${taskId}`);
+        if (reasoningEl) {
+            const full = (status.reasoning_text == null) ? '' : String(status.reasoning_text);
+            if (!full.trim()) {
+                if (reasoningEl._lastText !== '') reasoningEl.textContent = '';
+                reasoningEl.style.display = 'none';
+                reasoningEl._lastText = '';
+            } else {
+                reasoningEl.style.display = '';
+                if (reasoningEl._lastText !== full) {
+                    reasoningEl.textContent = full;
+                    reasoningEl._lastText = full;
+                    reasoningEl.scrollTop = reasoningEl.scrollHeight;
+                }
+            }
+        }
     }
 
     /**
@@ -1045,7 +1065,14 @@ function showAgentPlaceholder(taskId, type, prompt) {
     live.id = `task-progress-text-${taskId}`;
     live.style.cssText = 'font-size:12px;color:#888;display:none;';
 
-    span.append(headline, live);
+    // CU reasoning-narration transcript (reasoning_text) — starts empty; filled
+    // by updateTaskProgress. Scrollable, multi-line, auto-scrolls to newest.
+    const reasoning = document.createElement('div');
+    reasoning.className = 'task-reasoning';
+    reasoning.id = `task-reasoning-${taskId}`;
+    reasoning.style.display = 'none';
+
+    span.append(headline, live, reasoning);
     wrap.appendChild(span);
     hist.appendChild(wrap);
 

@@ -121,7 +121,11 @@ def get_task_status(task_id: str):
         "error_message": task.error_message,
         # G3-T11 (additive): the live pill line. device_id stays reachable via the
         # already-returned result_data, so it is not re-surfaced as a top-level key.
-        "progress_text": task.progress_text
+        "progress_text": task.progress_text,
+        # G3 live narration (additive): the accumulating CU reasoning transcript, so
+        # the in-chat placeholder pill — which polls THIS endpoint (not /tasks/list) —
+        # can render the scrollable reasoning window for a CU task.
+        "reasoning_text": task.reasoning_text
     }
 
 @app.post("/tasks/{task_id}/cancel")
