@@ -3,6 +3,9 @@ package com.aiblackbox.portal.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
 data class ChatMessage(
@@ -81,8 +84,39 @@ data class TaskStatus(
     val progress: Int = 0,
     @SerialName("result_data") val resultData: kotlinx.serialization.json.JsonElement? = null,
     @SerialName("result_url") val resultUrl: String? = null,
-    @SerialName("error_message") val error: String? = null
-)
+    @SerialName("error_message") val error: String? = null,
+    // G3-T13 (M3.3, additive): the live agent-step line shown under the pill.
+    // Top-level on BOTH /tasks/list and /tasks/status/{id} (Orchestrator
+    // task_routes.py :87 / :114), so kotlinx auto-parse fills it on the poll
+    // path — but the /tasks/list DISCOVERY loop builds TaskStatus by hand
+    // (ChatViewModel.startTaskDiscoveryLoop), so it is ALSO threaded there.
+    @SerialName("progress_text") val progressText: String? = null,
+    // G3-T13: the CU target device for the "Live" button. Top-level ONLY on
+    // /tasks/list; on /tasks/status/{id} it lives inside result_data. Prefer the
+    // top-level field, else fall back to result_data — see effectiveDeviceId().
+    @SerialName("device_id") val deviceId: String? = null
+) {
+    /**
+     * Resolve the CU device for the "Live" button regardless of which poll path
+     * built this object: top-level `device_id` (/tasks/list) first, else the
+     * `device_id` nested in `result_data` (/tasks/status/{id}). Null/blank-safe.
+     */
+    fun effectiveDeviceId(): String? =
+        deviceId?.takeIf { it.isNotBlank() }
+            ?: runCatching {
+                resultData?.jsonObject?.get("device_id")?.jsonPrimitive?.contentOrNull
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    /**
+     * cli_agent product provider (claude|gemini|codex) from `result_data.provider`
+     * — only /tasks/status/{id} carries it. Drives the specific product label
+     * (Claude Code / Gemini CLI / Codex) in TaskUi.taskTypeMeta.
+     */
+    fun cliProvider(): String? =
+        runCatching {
+            resultData?.jsonObject?.get("provider")?.jsonPrimitive?.contentOrNull
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+}
 
 @Serializable
 data class HealthResponse(

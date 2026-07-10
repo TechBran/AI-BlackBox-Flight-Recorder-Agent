@@ -727,7 +727,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 status = status,
                                 progress = t["progress"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                                 operator = t["operator"]?.jsonPrimitive?.content,
-                                resultUrl = t["result_url"]?.jsonPrimitive?.content
+                                resultUrl = t["result_url"]?.jsonPrimitive?.content,
+                                // G3-T13 (M3.3): this MANUAL builder is the primary feed for
+                                // TaskPanel — it overwrites the auto-parsed poll object every
+                                // ~2s, so the new pill fields MUST be threaded here or they
+                                // never surface. /tasks/list carries both top-level.
+                                progressText = t["progress_text"]?.jsonPrimitive?.contentOrNull,
+                                deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull
                             )
                         } catch (_: Exception) { null }
                     }
@@ -2603,6 +2609,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun completeMediaTask(taskId: String) {
         _pendingMediaTasks.value = _pendingMediaTasks.value - taskId
         _activeTasks.value = _activeTasks.value.filter { it.taskId != taskId }
+    }
+
+    /**
+     * G3-T13 (M3.3): STOP a single active task from the TaskPanel. Fires the REAL
+     * per-task cancel (POST /tasks/{id}/cancel — G2-T8), which signals the concrete
+     * work and marks the row CANCELLED. No optimistic local flip: the pill reflects
+     * `cancelled` on the next discovery/poll tick, keeping the server the source of
+     * truth (mirrors the Portal STOP button).
+     */
+    fun cancelTask(taskId: String) {
+        val repo = taskRepository ?: return
+        viewModelScope.launch {
+            try {
+                repo.cancel(taskId)
+            } catch (e: Exception) {
+                Log.w(TAG, "cancelTask($taskId) failed: ${e.message}")
+            }
+        }
     }
 
     /**

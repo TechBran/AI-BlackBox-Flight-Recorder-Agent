@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.data.model.TaskStatus
@@ -72,6 +73,10 @@ fun TaskPanel(
     tasks: List<TaskStatus>,
     visible: Boolean,
     onDismiss: () -> Unit,
+    // G3-T13 (M3.3): STOP any active pill (POST /tasks/{id}/cancel via the VM) and
+    // open the CU "Live" viewer for a processing CU task addressed at its device.
+    onStopTask: (String) -> Unit = {},
+    onLiveView: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
@@ -220,7 +225,7 @@ fun TaskPanel(
 
                     // Task items
                     tasks.forEach { task ->
-                        TaskItem(task)
+                        TaskItem(task, onStopTask = onStopTask, onLiveView = onLiveView)
                         Spacer(Modifier.height(6.dp))
                     }
                 }
@@ -230,7 +235,11 @@ fun TaskPanel(
 }
 
 @Composable
-private fun TaskItem(task: TaskStatus) {
+private fun TaskItem(
+    task: TaskStatus,
+    onStopTask: (String) -> Unit,
+    onLiveView: (String) -> Unit
+) {
     val isActive = task.status.equals("processing", true) || task.status.equals("pending", true)
     val isComplete = task.status.equals("completed", true)
     val isFailed = task.status.equals("failed", true)
@@ -249,7 +258,17 @@ private fun TaskItem(task: TaskStatus) {
         label = "borderColor"
     )
 
-    val (typeIcon, typeLabel) = getTaskTypeInfo(task.taskType)
+    // Shared task-ui.js mirror: real CU/CLI icons+labels (cli_agent + provider
+    // resolves to the product name). NEVER blank — unknown → gear + raw type.
+    val (typeIcon, typeLabel) = TaskUi.taskTypeMeta(task.taskType, task.cliProvider())
+
+    // Live agent-step line (single, wrap-safe, whitespace-collapsed). Blank ⇒ hidden.
+    val liveLine = TaskUi.truncateText(task.progressText, 140)
+    // "Live" button: processing CU task with a resolvable device (top-level
+    // device_id on /tasks/list, else result_data.device_id on /tasks/status).
+    val liveDeviceId = task.effectiveDeviceId()
+    val showLive = task.status.equals("processing", true) &&
+        TaskUi.canShowLiveView(task.taskType, liveDeviceId)
 
     Column(
         modifier = Modifier
@@ -327,16 +346,55 @@ private fun TaskItem(task: TaskStatus) {
                 fontSize = 10.sp
             )
         }
+
+        // Live agent-step line (G3-T13) \u2014 mirrors the Portal `.task-live-line`.
+        // Single-line ellipsized; the existing poll refreshes progressText.
+        if (liveLine.isNotEmpty()) {
+            Spacer(Modifier.height(3.dp))
+            Text(
+                liveLine,
+                style = MaterialTheme.typography.labelSmall,
+                color = Neutral500,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 10.sp
+            )
+        }
+
+        // Actions (G3-T13): STOP on any active pill; "Live" only on a processing
+        // CU pill with a device. Matches ui-setup.js renderActions gating.
+        if (isActive || showLive) {
+            Spacer(Modifier.height(5.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (showLive && liveDeviceId != null) {
+                    PillButton(label = "Live", accent = true) { onLiveView(liveDeviceId) }
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (isActive) {
+                    PillButton(label = "Stop", accent = true) { onStopTask(task.taskId) }
+                }
+            }
+        }
     }
 }
 
-private fun getTaskTypeInfo(taskType: String?): Pair<String, String> = when (taskType?.lowercase()) {
-    "image", "image_generation" -> "\uD83C\uDFA8" to "Image"
-    "video", "video_generation" -> "\uD83C\uDFA5" to "Video"
-    "music", "music_generation" -> "\uD83C\uDFB5" to "Music"
-    "audio", "audio_analysis" -> "\uD83D\uDD0A" to "Audio"
-    "video_analysis" -> "\uD83D\uDCF9" to "Video Analysis"
-    "gemini_tts" -> "\uD83D\uDDE3" to "TTS"
-    "browser_use", "computer_use" -> "\uD83D\uDCBB" to "Computer Use"
-    else -> "\u2699\uFE0F" to (taskType?.replace("_", " ")?.replaceFirstChar { it.uppercase() } ?: "Task")
+/** Small bordered clickable pill used for the STOP / Live actions. */
+@Composable
+private fun PillButton(label: String, accent: Boolean, onClick: () -> Unit) {
+    val tint = if (accent) BbxAccent else Neutral500
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+        color = tint,
+        fontSize = 10.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+            .clickFeedback { onClick() }
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+    )
 }

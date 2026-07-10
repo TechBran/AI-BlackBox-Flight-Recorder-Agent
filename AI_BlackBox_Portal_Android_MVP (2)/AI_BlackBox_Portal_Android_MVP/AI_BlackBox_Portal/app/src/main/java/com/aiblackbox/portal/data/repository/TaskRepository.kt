@@ -28,8 +28,13 @@ class TaskRepository(private val api: BlackBoxApi) {
                 taskType = obj["task_type"]?.jsonPrimitive?.contentOrNull,
                 status = obj["status"]?.jsonPrimitive?.content ?: "pending",
                 progress = obj["progress"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                // Carry result_data so TaskStatus.effectiveDeviceId()/cliProvider()
+                // still resolve on the manual fallback path (G3-T13 parity).
+                resultData = obj["result_data"],
                 resultUrl = obj["result_url"]?.jsonPrimitive?.contentOrNull,
-                error = obj["error_message"]?.jsonPrimitive?.contentOrNull
+                error = obj["error_message"]?.jsonPrimitive?.contentOrNull,
+                // G3-T13 (M3.3): live pill line — top-level on /tasks/status/{id}.
+                progressText = obj["progress_text"]?.jsonPrimitive?.contentOrNull
             )
         }
     }
@@ -66,5 +71,15 @@ class TaskRepository(private val api: BlackBoxApi) {
      */
     suspend fun cancelAll(): String {
         return api.post("/tasks/cancel-all", "{}")
+    }
+
+    /**
+     * Cancel ONE task (G3-T13). REAL per-task cancellation (G2-T8): the backend
+     * signals the concrete work (process-group kill for a CLI agent / cu-stop for
+     * Computer Use / cooperative flag for media) and marks the row CANCELLED.
+     * Idempotent. The status flips to `cancelled` on the next poll.
+     */
+    suspend fun cancel(taskId: String): String {
+        return api.post("/tasks/$taskId/cancel", "{}")
     }
 }
