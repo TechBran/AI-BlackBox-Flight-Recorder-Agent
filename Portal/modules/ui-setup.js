@@ -9,6 +9,7 @@
 import { $, toast, toastError } from './core-utils.js';
 import { getOperator } from './state-management.js';
 import { loadTimelineData, showTimelineDetail } from './timeline-browser.js';
+import { taskTypeMeta, isAgentTaskType, canShowLiveView, truncateText } from './task-ui.js';
 
 // =============================================================================
 // State
@@ -489,8 +490,15 @@ function startTaskPolling() {
 }
 
 /**
- * Update task monitor UI with current tasks
- * @param {Array} tasks - Task list from server
+ * Update task monitor UI with current tasks.
+ *
+ * T12: reconciles the panel INCREMENTALLY (create/update/remove nodes keyed by
+ * task_id) instead of blowing away innerHTML every 2s. That is load-bearing —
+ * a full re-render would collapse an expanded pill and reset a half-armed STOP
+ * button on every poll. It is also XSS-safe: every agent/model-derived string
+ * (prompt, progress_text) is written via textContent, never innerHTML.
+ *
+ * @param {Array} tasks - Task list from server (/tasks/list)
  */
 function updateTaskMonitor(tasks) {
     const taskMonitor = $("taskMonitor");
@@ -524,86 +532,233 @@ function updateTaskMonitor(tasks) {
     // Update task count
     taskCount.textContent = activeTasks.length;
 
-    // Show/hide monitor based on active tasks
-    if (activeTasks.length > 0) {
-        taskMonitor.classList.remove('hide');
-        // Render active tasks in panel
-        taskPanelBody.innerHTML = activeTasks.map(task => renderTaskItem(task)).join('');
-    } else {
-        // Clear panel body to remove any stale tasks
-        taskPanelBody.innerHTML = '';
-        // Hide monitor and close panel
+    if (activeTasks.length === 0) {
+        // Clear panel body to remove any stale tasks, then hide monitor + panel
+        taskPanelBody.replaceChildren();
         taskMonitor.classList.add('hide');
         const taskPanel = $("taskPanel");
-        if (taskPanel) {
-            taskPanel.classList.add('hide');
+        if (taskPanel) taskPanel.classList.add('hide');
+        return;
+    }
+
+    taskMonitor.classList.remove('hide');
+
+    // Incremental reconcile — preserves per-pill DOM state (expanded, armed STOP)
+    // across the 2s poll.
+    const existing = new Map();
+    for (const child of Array.from(taskPanelBody.children)) {
+        if (child.dataset && child.dataset.taskId) existing.set(child.dataset.taskId, child);
+    }
+
+    const seen = new Set();
+    for (const task of activeTasks) {
+        seen.add(task.task_id);
+        let node = existing.get(task.task_id);
+        if (!node) {
+            node = createTaskItem(task);
+            taskPanelBody.appendChild(node);
         }
+        updateTaskItem(node, task);
+    }
+
+    // Drop nodes for tasks that are no longer active
+    for (const [id, child] of existing) {
+        if (!seen.has(id)) child.remove();
     }
 }
 
 /**
- * Render a single task item for the task panel
- * @param {Object} task - Task object
- * @returns {string} HTML string
+ * Build a task-item DOM node once. Static structure + event handlers here;
+ * per-poll mutable content lives in updateTaskItem. Handlers read the LATEST
+ * task off `node._task` (set each poll) so a stale closure can't address the
+ * wrong device.
+ * @param {Object} task
+ * @returns {HTMLElement}
  */
-function renderTaskItem(task) {
-    const typeIcons = {
-        'image': '🎨',
-        'video': '🎬',
-        'audio': '🎵',
-        'chat': '💬',
-        'checkpoint': '💾',
-        'tts': '🔊',
-        'ssml': '🎙️'
-    };
+function createTaskItem(task) {
+    const item = document.createElement('div');
+    item.className = 'task-item';
+    item.dataset.taskId = task.task_id;
 
-    const typeNames = {
-        'image': 'Image Generation',
-        'video': 'Video Generation',
-        'audio': 'Audio Analysis',
-        'chat': 'Chat Response',
-        'checkpoint': 'Checkpoint',
-        'tts': 'Text-to-Speech',
-        'ssml': 'SSML Generation'
-    };
+    const header = document.createElement('div');
+    header.className = 'task-item-header';
+    const typeWrap = document.createElement('div');
+    typeWrap.className = 'task-type';
+    const iconEl = document.createElement('span');
+    iconEl.className = 'task-type-icon';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'task-type-name';
+    typeWrap.append(iconEl, nameEl);
+    const statusEl = document.createElement('span');
+    statusEl.className = 'task-status';
+    header.append(typeWrap, statusEl);
 
-    const icon = typeIcons[task.task_type] || '⚙️';
-    const typeName = typeNames[task.task_type] || task.task_type;
+    const descEl = document.createElement('div');
+    descEl.className = 'task-description';
+    const liveEl = document.createElement('div');
+    liveEl.className = 'task-live-line';
+    const progWrap = document.createElement('div');
+    progWrap.className = 'task-progress';
+    const progBar = document.createElement('div');
+    progBar.className = 'task-progress-bar';
+    progWrap.appendChild(progBar);
+    const timeEl = document.createElement('div');
+    timeEl.className = 'task-time';
+
+    const actions = document.createElement('div');
+    actions.className = 'task-actions';
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'task-btn task-stop-btn';
+    stopBtn.textContent = 'Stop';
+    const liveBtn = document.createElement('button');
+    liveBtn.type = 'button';
+    liveBtn.className = 'task-btn task-live-btn';
+    liveBtn.textContent = 'Live';
+    actions.append(stopBtn, liveBtn);
+
+    item.append(header, descEl, liveEl, progWrap, timeEl, actions);
+    item._refs = { iconEl, nameEl, statusEl, descEl, liveEl, progWrap, progBar, timeEl, actions, stopBtn, liveBtn };
+
+    // Click-to-expand (agent pills only) — reveals the full progress_text. Clicks
+    // on a button never toggle expansion.
+    item.addEventListener('click', (e) => {
+        if (e.target.closest('.task-btn')) return;
+        if (!item.classList.contains('task-expandable')) return;
+        item.classList.toggle('expanded');
+        renderLiveLine(item);
+    });
+
+    // STOP — inline two-click confirm (NO confirm() dialog).
+    stopBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleStopClick(item, stopBtn);
+    });
+
+    // Live — open the CU interactive viewer against the task's real device.
+    liveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const t = item._task;
+        if (t && canShowLiveView(t)) openLiveView(t);
+    });
+
+    return item;
+}
+
+/** Render the live progress line: truncated when collapsed, full when expanded. */
+function renderLiveLine(item) {
+    const { liveEl } = item._refs;
+    const t = item._task || {};
+    const full = (t.progress_text == null) ? '' : String(t.progress_text);
+    if (!full.trim()) {
+        liveEl.textContent = '';
+        liveEl.style.display = 'none';
+        return;
+    }
+    liveEl.style.display = '';
+    const expanded = item.classList.contains('expanded');
+    // textContent — progress_text is agent/model output (never innerHTML).
+    liveEl.textContent = expanded ? full.trim() : truncateText(full, 120);
+    liveEl.classList.toggle('expanded', expanded);
+}
+
+/**
+ * Update a task-item node's mutable content for the current poll.
+ * @param {HTMLElement} item
+ * @param {Object} task
+ */
+function updateTaskItem(item, task) {
+    item._task = task;
+    const r = item._refs;
+
+    const meta = taskTypeMeta(task.task_type);   // /tasks/list carries no provider
+    r.iconEl.textContent = meta.icon;
+    r.nameEl.textContent = meta.label;
+
+    r.statusEl.textContent = task.status;
+    r.statusEl.className = 'task-status ' + task.status;
+
+    // Prompt (agent/model output) → textContent, 60-char cap.
+    r.descEl.textContent = truncateText(task.prompt, 60) || 'Processing…';
+
+    // Expandable + live line: only agent (CU/CLI) tasks that actually have text.
+    const hasLive = !!(task.progress_text && String(task.progress_text).trim());
+    item.classList.toggle('task-expandable', isAgentTaskType(task.task_type) && hasLive);
+    if (!item.classList.contains('task-expandable')) item.classList.remove('expanded');
+    renderLiveLine(item);
+
+    // Progress bar (never for a terminal status).
     const progress = task.progress || 0;
-    // 'cancelled' is terminal (G2-T8): never show a progress bar for a terminal
-    // task, so a cancelled row can't read as still-working if it is ever rendered
-    // here (the active panel already filters to pending/processing).
     const isTerminal = ['completed', 'failed', 'cancelled'].includes(task.status);
+    if (progress > 0 && !isTerminal) {
+        r.progWrap.style.display = '';
+        r.progBar.style.width = progress + '%';
+    } else {
+        r.progWrap.style.display = 'none';
+    }
 
-    // Calculate elapsed time
+    // Elapsed time
     const createdAt = new Date(task.created_at);
-    const now = new Date();
-    const elapsed = Math.floor((now - createdAt) / 1000);
+    const elapsed = Math.max(0, Math.floor((Date.now() - createdAt.getTime()) / 1000));
     const timeStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+    r.timeEl.textContent = `Started ${timeStr} ago`;
 
-    // Truncate prompt for display
-    const description = task.prompt
-        ? task.prompt.substring(0, 60) + (task.prompt.length > 60 ? '...' : '')
-        : 'Processing...';
+    // Actions: STOP on any active pill; Live only on a processing CU pill with a device.
+    const active = task.status === 'pending' || task.status === 'processing';
+    const showLive = task.status === 'processing' && canShowLiveView(task);
+    r.stopBtn.style.display = active ? '' : 'none';
+    r.liveBtn.style.display = showLive ? '' : 'none';
+    r.actions.style.display = (active || showLive) ? '' : 'none';
+}
 
-    return `
-        <div class="task-item" data-task-id="${task.task_id}">
-            <div class="task-item-header">
-                <div class="task-type">
-                    <span class="task-type-icon">${icon}</span>
-                    <span>${typeName}</span>
-                </div>
-                <span class="task-status ${task.status}">${task.status}</span>
-            </div>
-            <div class="task-description">${description}</div>
-            ${progress > 0 && !isTerminal ? `
-                <div class="task-progress">
-                    <div class="task-progress-bar" style="width: ${progress}%"></div>
-                </div>
-            ` : ''}
-            <div class="task-time">Started ${timeStr} ago</div>
-        </div>
-    `;
+/**
+ * Inline STOP confirmation (no confirm() dialog). First click arms the button
+ * ("Sure?"), a second click within 3s fires POST /tasks/{id}/cancel; the next
+ * poll reflects the cancelled status and drops the pill.
+ */
+function handleStopClick(item, btn) {
+    const t = item._task;
+    if (!t) return;
+
+    if (btn.dataset.armed === '1') {
+        if (btn._disarmTimer) { clearTimeout(btn._disarmTimer); btn._disarmTimer = null; }
+        btn.dataset.armed = '';
+        btn.classList.remove('armed');
+        btn.textContent = 'Stopping…';
+        btn.disabled = true;
+        cancelTaskById(t.task_id);
+        return;
+    }
+
+    btn.dataset.armed = '1';
+    btn.classList.add('armed');
+    btn.textContent = 'Sure?';
+    btn._disarmTimer = setTimeout(() => {
+        btn.dataset.armed = '';
+        btn.classList.remove('armed');
+        btn.textContent = 'Stop';
+        btn._disarmTimer = null;
+    }, 3000);
+}
+
+/** POST the per-task cancel (T8). Next poll reflects the terminal status. */
+async function cancelTaskById(taskId) {
+    try {
+        await fetch(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+    } catch (e) {
+        console.error('[TaskMonitor] cancel failed:', e);
+        toastError('Failed to stop task');
+    }
+}
+
+/** Open the CU interactive viewer addressed at the task's real device (T11 device_id). */
+async function openLiveView(task) {
+    try {
+        const cuInteract = await import('./cu-interact.js');
+        cuInteract.open(undefined, task.device_id);
+    } catch (e) {
+        console.error('[TaskMonitor] failed to open CU live view:', e);
+    }
 }
 
 // Stop polling when page unloads

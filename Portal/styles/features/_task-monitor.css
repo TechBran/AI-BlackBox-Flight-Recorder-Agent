@@ -234,3 +234,114 @@
     margin-bottom: 12px;
     opacity: 0.3;
 }
+
+/* --- T12: live progress line, expandable pills, STOP / Live buttons --- */
+
+/* Latest agent step (progress_text). Collapsed = single ellipsized line;
+   expanded = wraps to full text. Renders nothing when empty (display:none set
+   inline by the JS). */
+.task-live-line {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.9;
+}
+
+.task-live-line.expanded {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+/* Agent (CU/CLI) pills are clickable to expand. */
+.task-item.task-expandable {
+    cursor: pointer;
+}
+
+.task-item.task-expandable:hover {
+    border-color: #1e40af;
+}
+
+.task-item.expanded {
+    border-color: #1e40af;
+}
+
+/* Action buttons row (STOP / Live). */
+.task-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.task-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--neutral-300);
+    background: var(--neutral-200);
+    color: var(--text);
+    cursor: pointer;
+    transition: all var(--transition-base);
+}
+
+.task-btn:hover {
+    filter: brightness(1.15);
+}
+
+.task-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.task-stop-btn {
+    border-color: rgba(244, 67, 54, 0.5);
+    color: #f44336;
+}
+
+.task-stop-btn.armed {
+    background: rgba(244, 67, 54, 0.9);
+    border-color: #f44336;
+    color: #fff;
+}
+
+.task-live-btn {
+    border-color: rgba(33, 150, 243, 0.5);
+    color: #2196f3;
+}
+
+/* --- T12: in-chat generic agent result bubble (CLI agent / unknown) --- */
+.agent-result {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.agent-result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.agent-result-exit {
+    font-size: 0.8rem;
+    opacity: 0.75;
+}
+
+.agent-result-body {
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--neutral-200);
+    border-radius: var(--radius-lg);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 320px;
+    overflow-y: auto;
+}

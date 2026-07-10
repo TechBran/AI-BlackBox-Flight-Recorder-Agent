@@ -18,8 +18,15 @@ const DISPLAY_HEIGHT = 720;   // fallback default — live value fetched from /b
 let displayW = DISPLAY_WIDTH;
 let displayH = DISPLAY_HEIGHT;
 
+// T12: device override passed by the top-bar "Live" button so the viewer polls
+// and drives the RIGHT device (the task's device_id from /tasks/list) instead of
+// the drawer's persisted selection. Null when opened without an override — then
+// we fall back to the drawer selection, then 'blackbox'. Cleared on close so a
+// later plain open() resumes the drawer selection.
+let _activeDeviceId = null;
+
 /** Get device_id for interactive action requests. */
-function _getDeviceId() { return getCUDeviceId() || 'blackbox'; }
+function _getDeviceId() { return _activeDeviceId || getCUDeviceId() || 'blackbox'; }
 
 /**
  * Fetch the live CU display resolution from /browser/status (fire-and-forget).
@@ -129,8 +136,11 @@ function createModal() {
     return modal;
 }
 
-export function open(initialScreenshotUrl) {
+export function open(initialScreenshotUrl, deviceId) {
     createModal();
+    // T12: optional device override (backward compatible — existing open(url)
+    // calls pass no deviceId and keep using the drawer selection).
+    if (deviceId) _activeDeviceId = deviceId;
     modal.classList.add('open');
     isOpen = true;
 
@@ -150,6 +160,7 @@ export function open(initialScreenshotUrl) {
 export function close() {
     if (!isOpen) return;
     isOpen = false;
+    _activeDeviceId = null;   // T12: drop the override so a later open() resumes the drawer device
     modal.classList.remove('open');
 
     if (pollingInterval) {

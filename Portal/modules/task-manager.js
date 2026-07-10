@@ -10,6 +10,7 @@
 import { $, toast } from './core-utils.js';
 import { getOperator } from './state-management.js';
 import { notifyTaskComplete } from './notifications.js';
+import { taskTypeMeta, isAgentTaskType, truncateText } from './task-ui.js';
 
 // =============================================================================
 // TaskManager Class
@@ -120,13 +121,16 @@ export class TaskManager {
         this.saveActiveTasks();
         this.showTaskNotification(taskId, type, 'queued', 0, null, taskOperator);
 
-        // Show placeholder in chat for image/video/music generation
+        // Show placeholder in chat for image/video/music generation, and — T12 —
+        // for Computer Use / CLI coding-agent tasks (previously got NO pill at all).
         if (type === 'image_generation') {
             showImagePlaceholder(taskId, prompt, count);
         } else if (type === 'video_generation') {
             showVideoPlaceholder(taskId, prompt, videoOptions);
         } else if (type === 'lyria_music') {
             showMusicPlaceholder(taskId, prompt, count);
+        } else if (isAgentTaskType(type)) {
+            showAgentPlaceholder(taskId, type, prompt);
         }
     }
 
@@ -266,6 +270,16 @@ export class TaskManager {
                     this.displayAudioResult(status.result_url, status.task_type, taskId);
                 } else if ((status.task_type === 'browser_use' || status.task_type === 'use_computer') && status.result_data) {
                     this.displayBrowserResult(status.result_data, taskId);
+                } else if (status.task_type === 'gemini_cu' && status.result_data) {
+                    // Gemini Computer Use produces the same screenshot/summary shape.
+                    this.displayBrowserResult(status.result_data, taskId);
+                } else if (status.task_type === 'cli_agent') {
+                    // CLI coding agent — stdout is untrusted; rendered textContent-safe.
+                    this.displayAgentResult(status, taskId);
+                } else {
+                    // T12 final else: any other/unknown completed task renders a sane,
+                    // XSS-safe generic result instead of silently nothing.
+                    this.displayAgentResult(status, taskId);
                 }
             } else {
                 console.log(`[TaskManager] Skipping result display for task ${taskId} - belongs to ${taskOperator}, current is ${currentOperator}`);
@@ -303,6 +317,15 @@ export class TaskManager {
         if (progressEl) {
             progressEl.textContent = `${status.progress}%`;
             progressEl.style.width = `${status.progress}%`;
+        }
+        // T12: live narration line. progress_text is agent/model output → rendered
+        // via textContent, NEVER innerHTML. Absent/empty (old rows, media tasks)
+        // renders nothing. The element only exists on agent placeholders.
+        const liveEl = document.getElementById(`task-progress-text-${taskId}`);
+        if (liveEl) {
+            const line = truncateText(status.progress_text, 140);
+            liveEl.textContent = line;
+            liveEl.style.display = line ? '' : 'none';
         }
     }
 
@@ -613,6 +636,65 @@ export class TaskManager {
             this.addBubble("assistant", html, { isHTML: true });
         }
     }
+
+    /**
+     * Display a generic agent (CLI coding agent / unknown) completion result.
+     * result_text is UNTRUSTED agent stdout (a CLI agent can emit <script> in
+     * its tail) — it is rendered via textContent, NEVER innerHTML. Replaces the
+     * in-chat placeholder if present, else appends a new bubble.
+     * @param {Object} status - Full task status (/tasks/status/{id})
+     * @param {string} taskId
+     */
+    displayAgentResult(status, taskId = null) {
+        const rd = status.result_data || {};
+        const meta = taskTypeMeta(status.task_type, rd.provider);
+        const resultText = (rd.result_text != null ? String(rd.result_text) : '').trim()
+            || `${meta.label} completed.`;
+
+        // Build the result DOM entirely with textContent (XSS-safe).
+        const container = document.createElement('div');
+        container.className = 'agent-result';
+
+        const header = document.createElement('div');
+        header.className = 'agent-result-header';
+        const badge = document.createElement('span');
+        badge.className = 'agent-result-badge';
+        badge.textContent = `${meta.icon} ${meta.label}`;
+        header.appendChild(badge);
+        if (rd.exit_code !== undefined && rd.exit_code !== null) {
+            const ec = document.createElement('span');
+            ec.className = 'agent-result-exit';
+            ec.textContent = `exit ${rd.exit_code}`;
+            header.appendChild(ec);
+        }
+
+        const body = document.createElement('pre');
+        body.className = 'agent-result-body';
+        body.textContent = resultText;   // <-- load-bearing: NEVER innerHTML
+
+        container.append(header, body);
+
+        // Replace the placeholder bubble if we made one (showAgentPlaceholder).
+        if (taskId) {
+            const placeholder = document.querySelector(`.bubble[data-task-id="${taskId}"]`);
+            if (placeholder) {
+                placeholder.classList.remove('generating-agent');
+                const bt = placeholder.querySelector('.bubble-text');
+                if (bt) {
+                    bt.style.cssText = '';
+                    bt.replaceChildren(container);
+                    return;
+                }
+            }
+        }
+
+        // Fallback: no placeholder — append a fresh bubble and inject the safe DOM.
+        if (this.addBubble) {
+            const bubble = this.addBubble('assistant', '');
+            const bt = bubble && bubble.querySelector('.bubble-text');
+            if (bt) bt.replaceChildren(container);
+        }
+    }
 }
 
 // =============================================================================
@@ -917,6 +999,56 @@ function showMusicPlaceholder(taskId, prompt, sampleCount = 1) {
     hist.appendChild(wrap);
 
     // Scroll to bottom
+    hist.scrollTop = hist.scrollHeight;
+}
+
+/**
+ * Show a placeholder pill in chat for a Computer Use / CLI coding-agent task
+ * (T12). Carries a `.task-live-line` (#task-progress-text-<taskId>) that
+ * updateTaskProgress fills from the task's progress_text on each poll. All
+ * dynamic text is set via textContent (label is a constant; progress_text is
+ * agent output filled later).
+ * @param {string} taskId
+ * @param {string} type - task_type (use_computer / cli_agent / ...)
+ * @param {string} prompt
+ */
+function showAgentPlaceholder(taskId, type, prompt) {
+    const hist = document.getElementById('history');
+    if (!hist) return;
+
+    const meta = taskTypeMeta(type);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble assistant generating-agent';
+    wrap.dataset.taskId = taskId;
+    if (prompt) wrap.title = String(prompt);   // full prompt on hover (attribute, not rendered as HTML)
+
+    const span = document.createElement('span');
+    span.className = 'bubble-text';
+    span.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+
+    const headline = document.createElement('span');
+    headline.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;';
+    const icon = document.createElement('span');
+    icon.textContent = meta.icon;
+    icon.style.cssText = 'font-size:18px;';
+    const label = document.createElement('span');
+    label.textContent = meta.label;   // textContent — safe
+    const dots = document.createElement('span');
+    dots.className = 'thinking-dots';
+    dots.innerHTML = '<span></span><span></span><span></span>';   // static markup
+    headline.append(icon, label, dots);
+
+    // Live narration line — starts empty; filled by updateTaskProgress.
+    const live = document.createElement('span');
+    live.className = 'task-live-line';
+    live.id = `task-progress-text-${taskId}`;
+    live.style.cssText = 'font-size:12px;color:#888;display:none;';
+
+    span.append(headline, live);
+    wrap.appendChild(span);
+    hist.appendChild(wrap);
+
     hist.scrollTop = hist.scrollHeight;
 }
 
