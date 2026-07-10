@@ -59,7 +59,11 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
             t for t in all_tasks
             if t.status in ['pending', 'processing']  # Always show active
             or (
-                t.status in ['completed', 'failed']  # Show recent completed
+                # Show recently-ended tasks. 'cancelled' is terminal like
+                # completed/failed (G2-T8) — without it a just-cancelled task
+                # would appear in NEITHER branch and the pill would vanish
+                # instantly, which is exactly the "UI lies" bug T8 kills.
+                t.status in ['completed', 'failed', 'cancelled']
                 and t.updated_at  # Has update timestamp
                 and datetime.fromisoformat(t.updated_at.replace('Z', '+00:00')) > cutoff_time
             )
@@ -101,16 +105,26 @@ def get_task_status(task_id: str):
         "error_message": task.error_message
     }
 
+@app.post("/tasks/{task_id}/cancel")
+def cancel_one_task(task_id: str):
+    """REAL per-task cancellation (G2-T8). Idempotent. Signals the concrete work
+    (process-group kill for a CLI agent / cu-stop for Computer Use / cooperative
+    flag for media) and marks the row CANCELLED (sticky). Returns a dict the UI
+    can render. 404 only for a task that does not exist."""
+    from Orchestrator.tasks import cancel_task
+    res = cancel_task(task_id)
+    if res.get("not_found"):
+        raise HTTPException(status_code=404, detail="Task not found")
+    return res
+
+
 @app.post("/tasks/cancel-all")
 def cancel_all_stuck_tasks():
-    """Cancel all pending/processing tasks by marking them as failed."""
-    all_tasks = task_db.get_all_tasks()
-    cancelled = 0
-    for t in all_tasks:
-        if t.status in (TaskStatus.PENDING, TaskStatus.PROCESSING):
-            update_task(t.task_id, status=TaskStatus.FAILED, error_message="Manually cancelled by operator")
-            cancelled += 1
-    return {"cancelled": cancelled}
+    """Cancel all pending/processing tasks. Post-T8 this loops the REAL per-task
+    cancel path (signals processes/CU, marks CANCELLED — no longer a cosmetic
+    flip to FAILED). Keeps the stuck-task-reaper behavior for handle-less rows."""
+    from Orchestrator.tasks import cancel_all_tasks
+    return cancel_all_tasks()
 
 # -----------------------------------------------------------------------------
 # Recent Snapshots (chronological, newest-first — for Android Timeline)

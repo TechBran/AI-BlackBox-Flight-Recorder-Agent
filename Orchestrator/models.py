@@ -196,6 +196,9 @@ class TaskStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"  # operator-initiated real cancel (G2-T8). DISTINCT
+    # from FAILED: a cancelled agent must NOT render as a crash. The `status`
+    # column is TEXT with no CHECK constraint, so adding this member is DB-safe.
 
 class TaskType(str, Enum):
     IMAGE_GENERATION = "image_generation"
@@ -286,6 +289,16 @@ class TaskDatabase:
         conn.close()
     
     def save_task(self, task: Task):
+        # CANCELLED is terminal-sticky at the DB layer (G2-T8). update_task guards
+        # the worker path, but some writers persist status via save_task DIRECTLY
+        # (e.g. gemini_cu_routes._run_task). Once an operator cancels a task, no
+        # later whole-row write may resurrect it to completed/failed — that is the
+        # "UI lies" bug T8 kills. Only reads when the incoming status is not
+        # already CANCELLED, and only forces on an actual regression.
+        if task.status != TaskStatus.CANCELLED:
+            existing = self.get_task(task.task_id)
+            if existing is not None and existing.status == TaskStatus.CANCELLED:
+                task.status = TaskStatus.CANCELLED
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("""

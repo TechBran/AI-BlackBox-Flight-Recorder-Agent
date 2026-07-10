@@ -52,7 +52,11 @@ class TaskRepository(private val api: BlackBoxApi) {
         while (true) {
             val status = getTaskStatus(taskId)
             emit(status)
-            if (status.status.equals("completed", true) || status.status.equals("failed", true)) break
+            // 'cancelled' is TERMINAL alongside completed/failed (G2-T8) — without
+            // it this flow emits forever and the task never resolves in the UI.
+            if (status.status.equals("completed", true)
+                || status.status.equals("failed", true)
+                || status.status.equals("cancelled", true)) break
             delay(intervalMs)
         }
     }

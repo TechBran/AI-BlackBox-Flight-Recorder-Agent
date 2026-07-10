@@ -199,7 +199,11 @@ export class TaskManager {
                 const status = await this.checkTaskStatus(taskId);
                 console.log('[DEBUG] Task status:', status.status);
 
-                if (status.status === 'completed' || status.status === 'failed') {
+                // 'cancelled' is TERMINAL alongside completed/failed (G2-T8).
+                // Without it a cancelled task never stops polling and the pill
+                // renders "processing forever" — the "UI lies" bug T8 kills.
+                if (status.status === 'completed' || status.status === 'failed'
+                    || status.status === 'cancelled') {
                     console.log('[DEBUG] Task finished, calling handleTaskComplete');
                     this.handleTaskComplete(taskId, status);
                     this.removeTask(taskId);
@@ -275,6 +279,11 @@ export class TaskManager {
 
             const taskTypeName = status.task_type.replace(/_/g, ' ');
             notifyTaskComplete(taskTypeName, false, taskOperator);
+        } else if (status.status === 'cancelled') {
+            // A cancel is operator-initiated — NOT a crash. Neutral toast; do
+            // NOT fire notifyTaskComplete(false) (that would render the thing
+            // the operator just stopped as an error/failure). G2-T8.
+            this.showTaskNotification(taskId, status.task_type, 'cancelled', 0, null, taskOperator);
         }
     }
 
@@ -323,9 +332,11 @@ export class TaskManager {
             message = `${typeName} completed!`;
         } else if (status === 'failed') {
             message = `${typeName} failed: ${error || 'Unknown error'}`;
+        } else if (status === 'cancelled') {
+            message = `${typeName} cancelled`;   // operator-initiated, not a crash
         }
 
-        toast(message);
+        if (message) toast(message);
     }
 
     /**

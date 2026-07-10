@@ -7548,28 +7548,38 @@ async def chat_save(request: Request):
 # -----------------------------------------------------------------------------
 # Computer Use Background Status
 # -----------------------------------------------------------------------------
+def resolve_cu_session(operator: str, session_id: str = "", model: str = ""):
+    """Shared CU session resolver for /chat/cu-status, /chat/cu-stop, and task
+    cancellation (tasks.cancel_task routes CU cancels through this).
+
+    Routes the backend decision through ``resolve_backend`` — it must NEVER
+    string-sniff model ids (test_cu_catalog.py:269 pins this). Anthropic AND
+    OpenAI share the browser session manager; Google uses the gemini one. Returns
+    the resolved ComputerUseSession/GeminiCUSession, or None. ``session_id`` is
+    honored by the browser lookup; empty falls back to the operator's session."""
+    session = None
+    if model and resolve_backend(model) == "google":
+        from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
+        session = gemini_get_session(operator)
+    if not session:
+        from Orchestrator.browser.session_manager import get_session as browser_get_session
+        session = browser_get_session(operator, session_id)
+    if not session:
+        try:
+            from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
+            session = gemini_get_session(operator)
+        except Exception:
+            pass
+    return session
+
+
 @app.get("/chat/cu-status")
 async def cu_status(request: Request):
     """Return the status of the current Computer Use background task."""
     operator = request.query_params.get("operator", current_default())
     cu_model = request.query_params.get("model", "")
 
-    session = None
-    if cu_model and resolve_backend(cu_model) == "google":
-        from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
-        session = gemini_get_session(operator)
-    if not session:
-        # Anthropic AND OpenAI share the browser session manager, so
-        # status works for both automatically.
-        from Orchestrator.browser.session_manager import get_operator_session
-        session = get_operator_session(operator)
-    if not session:
-        # Try Gemini as fallback
-        try:
-            from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
-            session = gemini_get_session(operator)
-        except Exception:
-            pass
+    session = resolve_cu_session(operator, "", cu_model)
     if not session:
         return {"status": "idle", "step": 0, "total": 0}
 
@@ -7595,22 +7605,7 @@ async def cu_stop(request: Request):
     session_id = body.get("session_id", "")
     cu_model = body.get("model", "")
 
-    session = None
-    if cu_model and resolve_backend(cu_model) == "google":
-        from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
-        session = gemini_get_session(operator)
-    if not session:
-        # Anthropic AND OpenAI share the browser session manager, so
-        # stop works for both automatically.
-        from Orchestrator.browser.session_manager import get_session
-        session = get_session(operator, session_id)
-    if not session:
-        # Try Gemini as fallback
-        try:
-            from Orchestrator.gemini_cu.session_manager import get_session as gemini_get_session
-            session = gemini_get_session(operator)
-        except Exception:
-            pass
+    session = resolve_cu_session(operator, session_id, cu_model)
 
     if not session or session.status != "running":
         return {"success": False, "error": "No running CU task"}

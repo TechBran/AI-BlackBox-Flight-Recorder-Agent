@@ -15,6 +15,9 @@ Original SHA-256: 902790a0b252457803f6617120cd974c32e4a5fb3b1e470a4fcae81ef56ef5
 import asyncio
 import base64
 import json
+import os
+import signal
+import threading
 import uuid
 import queue
 import time
@@ -97,6 +100,200 @@ def generate_prompt_slug(prompt: str, max_length: int = 30) -> str:
     slug = slug.rstrip('-')
 
     return slug if slug else 'media'
+
+
+# =============================================================================
+# Real task cancellation (G2-T8 / M2.0) — the safety gate that must land before
+# any YOLO CLI-agent tool is registered on any surface.
+#
+# The pre-T8 /tasks/cancel-all was cosmetic: it flipped DB rows to FAILED and
+# never signalled the worker or touched a process. Harmless for a stuck image
+# poll; ACTIVELY DANGEROUS for a YOLO CLI agent (the pill vanishes from the UI
+# while the process keeps running with full filesystem access).
+#
+# The registry maps task_id -> a handle describing HOW to stop the real work.
+# Three handle kinds:
+#   * "process"     — a CLI agent (T9) spawned with start_new_session=True (its
+#                     own process group). Cancel = os.killpg(pgid, SIGTERM) then
+#                     SIGKILL after a grace period. PROCESS-GROUP kill is what
+#                     makes the agent's CHILDREN die too, not just the parent.
+#   * "cu"          — a Computer Use task. Delegates to the existing cu-stop
+#                     mechanism (resolve the per-operator session, request_stop);
+#                     the display claim is released by the launch site's
+#                     done-callback / headless `finally: release_claim`.
+#   * (cooperative) — everything else (image/video/tts/music/chat/checkpoint):
+#                     no OS handle. A cooperative flag the provider poll loops
+#                     check via raise_if_cancelled(); correctness of the FINAL
+#                     status comes from CANCELLED being sticky in update_task.
+#
+# A handle-less row is ALWAYS still cancellable (marks CANCELLED) — that is the
+# stuck-task-reaper behavior the old cancel-all had, preserved.
+# =============================================================================
+_cancel_lock = threading.Lock()
+_cancel_handles: Dict[str, Dict[str, Any]] = {}   # task_id -> {"kind": ..., ...}
+_cancel_requested: set = set()                    # task_ids with a pending cancel
+
+
+class TaskCancelled(Exception):
+    """Raised by raise_if_cancelled() at a cooperative check point so process_task
+    lands the task in CANCELLED (never FAILED)."""
+
+
+def register_cancel_handle(task_id: str, kind: str, **fields) -> None:
+    """Register how to stop a task's real work. Called by the launch site
+    (process_browser_use for CU; the T9 CLI-agent spawner for processes)."""
+    with _cancel_lock:
+        _cancel_handles[task_id] = {"kind": kind, **fields}
+
+
+def unregister_cancel_handle(task_id: str) -> None:
+    with _cancel_lock:
+        _cancel_handles.pop(task_id, None)
+
+
+def request_cooperative_cancel(task_id: str) -> None:
+    with _cancel_lock:
+        _cancel_requested.add(task_id)
+
+
+def is_cancel_requested(task_id: str) -> bool:
+    with _cancel_lock:
+        return task_id in _cancel_requested
+
+
+def clear_cancel_request(task_id: str) -> None:
+    with _cancel_lock:
+        _cancel_requested.discard(task_id)
+
+
+def raise_if_cancelled(task_id: str) -> None:
+    """Cooperative check point for the poll loops (video etc.) and process_task
+    entry. Raises TaskCancelled if the operator requested cancellation."""
+    if is_cancel_requested(task_id):
+        raise TaskCancelled(task_id)
+
+
+_CANCEL_GRACE_SECONDS = 2.0  # SIGTERM -> (grace) -> SIGKILL for a process group
+
+
+def _kill_process_group(pid: int, task_id: str = "") -> None:
+    """SIGTERM the process GROUP, wait a short grace, then SIGKILL if still
+    alive. Group (not bare-pid) kill is what reaps the agent's children too."""
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return  # already gone / unknowable
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as e:
+        print(f"[CANCEL] SIGTERM pgroup {pgid} (task {task_id}) failed: {e}")
+    deadline = time.monotonic() + _CANCEL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)          # probe — raises when the group is gone
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        print(f"[CANCEL] SIGKILL pgroup {pgid} (task {task_id}) after grace")
+    except ProcessLookupError:
+        pass
+    except OSError as e:
+        print(f"[CANCEL] SIGKILL pgroup {pgid} (task {task_id}) failed: {e}")
+
+
+def _signal_cu_cancel(operator: str, session_id: str = "", model: str = "") -> bool:
+    """Route a CU cancel into the existing cu-stop mechanism — resolve the
+    per-operator session (via the SAME resolver cu-stop uses; no string-sniffing)
+    and request_stop(). request_stop sets the cooperative stop flag AND cancels
+    agent_task; the display claim is then released by the launch site's
+    done-callback / headless `finally: release_claim`. Returns True if a session
+    was found and asked to stop."""
+    try:
+        from Orchestrator.routes.chat_routes import resolve_cu_session
+    except Exception as e:  # pragma: no cover — import wiring
+        print(f"[CANCEL] could not import resolve_cu_session: {e}")
+        return False
+    session = resolve_cu_session(operator or "", session_id, model)
+    if session is None:
+        return False
+    try:
+        session.request_stop()
+        print(f"[CANCEL] CU stop requested for operator={operator!r} "
+              f"session={getattr(session, 'session_id', '?')[:8]}")
+        return True
+    except Exception as e:  # pragma: no cover — defensive
+        print(f"[CANCEL] request_stop failed for {operator!r}: {e}")
+        return False
+
+
+_CU_TASK_TYPES = (TaskType.BROWSER_USE, TaskType.USE_COMPUTER, TaskType.GEMINI_CU)
+
+
+def cancel_task(task_id: str) -> Dict[str, Any]:
+    """Cancel ONE task. Idempotent; marks CANCELLED; returns a UI-renderable dict.
+
+    Flow: set the cooperative flag (so a running poll loop / mint path sees it),
+    signal the concrete handle if one exists (process-group kill / CU stop), and
+    mark the row CANCELLED. CANCELLED is sticky in update_task, so an in-flight
+    worker completion can no longer flip it back to completed/failed.
+    """
+    task = task_db.get_task(task_id)
+    if task is None:
+        return {"task_id": task_id, "cancelled": False, "status": None,
+                "not_found": True, "detail": "task not found"}
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+        # Idempotent: already terminal. Report whether it ended cancelled.
+        return {"task_id": task_id,
+                "cancelled": task.status == TaskStatus.CANCELLED,
+                "status": task.status.value,
+                "already_terminal": True,
+                "detail": f"already {task.status.value}"}
+
+    request_cooperative_cancel(task_id)
+
+    with _cancel_lock:
+        handle = _cancel_handles.get(task_id)
+
+    detail = "cooperative"
+    if handle and handle.get("kind") == "process":
+        _kill_process_group(handle.get("pid"), task_id)
+        detail = "process-group-kill"
+    elif handle and handle.get("kind") == "cu":
+        _signal_cu_cancel(handle.get("operator", task.operator or ""),
+                          handle.get("session_id", ""), handle.get("model", ""))
+        detail = "cu-stop"
+    elif task.task_type in _CU_TASK_TYPES:
+        # No registered handle but a CU-shaped row (e.g. a GEMINI_CU task, which
+        # runs in gemini_cu_routes not the worker): route by operator into the
+        # cu-stop session lookup. model hint (if any) picks the right backend.
+        model_hint = ""
+        if isinstance(task.result_data, dict):
+            model_hint = task.result_data.get("model", "") or ""
+        _signal_cu_cancel(task.operator or "", "", model_hint)
+        detail = "cu-stop"
+
+    update_task(task_id, status=TaskStatus.CANCELLED,
+                error_message="Cancelled by operator", progress=0)
+    return {"task_id": task_id, "cancelled": True, "status": "cancelled",
+            "detail": detail}
+
+
+def cancel_all_tasks() -> Dict[str, Any]:
+    """Cancel every pending/processing task via the per-task path. Now marks
+    CANCELLED (was FAILED pre-T8). Keeps the stuck-task-reaper behavior for
+    handle-less rows."""
+    cancelled = 0
+    for t in task_db.get_all_tasks():
+        if t.status in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+            res = cancel_task(t.task_id)
+            if res.get("cancelled"):
+                cancelled += 1
+    return {"cancelled": cancelled}
 
 
 def create_task(task_type: TaskType, operator: Optional[str] = None, **kwargs) -> Task:
@@ -244,6 +441,9 @@ def _emit_task_notification(task, new_status) -> None:
     whole body is wrapped so a notify failure NEVER breaks update_task's DB write.
     """
     try:
+        # Only COMPLETED / FAILED fire. CANCELLED is deliberately EXCLUDED
+        # (G2-T8): a cancel is operator-initiated, so pushing them a notice about
+        # the thing they just stopped is noise. PROCESSING / progress are noise.
         if new_status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
             return
         operator = task.operator
@@ -279,6 +479,14 @@ def _emit_task_notification(task, new_status) -> None:
 def update_task(task_id: str, **kwargs):
     task = task_db.get_task(task_id)
     if task:
+        # CANCELLED is STICKY / terminal (G2-T8). Once an operator cancels a
+        # task, an in-flight worker completion must NOT flip it back to
+        # completed/failed — that is the "the UI lies" bug T8 exists to kill
+        # (a killed YOLO agent must not later render as a success). Drop only
+        # the status regression; other field writes (result_url, etc.) pass.
+        if (task.status == TaskStatus.CANCELLED
+                and kwargs.get("status") not in (None, TaskStatus.CANCELLED)):
+            kwargs.pop("status", None)
         task.updated_at = now_utc_iso()
         for key, value in kwargs.items():
             if hasattr(task, key):
@@ -342,6 +550,9 @@ def process_task(task: Task):
     """Process a single task based on its type"""
     try:
         update_task(task.task_id, status=TaskStatus.PROCESSING, progress=10)
+        # A task cancelled while queued (PENDING) never runs; one cancelled at
+        # the PROCESSING boundary short-circuits here before doing any work.
+        raise_if_cancelled(task.task_id)
 
         if task.task_type == TaskType.IMAGE_GENERATION:
             process_image_generation(task)
@@ -368,14 +579,26 @@ def process_task(task: Task):
             print(f"[WORKER] Skipping GEMINI_CU task {task.task_id} (handled by async route)")
             return
 
+    except TaskCancelled:
+        # Cooperative cancel fired at a check point. cancel_task already marked
+        # the row CANCELLED (and it is sticky), so there is nothing to write —
+        # just do NOT fall through to the FAILED handler.
+        print(f"[WORKER] Task {task.task_id} cancelled by operator")
     except Exception as e:
         print(f"[WORKER] Task {task.task_id} failed: {e}")
         import traceback
         traceback.print_exc()
+        # If a cancel was requested, the sticky CANCELLED status wins over this
+        # FAILED write anyway; keep it explicit so the intent is readable.
         update_task(task.task_id,
                    status=TaskStatus.FAILED,
                    error_message=str(e),
                    progress=0)
+    finally:
+        # Release cancellation bookkeeping for this run. (A task cancelled while
+        # still PENDING never reaches here; its flag lingers harmlessly.)
+        unregister_cancel_handle(task.task_id)
+        clear_cancel_request(task.task_id)
 
 def _default_image_provider() -> str:
     """Resolve the default image provider from env (IMAGE_DEFAULT), falling back
@@ -721,7 +944,11 @@ def process_video_generation(task: Task):
     while attempt < max_attempts:
         time.sleep(10)  # Poll every 10 seconds
         attempt += 1
-        
+
+        # Cooperative cancel check point (G2-T8): the 10s poll loop is the
+        # natural place to abort a long video generation before download.
+        raise_if_cancelled(task.task_id)
+
         # Update progress gradually
         progress = min(30 + (attempt * 0.5), 80)
         update_task(task.task_id, progress=int(progress))
@@ -1204,6 +1431,13 @@ def process_browser_use(task: Task):
         url = task_rd.get("url")
         operator = task.operator or "system"
 
+        # Register a CU cancel handle so /tasks/{id}/cancel routes into the
+        # cu-stop mechanism (resolve the per-operator session + request_stop).
+        # The display claim is released by run_cu_task's `finally: release_claim`
+        # and/or the driver task's done-callback — cancel does not touch it.
+        register_cancel_handle(task.task_id, "cu", operator=operator,
+                               model=task_rd.get("model") or "")
+
         update_task(task.task_id, progress=30)
 
         # Run the async headless runner in a new event loop (worker thread)
@@ -1221,6 +1455,17 @@ def process_browser_use(task: Task):
                 timeout=SESSION_TIMEOUT + 30
             )
         )
+
+        # MINT HYGIENE (G2-T8): if the operator cancelled this task, land it in
+        # CANCELLED and RETURN BEFORE the success path — so a killed YOLO agent's
+        # partial stdout NEVER enters the immutable ledger via /chat/save
+        # (precedent: the Android error-mint bug). The display claim is already
+        # released by run_cu_task's finally; here we only fix the DB + skip mint.
+        if is_cancel_requested(task.task_id):
+            update_task(task.task_id, status=TaskStatus.CANCELLED,
+                        error_message="Cancelled by operator", progress=0)
+            print(f"[WORKER] CU task {task.task_id} cancelled — skipping auto-snapshot")
+            return
 
         update_task(task.task_id, progress=90)
 

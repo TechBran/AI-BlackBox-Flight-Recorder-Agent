@@ -56,13 +56,31 @@ None for it and prune falls to the TTL branch — it therefore keeps a residual
 relied on there.
 
 FAIL-CLOSED, BY DESIGN. If a driver HANGS after ``status == "running"``, its
-claim is held indefinitely: prune never reclaims a ``running`` session, and the
-TTL only fires once the session is gone. This is intended — never hand agent B
-the mouse while agent A's driver is wedged mid-action. Caveat: ``/chat/cu-stop``
-is COOPERATIVE (it sets ``stop_requested``; it does not ``task.cancel()``), so a
-driver wedged before its next stop-check is freed only by a process restart. A
-hard cancel backstop is deliberately NOT added here — that is a behavior change
-for its own task.
+claim is held: prune never reclaims a ``running`` session, and the TTL only fires
+once the session is gone. This is intended — never hand agent B the mouse while
+agent A's driver is wedged mid-action.
+
+HOW THE CLAIM IS RELEASED ON E-STOP (corrected G2-T8 — the prior text here was
+WRONG and was the source of the error, not a record of it: it claimed cu-stop
+"does not task.cancel()"; it always has). ``/chat/cu-stop`` →
+``session.request_stop()`` sets the cooperative ``stop_requested`` flag (the
+driver honors it at its next loop-top — the fast path for a driver between
+actions) AND cancels ``agent_task``. A driver wedged in an ``await`` raises
+``CancelledError`` at that await point, the task COMPLETES, and the launch-site
+``add_done_callback`` / headless ``finally: release_claim`` frees the display —
+so an await-wedged driver is NOT held forever. The E-stop is instant by design
+(no cooperative grace delay) — a kill switch for a YOLO agent that waits is not a
+kill switch. request_stop cancels on the task's OWN loop via
+``call_soon_threadsafe`` (``session_manager._cancel_task_cross_loop``), so the
+worker-thread CU TASK path (``asyncio.run`` on its own loop) is freed too, not
+just the same-loop chat path.
+
+The ONE genuinely unrecoverable case is a driver blocked in a SYNCHRONOUS,
+non-awaiting call (e.g. a sync screenshot / sync HTTP with no timeout): the event
+loop never regains control, so the cancellation is never delivered — and
+``task.cancel()`` cannot free that either (it is a thread problem, not a task
+one). No backstop at this layer would help it; a process restart is the only
+recourse. That case, and only that case, still holds the claim.
 
 IMPORT DIRECTION (deliberate, acyclic). This module (as of the per-launch
 redesign) is NOT imported by ``browser/session_manager`` — the browser lock no

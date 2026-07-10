@@ -10,6 +10,33 @@ MAX_ITERATIONS = 50
 SESSION_TIMEOUT = 300
 
 
+def _cancel_task_cross_loop(agent_task) -> None:
+    """Cancel an asyncio.Task from ANY thread (G2-T8) — see the twin in
+    Orchestrator/browser/session_manager.py for the full rationale.
+
+    ``Task.cancel()`` must run on the task's own loop or it is not delivered
+    until that loop next wakes. We dispatch onto ``task.get_loop()`` via
+    ``call_soon_threadsafe`` unless already on that loop (same-loop callers
+    cancel directly — byte-identical to the pre-T8 behavior)."""
+    if agent_task is None or agent_task.done():
+        return
+    try:
+        task_loop = agent_task.get_loop()
+    except Exception:
+        task_loop = None
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if task_loop is None or task_loop is running:
+        agent_task.cancel()
+        return
+    try:
+        task_loop.call_soon_threadsafe(agent_task.cancel)
+    except RuntimeError:
+        pass
+
+
 class GeminiCUSession:
     """A persistent Gemini Computer Use session."""
 
@@ -85,9 +112,14 @@ class GeminiCUSession:
         return None
 
     def request_stop(self):
+        # Cooperative flag (driver checks it at loop-top) + hard cancel of
+        # agent_task on ITS OWN loop (cross-loop safe — G2-T8). NOTE: the
+        # gemini /run task path (gemini_cu_routes._run_task) iterates the loop
+        # generator directly and never sets agent_task, so there it is the
+        # cooperative flag alone that stops the driver; the display claim is
+        # released by _run_task's `finally: release_claim`.
         self.stop_requested = True
-        if self.agent_task and not self.agent_task.done():
-            self.agent_task.cancel()
+        _cancel_task_cross_loop(self.agent_task)
 
     def destroy(self):
         self.request_stop()

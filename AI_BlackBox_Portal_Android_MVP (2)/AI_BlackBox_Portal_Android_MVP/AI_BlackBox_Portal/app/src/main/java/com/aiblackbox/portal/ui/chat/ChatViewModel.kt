@@ -579,9 +579,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     _resolverPolling.remove(taskId)
                                     return@launch
                                 }
-                                status.status.equals("failed", true) -> {
+                                status.status.equals("failed", true)
+                                    || status.status.equals("cancelled", true) -> {
+                                    // 'cancelled' is terminal like failed (G2-T8):
+                                    // stop polling and drop the placeholder, or a
+                                    // cancelled media task polls for the full 25 min.
                                     removeMediaTaskFromMessage(taskId)
-                                    Log.w(TAG, "Media task $taskId failed — removed placeholder")
+                                    Log.w(TAG, "Media task $taskId ${status.status} — removed placeholder")
                                     _resolverPolling.remove(taskId)
                                     return@launch
                                 }
@@ -751,7 +755,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _activeTasks.value = _activeTasks.value.filter { task ->
                         task.taskId in serverActiveIds ||
                         task.status.equals("completed", true) ||
-                        task.status.equals("failed", true)
+                        task.status.equals("failed", true) ||
+                        task.status.equals("cancelled", true)   // terminal — show briefly (G2-T8)
                     }
                 } catch (_: Exception) {
                     // Silent — task discovery is best-effort
@@ -2699,15 +2704,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     val isDone = status.status.equals("completed", true)
                     val isFailed = status.status.equals("failed", true)
-                    if (isDone || isFailed) {
-                        // Emit completion event for notifications
-                        _taskCompletedEvent.tryEmit(status)
+                    // 'cancelled' is terminal (G2-T8): must end the poll and clean
+                    // up the placeholder, or the flow collects forever.
+                    val isCancelled = status.status.equals("cancelled", true)
+                    if (isDone || isFailed || isCancelled) {
+                        // Emit completion event for notifications — but NOT for a
+                        // cancel: it is operator-initiated, so a push notification
+                        // about the thing they just stopped is noise (and the
+                        // consumer would render any non-completed status as
+                        // "Failed"). Matches the backend suppress. G2-T8.
+                        if (!isCancelled) _taskCompletedEvent.tryEmit(status)
 
                         // Replace placeholder with actual media in the message
                         if (isDone && status.resultUrl != null) {
                             resolveMediaTaskInMessage(taskId, taskType, status.resultUrl!!)
                         } else {
-                            // Failed — just remove the placeholder
+                            // Failed or cancelled — just remove the placeholder
                             removeMediaTaskFromMessage(taskId)
                         }
 

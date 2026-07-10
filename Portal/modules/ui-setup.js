@@ -570,6 +570,10 @@ function renderTaskItem(task) {
     const icon = typeIcons[task.task_type] || '⚙️';
     const typeName = typeNames[task.task_type] || task.task_type;
     const progress = task.progress || 0;
+    // 'cancelled' is terminal (G2-T8): never show a progress bar for a terminal
+    // task, so a cancelled row can't read as still-working if it is ever rendered
+    // here (the active panel already filters to pending/processing).
+    const isTerminal = ['completed', 'failed', 'cancelled'].includes(task.status);
 
     // Calculate elapsed time
     const createdAt = new Date(task.created_at);
@@ -592,7 +596,7 @@ function renderTaskItem(task) {
                 <span class="task-status ${task.status}">${task.status}</span>
             </div>
             <div class="task-description">${description}</div>
-            ${progress > 0 ? `
+            ${progress > 0 && !isTerminal ? `
                 <div class="task-progress">
                     <div class="task-progress-bar" style="width: ${progress}%"></div>
                 </div>

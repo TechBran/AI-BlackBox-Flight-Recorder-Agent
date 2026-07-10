@@ -25,6 +25,37 @@ from Orchestrator.browser.chrome import ChromeInstance
 from Orchestrator.browser.actions import ActionExecutor
 
 
+def _cancel_task_cross_loop(agent_task) -> None:
+    """Cancel an asyncio.Task from ANY thread (G2-T8).
+
+    ``Task.cancel()`` is not thread-safe: it must run on the task's own event
+    loop or the cancellation is not delivered until that loop next wakes. CU
+    task-path drivers run on a worker thread's ``asyncio.run`` loop while the
+    E-stop request arrives on the API thread, so we dispatch the cancel onto the
+    task's OWN loop (obtained from ``task.get_loop()``) via
+    ``call_soon_threadsafe`` whenever the caller is not already on that loop.
+    Same-loop callers cancel directly — byte-identical to the pre-T8 behavior.
+    """
+    if agent_task is None or agent_task.done():
+        return
+    try:
+        task_loop = agent_task.get_loop()
+    except Exception:
+        task_loop = None
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if task_loop is None or task_loop is running:
+        agent_task.cancel()
+        return
+    try:
+        task_loop.call_soon_threadsafe(agent_task.cancel)
+    except RuntimeError:
+        # Loop already closed -> the task is finished; nothing to cancel.
+        pass
+
+
 class ComputerUseSession:
     """A persistent browser session for Computer Use chat provider."""
 
@@ -60,10 +91,25 @@ class ComputerUseSession:
         self._pending_dequeue: Optional[str] = None  # Stashed next prompt for auto-dequeue
 
     def request_stop(self):
-        """Request emergency stop of the running agent task."""
+        """Request emergency stop of the running agent task.
+
+        Sets the cooperative ``stop_requested`` flag (the driver honors it at its
+        next loop-top — the fast path for a driver between actions) AND cancels
+        ``agent_task`` (the hard path — an await-wedged driver raises
+        ``CancelledError`` at its await point, the task completes, and the
+        launch-site done-callback / headless ``finally`` releases the display
+        claim). An E-stop for a YOLO agent is instant by design — no grace delay.
+
+        CROSS-LOOP SAFE (G2-T8): the CU *task* path runs ``agent_task`` on a
+        worker thread's own ``asyncio.run`` loop, so a bare ``.cancel()`` from the
+        API thread would not wake that sleeping loop (the cancellation would not
+        be delivered until the loop next woke — up to SESSION_TIMEOUT). We cancel
+        on the task's OWN loop via ``call_soon_threadsafe``. Same-loop callers
+        (the chat CU path: handler and agent_task both on the main loop) are
+        byte-identical to a direct ``.cancel()``.
+        """
         self.stop_requested = True
-        if self.agent_task and not self.agent_task.done():
-            self.agent_task.cancel()
+        _cancel_task_cross_loop(self.agent_task)
 
     def fresh_event_queue(self) -> asyncio.Queue:
         """Replace the event queue with a new one bound to the CALLING loop.

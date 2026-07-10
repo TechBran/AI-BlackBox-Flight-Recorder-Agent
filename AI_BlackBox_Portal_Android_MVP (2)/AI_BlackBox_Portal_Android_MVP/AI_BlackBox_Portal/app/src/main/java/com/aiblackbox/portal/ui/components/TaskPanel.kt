@@ -234,11 +234,15 @@ private fun TaskItem(task: TaskStatus) {
     val isActive = task.status.equals("processing", true) || task.status.equals("pending", true)
     val isComplete = task.status.equals("completed", true)
     val isFailed = task.status.equals("failed", true)
+    // 'cancelled' is terminal and DISTINCT from failed (G2-T8): an
+    // operator-cancelled task must not render as a crash (red ✗) or as blank.
+    val isCancelled = task.status.equals("cancelled", true)
 
     val borderColor by animateColorAsState(
         targetValue = when {
             isComplete -> SolidGreen.copy(alpha = 0.3f)
             isFailed -> BbxAccent.copy(alpha = 0.3f)
+            isCancelled -> GlassBorder.copy(alpha = 0.5f)   // muted, not alarming
             isActive -> BbxAccent.copy(alpha = 0.15f)
             else -> GlassBorder
         },
@@ -272,6 +276,7 @@ private fun TaskItem(task: TaskStatus) {
             when {
                 isComplete -> Text("\u2713", color = SolidGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 isFailed -> Text("\u2717", color = BbxAccent, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                isCancelled -> Text("\u2298", color = BbxWhite.copy(alpha = 0.5f), fontWeight = FontWeight.Bold, fontSize = 14.sp)  // \u2298 cancelled
                 isActive -> {
                     val spin = rememberInfiniteTransition(label = "spin")
                     val spinAlpha by spin.animateFloat(
