@@ -123,6 +123,13 @@ async def _run_task(task_id, operator, device_id, environment,
         return
 
     session = get_or_create_session(operator, device_id, environment)
+    # A fresh task = fresh stop state (G2-T8). get_or_create_session returns the
+    # PERSISTENT per-operator session (300s TTL). A cancel of a PRIOR task left
+    # stop_requested=True on it, and the task path never resets it (run_gemini_cu_loop
+    # resets status/current_step but NOT stop_requested, and _run_task doesn't call
+    # reset_task_state — only the chat CU path does). Without this line the operator's
+    # NEXT task would break at step 1 and be silently voided by the mint guard below.
+    session.stop_requested = False
     screenshots = []
     final_text = ""
 
@@ -180,15 +187,17 @@ async def _run_task(task_id, operator, device_id, environment,
         # Android error-mint bug). Mirrors the USE_COMPUTER guard in
         # tasks.process_browser_use.
         #
-        # SIGNAL: session.stop_requested is authoritative and race-free HERE —
-        # request_stop() sets it on the exact session this task drives, the gemini
-        # loop exits cleanly via `break` (not an exception, so we reach this
-        # point), and unlike the per-task_id is_cancel_requested flag it is NEVER
-        # cleared by the worker's process_task `finally` (GEMINI_CU passes through
-        # process_task, which returns early and clears that flag on an arbitrary
-        # schedule). is_cancel_requested is OR'd in for symmetry + a flag-only
-        # cancel. (A stale stop_requested would have broken the loop at step 1, so
-        # there is no partial work to lose — skipping the mint is still correct.)
+        # SIGNAL: session.stop_requested is authoritative and race-free HERE.
+        # request_stop() sets it on the exact session this task drives, and the
+        # gemini loop exits cleanly via `break` (not an exception), so we reach
+        # this point. It reflects only THIS task's cancel because _run_task
+        # cleared it at entry (see the reset above) — reset_task_state() DOES
+        # clear stop_requested and HAS callers (the chat CU path in chat_routes),
+        # but the task path does not use it, hence that explicit reset. The worker
+        # thread's process_task `finally` clears the per-task_id is_cancel_requested
+        # flag (GEMINI_CU returns from process_task early) but never touches
+        # stop_requested. is_cancel_requested is OR'd in for symmetry with the
+        # USE_COMPUTER guard + a flag-only cancel.
         from Orchestrator.tasks import is_cancel_requested
         if getattr(session, "stop_requested", False) or is_cancel_requested(task_id):
             task.status = TaskStatus.CANCELLED

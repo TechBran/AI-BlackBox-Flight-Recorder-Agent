@@ -179,6 +179,12 @@ _CANCEL_GRACE_SECONDS = 2.0  # SIGTERM -> (grace) -> SIGKILL for a process group
 def _kill_process_group(pid: int, task_id: str = "") -> None:
     """SIGTERM the process GROUP, wait a short grace, then SIGKILL if still
     alive. Group (not bare-pid) kill is what reaps the agent's children too."""
+    if pid is None:
+        # A process handle registered without a pid — os.getpgid(None) would
+        # raise TypeError. T9 owns spawning with start_new_session=True and a
+        # valid pid (registry contract), but defend anyway since T9 is not built.
+        print(f"[CANCEL] process handle for task {task_id} has no pid — nothing to kill")
+        return
     try:
         pgid = os.getpgid(pid)
     except (ProcessLookupError, PermissionError, OSError):
@@ -286,7 +292,12 @@ def cancel_task(task_id: str) -> Dict[str, Any]:
 def cancel_all_tasks() -> Dict[str, Any]:
     """Cancel every pending/processing task via the per-task path. Now marks
     CANCELLED (was FAILED pre-T8). Keeps the stuck-task-reaper behavior for
-    handle-less rows."""
+    handle-less rows.
+
+    SERIAL, by design: each process-agent cancel is SIGTERM -> grace -> SIGKILL,
+    so N stuck CLI agents cost up to ~2N seconds in one synchronous request (the
+    panic button can take ~10s after a voice agent has launched five). Acceptable
+    for a one-shot E-stop; parallelize only if that ever becomes a real problem."""
     cancelled = 0
     for t in task_db.get_all_tasks():
         if t.status in (TaskStatus.PENDING, TaskStatus.PROCESSING):

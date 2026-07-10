@@ -284,6 +284,12 @@ export class TaskManager {
             // NOT fire notifyTaskComplete(false) (that would render the thing
             // the operator just stopped as an error/failure). G2-T8.
             this.showTaskNotification(taskId, status.task_type, 'cancelled', 0, null, taskOperator);
+        } else {
+            // Catch-all: handleTaskComplete is only reached for a terminal status
+            // today, but this guards against a future status becoming a silent
+            // no-op. Self-healing beats a comment.
+            console.warn(`[TaskManager] Task ${taskId} finished with unhandled status '${status.status}'`);
+            this.showTaskNotification(taskId, status.task_type, status.status, 0, null, taskOperator);
         }
     }
 
