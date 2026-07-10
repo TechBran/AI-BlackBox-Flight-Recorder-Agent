@@ -238,6 +238,13 @@ class Task:
     # tasks.append_task_progress) by the CU runner, the CLI-agent flush, and the
     # video poll loop. EPHEMERAL UI state — never minted into the ledger.
     progress_text: Optional[str] = None
+    # F2 (Part 2): the CU/device-control target, promoted to a REAL column so the
+    # polled /tasks/list projection can return it WITHOUT reading the result_data
+    # blob (the 97% of tasks.db that F2 relocated). Historically device_id lived
+    # only inside result_data; save_task mirrors result_data['device_id'] into this
+    # column automatically, so the CU writers (process_browser_use / gemini_cu) need
+    # no change. NULL for non-device tasks.
+    device_id: Optional[str] = None
 
 class TaskDatabase:
     """SQLite-based task persistence"""
@@ -275,7 +282,8 @@ class TaskDatabase:
                 operator TEXT,
                 image_data TEXT,
                 google_video_uri TEXT,
-                progress_text TEXT
+                progress_text TEXT,
+                device_id TEXT
             )
         """)
 
@@ -305,6 +313,26 @@ class TaskDatabase:
             # Column already exists
             pass
 
+        # F2 (Part 2): device_id real column — same idempotent ADD COLUMN precedent
+        # as above. Populated by save_task (mirrored from result_data['device_id'])
+        # and backfilled for pre-F2 rows by the relocate_reference_images migration.
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN device_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # F2 (Part 1): index for `ORDER BY created_at DESC`. Without it /tasks/list
+        # (polled every 2s by the task pill) did a full SCAN + a TEMP B-TREE sort
+        # (~1s, GIL-held). CREATE INDEX IF NOT EXISTS is idempotent; a fresh
+        # connection (TaskDatabase opens one per query) sees it on the next query,
+        # so the running process benefits without a restart.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)"
+        )
+        conn.commit()
+
         conn.close()
     
     def save_task(self, task: Task):
@@ -327,14 +355,22 @@ class TaskDatabase:
             existing = self.get_task(task.task_id)
             if existing is not None and existing.status == TaskStatus.CANCELLED:
                 task.status = TaskStatus.CANCELLED
+        # F2 (Part 2): mirror device_id into its real column. Prefer an explicitly
+        # set task.device_id; otherwise derive it from result_data['device_id'] so
+        # the existing CU writers (which only ever set result_data['device_id'])
+        # keep working with no change. NULL for non-device tasks.
+        device_id_val = task.device_id
+        if device_id_val is None and isinstance(task.result_data, dict):
+            device_id_val = task.result_data.get("device_id")
+
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO tasks
             (task_id, task_type, status, created_at, updated_at, prompt, input_file,
              result_url, result_data, error_message, progress, operator, image_data,
-             google_video_uri, progress_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             google_video_uri, progress_text, device_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.task_id, task.task_type, task.status, task.created_at, task.updated_at,
             task.prompt, task.input_file, task.result_url,
@@ -342,7 +378,8 @@ class TaskDatabase:
             task.error_message, task.progress, task.operator,
             json.dumps(task.image_data) if task.image_data else None,
             task.google_video_uri,
-            task.progress_text
+            task.progress_text,
+            device_id_val
         ))
         conn.commit()
         conn.close()
@@ -391,8 +428,38 @@ class TaskDatabase:
             operator=row[11],
             image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
             google_video_uri=row[13] if len(row) > 13 else None,
-            progress_text=row[14] if len(row) > 14 else None
+            progress_text=row[14] if len(row) > 14 else None,
+            device_id=row[15] if len(row) > 15 else None
         )
+
+    def get_task_list(self, operator: Optional[str] = None) -> List[Dict[str, Any]]:
+        """F2 (Part 2): LIGHTWEIGHT projection for the polled /tasks/list.
+
+        Selects ONLY the columns the task pill / monitor renders — deliberately NOT
+        result_data (the base64-heavy blob that was 97% of the DB). device_id comes
+        from its own real column (populated by save_task, backfilled by the F2
+        migration), so this query never reads or parses a result_data blob. Ordered
+        by created_at DESC, which uses idx_tasks_created_at (no TEMP B-TREE sort).
+
+        Returns a list of plain dicts (not Task objects) — the route needs only these
+        scalar fields. For the full record incl. result_data, use get_task (single-row
+        get-by-PK, ~0.04ms) via /tasks/status.
+        """
+        _cols = ("task_id", "task_type", "status", "progress", "created_at",
+                 "updated_at", "result_url", "operator", "prompt",
+                 "progress_text", "device_id")
+        select = ", ".join(_cols)
+        conn = self._connect()
+        cursor = conn.cursor()
+        if operator:
+            cursor.execute(
+                f"SELECT {select} FROM tasks WHERE operator = ? ORDER BY created_at DESC",
+                (operator,))
+        else:
+            cursor.execute(f"SELECT {select} FROM tasks ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(zip(_cols, row)) for row in rows]
 
     def get_all_tasks(self, operator: Optional[str] = None) -> List[Task]:
         conn = self._connect()
@@ -421,7 +488,8 @@ class TaskDatabase:
                 operator=row[11],
                 image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
                 google_video_uri=row[13] if len(row) > 13 else None,
-                progress_text=row[14] if len(row) > 14 else None
+                progress_text=row[14] if len(row) > 14 else None,
+                device_id=row[15] if len(row) > 15 else None
             ))
         return tasks
 

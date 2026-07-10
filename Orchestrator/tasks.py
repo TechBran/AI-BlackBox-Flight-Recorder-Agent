@@ -44,6 +44,7 @@ from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.models import Task, TaskStatus, TaskType, task_db, task_queue, worker_running
 import Orchestrator.models as models_module  # For modifying worker_running global
 from Orchestrator.media_index import add_media_entry
+from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.notifications.bridge import notify_in_background
@@ -885,6 +886,16 @@ def process_image_generation(task: Task):
         "created_at": now_utc_iso()
     }
     result_data["artifact"] = artifact
+
+    # F2 (Part 3): relocate any inline base64 reference-image INPUTS out of
+    # result_data onto disk before persisting the completed row. The provider has
+    # already consumed options.referenceImages[].data in-memory (call above), and
+    # nothing reads it back from a completed row — so keeping the (up to tens of MB)
+    # base64 in the DB was pure bloat (it was 97% of tasks.db). NON-DESTRUCTIVE: the
+    # bytes are written to Portal/uploads/refimages and verified before the inline
+    # base64 is dropped; on any failure the inline data is kept (never lose an input).
+    result_data, _relocated = relocate_reference_images(
+        result_data, task.task_id, UPLOADS_DIR)
 
     update_task(task.task_id,
                status=TaskStatus.COMPLETED,

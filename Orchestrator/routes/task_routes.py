@@ -45,7 +45,12 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
     allowing placeholder polling to detect completions.
     Use ?all=true to get full task history.
     """
-    all_tasks = task_db.get_all_tasks(operator)
+    # F2 (Part 2): projection — pulls ONLY the scalar columns the pill renders, NOT
+    # result_data (the base64 blob that was 97% of tasks.db). Previously this ran
+    # `SELECT * ... ORDER BY created_at DESC` + json.loads on every row (~1s, GIL-held,
+    # polled every 2s). Ordering now uses idx_tasks_created_at (no TEMP B-TREE sort).
+    # Rows are plain dicts of the projected fields (see TaskDatabase.get_task_list).
+    all_tasks = task_db.get_task_list(operator)
 
     # If all=true, return everything (for debugging/admin)
     if all:
@@ -57,35 +62,36 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
 
         filtered_tasks = [
             t for t in all_tasks
-            if t.status in ['pending', 'processing']  # Always show active
+            if t["status"] in ['pending', 'processing']  # Always show active
             or (
                 # Show recently-ended tasks. 'cancelled' is terminal like
                 # completed/failed (G2-T8) — without it a just-cancelled task
                 # would appear in NEITHER branch and the pill would vanish
                 # instantly, which is exactly the "UI lies" bug T8 kills.
-                t.status in ['completed', 'failed', 'cancelled']
-                and t.updated_at  # Has update timestamp
-                and datetime.fromisoformat(t.updated_at.replace('Z', '+00:00')) > cutoff_time
+                t["status"] in ['completed', 'failed', 'cancelled']
+                and t["updated_at"]  # Has update timestamp
+                and datetime.fromisoformat(t["updated_at"].replace('Z', '+00:00')) > cutoff_time
             )
         ]
 
     return {
         "tasks": [{
-            "task_id": t.task_id,
-            "task_type": t.task_type,
-            "status": t.status,
-            "progress": t.progress,
-            "created_at": t.created_at,
-            "updated_at": t.updated_at,
-            "result_url": t.result_url,
-            "operator": t.operator,
-            "prompt": t.prompt[:100] if t.prompt else None,
+            "task_id": t["task_id"],
+            "task_type": t["task_type"],
+            "status": t["status"],
+            "progress": t["progress"],
+            "created_at": t["created_at"],
+            "updated_at": t["updated_at"],
+            "result_url": t["result_url"],
+            "operator": t["operator"],
+            "prompt": t["prompt"][:100] if t["prompt"] else None,
             # G3-T11 (additive): live poll-visible progress line for the pill, and
-            # the CU target device. device_id has no top-level column — it lives in
-            # result_data (mirror tasks.process_browser_use: `.get("device_id") or
-            # "blackbox"`) so the Portal "Live" button (T12) can address it.
-            "progress_text": t.progress_text,
-            "device_id": (t.result_data or {}).get("device_id") or "blackbox",
+            # the CU target device. device_id is now its own real column (F2 Part 2),
+            # projected directly here — no result_data blob is read. Default mirrors
+            # the historical `result_data.get("device_id") or "blackbox"` semantics so
+            # the Portal "Live" button (T12) / Android pill (T13) address is unchanged.
+            "progress_text": t["progress_text"],
+            "device_id": t["device_id"] or "blackbox",
         } for t in filtered_tasks],
         "total_tasks": len(all_tasks),
         "filtered_count": len(filtered_tasks)
