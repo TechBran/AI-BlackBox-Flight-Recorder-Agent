@@ -234,6 +234,40 @@ def sync_embeddings(
     return new_store
 
 
+def sync_tool_embeddings_bg(reason: str = "") -> "object":
+    """Fire-and-forget (re)embed of every ToolVault tool under the ACTIVE model,
+    in a daemon thread. Returns the started Thread (tests join it).
+
+    Idempotent (hash+model keyed) → a fast no-op when the cache is already warm,
+    and it embeds whatever is stale/missing the MOMENT an embedding provider
+    first becomes reachable. NEVER raises.
+
+    The point of this seam is the fresh-box guarantee: ``embeddings.json`` is
+    gitignored (each box embeds its own tool vectors under its OWN chosen model),
+    and a box that keeps the DEFAULT embedding model never triggers an
+    ``/embeddings/migrate`` — so nothing would embed the tools between first boot
+    (no key yet → boot sync fails) and a manual restart. Calling this right after
+    onboarding writes API keys makes semantic tool selection self-heal with no
+    restart. ``registry`` is imported lazily inside the thread (module-level
+    import-cycle guard — see this module's header)."""
+    import threading
+
+    def _run():
+        try:
+            from Orchestrator.toolvault import registry as tv_registry
+            canonical = tv_registry.load_canonical()
+            store = sync_embeddings(canonical)
+            print(f"[TOOLVAULT-EMB] background sync ({reason or 'manual'}) "
+                  f"complete: {len(store)} tool vectors cached")
+        except Exception as e:  # noqa: BLE001 — background heal must never raise
+            print(f"[TOOLVAULT-EMB] background sync ({reason or 'manual'}) "
+                  f"failed (non-fatal): {type(e).__name__}: {e}")
+
+    t = threading.Thread(target=_run, name="toolvault-embed-sync-bg", daemon=True)
+    t.start()
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Similarity
 # ---------------------------------------------------------------------------

@@ -284,3 +284,10 @@ credentials
 # eval/build_ground_truth.py); corpus.jsonl + queries.jsonl ARE tracked.
 eval/ground_truth/_store/
 eval/ground_truth/_body_cache.json
+
+# ToolVault tool-embedding cache — PER-BOX derived, never committed. Each box
+# (re)embeds its own tool vectors under ITS chosen embedding model: boot-sync
+# (startup_toolvault_embedding_sync) + the onboarding /save heal-trigger +
+# /toolvault/reload + the model-switch cutover. A committed copy would ship one
+# box's model/dims to every clone and go stale on every description edit.
+ToolVault/embeddings.json

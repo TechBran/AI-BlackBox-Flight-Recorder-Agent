@@ -528,9 +528,26 @@ def save_secrets(req: SaveRequest) -> dict:
     must remain loopback-only after T1.3.2 first-run middleware lands."""
     logger.info("onboarding /save: keys=%s", list(req.secrets.keys()))
     try:
-        return update_env(req.secrets)
+        result = update_env(req.secrets)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # A blank box gains its embedding provider the instant these keys land.
+    # ToolVault/embeddings.json is gitignored (each box embeds its own tool
+    # vectors under its OWN chosen model), and a box that keeps the DEFAULT model
+    # never triggers an /embeddings/migrate — so without this nothing would embed
+    # the tools between first boot (no key → boot sync fails) and a manual
+    # restart, and semantic tool selection (use_computer, the CLI-agent tools,
+    # etc.) would be dark. Kick a fire-and-forget ToolVault embed sync so it
+    # self-heals now. Idempotent + non-fatal (no-op when warm; degrades if the
+    # provider still isn't ready). Boot twin: startup_toolvault_embedding_sync.
+    try:
+        from Orchestrator.toolvault.embeddings import sync_tool_embeddings_bg
+        sync_tool_embeddings_bg("onboarding key save")
+    except Exception:  # noqa: BLE001 — the heal trigger must never break /save
+        logger.warning(
+            "onboarding /save: tool-embedding heal trigger failed", exc_info=True
+        )
+    return result
 
 
 @router.post("/step/complete")
