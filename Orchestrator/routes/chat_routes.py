@@ -132,6 +132,24 @@ def _record_media_task(media_tasks: list, task_id, kind: str, prompt: str = "") 
     media_tasks.append({"task_id": tid, "type": kind, "prompt": (prompt or "")[:500]})
 
 
+def _browser_task_event(cu_result, tool_input: Dict) -> Optional[Dict]:
+    """The `browser_task` SSE event for a use_computer dispatch, or None.
+
+    Emitted on SUCCESS only. The T2 executor returns the task_id in
+    ToolResult.data on success (same shape the media catch-alls read) and, on an
+    unresolvable class, mirrors its structured FAILURE payload into .data — which
+    carries no "task_id" — so this returns None and the stream branch emits no
+    browser_task. ToolResult.data is a dataclass field that defaults to None, so
+    `.data or {}` is all the guarding needed. Keeping the emit DECISION in one
+    tested helper means a future executor that nested task_id under a sub-key, or
+    an inverted guard, fails a unit test instead of shipping silently."""
+    task_id = (cu_result.data or {}).get("task_id")
+    if not task_id:
+        return None
+    return {"type": "browser_task",
+            "data": {"task_id": task_id, "prompt": tool_input.get("prompt", "")}}
+
+
 def _last_user_msg(messages) -> str:
     """Extract text from the last user message (for ToolVault prompt injection).
 
@@ -1027,10 +1045,11 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         "content": result_message
                     })
                 elif tool_name == "use_computer":
-                    # Route through the ToolVault executor (like the other six
-                    # provider loops) so this branch inherits class resolution,
-                    # device_id, url, AND the structured retryable failure — never
-                    # the old inline create_task that dropped device_id + model.
+                    # Route through the ToolVault executor (as the five sibling
+                    # branches already did) so this branch inherits class
+                    # resolution, device_id, url, AND the structured retryable
+                    # failure — never the old inline create_task that dropped
+                    # device_id + model.
                     from Orchestrator.tools import BlackBoxToolExecutor
                     executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                     import asyncio
@@ -3534,10 +3553,11 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 })
                                 yield {"type": "tool_result", "data": f"Cron jobs: {result_message[:100]}"}
                             elif tool_name == "use_computer":
-                                # Route through the ToolVault executor (like the other six
-                                # provider loops) so this branch inherits class resolution,
-                                # device_id, url, AND the structured retryable failure — never
-                                # the old inline create_task that dropped device_id + model.
+                                # Route through the ToolVault executor (as the five sibling
+                                # branches already did) so this branch inherits class
+                                # resolution, device_id, url, AND the structured retryable
+                                # failure — never the old inline create_task that dropped
+                                # device_id + model.
                                 from Orchestrator.tools import BlackBoxToolExecutor
                                 executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
                                 cu_result = await executor.execute("use_computer", tool_input)
@@ -3549,13 +3569,11 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                     "content": result_message
                                 })
                                 yield {"type": "tool_result", "data": f"Computer Use: {result_message[:80]}"}
-                                # Preserve the browser_task SSE event on SUCCESS only. The
-                                # executor returns the task_id in .data (same shape the media
-                                # catch-alls read); an unresolvable class fails with no task,
-                                # so .data carries no task_id and no browser_task is emitted.
-                                _cu_task_id = (getattr(cu_result, "data", None) or {}).get("task_id")
-                                if _cu_task_id:
-                                    yield {"type": "browser_task", "data": {"task_id": _cu_task_id, "prompt": tool_input.get("prompt", "")}}
+                                # Preserve the browser_task SSE event on SUCCESS only
+                                # (guard lives in the tested _browser_task_event helper).
+                                _bt = _browser_task_event(cu_result, tool_input)
+                                if _bt:
+                                    yield _bt
                             elif tool_name in ("get_task_status", "get_snapshot", "list_recent_snapshots",
                                                "get_current_time",
                                                "analyze_image", "analyze_audio", "analyze_video",
