@@ -4098,7 +4098,16 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         return
 
     # ── Get/create persistent session ──
-    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    # The single-display arbiter (M1-T6) raises RuntimeError when another CU
+    # session (browser OR Gemini desktop) already holds the local display — now
+    # that the lock also sees the Gemini registry, that can fire here. Surface it
+    # as the SSE error event this stream already uses; never let a bare
+    # RuntimeError escape into the live SSE stream.
+    try:
+        session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    except RuntimeError as e:
+        yield {"type": "error", "data": str(e)}
+        return
     session.touch()
 
     # ── On-the-fly device switching ──
@@ -4381,16 +4390,17 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
     else:
         environment = "desktop"
 
-    # ── Desktop conflict guard (shared display arbiter — M1-T6) ──
-    # Consult BOTH registries (browser CU + other Gemini sessions), excluding
-    # THIS operator's own cached chat session so a reconnect/queue to a running
-    # task of their own is never self-blocked (get_or_create below returns it).
+    # ── Desktop conflict guard: ATOMIC check-and-reserve (shared arbiter M1-T6) ──
+    # Claim the local display keyed by this operator's Gemini chat lane. The
+    # arbiter consults BOTH registries + the reservation table and applies
+    # same-kind self-exclusion INTERNALLY (via gemini_cu's PUBLIC get_session), so
+    # a reconnect/queue to this operator's own running chat task is never
+    # self-blocked, and no route reaches into another module's registry
+    # internals. Reservation is reclaimed by prune once the chat session goes
+    # running/terminal (and on destroy_session); failure SHAPE unchanged (SSE).
     if environment == "desktop":
-        from Orchestrator.browser.display_arbiter import local_display_owner
-        from Orchestrator.gemini_cu import session_manager as _gsm
-        _own = _gsm._operator_sessions.get(operator)
-        owner = local_display_owner(
-            exclude_session_ids=frozenset({_own}) if _own else frozenset())
+        from Orchestrator.browser.display_arbiter import try_claim
+        owner = try_claim("gemini-chat", operator, f"gemini-chat:{operator}")
         if owner is not None:
             yield {"type": "error", "data": f"Cannot start Gemini CU — {owner.describe()}. Stop it first."}
             return
@@ -4649,7 +4659,14 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
         pass
 
     # ── Get/create persistent session (shared with the Anthropic path) ──
-    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    # As in the Anthropic stream: the single-display arbiter (M1-T6) may raise
+    # RuntimeError when another CU session holds the local display. Surface it as
+    # this stream's SSE error event; never let it escape bare into the SSE stream.
+    try:
+        session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
+    except RuntimeError as e:
+        yield {"type": "error", "data": str(e)}
+        return
     session.touch()
 
     # ── Emit session ID ──

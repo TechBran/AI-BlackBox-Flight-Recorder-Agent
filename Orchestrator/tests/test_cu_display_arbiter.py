@@ -32,20 +32,23 @@ from Orchestrator.browser.session_manager import ComputerUseSession
 from Orchestrator.browser.display_arbiter import local_display_owner, DisplayOwner
 from Orchestrator.gemini_cu import session_manager as gsm
 from Orchestrator.browser import headless
+from Orchestrator.browser import display_arbiter as da
 
 
 @pytest.fixture(autouse=True)
 def _clean_registries(monkeypatch):
-    """Both CU registries start and end EMPTY, and a constructed browser session
-    reports alive without a real Chrome/display so lookups are deterministic
-    regardless of NATIVE_MODE."""
+    """Both CU registries AND the reservation table start and end EMPTY, and a
+    constructed browser session reports alive without a real Chrome/display so
+    lookups are deterministic regardless of NATIVE_MODE."""
     monkeypatch.setattr(ComputerUseSession, "is_alive", lambda self: True)
     monkeypatch.setattr(ComputerUseSession, "destroy", lambda self: None)
     for reg in (bsm._sessions, bsm._operator_sessions, gsm._sessions, gsm._operator_sessions):
         reg.clear()
+    da._reservations.clear()
     yield
     for reg in (bsm._sessions, bsm._operator_sessions, gsm._sessions, gsm._operator_sessions):
         reg.clear()
+    da._reservations.clear()
 
 
 # ── helpers: register REAL sessions in each registry ────────────────────────
@@ -306,3 +309,159 @@ async def test_gemini_chat_guard_excludes_own_chat_session(monkeypatch):
         async for ev in cr.stream_gemini_computer_use(
                 [{"role": "user", "content": "resume"}], "", "brandon", device_id="blackbox"):
             assert ev.get("type") != "error", "guard wrongly blocked the operator's own session"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reservation lifecycle (M1-T6 review Issue 1: atomic check-and-reserve)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_try_claim_reserves_and_is_visible_before_any_session_exists():
+    """The whole point: a reservation makes the display "taken" in the gap BEFORE
+    a session is registered / running. No session exists here, yet the display is
+    owned."""
+    assert da.try_claim("gemini-task", "op", "task-1") is None      # claimed
+    owner = da.local_display_owner()
+    assert owner is not None and owner.kind == "gemini-task" and owner.operator == "op"
+
+
+def test_second_claim_is_denied_then_freed_by_release():
+    assert da.try_claim("gemini-task", "op1", "task-1") is None       # first wins
+    denied = da.try_claim("browser", "op2", "sid-2")                  # second denied
+    assert denied is not None and denied.session_id == "task-1"
+    da.release_claim("task-1")                                        # free it
+    assert da.try_claim("browser", "op2", "sid-2") is None            # now granted
+
+
+def test_release_claim_is_idempotent_and_safe_for_unknown_id():
+    da.release_claim("never-claimed")   # must not raise
+    assert da.local_display_owner() is None
+
+
+def test_reservation_pruned_once_its_session_is_running():
+    """A browser reservation is redundant once its session is visible as running
+    via the scan — prune drops it, and the scan still reports the owner."""
+    s = _register_browser("alice", status="idle")
+    da._reservations[s.session_id] = (
+        da.DisplayOwner("browser", "alice", s.session_id), __import__("time").monotonic())
+    s.status = "running"
+    owner = da.local_display_owner()                 # triggers prune
+    assert s.session_id not in da._reservations       # redundant reservation dropped
+    assert owner is not None and owner.session_id == s.session_id  # scan still owns it
+
+
+def test_reservation_pruned_once_its_session_is_terminal():
+    """After the task ends (complete), the reservation is reclaimed so the next
+    task is not wedged — even though the persistent chat session lingers."""
+    s = _register_gemini_chat("bob", status="running")
+    da._reservations["gemini-chat:bob"] = (
+        da.DisplayOwner("gemini-chat", "bob", "gemini-chat:bob"), __import__("time").monotonic())
+    s.status = "complete"
+    assert da.local_display_owner() is None            # display freed
+    assert "gemini-chat:bob" not in da._reservations
+
+
+def test_leaked_reservation_expires_by_ttl(monkeypatch):
+    """The named primary hazard: a leaked reservation (no session, never released)
+    must not wedge the display forever. It expires after the TTL."""
+    monkeypatch.setattr(da, "_RESERVATION_TTL", 0.05)
+    assert da.try_claim("gemini-task", "op", "leaked") is None
+    assert da.local_display_owner() is not None        # held now
+    __import__("time").sleep(0.06)
+    assert da.local_display_owner() is None             # reclaimed by TTL
+
+
+def test_browser_reservation_released_on_session_destruction():
+    """_cleanup_session releases the reservation keyed by the session id."""
+    s = bsm.get_or_create_session("brandon", device_id="blackbox")   # claims
+    assert da.local_display_owner() is not None
+    bsm._cleanup_session(s.session_id)                                # destroy
+    assert s.session_id not in da._reservations
+
+
+def test_gemini_chat_reservation_released_on_destroy_session():
+    da.try_claim("gemini-chat", "brandon", "gemini-chat:brandon")
+    assert "gemini-chat:brandon" in da._reservations
+    gsm.destroy_session("brandon")
+    assert "gemini-chat:brandon" not in da._reservations
+
+
+@pytest.mark.asyncio
+async def test_android_gemini_task_not_blocked_by_busy_local_desktop(monkeypatch):
+    """"Vice versa": a running browser desktop CU session (holds the LOCAL display)
+    must NOT block a Gemini ANDROID headless task — the guard is skipped for
+    environment != desktop, so android neither claims nor is blocked."""
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    _register_browser("someone", status="running")   # LOCAL desktop is busy
+
+    launched = {}
+
+    async def fake_loop(session, *a, **k):
+        launched["yes"] = True
+        session.current_step = 1
+        yield {"type": "done", "data": {"content": "ran on android"}}
+
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", fake_loop)
+
+    # Resolve an ADB device so environment == "android".
+    from types import SimpleNamespace
+    from Orchestrator import device_registry as dreg
+
+    class _FakeReg:
+        def get_device(self, did):
+            return SimpleNamespace(protocol=dreg.DeviceProtocol.ADB, name="Pixel", id=did)
+
+    monkeypatch.setattr(dreg, "get_registry", lambda: _FakeReg())
+
+    async def _ok(did):
+        return {"success": True}
+
+    import Orchestrator.adb as adb_mod
+    monkeypatch.setattr(adb_mod, "get_adb_manager", lambda: SimpleNamespace(ensure_connected=_ok))
+
+    result = await headless.run_cu_task(
+        "t-android", "gem-op", "tap", device_id="pixel-9",
+        model="gemini-2.5-computer-use-preview-10-2025")
+    # android task ran despite a busy LOCAL desktop — not blocked, did not claim
+    assert result["success"] is True
+    assert launched.get("yes") is True
+    assert not da._reservations   # android claimed nothing
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The race, directly (M1-T6 review Issue 1): two OS threads, exactly one wins
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_two_threads_contending_exactly_one_claims(monkeypatch):
+    """Two real OS threads (the tasks.py ThreadPoolExecutor model) both attempt to
+    take the display at once. A Barrier lines them up; a stall injected BETWEEN
+    the free-check and the reservation-record (the exact window the lock must
+    serialize) forces their critical sections to overlap. Under the arbiter's
+    RLock exactly ONE claim succeeds. Mutation-verified separately: with the lock
+    removed BOTH succeed (see the M1-T6 report)."""
+    import threading
+    import time as _t
+
+    # Stall between "display is free" and "record reservation": the winner holds
+    # the lock across this stall, so the loser blocks on the lock and, on
+    # acquiring, sees the recorded reservation. Without the lock, both would race
+    # through the stall and both record.
+    monkeypatch.setattr(da, "_before_record_hook", lambda: _t.sleep(0.15))
+
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def worker(i):
+        barrier.wait()          # release both threads together
+        results[i] = da.try_claim("gemini-task", f"op{i}", f"claim-{i}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    granted = [i for i, r in results.items() if r is None]
+    denied = [i for i, r in results.items() if r is not None]
+    assert len(granted) == 1, f"expected exactly one winner, got {results}"
+    assert len(denied) == 1
+    assert len(da._reservations) == 1       # exactly one reservation recorded

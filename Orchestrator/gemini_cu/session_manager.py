@@ -138,6 +138,10 @@ def destroy_session(operator: str):
     if sid and sid in _sessions:
         _sessions[sid].destroy()
         del _sessions[sid]
+    # Release any display reservation held by this operator's Gemini chat lane
+    # (M1-T6 leak backstop — the chat guard claims keyed by "gemini-chat:<op>").
+    from Orchestrator.browser.display_arbiter import release_claim
+    release_claim(f"gemini-chat:{operator}")
 
 
 def create_task_session(operator: str, device_id: str,

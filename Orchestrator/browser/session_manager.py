@@ -210,27 +210,29 @@ def get_or_create_session(operator: str, session_id: Optional[str] = None, devic
             _cleanup_session(sid)
 
     # ── Single-display arbitration (local device only) ──
-    # Delegate to the shared arbiter (M1-T6): it consults BOTH this browser
-    # registry AND the Gemini registry, so a new browser CU session now also
-    # refuses to start while a Gemini DESKTOP session (chat or task) is driving
-    # the one physical display — the previously-unguarded reverse direction.
+    # ATOMIC check-and-reserve via the shared arbiter (M1-T6): under the arbiter's
+    # process-wide lock it consults BOTH this browser registry AND the Gemini
+    # registry AND the reservation table, and — if free — records a reservation
+    # keyed by the session id we are about to create. This closes the concurrency
+    # hole (two OS-thread tasks both passing a point-in-time check and both taking
+    # the display): the loser sees the winner's reservation even though no session
+    # is "running" yet. Same-kind self-exclusion (the operator's own browser
+    # session) lives in the arbiter, so a Gemini DESKTOP session — even this
+    # operator's — still blocks (the previously-unguarded reverse direction).
     # Only the local display contends; a remote (non-"blackbox") request is
-    # independent. We reach here only when creating a NEW session for `operator`
-    # (an alive session is returned above, before this point), so `operator` has
-    # no running browser session to self-block on; excluding its own session id
-    # is belt-and-suspenders. Failure SHAPE is unchanged: RuntimeError.
+    # independent and never reserved. The reservation is released explicitly by
+    # the headless caller's finally and by _cleanup_session, with prune+TTL as the
+    # leak backstop. Failure SHAPE is unchanged: RuntimeError.
+    claim_id = session_id or str(uuid.uuid4())
     if device_id == "blackbox":
-        from Orchestrator.browser.display_arbiter import local_display_owner
-        own_sid = _operator_sessions.get(operator)
-        owner = local_display_owner(
-            exclude_session_ids=frozenset({own_sid}) if own_sid else frozenset()
-        )
+        from Orchestrator.browser.display_arbiter import try_claim
+        owner = try_claim("browser", operator, claim_id)
         if owner is not None:
             print(f"[CU-SESSION] Cannot create local session for {operator} — {owner.describe()}")
             raise RuntimeError(f"Cannot start session: {owner.describe()}")
 
-    # ── Create fresh session ──
-    session = ComputerUseSession(operator, session_id=session_id, device_id=device_id)
+    # ── Create fresh session (keyed by the id we just reserved) ──
+    session = ComputerUseSession(operator, session_id=claim_id, device_id=device_id)
     _sessions[session.session_id] = session
     _operator_sessions[operator] = session.session_id
     print(f"[CU-SESSION] Created new session {session.session_id[:8]} for {operator}")
@@ -268,6 +270,10 @@ def _cleanup_session(session_id: str):
         if _operator_sessions.get(session.operator) == session_id:
             del _operator_sessions[session.operator]
         del _sessions[session_id]
+        # Release any display reservation keyed by this session id (M1-T6 leak
+        # backstop — the browser lock claims keyed by the session id).
+        from Orchestrator.browser.display_arbiter import release_claim
+        release_claim(session_id)
 
 
 def destroy_session(operator: str):

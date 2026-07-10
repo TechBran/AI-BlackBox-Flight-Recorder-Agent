@@ -285,39 +285,43 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     else:
         environment = "desktop"
 
-    # ── Desktop-conflict guard (shared display arbiter — M1-T6) ──
-    # Consult BOTH registries so this Gemini task refuses to co-drive the one
-    # physical display with a browser CU task OR another Gemini desktop session
-    # (chat or task), regardless of operator. No self to exclude: this task's own
-    # session is created AFTER this check (below). Failure SHAPE unchanged
-    # (_failure dict — the task path is fire-and-forget).
+    # ── Desktop-conflict guard: ATOMIC check-and-reserve (shared arbiter M1-T6) ──
+    # For a DESKTOP target, atomically claim the local display (keyed by task_id)
+    # so two concurrent CU launches — tasks.py runs each in its OWN OS thread —
+    # can never both take it. Consults BOTH registries AND the reservation table.
+    # Android targets never touch the local X server, so they neither claim nor
+    # are blocked. Failure SHAPE unchanged (_failure dict — fire-and-forget).
     if environment == "desktop":
-        from Orchestrator.browser.display_arbiter import local_display_owner
-        owner = local_display_owner()
+        from Orchestrator.browser.display_arbiter import try_claim
+        owner = try_claim("gemini-task", operator, task_id)
         if owner is not None:
             return _failure(f"Cannot start Gemini CU — {owner.describe()}. Stop it first.")
 
-    # OWN, isolated session (see ISOLATION above) — never the operator-cached
-    # chat session. Fresh: own queue, empty history, requested device/env.
-    session = gemini_create_task_session(operator, device_id, environment)
-    session.status = "starting"
-    session.user_message = prompt
-
-    screenshots: list = []
-    agen = run_gemini_cu_loop(
-        session, prompt, model or GEMINI_CU_MODEL_DEFAULT, system_prompt, url)
-    session.agent_task = asyncio.create_task(_pump_generator(session, agen))
-    print(f"[CU-HEADLESS] Gemini driver launched for task {task_id} "
-          f"({operator}, env={environment})")
+    from Orchestrator.browser.display_arbiter import release_claim
+    session = None
     try:
+        # OWN, isolated session (see ISOLATION above) — never the operator-cached
+        # chat session. Fresh: own queue, empty history, requested device/env.
+        session = gemini_create_task_session(operator, device_id, environment)
+        session.status = "starting"
+        session.user_message = prompt
+
+        screenshots: list = []
+        agen = run_gemini_cu_loop(
+            session, prompt, model or GEMINI_CU_MODEL_DEFAULT, system_prompt, url)
+        session.agent_task = asyncio.create_task(_pump_generator(session, agen))
+        print(f"[CU-HEADLESS] Gemini driver launched for task {task_id} "
+              f"({operator}, env={environment})")
         return await _drain_and_fold(session, session.agent_task, screenshots)
     finally:
-        # Tear down ONLY this task's own session (drop from _sessions, stop its
-        # agent task). Never touches _operator_sessions, so the operator's
-        # interactive chat session survives. MUST be in the finally so it fires on
-        # failure and cancellation too (not just success) — a dropped task leaves
-        # no running pump behind.
-        gemini_destroy_task_session(session)
+        # Release the display reservation (idempotent; a no-op for android, which
+        # never claimed) and tear down ONLY this task's own session — never
+        # _operator_sessions, so the operator's chat session survives. MUST be in
+        # the finally so both fire on failure/cancellation too — a dropped task
+        # leaves no running pump and no leaked reservation behind.
+        release_claim(task_id)
+        if session is not None:
+            gemini_destroy_task_session(session)
 
 
 async def run_cu_task(task_id: str, operator: str, prompt: str,
@@ -384,83 +388,141 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     except RuntimeError as e:
         return _failure(str(e))
 
-    if session.status in ("running", "starting"):
-        return _failure(
-            f"Operator {operator} already has a running Computer Use task "
-            f"(session {session.session_id[:8]}). Wait for it to finish."
-        )
-
-    session.touch()
-    if session.device_id != device_id:
-        print(f"[CU-HEADLESS] Switching device {session.device_id} -> {device_id} for {operator}")
-        session.device_id = device_id
-
-    # ── Ensure display/device is ready (mirrors stream_computer_use) ──
-    if session.device_id == "blackbox":
-        if url and not is_domain_allowed(url):
-            return _failure(f"Domain blocked by security policy: {url}")
-        if not await session.ensure_browser(url or "about:blank"):
-            return _failure("Failed to start browser session")
-        if not NATIVE_MODE:
-            from Orchestrator.browser.display import get_display
-            display = get_display()
-            if not display.health_check():
-                print("[CU-HEADLESS] Display health check failed, attempting restart...")
-                display.stop()
-                display.start()
-                if not display.health_check():
-                    return _failure("Display health check failed after restart. Cannot proceed.")
-                print("[CU-HEADLESS] Display restarted successfully")
-        if not session.conversation_history:
-            await asyncio.sleep(2)  # small wait for Chrome if freshly started
-    else:
-        # Remote device — verify VNC reachability
-        from Orchestrator.device_registry import get_registry
-        from Orchestrator.remote_desktop import VNCClient
-        device = get_registry().get_device(session.device_id)
-        if not device:
-            return _failure(f"Device not found: {session.device_id}")
-        vnc = VNCClient(device.tailscale_ip, device.vnc_port, device.metadata.get("vnc_password"))
-        if not await vnc.is_reachable():
+    from Orchestrator.browser.display_arbiter import release_claim
+    try:
+        if session.status in ("running", "starting"):
             return _failure(
-                f"Cannot reach VNC on {device.name} ({device.tailscale_ip}:{device.vnc_port})"
+                f"Operator {operator} already has a running Computer Use task "
+                f"(session {session.session_id[:8]}). Wait for it to finish."
             )
 
-    # ── Reset task state for this run ──
-    session.reset_task_state()
-    # Rebind the event queue to THIS event loop (worker thread's asyncio.run);
-    # see ComputerUseSession.fresh_event_queue for the cross-loop rationale.
-    session.fresh_event_queue()
-    # A headless task is one-shot: stale prompts queued by an earlier CHAT
-    # turn must not auto-dequeue into this task's result.
-    session.prompt_queue.clear()
-    session.status = "starting"
-    session.user_message = prompt
-    if backend == "openai":
-        # One-shot isolation: a reused session may still carry a VALID
-        # openai_previous_response_id from a prior CHAT turn — continuing from it
-        # would splice this headless task into that conversation. Start fresh
-        # (reset_task_state does not clear it; it is not part of task state).
-        session.openai_previous_response_id = None
+        session.touch()
+        if session.device_id != device_id:
+            print(f"[CU-HEADLESS] Switching device {session.device_id} -> {device_id} for {operator}")
+            session.device_id = device_id
 
-    screenshots = []
+        # ── Ensure display/device is ready (mirrors stream_computer_use) ──
+        if session.device_id == "blackbox":
+            if url and not is_domain_allowed(url):
+                return _failure(f"Domain blocked by security policy: {url}")
+            if not await session.ensure_browser(url or "about:blank"):
+                return _failure("Failed to start browser session")
+            if not NATIVE_MODE:
+                from Orchestrator.browser.display import get_display
+                display = get_display()
+                if not display.health_check():
+                    print("[CU-HEADLESS] Display health check failed, attempting restart...")
+                    display.stop()
+                    display.start()
+                    if not display.health_check():
+                        return _failure("Display health check failed after restart. Cannot proceed.")
+                    print("[CU-HEADLESS] Display restarted successfully")
+            if not session.conversation_history:
+                await asyncio.sleep(2)  # small wait for Chrome if freshly started
+        else:
+            # Remote device — verify VNC reachability
+            from Orchestrator.device_registry import get_registry
+            from Orchestrator.remote_desktop import VNCClient
+            device = get_registry().get_device(session.device_id)
+            if not device:
+                return _failure(f"Device not found: {session.device_id}")
+            vnc = VNCClient(device.tailscale_ip, device.vnc_port, device.metadata.get("vnc_password"))
+            if not await vnc.is_reachable():
+                return _failure(
+                    f"Cannot reach VNC on {device.name} ({device.tailscale_ip}:{device.vnc_port})"
+                )
 
-    if backend == "openai":
-        # The OpenAI loop captures its own initial screenshot, builds its own
-        # tool array, and carries history server-side via previous_response_id,
-        # so the Anthropic-shaped preamble below is skipped. Bridge its yielded
-        # events onto the queue the shared fold drains (URL navigation, if any,
-        # was handled by ensure_browser above — mirrors the Anthropic path).
-        #
-        # Fossil context: unlike the Gemini driver (which retrieves internally),
-        # the OpenAI loop does NO retrieval, so — exactly as the Anthropic path
-        # and interactive OpenAI CU (chat_routes.py:4705-4709) do — build the
-        # system prompt WITH fossils here, or headless OpenAI is the only CU
-        # cohort running without memory.
-        from Orchestrator.openai_cu.agent_loop import (
-            _default_system_prompt as _openai_default_prompt,
-        )
-        oai_sys = system_prompt or _openai_default_prompt()
+        # ── Reset task state for this run ──
+        session.reset_task_state()
+        # Rebind the event queue to THIS event loop (worker thread's asyncio.run);
+        # see ComputerUseSession.fresh_event_queue for the cross-loop rationale.
+        session.fresh_event_queue()
+        # A headless task is one-shot: stale prompts queued by an earlier CHAT
+        # turn must not auto-dequeue into this task's result.
+        session.prompt_queue.clear()
+        session.status = "starting"
+        session.user_message = prompt
+        if backend == "openai":
+            # One-shot isolation: a reused session may still carry a VALID
+            # openai_previous_response_id from a prior CHAT turn — continuing from it
+            # would splice this headless task into that conversation. Start fresh
+            # (reset_task_state does not clear it; it is not part of task state).
+            session.openai_previous_response_id = None
+
+        screenshots = []
+
+        if backend == "openai":
+            # The OpenAI loop captures its own initial screenshot, builds its own
+            # tool array, and carries history server-side via previous_response_id,
+            # so the Anthropic-shaped preamble below is skipped. Bridge its yielded
+            # events onto the queue the shared fold drains (URL navigation, if any,
+            # was handled by ensure_browser above — mirrors the Anthropic path).
+            #
+            # Fossil context: unlike the Gemini driver (which retrieves internally),
+            # the OpenAI loop does NO retrieval, so — exactly as the Anthropic path
+            # and interactive OpenAI CU (chat_routes.py:4705-4709) do — build the
+            # system prompt WITH fossils here, or headless OpenAI is the only CU
+            # cohort running without memory.
+            from Orchestrator.openai_cu.agent_loop import (
+                _default_system_prompt as _openai_default_prompt,
+            )
+            oai_sys = system_prompt or _openai_default_prompt()
+            try:
+                cu_fossil_context, cu_provenance = build_cu_context(prompt, operator)
+            except Exception as e:
+                print(f"[CU-HEADLESS] build_cu_context failed (non-fatal): {e}")
+                cu_fossil_context, cu_provenance = "", {}
+            session.provenance = cu_provenance
+            if cu_fossil_context:
+                oai_sys += "\n\n" + cu_fossil_context
+                print(f"[CU-HEADLESS] Injected {len(cu_fossil_context)} chars of fossil context (openai)")
+            agen = run_openai_cu_loop(session, prompt, model or None, oai_sys, None)
+            session.agent_task = asyncio.create_task(_pump_generator(session, agen))
+            print(f"[CU-HEADLESS] OpenAI driver launched for task {task_id} ({operator})")
+            return await _drain_and_fold(session, session.agent_task, screenshots)
+
+        # ── Anthropic path (unchanged from the pre-T5 runner): build the initial
+        #    screenshot / system prompt / history / tool array / headers, launch the
+        #    driver (which pushes to session.event_queue itself), then fold. ──
+        initial_b64 = None
+        try:
+            if session.device_id != "blackbox":
+                initial_png = await capture_remote_screenshot(session.device_id)
+            else:
+                initial_png = capture_screenshot()
+            initial_b64 = screenshot_to_base64(initial_png)
+            session.screenshot_count += 1
+            screenshots.append(
+                save_screenshot_to_uploads(initial_png, f"cu_{operator}", session.screenshot_count)
+            )
+        except Exception as e:
+            print(f"[CU-HEADLESS] Initial screenshot failed: {e}")
+
+        # ── Build system prompt (exactly as stream_computer_use) ──
+        sys_prompt = system_prompt or COMPUTER_USE_SYSTEM_PROMPT.format(operator=operator)
+
+        if session.device_id != "blackbox":
+            from Orchestrator.device_registry import get_registry
+            device = get_registry().get_device(session.device_id)
+            if device:
+                device_context = (
+                    f"\n\n## TARGET DEVICE\n"
+                    f"You are controlling a REMOTE device over VNC:\n"
+                    f"- Device: {device.name} ({device.id})\n"
+                    f"- Type: {device.device_type.value}\n"
+                    f"- IP: {device.tailscale_ip}:{device.vnc_port}\n"
+                )
+                if device.description:
+                    device_context += f"- Description: {device.description}\n"
+                device_context += (
+                    f"\nScreenshots come from this remote device. "
+                    f"Actions (clicks, typing, scrolling) are sent to this remote device. "
+                    f"This is NOT the local BlackBox machine.\n"
+                )
+                sys_prompt += device_context
+
+        # Degrade gracefully: a fossil-retrieval failure must not strand the
+        # session in "starting" (the task path has no interactive retry).
         try:
             cu_fossil_context, cu_provenance = build_cu_context(prompt, operator)
         except Exception as e:
@@ -468,103 +530,53 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
             cu_fossil_context, cu_provenance = "", {}
         session.provenance = cu_provenance
         if cu_fossil_context:
-            oai_sys += "\n\n" + cu_fossil_context
-            print(f"[CU-HEADLESS] Injected {len(cu_fossil_context)} chars of fossil context (openai)")
-        agen = run_openai_cu_loop(session, prompt, model or None, oai_sys, None)
-        session.agent_task = asyncio.create_task(_pump_generator(session, agen))
-        print(f"[CU-HEADLESS] OpenAI driver launched for task {task_id} ({operator})")
+            sys_prompt += "\n\n" + cu_fossil_context
+            print(f"[CU-HEADLESS] Injected {len(cu_fossil_context)} chars of fossil context")
+
+        # ── Build history ──
+        user_content = [{"type": "text", "text": prompt}]
+        if initial_b64:
+            user_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": initial_b64}
+            })
+        session.trim_history()
+        history = strip_screenshots_from_history(list(session.conversation_history))
+        history.append({"role": "user", "content": user_content})
+
+        # ── Tool array + headers (exactly as stream_computer_use) ──
+        try:
+            vault_tools = _get_tools("anthropic", _last_user_msg(history), group="chat_cu")
+        except Exception as e:
+            print(f"[CU-HEADLESS] ToolVault injection failed (non-fatal): {e}")
+            vault_tools = []
+        tools = [
+            {"type": COMPUTER_TOOL_TYPE, "name": "computer",
+             "display_width_px": DISPLAY_WIDTH, "display_height_px": DISPLAY_HEIGHT},
+            {"type": "bash_20250124", "name": "bash"},
+            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
+        ] + vault_tools
+
+        headers = {
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": ANTHROPIC_BETA_HEADER,
+            "content-type": "application/json",
+        }
+
+        # ── Launch the driver and drain its event queue ──
+        session.agent_task = asyncio.create_task(
+            run_anthropic_cu_loop(
+                session, history, sys_prompt, tools, headers,
+                model or CU_MODEL_DEFAULT, operator, prompt,
+            )
+        )
+        print(f"[CU-HEADLESS] Driver launched for task {task_id} ({operator})")
+
         return await _drain_and_fold(session, session.agent_task, screenshots)
-
-    # ── Anthropic path (unchanged from the pre-T5 runner): build the initial
-    #    screenshot / system prompt / history / tool array / headers, launch the
-    #    driver (which pushes to session.event_queue itself), then fold. ──
-    initial_b64 = None
-    try:
-        if session.device_id != "blackbox":
-            initial_png = await capture_remote_screenshot(session.device_id)
-        else:
-            initial_png = capture_screenshot()
-        initial_b64 = screenshot_to_base64(initial_png)
-        session.screenshot_count += 1
-        screenshots.append(
-            save_screenshot_to_uploads(initial_png, f"cu_{operator}", session.screenshot_count)
-        )
-    except Exception as e:
-        print(f"[CU-HEADLESS] Initial screenshot failed: {e}")
-
-    # ── Build system prompt (exactly as stream_computer_use) ──
-    sys_prompt = system_prompt or COMPUTER_USE_SYSTEM_PROMPT.format(operator=operator)
-
-    if session.device_id != "blackbox":
-        from Orchestrator.device_registry import get_registry
-        device = get_registry().get_device(session.device_id)
-        if device:
-            device_context = (
-                f"\n\n## TARGET DEVICE\n"
-                f"You are controlling a REMOTE device over VNC:\n"
-                f"- Device: {device.name} ({device.id})\n"
-                f"- Type: {device.device_type.value}\n"
-                f"- IP: {device.tailscale_ip}:{device.vnc_port}\n"
-            )
-            if device.description:
-                device_context += f"- Description: {device.description}\n"
-            device_context += (
-                f"\nScreenshots come from this remote device. "
-                f"Actions (clicks, typing, scrolling) are sent to this remote device. "
-                f"This is NOT the local BlackBox machine.\n"
-            )
-            sys_prompt += device_context
-
-    # Degrade gracefully: a fossil-retrieval failure must not strand the
-    # session in "starting" (the task path has no interactive retry).
-    try:
-        cu_fossil_context, cu_provenance = build_cu_context(prompt, operator)
-    except Exception as e:
-        print(f"[CU-HEADLESS] build_cu_context failed (non-fatal): {e}")
-        cu_fossil_context, cu_provenance = "", {}
-    session.provenance = cu_provenance
-    if cu_fossil_context:
-        sys_prompt += "\n\n" + cu_fossil_context
-        print(f"[CU-HEADLESS] Injected {len(cu_fossil_context)} chars of fossil context")
-
-    # ── Build history ──
-    user_content = [{"type": "text", "text": prompt}]
-    if initial_b64:
-        user_content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": initial_b64}
-        })
-    session.trim_history()
-    history = strip_screenshots_from_history(list(session.conversation_history))
-    history.append({"role": "user", "content": user_content})
-
-    # ── Tool array + headers (exactly as stream_computer_use) ──
-    try:
-        vault_tools = _get_tools("anthropic", _last_user_msg(history), group="chat_cu")
-    except Exception as e:
-        print(f"[CU-HEADLESS] ToolVault injection failed (non-fatal): {e}")
-        vault_tools = []
-    tools = [
-        {"type": COMPUTER_TOOL_TYPE, "name": "computer",
-         "display_width_px": DISPLAY_WIDTH, "display_height_px": DISPLAY_HEIGHT},
-        {"type": "bash_20250124", "name": "bash"},
-        {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
-    ] + vault_tools
-
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": ANTHROPIC_BETA_HEADER,
-        "content-type": "application/json",
-    }
-
-    # ── Launch the driver and drain its event queue ──
-    session.agent_task = asyncio.create_task(
-        run_anthropic_cu_loop(
-            session, history, sys_prompt, tools, headers,
-            model or CU_MODEL_DEFAULT, operator, prompt,
-        )
-    )
-    print(f"[CU-HEADLESS] Driver launched for task {task_id} ({operator})")
-
-    return await _drain_and_fold(session, session.agent_task, screenshots)
+    finally:
+        # Free the display reservation the browser lock claimed (keyed by
+        # the session id). Every exit path passes through here; prune + TTL
+        # are the backstop, and it is a no-op for a resumed (unreserved)
+        # session (which get_or_create returns without reserving).
+        release_claim(session.session_id)

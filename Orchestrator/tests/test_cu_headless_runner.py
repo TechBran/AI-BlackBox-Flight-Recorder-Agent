@@ -142,18 +142,24 @@ async def test_drain_stop_event_fails_task(runner_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_single_display_conflict_returns_failed_dict(runner_env, monkeypatch):
-    """get_or_create_session raises RuntimeError when another operator holds
-    the local display — the runner must return a clean FAILED contract dict,
-    not crash the worker."""
+    """get_or_create_session raises RuntimeError when the display arbiter denies
+    the claim — the runner must return a clean FAILED contract dict, not crash the
+    worker. The stubbed RuntimeError carries the REAL production message (built
+    from the arbiter's DisplayOwner.describe()), so the assertion tracks the
+    shipping string, not a hand-written fixture substring (M1-T6 review Issue 4)."""
+    from Orchestrator.browser.display_arbiter import DisplayOwner
+    real_message = f"Cannot start session: {DisplayOwner('browser', 'alice', 'abcd1234ef').describe()}"
+
     def boom(operator, session_id=None, device_id="blackbox"):
-        raise RuntimeError("Cannot start session: alice has a running Computer Use task on the local display")
+        raise RuntimeError(real_message)
 
     monkeypatch.setattr(headless, "get_or_create_session", boom)
 
     result = await headless.run_cu_task("t4", "system", "conflict")
 
     assert result["success"] is False
-    assert "running Computer Use task" in result["result_text"]
+    assert result["result_text"] == real_message                 # exact production string
+    assert "Computer Use" in result["result_text"] and "running" in result["result_text"].lower()
     assert result["screenshots"] == [] and result["final_screenshot"] is None
 
 
