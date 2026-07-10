@@ -195,6 +195,29 @@ def test_every_use_computer_branch_routes_through_executor():
     )
 
 
+def test_stream_branch_still_calls_the_browser_task_helper():
+    """Pins the seam the _browser_task_event extraction created.
+
+    The helper's own behavior is covered below, but a tested helper proves
+    nothing if the shipping branch stops calling it: delete the call site and
+    every other test in this file still passes (verified). Nothing else looks
+    for it — the property test above asserts only that .execute() is called.
+    """
+    callers = [
+        b.lineno for b in _use_computer_branches(_CHAT_ROUTES)
+        if any(
+            isinstance(c.func, ast.Name) and c.func.id == "_browser_task_event"
+            for c in _branch_body_calls(b)
+        )
+    ]
+    assert len(callers) == 1, (
+        "expected exactly ONE use_computer branch (the Anthropic stream branch) to "
+        f"call _browser_task_event, found {len(callers)} at {callers}. If the call "
+        "site was removed, the stream branch silently stops emitting browser_task "
+        "while the helper's unit tests keep passing."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Behavior: the non-stream Anthropic loop, driven end-to-end                   #
 # --------------------------------------------------------------------------- #
