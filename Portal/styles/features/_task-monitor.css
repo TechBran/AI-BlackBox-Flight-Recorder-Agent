@@ -184,6 +184,13 @@
     color: #f44336;
 }
 
+/* Cancelled is terminal but operator-initiated — muted/neutral grey, NOT the
+   red of failed. A cancelled task must look distinct from a crash (G2-T8). */
+.task-status.cancelled {
+    background: rgba(158, 158, 158, 0.18);
+    color: #9e9e9e;
+}
+
 .task-description {
     font-size: 13px;
     color: var(--muted);

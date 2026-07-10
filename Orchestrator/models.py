@@ -295,6 +295,15 @@ class TaskDatabase:
         # later whole-row write may resurrect it to completed/failed — that is the
         # "UI lies" bug T8 kills. Only reads when the incoming status is not
         # already CANCELLED, and only forces on an actual regression.
+        #
+        # TOCTOU CAVEAT: this read-then-write is NOT atomic. A direct
+        # save_task(COMPLETED) from the main loop interleaved with a cancel_task
+        # write from a worker thread has a narrow window where the read misses the
+        # cancel. This is a SECONDARY defense — update_task's guard is the primary
+        # one, and the GEMINI_CU path is additionally guarded before the write in
+        # gemini_cu_routes._run_task. Closing this window fully would require a
+        # single UPDATE...WHERE status!='cancelled' transaction; do not mistake
+        # this guard for that guarantee.
         if task.status != TaskStatus.CANCELLED:
             existing = self.get_task(task.task_id)
             if existing is not None and existing.status == TaskStatus.CANCELLED:

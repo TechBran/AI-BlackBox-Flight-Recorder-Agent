@@ -345,6 +345,64 @@ def test_cancelled_cu_task_does_not_mint(fake_task_db, monkeypatch):
     assert fake_task_db["cu-1"].status == TaskStatus.CANCELLED
 
 
+def _run_gemini_task(task_id, operator, stopped, loop_events, fake_db, monkeypatch):
+    """Drive gemini_cu_routes._run_task with a mocked session + loop + snapshot.
+    Returns the list of _snapshot_cu_result invocations (the mint boundary)."""
+    from Orchestrator.routes import gemini_cu_routes as gcr
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "gsess-" + task_id
+            self.stop_requested = stopped
+            self.current_step = 2
+            self.total_tokens = {"input": 0, "output": 0}
+
+    monkeypatch.setattr(gcr, "get_or_create_session", lambda *a, **k: FakeSession())
+
+    async def fake_loop(session, prompt, model, system_prompt, url):
+        for ev in loop_events:
+            yield ev
+
+    monkeypatch.setattr(gcr, "run_gemini_cu_loop", fake_loop)
+
+    minted = []
+
+    async def fake_snapshot(*a, **k):
+        minted.append((a, k))
+
+    monkeypatch.setattr(gcr, "_snapshot_cu_result", fake_snapshot)
+
+    _seed(fake_db, task_id, task_type=TaskType.GEMINI_CU, operator=operator)
+    fake_db[task_id].result_data = {}
+
+    # environment="android" so no local display claim is taken (ADB device).
+    asyncio.run(gcr._run_task(task_id, operator, "android", "android",
+                              "do a thing", "gemini-x", None, None))
+    return minted
+
+
+def test_gemini_cancelled_task_does_not_mint(fake_task_db, monkeypatch):
+    """A cancelled GEMINI_CU task must NOT auto-snapshot — the gemini driver
+    exits cleanly via `break`, so the mint must be guarded on stop_requested."""
+    minted = _run_gemini_task(
+        "gcu-1", "Brandon", stopped=True,
+        loop_events=[{"type": "cu_stopped", "data": {"step": 2}}],
+        fake_db=fake_task_db, monkeypatch=monkeypatch)
+    assert minted == [], "cancelled GEMINI_CU task auto-snapshotted — must not"
+    assert fake_task_db["gcu-1"].status == TaskStatus.CANCELLED
+
+
+def test_gemini_successful_task_still_mints(fake_task_db, monkeypatch):
+    """Control: a NON-cancelled GEMINI_CU success still mints (proves the guard
+    above isn't passing because the mint path is globally broken)."""
+    minted = _run_gemini_task(
+        "gcu-2", "Brandon", stopped=False,
+        loop_events=[{"type": "done", "data": {"content": "did it"}}],
+        fake_db=fake_task_db, monkeypatch=monkeypatch)
+    assert len(minted) == 1, "a normal GEMINI_CU success must still auto-snapshot"
+    assert fake_task_db["gcu-2"].status == TaskStatus.COMPLETED
+
+
 def test_successful_cu_task_still_mints(fake_task_db, monkeypatch):
     """Control: a NON-cancelled CU success still mints (proves the test above
     isn't passing because mint is globally broken)."""
@@ -452,6 +510,43 @@ def test_request_stop_cross_loop_cancels(clean_arbiter):
     t.join(4)
     assert not t.is_alive(), "cross-loop cancel did not stop the worker task"
     assert outcome.get("cancelled") is True
+
+
+def test_gemini_request_stop_same_loop_cancels(clean_arbiter):
+    """Parity with the browser twin: request_stop() from WITHIN the driver's own
+    loop (the chat path) cancels agent_task; the task completes; the done-callback
+    releases the display claim. Also asserts stop_requested is set."""
+    from Orchestrator.gemini_cu.session_manager import GeminiCUSession
+    da = clean_arbiter
+
+    async def scenario():
+        sess = GeminiCUSession(operator="g-same", device_id="blackbox",
+                               environment="desktop")
+        sess.status = "running"
+        sess.agent_task = asyncio.create_task(asyncio.sleep(100))
+        claim_id = "g-claim-same"
+        owner = da.try_claim("gemini-chat", "g-same", claim_id,
+                             session_id=sess.session_id)
+        assert owner is None
+        sess.agent_task.add_done_callback(
+            lambda _t, c=claim_id: da.release_claim(c))
+        await asyncio.sleep(0)
+        assert da.local_display_owner() is not None
+
+        sess.request_stop()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(sess.agent_task, timeout=3)
+        await asyncio.sleep(0)
+
+        assert sess.stop_requested is True
+        assert sess.agent_task.cancelled()
+        assert da.local_display_owner() is None, "display claim leaked after stop"
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        loop.close()
 
 
 def test_gemini_request_stop_cross_loop_cancels():

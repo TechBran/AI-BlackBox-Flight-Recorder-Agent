@@ -543,6 +543,16 @@ def background_worker():
                     future = pool.submit(process_task, task)
                     active_futures[task_id] = future
                     future.add_done_callback(lambda f, tid=task_id: _on_task_done(tid, f))
+                else:
+                    # Dequeued but NOT runnable — cancelled while PENDING, or gone.
+                    # process_task's finally never runs for it, so clean up its
+                    # cancel bookkeeping HERE (the one point we KNOW it won't run),
+                    # or the flag leaks in _cancel_requested forever (G2-T8).
+                    # NOT done in cancel_task: that would race a concurrent dequeue
+                    # which had already read PENDING and could clear the flag out
+                    # from under a running CU task's mint guard.
+                    unregister_cancel_handle(task_id)
+                    clear_cancel_request(task_id)
             else:
                 time.sleep(2)  # Wait before checking again
 
