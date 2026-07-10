@@ -1,6 +1,6 @@
 {
   "name": "use_computer",
-  "description": "Control the computer using an AI agent powered by Claude Opus 4.6. Can browse the web, use desktop apps, run terminal commands, manage files — full Linux desktop access. Returns a task ID - use get_task_status to check progress.",
+  "description": "Control the computer using an autonomous AI agent. Can browse the web, use desktop apps, run terminal commands, and manage files — full Linux desktop access. Returns a task ID - use get_task_status to check progress.",
   "category": "computer_control",
   "groups": [
     "chat",
@@ -25,6 +25,10 @@
       "device_id": {
         "type": "string",
         "description": "Target device ID from the Tailscale mesh (default: 'blackbox' for local machine). Use list_devices to see available devices."
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional. The computer-use model CLASS to run: one of 'opus' (the default), 'sonnet', 'fable', 'gemini', or 'gpt'. The backend provider is DERIVED from the class you pick — you do not choose a backend directly. A concrete model id is also accepted. Omit to use the configured default class."
       }
     },
     "required": [
