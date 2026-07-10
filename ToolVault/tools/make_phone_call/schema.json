@@ -1,6 +1,6 @@
 {
   "name": "make_phone_call",
-  "description": "DELEGATE a real phone call to a separate AI voice agent via the TG200 cellular gateway. You are NOT making the call yourself — you are BRIEFING another AI agent who will have a real-time voice conversation on your behalf. Use 'role' to define WHO the agent IS (their persona/character), and 'greeting' for WHAT task to accomplish on this call. Use search_contacts first to find the number.",
+  "description": "Make a real phone call on the user's behalf by BRIEFING a separate AI voice agent (via the TG200 cellular gateway) that has the live voice conversation for you — you are NOT on the call yourself. This is the tool for 'call X', 'phone X', 'give X a call'.",
   "category": "communication",
   "groups": [
     "chat",
@@ -41,5 +41,5 @@
     ]
   },
   "example": "make_phone_call(phone_number=\"...\")",
-  "notes": "Look up contact number with search_contacts first."
+  "notes": "Use 'role' to define WHO the agent is (their persona) and 'greeting' for WHAT to accomplish on the call. Look up the contact number with search_contacts first."
 }

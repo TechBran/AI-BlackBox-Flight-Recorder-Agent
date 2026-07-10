@@ -1,6 +1,6 @@
 {
   "name": "stop_device_control",
-  "description": "Incident kill switch for remote device control (M8.2). Immediately STOPS device-control sessions on the user's phone/tablet/XR device over Tailscale — halting a runaway, unwanted, or mistaken control_device run. By default it kills ALL in-flight device-control tasks for this operator on the resolved device ('kill-all'); pass a specific task_id to kill just that one. The device refuses every subsequent action frame for a killed task and drops its consent banner. Use this the instant the user says 'stop', 'stop controlling my phone', 'cancel that', or when a device-control session is misbehaving. Returns {ok, killed_count}. Operator-scoped: it can only stop this operator's own device sessions.",
+  "description": "Kill switch for remote device control: immediately STOPS control_device sessions on the user's phone/tablet/XR device over Tailscale, halting a runaway or unwanted run. Use this the instant the user says 'stop', 'stop controlling my phone', or 'cancel that'. By default it kills ALL in-flight device-control tasks for this operator on the resolved device; pass a task_id to kill just that one. Operator-scoped.",
   "category": "computer_control",
   "groups": ["chat", "chat_cu", "mcp"],
   "tier": 2,
