@@ -70,11 +70,24 @@ def test_chat_cu_excludes_use_computer():
 
 
 def test_chat_cu_includes_other_tools():
-    """chat_cu should have everything chat has minus use_computer."""
+    """chat_cu (the toolset a Computer-Use agent sees) = chat MINUS the
+    autonomous-agent-spawning tools. The invariant is NOT "minus use_computer"
+    specifically — it's "an agent already running an autonomous task must not
+    spawn MORE autonomous agents." That excludes use_computer (no recursive CU)
+    AND the YOLO CLI-agent tools (a screen-driving agent shouldn't fire off a
+    background coding agent — consistent with the display arbiter + sandbox + the
+    no-mcp/RCE posture). If you WANT a CU session to be able to launch a CLI agent,
+    add "chat_cu" to those tools' groups and widen this set — it's a product call.
+    (Was "== {use_computer}"; that described the state before the CLI-agent tools
+    existed, not the principle.)"""
     chat = set(get_group_tool_names("chat"))
     chat_cu = set(get_group_tool_names("chat_cu"))
     diff = chat - chat_cu
-    assert diff == {"use_computer"}, f"chat vs chat_cu diff should be just use_computer, got: {diff}"
+    agent_spawning = {"use_computer", "claude_code_task", "gemini_cli_task", "codex_cli_task"}
+    assert diff == agent_spawning, (
+        f"chat vs chat_cu diff should be exactly the agent-spawning tools "
+        f"{agent_spawning}, got: {diff}"
+    )
 
 
 def test_realtime_group_count():
