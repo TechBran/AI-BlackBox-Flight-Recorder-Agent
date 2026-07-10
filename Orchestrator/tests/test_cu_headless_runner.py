@@ -220,6 +220,42 @@ async def test_anthropic_key_present_proceeds_past_both_gates(runner_env, monkey
     assert result["result_text"] == "reached the driver"
 
 
+@pytest.mark.asyncio
+async def test_google_only_box_reaches_backend_guard_without_anthropic_key(runner_env, monkeypatch):
+    """Pins the fresh-box PORTABILITY gate — the whole point of M1-T4.
+
+    A customer box provisioned with ONLY a Google key (NO Anthropic credential
+    at all) must run a Gemini CU task far enough to hit T5's Anthropic-only
+    backend guard — it must NOT die naming the wrong vendor's key. Every OTHER
+    gemini/openai test inherits the fixture's ANTHROPIC_API_KEY="test-key", so
+    this is the only test that exercises the empty-Anthropic-key box the reorder
+    exists to fix. Moving the ANTHROPIC_API_KEY check back above
+    resolve_backend() makes the THIRD assertion fail (verified by mutation)."""
+    monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")   # fresh box: no Anthropic credential
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake")  # only Google is provisioned
+    result = await headless.run_cu_task(
+        "t-google-only", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert "anthropic" in result["result_text"].lower()               # reached T5's backend guard
+    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]   # did NOT die on the wrong vendor's key
+
+
+@pytest.mark.asyncio
+async def test_openai_only_box_reaches_backend_guard_without_anthropic_key(runner_env, monkeypatch):
+    """Same fresh-box portability invariant as the Google case, on the OpenAI
+    backend: an OpenAI-only box (no Anthropic credential) must reach T5's
+    Anthropic-only guard, not die on the missing Anthropic key."""
+    monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")   # fresh box: no Anthropic credential
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake")  # only OpenAI is provisioned
+    result = await headless.run_cu_task(
+        "t-openai-only", "system", "hi", model="gpt-5.5")
+
+    assert result["success"] is False
+    assert "anthropic" in result["result_text"].lower()               # reached T5's backend guard
+    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]   # did NOT die on the wrong vendor's key
+
+
 def test_fresh_event_queue_unbinds_dead_worker_loop():
     """Regression (Task 12 review C1): a session whose event_queue was bound
     inside a worker thread's asyncio.run() must be reusable from a NEW loop
