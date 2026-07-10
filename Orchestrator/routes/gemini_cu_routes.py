@@ -132,9 +132,9 @@ async def _run_task(task_id, operator, device_id, environment,
     #    must stay unaffected — gate on the display, not the route). The claim key
     #    is per-launch (this task id); released in the finally below. ──
     from Orchestrator.browser.display_arbiter import (
-        try_claim, release_claim, _GEMINI_LOCAL_ENVIRONMENTS,
+        try_claim, release_claim, is_local_environment,
     )
-    _claims_display = environment in _GEMINI_LOCAL_ENVIRONMENTS
+    _claims_display = is_local_environment(environment)
     _claim_id = f"gemini-route-run:{task_id}"
     if _claims_display:
         owner = try_claim("gemini-task", operator, _claim_id, session_id=session.session_id)
@@ -233,9 +233,9 @@ async def stream_gemini_cu(body: GeminiCURequest):
     #    claims. Claim + release live inside the generator so a stream that is
     #    never consumed cannot leak a claim. ──
     from Orchestrator.browser.display_arbiter import (
-        try_claim, release_claim, _GEMINI_LOCAL_ENVIRONMENTS,
+        try_claim, release_claim, is_local_environment,
     )
-    _claims_display = environment in _GEMINI_LOCAL_ENVIRONMENTS
+    _claims_display = is_local_environment(environment)
     _claim_id = f"gemini-route-stream:{uuid.uuid4()}"
 
     async def event_stream():

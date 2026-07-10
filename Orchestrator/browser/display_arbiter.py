@@ -55,13 +55,27 @@ None for it and prune falls to the TTL branch — it therefore keeps a residual
 ``finally`` release (headless task path) is what actually bounds it; prune is not
 relied on there.
 
-IMPORT DIRECTION (deliberate, acyclic). This module imports the two
-session-manager modules LAZILY (function-local). It is imported — also lazily —
-by ``browser/session_manager``… no: as of the per-launch redesign the browser
-lock no longer arbitrates. It is imported lazily by the five LAUNCH sites
-(``browser/headless`` ×2 and the three ``chat_routes`` CU streams). Function-local
-imports guarantee no module-load cycle can form (the repo already leans on this —
-see ``browser/headless.py`` and ``browser/dispatch.py``).
+FAIL-CLOSED, BY DESIGN. If a driver HANGS after ``status == "running"``, its
+claim is held indefinitely: prune never reclaims a ``running`` session, and the
+TTL only fires once the session is gone. This is intended — never hand agent B
+the mouse while agent A's driver is wedged mid-action. Caveat: ``/chat/cu-stop``
+is COOPERATIVE (it sets ``stop_requested``; it does not ``task.cancel()``), so a
+driver wedged before its next stop-check is freed only by a process restart. A
+hard cancel backstop is deliberately NOT added here — that is a behavior change
+for its own task.
+
+IMPORT DIRECTION (deliberate, acyclic). This module (as of the per-launch
+redesign) is NOT imported by ``browser/session_manager`` — the browser lock no
+longer arbitrates. It is imported lazily by the SIX launch sites
+(``browser/headless`` ×2, the three ``chat_routes`` CU streams, and
+``gemini_cu_routes`` ×2), and it imports the two session-manager modules LAZILY
+(function-local) in return. Function-local imports guarantee no module-load cycle
+can form (the repo already leans on this — see ``browser/headless.py`` and
+``browser/dispatch.py``).
+
+Callers MUST NOT import the private ``_GEMINI_LOCAL_ENVIRONMENTS`` — use the
+public ``is_local_environment`` predicate so the "which envs drive the local
+display" answer lives in ONE place (guarded by the driver-drift test).
 """
 import threading
 import time
@@ -127,13 +141,22 @@ _reservations: Dict[str, Tuple[DisplayOwner, float]] = {}
 _GEMINI_LOCAL_ENVIRONMENTS = ("browser", "desktop")
 
 
+def is_local_environment(env: Optional[str]) -> bool:
+    """Public predicate: does this Gemini ``environment`` drive the local X
+    display? The SINGLE source of truth for that question — every launch site
+    gates its claim on this, so widening the set (when the driver-drift test
+    fires) updates all of them at once. Never let a caller hardcode the tuple or
+    import the private constant (that is the exact drift the drift test guards)."""
+    return env in _GEMINI_LOCAL_ENVIRONMENTS
+
+
 def _browser_holds_local(session) -> bool:
     return (getattr(session, "device_id", None) == "blackbox"
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 
 def _gemini_holds_local(session) -> bool:
-    return (getattr(session, "environment", None) in _GEMINI_LOCAL_ENVIRONMENTS
+    return (is_local_environment(getattr(session, "environment", None))
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 

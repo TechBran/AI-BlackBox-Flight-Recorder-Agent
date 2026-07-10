@@ -495,36 +495,70 @@ async def test_gemini_browser_session_blocks_browser_and_gemini_launches(monkeyp
     assert r2["success"] is False
 
 
-def test_arbiter_local_env_superset_of_gemini_driver():
-    """Drift guard (Hole 2): the arbiter's Gemini local-environment set must be a
-    SUPERSET of the environments the driver actually drives the local display for.
-    Scans the exact functions the driver uses (_capture_screenshot /
-    _execute_predefined_action) for `session.environment in (...)` tuples. If a
-    future driver adds a fourth local environment, this fails at commit time."""
+def _scan_gemini_driver_environments(source: str):
+    """Collect every `session.environment` comparison-constant in a Gemini-driver
+    source string, and the names of the functions that branch on `environment`.
+    Whole-MODULE scan (M-3): not pinned to a fixed function list, so a THIRD
+    function that drives the local display for a new environment is seen too."""
     import ast
+    tree = ast.parse(source)
+    envs = set()
+    branching_fns = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Compare)
+                    and isinstance(n.left, ast.Attribute)
+                    and n.left.attr == "environment"):
+                branching_fns.add(fn.name)
+                for comp in n.comparators:
+                    elts = comp.elts if isinstance(comp, (ast.Tuple, ast.List, ast.Set)) else [comp]
+                    for e in elts:
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                            envs.add(e.value)
+    return envs, branching_fns
+
+
+def test_arbiter_local_env_superset_of_gemini_driver():
+    """Drift guard (Hole 2, widened per M-3): scan the WHOLE gemini driver module
+    for every `session.environment` comparison (not a fixed function list, so a
+    THIRD local-display function for a new environment is caught), drop the known
+    non-local branch ("android"), and assert every remaining env is recognised by
+    the arbiter's PUBLIC predicate. A driver that starts driving the local display
+    for an environment the arbiter doesn't know fails here at commit time — before
+    it surfaces with a live mouse. Mutation-verified in the report: inject a fake
+    third local-display function into a scratch copy of the driver and this
+    fails."""
     import inspect
     import Orchestrator.gemini_cu.agent_loop as al
 
-    tree = ast.parse(inspect.getsource(al))
-    targets = {"_capture_screenshot", "_execute_predefined_action"}
-    driver_local = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in targets:
-            for n in ast.walk(node):
-                if (isinstance(n, ast.Compare) and len(n.ops) == 1
-                        and isinstance(n.ops[0], ast.In)
-                        and isinstance(n.left, ast.Attribute)
-                        and n.left.attr == "environment"):
-                    comp = n.comparators[0]
-                    if isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
-                        for e in comp.elts:
-                            if isinstance(e, ast.Constant) and isinstance(e.value, str):
-                                driver_local.add(e.value)
-    driver_local.discard("android")  # ADB — the driver's non-local elif branch
-    assert driver_local, "drift guard matched nothing — the AST matcher is broken"
-    assert driver_local <= set(da._GEMINI_LOCAL_ENVIRONMENTS), (
-        f"driver drives the local display for {driver_local}, but the arbiter's "
-        f"local-env set is {da._GEMINI_LOCAL_ENVIRONMENTS} — widen _gemini_holds_local")
+    envs, branching_fns = _scan_gemini_driver_environments(inspect.getsource(al))
+    driver_local = envs - {"android"}   # android = the driver's non-local branch
+    assert driver_local, "drift guard matched no environment comparison — matcher broken"
+    unknown = {e for e in driver_local if not da.is_local_environment(e)}
+    assert not unknown, (
+        f"gemini driver branches on local environment(s) {sorted(unknown)} the "
+        f"arbiter does not recognise (branching fns: {sorted(branching_fns)}) — "
+        f"widen display_arbiter._GEMINI_LOCAL_ENVIRONMENTS / is_local_environment")
+
+
+def test_local_env_source_of_truth_not_reimported_privately():
+    """I-1: no module outside display_arbiter may reference the PRIVATE
+    _GEMINI_LOCAL_ENVIRONMENTS — that reach-into-internals is the exact drift
+    (a hardcoded/copied env set) the public is_local_environment predicate exists
+    to prevent. Callers must go through the predicate."""
+    import pathlib
+    root = pathlib.Path(da.__file__).resolve().parents[2] / "Orchestrator"
+    offenders = []
+    for p in root.rglob("*.py"):
+        if p.name == "display_arbiter.py" or "/tests/" in p.as_posix():
+            continue
+        if "_GEMINI_LOCAL_ENVIRONMENTS" in p.read_text(encoding="utf-8"):
+            offenders.append(str(p.relative_to(root)))
+    assert not offenders, (
+        f"these modules import the private _GEMINI_LOCAL_ENVIRONMENTS instead of "
+        f"calling is_local_environment(): {offenders}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

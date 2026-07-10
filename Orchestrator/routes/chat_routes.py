@@ -4382,7 +4382,9 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
     )
     from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL
     from Orchestrator.config import GOOGLE_API_KEY
-    from Orchestrator.browser.display_arbiter import try_claim, release_claim
+    from Orchestrator.browser.display_arbiter import (
+        try_claim, release_claim, is_local_environment,
+    )
 
     # Per-LAUNCH display claim id (M1-T6). A claim is made only if THIS turn
     # actually launches a driver (below); released in the consumer-loop finally.
@@ -4507,11 +4509,10 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             print(f"[GEMINI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
         # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    Only a LOCAL-display environment touches the local X server; android
-        #    does not, so it never claims/blocks. ("browser" is included for parity
-        #    with the arbiter's local-env set even though this chat path only
-        #    produces desktop/android.) Released via the driver's done-callback. ──
-        if session.environment in ("browser", "desktop"):
+        #    Gate on the arbiter's PUBLIC local-environment predicate (single
+        #    source of truth; android is never local so it never claims/blocks).
+        #    Released via the driver's done-callback below. ──
+        if is_local_environment(session.environment):
             owner = try_claim("gemini-chat", operator, _display_claim_id,
                               session_id=session.session_id)
             if owner is not None:
@@ -4522,10 +4523,6 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
         session.agent_task = asyncio.create_task(
             _gemini_cu_agent_loop(session, operator, user_text, model, system_prompt)
         )
-        # Release on the DRIVER TASK's lifecycle, not this consumer generator's
-        # (M1-T6 rev2, Hole 3): the task survives client disconnect, so this
-        # callback fires only when the driver actually finishes (incl. its
-        # auto-dequeue) or on E-stop.
         # Release on the DRIVER TASK's lifecycle, not this consumer generator's
         # (M1-T6 rev2, Hole 3): the task survives client disconnect, so this
         # callback fires only when the driver actually finishes (incl. its
