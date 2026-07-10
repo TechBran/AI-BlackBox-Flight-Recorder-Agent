@@ -14,6 +14,7 @@ Consumers: tasks.process_browser_use (the /browser/run + use_computer +
 scheduler path). This replaced the legacy browser/agent_loop.BrowserSession.
 """
 import asyncio
+import contextlib
 
 from Orchestrator.browser.config import (
     ANTHROPIC_BETA_HEADER, COMPUTER_TOOL_TYPE,
@@ -29,6 +30,7 @@ from Orchestrator.gemini_cu.agent_loop import run_gemini_cu_loop
 from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL as GEMINI_CU_MODEL_DEFAULT
 from Orchestrator.gemini_cu.session_manager import (
     get_or_create_session as gemini_get_or_create_session,
+    destroy_session as gemini_destroy_session,
 )
 from Orchestrator.openai_cu.agent_loop import run_openai_cu_loop
 from Orchestrator.browser.screenshot import (
@@ -188,9 +190,12 @@ async def _drain_and_fold(session, agent_task, screenshots) -> dict:
     finally:
         # Own the driver task: if THIS coroutine is cancelled (outer wait_for
         # timeout), don't rely on loop teardown to stop the driver — it would
-        # keep clicking with no consumer.
+        # keep clicking with no consumer. Await the cancellation so the task is
+        # fully torn down (no "task was destroyed but it is pending" warning).
         if agent_task and not agent_task.done():
             agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await agent_task
 
     final_screenshot = screenshots[-1] if screenshots else None
     if error_msg:
@@ -240,10 +245,11 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     device->environment resolution is ported from
     chat_routes.stream_gemini_computer_use (chat_routes.py:4365-4382).
 
-    NOTE (display race): skipping the Anthropic lock means a Gemini headless task
-    is NOT blocked by a concurrent Anthropic/OpenAI local task (both drive the
-    one physical display). The task path is effectively single-tenant per box;
-    cross-backend display arbitration is out of scope for T5 (see report).
+    DISPLAY ARBITRATION: skipping the Anthropic single-display LOCK does not mean
+    skipping conflict detection — for a desktop target we port the chat path's
+    operator-scoped desktop-conflict guard (chat_routes.py:4383-4389) so a Gemini
+    task cannot run while that operator's Anthropic/OpenAI CU task is driving the
+    one physical display. (Matters once M1-T7 lets voice agents launch CU tasks.)
     """
     # ── Resolve device -> environment ──
     if device_id and device_id != "blackbox":
@@ -262,6 +268,19 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
             environment = "desktop"
     else:
         environment = "desktop"
+
+    # ── Desktop-conflict guard (ported from stream_gemini_computer_use) ──
+    # The browser ComputerUseSession is shared by the Anthropic AND OpenAI CU
+    # paths, so get_operator_session covers both. A running one owns the local
+    # display; refuse rather than corrupt it with concurrent input.
+    if environment == "desktop":
+        from Orchestrator.browser.session_manager import get_operator_session
+        busy = get_operator_session(operator)
+        if busy and busy.status == "running":
+            return _failure(
+                "Cannot start Gemini CU — an Anthropic/OpenAI Computer Use task "
+                "is running on this desktop. Stop it first."
+            )
 
     session = gemini_get_or_create_session(operator, device_id, environment)
     if session.status in ("running", "starting"):
@@ -285,7 +304,19 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     session.agent_task = asyncio.create_task(_pump_generator(session, agen))
     print(f"[CU-HEADLESS] Gemini driver launched for task {task_id} "
           f"({operator}, env={environment})")
-    return await _drain_and_fold(session, session.agent_task, screenshots)
+    try:
+        return await _drain_and_fold(session, session.agent_task, screenshots)
+    finally:
+        # Drop the per-operator cached Gemini session. We rebound its event_queue
+        # to THIS worker thread's asyncio.run loop; GeminiCUSession — shared with
+        # the chat path (chat_routes.py:4393) — has NO fresh_event_queue(), so
+        # leaving it cached would make the next chat Gemini CU turn for this
+        # operator (within the 300s TTL) await a queue bound to a now-dead loop
+        # and crash with "bound to a different event loop". Dropping it forces
+        # the next turn to build a fresh session (headless tasks are one-shot, so
+        # discarding conversation_history is fine). Idempotent: no-op if already
+        # gone; destroy() also stops any still-running agent_task.
+        gemini_destroy_session(operator)
 
 
 async def run_cu_task(task_id: str, operator: str, prompt: str,

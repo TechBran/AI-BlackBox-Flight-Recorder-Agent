@@ -422,6 +422,129 @@ def test_key_map_backends_match_cu_model_filters():
     assert set(headless._BACKEND_KEY_NAMES) == set(CU_MODEL_FILTERS)
 
 
+@pytest.mark.asyncio
+async def test_headless_gemini_run_drops_poisoned_session(runner_env, monkeypatch):
+    """Regression (coordinator Issue 1 — the reviewer's flagged riskiest line).
+
+    The headless run rebinds the shared per-operator GeminiCUSession's
+    event_queue to the worker thread's asyncio.run loop. GeminiCUSession is
+    cached in gemini_cu.session_manager._operator_sessions AND shared with the
+    chat path, which does NOT rebind. Left cached, the next chat Gemini CU turn
+    for the same operator (within the 300s TTL) would await a queue bound to a
+    now-dead loop and crash with 'bound to a different event loop'. The runner
+    must drop the session after the run.
+
+    Uses the REAL Gemini factory (not the mock) so the session is genuinely
+    cached, then asserts it is gone afterward. Mutation-verified: removing the
+    finally teardown leaves get_session() != None and fails this test."""
+    import Orchestrator.gemini_cu.session_manager as gem_sm
+
+    op = "gem-teardown-op"
+    gem_sm.destroy_session(op)  # clean slate
+    assert gem_sm.get_session(op) is None
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    events = [{"type": "done", "data": {"content": "ok"}}]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 1))
+
+    try:
+        result = await headless.run_cu_task(
+            "t-gem-teardown", op, "hi",
+            model="gemini-2.5-computer-use-preview-10-2025")
+
+        assert result["success"] is True
+        # The poisoned session must NOT remain cached for the next chat turn.
+        assert gem_sm.get_session(op) is None
+    finally:
+        gem_sm.destroy_session(op)  # belt-and-braces cleanup
+
+
+@pytest.mark.asyncio
+async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypatch):
+    """Issue 2: a same-operator Gemini DESKTOP task must not run while that
+    operator's Anthropic/OpenAI CU task (both use the browser ComputerUseSession)
+    is driving the one physical display — parity with the chat path's
+    desktop-conflict guard. The Gemini driver must never launch."""
+    import Orchestrator.browser.session_manager as bsm
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+
+    def _no_gemini_session(*a, **k):
+        raise AssertionError("Gemini session created despite desktop conflict")
+
+    monkeypatch.setattr(headless, "gemini_get_or_create_session", _no_gemini_session)
+    monkeypatch.setattr(bsm, "get_operator_session",
+                        lambda operator: SimpleNamespace(status="running"))
+
+    def _boom(*a, **k):
+        raise AssertionError("Gemini driver launched despite desktop conflict")
+
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
+
+    result = await headless.run_cu_task(
+        "t-gem-conflict", "system", "hi",
+        model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert "running" in result["result_text"].lower()
+    assert "Computer Use" in result["result_text"]
+
+
+def test_driver_signatures_match_runner_call():
+    """Issue 3 (mock-fidelity guard). The Gemini/OpenAI mocks take
+    (session, *args, **kwargs), so a real driver signature change would sail
+    through green. Bind the REAL driver signatures with EXACTLY the arguments
+    headless.py passes — this fails at commit time if a parameter is renamed or
+    removed, without running the driver. Keep these bind calls byte-for-byte in
+    sync with the call sites (headless._run_gemini_cu_task / run_cu_task openai
+    branch)."""
+    import inspect
+    from Orchestrator.gemini_cu.agent_loop import run_gemini_cu_loop as real_gem
+    from Orchestrator.openai_cu.agent_loop import run_openai_cu_loop as real_oai
+
+    # _run_gemini_cu_task: run_gemini_cu_loop(session, prompt, model, system_prompt, url)
+    inspect.signature(real_gem).bind(object(), "prompt", "model", "sys", "url")
+    # run_cu_task openai branch: run_openai_cu_loop(session, prompt, model, system_prompt, None)
+    inspect.signature(real_oai).bind(object(), "prompt", "model", "sys", None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_dict_error_extracts_message(runner_env, monkeypatch):
+    """FOLD gap 4: Gemini/OpenAI wrap errors as {"message": ...} (Anthropic sends
+    a bare str). The fold must surface the message, not str(dict)."""
+    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+                        lambda *a, **k: _fresh_gemini_session())
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    events = [{"type": "error", "data": {"message": "Gemini API error: quota exhausted"}}]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 1))
+
+    result = await headless.run_cu_task(
+        "t-gerr", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert result["result_text"] == "Gemini API error: quota exhausted"
+
+
+@pytest.mark.asyncio
+async def test_openai_reasonless_cu_stopped_fails(runner_env, monkeypatch):
+    """FOLD: Gemini/OpenAI emit cu_stopped as {step} with NO `reason`; Anthropic
+    emits {step, reason}. A stopped task is FAILED and the fold defaults the
+    reason so the reason-less shape still fails cleanly (not crashes)."""
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake-openai-key")
+    events = [
+        {"type": "cu_screenshot", "data": {"url": "/ui/uploads/o1.png", "step": 1}},
+        {"type": "cu_stopped", "data": {"step": 2}},  # no "reason"
+        {"type": "usage", "data": {"input": 4, "output": 1}},
+    ]
+    monkeypatch.setattr(headless, "run_openai_cu_loop", _scripted_agen(events, 2))
+
+    result = await headless.run_cu_task("t-ostop", "system", "hi", model="gpt-5.5")
+
+    assert result["success"] is False
+    assert "stopped" in result["result_text"].lower()
+    assert result["final_screenshot"] == "/ui/uploads/o1.png"
+
+
 def test_fresh_event_queue_unbinds_dead_worker_loop():
     """Regression (Task 12 review C1): a session whose event_queue was bound
     inside a worker thread's asyncio.run() must be reusable from a NEW loop
