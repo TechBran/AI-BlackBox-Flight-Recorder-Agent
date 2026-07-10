@@ -37,6 +37,24 @@ VOICE_ROUTE_FILES = [
     "grok_live_routes.py",
 ]
 
+# Every semantic piece the COMPUTER CONTROL block MUST teach, keyed to a tuple of
+# distinctive substrings that prove it (ALL must be present for the piece to
+# count). Asserting each piece separately per branch means a branch gutted down
+# to just the heading + "get_task_status" satisfies NONE of these — so the guard
+# catches a HOLLOWED-OUT branch, not merely an unedited twin. In particular the
+# single-tenant piece requires the ASYNC framing ("FAILED" surfaced by a poll):
+# a synchronous "if a launch is refused..." wording lacks it, because
+# use_computer always returns success + a task_id and the display-busy refusal
+# only appears later via get_task_status.
+REQUIRED_PIECES = {
+    "async task_id claim": ("ASYNCHRONOUS", "returns a task_id"),
+    "announce + poll (don't go silent)": ("you've started it", "poll get_task_status(task_id)"),
+    "stall directive (SNAP-3675)": ("ACTUALLY CALL IT",),
+    "model CLASS list (all five)": ("opus", "sonnet", "fable", "gemini", "gpt"),
+    "SYNCHRONOUS structured-failure handling": ('"available"', '"retryable"'),
+    "ASYNCHRONOUS single-tenant display refusal (surfaced by poll)": ("single-tenant", "FAILED"),
+}
+
 
 @pytest.fixture(autouse=True)
 def _fresh():
@@ -120,12 +138,14 @@ def test_exactly_six_system_instruction_branches():
     assert total == 6, f"expected 6 system_instructions branches across voice routes, found {total}"
 
 
-def test_all_six_branches_carry_computer_control_guidance():
+def test_all_six_branches_carry_every_computer_control_piece():
     for fn in VOICE_ROUTE_FILES:
         blocks = _system_instruction_literals(ROUTES / fn)
         assert len(blocks) == 2, f"{fn}: expected 2 system_instructions branches, got {len(blocks)}"
         for i, text in enumerate(blocks):
-            assert MARKER in text, f"{fn} branch #{i} is missing the {MARKER!r} section"
-            # The whole point: poll the launched task instead of going silent.
-            assert "get_task_status" in text, (
-                f"{fn} branch #{i} COMPUTER CONTROL section omits the get_task_status poll directive")
+            assert MARKER in text, f"{fn} branch #{i} is missing the {MARKER!r} section entirely"
+            for piece, needles in REQUIRED_PIECES.items():
+                missing = [n for n in needles if n not in text]
+                assert not missing, (
+                    f"{fn} branch #{i} COMPUTER CONTROL section is missing the "
+                    f"{piece!r} guidance (absent substrings: {missing})")
