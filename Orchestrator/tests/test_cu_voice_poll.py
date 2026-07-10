@@ -1,6 +1,6 @@
 """M1-T7: voice agents can drive AND poll computer use.
 
-Two halves, both guarded here:
+Three things guarded here:
 
   1. GROUPS — ``get_task_status`` is now exposed to all three voice surfaces
      (groups ``realtime`` / ``gemini_live`` / ``grok_live``) IN ADDITION to its
@@ -9,15 +9,24 @@ Two halves, both guarded here:
      learn whether it finished. It must serialize to the FLAT shape each voice
      surface accepts (plain string params — no enum / nested object).
 
-  2. PROMPTS — all SIX voice ``system_instructions`` branches (a ``custom_role``
-     branch + a default branch, in each of the three routes) carry the
-     COMPUTER CONTROL guidance. This is the guard against the "edit one branch,
-     miss its twin" bug shape that has bitten this repo before: the structural
-     test finds every ``system_instructions`` f-string by AST and asserts each
-     one contains the distinctive marker.
+  2. PROMPTS — the COMPUTER CONTROL guidance is a SINGLE shared constant
+     (``Orchestrator.routes.voice_prompts.CU_CONTROL_BLOCK``) interpolated into
+     all SIX voice ``system_instructions`` branches (a ``custom_role`` branch +
+     a default branch, in each of the three routes). Because there is one copy,
+     drift is structurally impossible and there is no per-branch content guard
+     to keep in sync. The invariant is now: exactly six branches, each
+     interpolating the constant; plus a content check on the constant itself.
+
+  3. RENDER — every one of the six branches actually EVALUATES without raising.
+     This is the guard the earlier AST-only test could not provide: a plain
+     f-string could carry a valid-but-broken interpolation that py_compile and
+     ast.parse both accept and that only raises at a live voice session. Four of
+     the six branches are otherwise never runtime-rendered by any test.
 """
 import ast
+import json
 import pathlib
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -27,9 +36,9 @@ from Orchestrator.tools.tool_registry import (
     get_gemini_live_tools,
     reset_cache,
 )
+from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 
 ROUTES = pathlib.Path(__file__).resolve().parents[1] / "routes"
-MARKER = "COMPUTER CONTROL"
 
 VOICE_ROUTE_FILES = [
     "realtime_routes.py",
@@ -37,21 +46,21 @@ VOICE_ROUTE_FILES = [
     "grok_live_routes.py",
 ]
 
-# Every semantic piece the COMPUTER CONTROL block MUST teach, keyed to a tuple of
-# distinctive substrings that prove it (ALL must be present for the piece to
-# count). Asserting each piece separately per branch means a branch gutted down
-# to just the heading + "get_task_status" satisfies NONE of these — so the guard
-# catches a HOLLOWED-OUT branch, not merely an unedited twin. In particular the
-# single-tenant piece requires the ASYNC framing ("FAILED" surfaced by a poll):
-# a synchronous "if a launch is refused..." wording lacks it, because
-# use_computer always returns success + a task_id and the display-busy refusal
-# only appears later via get_task_status.
+CONSTANT_NAME = "CU_CONTROL_BLOCK"
+
+# Every semantic piece the shared CU_CONTROL_BLOCK must teach, keyed to a tuple
+# of distinctive substrings that prove it (ALL must be present). Because the
+# block is ONE constant, this content check runs once against the single source
+# of truth — not per-branch. Note the SYNCHRONOUS piece asserts the LITERAL
+# brace shape ``{"success": false, ...}``: the constant is a plain string, so it
+# carries real braces with no f-string escaping.
 REQUIRED_PIECES = {
     "async task_id claim": ("ASYNCHRONOUS", "returns a task_id"),
     "announce + poll (don't go silent)": ("you've started it", "poll get_task_status(task_id)"),
+    "polling cadence / terminal rule": ("between checks", "tight loop"),
     "stall directive (SNAP-3675)": ("ACTUALLY CALL IT",),
     "model CLASS list (all five)": ("opus", "sonnet", "fable", "gemini", "gpt"),
-    "SYNCHRONOUS structured-failure handling": ('"available"', '"retryable"'),
+    "SYNCHRONOUS structured-failure handling": ('{"success": false, ...}', '"available"', '"retryable"'),
     "ASYNCHRONOUS single-tenant display refusal (surfaced by poll)": ("single-tenant", "FAILED"),
 }
 
@@ -113,39 +122,160 @@ def test_get_task_status_in_gemini_live_group_and_flat():
 
 
 # ---------------------------------------------------------------------------
-# 2. Six-branch prompt guard (AST scan of every system_instructions f-string)
+# 2a. Content of the single source of truth (checked ONCE, not per branch)
 # ---------------------------------------------------------------------------
 
-def _system_instruction_literals(path):
-    """Return the concatenated LITERAL text of every ``system_instructions = f"..."``
-    assignment in a source file (interpolations dropped; escaped braces collapsed
-    by the AST, so the rendered marker text is what we match)."""
+def test_cu_control_block_teaches_every_piece():
+    for piece, needles in REQUIRED_PIECES.items():
+        missing = [n for n in needles if n not in CU_CONTROL_BLOCK]
+        assert not missing, (
+            f"CU_CONTROL_BLOCK is missing the {piece!r} guidance (absent substrings: {missing})")
+
+
+# ---------------------------------------------------------------------------
+# 2b. Structural guard: exactly six branches, each interpolating the constant
+# ---------------------------------------------------------------------------
+
+def _system_instruction_joinedstrs(path):
+    """Every ``system_instructions = f"..."`` assignment's JoinedStr node in a file."""
     tree = ast.parse(path.read_text())
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             if "system_instructions" in targets and isinstance(node.value, ast.JoinedStr):
-                literal = "".join(
-                    v.value for v in node.value.values if isinstance(v, ast.Constant)
-                )
-                out.append(literal)
+                out.append(node.value)
     return out
 
 
+def _interpolates(joinedstr, name):
+    """True iff the f-string contains a ``{name}`` replacement field (a bare Name)."""
+    for v in joinedstr.values:
+        if isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name) and v.value.id == name:
+            return True
+    return False
+
+
 def test_exactly_six_system_instruction_branches():
-    total = sum(len(_system_instruction_literals(ROUTES / fn)) for fn in VOICE_ROUTE_FILES)
+    total = sum(len(_system_instruction_joinedstrs(ROUTES / fn)) for fn in VOICE_ROUTE_FILES)
     assert total == 6, f"expected 6 system_instructions branches across voice routes, found {total}"
 
 
-def test_all_six_branches_carry_every_computer_control_piece():
+def test_all_six_branches_interpolate_the_cu_control_constant():
     for fn in VOICE_ROUTE_FILES:
-        blocks = _system_instruction_literals(ROUTES / fn)
-        assert len(blocks) == 2, f"{fn}: expected 2 system_instructions branches, got {len(blocks)}"
-        for i, text in enumerate(blocks):
-            assert MARKER in text, f"{fn} branch #{i} is missing the {MARKER!r} section entirely"
-            for piece, needles in REQUIRED_PIECES.items():
-                missing = [n for n in needles if n not in text]
-                assert not missing, (
-                    f"{fn} branch #{i} COMPUTER CONTROL section is missing the "
-                    f"{piece!r} guidance (absent substrings: {missing})")
+        nodes = _system_instruction_joinedstrs(ROUTES / fn)
+        assert len(nodes) == 2, f"{fn}: expected 2 system_instructions branches, got {len(nodes)}"
+        for i, js in enumerate(nodes):
+            assert _interpolates(js, CONSTANT_NAME), (
+                f"{fn} branch #{i} does not interpolate {{{CONSTANT_NAME}}} — "
+                f"the COMPUTER CONTROL guidance would be absent from that branch")
+
+
+# ---------------------------------------------------------------------------
+# 3. Render guard: all six branches evaluate without raising, and the block
+#    actually lands in the payload sent upstream (proves interpolation worked
+#    AND that the literal braces survived — the exact failure that only shows
+#    up at a live voice session otherwise).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _stub_fossil(monkeypatch):
+    """Stub build_fossil_context in all three route modules (mirrors
+    test_live_models) so configure_* never touches real snapshots."""
+    def _stub(user_text, operator, log_prefix=""):
+        return ("", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []})
+
+    for mod in VOICE_ROUTE_FILES:
+        modname = mod[:-3]  # strip ".py"
+        monkeypatch.setattr(f"Orchestrator.routes.{modname}.build_fossil_context", _stub)
+
+
+def _make_openai_session():
+    s = MagicMock()
+    s.openai_ws = MagicMock()
+    s.openai_ws.send = AsyncMock()
+    s.provenance = {}
+    s.context_injected = False
+    return s
+
+
+def _make_gemini_session():
+    s = MagicMock()
+    s.gemini_ws = MagicMock()
+    s.gemini_ws.send = AsyncMock()
+    s.resumption_handle = None
+    s.provenance = {}
+    s.context_injected = False
+    s.voice = ""
+    return s
+
+
+def _make_grok_session():
+    s = MagicMock()
+    s.grok_ws = MagicMock()
+    s.grok_ws.send = AsyncMock()
+    s.provenance = {}
+    s.context_injected = False
+    s.voice = ""
+    return s
+
+
+def _iter_strings(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def _assert_cu_block_sent(send_mock, label):
+    """The CU block rendered into at least one payload sent upstream."""
+    assert send_mock.await_count >= 1, f"{label}: configure sent nothing upstream"
+    blob = ""
+    for call in send_mock.await_args_list:
+        raw = call.args[0]
+        try:
+            blob += "\n".join(_iter_strings(json.loads(raw)))
+        except Exception:
+            blob += str(raw)
+    assert "COMPUTER CONTROL:" in blob, f"{label}: CU block heading not in any sent payload"
+    assert "poll get_task_status(task_id)" in blob, f"{label}: poll directive missing"
+    # Literal braces survived (no f-string escaping artifact like {{ or a
+    # ValueError from a broken replacement field).
+    assert '{"success": false, ...}' in blob, f"{label}: literal failure-shape braces missing/mangled"
+
+
+@pytest.mark.asyncio
+async def test_all_six_voice_branches_render_without_raising(_stub_fossil):
+    from Orchestrator.routes.realtime_routes import configure_openai_session
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    from Orchestrator.routes.grok_live_routes import configure_grok_session
+
+    CUSTOM = "You are a friendly outbound-call assistant for a dentist office."
+
+    # realtime — default branch (custom_role="") then custom_role branch
+    s = _make_openai_session()
+    await configure_openai_session(session=s, operator="op", voice="ash")
+    _assert_cu_block_sent(s.openai_ws.send, "realtime/default")
+    s = _make_openai_session()
+    await configure_openai_session(session=s, operator="op", voice="ash", custom_role=CUSTOM)
+    _assert_cu_block_sent(s.openai_ws.send, "realtime/custom_role")
+
+    # gemini_live — default then custom_role
+    s = _make_gemini_session()
+    await configure_gemini_session(session=s, operator="op", voice="Charon")
+    _assert_cu_block_sent(s.gemini_ws.send, "gemini_live/default")
+    s = _make_gemini_session()
+    await configure_gemini_session(session=s, operator="op", voice="Charon", custom_role=CUSTOM)
+    _assert_cu_block_sent(s.gemini_ws.send, "gemini_live/custom_role")
+
+    # grok_live — default then custom_role
+    s = _make_grok_session()
+    await configure_grok_session(session=s, operator="op", voice="Ara")
+    _assert_cu_block_sent(s.grok_ws.send, "grok_live/default")
+    s = _make_grok_session()
+    await configure_grok_session(session=s, operator="op", voice="Ara", custom_role=CUSTOM)
+    _assert_cu_block_sent(s.grok_ws.send, "grok_live/custom_role")

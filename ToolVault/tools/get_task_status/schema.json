@@ -1,6 +1,6 @@
 {
   "name": "get_task_status",
-  "description": "Check the status of an async generation task (image, video, music). Returns status, progress, and result URL when complete.",
+  "description": "Check the status of an async task (image, video, or music generation, or a use_computer computer-use task). Returns status, progress, and result URL when complete.",
   "category": "task_management",
   "groups": [
     "chat",
@@ -17,7 +17,7 @@
     "properties": {
       "task_id": {
         "type": "string",
-        "description": "The task ID returned by generate_image/generate_video/lyria_music"
+        "description": "The task ID returned by generate_image/generate_video/lyria_music/use_computer"
       }
     },
     "required": [

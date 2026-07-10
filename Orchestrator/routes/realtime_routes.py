@@ -71,6 +71,7 @@ from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
+from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -377,11 +378,7 @@ You have search_contacts and save_contact for the contact book.
 You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
 Before making calls or sending texts, always search_contacts first to find the person's number. When a user mentions someone new with contact info, save them to the contact book.
 
-COMPUTER CONTROL:
-use_computer drives a real computer — it can browse the web, use apps, and run commands. It starts an ASYNCHRONOUS background task and returns a task_id right away; it does NOT block or return the result. When you need it, ACTUALLY CALL IT — don't just say you're going to (never say "let me open the browser" and then stop). Tell the user you've started it, then poll get_task_status(task_id) until it finishes and report the outcome — never go silent while it runs.
-- The optional model param names a model CLASS: opus (default, most capable), sonnet, fable, gemini, or gpt. Omit it unless the user asks for a specific provider; never name a concrete model id.
-- Two kinds of failure. SYNCHRONOUS — the tool call itself returns {{"success": false, ...}} for an unresolvable model class: read its "available" list and retry with a class from it; when "retryable" is false, say what went wrong instead of retrying.
-- ASYNCHRONOUS — the launch is always accepted and returns a task_id even when the machine can't actually run it. The local display is single-tenant, so if another Computer Use task holds it, get_task_status comes back FAILED naming who holds the display. Relay that, offer to wait or retry — do not loop.
+{CU_CONTROL_BLOCK}
 
 VOICE INTERACTION:
 This is a real-time voice conversation. Be concise and natural. The person on the phone cannot see text - speak clearly."""
@@ -466,11 +463,7 @@ The frontend automatically renders media URLs as embedded players/images:
 Use this to show the user which media you found with list_media or get_media BEFORE taking action on it.
 This lets the user verify you have the right file before you extend a video or modify an image.
 
-COMPUTER CONTROL:
-use_computer drives a real computer — it can browse the web, use apps, and run commands. It starts an ASYNCHRONOUS background task and returns a task_id right away; it does NOT block or return the result. When you need it, ACTUALLY CALL IT — don't just say you're going to (never say "let me open the browser" and then stop). Tell the user you've started it, then poll get_task_status(task_id) until it finishes and report the outcome — never go silent while it runs.
-- The optional model param names a model CLASS: opus (default, most capable), sonnet, fable, gemini, or gpt. Omit it unless the user asks for a specific provider; never name a concrete model id.
-- Two kinds of failure. SYNCHRONOUS — the tool call itself returns {{"success": false, ...}} for an unresolvable model class: read its "available" list and retry with a class from it; when "retryable" is false, say what went wrong instead of retrying.
-- ASYNCHRONOUS — the launch is always accepted and returns a task_id even when the machine can't actually run it. The local display is single-tenant, so if another Computer Use task holds it, get_task_status comes back FAILED naming who holds the display. Relay that, offer to wait or retry — do not loop.
+{CU_CONTROL_BLOCK}
 
 CONTACT BOOK:
 You have search_contacts and save_contact for the contact book.
