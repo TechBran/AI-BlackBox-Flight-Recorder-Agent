@@ -2,39 +2,22 @@
 
 The `model` param carries a stable CU model CLASS (or a concrete id); the
 concrete id is resolved here — at task-creation time — against the live CU
-catalog via Orchestrator.browser.dispatch.resolve_model_class. Resolving here
-(not in the headless runner) means the runner's existing resolve_backend(model)
-call keeps working unchanged: it just receives an already-concrete id.
+catalog via Orchestrator.browser.dispatch. Resolving here (not in the headless
+runner) means the runner's existing resolve_backend(model) call keeps working
+unchanged: it just receives an already-concrete id.
 """
 import asyncio
 import json
 
 from Orchestrator.toolvault.context import ToolContext, ToolResult
 
-# The closed CU class set (mirrors the schema text). `haiku` has NO CU support
-# and is intentionally absent. Used only to report which classes the LIVE
-# catalog can currently satisfy when resolution fails.
-_CU_MODEL_CLASSES = ("opus", "sonnet", "fable", "gemini", "gpt")
 
-
-def _available_cu_classes() -> list:
-    """Which closed CU classes the LIVE catalog can currently serve.
-
-    Sync (does a cached catalog fetch); call OFF the event loop. Uses dispatch's
-    PUBLIC resolver so there is no duplicated class/backend logic here.
-    """
-    from Orchestrator.browser.dispatch import resolve_model_class
+def _fetch_cu_catalog() -> list:
+    """Live CU catalog model list. SYNC — does a cached vendor fetch (may hit
+    the network on a cold cache), so call it OFF the event loop. Never raises:
+    a total outage yields a static fallback list."""
     from Orchestrator.routes.admin_routes import get_available_models
-
-    catalog = get_available_models("computer-use").get("models", [])
-    available = []
-    for cls in _CU_MODEL_CLASSES:
-        try:
-            resolve_model_class(cls, catalog=catalog)
-            available.append(cls)
-        except ValueError:
-            pass
-    return available
+    return get_available_models("computer-use").get("models", [])
 
 
 async def execute(params: dict, ctx: ToolContext) -> ToolResult:
@@ -48,22 +31,27 @@ async def execute(params: dict, ctx: ToolContext) -> ToolResult:
     if not prompt:
         return ToolResult(False, "Prompt is required for use_computer")
 
-    from Orchestrator.browser.dispatch import resolve_model_class
+    from Orchestrator.browser import dispatch
 
-    # resolve_model_class is SYNC and may perform a cached network fetch on a
-    # cold cache (catalog=None path) — keep it off the event loop.
+    # ONE catalog fetch, kept off the event loop (see _fetch_cu_catalog). It
+    # backs both the resolution below AND the available-classes report on the
+    # failure path — pass it in explicitly so nothing re-fetches or re-probes.
+    catalog = await asyncio.to_thread(_fetch_cu_catalog)
+
     try:
-        resolved_model = await asyncio.to_thread(resolve_model_class, model)
+        resolved_model = dispatch.resolve_model_class(model, catalog=catalog)
     except ValueError as e:
-        # Structured, retryable failure: the calling LLM asked for a class we
-        # cannot serve and must be able to retry with one we can. The main chat
-        # path forwards ToolResult.result (the string) to the model, so the
-        # machine-actionable payload lives THERE; data mirrors it for the voice
-        # surfaces (which read rich_result()/data).
-        available = await asyncio.to_thread(_available_cu_classes)
+        # Structured, retryable failure so the calling LLM can retry with a class
+        # we CAN serve. The main chat path forwards ToolResult.result (the
+        # string) to the model, so the machine-actionable payload lives THERE;
+        # data mirrors it for the voice surfaces (which read rich_result()/data).
+        # `available` comes from dispatch (single source of truth), and
+        # `retryable` tracks it: an empty list means there is nothing to retry
+        # with (total outage) — telling the model to retry then would spin.
+        available = dispatch.available_classes(catalog)
         payload = {
             "success": False,
-            "retryable": True,
+            "retryable": bool(available),
             "reason": str(e),
             "available": available,
         }

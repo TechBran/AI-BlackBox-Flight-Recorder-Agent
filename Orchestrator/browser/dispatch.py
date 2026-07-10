@@ -35,6 +35,25 @@ _CLASS_SPEC = {
     "gpt":    ("openai", "gpt"),
 }
 
+# Public, canonical CU class taxonomy — DERIVED from _CLASS_SPEC so there is a
+# SINGLE source of truth. Downstream (e.g. the use_computer executor) advertises
+# these; adding a class here flows through with no parallel literal to update.
+CU_MODEL_CLASSES = tuple(_CLASS_SPEC)
+
+
+def available_classes(catalog: List[Dict[str, Any]]) -> List[str]:
+    """The closed CU classes the given catalog can currently satisfy, sorted.
+
+    Same membership test resolve_model_class's rule 4 uses for its error message
+    — factored out so the message and any programmatic caller share ONE
+    computation and can never drift.
+    """
+    return sorted(
+        cls for cls, (backend, token) in _CLASS_SPEC.items()
+        if any(m.get("backend") == backend and token in m.get("id", "")
+               for m in catalog)
+    )
+
 
 def resolve_backend(model: str) -> str:
     model = (model or CU_MODEL_DEFAULT).strip()
@@ -150,11 +169,7 @@ def resolve_model_class(
             return max(candidates, key=lambda m: _version_key(m["id"]))["id"]
 
     # Rule 4 — unresolvable. Name the classes the catalog can currently satisfy.
-    available = sorted(
-        cls for cls, (backend, token) in _CLASS_SPEC.items()
-        if any(m.get("backend") == backend and token in m.get("id", "")
-               for m in catalog)
-    )
+    available = available_classes(catalog)
     raise ValueError(
         f"Cannot resolve computer-use model {class_or_id!r}. "
         f"Pass a concrete CU-capable model id, or one of these classes "

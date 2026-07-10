@@ -17,6 +17,7 @@ Verified here:
 """
 import asyncio
 import json
+import re
 
 import pytest
 
@@ -109,6 +110,25 @@ def test_model_param_description_names_the_closed_class_set():
     assert "backend" in desc
 
 
+def test_model_param_description_signals_capability_ordering():
+    """A model told "use the best/fastest" needs a capability signal; "default"
+    alone does not mean "flagship" to a reader (quality-first-default posture)."""
+    _, m = _model_param()
+    desc = m["description"].lower()
+    assert "most capable" in desc
+
+
+def test_model_param_description_has_no_concrete_model_id():
+    """The whole point of the class taxonomy: CLASS names live in the schema,
+    volatile provider-fact ids never do. Class names (opus/gpt/gemini) are fine;
+    concrete ids (claude-*, gpt-5.x, gemini-2.x, computer-use-preview) are not."""
+    _, m = _model_param()
+    desc = m["description"].lower()
+    for marker in ("claude-", "gpt-", "gemini-", "computer-use-preview"):
+        assert marker not in desc, f"param description leaks a concrete id marker {marker!r}"
+    assert not re.search(r"\d+\.\d+", desc), "param description leaks a version number"
+
+
 def test_tool_description_is_provider_agnostic():
     tool, _ = _model_param()
     desc = tool["description"].lower()
@@ -177,6 +197,7 @@ def _assert_structured_failure(res, bad_token):
     # string) to the model, so the machine-actionable payload lives THERE.
     payload = json.loads(res.result)
     assert payload["success"] is False
+    # _CATALOG serves classes, so a bad class IS retryable with a valid one.
     assert payload["retryable"] is True
     assert bad_token in payload["reason"]
     assert set(payload["available"]) == {"opus", "sonnet", "gemini"}  # per _CATALOG
@@ -198,6 +219,34 @@ def test_known_class_the_catalog_cannot_serve_lists_alternatives(patched):
     assert "result_data" not in patched
 
 
+def test_no_available_classes_makes_failure_non_retryable(monkeypatch):
+    """Total-outage / no-provider state: the catalog yields no CU member, so
+    there is nothing to retry WITH. `retryable` must be False so a compliant LLM
+    does not spin re-issuing the identical call until an outer cap."""
+    from Orchestrator.routes import admin_routes
+    monkeypatch.setattr(admin_routes, "get_available_models",
+                        lambda kind: {"models": []})
+    res = _run({"prompt": "x", "model": "opus"})
+    assert res.success is False
+    payload = json.loads(res.result)
+    assert payload["available"] == []
+    assert payload["retryable"] is False
+    assert res.data == payload
+
+
+def test_available_classes_are_sourced_from_dispatch(monkeypatch, patched):
+    """The executor's advertised `available` list comes from
+    dispatch.available_classes — NOT a local literal. This is the single-source
+    guard: if dispatch grew a sixth class, the executor carries it through; if
+    someone reintroduced a local tuple, this delegation test fails."""
+    from Orchestrator.browser import dispatch
+    monkeypatch.setattr(dispatch, "available_classes", lambda cat: ["sentinel-class"])
+    res = _run({"prompt": "x", "model": "banana"})
+    payload = json.loads(res.result)
+    assert payload["available"] == ["sentinel-class"]
+    assert payload["retryable"] is True  # bool(non-empty)
+
+
 def test_missing_prompt_short_circuits(patched):
     res = _run({})
     assert res.success is False
@@ -208,10 +257,16 @@ def test_missing_prompt_short_circuits(patched):
 # Executor — blocking-call hazard (T1 code-review finding)
 # ---------------------------------------------------------------------------
 
-def test_resolution_does_not_block_the_event_loop(monkeypatch):
-    """resolve_model_class is SYNC and may do a cached network fetch on a cold
-    cache. The executor must keep it OFF the event loop. Proof: a concurrent
-    heartbeat keeps ticking while a deliberately-slow catalog fetch runs."""
+@pytest.mark.parametrize("model,expect_success", [
+    (None, True),        # happy path: default class resolves
+    ("banana", False),   # error path: unresolvable class
+])
+def test_single_catalog_fetch_never_blocks_the_event_loop(monkeypatch, model, expect_success):
+    """The ONE catalog fetch is sync and may hit the network on a cold cache, so
+    it must run OFF the event loop. It backs BOTH the resolution and the
+    available-classes report, so a concurrent heartbeat must keep ticking on the
+    happy AND the error path. Proof: a deliberately-slow fetch does not starve a
+    10ms heartbeat."""
     import time
     from Orchestrator.routes import admin_routes
     from Orchestrator import tasks as tasks_mod
@@ -239,12 +294,15 @@ def test_resolution_does_not_block_the_event_loop(monkeypatch):
     async def main():
         hb = asyncio.create_task(heartbeat())
         await asyncio.sleep(0)  # let the heartbeat start
-        res = await ex({"prompt": "x"}, ToolContext(operator="system"))
+        params = {"prompt": "x"}
+        if model is not None:
+            params["model"] = model
+        res = await ex(params, ToolContext(operator="system"))
         hb.cancel()
         return res
 
     res = asyncio.run(main())
-    assert res.success is True
+    assert res.success is expect_success
     # If the sync sleep blocked the loop, the 10ms heartbeat could not tick.
     assert len(ticks) >= 5, (
-        f"event loop appears blocked during resolve ({len(ticks)} ticks in {DELAY}s)")
+        f"event loop appears blocked during fetch ({len(ticks)} ticks in {DELAY}s)")

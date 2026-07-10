@@ -28,7 +28,7 @@
       },
       "model": {
         "type": "string",
-        "description": "Optional. The computer-use model CLASS to run: one of 'opus' (the default), 'sonnet', 'fable', 'gemini', or 'gpt'. The backend provider is DERIVED from the class you pick — you do not choose a backend directly. A concrete model id is also accepted. Omit to use the configured default class."
+        "description": "Optional. The computer-use model CLASS to run: one of 'opus' (the default), 'sonnet', 'fable', 'gemini', or 'gpt'. 'opus' is the most capable class and is the default; omit this param unless you specifically need a different provider. The backend provider is DERIVED from the class you pick — you do not choose a backend directly. A concrete model id is also accepted."
       }
     },
     "required": [

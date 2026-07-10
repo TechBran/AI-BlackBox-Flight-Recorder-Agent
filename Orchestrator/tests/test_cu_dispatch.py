@@ -268,6 +268,43 @@ def test_known_class_with_no_catalog_candidates_raises():
         resolve_model_class("fable", catalog=CATALOG)
 
 
+# ---------------------------------------------------------------------------
+# Public class set + available_classes() helper (M1-T2 review issue 2):
+# ONE source of truth for the CU class taxonomy, ONE membership computation
+# shared by resolve_model_class's rule-4 message and downstream callers.
+# ---------------------------------------------------------------------------
+
+def test_cu_model_classes_is_public_and_matches_spec():
+    from Orchestrator.browser import dispatch
+    # Derived from the canonical spec — not a hand-maintained parallel literal.
+    assert dispatch.CU_MODEL_CLASSES == tuple(dispatch._CLASS_SPEC)
+    assert set(dispatch.CU_MODEL_CLASSES) == {"opus", "sonnet", "fable", "gemini", "gpt"}
+    assert "haiku" not in dispatch.CU_MODEL_CLASSES  # no CU support
+
+
+def test_available_classes_reports_catalog_subset():
+    from Orchestrator.browser.dispatch import available_classes
+    # CATALOG serves opus/sonnet/gpt/gemini but NOT fable -> sorted subset.
+    assert available_classes(CATALOG) == ["gemini", "gpt", "opus", "sonnet"]
+
+
+def test_available_classes_empty_when_catalog_has_no_cu_models():
+    from Orchestrator.browser.dispatch import available_classes
+    assert available_classes([]) == []
+
+
+def test_rule4_message_and_available_classes_agree():
+    """The rule-4 error names EXACTLY the classes available_classes() reports —
+    one computation, not two that can drift."""
+    from Orchestrator.browser.dispatch import resolve_model_class, available_classes
+    avail = available_classes(CATALOG)
+    assert avail, "precondition: catalog must serve at least one class"
+    with pytest.raises(ValueError) as ei:
+        resolve_model_class("turbo", catalog=CATALOG)
+    for cls in avail:
+        assert cls in str(ei.value)
+
+
 def test_resolve_model_class_uses_live_catalog_when_not_injected(monkeypatch):
     """Seam: with no injected catalog, resolution reuses the live
     /models/computer-use catalog builder (get_available_models)."""
