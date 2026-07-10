@@ -431,20 +431,287 @@ async def test_gemini_chat_reconnect_does_not_claim_or_leak(monkeypatch):
     assert not da._reservations                            # no leak (C3)
 
 
-def test_all_three_chat_streams_release_their_claim_in_a_finally():
-    """Structural guard (invariant 4): each chat CU stream must release its
-    per-launch claim id in a finally, so the two browser streams inherit the
-    guarantee the gemini one is driven for above."""
+def test_all_three_chat_streams_release_via_agent_task_done_callback():
+    """Structural guard (Hole 3): each chat CU stream must bind its per-launch
+    release to the DRIVER TASK's lifecycle (agent_task.add_done_callback), NOT a
+    consumer-generator finally — otherwise a client disconnect during the
+    pre-"running" window drops a live claim. Also assert no bare consumer finally
+    releases the claim (the mutation this test discriminates against)."""
     import ast
     import inspect
 
     for fn in (cr.stream_computer_use, cr.stream_openai_computer_use,
                cr.stream_gemini_computer_use):
         tree = ast.parse(inspect.getsource(fn))
-        released = any(
-            isinstance(n, ast.Call) and getattr(n.func, "id", "") == "release_claim"
-            and n.args and getattr(n.args[0], "id", "") == "_display_claim_id"
-            for n in ast.walk(tree)
-        )
-        has_finally = any(isinstance(n, ast.Try) and n.finalbody for n in ast.walk(tree))
-        assert released and has_finally, f"{fn.__name__} does not release its claim in a finally"
+        callbacks = [n for n in ast.walk(tree)
+                     if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "add_done_callback"]
+        # the callback body must reference release_claim
+        bound = any("release_claim" in ast.dump(cb) for cb in callbacks)
+        assert bound, f"{fn.__name__} does not release via agent_task.add_done_callback"
+        # and there must be no finally-body that calls release_claim (the old,
+        # disconnect-buggy shape)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Try) and n.finalbody:
+                fin = ast.dump(ast.Module(body=n.finalbody, type_ignores=[]))
+                assert "release_claim" not in fin, (
+                    f"{fn.__name__} still releases in a consumer finally (Hole 3)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hole 2: the Gemini "browser" environment drives the local display
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_gemini_browser_environment_owns_local_display():
+    """A `browser`-environment Gemini session drives the local X server
+    (agent_loop._capture_screenshot/_execute_predefined_action branch on
+    `in ("browser","desktop")`), so the arbiter must report it as a holder."""
+    s = _register_gemini_task("carol", status="running", environment="browser")
+    o = local_display_owner()
+    assert o is not None and o.session_id == s.session_id
+
+
+@pytest.mark.asyncio
+async def test_gemini_browser_session_blocks_browser_and_gemini_launches(monkeypatch):
+    """A running `browser`-environment Gemini session blocks BOTH a browser CU
+    launch and a gemini-task launch."""
+    monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake")
+    _register_gemini_chat("holder", status="running", environment="browser")
+
+    # browser headless launch refused (returns before ensure_browser)
+    r1 = await headless.run_cu_task("t-b1", "op", "hi", model="claude-opus-4-6")
+    assert r1["success"] is False and "Computer Use" in r1["result_text"]
+
+    # gemini-task launch refused
+    def _boom(*a, **k):
+        raise AssertionError("launched despite a browser-env holder")
+
+    monkeypatch.setattr(headless, "gemini_create_task_session", _boom)
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _boom)
+    r2 = await headless.run_cu_task("t-b2", "op", "hi",
+                                    model="gemini-2.5-computer-use-preview-10-2025")
+    assert r2["success"] is False
+
+
+def test_arbiter_local_env_superset_of_gemini_driver():
+    """Drift guard (Hole 2): the arbiter's Gemini local-environment set must be a
+    SUPERSET of the environments the driver actually drives the local display for.
+    Scans the exact functions the driver uses (_capture_screenshot /
+    _execute_predefined_action) for `session.environment in (...)` tuples. If a
+    future driver adds a fourth local environment, this fails at commit time."""
+    import ast
+    import inspect
+    import Orchestrator.gemini_cu.agent_loop as al
+
+    tree = ast.parse(inspect.getsource(al))
+    targets = {"_capture_screenshot", "_execute_predefined_action"}
+    driver_local = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in targets:
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Compare) and len(n.ops) == 1
+                        and isinstance(n.ops[0], ast.In)
+                        and isinstance(n.left, ast.Attribute)
+                        and n.left.attr == "environment"):
+                    comp = n.comparators[0]
+                    if isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
+                        for e in comp.elts:
+                            if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                                driver_local.add(e.value)
+    driver_local.discard("android")  # ADB — the driver's non-local elif branch
+    assert driver_local, "drift guard matched nothing — the AST matcher is broken"
+    assert driver_local <= set(da._GEMINI_LOCAL_ENVIRONMENTS), (
+        f"driver drives the local display for {driver_local}, but the arbiter's "
+        f"local-env set is {da._GEMINI_LOCAL_ENVIRONMENTS} — widen _gemini_holds_local")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hole 1: gemini_cu_routes is the sixth launch site
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _fake_task_db(monkeypatch, task):
+    from types import SimpleNamespace
+    from Orchestrator import tasks as tasks_mod
+    db = SimpleNamespace(get_task=lambda tid: task, save_task=lambda t: None)
+    monkeypatch.setattr(tasks_mod, "task_db", db)
+
+
+def _make_route_task(environment):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        task_id="rt1", status=None, progress=0, result_url=None,
+        result_data={"device_id": "blackbox", "environment": environment,
+                     "model": "m", "url": None})
+
+
+@pytest.mark.asyncio
+async def test_gemini_route_run_claims_and_releases(monkeypatch):
+    """gemini_cu_routes._run_task (the /run driver): a LOCAL launch claims the
+    display while it drives, and releases on exit."""
+    from Orchestrator.routes import gemini_cu_routes as gr
+    task = _make_route_task("browser")
+    _fake_task_db(monkeypatch, task)
+    observed = {}
+
+    async def fake_loop(session, prompt, model, system_prompt, url):
+        observed["blocked"] = da.try_claim("browser", "op2", "concurrent") is not None
+        da.release_claim("concurrent")
+        yield {"type": "done", "data": {"content": "ok"}}
+
+    monkeypatch.setattr(gr, "run_gemini_cu_loop", fake_loop)
+
+    async def _no_snap(*a, **k):
+        return None
+
+    monkeypatch.setattr(gr, "_snapshot_cu_result", _no_snap)
+
+    await gr._run_task("rt1", "op", "blackbox", "browser", "do it", "m", None, None)
+    assert observed["blocked"] is True         # the route launch had claimed
+    assert not da._reservations                 # released in finally
+
+
+@pytest.mark.asyncio
+async def test_gemini_route_run_android_does_not_claim(monkeypatch):
+    """An ADB/android /run task must NOT claim the local display."""
+    from Orchestrator.routes import gemini_cu_routes as gr
+    task = _make_route_task("android")
+    _fake_task_db(monkeypatch, task)
+    observed = {}
+
+    async def fake_loop(session, prompt, model, system_prompt, url):
+        observed["blocked"] = da.try_claim("browser", "op2", "concurrent") is not None
+        da.release_claim("concurrent")
+        yield {"type": "done", "data": {"content": "ok"}}
+
+    monkeypatch.setattr(gr, "run_gemini_cu_loop", fake_loop)
+
+    async def _no_snap(*a, **k):
+        return None
+
+    monkeypatch.setattr(gr, "_snapshot_cu_result", _no_snap)
+
+    await gr._run_task("rt1", "op", "pixel-9", "android", "tap", "m", None, None)
+    assert observed["blocked"] is False        # android never claimed the display
+    assert not da._reservations
+
+
+@pytest.mark.asyncio
+async def test_gemini_route_run_releases_on_driver_error(monkeypatch):
+    """A LOCAL /run task whose driver raises must still release the claim."""
+    from Orchestrator.routes import gemini_cu_routes as gr
+    from Orchestrator.models import TaskStatus
+    task = _make_route_task("browser")
+    _fake_task_db(monkeypatch, task)
+
+    async def boom_loop(session, prompt, model, system_prompt, url):
+        raise RuntimeError("driver exploded")
+        yield  # unreachable — makes this an async generator
+
+    monkeypatch.setattr(gr, "run_gemini_cu_loop", boom_loop)
+
+    await gr._run_task("rt1", "op", "blackbox", "browser", "x", "m", None, None)
+    assert task.status == TaskStatus.FAILED
+    assert not da._reservations                 # released in finally despite the error
+
+
+@pytest.mark.asyncio
+async def test_gemini_route_run_refuses_when_display_taken(monkeypatch):
+    """A LOCAL /run task is refused (task FAILED, driver never launched) when the
+    display is already held."""
+    from Orchestrator.routes import gemini_cu_routes as gr
+    from Orchestrator.models import TaskStatus
+    task = _make_route_task("browser")
+    _fake_task_db(monkeypatch, task)
+    _register_browser("someone", status="running")   # display busy
+
+    def _boom(*a, **k):
+        raise AssertionError("driver launched despite a display conflict")
+
+    monkeypatch.setattr(gr, "run_gemini_cu_loop", _boom)
+    await gr._run_task("rt1", "op", "blackbox", "browser", "x", "m", None, None)
+    assert task.status == TaskStatus.FAILED
+    assert "Computer Use" in task.result_data["error"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_route_stream_claims_and_releases(monkeypatch):
+    """gemini_cu_routes /stream: the launch claims (driver runs inline in the
+    generator) and releases when the stream is exhausted."""
+    from types import SimpleNamespace
+    from Orchestrator.routes import gemini_cu_routes as gr
+
+    class _Reg:
+        def get_device(self, did):
+            return SimpleNamespace(protocol=gr.DeviceProtocol.HTTP if hasattr(gr.DeviceProtocol, "HTTP") else None,
+                                   name="Desk", id=did)
+
+    # A non-ADB device -> environment "browser".
+    monkeypatch.setattr(gr, "get_registry", lambda: _Reg())
+    observed = {}
+
+    async def fake_loop(session, prompt, model, system_prompt, url):
+        observed["blocked"] = da.try_claim("browser", "op2", "concurrent") is not None
+        da.release_claim("concurrent")
+        yield {"type": "done", "data": {"content": "ok"}}
+
+    monkeypatch.setattr(gr, "run_gemini_cu_loop", fake_loop)
+
+    body = gr.GeminiCURequest(prompt="go", operator="op", device_id="blackbox")
+    resp = await gr.stream_gemini_cu(body)
+    chunks = [c async for c in resp.body_iterator]
+    assert observed["blocked"] is True          # the stream launch had claimed
+    assert not da._reservations                  # released in the generator finally
+    assert any("[DONE]" in c for c in chunks)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hole 3: disconnect during the pre-"running" window must NOT drop a live claim
+# ═══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_disconnect_during_starting_keeps_claim(monkeypatch):
+    """Hole 3: the driver task survives client disconnect by design and only sets
+    status="running" after being scheduled. A disconnect in the [claim … running]
+    window must NOT release the claim — release is bound to the DRIVER TASK's
+    done-callback, not the consumer generator's exit. Mutation-verified in the
+    report: move the release back to a consumer finally and this fails."""
+    import asyncio
+    import contextlib
+
+    monkeypatch.setattr("Orchestrator.config.GOOGLE_API_KEY", "fake", raising=False)
+    monkeypatch.setattr(cr, "build_cu_context", lambda *a, **k: ("", {}))
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def blocking_wrapper(session, operator, user_text, model, system_prompt):
+        # deliberately does NOT set status="running" — this IS the pre-running window
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(cr, "_gemini_cu_agent_loop", blocking_wrapper)
+
+    agen = cr.stream_gemini_computer_use(
+        [{"role": "user", "content": "go"}], "", "brandon", device_id="blackbox")
+
+    async def consume():
+        async for _ in agen:
+            pass
+
+    task = asyncio.create_task(consume())
+    await started.wait()                       # driver launched → claim made
+    assert da._reservations                     # claim held while "starting"
+
+    task.cancel()                               # simulate client disconnect
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    # THE FIX: the claim is STILL held (driver task not done → callback not fired)
+    assert da._reservations, "Hole 3: disconnect during 'starting' dropped a live claim"
+
+    finish.set()                                # let the driver finish
+    await asyncio.sleep(0.02)                    # let the done-callback run
+    assert not da._reservations                  # released on the driver's lifecycle

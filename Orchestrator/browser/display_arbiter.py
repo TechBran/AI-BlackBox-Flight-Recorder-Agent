@@ -115,13 +115,25 @@ class DisplayOwner:
 _reservations: Dict[str, Tuple[DisplayOwner, float]] = {}
 
 
+# The Gemini `environment` values that drive the LOCAL X display. MUST be a
+# superset of the environments the Gemini driver actually captures/acts on
+# locally — gemini_cu/agent_loop.py's _capture_screenshot and
+# _execute_predefined_action both branch on `environment in ("browser",
+# "desktop")` for local-display work ("android" is ADB, not local). There is no
+# shared constant across the two modules, so a structural drift test
+# (test_arbiter_local_env_superset_of_driver) asserts this stays a superset — a
+# fourth local environment added to the driver fails that test at commit time
+# instead of surfacing with a live mouse (M1-T6 rev2, Hole 2).
+_GEMINI_LOCAL_ENVIRONMENTS = ("browser", "desktop")
+
+
 def _browser_holds_local(session) -> bool:
     return (getattr(session, "device_id", None) == "blackbox"
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 
 def _gemini_holds_local(session) -> bool:
-    return (getattr(session, "environment", None) == "desktop"
+    return (getattr(session, "environment", None) in _GEMINI_LOCAL_ENVIRONMENTS
             and getattr(session, "status", None) in _BUSY_STATUSES)
 
 

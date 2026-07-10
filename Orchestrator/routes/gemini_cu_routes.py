@@ -1,6 +1,7 @@
 """REST API routes for Gemini Computer Use."""
 import asyncio
 import json
+import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -125,6 +126,24 @@ async def _run_task(task_id, operator, device_id, environment,
     screenshots = []
     final_text = ""
 
+    # ── Per-launch display claim (M1-T6). This is the sixth CU launch site.
+    #    Only local-display environments claim; android is ADB and never touches
+    #    the local X server (control_android_device routes through here too and
+    #    must stay unaffected — gate on the display, not the route). The claim key
+    #    is per-launch (this task id); released in the finally below. ──
+    from Orchestrator.browser.display_arbiter import (
+        try_claim, release_claim, _GEMINI_LOCAL_ENVIRONMENTS,
+    )
+    _claims_display = environment in _GEMINI_LOCAL_ENVIRONMENTS
+    _claim_id = f"gemini-route-run:{task_id}"
+    if _claims_display:
+        owner = try_claim("gemini-task", operator, _claim_id, session_id=session.session_id)
+        if owner is not None:
+            task.status = TaskStatus.FAILED
+            task.result_data["error"] = f"Cannot start Gemini CU — {owner.describe()}. Stop it first."
+            task_db.save_task(task)
+            return
+
     try:
         task.status = TaskStatus.PROCESSING
         task_db.save_task(task)
@@ -181,6 +200,11 @@ async def _run_task(task_id, operator, device_id, environment,
         task_db.save_task(task)
         print(f"[GEMINI CU] Task {task_id} failed: {error_msg}")
         traceback.print_exc()
+    finally:
+        # Release the per-launch display claim on every exit (invariant 4).
+        # Idempotent + a no-op for android (never claimed). The driver runs inline
+        # in this task, so this task's completion IS the driver's lifecycle.
+        release_claim(_claim_id)
 
 
 @router.post("/stream")
@@ -203,12 +227,32 @@ async def stream_gemini_cu(body: GeminiCURequest):
 
     session = get_or_create_session(body.operator, body.device_id, environment)
 
+    # ── Per-launch display claim (M1-T6). The driver runs INLINE in this
+    #    generator (not a detached background task), so the generator's finally IS
+    #    the driver's lifecycle — no Hole-3 disconnect window here. Android never
+    #    claims. Claim + release live inside the generator so a stream that is
+    #    never consumed cannot leak a claim. ──
+    from Orchestrator.browser.display_arbiter import (
+        try_claim, release_claim, _GEMINI_LOCAL_ENVIRONMENTS,
+    )
+    _claims_display = environment in _GEMINI_LOCAL_ENVIRONMENTS
+    _claim_id = f"gemini-route-stream:{uuid.uuid4()}"
+
     async def event_stream():
-        async for event in run_gemini_cu_loop(
-            session, body.prompt, body.model, body.system_prompt, body.url
-        ):
-            yield f"data: {json.dumps(event)}\n\n"
-        yield "data: [DONE]\n\n"
+        try:
+            if _claims_display:
+                owner = try_claim("gemini-task", body.operator, _claim_id,
+                                  session_id=session.session_id)
+                if owner is not None:
+                    yield f"data: {json.dumps({'type': 'error', 'data': owner.describe()})}\n\n"
+                    return
+            async for event in run_gemini_cu_loop(
+                session, body.prompt, body.model, body.system_prompt, body.url
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            release_claim(_claim_id)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

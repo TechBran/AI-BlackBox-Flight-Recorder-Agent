@@ -4298,6 +4298,14 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
         session.agent_task = asyncio.create_task(
             _cu_agent_loop(session, history, system_prompt, tools, headers, model, operator, user_text)
         )
+        # Release the display claim on the DRIVER TASK's lifecycle, not this
+        # consumer generator's (M1-T6 rev2, Hole 3): the driver survives client
+        # disconnect by design, so a consumer-finally release would drop a live
+        # claim during the pre-"running" launch window. This callback fires only
+        # when the driver actually finishes (incl. its internal auto-dequeue),
+        # or on E-stop cancellation.
+        session.agent_task.add_done_callback(
+            lambda _t, _cid=_display_claim_id: release_claim(_cid))
         print(f"[CU-STREAM] Background task launched for {operator}")
 
     # ── Queue consumer loop — yields events as SSE ──
@@ -4316,14 +4324,9 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
 
             yield event
     except (asyncio.CancelledError, GeneratorExit):
-        # Client disconnected — task keeps running in background
+        # Client disconnected — task keeps running in background (and still owns
+        # its display claim until IT finishes — see the done-callback above).
         print(f"[CU-STREAM] Client disconnected for {operator}, task continues in background")
-    finally:
-        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
-        # for reconnect/queue/remote turns that never claimed. Once "running", the
-        # status scan owns the display, so releasing here (even on disconnect) is
-        # safe.
-        release_claim(_display_claim_id)
 
 
 # =============================================================================
@@ -4504,9 +4507,11 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             print(f"[GEMINI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
         # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    Only a DESKTOP target touches the local X server; android does not,
-        #    so it never claims/blocks. Released in the consumer-loop finally. ──
-        if session.environment == "desktop":
+        #    Only a LOCAL-display environment touches the local X server; android
+        #    does not, so it never claims/blocks. ("browser" is included for parity
+        #    with the arbiter's local-env set even though this chat path only
+        #    produces desktop/android.) Released via the driver's done-callback. ──
+        if session.environment in ("browser", "desktop"):
             owner = try_claim("gemini-chat", operator, _display_claim_id,
                               session_id=session.session_id)
             if owner is not None:
@@ -4517,6 +4522,16 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
         session.agent_task = asyncio.create_task(
             _gemini_cu_agent_loop(session, operator, user_text, model, system_prompt)
         )
+        # Release on the DRIVER TASK's lifecycle, not this consumer generator's
+        # (M1-T6 rev2, Hole 3): the task survives client disconnect, so this
+        # callback fires only when the driver actually finishes (incl. its
+        # auto-dequeue) or on E-stop.
+        # Release on the DRIVER TASK's lifecycle, not this consumer generator's
+        # (M1-T6 rev2, Hole 3): the task survives client disconnect, so this
+        # callback fires only when the driver actually finishes (incl. its
+        # auto-dequeue) or on E-stop.
+        session.agent_task.add_done_callback(
+            lambda _t, _cid=_display_claim_id: release_claim(_cid))
         print(f"[GEMINI-CU-STREAM] Background task launched for {operator} on {session.device_id} ({session.environment})")
 
     # ── Queue consumer loop ──
@@ -4533,13 +4548,9 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
 
             yield event
     except (asyncio.CancelledError, GeneratorExit):
+        # Task keeps running in background and still owns its claim until IT
+        # finishes (see the done-callback above).
         print(f"[GEMINI-CU-STREAM] Client disconnected for {operator}, task continues in background")
-    finally:
-        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
-        # for the reconnect/queue/android turns that never claimed. Once the
-        # driver is "running", the status scan owns the display, so releasing the
-        # (now-redundant) reservation here — even on client disconnect — is safe.
-        release_claim(_display_claim_id)
 
 
 async def _gemini_cu_agent_loop(session, operator: str, user_text: str,
@@ -4759,18 +4770,25 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
             print(f"[OPENAI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
         # ── Claim the local display for THIS launch (M1-T6, per-launch key).
-        #    OpenAI CU is local-desktop only (guarded above), so it always claims;
-        #    released in the consumer-loop finally. ──
-        owner = try_claim("browser", operator, _display_claim_id,
-                          session_id=session.session_id)
-        if owner is not None:
-            yield {"type": "error", "data": f"Cannot start OpenAI CU — {owner.describe()}. Stop it first."}
-            return
+        #    Gated on the local target for symmetry with the Anthropic/headless
+        #    paths (OpenAI CU is local-desktop only, but be explicit). ──
+        if session.device_id == "blackbox":
+            owner = try_claim("browser", operator, _display_claim_id,
+                              session_id=session.session_id)
+            if owner is not None:
+                yield {"type": "error", "data": f"Cannot start OpenAI CU — {owner.describe()}. Stop it first."}
+                return
 
         # ── Launch background task ──
         session.agent_task = asyncio.create_task(
             _openai_cu_agent_loop(session, operator, user_text, model, system_prompt)
         )
+        # Release on the DRIVER TASK's lifecycle, not this consumer generator's
+        # (M1-T6 rev2, Hole 3): the task survives client disconnect, so this
+        # callback fires only when the driver actually finishes (incl. its
+        # auto-dequeue) or on E-stop.
+        session.agent_task.add_done_callback(
+            lambda _t, _cid=_display_claim_id: release_claim(_cid))
         print(f"[OPENAI-CU-STREAM] Background task launched for {operator} (local desktop)")
 
     # ── Queue consumer loop ──
@@ -4787,12 +4805,9 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
 
             yield event
     except (asyncio.CancelledError, GeneratorExit):
+        # Task keeps running in background and still owns its claim until IT
+        # finishes (see the done-callback above).
         print(f"[OPENAI-CU-STREAM] Client disconnected for {operator}, task continues in background")
-    finally:
-        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
-        # for reconnect/queue turns that never claimed. Once "running", the status
-        # scan owns the display, so releasing here (even on disconnect) is safe.
-        release_claim(_display_claim_id)
 
 
 async def _openai_cu_agent_loop(session, operator: str, user_text: str,
