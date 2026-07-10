@@ -728,10 +728,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 progress = t["progress"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                                 operator = t["operator"]?.jsonPrimitive?.content,
                                 resultUrl = t["result_url"]?.jsonPrimitive?.content,
-                                // G3-T13 (M3.3): this MANUAL builder is the primary feed for
-                                // TaskPanel — it overwrites the auto-parsed poll object every
-                                // ~2s, so the new pill fields MUST be threaded here or they
-                                // never surface. /tasks/list carries both top-level.
+                                // G3-T13 (M3.3): this MANUAL /tasks/list builder is the SOLE
+                                // feed for panel tasks. startTaskPolling (called at :755) EARLY-
+                                // RETURNS for them — the task was just added to _activeTasks at
+                                // :754, so its guard is already true — so the /tasks/status
+                                // auto-parse poll never runs for a panel task and never sets
+                                // these fields. Thread them HERE or they never surface.
+                                // /tasks/list carries progress_text AND device_id top-level.
                                 progressText = t["progress_text"]?.jsonPrimitive?.contentOrNull,
                                 deviceId = t["device_id"]?.jsonPrimitive?.contentOrNull
                             )
@@ -752,6 +755,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val newTasks = activeServerTasks.filter { it.taskId !in existingIds }
                     if (newTasks.isNotEmpty()) {
                         _activeTasks.value = _activeTasks.value + newTasks
+                        // startTaskPolling early-returns here BY DESIGN — the task was just
+                        // added to _activeTasks on the line above, so its guard
+                        // (`if (_activeTasks.value.any { it.taskId == taskId }) return`) is
+                        // already true; the /tasks/status poll never runs and this discovery
+                        // loop is the SOLE panel feed. Do NOT reorder this after the add, or
+                        // drop that guard, without accepting a per-2s label flicker
+                        // (e.g. "CLI Agent" <-> "Claude Code") from the poll object then ALSO
+                        // writing _activeTasks with a differently-resolved TaskStatus. (G3-T13)
                         newTasks.forEach { startTaskPolling(it.taskId, it.taskType) }
                         Log.d(TAG, "Discovered ${newTasks.size} new active tasks")
                     }

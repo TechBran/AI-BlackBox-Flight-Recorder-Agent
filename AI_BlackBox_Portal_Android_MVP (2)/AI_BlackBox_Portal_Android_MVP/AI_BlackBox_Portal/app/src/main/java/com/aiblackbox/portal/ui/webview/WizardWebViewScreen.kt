@@ -122,6 +122,11 @@ fun WizardWebViewScreen(
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    // G3-T13 M-2 defense-in-depth: loads only an http(s) server origin
+                    // (the onboarding SPA) with no JS bridge/file upload, so deny local
+                    // file:// and content:// access outright.
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
                     // Plain WebViewClient keeps same-origin SPA navigation inside
                     // the WebView (no external-browser bounce on internal links).
                     webViewClient = WebViewClient()

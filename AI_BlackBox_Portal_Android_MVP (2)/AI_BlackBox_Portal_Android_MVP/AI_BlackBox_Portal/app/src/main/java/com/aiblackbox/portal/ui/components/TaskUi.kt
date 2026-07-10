@@ -13,9 +13,9 @@ package com.aiblackbox.portal.ui.components
  *
  * PURE: no Android / Compose / serialization imports on purpose — every function
  * is trivially unit-testable (see TaskUiTest) and is a byte-for-byte behavioural
- * mirror of the JS spec. Icons are UTF-16 escapes (matching the codebase style)
- * but are the SAME strings as the JS emoji literals; the trailing comment shows
- * the glyph.
+ * mirror of the JS spec. Icons are literal emoji (UTF-8 source) — the SAME strings
+ * as the JS emoji literals; the trailing comment repeats the glyph so it stays
+ * legible even where an editor renders the emoji ambiguously.
  */
 object TaskUi {
 

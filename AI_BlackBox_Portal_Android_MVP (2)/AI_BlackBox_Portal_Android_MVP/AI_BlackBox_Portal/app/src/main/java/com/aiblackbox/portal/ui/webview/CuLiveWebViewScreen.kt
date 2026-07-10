@@ -121,6 +121,11 @@ fun CuLiveWebViewScreen(
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    // M-2 (G3-T13): defense-in-depth. This WebView only ever loads an
+                    // http(s) server origin and exposes no JS bridge, so deny local
+                    // file:// and content:// access outright.
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
