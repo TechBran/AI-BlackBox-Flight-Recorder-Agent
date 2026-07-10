@@ -71,6 +71,10 @@ def _version_core(model_id: str) -> Tuple[int, ...]:
     alias share the SAME core (`gpt-5.5-2026-04-23` and `gpt-5.5` -> (5, 5)).
     Two- and three-digit runs are real version parts and are kept (`gpt-5.12`
     -> (5, 12)).
+
+    ASSUMES version components are < 4 digits. A hypothetical `gpt-5.1000` would
+    lose its minor (-> (5,)) and rank below `gpt-5.5`. No vendor numbers versions
+    that way; the date-exclusion determinism is worth the trade.
     """
     core: List[int] = []
     for run in re.findall(r"\d+", model_id):
