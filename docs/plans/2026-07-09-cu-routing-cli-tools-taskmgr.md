@@ -132,6 +132,13 @@ through `executor.execute` like the other five call sites (`:1586, :2706, :5447,
      and reads Gemini-only state (`session.environment`, genai-typed history). Build it explicitly, port
      the **device→environment resolution** from `chat_routes.py:4342-4370`, and **skip the Anthropic
      single-display lock** for this backend.
+> **Execution note (2026-07-09):** steps 3 and 4 below were originally scoped as a separate follow-up task.
+> They were merged back into this one during execution. A dispatch that drains the non-Anthropic loops but
+> reads the wrong token keys and mishandles step-exhaustion is a *broken* drain: it would land a state where
+> every Gemini/OpenAI CU task silently records `tokens {0,0}` and reports FAILED-with-empty-result on the
+> iteration cap. On a box that serves production from the working tree, that is not a shippable intermediate.
+> "Fold into the pinned contract" is not separable from "make the fold correct."
+
 3. **Normalize the usage/token keys.** The fold reads `data.get("prompt_tokens")` / `("completion_tokens")`
    (`headless.py:245-246`, the Anthropic driver's names at `driver_anthropic.py:179-182`), but Gemini
    (`gemini_cu/agent_loop.py:641`) and OpenAI (`openai_cu/agent_loop.py:572`) both yield
