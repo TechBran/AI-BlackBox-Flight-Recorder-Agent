@@ -650,3 +650,207 @@ def test_background_worker_cli_budget_does_not_starve_media(fake_task_db, monkey
         worker.join(10)
         with tasks_mod.task_lock:
             tasks_mod.task_queue.clear()
+
+
+# ===========================================================================
+# 10. C1 — worker-loop hardening (race + supervision)
+# ===========================================================================
+def test_snapshot_active_survives_concurrent_pop():
+    """C1 race: _on_task_done pops active_futures/active_types on a POOL thread
+    while the loop iterates them. _snapshot_active list()-copies in C so a
+    concurrent pop can't raise 'dictionary changed size during iteration'.
+    MUTATION: drop the list() wraps -> this raises under the mutator."""
+    class SlowFuture:
+        def __init__(self, done):
+            self._done = done
+
+        def done(self):
+            time.sleep(0.0003)   # release the GIL mid-iteration (widens the race)
+            return self._done
+
+    # Sized so ONE snapshot's iteration window (~N*sleep = 45ms) is wide enough
+    # for a concurrent pop to land (mutation raises on the first call), while the
+    # fixed path's total sleep (iters*N*sleep ~= 0.9s) keeps the test fast.
+    N = 150
+    active_futures = {f"t{i}": SlowFuture(False) for i in range(N)}
+    active_types = {f"t{i}": TaskType.CLI_AGENT for i in range(N)}
+    stop = threading.Event()
+    errors = []
+
+    def mutator():
+        i = 0
+        while not stop.is_set():
+            k = f"t{i % N}"
+            active_futures.pop(k, None)
+            active_types.pop(k, None)
+            active_futures[k] = SlowFuture(False)
+            active_types[k] = TaskType.CLI_AGENT
+            i += 1
+
+    mt = threading.Thread(target=mutator, daemon=True)
+    mt.start()
+    try:
+        for _ in range(20):
+            tasks_mod._snapshot_active(active_futures, active_types)
+    except RuntimeError as e:
+        errors.append(e)
+    finally:
+        stop.set()
+        mt.join(2)
+    assert not errors, f"_snapshot_active raced under concurrent pop: {errors!r}"
+
+
+def test_snapshot_active_counts_are_correct():
+    class _F:
+        def __init__(self, d):
+            self._d = d
+
+        def done(self):
+            return self._d
+    af = {"a": _F(True), "b": _F(False), "c": _F(False)}
+    at = {"a": TaskType.CLI_AGENT, "b": TaskType.CLI_AGENT, "c": TaskType.IMAGE_GENERATION}
+    done_ids, active_cli, active_other = tasks_mod._snapshot_active(af, at)
+    assert done_ids == ["a"]
+    assert active_cli == 2 and active_other == 1
+
+
+def test_worker_loop_survives_iteration_exception(fake_task_db, monkeypatch):
+    """C1 supervision: background_worker is a single unsupervised daemon thread.
+    ANY single-iteration exception must be caught+logged+continued, never kill
+    the whole task system. MUTATION: drop the try/except -> the worker dies on
+    the first raise and the task is never processed."""
+    import Orchestrator.models as models_module
+    if models_module.worker_running:
+        pytest.skip("a background worker is already running in this process")
+    with tasks_mod.task_lock:
+        tasks_mod.task_queue.clear()
+
+    calls = {"n": 0}
+    real_select = tasks_mod._select_runnable
+
+    def flaky_select(cands, active, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom mid-iteration")
+        return real_select(cands, active, *a, **k)
+
+    monkeypatch.setattr(tasks_mod, "_select_runnable", flaky_select)
+    ran = threading.Event()
+
+    def fake_process_task(task):
+        ran.set()
+        tasks_mod.update_task(task.task_id, status=TaskStatus.COMPLETED)
+
+    monkeypatch.setattr(tasks_mod, "process_task", fake_process_task)
+    tasks_mod.create_task(TaskType.IMAGE_GENERATION, operator="B", prompt="x")
+
+    worker = threading.Thread(target=tasks_mod.background_worker, daemon=True)
+    worker.start()
+    try:
+        assert ran.wait(10), "worker died on an iteration exception (no supervision)"
+        assert calls["n"] >= 2, "the raising path was not exercised then recovered"
+    finally:
+        models_module.worker_running = False
+        worker.join(10)
+        with tasks_mod.task_lock:
+            tasks_mod.task_queue.clear()
+
+
+# ===========================================================================
+# 11. I2 — a single unbounded stdout line must not OOM the worker
+# ===========================================================================
+def test_read_stream_clamps_giant_line_on_ingest():
+    """I2: a YOLO agent catting a 50MB log emits one unbounded line. It must be
+    clamped ON INGEST (not just at read time in _current_tail), or 400 such
+    lines is multi-GB resident. MUTATION: drop the [:TAIL_MAX_CHARS] on ingest
+    -> a full-length line is retained."""
+    import io
+    import collections
+    giant = "Y" * (headless.TAIL_MAX_CHARS * 4)
+    stream = io.StringIO(giant + "\n" + '{"result":"ok"}' + "\n")
+    raw = collections.deque(maxlen=headless.TAIL_MAX_LINES)
+    events = collections.deque(maxlen=headless.TAIL_MAX_LINES)
+    headless._read_stream(stream, raw, events, threading.Lock())
+    assert all(len(line) <= headless.TAIL_MAX_CHARS for line in raw), \
+        "a stdout line was retained unclamped (I2 OOM risk)"
+    # the small valid JSON line still parses; the oversized one was not parsed
+    assert any(isinstance(e, dict) and e.get("result") == "ok" for e in events)
+    assert not any(isinstance(e, dict) and len(str(e)) > headless.TAIL_MAX_CHARS * 2
+                   for e in events)
+
+
+# ===========================================================================
+# 12. I3 — an exception after spawn must not leak a running fully-open child
+# ===========================================================================
+def test_run_cli_agent_kills_child_if_tail_flush_raises(fake_task_db, monkeypatch, tmp_path):
+    """I3: the tail-flush update_task() raising (e.g. WAL-locked sqlite) must NOT
+    leak a running fully-open child. The post-spawn body is try/finally-wrapped
+    to group-kill on any exit path. MUTATION: drop the try/finally -> the sleeper
+    child survives the exception."""
+    import sqlite3
+    exe = _make_exe(tmp_path, "sleeper",
+                    'echo \'{"type":"start"}\'\nsleep 300\n')
+    _seed(fake_task_db, "c-i3")
+    captured = {}
+
+    def boom(*a, **k):
+        h = tasks_mod._cancel_handles.get("c-i3")
+        if h:
+            captured["pid"] = h.get("pid")
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(tasks_mod, "update_task", boom)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            headless.run_cli_agent(provider="claude", prompt="p", model="opus",
+                                   cwd=str(tmp_path), permission_mode="yolo",
+                                   task_id="c-i3", bin_path=exe, timeout=30)
+        pid = captured.get("pid")
+        assert pid, "tail-flush never ran — cannot verify child cleanup"
+
+        def _alive(p):
+            try:
+                os.kill(p, 0)
+                return True
+            except ProcessLookupError:
+                return False
+        deadline = time.monotonic() + 5
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(pid), "fully-open child leaked after a post-spawn exception"
+        assert tasks_mod._cancel_handles.get("c-i3") is None, "cancel handle leaked"
+    finally:
+        pid = captured.get("pid")
+        if pid:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
+# ===========================================================================
+# 13. M5 — env strip hardened (keys + redirect vars); regression guard
+# ===========================================================================
+def test_build_child_env_strips_keys_and_redirect_vars():
+    """M5 defense-in-depth: for each provider, its billing key AND redirect vars
+    (BASE_URL / AUTH_TOKEN) must not survive. Guards against a future .env
+    addition silently regressing the strip."""
+    base = dict(os.environ)
+    base.update({
+        "ANTHROPIC_API_KEY": "a", "ANTHROPIC_AUTH_TOKEN": "t", "ANTHROPIC_BASE_URL": "http://proxy",
+        "GOOGLE_API_KEY": "g", "GEMINI_API_KEY": "g2",
+        "OPENAI_API_KEY": "o", "OPENAI_BASE_URL": "http://oai-proxy",
+    })
+    must_be_gone = {
+        "claude": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+        "gemini": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        "codex": ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+    }
+    for prov, keys in must_be_gone.items():
+        env = headless.build_child_env(prov, base_env=base)
+        for k in keys:
+            assert k not in env, f"{prov}: {k} survived build_child_env"
+    # GOOGLE_APPLICATION_CREDENTIALS is still KEPT for gemini (Vertex).
+    base["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/creds.json"
+    assert headless.build_child_env("gemini", base_env=base)["GOOGLE_APPLICATION_CREDENTIALS"] \
+        == "/tmp/creds.json"

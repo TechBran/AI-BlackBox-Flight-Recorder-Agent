@@ -283,6 +283,28 @@ def _select_runnable(candidates, active_types,
     return None
 
 
+def _snapshot_active(active_futures, active_types):
+    """Snapshot the worker's tracking dicts for ONE loop iteration WITHOUT racing
+    _on_task_done — which runs on a POOL worker thread and pops both dicts. A
+    plain `for tid, f in active_futures.items()` / `sum(... in active_types.values())`
+    is a Python-level loop: the GIL is released between elements, so a concurrent
+    `.pop()` raises `RuntimeError: dictionary changed size during iteration` and,
+    with no supervision, silently kills the single unsupervised worker thread and
+    the whole task system (C1). `list()` of a dict view copies in C without
+    releasing the GIL mid-copy, so it is race-safe. (Individual dict.pop /
+    __setitem__ are already atomic under the GIL; only these iterations needed it.)
+
+    Returns (done_ids, active_cli, active_other). Counts are taken from the full
+    snapshot (they may transiently include a just-finished task for one 0.5s
+    cycle — harmless/conservative: it can only DELAY a dispatch, never overrun a
+    budget; the next iteration corrects it once done_ids are popped)."""
+    done_ids = [tid for tid, f in list(active_futures.items()) if f.done()]
+    types = list(active_types.values())
+    active_cli = sum(1 for t in types if t in _CLI_AGENT_TASK_TYPES)
+    active_other = len(types) - active_cli
+    return done_ids, active_cli, active_other
+
+
 def cancel_task(task_id: str) -> Dict[str, Any]:
     """Cancel ONE task. Idempotent; marks CANCELLED; returns a UI-renderable dict.
 
@@ -582,60 +604,75 @@ def background_worker():
 
     with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="task-worker") as pool:
         while models_module.worker_running:
-            # Clean up finished futures
-            done_ids = [tid for tid, f in active_futures.items() if f.done()]
-            for tid in done_ids:
-                active_futures.pop(tid, None)
-                active_types.pop(tid, None)
+            # SUPERVISION (C1): this is a single unsupervised daemon thread with no
+            # restart. ANY unhandled exception in one iteration would kill the whole
+            # task system (media/chat/checkpoint/CU/CLI) silently until a service
+            # restart. Catch + log + continue so no single-iteration fault (a race,
+            # a get_task DB hiccup, a bad row) can ever take the worker down.
+            try:
+                # Reap finished futures + read budgets via a race-safe snapshot
+                # (_on_task_done pops these dicts from a pool thread — see C1).
+                done_ids, active_cli, active_other = _snapshot_active(
+                    active_futures, active_types)
+                for tid in done_ids:
+                    active_futures.pop(tid, None)
+                    active_types.pop(tid, None)
 
-            # Both budgets full -> nothing can start; wait.
-            active_cli = sum(1 for t in active_types.values() if t in _CLI_AGENT_TASK_TYPES)
-            active_other = len(active_types) - active_cli
-            if active_cli >= MAX_CONCURRENT_CLI_AGENT and active_other >= MAX_CONCURRENT:
-                time.sleep(0.5)
-                continue
-
-            # Snapshot the queue, resolve each id, and reap stale rows (cancelled
-            # while PENDING, or gone) — process_task's finally never runs for
-            # those, so their cancel bookkeeping must be cleared HERE or it leaks
-            # forever (G2-T8). Then pick the first runnable task honoring both
-            # budgets (scanning past a saturated class == no head-of-line block).
-            with task_lock:
-                queued_ids = list(task_queue)
-
-            candidates: list[tuple[str, Task]] = []
-            for tid in queued_ids:
-                task = task_db.get_task(tid)
-                if task is None or task.status != TaskStatus.PENDING:
-                    with task_lock:
-                        if tid in task_queue:
-                            task_queue.remove(tid)
-                    unregister_cancel_handle(tid)
-                    clear_cancel_request(tid)
+                # Both budgets full -> nothing can start; wait.
+                if active_cli >= MAX_CONCURRENT_CLI_AGENT and active_other >= MAX_CONCURRENT:
+                    time.sleep(0.5)
                     continue
-                candidates.append((tid, task))
 
-            selected_id = _select_runnable(
-                [(tid, t.task_type) for tid, t in candidates],
-                list(active_types.values()),
-            )
+                # Snapshot the queue, resolve each id, and reap stale rows
+                # (cancelled while PENDING, or gone) — process_task's finally never
+                # runs for those, so their cancel bookkeeping must be cleared HERE
+                # or it leaks forever (G2-T8). Then pick the first runnable task
+                # honoring both budgets (scanning past a saturated class == no
+                # head-of-line block).
+                # I4 (noted, not restructured): this does one get_task per queued
+                # id per ~0.5s cycle. Tolerable at workstation queue depths; the
+                # supervision above removes its worst-case consequence.
+                with task_lock:
+                    queued_ids = list(task_queue)
 
-            if selected_id is None:
+                candidates: list[tuple[str, Task]] = []
+                for tid in queued_ids:
+                    task = task_db.get_task(tid)
+                    if task is None or task.status != TaskStatus.PENDING:
+                        with task_lock:
+                            if tid in task_queue:
+                                task_queue.remove(tid)
+                        unregister_cancel_handle(tid)
+                        clear_cancel_request(tid)
+                        continue
+                    candidates.append((tid, task))
+
+                selected_id = _select_runnable(
+                    [(tid, t.task_type) for tid, t in candidates],
+                    list(active_types.values()),
+                )
+
+                if selected_id is None:
+                    time.sleep(0.5)
+                    continue
+
+                task = next(t for tid, t in candidates if tid == selected_id)
+                with task_lock:
+                    if selected_id in task_queue:
+                        task_queue.remove(selected_id)
+
+                print(f"[WORKER] Submitting task {selected_id} ({task.task_type}) "
+                      f"[active_other={active_other}/{MAX_CONCURRENT}, "
+                      f"active_cli={active_cli}/{MAX_CONCURRENT_CLI_AGENT}]")
+                active_types[selected_id] = task.task_type
+                future = pool.submit(process_task, task)
+                active_futures[selected_id] = future
+                future.add_done_callback(lambda f, tid=selected_id: _on_task_done(tid, f))
+            except Exception as e:  # noqa: BLE001 — supervision is the whole point
+                print(f"[WORKER] loop iteration error (recovered, worker stays alive): {e}")
+                import traceback
+                traceback.print_exc()
                 time.sleep(0.5)
-                continue
-
-            task = next(t for tid, t in candidates if tid == selected_id)
-            with task_lock:
-                if selected_id in task_queue:
-                    task_queue.remove(selected_id)
-
-            print(f"[WORKER] Submitting task {selected_id} ({task.task_type}) "
-                  f"[active_other={active_other}/{MAX_CONCURRENT}, "
-                  f"active_cli={active_cli}/{MAX_CONCURRENT_CLI_AGENT}]")
-            active_types[selected_id] = task.task_type
-            future = pool.submit(process_task, task)
-            active_futures[selected_id] = future
-            future.add_done_callback(lambda f, tid=selected_id: _on_task_done(tid, f))
 
 def process_task(task: Task):
     """Process a single task based on its type"""

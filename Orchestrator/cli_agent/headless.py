@@ -93,12 +93,16 @@ _PROVIDER_BINARY_NAMES = {
 # forwards an optional concrete model id verbatim.
 CLAUDE_MODEL_CLASSES: tuple[str, ...] = ("fable", "opus", "sonnet", "haiku")
 
-# Per-provider env strip. Each provider strips ONLY the key(s) IT reads and would
-# bill on — minimal blast radius (mirrors the zellij denylist philosophy).
+# Per-provider env strip. Each provider strips its own billing KEY plus its
+# redirect vars (BASE_URL / AUTH_TOKEN) — defense-in-depth (M5): a YOLO coding
+# agent has no reason to inherit the Orchestrator's provider-proxy config, and
+# an inherited *_BASE_URL could silently re-point the agent at our proxy. Minimal
+# blast radius otherwise — we do NOT use a strict allowlist, because a coding
+# agent legitimately needs the operator's broad shell/toolchain env.
 _ENV_STRIP: dict[str, tuple[str, ...]] = {
-    "claude": ("ANTHROPIC_API_KEY",),
+    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-    "codex": ("OPENAI_API_KEY",),
+    "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
 }
 # NOTE: GOOGLE_APPLICATION_CREDENTIALS is intentionally NOT in gemini's list —
 # see the module docstring (Vertex/ADC, kept in lock-step with the zellij denylist).
@@ -243,13 +247,22 @@ def _read_stream(stream, raw_lines: collections.deque, events: collections.deque
     closes the pipe, so this thread always terminates."""
     try:
         for raw in stream:
-            line = raw.rstrip("\n")
+            stripped = raw.rstrip("\n")
+            # I2: clamp ON INGEST, not just at read time. A YOLO agent told to
+            # "cat and summarize this 50MB log" emits one unbounded line; the
+            # maxlen deques bound line COUNT (400), so 400 unclamped lines is
+            # multi-GB resident. Retaining only the clamped prefix bounds memory.
+            line = stripped[:TAIL_MAX_CHARS]
             with lock:
                 raw_lines.append(line)
-                try:
-                    events.append(json.loads(line))
-                except (ValueError, TypeError):
-                    pass  # non-JSON banner/log line — kept in raw tail only
+                # Only parse lines that were NOT oversized — a truncated line
+                # can't be valid JSON, and we must not spend CPU/memory json-
+                # loading a giant blob (I2).
+                if len(stripped) <= TAIL_MAX_CHARS:
+                    try:
+                        events.append(json.loads(line))
+                    except (ValueError, TypeError):
+                        pass  # non-JSON banner/log line — kept in raw tail only
     except (ValueError, OSError):
         pass  # pipe closed under us (kill) — expected
 
@@ -314,60 +327,77 @@ def run_cli_agent(provider: str, prompt: str, model: Optional[str], cwd: str,
     cancelled = False
     timed_out = False
 
-    while True:
-        rc = proc.poll()
-        if rc is not None:
-            break
-        if task_id and is_cancel_requested(task_id):
-            cancelled = True
-            _kill_process_group(proc.pid, task_id or "")
-            break
-        if time.monotonic() > deadline:
-            timed_out = True
-            _kill_process_group(proc.pid, task_id or "")
-            break
-        now = time.monotonic()
-        if task_id and now - last_flush >= _TAIL_FLUSH_SECONDS:
-            last_flush = now
-            update_task(task_id, result_data={
-                **(_result_data_for(task_id, provider, model)),
-                "tail": _current_tail(),
-            })
-        time.sleep(_POLL_INTERVAL)
-
-    # Drain the reader (the pipe is at EOF after exit, or closed by the kill).
-    reader.join(timeout=5)
-
-    # UNREGISTER the process handle BEFORE reaping, so a late cancel can never
-    # killpg a reused pid (registry contract). Idempotent with process_task's
-    # finally, which also unregisters.
-    if task_id:
-        unregister_cancel_handle(task_id)
-
+    # I3: EVERYTHING after the spawn is inside try/finally. A realistic trigger is
+    # the tail-flush update_task() raising sqlite3.OperationalError under WAL
+    # contention; without this, the exception propagates, process_cli_agent marks
+    # the row FAILED, and the spawned FULLY-OPEN child is never killed —
+    # process_task's finally then unregisters the handle, so the operator can't
+    # reap it through the registry either. The finally group-kills any still-alive
+    # child on EVERY exit path (normal return included, where it's a no-op).
     try:
-        exit_code = proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        exit_code = proc.poll()
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                break
+            if task_id and is_cancel_requested(task_id):
+                cancelled = True
+                _kill_process_group(proc.pid, task_id or "")
+                break
+            if time.monotonic() > deadline:
+                timed_out = True
+                _kill_process_group(proc.pid, task_id or "")
+                break
+            now = time.monotonic()
+            if task_id and now - last_flush >= _TAIL_FLUSH_SECONDS:
+                last_flush = now
+                update_task(task_id, result_data={
+                    **(_result_data_for(task_id, provider, model)),
+                    "tail": _current_tail(),
+                })
+            time.sleep(_POLL_INTERVAL)
 
-    tail = _current_tail()
-    with lock:
-        ev_list = list(events)
-    result_text = _extract_result_text(ev_list)
-    if not result_text:
-        result_text = tail
-    result_text = result_text[:RESULT_TEXT_MAX_CHARS]
+        # Drain the reader (the pipe is at EOF after exit, or closed by the kill).
+        reader.join(timeout=5)
 
-    success = (exit_code == 0) and not cancelled and not timed_out
-    return {
-        "success": success,
-        "exit_code": exit_code,
-        "cancelled": cancelled,
-        "timed_out": timed_out,
-        "result_text": result_text,
-        "tail": tail,
-        "events": len(ev_list),
-        "provider": provider,
-    }
+        # UNREGISTER the process handle BEFORE reaping, so a late cancel can never
+        # killpg a reused pid (registry contract). Idempotent with process_task's
+        # finally, which also unregisters.
+        if task_id:
+            unregister_cancel_handle(task_id)
+
+        try:
+            exit_code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            exit_code = proc.poll()
+
+        tail = _current_tail()
+        with lock:
+            ev_list = list(events)
+        result_text = _extract_result_text(ev_list)
+        if not result_text:
+            result_text = tail
+        result_text = result_text[:RESULT_TEXT_MAX_CHARS]
+
+        success = (exit_code == 0) and not cancelled and not timed_out
+        return {
+            "success": success,
+            "exit_code": exit_code,
+            "cancelled": cancelled,
+            "timed_out": timed_out,
+            "result_text": result_text,
+            "tail": tail,
+            "events": len(ev_list),
+            "provider": provider,
+        }
+    finally:
+        # Never leak a running fully-open child (I3). On the normal path the child
+        # is already reaped -> poll() is not None -> no-op. On any exception path
+        # (e.g. a raising tail-flush) it is still alive -> group-kill it and clean
+        # up the handle so it cannot become an unkillable orphan.
+        if proc.poll() is None:
+            _kill_process_group(proc.pid, task_id or "")
+        if task_id:
+            unregister_cancel_handle(task_id)
 
 
 def _result_data_for(task_id: str, provider: str, model: Optional[str]) -> dict:
