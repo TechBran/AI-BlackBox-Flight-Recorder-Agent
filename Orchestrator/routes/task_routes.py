@@ -92,6 +92,10 @@ def list_tasks(operator: Optional[str] = None, all: bool = False):
             # the Portal "Live" button (T12) / Android pill (T13) address is unchanged.
             "progress_text": t["progress_text"],
             "device_id": t["device_id"] or "blackbox",
+            # G3 live narration: the accumulating model-reasoning transcript the
+            # expanded pill renders (scrollable). Bounded (rolling tail) so the
+            # polled payload stays small; None/absent for non-CU tasks.
+            "reasoning_text": t.get("reasoning_text"),
         } for t in filtered_tasks],
         "total_tasks": len(all_tasks),
         "filtered_count": len(filtered_tasks)

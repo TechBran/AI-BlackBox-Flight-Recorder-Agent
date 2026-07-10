@@ -245,6 +245,14 @@ class Task:
     # column automatically, so the CU writers (process_browser_use / gemini_cu) need
     # no change. NULL for non-device tasks.
     device_id: Optional[str] = None
+    # Live model NARRATION for a computer-use run — the accumulating transcript of
+    # what the model says it is doing ("clicking the search box, typing Tokyo…"),
+    # folded from the driver `content` event stream by _drain_and_fold and APPENDED
+    # (rolling tail window) via tasks.append_task_reasoning. Distinct from
+    # progress_text (the terse latest "step N/M — action" pill line): this is the
+    # growing, scrollable/expandable reasoning the pill's expanded view renders.
+    # EPHEMERAL UI state — never minted. NULL for non-CU tasks.
+    reasoning_text: Optional[str] = None
 
 class TaskDatabase:
     """SQLite-based task persistence"""
@@ -283,7 +291,8 @@ class TaskDatabase:
                 image_data TEXT,
                 google_video_uri TEXT,
                 progress_text TEXT,
-                device_id TEXT
+                device_id TEXT,
+                reasoning_text TEXT
             )
         """)
 
@@ -318,6 +327,16 @@ class TaskDatabase:
         # and backfilled for pre-F2 rows by the relocate_reference_images migration.
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN device_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Live CU model-narration transcript — same idempotent ADD COLUMN precedent.
+        # Written (appended) by append_task_reasoning; survives whole-row save_task
+        # because update_task read-modify-writes via get_task. NULL for non-CU tasks.
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN reasoning_text TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             # Column already exists
@@ -369,8 +388,8 @@ class TaskDatabase:
             INSERT OR REPLACE INTO tasks
             (task_id, task_type, status, created_at, updated_at, prompt, input_file,
              result_url, result_data, error_message, progress, operator, image_data,
-             google_video_uri, progress_text, device_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             google_video_uri, progress_text, device_id, reasoning_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task.task_id, task.task_type, task.status, task.created_at, task.updated_at,
             task.prompt, task.input_file, task.result_url,
@@ -379,7 +398,11 @@ class TaskDatabase:
             json.dumps(task.image_data) if task.image_data else None,
             task.google_video_uri,
             task.progress_text,
-            device_id_val
+            device_id_val,
+            # Accumulating CU narration. Included so a whole-row flush preserves it:
+            # update_task read-modify-writes via get_task (which reads reasoning_text
+            # back), so the terminal COMPLETED save never wipes the transcript.
+            task.reasoning_text
         ))
         conn.commit()
         conn.close()
@@ -402,7 +425,28 @@ class TaskDatabase:
         )
         conn.commit()
         conn.close()
-    
+
+    def append_reasoning_text(self, task_id: str, chunk: str, max_chars: int):
+        """APPEND a narration chunk to the accumulating reasoning_text transcript,
+        keeping only the trailing `max_chars` (rolling window), in ONE statement.
+
+        Targeted single-column UPDATE (like update_progress_text) — never a whole-row
+        save. `substr(x, -N)` returns the last N chars (whole string if shorter), so
+        `substr(COALESCE(reasoning_text,'') || ?, -max_chars)` both appends and bounds
+        atomically without a read-modify-write. No-op if the row is gone. Public entry
+        point: tasks.append_task_reasoning (guard + non-empty check)."""
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE tasks "
+            "SET reasoning_text = substr(COALESCE(reasoning_text, '') || ?, -?), "
+            "    updated_at = ? "
+            "WHERE task_id = ?",
+            (chunk, max_chars, now_utc_iso(), task_id),
+        )
+        conn.commit()
+        conn.close()
+
     def get_task(self, task_id: str) -> Optional[Task]:
         conn = self._connect()
         cursor = conn.cursor()
@@ -429,7 +473,8 @@ class TaskDatabase:
             image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
             google_video_uri=row[13] if len(row) > 13 else None,
             progress_text=row[14] if len(row) > 14 else None,
-            device_id=row[15] if len(row) > 15 else None
+            device_id=row[15] if len(row) > 15 else None,
+            reasoning_text=row[16] if len(row) > 16 else None
         )
 
     def get_task_list(self, operator: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -447,7 +492,7 @@ class TaskDatabase:
         """
         _cols = ("task_id", "task_type", "status", "progress", "created_at",
                  "updated_at", "result_url", "operator", "prompt",
-                 "progress_text", "device_id")
+                 "progress_text", "device_id", "reasoning_text")
         select = ", ".join(_cols)
         conn = self._connect()
         cursor = conn.cursor()
@@ -489,7 +534,8 @@ class TaskDatabase:
                 image_data=json.loads(row[12]) if len(row) > 12 and row[12] else None,
                 google_video_uri=row[13] if len(row) > 13 else None,
                 progress_text=row[14] if len(row) > 14 else None,
-                device_id=row[15] if len(row) > 15 else None
+                device_id=row[15] if len(row) > 15 else None,
+                reasoning_text=row[16] if len(row) > 16 else None
             ))
         return tasks
 

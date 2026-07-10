@@ -623,6 +623,35 @@ def append_task_progress(task_id: str, line: str):
         print(f"[PROGRESS] append_task_progress({task_id}) failed (non-fatal): {e}")
 
 
+# Rolling tail window for the accumulating CU model-narration transcript. Big
+# enough for a scrollable/expandable multi-step view; bounded so the polled
+# /tasks/list payload (which now carries reasoning_text for the pill) stays small
+# and an unbounded/long-running run can never grow the column without limit.
+REASONING_MAX_CHARS = 8000
+
+
+def append_task_reasoning(task_id: str, chunk: str):
+    """APPEND a model-narration chunk to a task's accumulating reasoning_text
+    transcript — the growing, scrollable CU commentary the expanded pill renders
+    ("clicking the search box, typing Tokyo…").
+
+    APPENDS (rolling tail of REASONING_MAX_CHARS) — unlike append_task_progress,
+    which REPLACES a single latest "step N/M — action" line. Whitespace-only /
+    empty chunks are ignored (nothing to show), but a chunk WITH content keeps its
+    internal spacing/newlines so the transcript stays readable.
+
+    BEST-EFFORT: reasoning_text is ephemeral UI state (never minted). A DB hiccup
+    here must NEVER take down the CU run producing it — every failure is swallowed.
+    The accumulated value survives a whole-row save_task because update_task
+    read-modify-writes via get_task (it reads reasoning_text back, then re-writes)."""
+    if not chunk or not str(chunk).strip():
+        return
+    try:
+        task_db.append_reasoning_text(task_id, str(chunk), REASONING_MAX_CHARS)
+    except Exception as e:  # noqa: BLE001 — UI state, never fatal to the producer
+        print(f"[REASONING] append_task_reasoning({task_id}) failed (non-fatal): {e}")
+
+
 def background_worker():
     """Process tasks from the queue using a thread pool for concurrency.
 

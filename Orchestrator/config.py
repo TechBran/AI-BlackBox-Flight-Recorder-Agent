@@ -185,7 +185,7 @@ CU_FRONTIER_OPENAI_MODEL    = CFG.get("computer_use", "frontier_openai_model",
                                       fallback="gpt-5.5").strip()
 CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
 CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
-CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=100)
+CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=150)
 CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallback=300)
 
 # CU-CAPABILITY gates: which model ids from each vendor's live catalog can

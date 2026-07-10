@@ -185,11 +185,13 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
     # to "no live progress", never a broken CU run.
     if task_id:
         try:
-            from Orchestrator.tasks import append_task_progress
+            from Orchestrator.tasks import append_task_progress, append_task_reasoning
         except Exception:
             append_task_progress = None
+            append_task_reasoning = None
     else:
         append_task_progress = None
+        append_task_reasoning = None
     _last_step = None
     _last_total = None
     _last_progress_line = None
@@ -206,6 +208,36 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
             return ""
         return f"step {step}/{_last_total} — " if _last_total else f"step {step} — "
 
+    # G3 live-narration fold: the model's natural-language commentary ("I'll click
+    # the search box, then type Tokyo…") rides the `content` event on ALL three
+    # backends (Anthropic per-token str deltas; Gemini/OpenAI per-step {text,step}
+    # lumps). Buffer it and flush to the ACCUMULATING reasoning_text transcript on
+    # step/action/done boundaries and past a size threshold, so the expanded pill
+    # renders a growing, scrollable per-step narration WITHOUT one DB write per
+    # token. This is separate from _emit_progress (the terse latest-line pill).
+    _reasoning_buf = []
+    _last_reasoned_step = [None]
+    _REASONING_FLUSH_CHARS = 400
+
+    def _buf_len() -> int:
+        return sum(len(s) for s in _reasoning_buf)
+
+    def _flush_reasoning():
+        nonlocal _reasoning_buf
+        if not append_task_reasoning or not _reasoning_buf:
+            return
+        text = "".join(_reasoning_buf)
+        _reasoning_buf = []
+        if not text.strip():
+            return
+        # Tag with the step only on the FIRST flush of a new step (a mid-step
+        # size-threshold flush continues the same step, no repeated header).
+        if _last_step != _last_reasoned_step[0]:
+            _last_reasoned_step[0] = _last_step
+            header = f"\n[step {_last_step}] " if _last_step is not None else "\n"
+            text = header + text
+        append_task_reasoning(task_id, text)
+
     try:
         while True:
             event = await session.event_queue.get()
@@ -216,6 +248,9 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
             if etype == "cu_step":
                 # {"step": N, "total": M} — the per-iteration heartbeat. Track both
                 # so a later cu_action can render "step N/M — action(...)".
+                # Flush any trailing narration under the OUTGOING step first, before
+                # _last_step advances, so it is attributed to the step that produced it.
+                _flush_reasoning()
                 d = data or {}
                 if d.get("step") is not None:
                     _last_step = d["step"]
@@ -229,17 +264,27 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
             elif etype == "cu_action":
                 # {"action", "params", "step"} — the concrete tool call. THE line
                 # the pill wants: "step 7/15 — left_click([243, 118])".
+                # The reasoning that led to this action is now fully buffered — flush
+                # it (attributed to the current step) so the transcript reads
+                # "[step N] <reasoning>" just above the action it produced.
+                _flush_reasoning()
                 d = data or {}
                 s = d.get("step", _last_step)
                 action = d.get("action") or "action"
                 inner = _format_cu_params(d.get("params"))
                 _emit_progress(f"{_step_prefix(s)}{action}({inner})")
             elif etype == "thinking":
-                # Per-delta while the model reasons; dedupe collapses the burst to a
-                # single "thinking…" so the pill isn't blank before step 1. (content
-                # is intentionally NOT folded here — it is per-token and IS the final
-                # answer, already surfaced via result_text/done below.)
+                # Extended-thinking deltas. Dormant for Anthropic here (the payload
+                # sets no `thinking` param) and unused by Gemini/OpenAI, but wired for
+                # when it is enabled. Keep a terse "thinking…" on the pill one-liner
+                # so it isn't blank before step 1, AND fold the actual reasoning text
+                # into the growing narration transcript (the expanded-pill view).
                 _emit_progress("thinking…")
+                _t = data.get("text") if isinstance(data, dict) else (data if isinstance(data, str) else "")
+                if _t:
+                    _reasoning_buf.append(_t)
+                    if _buf_len() >= _REASONING_FLUSH_CHARS:
+                        _flush_reasoning()
             if etype == "cu_screenshot":
                 ss_url = (data or {}).get("url")
                 if ss_url:
@@ -250,14 +295,24 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
                 tokens["output"] += d.get("completion_tokens", d.get("output", 0)) or 0
             elif etype == "content":
                 # Anthropic streams str deltas; Gemini/OpenAI yield {"text": ...}.
-                # Kept only as the done-less exhaustion fallback.
+                # This is the model's live natural-language narration. Kept for the
+                # done-less exhaustion fallback (content_accumulated) AND folded into
+                # the growing reasoning_text transcript the expanded pill renders.
                 if isinstance(data, dict):
-                    content_accumulated += data.get("text", "") or ""
+                    _txt = data.get("text", "") or ""
                 elif isinstance(data, str):
-                    content_accumulated += data
+                    _txt = data
+                else:
+                    _txt = ""
+                content_accumulated += _txt
+                if _txt:
+                    _reasoning_buf.append(_txt)
+                    if _buf_len() >= _REASONING_FLUSH_CHARS:
+                        _flush_reasoning()
             elif etype == "done":
                 done_seen = True
                 result_text = (data or {}).get("content", "")
+                _flush_reasoning()  # any trailing narration after the last action
             elif etype == "error":
                 # Anthropic error data is a str; Gemini/OpenAI wrap it {"message"}.
                 if isinstance(data, dict):
@@ -266,10 +321,16 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
                     error_msg = data if isinstance(data, str) else str(data)
             elif etype == "cu_stopped":
                 stopped_reason = (data or {}).get("reason", "stopped")
+                _flush_reasoning()  # keep the pre-stop narration in the transcript
             # cu_step / cu_action / thinking are folded into progress_text at the
-            # top of the loop (G3-T11 live pill). The remaining streaming-UI event
-            # types (content_start, cu_bash_output, provenance, cu_safety, ...) are
-            # not needed for either the contract dict or the live line — ignored.
+            # top of the loop (G3-T11 live pill); content/thinking are additionally
+            # folded into the accumulating reasoning_text transcript (G3 live
+            # narration). The remaining streaming-UI event types (content_start,
+            # cu_bash_output, provenance, cu_safety, ...) are not needed — ignored.
+
+        # Flush any narration still buffered when the driver finished without a
+        # trailing done/action/stop boundary (e.g. iteration-capped exhaustion).
+        _flush_reasoning()
 
         try:
             await agent_task  # surface any unexpected driver exception

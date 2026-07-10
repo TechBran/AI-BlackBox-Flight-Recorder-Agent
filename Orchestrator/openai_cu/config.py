@@ -8,6 +8,8 @@ with pixel coordinates in the space of the screenshot you send it.
 Docs: https://developers.openai.com/api/docs/guides/tools-computer-use
 """
 
+from Orchestrator.config import CU_MAX_ITERATIONS
+
 # Model — the default must match Orchestrator.config CU_MODEL_FILTERS["openai"]
 # so resolve_backend() routes it to this driver.
 OPENAI_CU_MODEL_DEFAULT = "gpt-5.5"
@@ -27,8 +29,10 @@ OPENAI_CU_HEIGHT = 720
 # new bare `computer` tool does not.
 OPENAI_CU_ENVIRONMENT = "browser"
 
-# Agent loop limits (wall-clock cap matches Gemini's 1800s)
-MAX_ITERATIONS = 50
+# Agent loop limits (wall-clock cap matches Gemini's 1800s). Single source:
+# Orchestrator/config.py [computer_use] max_iterations, so all 3 CU backends share
+# ONE cap (was a hardcoded 50 — the ceiling a GPT-fallback run actually hit).
+MAX_ITERATIONS = CU_MAX_ITERATIONS
 SESSION_TIMEOUT = 300
 MAX_WALL_CLOCK = 1800
 
