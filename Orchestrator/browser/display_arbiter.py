@@ -16,88 +16,84 @@ Both Gemini kinds target the local display only when ``environment == "desktop"`
 an ``"android"`` environment is an ADB device and does NOT touch the local X
 server.
 
-Before M1-T6 no single guard saw all three; this module is the ONE place that
-consults BOTH registries so every guard can ask the same question — "who owns the
-local display right now?" — and see all three.
+CLAIMS ARE PER-LAUNCH, NOT PER-SESSION (M1-T6 quality review — C1/C2 root cause)
+------------------------------------------------------------------------------
+A *session* is long-lived, reused across turns, and shared between an operator's
+chat and task lanes. A *launch* is the thing that actually grabs the mouse. Keying
+a reservation to a session breaks on reuse (a reused session's claim was released
+between turns, leaving the next launch window unguarded) and lets a refused launch
+drop a concurrent live launch's claim. So a claim is keyed by a caller-supplied
+**per-launch id** (a task id, or a fresh uuid per chat turn) — never a bare
+session id. The session id is recorded inside the owner for reporting + prune
+lookup only; it is never the key.
 
-WHY A LOCK AND A RESERVATION REGISTRY (M1-T6 review, Issue 1 — the BLOCKER)
---------------------------------------------------------------------------
-A point-in-time *check* is not enough. CU tasks run in tasks.py's
-``ThreadPoolExecutor`` — each task in its OWN OS thread via ``asyncio.run`` — with
-no lock anywhere around the session registries. The session that will drive the
-display is registered (and only becomes ``status == "running"``) AFTER the guard
-checks. So two threads can both check an empty registry, both pass, and both
-drive the one physical mouse. No choice of "busy" statuses closes that — the
-window (ensure_browser + a 2s settle + driver launch) is *seconds*. M1-T7 (three
-voice agents launching CU) makes concurrent launches routine.
-
-The fix is an ATOMIC check-and-reserve under a process-wide lock: look at both
-registries AND the reservation table, and — if free — record a reservation,
-before releasing the lock. The contenders are OS threads, so the lock is a
+THE LOCK (Issue 1 — the original blocker). CU tasks run in tasks.py's
+``ThreadPoolExecutor`` — each in its own OS thread via ``asyncio.run`` — with no
+lock around the registries, and a session only becomes ``status == "running"``
+seconds after the launch decision (ensure_browser + a 2s settle + driver launch).
+So the check and the reservation must be atomic under a process-wide
 ``threading.RLock`` (reentrant: ``try_claim`` calls ``local_display_owner``,
-both under the lock). A reservation makes a caller's intent visible to the next
-caller in the gap between "decided to run" and "session visibly running".
+both under the lock). This is arbitration, not a queue/priority/preemption
+(YAGNI): on conflict the caller REFUSES. Each caller keeps its own failure shape
+(RuntimeError / ``_failure`` dict / SSE error event); the arbiter only reports.
 
-This is arbitration, not a queue/priority/preemption (YAGNI): on conflict the
-caller REFUSES. Each caller keeps its own failure shape (RuntimeError /
-``_failure`` dict / SSE error event); the arbiter only reports.
-
-LEAK SAFETY (the named primary hazard). A leaked reservation must never wedge the
-display permanently. Three independent reclaim paths:
-  1. Explicit ``release_claim`` in the reserving callers' ``finally`` (headless
-     browser + Gemini task).
-  2. ``release_claim`` on session destruction (browser ``_cleanup_session``,
-     Gemini ``destroy_session``) — the persistent chat kinds.
-  3. Lazy prune inside every locked read: a reservation is dropped once its own
-     session is RUNNING (now visible via the registry scan — the reservation is
-     redundant) or has ENDED (complete/error/stopped), and unconditionally after
-     a TTL. A RUNNING task always remains visible via the status scan, so
-     expiring a stale reservation can never drop protection for a live task — it
-     only reclaims a leaked or never-launched claim.
+GUARANTEED RELEASE (invariants 3+4). Every launch site releases the exact claim
+it made, on every exit path, from a ``finally`` — never another launch's claim
+(per-launch keys make cross-release impossible), and never relying on prune as
+the primary path. Prune is a leak backstop only:
+  * a claim whose recorded session is RUNNING is redundant (the status scan now
+    owns the display) or has ENDED (complete/error/stopped) — dropped;
+  * a claim whose session never materialised (or is gone) is dropped after a TTL.
+The state check runs BEFORE the TTL, so a claim whose session still exists and is
+merely ``starting``/``idle`` is never TTL-dropped mid-launch (C4). A live task is
+always visible via the status scan regardless of its reservation, so expiring a
+stale reservation never removes protection from a running task.
+NOTE: a ``gemini-task`` claim is keyed by a task id and records no resolvable
+session id (its GeminiCUSession uuid differs), so ``_own_session_for`` returns
+None for it and prune falls to the TTL branch — it therefore keeps a residual
+``starting``-beyond-TTL gap, closed only once it reaches ``running``. Its explicit
+``finally`` release (headless task path) is what actually bounds it; prune is not
+relied on there.
 
 IMPORT DIRECTION (deliberate, acyclic). This module imports the two
 session-manager modules LAZILY (function-local). It is imported — also lazily —
-by ``browser/session_manager`` (its lock), ``chat_routes`` (the Gemini chat
-guard) and ``browser/headless`` (the Gemini task guard). Keeping our own imports
-function-local guarantees no module-load cycle can form no matter who imports
-whom (the repo already leans on this — see ``browser/headless.py`` and
-``browser/dispatch.py``). Self-exclusion uses each manager's PUBLIC accessor
-(``get_operator_session`` / ``get_session``) so no caller — and this module's
-own lookups — ever reach into another module's private registry maps (Issue 3).
+by ``browser/session_manager``… no: as of the per-launch redesign the browser
+lock no longer arbitrates. It is imported lazily by the five LAUNCH sites
+(``browser/headless`` ×2 and the three ``chat_routes`` CU streams). Function-local
+imports guarantee no module-load cycle can form (the repo already leans on this —
+see ``browser/headless.py`` and ``browser/dispatch.py``).
 """
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple
 
-# A session "holds" the local display only while actively driving it. Match the
-# single status every pre-M1-T6 guard already keyed on ("running") so this
-# unification changes WHICH states the status-scan blocks for NO one. The gap
-# BEFORE "running" (idle→starting→running) is covered by reservations, not by
-# widening this — see the module docstring.
+# A session "holds" the local display only while actively driving it — match the
+# single status every pre-M1-T6 guard keyed on ("running"). The pre-"running"
+# window (idle→starting→running) is covered by the per-launch reservation, not by
+# widening this.
 _BUSY_STATUSES = ("running",)
 
-# When a reservation's own session reaches one of these, the reservation is
-# reclaimed by prune: "running" is now visible via the status scan (reservation
-# redundant); the terminal three mean the task ended (display free). NOT
-# "starting" (the scan does not count it, so the reservation must persist to keep
-# protection) and NOT "idle" (pre-launch — protection still needed).
+# When a reservation's recorded session reaches one of these, prune reclaims it:
+# "running" is now visible via the status scan (reservation redundant); the
+# terminal three mean the task ended (display free). NOT "starting" (the scan
+# does not count it — the reservation must persist) and NOT "idle" (pre-launch).
 _RECLAIM_WHEN_OWN_STATUS_IN = frozenset({"running", "complete", "error", "stopped"})
 
-# Backstop only. Longer than any real launch window; a live task stays visible
-# via the status scan regardless, so this never shortens protection for a running
-# task — it only bounds a leaked / never-launched reservation.
+# Backstop only, for a claim whose session never materialised / is gone. A live
+# task stays visible via the status scan regardless, so this never shortens
+# protection for a running task.
 _RESERVATION_TTL = 120.0
 
 # Process-wide, cross-THREAD (contenders are OS threads). Reentrant: try_claim
 # holds it across a local_display_owner call.
 _lock = threading.RLock()
 
-# Test seam: if set, called inside try_claim's critical section AFTER the "is the
-# display free?" check and BEFORE the reservation is recorded. Production leaves
-# it None (a single is-None branch, no overhead). A concurrency test sets it to a
-# stall so two threads deterministically overlap in exactly the window the lock
-# must serialize (without it, the GIL hides the check→record race).
+# Test seam: if set, called inside try_claim's critical section AFTER the free
+# check and BEFORE the reservation is recorded. Production leaves it None. A
+# concurrency test sets it to a stall so two threads deterministically overlap in
+# exactly the window the lock must serialize.
 _before_record_hook = None
 
 
@@ -106,7 +102,7 @@ class DisplayOwner:
     """Who currently holds (or has reserved) the local X display."""
     kind: str          # "browser" | "gemini-chat" | "gemini-task"
     operator: str
-    session_id: str    # session id, or the reservation's claim id
+    session_id: str    # recorded for reporting / prune lookup — NEVER the claim key
 
     def describe(self) -> str:
         label = ("an Anthropic/OpenAI Computer Use task" if self.kind == "browser"
@@ -115,9 +111,7 @@ class DisplayOwner:
                 f"(operator {self.operator}, session {self.session_id[:8]})")
 
 
-# claim_id -> (owner, monotonic_claim_time). claim_id is caller-chosen and stable
-# for the life of the claim (browser: the session id; Gemini chat:
-# "gemini-chat:<operator>"; Gemini task: the task id).
+# claim_id (per-launch, caller-chosen, unique) -> (owner, monotonic_claim_time).
 _reservations: Dict[str, Tuple[DisplayOwner, float]] = {}
 
 
@@ -132,72 +126,54 @@ def _gemini_holds_local(session) -> bool:
 
 
 def _own_session_for(owner: DisplayOwner):
-    """The requester's OWN persistent session (via PUBLIC accessors), used to
-    reclaim a redundant/ended reservation. Gemini TASK claims have no persistent
-    self and are reclaimed only by explicit release + TTL."""
-    if owner.kind == "browser":
-        from Orchestrator.browser import session_manager as bsm
-        return bsm.get_operator_session(owner.operator)
-    if owner.kind == "gemini-chat":
-        from Orchestrator.gemini_cu import session_manager as gsm
-        return gsm.get_session(owner.operator)
-    return None
+    """Resolve the reservation's recorded session BY ITS ID (M2 — not by
+    operator, which would return whatever is cached now rather than the reserved
+    session). Looks in both registries. Returns None when the id resolves to no
+    live session (a gemini-task claim keyed by a task id, a never-created session,
+    or a destroyed one)."""
+    sid = owner.session_id
+    from Orchestrator.browser import session_manager as bsm
+    s = bsm._sessions.get(sid)
+    if s is not None:
+        return s
+    from Orchestrator.gemini_cu import session_manager as gsm
+    return gsm._sessions.get(sid)
 
 
 def _prune_locked() -> None:
-    """Drop stale reservations. MUST be called under _lock."""
+    """Drop stale reservations. MUST be called under _lock. State check BEFORE the
+    TTL (C4): a claim whose session still exists and is starting/idle is kept."""
     now = time.monotonic()
     for claim_id, (owner, ts) in list(_reservations.items()):
-        if (now - ts) > _RESERVATION_TTL:
-            _reservations.pop(claim_id, None)
-            continue
         sess = _own_session_for(owner)
-        if sess is not None and getattr(sess, "status", None) in _RECLAIM_WHEN_OWN_STATUS_IN:
-            _reservations.pop(claim_id, None)
-
-
-def _own_same_kind_claim_ids(requester_kind: str, operator: str) -> FrozenSet[str]:
-    """The claim/session id(s) the requester counts as "itself" — skipped so a
-    caller never blocks on its own session (resume/reconnect). Same-KIND only: a
-    browser request excludes its own browser session but NOT the operator's
-    Gemini session (that is a real conflict), and vice versa. Uses PUBLIC
-    accessors (Issue 3)."""
-    ids = set()
-    if requester_kind == "browser":
-        from Orchestrator.browser import session_manager as bsm
-        s = bsm.get_operator_session(operator)
-        if s is not None:
-            ids.add(s.session_id)
-    elif requester_kind == "gemini-chat":
-        from Orchestrator.gemini_cu import session_manager as gsm
-        s = gsm.get_session(operator)
-        if s is not None:
-            ids.add(s.session_id)
-        ids.add(f"gemini-chat:{operator}")  # this operator's own chat reservation
-    return frozenset(ids)
+        if sess is not None:
+            if getattr(sess, "status", None) in _RECLAIM_WHEN_OWN_STATUS_IN:
+                _reservations.pop(claim_id, None)      # redundant (scan owns) or ended
+            # else: exists but starting/idle — KEEP (never TTL-drop a live launch)
+        elif (now - ts) > _RESERVATION_TTL:
+            _reservations.pop(claim_id, None)          # never materialised / gone
 
 
 def local_display_owner(
     exclude_session_ids: FrozenSet[str] = frozenset(),
 ) -> Optional[DisplayOwner]:
     """Return who holds/claims the LOCAL X display, consulting reservations AND
-    both registries, or ``None`` if free. Read-only. ``exclude_session_ids`` are
-    treated as "self" and skipped. Prunes stale reservations first."""
+    both registries, or ``None`` if free. Read-only. ``exclude_session_ids`` skips
+    matching claim ids / recorded session ids (used by tests; the launch sites do
+    not need self-exclusion because a claim is made only at an actual launch,
+    after reconnect/queue is already handled). Prunes stale reservations first."""
     with _lock:
         _prune_locked()
-        # Reservations first — they cover the pre-"running" window.
         for claim_id, (owner, _ts) in _reservations.items():
             if claim_id in exclude_session_ids or owner.session_id in exclude_session_ids:
                 continue
             return owner
-        # Browser registry (Anthropic + OpenAI share ComputerUseSession).
         from Orchestrator.browser import session_manager as bsm
         for sid, s in list(bsm._sessions.items()):
             if sid in exclude_session_ids:
                 continue
             if _browser_holds_local(s):
                 return DisplayOwner("browser", getattr(s, "operator", "?"), sid)
-        # Gemini registry: chat (in _operator_sessions) + one-shot task (uuid only).
         from Orchestrator.gemini_cu import session_manager as gsm
         chat_sids = set(gsm._operator_sessions.values())
         for sid, s in list(gsm._sessions.items()):
@@ -209,27 +185,45 @@ def local_display_owner(
         return None
 
 
-def try_claim(requester_kind: str, operator: str, claim_id: str) -> Optional[DisplayOwner]:
-    """ATOMIC check-and-reserve. Under the lock: if the local display is free
-    (respecting same-kind self-exclusion), record a reservation for ``claim_id``
-    and return ``None`` (claimed). Otherwise reserve nothing and return the
-    current owner (denied). Pair every success with ``release_claim(claim_id)``
-    (finally / on session destruction); prune + TTL are the leak backstop."""
+def try_claim(requester_kind: str, operator: str, claim_id: str,
+              session_id: str = "") -> Optional[DisplayOwner]:
+    """ATOMIC check-and-reserve. Under the lock: if the local display is free,
+    record a reservation under the per-launch ``claim_id`` and return ``None``
+    (claimed); otherwise reserve nothing and return the current owner (denied).
+    ``session_id`` is recorded in the owner for reporting / prune lookup — it is
+    NOT the key. Pair every success with ``release_claim(claim_id)`` in a
+    ``finally`` (or use ``claim_local_display``)."""
     with _lock:
-        exclude = set(_own_same_kind_claim_ids(requester_kind, operator))
-        exclude.add(claim_id)
-        owner = local_display_owner(exclude_session_ids=frozenset(exclude))
+        owner = local_display_owner()
         if owner is not None:
             return owner
         if _before_record_hook is not None:
             _before_record_hook()  # test seam — see its definition above
         _reservations[claim_id] = (
-            DisplayOwner(requester_kind, operator, claim_id), time.monotonic())
+            DisplayOwner(requester_kind, operator, session_id or claim_id),
+            time.monotonic())
         return None
 
 
 def release_claim(claim_id: str) -> None:
-    """Drop a reservation. Idempotent; safe to call for an id that was never
-    claimed (e.g. a remote request, or a claim that already TTL-expired)."""
+    """Drop a reservation. Idempotent; a no-op for an id that was never claimed
+    (a denied launch, a remote/android launch that never claimed, or one already
+    reclaimed by prune)."""
     with _lock:
         _reservations.pop(claim_id, None)
+
+
+@contextmanager
+def claim_local_display(requester_kind: str, operator: str, claim_id: str,
+                        session_id: str = ""):
+    """Context manager wrapping try_claim/release_claim so a launch site gets
+    guaranteed release (invariant 4) and can only release its OWN claim
+    (invariant 3) by construction. Yields the current owner: ``None`` means
+    GRANTED (proceed); a ``DisplayOwner`` means DENIED (the body must not drive).
+    Only a granted claim is released on exit."""
+    owner = try_claim(requester_kind, operator, claim_id, session_id=session_id)
+    try:
+        yield owner
+    finally:
+        if owner is None:
+            release_claim(claim_id)

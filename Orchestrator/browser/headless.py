@@ -380,15 +380,16 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         return _failure("OpenAI CU supports the local desktop only for now")
 
     # ── Get/create persistent session ──
-    # The session manager enforces the single-display constraint: it raises
-    # RuntimeError if another operator has a running local task. The task
-    # path is fire-and-forget, so a clear FAILED task beats a crash.
+    # get_or_create_session is session lifecycle only (M1-T6): it no longer
+    # arbitrates the display. It may still raise RuntimeError in tests that stub
+    # it, so keep the guard — a fire-and-forget task prefers a FAILED dict to a
+    # crash.
     try:
         session = get_or_create_session(operator, device_id=device_id)
     except RuntimeError as e:
         return _failure(str(e))
 
-    from Orchestrator.browser.display_arbiter import release_claim
+    from Orchestrator.browser.display_arbiter import release_claim, try_claim
     try:
         if session.status in ("running", "starting"):
             return _failure(
@@ -400,6 +401,15 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         if session.device_id != device_id:
             print(f"[CU-HEADLESS] Switching device {session.device_id} -> {device_id} for {operator}")
             session.device_id = device_id
+
+        # ── Claim the local display for THIS launch (M1-T6, per-launch key =
+        #    task_id). Atomic across BOTH registries + reservations; released in
+        #    the finally below. A remote (non-"blackbox") VNC target does not touch
+        #    the local X server, so it neither claims nor is blocked. ──
+        if session.device_id == "blackbox":
+            owner = try_claim("browser", operator, task_id, session_id=session.session_id)
+            if owner is not None:
+                return _failure(f"Cannot start Computer Use — {owner.describe()}. Stop it first.")
 
         # ── Ensure display/device is ready (mirrors stream_computer_use) ──
         if session.device_id == "blackbox":
@@ -575,8 +585,7 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
 
         return await _drain_and_fold(session, session.agent_task, screenshots)
     finally:
-        # Free the display reservation the browser lock claimed (keyed by
-        # the session id). Every exit path passes through here; prune + TTL
-        # are the backstop, and it is a no-op for a resumed (unreserved)
-        # session (which get_or_create returns without reserving).
-        release_claim(session.session_id)
+        # Release THIS launch's display claim (per-launch key = task_id). Every
+        # exit path passes through here (invariant 4); idempotent, so a no-op for
+        # a remote target or a denied claim that never recorded task_id.
+        release_claim(task_id)

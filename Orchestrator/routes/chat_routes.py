@@ -4092,22 +4092,20 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
     from Orchestrator.browser.session_manager import (
         get_or_create_session, strip_screenshots_from_history
     )
+    import uuid
+    from Orchestrator.browser.display_arbiter import try_claim, release_claim
+
+    # Per-LAUNCH display claim id (M1-T6). Claimed only if THIS turn launches a
+    # driver (new-message branch below); released in the consumer-loop finally.
+    _display_claim_id = str(uuid.uuid4())
 
     if not CU_API_KEY:
         yield {"type": "error", "data": "ANTHROPIC_API_KEY not set"}
         return
 
-    # ── Get/create persistent session ──
-    # The single-display arbiter (M1-T6) raises RuntimeError when another CU
-    # session (browser OR Gemini desktop) already holds the local display — now
-    # that the lock also sees the Gemini registry, that can fire here. Surface it
-    # as the SSE error event this stream already uses; never let a bare
-    # RuntimeError escape into the live SSE stream.
-    try:
-        session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
-    except RuntimeError as e:
-        yield {"type": "error", "data": str(e)}
-        return
+    # ── Get/create persistent session (lifecycle only — no display arbitration
+    #    here; that is per-launch, at the driver launch below) ──
+    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
     session.touch()
 
     # ── On-the-fly device switching ──
@@ -4285,6 +4283,17 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
             "content-type": "application/json"
         }
 
+        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
+        #    Only a "blackbox" target touches the local X server; a remote VNC
+        #    target does not, so it never claims/blocks. Released in the
+        #    consumer-loop finally. ──
+        if session.device_id == "blackbox":
+            owner = try_claim("browser", operator, _display_claim_id,
+                              session_id=session.session_id)
+            if owner is not None:
+                yield {"type": "error", "data": f"Cannot start Computer Use — {owner.describe()}. Stop it first."}
+                return
+
         # ── Launch background task ──
         session.agent_task = asyncio.create_task(
             _cu_agent_loop(session, history, system_prompt, tools, headers, model, operator, user_text)
@@ -4309,6 +4318,12 @@ async def stream_computer_use(messages: List[Dict], model: str, operator: str, s
     except (asyncio.CancelledError, GeneratorExit):
         # Client disconnected — task keeps running in background
         print(f"[CU-STREAM] Client disconnected for {operator}, task continues in background")
+    finally:
+        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
+        # for reconnect/queue/remote turns that never claimed. Once "running", the
+        # status scan owns the display, so releasing here (even on disconnect) is
+        # safe.
+        release_claim(_display_claim_id)
 
 
 # =============================================================================
@@ -4357,12 +4372,18 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
       cu_queued, cu_queue_next, content, usage, done, error, heartbeat
     """
     import asyncio
+    import uuid
     from Orchestrator.gemini_cu import (
         get_or_create_session as gemini_get_or_create,
         run_gemini_cu_loop,
     )
     from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL
     from Orchestrator.config import GOOGLE_API_KEY
+    from Orchestrator.browser.display_arbiter import try_claim, release_claim
+
+    # Per-LAUNCH display claim id (M1-T6). A claim is made only if THIS turn
+    # actually launches a driver (below); released in the consumer-loop finally.
+    _display_claim_id = str(uuid.uuid4())
 
     if not GOOGLE_API_KEY:
         yield {"type": "error", "data": "GOOGLE_API_KEY not set"}
@@ -4390,20 +4411,10 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
     else:
         environment = "desktop"
 
-    # ── Desktop conflict guard: ATOMIC check-and-reserve (shared arbiter M1-T6) ──
-    # Claim the local display keyed by this operator's Gemini chat lane. The
-    # arbiter consults BOTH registries + the reservation table and applies
-    # same-kind self-exclusion INTERNALLY (via gemini_cu's PUBLIC get_session), so
-    # a reconnect/queue to this operator's own running chat task is never
-    # self-blocked, and no route reaches into another module's registry
-    # internals. Reservation is reclaimed by prune once the chat session goes
-    # running/terminal (and on destroy_session); failure SHAPE unchanged (SSE).
-    if environment == "desktop":
-        from Orchestrator.browser.display_arbiter import try_claim
-        owner = try_claim("gemini-chat", operator, f"gemini-chat:{operator}")
-        if owner is not None:
-            yield {"type": "error", "data": f"Cannot start Gemini CU — {owner.describe()}. Stop it first."}
-            return
+    # Display arbitration is per-LAUNCH (M1-T6): the claim is made right before
+    # the driver is launched (new-message branch below), not here — so reconnect/
+    # queue turns never claim and can never self-block, and there is no guard-level
+    # claim to leak on an early return (review C3).
 
     # ── Get/create persistent session ──
     session = gemini_get_or_create(operator, device_id, environment, session_id)
@@ -4492,6 +4503,16 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             system_prompt += "\n\n" + cu_fossil_context
             print(f"[GEMINI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
+        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
+        #    Only a DESKTOP target touches the local X server; android does not,
+        #    so it never claims/blocks. Released in the consumer-loop finally. ──
+        if session.environment == "desktop":
+            owner = try_claim("gemini-chat", operator, _display_claim_id,
+                              session_id=session.session_id)
+            if owner is not None:
+                yield {"type": "error", "data": f"Cannot start Gemini CU — {owner.describe()}. Stop it first."}
+                return
+
         # ── Launch background task ──
         session.agent_task = asyncio.create_task(
             _gemini_cu_agent_loop(session, operator, user_text, model, system_prompt)
@@ -4513,6 +4534,12 @@ async def stream_gemini_computer_use(messages: List[Dict], model: str,
             yield event
     except (asyncio.CancelledError, GeneratorExit):
         print(f"[GEMINI-CU-STREAM] Client disconnected for {operator}, task continues in background")
+    finally:
+        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
+        # for the reconnect/queue/android turns that never claimed. Once the
+        # driver is "running", the status scan owns the display, so releasing the
+        # (now-redundant) reservation here — even on client disconnect — is safe.
+        release_claim(_display_claim_id)
 
 
 async def _gemini_cu_agent_loop(session, operator: str, user_text: str,
@@ -4632,9 +4659,15 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
       cu_queued, cu_queue_next, content, usage, done, error, heartbeat
     """
     import asyncio
+    import uuid
     from Orchestrator.browser.session_manager import get_or_create_session
+    from Orchestrator.browser.display_arbiter import try_claim, release_claim
     from Orchestrator.config import OPENAI_API_KEY
     from Orchestrator.openai_cu.config import OPENAI_CU_MODEL_DEFAULT
+
+    # Per-LAUNCH display claim id (M1-T6). Claimed only if THIS turn launches a
+    # driver (new-message branch below); released in the consumer-loop finally.
+    _display_claim_id = str(uuid.uuid4())
 
     if not OPENAI_API_KEY:
         yield {"type": "error", "data": "OPENAI_API_KEY not set"}
@@ -4658,15 +4691,9 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
     except Exception:
         pass
 
-    # ── Get/create persistent session (shared with the Anthropic path) ──
-    # As in the Anthropic stream: the single-display arbiter (M1-T6) may raise
-    # RuntimeError when another CU session holds the local display. Surface it as
-    # this stream's SSE error event; never let it escape bare into the SSE stream.
-    try:
-        session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
-    except RuntimeError as e:
-        yield {"type": "error", "data": str(e)}
-        return
+    # ── Get/create persistent session (shared with the Anthropic path; lifecycle
+    #    only — display arbitration is per-launch, at the driver launch below) ──
+    session = get_or_create_session(operator, session_id=session_id, device_id=device_id)
     session.touch()
 
     # ── Emit session ID ──
@@ -4731,6 +4758,15 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
             system_prompt += "\n\n" + cu_fossil_context
             print(f"[OPENAI-CU-STREAM] Injected {len(cu_fossil_context)} chars of fossil context")
 
+        # ── Claim the local display for THIS launch (M1-T6, per-launch key).
+        #    OpenAI CU is local-desktop only (guarded above), so it always claims;
+        #    released in the consumer-loop finally. ──
+        owner = try_claim("browser", operator, _display_claim_id,
+                          session_id=session.session_id)
+        if owner is not None:
+            yield {"type": "error", "data": f"Cannot start OpenAI CU — {owner.describe()}. Stop it first."}
+            return
+
         # ── Launch background task ──
         session.agent_task = asyncio.create_task(
             _openai_cu_agent_loop(session, operator, user_text, model, system_prompt)
@@ -4752,6 +4788,11 @@ async def stream_openai_computer_use(messages: List[Dict], model: str,
             yield event
     except (asyncio.CancelledError, GeneratorExit):
         print(f"[OPENAI-CU-STREAM] Client disconnected for {operator}, task continues in background")
+    finally:
+        # Release THIS launch's display claim (invariant 4). Idempotent + a no-op
+        # for reconnect/queue turns that never claimed. Once "running", the status
+        # scan owns the display, so releasing here (even on disconnect) is safe.
+        release_claim(_display_claim_id)
 
 
 async def _openai_cu_agent_loop(session, operator: str, user_text: str,
