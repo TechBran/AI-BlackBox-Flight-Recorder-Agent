@@ -21,6 +21,16 @@ from Orchestrator.browser.config import (
 )
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop
+# The Gemini/OpenAI CU drivers + the Gemini session factory. Imported at module
+# level (not lazily) so tests can monkeypatch `headless.run_gemini_cu_loop` /
+# `headless.run_openai_cu_loop` / `headless.gemini_get_or_create_session` the
+# same way they already patch `headless.run_anthropic_cu_loop`.
+from Orchestrator.gemini_cu.agent_loop import run_gemini_cu_loop
+from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL as GEMINI_CU_MODEL_DEFAULT
+from Orchestrator.gemini_cu.session_manager import (
+    get_or_create_session as gemini_get_or_create_session,
+)
+from Orchestrator.openai_cu.agent_loop import run_openai_cu_loop
 from Orchestrator.browser.screenshot import (
     capture_screenshot, capture_remote_screenshot,
     screenshot_to_base64, save_screenshot_to_uploads,
@@ -53,64 +63,285 @@ def _failure(message: str, screenshots=None, steps: int = 0, tokens=None) -> dic
     }
 
 
+# Backend -> the Orchestrator.config attribute name that gates it. STATIC (the
+# key NAMES) so a CI test can assert this stays in lockstep with
+# CU_MODEL_FILTERS at COMMIT time — a 4th CU family added to CU_MODEL_FILTERS
+# without a matching entry here would otherwise only surface at RUNTIME. The
+# key VALUES are read from this module's globals at CALL time (see run_cu_task),
+# so a late-set / monkeypatched / wizard-pasted key still takes effect and the
+# test monkeypatch seam (`headless.<KEY>`) is preserved. Keys mirror
+# CU_MODEL_FILTERS (resolve_backend returns 'google', never 'gemini').
+_BACKEND_KEY_NAMES = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google":    "GOOGLE_API_KEY",
+    "openai":    "OPENAI_API_KEY",
+}
+
+
+async def _pump_generator(session, agen):
+    """Bridge a YIELDING CU driver (Gemini/OpenAI) onto the PUSH-based
+    session.event_queue that _drain_and_fold consumes.
+
+    The Anthropic driver pushes its own events + None sentinel directly; the
+    Gemini/OpenAI loops are async generators, so this forwards each yielded
+    event to the queue and always terminates it with the None sentinel. It
+    deliberately does NOT invent a `done` — the done-synthesis lives in the fold
+    (a done-less iteration-capped run is a real case the fold handles).
+    """
+    try:
+        async for event in agen:
+            try:
+                session.event_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # drop if the consumer fell behind (mirrors driver emit)
+    except asyncio.CancelledError:
+        raise  # propagate E-stop / outer wait_for-timeout cancellation
+    except Exception as e:
+        try:
+            session.event_queue.put_nowait({"type": "error", "data": str(e)})
+        except asyncio.QueueFull:
+            pass
+    finally:
+        # Sentinel MUST be delivered so the drain terminates; drain one item if
+        # the queue is full (same guard the Anthropic driver uses).
+        try:
+            session.event_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            try:
+                session.event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                session.event_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+
+async def _drain_and_fold(session, agent_task, screenshots) -> dict:
+    """Drain session.event_queue to the None sentinel and fold events into the
+    pinned task-result contract dict. Shared by all three backends.
+
+    Two normalizations make it correct across drivers (the Anthropic-only
+    original silently mis-recorded both for Gemini/OpenAI):
+
+    * USAGE keys — the Anthropic driver emits {prompt_tokens, completion_tokens}
+      (driver_anthropic.py:179-182); the Gemini/OpenAI loops emit
+      session.total_tokens {input, output} (gemini_cu/agent_loop.py:641,
+      openai_cu/agent_loop.py:572). Read BOTH, or non-Anthropic tokens record
+      {0, 0}.
+    * DONE on exhaustion — the Anthropic driver ALWAYS emits a final `done`
+      (driver_anthropic.py:491); Gemini/OpenAI emit one only when the model
+      stops calling tools, and on MAX_ITERATIONS exhaustion fall through to
+      `yield usage` with NO done. When no done arrives on a clean exit,
+      synthesize the result from accumulated `content` (mirrors the chat path's
+      _gemini_cu_agent_loop) so an iteration-capped run reports success with
+      real text instead of an empty failure.
+    """
+    result_text = ""
+    content_accumulated = ""
+    error_msg = None
+    stopped_reason = None
+    done_seen = False
+    tokens = {"input": 0, "output": 0}
+
+    try:
+        while True:
+            event = await session.event_queue.get()
+            if event is None:
+                break  # sentinel — driver finished
+            etype = event.get("type")
+            data = event.get("data")
+            if etype == "cu_screenshot":
+                ss_url = (data or {}).get("url")
+                if ss_url:
+                    screenshots.append(ss_url)
+            elif etype == "usage":
+                d = data or {}
+                tokens["input"] += d.get("prompt_tokens", d.get("input", 0)) or 0
+                tokens["output"] += d.get("completion_tokens", d.get("output", 0)) or 0
+            elif etype == "content":
+                # Anthropic streams str deltas; Gemini/OpenAI yield {"text": ...}.
+                # Kept only as the done-less exhaustion fallback.
+                if isinstance(data, dict):
+                    content_accumulated += data.get("text", "") or ""
+                elif isinstance(data, str):
+                    content_accumulated += data
+            elif etype == "done":
+                done_seen = True
+                result_text = (data or {}).get("content", "")
+            elif etype == "error":
+                # Anthropic error data is a str; Gemini/OpenAI wrap it {"message"}.
+                if isinstance(data, dict):
+                    error_msg = data.get("message") or str(data)
+                else:
+                    error_msg = data if isinstance(data, str) else str(data)
+            elif etype == "cu_stopped":
+                stopped_reason = (data or {}).get("reason", "stopped")
+            # all other event types (thinking, content_start, cu_step,
+            # cu_action, cu_bash_output, provenance, cu_safety, ...) are
+            # streaming-UI concerns — ignored here
+
+        try:
+            await agent_task  # surface any unexpected driver exception
+        except Exception as e:  # pragma: no cover — drivers catch internally
+            error_msg = error_msg or str(e)
+    finally:
+        # Own the driver task: if THIS coroutine is cancelled (outer wait_for
+        # timeout), don't rely on loop teardown to stop the driver — it would
+        # keep clicking with no consumer.
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
+
+    final_screenshot = screenshots[-1] if screenshots else None
+    if error_msg:
+        return {
+            "success": False, "result_text": error_msg,
+            "screenshots": screenshots, "final_screenshot": final_screenshot,
+            "steps": session.current_step, "tokens": tokens,
+        }
+    if stopped_reason:
+        # E-stop: a stopped task is FAILED, not a success.
+        return {
+            "success": False,
+            "result_text": result_text or f"[Task stopped: {stopped_reason}]",
+            "screenshots": screenshots, "final_screenshot": final_screenshot,
+            "steps": session.current_step, "tokens": tokens,
+        }
+    # Clean exit. A `done` means the driver produced a final answer (Anthropic
+    # always does; Gemini/OpenAI do when the model stops calling tools).
+    # Otherwise it's an iteration-capped Gemini/OpenAI run — synthesize from
+    # accumulated content so real work isn't lost as an empty failure.
+    if done_seen:
+        final_text = result_text
+    elif content_accumulated:
+        final_text = content_accumulated
+    else:
+        final_text = "(CU loop ended without a final response)"
+    return {
+        "success": done_seen or bool(content_accumulated),
+        "result_text": final_text,
+        "screenshots": screenshots,
+        "final_screenshot": final_screenshot,
+        "steps": session.current_step,
+        "tokens": tokens,
+    }
+
+
+async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
+                              device_id: str, model: str,
+                              system_prompt: str, url: str) -> dict:
+    """Gemini CU headless dispatch.
+
+    Uses the Gemini CU session type + factory (NOT
+    browser.session_manager.get_or_create_session), so it deliberately SKIPS the
+    Anthropic single-local-display lock: the Gemini driver requires a
+    GeminiCUSession (gemini_cu/agent_loop.py:398) built by a different factory
+    with a different signature, and passing the browser session would raise. The
+    device->environment resolution is ported from
+    chat_routes.stream_gemini_computer_use (chat_routes.py:4365-4382).
+
+    NOTE (display race): skipping the Anthropic lock means a Gemini headless task
+    is NOT blocked by a concurrent Anthropic/OpenAI local task (both drive the
+    one physical display). The task path is effectively single-tenant per box;
+    cross-backend display arbitration is out of scope for T5 (see report).
+    """
+    # ── Resolve device -> environment ──
+    if device_id and device_id != "blackbox":
+        from Orchestrator.device_registry import get_registry, DeviceProtocol
+        device = get_registry().get_device(device_id)
+        if device and device.protocol == DeviceProtocol.ADB:
+            environment = "android"
+            try:
+                from Orchestrator.adb import get_adb_manager
+                result = await get_adb_manager().ensure_connected(device_id)
+                if not result.get("success"):
+                    return _failure(f"Cannot connect to device: {result.get('error')}")
+            except Exception as e:
+                return _failure(f"ADB connection error: {e}")
+        else:
+            environment = "desktop"
+    else:
+        environment = "desktop"
+
+    session = gemini_get_or_create_session(operator, device_id, environment)
+    if session.status in ("running", "starting"):
+        return _failure(
+            f"Operator {operator} already has a running Computer Use task "
+            f"(session {session.session_id[:8]}). Wait for it to finish."
+        )
+    session.touch()
+    session.reset_task_state()
+    # Rebind the event queue to THIS loop (worker thread's asyncio.run).
+    # GeminiCUSession has no fresh_event_queue(); a queue bound to a dead worker
+    # loop raises "bound to a different event loop" on the next task.
+    session.event_queue = asyncio.Queue(maxsize=2000)
+    session.prompt_queue.clear()
+    session.status = "starting"
+    session.user_message = prompt
+
+    screenshots: list = []
+    agen = run_gemini_cu_loop(
+        session, prompt, model or GEMINI_CU_MODEL_DEFAULT, system_prompt, url)
+    session.agent_task = asyncio.create_task(_pump_generator(session, agen))
+    print(f"[CU-HEADLESS] Gemini driver launched for task {task_id} "
+          f"({operator}, env={environment})")
+    return await _drain_and_fold(session, session.agent_task, screenshots)
+
+
 async def run_cu_task(task_id: str, operator: str, prompt: str,
                       device_id: str = "blackbox", model: str = "",
                       system_prompt: str = None, url: str = None) -> dict:
     """Run one Computer Use task headlessly and return the result contract dict.
 
-    Anthropic-only EXECUTION for now: the legacy task path (BrowserSession) was
-    Anthropic-only, and the chat path covers Gemini CU. Non-anthropic backends
-    fail fast with a clear message instead of silently running the wrong driver
-    (T5 lands the real three-backend dispatch and removes that guard). The
-    API-key gate below is ALREADY backend-aware ahead of T5 — it requires only
-    the resolved backend's key — so a Google-only / OpenAI-only box reaches the
-    fail-fast guard rather than dying on a missing Anthropic key.
+    Three-backend dispatch (T5): the backend is resolved from `model`, only
+    THAT backend's API key is required, then the task is routed to its driver:
+
+      * anthropic -> run_anthropic_cu_loop over the browser ComputerUseSession
+        (unchanged; the driver pushes events to session.event_queue directly).
+      * openai    -> run_openai_cu_loop over the SAME browser ComputerUseSession
+        (documented compatible, openai_cu/agent_loop.py:300-301), bridged onto
+        the queue by _pump_generator.
+      * google    -> _run_gemini_cu_task: a GeminiCUSession via its own factory,
+        which SKIPS the Anthropic single-display lock (see that helper).
+
+    Every path folds through _drain_and_fold, which pins the result contract
+    dict and normalizes the drivers' differing usage/done conventions.
     """
-    # Lazy chat_routes imports — same precedent as driver_anthropic's helper
-    # imports: chat_routes is the (deferred-cleanup) home of these helpers and
-    # importing it at module level would create an import cycle.
+    # Resolve the backend FIRST, then require only THAT backend's key. Checking
+    # ANTHROPIC_API_KEY before the backend was known killed a Gemini/OpenAI task
+    # on a box with no Anthropic key (a fresh-customer box may carry only a
+    # Google or OpenAI key) and, worse, blamed the wrong vendor.
+    backend = resolve_backend(model)
+    # Fail LOUD, never silent: an unmapped backend (a 4th CU_MODEL_FILTERS family
+    # added without extending _BACKEND_KEY_NAMES) must NOT slip through ungated.
+    if backend not in _BACKEND_KEY_NAMES:
+        return _failure(f"No API-key gate configured for backend '{backend}'")
+    # Read the key VALUE at CALL time from this module's globals (never a per-call
+    # snapshot of import-time values) so a late-set / monkeypatched / wizard-pasted
+    # key takes effect. The NAME lives in the module-level _BACKEND_KEY_NAMES
+    # constant (see its comment) so a CI test can assert the map stays in lockstep
+    # with CU_MODEL_FILTERS without freezing the values.
+    key_name = _BACKEND_KEY_NAMES[backend]
+    key_value = globals().get(key_name)
+    if not key_value:
+        return _failure(f"{key_name} not set — add it in the onboarding wizard")
+
+    # ── Dispatch by backend (T5) ──
+    # Gemini needs its OWN session type + factory and must NOT take the Anthropic
+    # single-display lock, so it branches BEFORE any browser session is created.
+    if backend == "google":
+        return await _run_gemini_cu_task(
+            task_id, operator, prompt, device_id, model, system_prompt, url)
+
+    # anthropic + openai share the browser ComputerUseSession + its single-local-
+    # display lock. Lazy chat_routes import (only the anthropic branch uses these
+    # names; importing chat_routes at module scope would create an import cycle).
     from Orchestrator.routes.chat_routes import (
         COMPUTER_USE_SYSTEM_PROMPT, build_cu_context, _get_tools, _last_user_msg,
     )
 
-    # Resolve the backend FIRST, then require only THAT backend's key. Checking
-    # ANTHROPIC_API_KEY before the backend was known killed a Gemini/OpenAI task
-    # on a box with no Anthropic key (a fresh-customer box may carry only a
-    # Google or OpenAI key) and, worse, blamed the wrong vendor. Each backend's
-    # key is the SAME value its driver uses (see the import note above).
-    backend = resolve_backend(model)
-    # Built PER CALL (never hoisted to module scope): the key VALUES must be read
-    # at call time so late-set / monkeypatched keys take effect. A module-level
-    # dict would freeze the import-time values, silently breaking every
-    # monkeypatch-based test in test_cu_headless_runner.py and defeating a
-    # runtime key paste from the onboarding wizard.
-    backend_keys = {
-        "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
-        "google":    ("GOOGLE_API_KEY", GOOGLE_API_KEY),
-        "openai":    ("OPENAI_API_KEY", OPENAI_API_KEY),
-    }
-    # Fail LOUD, never silent: an unmapped backend (e.g. a 4th CU_MODEL_FILTERS
-    # family added post-T5 without extending this map) must NOT slip through with
-    # no key gate at all — that is the exact silent-gap class M1-T4 exists to
-    # close, and it would contradict CU_MODEL_FILTERS' "fail loud, not silent"
-    # principle (config.py). Today the backend!=anthropic guard below backstops
-    # it, but T5 removes that guard — so this stays the honest gate.
-    if backend not in backend_keys:
-        return _failure(f"No API-key gate configured for backend '{backend}'")
-    key_name, key_value = backend_keys[backend]
-    if not key_value:
-        return _failure(f"{key_name} not set — add it in the onboarding wizard")
-
-    # Non-Anthropic backends still fail fast here (T5 lands the real three-backend
-    # session dispatch and removes this guard). Ordering matters: with a valid
-    # backend key present, a Gemini/OpenAI task now reaches THIS message instead
-    # of the (wrong) missing-Anthropic-key message it used to hit.
-    if backend != "anthropic":
-        return _failure(
-            f"Headless CU tasks support Anthropic models only (got '{model}' "
-            f"-> backend '{backend}'). Use the chat Computer Use provider for "
-            f"Gemini/OpenAI computer use."
-        )
+    if backend == "openai" and device_id != "blackbox":
+        return _failure("OpenAI CU supports the local desktop only for now")
 
     # ── Get/create persistent session ──
     # The session manager enforces the single-display constraint: it raises
@@ -173,9 +404,29 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     session.prompt_queue.clear()
     session.status = "starting"
     session.user_message = prompt
+    if backend == "openai":
+        # One-shot isolation: a reused session may still carry a VALID
+        # openai_previous_response_id from a prior CHAT turn — continuing from it
+        # would splice this headless task into that conversation. Start fresh
+        # (reset_task_state does not clear it; it is not part of task state).
+        session.openai_previous_response_id = None
 
-    # ── Capture initial screenshot (same naming as the chat path) ──
     screenshots = []
+
+    if backend == "openai":
+        # The OpenAI loop captures its own initial screenshot, builds its own
+        # tool array, and carries history server-side via previous_response_id,
+        # so the Anthropic-shaped preamble below is skipped. Bridge its yielded
+        # events onto the queue the shared fold drains (URL navigation, if any,
+        # was handled by ensure_browser above — mirrors the Anthropic path).
+        agen = run_openai_cu_loop(session, prompt, model or None, system_prompt, None)
+        session.agent_task = asyncio.create_task(_pump_generator(session, agen))
+        print(f"[CU-HEADLESS] OpenAI driver launched for task {task_id} ({operator})")
+        return await _drain_and_fold(session, session.agent_task, screenshots)
+
+    # ── Anthropic path (unchanged from the pre-T5 runner): build the initial
+    #    screenshot / system prompt / history / tool array / headers, launch the
+    #    driver (which pushes to session.event_queue itself), then fold. ──
     initial_b64 = None
     try:
         if session.device_id != "blackbox":
@@ -265,69 +516,4 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     )
     print(f"[CU-HEADLESS] Driver launched for task {task_id} ({operator})")
 
-    result_text = ""
-    error_msg = None
-    stopped_reason = None
-    done_seen = False
-    tokens = {"input": 0, "output": 0}
-
-    try:
-        while True:
-            event = await session.event_queue.get()
-            if event is None:
-                break  # sentinel — driver finished
-            etype = event.get("type")
-            data = event.get("data")
-            if etype == "cu_screenshot":
-                ss_url = (data or {}).get("url")
-                if ss_url:
-                    screenshots.append(ss_url)
-            elif etype == "usage":
-                tokens["input"] += (data or {}).get("prompt_tokens", 0)
-                tokens["output"] += (data or {}).get("completion_tokens", 0)
-            elif etype == "done":
-                done_seen = True
-                result_text = (data or {}).get("content", "")
-            elif etype == "error":
-                error_msg = data if isinstance(data, str) else str(data)
-            elif etype == "cu_stopped":
-                stopped_reason = (data or {}).get("reason", "stopped")
-            # all other event types (thinking, content, cu_action, cu_step,
-            # cu_bash_output, ...) are streaming-UI concerns — ignored here
-
-        try:
-            await session.agent_task  # surface any unexpected driver exception
-        except Exception as e:  # pragma: no cover — driver catches internally
-            error_msg = error_msg or str(e)
-    finally:
-        # Own the driver task: if THIS coroutine is cancelled (outer wait_for
-        # timeout), don't rely on loop teardown to stop the driver — it would
-        # keep clicking with no consumer if a caller ever drives us on a
-        # long-lived loop instead of asyncio.run().
-        if session.agent_task and not session.agent_task.done():
-            session.agent_task.cancel()
-
-    final_screenshot = screenshots[-1] if screenshots else None
-    if error_msg:
-        return {
-            "success": False, "result_text": error_msg,
-            "screenshots": screenshots, "final_screenshot": final_screenshot,
-            "steps": session.current_step, "tokens": tokens,
-        }
-    if stopped_reason:
-        # E-stop: the driver emits cu_stopped (and may still emit a done with
-        # the stop notice) — a stopped task is a FAILED task, not a success.
-        return {
-            "success": False,
-            "result_text": result_text or f"[Task stopped: {stopped_reason}]",
-            "screenshots": screenshots, "final_screenshot": final_screenshot,
-            "steps": session.current_step, "tokens": tokens,
-        }
-    return {
-        "success": done_seen,
-        "result_text": result_text if done_seen else "(CU loop ended without a final response)",
-        "screenshots": screenshots,
-        "final_screenshot": final_screenshot,
-        "steps": session.current_step,
-        "tokens": tokens,
-    }
+    return await _drain_and_fold(session, session.agent_task, screenshots)

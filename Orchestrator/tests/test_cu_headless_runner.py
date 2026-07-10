@@ -68,6 +68,23 @@ def _scripted_driver(events, final_step):
     return fake_driver
 
 
+def _scripted_agen(events, final_step):
+    """Build a fake run_gemini_cu_loop / run_openai_cu_loop: an async GENERATOR
+    that yields scripted events (the real Gemini/OpenAI loops yield; the runner
+    bridges them onto the queue via _pump_generator). No sentinel — the bridge
+    appends it."""
+    async def fake_loop(session, *args, **kwargs):
+        session.current_step = final_step
+        for evt in events:
+            yield evt
+    return fake_loop
+
+
+def _fresh_gemini_session(operator="system", device_id="blackbox", environment="desktop"):
+    from Orchestrator.gemini_cu.session_manager import GeminiCUSession
+    return GeminiCUSession(operator, device_id, environment)
+
+
 @pytest.mark.asyncio
 async def test_drain_maps_events_to_contract(runner_env, monkeypatch):
     events = [
@@ -141,25 +158,48 @@ async def test_single_display_conflict_returns_failed_dict(runner_env, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_non_anthropic_backend_rejected(runner_env, monkeypatch):
-    """The task path is Anthropic-only FOR NOW (T5 lands the real multi-backend
-    dispatch); Gemini CU currently lives on the chat path.
+async def test_gemini_backend_dispatches_and_succeeds(runner_env, monkeypatch):
+    """T5 (was test_non_anthropic_backend_rejected, which asserted the now-DELETED
+    Anthropic-only guard). Intent preserved and inverted per the task: a Gemini
+    model + Google key is no longer REJECTED — it DISPATCHES to the Gemini CU
+    driver over its OWN GeminiCUSession (never the browser session, never the
+    Anthropic driver) and returns that driver's result."""
+    holder = {}
 
-    The key gate is now backend-aware and checked BEFORE this guard, so a Gemini
-    task on a box with no GOOGLE key would fail on the missing key rather than
-    reach the guard under test here. A fake GOOGLE_API_KEY is set so this test
-    keeps exercising the backend GUARD (its original intent)."""
+    def fake_gem(operator, device_id="blackbox", environment="desktop", session_id=None):
+        s = _fresh_gemini_session(operator, device_id, environment)
+        holder["gemini_session"] = s
+        return s
+
+    monkeypatch.setattr(headless, "gemini_get_or_create_session", fake_gem)
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+
+    def _boom(*a, **k):
+        raise AssertionError("Anthropic driver invoked for a Gemini task")
+
+    monkeypatch.setattr(headless, "run_anthropic_cu_loop", _boom)
+
+    events = [
+        {"type": "cu_screenshot", "data": {"url": "/ui/uploads/g1.png", "step": 1}},
+        {"type": "content", "data": {"text": "looking", "step": 1}},
+        {"type": "done", "data": {"content": "Gemini finished the task"}},
+        {"type": "usage", "data": {"input": 30, "output": 12}},
+    ]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 2))
+
     result = await headless.run_cu_task(
         "t5", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
 
-    assert result["success"] is False
-    # "models only" is the guard's DISTINCTIVE phrasing; bare "anthropic" also
-    # matches the "ANTHROPIC_API_KEY not set" key-gate message, so it can't tell
-    # the two failures apart (that ambiguity is what hid the fresh-box bug).
-    assert "models only" in result["result_text"]
-    assert "anthropic" in result["result_text"].lower()
-    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]
+    assert result["success"] is True
+    assert result["result_text"] == "Gemini finished the task"
+    assert result["screenshots"] == ["/ui/uploads/g1.png"]
+    assert result["final_screenshot"] == "/ui/uploads/g1.png"
+    assert result["steps"] == 2
+    assert result["tokens"] == {"input": 30, "output": 12}
+    # It really used a GeminiCUSession, not the browser ComputerUseSession.
+    from Orchestrator.gemini_cu.session_manager import GeminiCUSession
+    assert isinstance(holder["gemini_session"], GeminiCUSession)
+    assert "session" not in runner_env  # browser get_or_create was never called
 
 
 @pytest.mark.asyncio
@@ -201,21 +241,27 @@ async def test_openai_missing_key_fails(runner_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gemini_with_google_key_reaches_backend_guard(runner_env, monkeypatch):
-    """Gemini model + GOOGLE_API_KEY present -> the key gate is satisfied, so the
-    request advances to T5's Anthropic-only fail-fast. Proves the key gate is no
-    longer the blocker on a Google-provisioned box (fresh-box portability)."""
+async def test_gemini_token_fold_reads_input_output_keys(runner_env, monkeypatch):
+    """FOLD 2a (was test_gemini_with_google_key_reaches_backend_guard). The Gemini
+    loop emits usage as session.total_tokens {input, output}
+    (gemini_cu/agent_loop.py:641), NOT the Anthropic driver's {prompt_tokens,
+    completion_tokens}. The fold must read the {input, output} keys or every
+    Gemini CU task silently records tokens {0, 0} while still passing the
+    Anthropic-only golden test."""
+    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+                        lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
-    result = await headless.run_cu_task(
-        "t-gem2", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+    events = [
+        {"type": "usage", "data": {"input": 21, "output": 9}},
+        {"type": "done", "data": {"content": "done"}},
+    ]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 1))
 
-    assert result["success"] is False
-    # Distinctive guard phrasing — see test_non_anthropic_backend_rejected.
-    assert "models only" in result["result_text"]
-    assert "anthropic" in result["result_text"].lower()
-    # The key gate did NOT fire — the backend guard is what remains.
-    assert "GOOGLE_API_KEY not set" not in result["result_text"]
-    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]
+    result = await headless.run_cu_task(
+        "t-gtok", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is True
+    assert result["tokens"] == {"input": 21, "output": 9}
 
 
 @pytest.mark.asyncio
@@ -233,38 +279,46 @@ async def test_anthropic_key_present_proceeds_past_both_gates(runner_env, monkey
 
 
 @pytest.mark.asyncio
-async def test_google_only_box_reaches_backend_guard_without_anthropic_key(runner_env, monkeypatch):
-    """Pins the fresh-box PORTABILITY gate — the whole point of M1-T4.
+async def test_google_only_box_dispatches_without_anthropic_key(runner_env, monkeypatch):
+    """Pins the fresh-box PORTABILITY invariant — the whole point of M1-T4/T5
+    (was test_google_only_box_reaches_backend_guard_without_anthropic_key, which
+    asserted the deleted Anthropic-only guard).
 
-    A customer box provisioned with ONLY a Google key (NO Anthropic credential
-    at all) must run a Gemini CU task far enough to hit T5's Anthropic-only
-    backend guard — it must NOT die naming the wrong vendor's key. Every OTHER
-    gemini/openai test inherits the fixture's ANTHROPIC_API_KEY="test-key", so
-    this is the only test that exercises the empty-Anthropic-key box the reorder
-    exists to fix. Moving the ANTHROPIC_API_KEY check back above
-    resolve_backend() makes the THIRD assertion fail (verified by mutation)."""
+    A customer box provisioned with ONLY a Google key (NO Anthropic credential)
+    must RUN a Gemini CU task to completion — not die naming the wrong vendor's
+    key, and (post-T5) not hit any Anthropic-only guard. Moving the
+    ANTHROPIC_API_KEY check back above resolve_backend() makes this fail (the
+    task would die on 'ANTHROPIC_API_KEY not set')."""
+    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+                        lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")   # fresh box: no Anthropic credential
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake")  # only Google is provisioned
+    events = [{"type": "done", "data": {"content": "ran on a google-only box"}}]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 1))
+
     result = await headless.run_cu_task(
         "t-google-only", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
 
-    assert result["success"] is False
-    assert "anthropic" in result["result_text"].lower()               # reached T5's backend guard
+    assert result["success"] is True
+    assert result["result_text"] == "ran on a google-only box"
     assert "ANTHROPIC_API_KEY not set" not in result["result_text"]   # did NOT die on the wrong vendor's key
 
 
 @pytest.mark.asyncio
-async def test_openai_only_box_reaches_backend_guard_without_anthropic_key(runner_env, monkeypatch):
-    """Same fresh-box portability invariant as the Google case, on the OpenAI
-    backend: an OpenAI-only box (no Anthropic credential) must reach T5's
-    Anthropic-only guard, not die on the missing Anthropic key."""
+async def test_openai_only_box_dispatches_without_anthropic_key(runner_env, monkeypatch):
+    """Same fresh-box portability invariant on the OpenAI backend: an OpenAI-only
+    box (no Anthropic credential) must RUN an OpenAI CU task, not die on the
+    missing Anthropic key."""
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")   # fresh box: no Anthropic credential
     monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake")  # only OpenAI is provisioned
+    events = [{"type": "done", "data": {"content": "ran on an openai-only box"}}]
+    monkeypatch.setattr(headless, "run_openai_cu_loop", _scripted_agen(events, 1))
+
     result = await headless.run_cu_task(
         "t-openai-only", "system", "hi", model="gpt-5.5")
 
-    assert result["success"] is False
-    assert "anthropic" in result["result_text"].lower()               # reached T5's backend guard
+    assert result["success"] is True
+    assert result["result_text"] == "ran on an openai-only box"
     assert "ANTHROPIC_API_KEY not set" not in result["result_text"]   # did NOT die on the wrong vendor's key
 
 
@@ -283,6 +337,89 @@ async def test_unmapped_backend_fails_loudly_not_silent(runner_env, monkeypatch)
     assert result["success"] is False
     assert "No API-key gate configured" in result["result_text"]
     assert "backend 'xai'" in result["result_text"]
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_dispatches_and_token_fold(runner_env, monkeypatch):
+    """FOLD 2a for OpenAI + dispatch. The OpenAI loop reuses the browser
+    ComputerUseSession and emits usage as session.total_tokens {input, output}
+    (openai_cu/agent_loop.py:572). Proves the openai backend dispatches through
+    _pump_generator and its {input, output} usage is normalized (not {0, 0})."""
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake-openai-key")
+    events = [
+        {"type": "cu_screenshot", "data": {"url": "/ui/uploads/o1.png", "step": 0}},
+        {"type": "content", "data": {"text": "clicking", "step": 1}},
+        {"type": "usage", "data": {"input": 33, "output": 14}},
+        {"type": "done", "data": {"content": "OpenAI finished"}},
+    ]
+    monkeypatch.setattr(headless, "run_openai_cu_loop", _scripted_agen(events, 3))
+
+    result = await headless.run_cu_task("t-otok", "system", "hi", model="gpt-5.5")
+
+    assert result["success"] is True
+    assert result["result_text"] == "OpenAI finished"
+    assert result["tokens"] == {"input": 33, "output": 14}
+    assert result["screenshots"] == ["/ui/uploads/o1.png"]
+    assert result["steps"] == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_iteration_capped_synthesizes_result(runner_env, monkeypatch):
+    """FOLD 2b for Gemini. On MAX_ITERATIONS exhaustion the Gemini loop yields
+    `usage` with NO `done` (gemini_cu/agent_loop.py:641). Without synthesis the
+    runner reports FAILED with empty result_text despite real work; the fold must
+    synthesize the result from accumulated `content` and report success."""
+    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+                        lambda *a, **k: _fresh_gemini_session())
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    events = [  # note: NO `done` event — the loop exhausted its step budget
+        {"type": "content", "data": {"text": "Step one done. ", "step": 1}},
+        {"type": "content", "data": {"text": "Step two done.", "step": 2}},
+        {"type": "usage", "data": {"input": 50, "output": 20}},
+    ]
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 40))
+
+    result = await headless.run_cu_task(
+        "t-gcap", "system", "big task",
+        model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is True                       # not an empty failure
+    assert result["result_text"] == "Step one done. Step two done."  # synthesized
+    assert result["steps"] == 40
+    assert result["tokens"] == {"input": 50, "output": 20}
+
+
+@pytest.mark.asyncio
+async def test_openai_iteration_capped_synthesizes_result(runner_env, monkeypatch):
+    """FOLD 2b for OpenAI. The for-else exhaustion path
+    (openai_cu/agent_loop.py:566-572) yields `usage` with no `done`. Synthesize
+    from accumulated `content`."""
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake-openai-key")
+    events = [  # NO `done`
+        {"type": "content", "data": {"text": "partial progress", "step": 1}},
+        {"type": "usage", "data": {"input": 12, "output": 5}},
+    ]
+    monkeypatch.setattr(headless, "run_openai_cu_loop", _scripted_agen(events, 40))
+
+    result = await headless.run_cu_task(
+        "t-ocap", "system", "big task", model="gpt-5.5")
+
+    assert result["success"] is True
+    assert result["result_text"] == "partial progress"
+    assert result["steps"] == 40
+    assert result["tokens"] == {"input": 12, "output": 5}
+
+
+def test_key_map_backends_match_cu_model_filters():
+    """Item-4 static coupling. _BACKEND_KEY_NAMES must stay in lockstep with
+    CU_MODEL_FILTERS at COMMIT time — a 4th CU family (e.g. 'xai') added to
+    CU_MODEL_FILTERS without a key-name entry would otherwise only surface at
+    RUNTIME (the 'No API-key gate configured' path in
+    test_unmapped_backend_fails_loudly_not_silent). Key NAMES are a static module
+    constant; the key VALUES are still read from module globals at call time, so
+    this static assertion does not disturb the per-call monkeypatch seam."""
+    from Orchestrator.config import CU_MODEL_FILTERS
+    assert set(headless._BACKEND_KEY_NAMES) == set(CU_MODEL_FILTERS)
 
 
 def test_fresh_event_queue_unbinds_dead_worker_loop():
