@@ -16,7 +16,7 @@ scheduler path). This replaced the legacy browser/agent_loop.BrowserSession.
 import asyncio
 
 from Orchestrator.browser.config import (
-    ANTHROPIC_API_KEY, ANTHROPIC_BETA_HEADER, COMPUTER_TOOL_TYPE,
+    ANTHROPIC_BETA_HEADER, COMPUTER_TOOL_TYPE,
     DISPLAY_WIDTH, DISPLAY_HEIGHT, NATIVE_MODE, is_domain_allowed,
 )
 from Orchestrator.browser.dispatch import resolve_backend
@@ -28,13 +28,17 @@ from Orchestrator.browser.screenshot import (
 from Orchestrator.browser.session_manager import (
     get_or_create_session, strip_screenshots_from_history,
 )
-# GOOGLE_API_KEY / OPENAI_API_KEY are sourced from THE SAME place the CU drivers
-# read them, so the runner's key gate can never disagree with the driver it
-# gates: gemini_cu/agent_loop.py does `genai.Client(api_key=GOOGLE_API_KEY)` and
-# openai_cu/agent_loop.py does `AsyncOpenAI(api_key=OPENAI_API_KEY)`, both
-# importing these names from Orchestrator.config. (ANTHROPIC_API_KEY continues to
-# come via browser.config, which re-exports it from the same Orchestrator.config.)
-from Orchestrator.config import CU_MODEL_DEFAULT, GOOGLE_API_KEY, OPENAI_API_KEY
+# All three CU API keys are imported from Orchestrator.config — the SINGLE module
+# the CU drivers themselves read, so the runner's key gate can never disagree with
+# the driver it gates: gemini_cu/agent_loop.py does
+# `genai.Client(api_key=GOOGLE_API_KEY)` and openai_cu/agent_loop.py does
+# `AsyncOpenAI(api_key=OPENAI_API_KEY)`, both importing from here; browser.config
+# only RE-EXPORTED ANTHROPIC_API_KEY from this same place. Sourcing all three from
+# one module keeps them visibly parallel, so a test author patches the one obvious
+# attribute (`headless.<KEY>`) instead of silently patching the wrong module.
+from Orchestrator.config import (
+    CU_MODEL_DEFAULT, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY,
+)
 
 
 def _failure(message: str, screenshots=None, steps: int = 0, tokens=None) -> dict:
@@ -54,10 +58,13 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
                       system_prompt: str = None, url: str = None) -> dict:
     """Run one Computer Use task headlessly and return the result contract dict.
 
-    Anthropic-only by design: the legacy task path (BrowserSession) was
-    Anthropic-only, and the chat path covers Gemini CU. Non-anthropic
-    backends fail fast with a clear message instead of silently running
-    the wrong driver (YAGNI until a consumer needs it).
+    Anthropic-only EXECUTION for now: the legacy task path (BrowserSession) was
+    Anthropic-only, and the chat path covers Gemini CU. Non-anthropic backends
+    fail fast with a clear message instead of silently running the wrong driver
+    (T5 lands the real three-backend dispatch and removes that guard). The
+    API-key gate below is ALREADY backend-aware ahead of T5 — it requires only
+    the resolved backend's key — so a Google-only / OpenAI-only box reaches the
+    fail-fast guard rather than dying on a missing Anthropic key.
     """
     # Lazy chat_routes imports — same precedent as driver_anthropic's helper
     # imports: chat_routes is the (deferred-cleanup) home of these helpers and
@@ -72,13 +79,27 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
     # Google or OpenAI key) and, worse, blamed the wrong vendor. Each backend's
     # key is the SAME value its driver uses (see the import note above).
     backend = resolve_backend(model)
-    _backend_key = {
+    # Built PER CALL (never hoisted to module scope): the key VALUES must be read
+    # at call time so late-set / monkeypatched keys take effect. A module-level
+    # dict would freeze the import-time values, silently breaking every
+    # monkeypatch-based test in test_cu_headless_runner.py and defeating a
+    # runtime key paste from the onboarding wizard.
+    backend_keys = {
         "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
         "google":    ("GOOGLE_API_KEY", GOOGLE_API_KEY),
         "openai":    ("OPENAI_API_KEY", OPENAI_API_KEY),
-    }.get(backend)
-    if _backend_key and not _backend_key[1]:
-        return _failure(f"{_backend_key[0]} not set")
+    }
+    # Fail LOUD, never silent: an unmapped backend (e.g. a 4th CU_MODEL_FILTERS
+    # family added post-T5 without extending this map) must NOT slip through with
+    # no key gate at all — that is the exact silent-gap class M1-T4 exists to
+    # close, and it would contradict CU_MODEL_FILTERS' "fail loud, not silent"
+    # principle (config.py). Today the backend!=anthropic guard below backstops
+    # it, but T5 removes that guard — so this stays the honest gate.
+    if backend not in backend_keys:
+        return _failure(f"No API-key gate configured for backend '{backend}'")
+    key_name, key_value = backend_keys[backend]
+    if not key_value:
+        return _failure(f"{key_name} not set — add it in the onboarding wizard")
 
     # Non-Anthropic backends still fail fast here (T5 lands the real three-backend
     # session dispatch and removes this guard). Ordering matters: with a valid

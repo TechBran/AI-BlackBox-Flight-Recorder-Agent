@@ -25,6 +25,11 @@ def runner_env(monkeypatch):
         return s
 
     monkeypatch.setattr(headless, "get_or_create_session", fake_get_or_create)
+    # Working-box default: an Anthropic key is present. This is deliberately NOT
+    # narrowed per-test — but it is exactly why the fresh-box defect was
+    # invisible (every gemini/openai test inherits an Anthropic key). Fresh-box /
+    # wrong-vendor scenarios MUST override this to "" to exercise the
+    # no-Anthropic-key path (see test_google_only_box_..._without_anthropic_key).
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(headless, "NATIVE_MODE", True)
 
@@ -143,14 +148,18 @@ async def test_non_anthropic_backend_rejected(runner_env, monkeypatch):
     The key gate is now backend-aware and checked BEFORE this guard, so a Gemini
     task on a box with no GOOGLE key would fail on the missing key rather than
     reach the guard under test here. A fake GOOGLE_API_KEY is set so this test
-    keeps exercising the backend GUARD (its original intent) — the assertions
-    (success False, "anthropic" in the text) are unchanged."""
+    keeps exercising the backend GUARD (its original intent)."""
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
     result = await headless.run_cu_task(
         "t5", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
 
     assert result["success"] is False
+    # "models only" is the guard's DISTINCTIVE phrasing; bare "anthropic" also
+    # matches the "ANTHROPIC_API_KEY not set" key-gate message, so it can't tell
+    # the two failures apart (that ambiguity is what hid the fresh-box bug).
+    assert "models only" in result["result_text"]
     assert "anthropic" in result["result_text"].lower()
+    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]
 
 
 @pytest.mark.asyncio
@@ -201,9 +210,12 @@ async def test_gemini_with_google_key_reaches_backend_guard(runner_env, monkeypa
         "t-gem2", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
 
     assert result["success"] is False
+    # Distinctive guard phrasing — see test_non_anthropic_backend_rejected.
+    assert "models only" in result["result_text"]
     assert "anthropic" in result["result_text"].lower()
     # The key gate did NOT fire — the backend guard is what remains.
     assert "GOOGLE_API_KEY not set" not in result["result_text"]
+    assert "ANTHROPIC_API_KEY not set" not in result["result_text"]
 
 
 @pytest.mark.asyncio
@@ -254,6 +266,23 @@ async def test_openai_only_box_reaches_backend_guard_without_anthropic_key(runne
     assert result["success"] is False
     assert "anthropic" in result["result_text"].lower()               # reached T5's backend guard
     assert "ANTHROPIC_API_KEY not set" not in result["result_text"]   # did NOT die on the wrong vendor's key
+
+
+@pytest.mark.asyncio
+async def test_unmapped_backend_fails_loudly_not_silent(runner_env, monkeypatch):
+    """A backend with NO entry in the key map must fail LOUD, never slip through
+    with no API-key gate. This is the guard that keeps T5 honest: after T5
+    deletes the backend!=anthropic backstop, a 4th CU_MODEL_FILTERS family added
+    without extending the map would otherwise run ungated. resolve_backend is
+    stubbed to return an unmapped 'xai' (it can't produce one today); the runner
+    must reject it by name, not silently continue. Mutation-verified: reverting
+    to the old `.get(backend)`/falsy-None short-circuit makes this test fail."""
+    monkeypatch.setattr(headless, "resolve_backend", lambda model: "xai")
+    result = await headless.run_cu_task("t-xai", "system", "hi", model="grok-cu-1")
+
+    assert result["success"] is False
+    assert "No API-key gate configured" in result["result_text"]
+    assert "backend 'xai'" in result["result_text"]
 
 
 def test_fresh_event_queue_unbinds_dead_worker_loop():
