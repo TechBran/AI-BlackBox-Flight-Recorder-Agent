@@ -449,9 +449,13 @@ def _patch_run(monkeypatch, result):
                         lambda **kwargs: result, raising=True)
 
 
-def test_process_cli_agent_success_mints_bounded(fake_task_db, monkeypatch):
+def test_process_cli_agent_success_mints_bounded(fake_task_db, monkeypatch, tmp_path):
     """A successful CLI agent mints — but raw stdout must be BOUNDED before it
     reaches the immutable ledger (mutation target c)."""
+    # Isolate HOME: process_cli_agent resolves the default cwd to
+    # ~/agent-workspaces/<task_id> and CREATES it (G2-T10), so an un-isolated run
+    # would litter the operator's real home.
+    monkeypatch.setenv("HOME", str(tmp_path))
     huge = "X" * 50000
     _seed(fake_task_db, "c-mint", prompt="P" * 5000,
           result_data={"provider": "claude", "model": "opus"})
@@ -480,9 +484,10 @@ def test_process_cli_agent_success_mints_bounded(fake_task_db, monkeypatch):
     assert fake_task_db["c-mint"].status == TaskStatus.COMPLETED
 
 
-def test_process_cli_agent_cancelled_does_not_mint(fake_task_db, monkeypatch):
+def test_process_cli_agent_cancelled_does_not_mint(fake_task_db, monkeypatch, tmp_path):
     """A cancelled CLI agent must NOT mint (precedent: the Android error-mint
     bug; mirrors process_browser_use)."""
+    monkeypatch.setenv("HOME", str(tmp_path))  # isolate the G2-T10 default workspace
     _seed(fake_task_db, "c-cx", result_data={"provider": "claude", "model": "opus"})
     _patch_run(monkeypatch, {
         "success": True, "exit_code": 0, "cancelled": True, "timed_out": False,
@@ -500,7 +505,8 @@ def test_process_cli_agent_cancelled_does_not_mint(fake_task_db, monkeypatch):
     assert fake_task_db["c-cx"].status == TaskStatus.CANCELLED
 
 
-def test_process_cli_agent_failure_sets_failed_no_mint(fake_task_db, monkeypatch):
+def test_process_cli_agent_failure_sets_failed_no_mint(fake_task_db, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))  # isolate the G2-T10 default workspace
     _seed(fake_task_db, "c-f", result_data={"provider": "codex", "model": "gpt"})
     _patch_run(monkeypatch, {
         "success": False, "exit_code": 2, "cancelled": False, "timed_out": False,
@@ -515,10 +521,11 @@ def test_process_cli_agent_failure_sets_failed_no_mint(fake_task_db, monkeypatch
     assert posted == [], "a failed CLI agent should not mint"
 
 
-def test_process_cli_agent_failure_surfaces_cli_error(fake_task_db, monkeypatch):
+def test_process_cli_agent_failure_surfaces_cli_error(fake_task_db, monkeypatch, tmp_path):
     """Finding 2: a failed gemini (keys stripped, no OAuth) must land its own
     auth error in the task's error_message — not a generic 'failed' string that
     hides why. T10 turns this into a fail-fast 'authenticate the CLI' message."""
+    monkeypatch.setenv("HOME", str(tmp_path))  # isolate the G2-T10 default workspace
     err = "When using Gemini API, you must specify the GEMINI_API_KEY environment variable."
     _seed(fake_task_db, "c-auth", result_data={"provider": "gemini"})
     _patch_run(monkeypatch, {

@@ -56,6 +56,31 @@ def _x_availability_feature_errors(data) -> list:
     ]
 
 
+def _cli_agent_mcp_group_errors(data) -> list:
+    """Guard the D1 invariant for EVERY tool, not just the three known names: a
+    tool categorized ``cli_agent`` must NEVER be in the ``mcp`` group.
+
+    The ``mcp`` group feeds ``MCP/blackbox_mcp_server.py``, exposed over the
+    Tailscale **Funnel** (public HTTPS ingress). A fully-open CLI-agent tool there
+    is remote arbitrary command execution under the operator's shell. A test
+    parametrized over today's tool names can't catch a 4th cli_agent tool added
+    later with ``mcp`` in its groups — a category-keyed CI check can, and does.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict) or data.get("category") != "cli_agent":
+        return []
+    groups = data.get("groups")
+    if isinstance(groups, list) and "mcp" in groups:
+        name = data.get("name", "<unknown>")
+        return [
+            f"cli_agent tool {name!r} must NOT be in the 'mcp' group: the mcp "
+            f"group is served over the public Tailscale Funnel, which would make a "
+            f"fully-open CLI agent remote arbitrary command execution (invariant D1)."
+        ]
+    return []
+
+
 def validate_all() -> dict:
     """Validate every module under ``registry.TOOLS_DIR`` and report.
 
@@ -109,6 +134,8 @@ def validate_all() -> dict:
             # An x-availability.feature must be a known FEATURES key (see the
             # helper's docstring: an unknown one is a live-injector/MCP landmine).
             folder_errors.extend(_x_availability_feature_errors(data))
+            # A cli_agent-category tool must never be in the public `mcp` group.
+            folder_errors.extend(_cli_agent_mcp_group_errors(data))
 
         # Track the canonical name for embedding coverage (best effort —
         # even if other fields are invalid, a string name is what the store

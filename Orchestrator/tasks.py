@@ -1700,12 +1700,6 @@ def process_cli_agent(task: Task):
     # `model` is provider-dependent: a claude CLASS, or an optional concrete id
     # for gemini/codex. Empty -> the CLI's own default (see headless.build_argv).
     model = (task_rd.get("model") or "").strip() or None
-    # SECURITY (G2-T10): no cwd -> an isolated per-task workspace, NEVER
-    # os.getcwd(). The service's cwd is the live source tree it imports from, so a
-    # fully-open (YOLO) agent defaulting there could rewrite the very modules it is
-    # executing. cli_agent_workspace() creates the dir (0700) here because Popen
-    # fails on a missing cwd. An explicit cwd is honored verbatim.
-    cwd = task_rd.get("cwd") or cli_agent_workspace(task.task_id)
     permission_mode = task_rd.get("permission_mode") or "yolo"
     operator = task.operator or "system"
     prompt = task.prompt or ""
@@ -1715,6 +1709,15 @@ def process_cli_agent(task: Task):
           f"(provider={provider}, model={model or '(default)'})")
 
     try:
+        # SECURITY (G2-T10): no cwd -> an isolated per-task workspace, NEVER
+        # os.getcwd(). The service's cwd is the live source tree it imports from, so
+        # a fully-open (YOLO) agent defaulting there could rewrite the very modules
+        # it is executing. Resolved INSIDE the try so a workspace-creation failure
+        # (e.g. ProtectHome re-hardened without adding ~/agent-workspaces to
+        # ReadWritePaths, or a full disk) marks the task FAILED here instead of
+        # escaping and stranding it in PROCESSING. cli_agent_workspace() creates the
+        # dir (0700) because Popen fails on a missing cwd; explicit cwd honored.
+        cwd = task_rd.get("cwd") or cli_agent_workspace(task.task_id)
         result = headless.run_cli_agent(
             provider=provider,
             prompt=prompt,

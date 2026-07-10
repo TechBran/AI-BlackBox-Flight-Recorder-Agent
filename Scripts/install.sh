@@ -731,6 +731,12 @@ sudo tee /etc/systemd/system/blackbox.service.d/cli-agent-overrides.conf > /dev/
 # the cli-agent zellij endpoints. Without this, every
 # /cli-agent/zellij/launch returns 500 "attempt to write a readonly
 # database" once CLI_AGENT_BACKEND=zellij.
+#
+# G2-T10 (2026-07-10): CLI-agent ToolVault tasks default an omitted cwd to
+# \$REAL_HOME/agent-workspaces/<task_id>. ProtectHome=no (below) already makes
+# all of \$HOME writable, so it needs NO entry here today. If ProtectHome is
+# EVER re-hardened to read-only, add \$REAL_HOME/agent-workspaces to this list
+# (else every default-cwd CLI-agent task fails creating its workspace).
 ReadWritePaths=$REAL_HOME/.claude $REAL_HOME/.claude.json $REAL_HOME/.gemini $REAL_HOME/.codex $REAL_HOME/.config $REAL_HOME/.cache $REAL_HOME/.npm $REAL_HOME/.local/share/zellij $REAL_HOME/.local/share/blackbox /tmp
 # Disable PrivateTmp so tmux's socket lives in real /tmp and survives
 # service restarts (combined with KillMode=process below).

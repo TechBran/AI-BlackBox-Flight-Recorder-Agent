@@ -309,6 +309,21 @@ def test_codex_auth_reads_only_auth_mode_never_leaks_secret(home, captured):
     assert "SECRET" not in blob and "sk-SECRET" not in blob
 
 
+def test_codex_malformed_auth_json_never_leaks_secret(tmp_path, monkeypatch, captured):
+    """Defense-in-depth on the leak path: a MALFORMED ~/.codex/auth.json carrying
+    a secret must fail-fast (unauthenticated) and the secret must NOT appear in the
+    returned reason / .result / .data."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = tmp_path / ".codex" / "auth.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{ not valid json, OPENAI_API_KEY: sk-MALFORMED-SENTINEL-LEAK ')
+    res = _run("codex_cli_task", {"prompt": "x"})
+    assert res.success is False
+    blob = json.dumps({"result": res.result, "data": res.data})
+    assert "SENTINEL" not in blob and "MALFORMED" not in blob
+    assert captured == []
+
+
 def test_codex_empty_auth_mode_is_unauthenticated(tmp_path, monkeypatch, captured):
     """Presence != mode: an auth.json with a blank auth_mode is NOT signed in."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -454,6 +469,63 @@ def test_missing_prompt_short_circuits_before_auth(tmp_path, monkeypatch, captur
 # ---------------------------------------------------------------------------
 # validate.py guard — x-availability.feature must be a known FEATURES key
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# validate.py guard — the D1 mcp invariant, enforced by CATEGORY (protects the
+# FUTURE, not just the three known names)
+# ---------------------------------------------------------------------------
+
+def test_no_cli_agent_category_tool_is_in_mcp_group():
+    """PROPERTY guard: ANY tool categorized `cli_agent` must never carry `mcp`.
+    A name-parametrized test only guards the tools that exist today; this scans
+    the whole catalog so a 4th cli_agent tool added with mcp is caught."""
+    offenders = []
+    for name in tool_registry.get_all_tool_names():
+        t = registry.get_tool(name)
+        if t and t.get("category") == "cli_agent" and "mcp" in (t.get("groups") or []):
+            offenders.append(name)
+    assert offenders == [], f"cli_agent tools wrongly in the mcp group: {offenders}"
+
+
+def test_validate_flags_mcp_group_on_cli_agent_tool():
+    from Orchestrator.toolvault import validate as v
+    errs = v._cli_agent_mcp_group_errors(
+        {"name": "x_task", "category": "cli_agent", "groups": ["chat", "mcp"]})
+    assert errs and any("mcp" in e.lower() for e in errs)
+
+
+def test_validate_allows_mcp_on_non_cli_agent_and_clean_cli_agent():
+    from Orchestrator.toolvault import validate as v
+    # a non-cli_agent tool (e.g. use_computer) legitimately lives in mcp
+    assert v._cli_agent_mcp_group_errors(
+        {"name": "use_computer", "category": "computer_control",
+         "groups": ["chat", "mcp"]}) == []
+    # a clean cli_agent tool (no mcp) is fine
+    assert v._cli_agent_mcp_group_errors(
+        {"name": "claude_code_task", "category": "cli_agent",
+         "groups": ["chat", "realtime"]}) == []
+
+
+def test_validate_all_fails_on_cli_agent_mcp(tmp_path, monkeypatch):
+    """The category guard is wired into validate_all(), not just a helper."""
+    from Orchestrator.toolvault import validate as v
+    tools = tmp_path / "tools"
+    bad = tools / "rogue_cli_task"
+    bad.mkdir(parents=True)
+    (bad / "schema.json").write_text(json.dumps({
+        "name": "rogue_cli_task",
+        "description": "A rogue CLI-agent tool wrongly exposed to mcp.",
+        "category": "cli_agent",
+        "groups": ["chat", "mcp"],
+        "tier": 2,
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }))
+    monkeypatch.setattr(registry, "TOOLS_DIR", tools)
+    report = v.validate_all()
+    assert report["ok"] is False
+    assert "rogue_cli_task" in report["errors"]
+    assert any("mcp" in m.lower() for m in report["errors"]["rogue_cli_task"])
+
 
 def test_validate_flags_unknown_feature_key():
     from Orchestrator.toolvault import validate as v
