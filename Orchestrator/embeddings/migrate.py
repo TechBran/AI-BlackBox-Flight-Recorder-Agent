@@ -697,9 +697,62 @@ async def _run_engine(target_slug: str) -> dict:
             _finish_job("stalled", error=msg)
             return get_job_status()
 
-        # ── cutover (in-process, both parts, this order) ─────────────────────
+        # ── cutover (in-process, this order — the ORDERING is the fix) ───────
+        # INVARIANT: at the instant set_active_slug flips the pointer, the live
+        # ToolVault/embeddings.json MUST already hold vectors in the TARGET
+        # model's space. generate_embedding_sync governs BOTH snapshot AND
+        # ToolVault query embedding via get_active_slug(), and cosine_similarity
+        # returns 0.0 on a dim mismatch — so if the tool store still held the
+        # OLD model's vectors after the flip, semantic tool selection would
+        # score EVERY tool 0.0 for the seconds a re-embed takes, and the
+        # semantic-only tools (use_computer, the CLI-agent tools) would VANISH
+        # from the model's system prompt (keyword weight 0.4 < 0.5 threshold
+        # cannot rescue them). So: precompute the target-model tool vectors
+        # while the OLD pointer is STILL LIVE (old query model still matches the
+        # old on-disk store → tool search stays UP during the slow provider
+        # calls), flip the pointer, then promote the precomputed store
+        # back-to-back. The flip + promote are SYNCHRONOUS with NO `await`
+        # between them, so from the event loop's view they are atomic: a
+        # concurrent on-loop request cannot run in the gap and observe
+        # pointer=new while the store is still old. The promote is one small
+        # atomic .part+os.replace (save_embeddings_store); blocking the shared
+        # loop for that single sub-30ms write at a RARE model cutover is the
+        # correct trade for closing the window (the slow provider calls already
+        # ran OFF the loop in the precompute above).
+        new_tool_store = await asyncio.to_thread(
+            _precompute_toolvault_store, target_slug
+        )  # provider calls OFF the shared loop; OLD pointer still live here
+        promoted = False
         set_active_slug(target_slug)        # 1. persist the pointer (disk)
-        search.swap_active(target_slug)     # 2. repoint live searches (memory)
+        if new_tool_store is not None:
+            try:
+                # 2. promote the precomputed store: the live tool vectors now
+                #    match the just-flipped query-embed model. path=None →
+                #    default EMBEDDINGS_PATH (ToolVault/embeddings.json). SYNC on
+                #    purpose — no await between the flip (1) and this write.
+                from Orchestrator.toolvault.embeddings import save_embeddings_store
+                save_embeddings_store(new_tool_store, None)
+                promoted = True
+            except Exception as e:  # noqa: BLE001 — cutover must NEVER fail on toolvault
+                print(f"[MIGRATE] toolvault store promote failed (non-fatal): {e}")
+        search.swap_active(target_slug)     # 3. repoint live searches (memory)
+        if not promoted:
+            # FALLBACK: precompute unavailable (toolvault import / provider down)
+            # OR the promote write itself failed. Either way the live tool store
+            # was NOT flipped into the new model's space, so the cutover must NOT
+            # silently leave a permanent all-zero-cosine gap: degrade to the
+            # pre-fix behavior — a fire-and-forget re-embed — and accept a
+            # transient tool-search gap until it finishes. The cutover must NEVER
+            # fail because of ToolVault.
+            print(
+                "[MIGRATE] WARNING: toolvault precompute/promote unavailable — "
+                "falling back to fire-and-forget re-embed; semantic tool "
+                "selection is degraded for a few seconds until it completes"
+            )
+            try:
+                _toolvault_cutover_hook(target_slug)
+            except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
+                print(f"[MIGRATE] toolvault cutover hook raised (non-fatal): {e}")
 
         raced = sorted(target.ids() - preexisting_ids - job_appended)
         if raced:
@@ -708,10 +761,6 @@ async def _run_engine(target_slug: str) -> dict:
                 f"with old-model vectors: {raced} — their search ranking may be "
                 f"slightly off until re-embedded"
             )
-        try:
-            _toolvault_cutover_hook(target_slug)
-        except Exception as e:  # noqa: BLE001 — cutover must not fail on toolvault
-            print(f"[MIGRATE] toolvault cutover hook raised (non-fatal): {e}")
         # Recompute health for the NEW active model BEFORE marking the job done,
         # so a status poll that sees state=done also reads fresh health. Without
         # this, the watcher's cached "superseded -> <target>" verdict (computed
@@ -824,6 +873,9 @@ async def _activate_candidate(target_slug: str) -> None:
         evict_store(target_slug)
         evict_store(target_slug, base_dir=_build_base_dir())
         if is_active:
+            # SAME-SLUG store rebuild (no set_active_slug above → the query-embed
+            # model is unchanged, same dims) — NOT the model-switch cutover, so
+            # ToolVault tool vectors stay valid and need no re-embed here.
             search.swap_active(target_slug)
         print(f"[MIGRATE] re-embed {target_slug}: recovered interrupted swap (.incoming -> live)")
         return
@@ -865,6 +917,9 @@ async def _activate_candidate(target_slug: str) -> None:
     evict_store(target_slug, base_dir=_build_base_dir()) # _build base
 
     if is_active:
+        # SAME-SLUG store rebuild (no set_active_slug → query-embed model + dims
+        # unchanged) — NOT the model-switch cutover, so ToolVault tool vectors
+        # remain in the right space and need no re-embed here.
         search.swap_active(target_slug)                 # reopen fresh live handle
         try:
             await _catch_up_fill(target_slug)
@@ -1064,6 +1119,38 @@ def _quarantine_ids(snap_ids: list[str]) -> None:
     with _JOB_LOCK:
         _JOB["skipped"].extend(snap_ids)
         _persist_locked()
+
+
+def _precompute_toolvault_store(target_slug: str) -> "dict | None":
+    """Compute the ToolVault embedding store under ``target_slug`` WITHOUT
+    persisting it — the close-the-window half of the model-switch cutover.
+
+    Called via ``asyncio.to_thread`` from ``_run_engine`` BEFORE
+    ``set_active_slug``, i.e. while the OLD active pointer is still live: the
+    slow per-description provider calls therefore run with the old query model
+    still matching the old on-disk tool vectors, so semantic tool selection
+    stays UP for the whole precompute. ``sync_embeddings(target_slug=...,
+    save=False)`` stamps every vector with ``target_slug`` and returns the dict
+    for the caller to promote (one atomic write) the instant the pointer flips.
+    ToolVault imports are LAZY (the embeddings package must never import
+    toolvault at module level — import-cycle guard). ANY failure returns None
+    so the caller can fall back to the fire-and-forget re-embed: the cutover
+    must NEVER fail because of ToolVault.
+    """
+    try:
+        from Orchestrator.toolvault import embeddings as tv_embeddings
+        from Orchestrator.toolvault import registry as tv_registry
+
+        canonical = tv_registry.load_canonical()
+        return tv_embeddings.sync_embeddings(
+            canonical, target_slug=target_slug, save=False
+        )
+    except Exception as e:  # noqa: BLE001 — never fail the cutover on toolvault
+        print(
+            f"[MIGRATE] toolvault precompute failed (non-fatal): "
+            f"{type(e).__name__}: {e}"
+        )
+        return None
 
 
 def _toolvault_cutover_hook(target_slug: str) -> "threading.Thread | None":

@@ -68,16 +68,23 @@ def _active_slug() -> str:
     return get_active_slug()
 
 
-def embed_tool_description(description: str) -> Optional[List[float]]:
+def embed_tool_description(
+    description: str, slug: Optional[str] = None
+) -> Optional[List[float]]:
     """Embed a tool description via the shared active provider.
 
     purpose="document": this text will be searched against. Truncation and
     retry/backoff live in the provider layer. Returns None on failure — the
     shared layer's contract, identical to the old in-module behavior.
+
+    ``slug`` pins the embedding model; omitting it (the default) resolves the
+    live active pointer exactly as before. An explicit slug lets the sync run
+    under a TARGET model while the live pointer still points elsewhere (the
+    model-switch precompute path).
     """
     from Orchestrator.embeddings.search import generate_embedding_sync
 
-    return generate_embedding_sync(description, purpose="document")
+    return generate_embedding_sync(description, purpose="document", slug=slug)
 
 
 def embed_query(query: str) -> Optional[List[float]]:
@@ -144,6 +151,8 @@ def sync_embeddings(
     path: Optional[Path] = None,
     *,
     force: bool = False,
+    target_slug: Optional[str] = None,
+    save: bool = True,
 ) -> Dict[str, Any]:
     """Sync the embedding cache against the canonical tool list.
 
@@ -161,6 +170,16 @@ def sync_embeddings(
         canonical: list of schema dicts (each with ``name`` + ``description``).
         path: store path override (defaults to ``EMBEDDINGS_PATH``).
         force: re-embed every tool regardless of hash.
+        target_slug: embed (and cache-key) under THIS model instead of the live
+            active pointer. Omitting it (the default) resolves ``_active_slug()``
+            exactly as before. The model-switch cutover passes the migration
+            target so the store is computed in the NEW model's vector space
+            while the OLD pointer is still live.
+        save: when True (default) write the store to ``path`` atomically, as
+            always. When False, SKIP the write and just return the computed
+            dict — the cutover promotes it with a single atomic write of its own
+            immediately after flipping the active pointer, so the live store is
+            never left inconsistent with the pointer.
 
     Returns:
         The new store dict.
@@ -168,7 +187,7 @@ def sync_embeddings(
     existing = load_embeddings_store(path)
     new_store: Dict[str, Any] = {}
 
-    active = _active_slug()
+    active = target_slug or _active_slug()
     embedded = 0
     skipped = 0
     canonical_names = set()
@@ -194,7 +213,7 @@ def sync_embeddings(
             skipped += 1
             continue
 
-        vec = embed_tool_description(description)
+        vec = embed_tool_description(description, slug=active)
         if vec:
             new_store[name] = {"hash": h, "model": active, "vector": vec}
             embedded += 1
@@ -208,8 +227,10 @@ def sync_embeddings(
 
     pruned = len([n for n in existing if n not in canonical_names])
 
-    save_embeddings_store(new_store, path)
-    print(f"[TOOLVAULT-EMB] embedded={embedded} skipped={skipped} pruned={pruned}")
+    if save:
+        save_embeddings_store(new_store, path)
+    print(f"[TOOLVAULT-EMB] embedded={embedded} skipped={skipped} pruned={pruned}"
+          f"{'' if save else ' (computed, not saved)'}")
     return new_store
 
 

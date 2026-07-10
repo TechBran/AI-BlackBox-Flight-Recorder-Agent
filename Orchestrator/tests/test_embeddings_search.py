@@ -179,6 +179,29 @@ def test_query_purpose_from_semantic_search_and_document_from_generate():
     assert fake.calls[-1] == (["snapshot body text"], "document")
 
 
+def test_generate_embedding_sync_explicit_slug_overrides_active_pointer():
+    """An explicit slug embeds under THAT model, NOT the persisted active
+    pointer — the seam the model-switch cutover uses to precompute ToolVault
+    tool vectors in the target space while the old pointer is still live. The
+    active pointer is never moved as a side effect."""
+    from Orchestrator.embeddings.store import get_active_slug
+
+    active_vec = [1.0] * DIMS
+    target_vec = [2.0] * DIMS
+    active_fake = _install_fake(GEMINI_SLUG, active_vec)
+    target_fake = _install_fake(OPENAI_SLUG, target_vec)
+    set_active_slug(GEMINI_SLUG)  # live pointer = GEMINI
+
+    # No slug → active model (GEMINI).
+    assert search.generate_embedding_sync("t", slug=None) == active_vec
+    assert active_fake.calls[-1] == (["t"], "document")
+
+    # Explicit slug → the TARGET model's provider, pointer untouched.
+    assert search.generate_embedding_sync("t", slug=OPENAI_SLUG) == target_vec
+    assert target_fake.calls[-1] == (["t"], "document")
+    assert get_active_slug() == GEMINI_SLUG  # the pointer never moved
+
+
 # ── failure contracts ────────────────────────────────────────────────────────
 
 def test_generate_embedding_sync_failure_returns_none(capsys):

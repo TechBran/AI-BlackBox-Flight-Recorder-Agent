@@ -189,15 +189,26 @@ def _note_query_success() -> None:
 
 # ── public API (legacy monitoring contracts) ─────────────────────────────────
 
-def generate_embedding_sync(text: str, purpose: str = "document") -> list[float] | None:
+def generate_embedding_sync(
+    text: str, purpose: str = "document", slug: str | None = None
+) -> list[float] | None:
     """Embed one text with the active provider; None on failure.
 
     Exact contract of the legacy monitoring.generate_embedding: prints an
     [EMBEDDING]-prefixed line and returns None instead of raising (mint paths
     treat a missing embedding as a soft failure). Truncation + retry/backoff
     live in the provider layer.
+
+    ``slug`` pins WHICH model embeds this text; omitting it (the default) uses
+    the persisted active pointer, so every existing caller is unaffected. An
+    EXPLICIT slug lets a caller embed under a target model while the live
+    ``get_active_slug()`` pointer still points elsewhere — the model-switch
+    cutover uses this to precompute ToolVault tool vectors in the target space
+    BEFORE flipping the pointer, so semantic tool selection never sees a
+    dim-mismatch (all-zero-cosine) gap. Do NOT replace this with a global
+    "current slug" override: concurrent queries would race it.
     """
-    slug = get_active_slug()
+    slug = slug or get_active_slug()
     try:
         provider = get_provider(slug)
         vectors = _run_async(provider.embed([text], purpose))

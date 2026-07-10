@@ -50,6 +50,13 @@ def toolvault_hook(monkeypatch):
     monkeypatch.setattr(
         migrate, "_toolvault_cutover_hook", lambda slug: calls.append(slug)
     )
+    # Stub the precompute half of the real cutover too (no-tool-gap fix): left
+    # live it would touch the network and write the real ToolVault store. None →
+    # the cutover takes the fire-and-forget FALLBACK (fires the hook above), so
+    # rebuild tests still see an empty recorder and the run_migration cutover
+    # tests are unaffected. Hermetic primary-path coverage lives in
+    # toolvault/tests/test_swap_no_toolgap.py.
+    monkeypatch.setattr(migrate, "_precompute_toolvault_store", lambda slug: None)
     return calls
 
 

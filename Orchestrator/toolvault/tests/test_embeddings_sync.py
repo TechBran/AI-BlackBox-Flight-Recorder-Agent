@@ -54,7 +54,7 @@ def patched_embed(monkeypatch):
     """Monkeypatch embed_tool_description with a call counter."""
     calls = {"count": 0, "texts": []}
 
-    def fake_embed(text):
+    def fake_embed(text, slug=None):
         calls["count"] += 1
         calls["texts"].append(text)
         return list(FAKE_VECTOR)
@@ -163,13 +163,13 @@ def test_embed_failure_keeps_prior_entry(store_path, monkeypatch):
     canon = _canonical(2)
 
     # First sync: both succeed.
-    monkeypatch.setattr(embeddings, "embed_tool_description", lambda t: list(FAKE_VECTOR))
+    monkeypatch.setattr(embeddings, "embed_tool_description", lambda t, slug=None: list(FAKE_VECTOR))
     embeddings.sync_embeddings(canon, store_path)
 
     # Change tool_0's description, but embed now fails for the changed one.
     canon[0]["description"] = "changed description that fails"
 
-    def flaky_embed(text):
+    def flaky_embed(text, slug=None):
         if text == "changed description that fails":
             return None
         return list(FAKE_VECTOR)
@@ -185,7 +185,7 @@ def test_embed_failure_keeps_prior_entry(store_path, monkeypatch):
 
 def test_embed_failure_new_tool_skipped(store_path, monkeypatch):
     canon = _canonical(1)
-    monkeypatch.setattr(embeddings, "embed_tool_description", lambda t: None)
+    monkeypatch.setattr(embeddings, "embed_tool_description", lambda t, slug=None: None)
     store = embeddings.sync_embeddings(canon, store_path)
     # New tool that failed to embed is simply absent — no crash.
     assert "tool_0" not in store
@@ -203,7 +203,7 @@ def test_embed_routes_through_shared_layer(monkeypatch):
 
     calls = []
 
-    def fake_sync(text, purpose="document"):
+    def fake_sync(text, purpose="document", slug=None):
         calls.append((text, purpose))
         return list(FAKE_VECTOR)
 
@@ -219,7 +219,8 @@ def test_embed_failure_semantics_none_passthrough(monkeypatch):
     from Orchestrator.embeddings import search as shared_search
 
     monkeypatch.setattr(
-        shared_search, "generate_embedding_sync", lambda text, purpose="document": None
+        shared_search, "generate_embedding_sync",
+        lambda text, purpose="document", slug=None: None,
     )
     assert embeddings.embed_tool_description("x") is None
     assert embeddings.embed_query("x") is None
@@ -280,3 +281,35 @@ def test_old_format_entry_missing_model_field_is_stale(store_path, patched_embed
 
     assert patched_embed["count"] == 1
     assert store["tool_0"]["model"] == SLUG_A
+
+
+# ---------------------------------------------------------------------------
+# no-tool-gap fix: save=False (compute-only) + target_slug override
+# ---------------------------------------------------------------------------
+
+def test_sync_save_false_computes_but_never_writes(store_path, patched_embed):
+    """save=False returns the fully-computed store yet touches NO disk — the
+    model-switch cutover promotes it with its own atomic write AFTER the active
+    pointer flips, so the live store is never left inconsistent with the flip."""
+    canon = _canonical(3)
+    store = embeddings.sync_embeddings(canon, store_path, save=False)
+
+    assert patched_embed["count"] == 3                 # embedding still happened
+    assert set(store.keys()) == {"tool_0", "tool_1", "tool_2"}
+    assert not store_path.exists()                     # but nothing was written
+
+
+def test_sync_target_slug_embeds_and_keys_under_target(
+    store_path, patched_embed, active_slug
+):
+    """target_slug embeds + cache-keys under THAT model, ignoring the live
+    active pointer (which stays SLUG_A) — the precompute-under-the-new-model
+    half of the cutover, run while the OLD pointer is still live."""
+    canon = _canonical(2)
+    store = embeddings.sync_embeddings(
+        canon, store_path, target_slug=SLUG_B, save=False
+    )
+
+    assert all(e["model"] == SLUG_B for e in store.values())  # stamped TARGET
+    assert active_slug["slug"] == SLUG_A                       # pointer untouched
+    assert not store_path.exists()
