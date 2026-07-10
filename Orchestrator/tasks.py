@@ -238,6 +238,50 @@ def _signal_cu_cancel(operator: str, session_id: str = "", model: str = "") -> b
 
 _CU_TASK_TYPES = (TaskType.BROWSER_USE, TaskType.USE_COMPUTER, TaskType.GEMINI_CU)
 
+# CLI-agent task types get their OWN concurrency budget (see background_worker).
+_CLI_AGENT_TASK_TYPES = (TaskType.CLI_AGENT,)
+
+# ------------------------------- concurrency --------------------------------
+# Two INDEPENDENT budgets, not one shared pool, so the two classes never starve
+# each other:
+#   * MAX_CONCURRENT           — image/video/tts/music/chat/checkpoint/CU. Kept
+#                                at 4: the historical rate-limit ceiling for the
+#                                media/provider APIs. Unchanged by T9.
+#   * MAX_CONCURRENT_CLI_AGENT — headless coding agents (claude/gemini/codex).
+#                                > 1 because Brandon requires agents running
+#                                "concurrently at the same exact time". Capped at
+#                                3: each is a heavyweight OS process doing real
+#                                filesystem work, so 3 is a sane workstation
+#                                ceiling; a voice agent that fires five gets three
+#                                running and two queued (they drain as slots free).
+# The thread pool is sized to their SUM so a full media load can never block a
+# CLI agent and a full CLI slice can never block image/TTS/video.
+MAX_CONCURRENT = 4
+MAX_CONCURRENT_CLI_AGENT = 3
+
+
+def _select_runnable(candidates, active_types,
+                     max_other: int = MAX_CONCURRENT,
+                     max_cli: int = MAX_CONCURRENT_CLI_AGENT):
+    """Pick the first queued task runnable under its class budget.
+
+    candidates:   ordered [(task_id, TaskType)] — FIFO order of the queue.
+    active_types: iterable of TaskType currently occupying a worker.
+    Returns the chosen task_id (scanning past a class that is at capacity so a
+    saturated class never head-of-line-blocks the other), or None if nothing is
+    runnable right now.
+    """
+    active_cli = sum(1 for t in active_types if t in _CLI_AGENT_TASK_TYPES)
+    active_other = sum(1 for t in active_types if t not in _CLI_AGENT_TASK_TYPES)
+    for task_id, task_type in candidates:
+        if task_type in _CLI_AGENT_TASK_TYPES:
+            if active_cli < max_cli:
+                return task_id
+        else:
+            if active_other < max_other:
+                return task_id
+    return None
+
 
 def cancel_task(task_id: str) -> Dict[str, Any]:
     """Cancel ONE task. Idempotent; marks CANCELLED; returns a UI-renderable dict.
@@ -439,6 +483,7 @@ _TASK_LABELS = {
     TaskType.BROWSER_USE: "Computer Use",
     TaskType.USE_COMPUTER: "Computer Use",
     TaskType.GEMINI_CU: "Device control",
+    TaskType.CLI_AGENT: "CLI Agent",
 }
 
 
@@ -513,59 +558,84 @@ def background_worker():
     """Process tasks from the queue using a thread pool for concurrency.
 
     Uses ThreadPoolExecutor so slow tasks (checkpoints, video gen) don't block
-    fast tasks (images, TTS). Max 4 concurrent tasks to avoid API rate limits.
+    fast tasks (images, TTS). Two INDEPENDENT budgets (MAX_CONCURRENT for
+    everything, MAX_CONCURRENT_CLI_AGENT for headless coding agents) so neither
+    class can starve the other. The pool is sized to their sum.
     """
     from concurrent.futures import ThreadPoolExecutor, Future
-    MAX_CONCURRENT = 4
+    pool_size = MAX_CONCURRENT + MAX_CONCURRENT_CLI_AGENT
 
     models_module.worker_running = True
-    print(f"[WORKER] Background worker started (max_concurrent={MAX_CONCURRENT})")
+    print(f"[WORKER] Background worker started "
+          f"(max_concurrent={MAX_CONCURRENT}, max_cli_agent={MAX_CONCURRENT_CLI_AGENT})")
 
-    active_futures: dict[str, Future] = {}  # task_id -> Future
+    active_futures: dict[str, Future] = {}       # task_id -> Future
+    active_types: dict[str, TaskType] = {}       # task_id -> TaskType (for budgeting)
 
     def _on_task_done(task_id: str, future: Future):
         """Callback when a task completes — clean up tracking."""
         active_futures.pop(task_id, None)
+        active_types.pop(task_id, None)
         exc = future.exception()
         if exc:
             print(f"[WORKER] Task {task_id} raised uncaught exception: {exc}")
 
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT, thread_name_prefix="task-worker") as pool:
+    with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="task-worker") as pool:
         while models_module.worker_running:
             # Clean up finished futures
             done_ids = [tid for tid, f in active_futures.items() if f.done()]
             for tid in done_ids:
                 active_futures.pop(tid, None)
+                active_types.pop(tid, None)
 
-            # Only pop from queue if we have capacity
-            if len(active_futures) >= MAX_CONCURRENT:
+            # Both budgets full -> nothing can start; wait.
+            active_cli = sum(1 for t in active_types.values() if t in _CLI_AGENT_TASK_TYPES)
+            active_other = len(active_types) - active_cli
+            if active_cli >= MAX_CONCURRENT_CLI_AGENT and active_other >= MAX_CONCURRENT:
                 time.sleep(0.5)
                 continue
 
-            task_id = None
+            # Snapshot the queue, resolve each id, and reap stale rows (cancelled
+            # while PENDING, or gone) — process_task's finally never runs for
+            # those, so their cancel bookkeeping must be cleared HERE or it leaks
+            # forever (G2-T8). Then pick the first runnable task honoring both
+            # budgets (scanning past a saturated class == no head-of-line block).
             with task_lock:
-                if task_queue:
-                    task_id = task_queue.pop(0)
+                queued_ids = list(task_queue)
 
-            if task_id:
-                task = task_db.get_task(task_id)
-                if task and task.status == TaskStatus.PENDING:
-                    print(f"[WORKER] Submitting task {task_id} ({task.task_type}) [active={len(active_futures)}]")
-                    future = pool.submit(process_task, task)
-                    active_futures[task_id] = future
-                    future.add_done_callback(lambda f, tid=task_id: _on_task_done(tid, f))
-                else:
-                    # Dequeued but NOT runnable — cancelled while PENDING, or gone.
-                    # process_task's finally never runs for it, so clean up its
-                    # cancel bookkeeping HERE (the one point we KNOW it won't run),
-                    # or the flag leaks in _cancel_requested forever (G2-T8).
-                    # NOT done in cancel_task: that would race a concurrent dequeue
-                    # which had already read PENDING and could clear the flag out
-                    # from under a running CU task's mint guard.
-                    unregister_cancel_handle(task_id)
-                    clear_cancel_request(task_id)
-            else:
-                time.sleep(2)  # Wait before checking again
+            candidates: list[tuple[str, Task]] = []
+            for tid in queued_ids:
+                task = task_db.get_task(tid)
+                if task is None or task.status != TaskStatus.PENDING:
+                    with task_lock:
+                        if tid in task_queue:
+                            task_queue.remove(tid)
+                    unregister_cancel_handle(tid)
+                    clear_cancel_request(tid)
+                    continue
+                candidates.append((tid, task))
+
+            selected_id = _select_runnable(
+                [(tid, t.task_type) for tid, t in candidates],
+                list(active_types.values()),
+            )
+
+            if selected_id is None:
+                time.sleep(0.5)
+                continue
+
+            task = next(t for tid, t in candidates if tid == selected_id)
+            with task_lock:
+                if selected_id in task_queue:
+                    task_queue.remove(selected_id)
+
+            print(f"[WORKER] Submitting task {selected_id} ({task.task_type}) "
+                  f"[active_other={active_other}/{MAX_CONCURRENT}, "
+                  f"active_cli={active_cli}/{MAX_CONCURRENT_CLI_AGENT}]")
+            active_types[selected_id] = task.task_type
+            future = pool.submit(process_task, task)
+            active_futures[selected_id] = future
+            future.add_done_callback(lambda f, tid=selected_id: _on_task_done(tid, f))
 
 def process_task(task: Task):
     """Process a single task based on its type"""
@@ -595,6 +665,8 @@ def process_task(task: Task):
             process_checkpoint_task(task)
         elif task.task_type in (TaskType.BROWSER_USE, TaskType.USE_COMPUTER):
             process_browser_use(task)
+        elif task.task_type == TaskType.CLI_AGENT:
+            process_cli_agent(task)
         elif task.task_type == TaskType.GEMINI_CU:
             # Handled by asyncio.create_task in gemini_cu_routes — skip worker processing
             print(f"[WORKER] Skipping GEMINI_CU task {task.task_id} (handled by async route)")
@@ -1567,6 +1639,119 @@ def process_browser_use(task: Task):
             progress=0,
         )
         print(f"[WORKER] Browser task {task.task_id} error: {e}")
+
+
+def process_cli_agent(task: Task):
+    """Process a headless CLI-agent task (claude/gemini/codex) — G2-T9.
+
+    Mirrors process_browser_use, including its mint hygiene:
+      * The runner registers the "process" cancel handle (with the child pid);
+        /tasks/{id}/cancel does the process-group kill.
+      * A CANCELLED agent lands in CANCELLED and RETURNS before the mint — a
+        killed YOLO agent's partial stdout must never enter the immutable ledger
+        (precedent: the Android error-mint bug).
+      * A SUCCESSFUL agent mints a BOUNDED, model-summarized string via
+        /chat/save. Raw agent stdout is untrusted/unbounded and must be clamped
+        (result_text[:1000], prompt[:300]) — future sessions semantically search
+        the ledger and treat it as ground truth.
+    """
+    from Orchestrator.cli_agent import headless
+
+    task_rd = task.result_data or {}
+    provider = (task_rd.get("provider") or "").strip()
+    model_class = (task_rd.get("model_class") or "").strip()
+    cwd = task_rd.get("cwd") or os.getcwd()
+    permission_mode = task_rd.get("permission_mode") or "yolo"
+    operator = task.operator or "system"
+    prompt = task.prompt or ""
+
+    update_task(task.task_id, progress=20)
+    print(f"[WORKER] Starting CLI-agent task {task.task_id} "
+          f"(provider={provider}, model_class={model_class})")
+
+    try:
+        result = headless.run_cli_agent(
+            provider=provider,
+            prompt=prompt,
+            model_class=model_class,
+            cwd=cwd,
+            permission_mode=permission_mode,
+            task_id=task.task_id,
+            timeout=float(task_rd.get("timeout") or headless._DEFAULT_TIMEOUT),
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        update_task(task.task_id, status=TaskStatus.FAILED,
+                    error_message=str(e), progress=0)
+        print(f"[WORKER] CLI-agent task {task.task_id} error: {e}")
+        return
+
+    # MINT HYGIENE: cancelled -> CANCELLED, RETURN before the mint. Covers both a
+    # cancel the runner observed (result["cancelled"]) and a late cancel that
+    # landed after the runner returned (is_cancel_requested). CANCELLED is sticky.
+    if result.get("cancelled") or is_cancel_requested(task.task_id):
+        update_task(task.task_id, status=TaskStatus.CANCELLED,
+                    error_message="Cancelled by operator", progress=0)
+        print(f"[WORKER] CLI-agent task {task.task_id} cancelled — skipping auto-snapshot")
+        return
+
+    result_text = result.get("result_text", "") or ""
+
+    if not result.get("success"):
+        err = "timed out" if result.get("timed_out") else (
+            f"exit code {result.get('exit_code')}")
+        update_task(
+            task.task_id,
+            status=TaskStatus.FAILED,
+            error_message=f"CLI agent {provider} failed ({err})",
+            result_data={**task_rd,
+                         "tail": result.get("tail", "")[:headless.TAIL_MAX_CHARS],
+                         "exit_code": result.get("exit_code"),
+                         "timed_out": result.get("timed_out", False)},
+            progress=0,
+        )
+        print(f"[WORKER] CLI-agent task {task.task_id} failed: {err}")
+        return
+
+    update_task(
+        task.task_id,
+        status=TaskStatus.COMPLETED,
+        result_data={**task_rd,
+                     "result_text": result_text[:headless.RESULT_TEXT_MAX_CHARS],
+                     "tail": result.get("tail", "")[:headless.TAIL_MAX_CHARS],
+                     "exit_code": result.get("exit_code"),
+                     "events": result.get("events", 0)},
+        progress=100,
+    )
+    print(f"[WORKER] CLI-agent task {task.task_id} completed "
+          f"({result.get('events', 0)} events)")
+
+    # Auto-snapshot: BOUNDED summary via /chat/save (direct save + auto-mint).
+    try:
+        import requests as req
+        summary = (
+            f"CLI AGENT — TASK RESULT\n\n"
+            f"Task ID: {task.task_id}\n"
+            f"Provider: {provider}  Model class: {model_class}\n"
+            f"Prompt: {prompt[:300]}\n"
+            f"Exit code: {result.get('exit_code')}\n\n"
+            f"Result:\n{result_text[:1000]}"
+        )
+        resp = req.post(
+            "http://localhost:9091/chat/save",
+            json={
+                "operator": operator,
+                "user_message": f"CLI agent ({provider}) task: {prompt[:300]}",
+                "assistant_response": summary,
+                "model": f"cli-agent-{provider}",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        print(f"[WORKER] Auto-snapshot saved for CLI-agent task {task.task_id}")
+    except Exception as snap_err:
+        print(f"[WORKER] Auto-snapshot failed (non-fatal): {snap_err}")
 
 
 def build_sms_prompt_prefix(

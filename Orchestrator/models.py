@@ -214,6 +214,7 @@ class TaskType(str, Enum):
     BROWSER_USE = "browser_use"  # Legacy — kept for backward compat with old DB rows
     USE_COMPUTER = "use_computer"  # Computer Use agent (Anthropic CU on Linux desktop)
     GEMINI_CU = "gemini_cu"      # Gemini Computer Use (Android/browser via gemini_cu_routes)
+    CLI_AGENT = "cli_agent"      # Headless CLI coding agent (claude/gemini/codex) — G2-T9
 
 @dataclass
 class Task:
