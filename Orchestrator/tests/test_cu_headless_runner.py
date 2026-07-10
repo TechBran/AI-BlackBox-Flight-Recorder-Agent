@@ -136,14 +136,88 @@ async def test_single_display_conflict_returns_failed_dict(runner_env, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_non_anthropic_backend_rejected(runner_env):
-    """The task path is Anthropic-only (legacy parity); Gemini CU lives on the
-    chat path."""
+async def test_non_anthropic_backend_rejected(runner_env, monkeypatch):
+    """The task path is Anthropic-only FOR NOW (T5 lands the real multi-backend
+    dispatch); Gemini CU currently lives on the chat path.
+
+    The key gate is now backend-aware and checked BEFORE this guard, so a Gemini
+    task on a box with no GOOGLE key would fail on the missing key rather than
+    reach the guard under test here. A fake GOOGLE_API_KEY is set so this test
+    keeps exercising the backend GUARD (its original intent) — the assertions
+    (success False, "anthropic" in the text) are unchanged."""
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
     result = await headless.run_cu_task(
         "t5", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
 
     assert result["success"] is False
     assert "anthropic" in result["result_text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_missing_key_fails(runner_env, monkeypatch):
+    """Anthropic model + no ANTHROPIC_API_KEY -> failure naming the Anthropic key."""
+    monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")
+    result = await headless.run_cu_task(
+        "t-anth", "system", "hi", model="claude-opus-4-6")
+
+    assert result["success"] is False
+    assert "ANTHROPIC_API_KEY" in result["result_text"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_missing_google_key_names_google_not_anthropic(runner_env, monkeypatch):
+    """Gemini model + no GOOGLE_API_KEY must fail naming the GOOGLE key — NOT the
+    Anthropic one. Before the gate reorder this failed with the Anthropic-only
+    backend message (which names the WRONG vendor), so this test went red first."""
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "")
+    result = await headless.run_cu_task(
+        "t-gem", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert "GOOGLE_API_KEY" in result["result_text"]
+    # The failure must not name the wrong vendor's key.
+    assert "anthropic" not in result["result_text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_openai_missing_key_fails(runner_env, monkeypatch):
+    """OpenAI model + no OPENAI_API_KEY -> failure naming the OPENAI key."""
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "")
+    result = await headless.run_cu_task(
+        "t-oai", "system", "hi", model="gpt-5.5")
+
+    assert result["success"] is False
+    assert "OPENAI_API_KEY" in result["result_text"]
+    assert "anthropic" not in result["result_text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_gemini_with_google_key_reaches_backend_guard(runner_env, monkeypatch):
+    """Gemini model + GOOGLE_API_KEY present -> the key gate is satisfied, so the
+    request advances to T5's Anthropic-only fail-fast. Proves the key gate is no
+    longer the blocker on a Google-provisioned box (fresh-box portability)."""
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    result = await headless.run_cu_task(
+        "t-gem2", "system", "hi", model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert "anthropic" in result["result_text"].lower()
+    # The key gate did NOT fire — the backend guard is what remains.
+    assert "GOOGLE_API_KEY not set" not in result["result_text"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_key_present_proceeds_past_both_gates(runner_env, monkeypatch):
+    """Anthropic model + key present -> proceeds past BOTH gates and reaches the
+    driver (scripted here so no real browser work happens)."""
+    events = [{"type": "done", "data": {"thinking": "", "content": "reached the driver"}}]
+    monkeypatch.setattr(headless, "run_anthropic_cu_loop", _scripted_driver(events, 1))
+
+    result = await headless.run_cu_task(
+        "t-anth2", "system", "hi", model="claude-opus-4-6")
+
+    assert result["success"] is True
+    assert result["result_text"] == "reached the driver"
 
 
 def test_fresh_event_queue_unbinds_dead_worker_loop():

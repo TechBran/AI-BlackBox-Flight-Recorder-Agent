@@ -28,7 +28,13 @@ from Orchestrator.browser.screenshot import (
 from Orchestrator.browser.session_manager import (
     get_or_create_session, strip_screenshots_from_history,
 )
-from Orchestrator.config import CU_MODEL_DEFAULT
+# GOOGLE_API_KEY / OPENAI_API_KEY are sourced from THE SAME place the CU drivers
+# read them, so the runner's key gate can never disagree with the driver it
+# gates: gemini_cu/agent_loop.py does `genai.Client(api_key=GOOGLE_API_KEY)` and
+# openai_cu/agent_loop.py does `AsyncOpenAI(api_key=OPENAI_API_KEY)`, both
+# importing these names from Orchestrator.config. (ANTHROPIC_API_KEY continues to
+# come via browser.config, which re-exports it from the same Orchestrator.config.)
+from Orchestrator.config import CU_MODEL_DEFAULT, GOOGLE_API_KEY, OPENAI_API_KEY
 
 
 def _failure(message: str, screenshots=None, steps: int = 0, tokens=None) -> dict:
@@ -60,10 +66,24 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         COMPUTER_USE_SYSTEM_PROMPT, build_cu_context, _get_tools, _last_user_msg,
     )
 
-    if not ANTHROPIC_API_KEY:
-        return _failure("ANTHROPIC_API_KEY not set")
-
+    # Resolve the backend FIRST, then require only THAT backend's key. Checking
+    # ANTHROPIC_API_KEY before the backend was known killed a Gemini/OpenAI task
+    # on a box with no Anthropic key (a fresh-customer box may carry only a
+    # Google or OpenAI key) and, worse, blamed the wrong vendor. Each backend's
+    # key is the SAME value its driver uses (see the import note above).
     backend = resolve_backend(model)
+    _backend_key = {
+        "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        "google":    ("GOOGLE_API_KEY", GOOGLE_API_KEY),
+        "openai":    ("OPENAI_API_KEY", OPENAI_API_KEY),
+    }.get(backend)
+    if _backend_key and not _backend_key[1]:
+        return _failure(f"{_backend_key[0]} not set")
+
+    # Non-Anthropic backends still fail fast here (T5 lands the real three-backend
+    # session dispatch and removes this guard). Ordering matters: with a valid
+    # backend key present, a Gemini/OpenAI task now reaches THIS message instead
+    # of the (wrong) missing-Anthropic-key message it used to hit.
     if backend != "anthropic":
         return _failure(
             f"Headless CU tasks support Anthropic models only (got '{model}' "
