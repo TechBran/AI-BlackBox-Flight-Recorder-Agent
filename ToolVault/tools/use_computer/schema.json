@@ -1,6 +1,6 @@
 {
   "name": "use_computer",
-  "description": "Control the computer using an autonomous AI agent. Can browse the web, use desktop apps, run terminal commands, and manage files — full Linux desktop access. Returns a task ID - use get_task_status to check progress.",
+  "description": "Control this computer with an autonomous AI agent that operates the screen like a person. Open a web browser and any website, click buttons, type, fill out and submit forms, log in, scroll and navigate pages; also use desktop apps, run terminal commands, and manage files (full Linux desktop). Use it for online tasks like book a flight, book a hotel, buy something, shop, or complete a form on a website. It runs in the background and returns a task ID; the user can watch it on the live task pill. Check get_task_status only if someone asks whether it's finished yet.",
   "category": "computer_control",
   "groups": [
     "chat",

@@ -1,6 +1,6 @@
 {
   "name": "get_task_status",
-  "description": "Check the status of an async task (image, video, or music generation, or a use_computer computer-use task). Returns status, progress, and result URL when complete.",
+  "description": "Check whether an async task is done yet — an image, video, or music generation, a use_computer computer-use run, or a CLI coding-agent task. Answers \"is it finished/ready yet\", reports progress and whether it is still running, and returns the result URL once complete. This is a one-shot check — call it once when you (or the user) want a status update; you do not need to poll it in a loop, since the live task pill refreshes progress on its own. Takes the task ID the generating tool returned.",
   "category": "task_management",
   "groups": [
     "chat",
@@ -26,5 +26,5 @@
   },
   "returns": "Returns status, progress, and result URL when complete",
   "example": "get_task_status(task_id=\"...\")",
-  "notes": "Async operation - use get_task_status to check progress."
+  "notes": "One-shot status check. The live task pill refreshes progress on its own, so there is no need to poll this in a loop."
 }

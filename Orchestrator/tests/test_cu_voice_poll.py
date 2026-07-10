@@ -1,4 +1,12 @@
-"""M1-T7: voice agents can drive AND poll computer use.
+"""M1-T7 / F1: voice agents can drive computer use and do a one-shot status check.
+
+F1 (fire-and-forget): the shared CU guidance no longer tells the model to poll
+``get_task_status`` in a loop inside the streaming turn (each poll re-prefills the
+whole conversation and can burn the tool-iteration cap before the task finishes).
+Group 3's live task pill surfaces progress/completion out-of-band, so the model
+now announces the launch, points the user at the pill, and ENDS the turn;
+``get_task_status`` remains exposed for a single explicit "is it done?" check.
+
 
 Three things guarded here:
 
@@ -56,12 +64,14 @@ CONSTANT_NAME = "CU_CONTROL_BLOCK"
 # carries real braces with no f-string escaping.
 REQUIRED_PIECES = {
     "async task_id claim": ("ASYNCHRONOUS", "returns a task_id"),
-    "announce + poll (don't go silent)": ("you've started it", "poll get_task_status(task_id)"),
-    "polling cadence / terminal rule": ("between checks", "tight loop"),
+    "fire-and-forget: announce, point at the task pill, end the turn": (
+        "watch its progress on the live task pill", "END your turn"),
+    "no in-turn poll loop; one explicit check is allowed": (
+        "Do NOT poll get_task_status in a loop", "check get_task_status(task_id) once"),
     "stall directive (SNAP-3675)": ("ACTUALLY CALL IT",),
     "model CLASS list (all five)": ("opus", "sonnet", "fable", "gemini", "gpt"),
     "SYNCHRONOUS structured-failure handling": ('{"success": false, ...}', '"available"', '"retryable"'),
-    "ASYNCHRONOUS single-tenant display refusal (surfaced by poll)": ("single-tenant", "FAILED"),
+    "ASYNCHRONOUS single-tenant display refusal (surfaced by the pill / one-shot check)": ("single-tenant", "FAILED"),
 }
 
 
@@ -242,7 +252,8 @@ def _assert_cu_block_sent(send_mock, label):
         except Exception:
             blob += str(raw)
     assert "COMPUTER CONTROL:" in blob, f"{label}: CU block heading not in any sent payload"
-    assert "poll get_task_status(task_id)" in blob, f"{label}: poll directive missing"
+    assert "watch its progress on the live task pill" in blob, (
+        f"{label}: fire-and-forget task-pill directive missing")
     # Literal braces survived (no f-string escaping artifact like {{ or a
     # ValueError from a broken replacement field).
     assert '{"success": false, ...}' in blob, f"{label}: literal failure-shape braces missing/mangled"

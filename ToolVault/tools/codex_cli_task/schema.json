@@ -1,6 +1,6 @@
 {
   "name": "codex_cli_task",
-  "description": "Run the Codex CLI as an autonomous coding agent on THIS machine, in the operator's shell with FULL permissions - it can read and write files and run any command in the working directory. Asynchronous: it returns a task ID immediately; poll get_task_status for progress and the final result, and cancel it with the task cancel endpoint. Use it for real multi-step coding and system tasks in a working directory, not for quick questions.",
+  "description": "Run the Codex CLI as an autonomous coding agent on THIS machine, in the operator's shell with FULL permissions - it can read and write files and run any command in the working directory. Asynchronous: it returns a task ID immediately and runs in the background — the user can watch its progress on the live task pill; check get_task_status if asked whether it's done, and cancel it with the task cancel endpoint. Use it for real multi-step coding and system tasks in a working directory, not for quick questions.",
   "category": "cli_agent",
   "groups": [
     "chat",
