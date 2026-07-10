@@ -19,6 +19,11 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+# _resolve_cu_model was hoisted to browser/dispatch.py (M1-T1) — it is a pure
+# function of the model string + CU_MODEL_FILTERS, shared with the CU dispatch
+# path. Imported into this namespace so _execute_cu_job's call site is unchanged.
+from Orchestrator.browser.dispatch import _resolve_cu_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -174,36 +179,6 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Computer-use SSE execution
 # ---------------------------------------------------------------------------
-
-def _resolve_cu_model(model: Optional[str]) -> str:
-    """Resolve the CU model id to use for a CU cron job (M4.1c).
-
-    A chosen CU model is honored only when it passes the SAME capability
-    filters the /models/computer-use catalog uses (CU_MODEL_FILTERS, via
-    resolve_backend) — otherwise the CU streaming path could be handed an
-    arbitrary id that no driver can run. Falls back to CU_MODEL_DEFAULT when
-    the model is empty/Auto OR when the id fails the filters.
-    """
-    import re
-
-    from Orchestrator.config import CU_MODEL_DEFAULT, CU_MODEL_FILTERS
-
-    candidate = (model or "").strip()
-    if not candidate or candidate.lower() in ("computer-use", "cu"):
-        return CU_MODEL_DEFAULT
-
-    # A CU id is valid only if it matches one of the per-vendor capability
-    # patterns (the same data resolve_backend keys off). An unfilterable id
-    # must never reach the stream — fall back to the configured default.
-    if any(re.match(pattern, candidate) for pattern in CU_MODEL_FILTERS.values()):
-        return candidate
-
-    logger.warning(
-        "CU model '%s' fails CU_MODEL_FILTERS; falling back to default '%s'",
-        candidate, CU_MODEL_DEFAULT,
-    )
-    return CU_MODEL_DEFAULT
-
 
 async def _execute_cu_job(
     job_name: str,

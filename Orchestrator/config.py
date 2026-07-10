@@ -188,20 +188,27 @@ CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/
 CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=100)
 CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallback=300)
 
-# CU-capability filters: which model ids from each vendor's live catalog can
-# drive the computer tool. Regex anchored at start (re.match). Data, not code —
+# CU-CAPABILITY gates: which model ids from each vendor's live catalog can
+# drive the computer tool. These answer "can this model CLASS do CU at all?" —
+# never "which version." Regex anchored at start (re.match). Data, not code —
 # when a vendor ships a new CU-capable family, extend the pattern here.
 #   anthropic: opus/sonnet/fable/mythos at major version >= 4
-#              (computer_20251124 tool; haiku excluded — no CU support)
-#   google:    any Gemini id containing "computer-use"
-#   openai:    gpt-5.5 (+ dated snapshots) carries the built-in `computer`
-#              tool; -pro is excluded (undocumented for computer use).
-#              computer-use-preview kept for orgs still on the deprecated,
-#              access-gated preview model.
+#              (computer_20251124 tool; haiku excluded — no CU support).
+#              Open version tail: Opus 4.8 / a future Opus 5 match with zero
+#              edits. THIS IS THE GOOD PATTERN — the others mirror its shape.
+#   google:    any Gemini id containing "computer-use" (the capability lives in
+#              the family, not the version; -pro / flash carry no computer tool).
+#   openai:    CU capability lives in the built-in `computer` tool, which
+#              gpt-5.5 introduced and every later 5.x minor carries — so the
+#              gate is gpt-5.<minor> with minor >= 5 (5.5, 5.6, ... 5.12), NOT a
+#              version pin. Dated/named snapshots (gpt-5.6-sol, gpt-5.5-2026-04-23)
+#              pass; -pro is excluded (undocumented for computer use);
+#              gpt-5.1..5.4 lack the tool. computer-use-preview kept for orgs
+#              still on the deprecated, access-gated preview model.
 CU_MODEL_FILTERS = {
     "anthropic": r"claude-(opus|sonnet|fable|mythos)-([4-9]|\d{2,})",
     "google":    r"gemini-.*computer-use",
-    "openai":    r"(computer-use-preview|gpt-5\.5($|-\d))",
+    "openai":    r"(computer-use-preview|gpt-5\.([5-9]|\d{2,})($|-(?!pro)))",
 }
 
 # ── Embeddings — pluggable snapshot-embedding layer (2026-06-11) ─────────────
