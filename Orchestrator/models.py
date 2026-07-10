@@ -298,10 +298,6 @@ class TaskDatabase:
         # Idempotent — mirrors the image_data / google_video_uri precedent above:
         # ADD COLUMN on a pre-existing tasks.db, catch OperationalError when the
         # column is already there. The CREATE TABLE above covers a brand-new DB.
-        # G3-T11: add progress_text column if it doesn't exist (existing DBs).
-        # Idempotent — mirrors the image_data / google_video_uri precedent above:
-        # ADD COLUMN on a pre-existing tasks.db, catch OperationalError when the
-        # column is already there. The CREATE TABLE above covers a brand-new DB.
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN progress_text TEXT")
             conn.commit()

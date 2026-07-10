@@ -568,6 +568,14 @@ def update_task(task_id: str, **kwargs):
         task.updated_at = now_utc_iso()
         for key, value in kwargs.items():
             if hasattr(task, key):
+                # SHARED CLAMP (G3-T11): progress_text also flows through here via
+                # the whole-row save_task path (the CLI-agent flush), NOT only
+                # through update_progress_text. Bounding it at THIS choke point
+                # covers that path and any future direct caller, so an untrusted
+                # raw-stdout line can never bypass the bound whichever path it takes.
+                if (key == "progress_text" and isinstance(value, str)
+                        and len(value) > PROGRESS_TEXT_MAX_CHARS):
+                    value = value[:PROGRESS_TEXT_MAX_CHARS]
                 setattr(task, key, value)
         task_db.save_task(task)
         # Wholesale notification choke-point: a TERMINAL status change here covers
@@ -595,6 +603,11 @@ def append_task_progress(task_id: str, line: str):
     BEST-EFFORT: progress_text is ephemeral UI state (never minted). A DB hiccup
     here (e.g. WAL contention) must NEVER take down the CU/CLI/video run that is
     producing it — so every failure is swallowed.
+
+    RACE (benign, accepted): a concurrent whole-row update_task flush does a
+    read-modify-write and can momentarily overwrite this single-column write with
+    a slightly-stale line. Acceptable for a polled UI preview; the terminal write
+    is already ordered after the run, so the final state is never wrong.
     """
     if not line:
         return

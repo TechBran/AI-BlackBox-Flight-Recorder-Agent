@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 from Orchestrator import tasks as tasks_mod
 from Orchestrator.browser import headless as cu_headless
+from Orchestrator.cli_agent.headless import _progress_line_from_tail
 from Orchestrator.models import Task, TaskDatabase, TaskStatus, TaskType
 from Orchestrator.routes import task_routes
 
@@ -120,6 +121,39 @@ def test_append_task_progress_writes_bounds_and_preserves(tmp_path, monkeypatch)
     tasks_mod.append_task_progress("a1", "")
     tasks_mod.append_task_progress("a1", "   ")
     assert db.get_task("a1").progress_text is not None
+
+
+def test_update_task_clamps_progress_text(tmp_path, monkeypatch):
+    """The shared write choke point: the CLI path writes progress_text through
+    update_task -> save_task (NOT update_progress_text), so the bound must ALSO
+    hold in update_task's setattr loop — otherwise an untrusted raw-stdout line
+    could bypass the clamp via that path or any future direct caller."""
+    db = TaskDatabase(str(tmp_path / "t.db"))
+    monkeypatch.setattr(tasks_mod, "task_db", db)
+    db.save_task(_mk("c1"))
+    tasks_mod.update_task("c1", progress_text="y" * 50000)
+    got = db.get_task("c1")
+    assert got.progress_text is not None
+    assert len(got.progress_text) <= tasks_mod.PROGRESS_TEXT_MAX_CHARS
+
+
+# ---------------------------------------------------------------------------
+# 2b. CLI producer — _progress_line_from_tail: latest non-blank line, bounded
+#     to the CANONICAL constant (not a decoupled literal).
+# ---------------------------------------------------------------------------
+def test_cli_progress_line_from_tail_latest_and_bounded():
+    # Latest NON-BLANK line (trailing blanks/whitespace skipped).
+    assert _progress_line_from_tail(
+        "first line\n\n   \nlast meaningful line  ") == "last meaningful line"
+    assert _progress_line_from_tail("") == ""
+    assert _progress_line_from_tail("   \n\n\t") == ""
+
+    # Bounded to PROGRESS_TEXT_MAX_CHARS, not a bare literal. A line longer than
+    # the bound clamps to EXACTLY the canonical constant — reverting the fix to a
+    # decoupled/different literal makes this fail (mutation-verify).
+    long_line = "x" * (tasks_mod.PROGRESS_TEXT_MAX_CHARS + 50)
+    out = _progress_line_from_tail("earlier line\n" + long_line)
+    assert len(out) == tasks_mod.PROGRESS_TEXT_MAX_CHARS
 
 
 def test_update_task_preserves_progress_text(tmp_path, monkeypatch):

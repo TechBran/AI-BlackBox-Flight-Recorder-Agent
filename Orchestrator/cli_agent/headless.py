@@ -121,13 +121,16 @@ def _progress_line_from_tail(tail: str) -> str:
     """G3-T11: the CLI-agent producer. Distil the bounded stdout tail into the
     single latest line for progress_text, so a CLI-agent task exposes the SAME
     one field the CU/video tasks do and the UI reads one thing for all types.
-    Latest non-blank line, clamped short (the pill is one line)."""
+    Latest non-blank line, clamped to the canonical PROGRESS_TEXT_MAX_CHARS
+    (imported, NOT a decoupled literal — this producer is fed by untrusted raw
+    agent stdout). Lazy import mirrors this module's tasks.py cycle-avoidance."""
     if not tail:
         return ""
+    from Orchestrator.tasks import PROGRESS_TEXT_MAX_CHARS
     for ln in reversed(tail.splitlines()):
         ln = ln.strip()
         if ln:
-            return ln[:500]
+            return ln[:PROGRESS_TEXT_MAX_CHARS]
     return ""
 
 _TAIL_FLUSH_SECONDS = 2.0   # roughly how often the DB tail is refreshed
