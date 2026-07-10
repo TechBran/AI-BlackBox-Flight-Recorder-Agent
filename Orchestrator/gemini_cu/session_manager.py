@@ -138,3 +138,30 @@ def destroy_session(operator: str):
     if sid and sid in _sessions:
         _sessions[sid].destroy()
         del _sessions[sid]
+
+
+def create_task_session(operator: str, device_id: str,
+                        environment: str) -> GeminiCUSession:
+    """Create an ISOLATED, one-shot Gemini CU session for a headless task.
+
+    Registered in _sessions (by its own uuid) but deliberately NOT in
+    _operator_sessions, so it never shadows, borrows, or clobbers the operator's
+    interactive CHAT session (which get_or_create_session owns via
+    _operator_sessions). The headless task path needs its own event_queue (its
+    worker thread runs a distinct asyncio.run loop), a fresh conversation_history
+    (so the driver's first-turn fossil retrieval fires and no chat context leaks
+    in), and the EXACT requested device_id/environment (get_or_create_session
+    returns a cache hit as-is and never re-applies them). Pair with
+    destroy_task_session(). Additive: alters no existing function's behavior.
+    """
+    session = GeminiCUSession(operator, device_id, environment)
+    _sessions[session.session_id] = session
+    return session
+
+
+def destroy_task_session(session: GeminiCUSession):
+    """Tear down a create_task_session() session: stop its agent task and drop it
+    from _sessions. Never touches _operator_sessions, so the operator's chat
+    session is left intact. Idempotent."""
+    session.destroy()
+    _sessions.pop(session.session_id, None)

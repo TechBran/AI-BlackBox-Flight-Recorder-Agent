@@ -22,15 +22,20 @@ from Orchestrator.browser.config import (
 )
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop
-# The Gemini/OpenAI CU drivers + the Gemini session factory. Imported at module
-# level (not lazily) so tests can monkeypatch `headless.run_gemini_cu_loop` /
-# `headless.run_openai_cu_loop` / `headless.gemini_get_or_create_session` the
-# same way they already patch `headless.run_anthropic_cu_loop`.
+# The Gemini/OpenAI CU drivers + the Gemini task-session factory. Imported at
+# module level (not lazily) so tests can monkeypatch `headless.run_gemini_cu_loop`
+# / `headless.run_openai_cu_loop` / `headless.gemini_create_task_session` the same
+# way they already patch `headless.run_anthropic_cu_loop`. TRADE-OFF: this eager
+# import couples the Google (genai) AND OpenAI SDKs to THIS runner's
+# importability — a box missing either SDK can no longer import headless at all,
+# so even Anthropic headless CU breaks (the chat path imports them lazily and
+# stays resilient). Accepted for the monkeypatch seam; both SDKs ship on every
+# box that runs any CU.
 from Orchestrator.gemini_cu.agent_loop import run_gemini_cu_loop
 from Orchestrator.gemini_cu.config import DEFAULT_CU_MODEL as GEMINI_CU_MODEL_DEFAULT
 from Orchestrator.gemini_cu.session_manager import (
-    get_or_create_session as gemini_get_or_create_session,
-    destroy_session as gemini_destroy_session,
+    create_task_session as gemini_create_task_session,
+    destroy_task_session as gemini_destroy_task_session,
 )
 from Orchestrator.openai_cu.agent_loop import run_openai_cu_loop
 from Orchestrator.browser.screenshot import (
@@ -237,13 +242,24 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
                               system_prompt: str, url: str) -> dict:
     """Gemini CU headless dispatch.
 
-    Uses the Gemini CU session type + factory (NOT
+    Uses the Gemini CU session type (NOT
     browser.session_manager.get_or_create_session), so it deliberately SKIPS the
     Anthropic single-local-display lock: the Gemini driver requires a
-    GeminiCUSession (gemini_cu/agent_loop.py:398) built by a different factory
-    with a different signature, and passing the browser session would raise. The
-    device->environment resolution is ported from
-    chat_routes.stream_gemini_computer_use (chat_routes.py:4365-4382).
+    GeminiCUSession (gemini_cu/agent_loop.py:398) built with a different signature,
+    and passing the browser session would raise. The device->environment
+    resolution is ported from stream_gemini_computer_use (chat_routes.py:4365-4382).
+
+    ISOLATION: the headless task gets its OWN session via create_task_session, NOT
+    the operator-cached CHAT session that get_or_create_session returns. Borrowing
+    the chat session was wrong on three counts — a cache hit is returned as-is,
+    never re-applying the requested device_id/environment (so a cached ANDROID
+    chat turn would silently run a "blackbox" task against the phone); its
+    non-empty conversation_history suppressed the driver's first-turn fossil
+    retrieval (gemini_cu/agent_loop.py:417) AND contaminated the one-shot task
+    with the user's prior chat. An owned session fixes all three (correct device
+    at construction, fresh history, no contamination), needs no queue rebind (its
+    queue is born on this worker loop), and its teardown drops ONLY itself —
+    leaving the operator's chat session untouched.
 
     DISPLAY ARBITRATION: skipping the Anthropic single-display LOCK does not mean
     skipping conflict detection — for a desktop target we port the chat path's
@@ -282,19 +298,9 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
                 "is running on this desktop. Stop it first."
             )
 
-    session = gemini_get_or_create_session(operator, device_id, environment)
-    if session.status in ("running", "starting"):
-        return _failure(
-            f"Operator {operator} already has a running Computer Use task "
-            f"(session {session.session_id[:8]}). Wait for it to finish."
-        )
-    session.touch()
-    session.reset_task_state()
-    # Rebind the event queue to THIS loop (worker thread's asyncio.run).
-    # GeminiCUSession has no fresh_event_queue(); a queue bound to a dead worker
-    # loop raises "bound to a different event loop" on the next task.
-    session.event_queue = asyncio.Queue(maxsize=2000)
-    session.prompt_queue.clear()
+    # OWN, isolated session (see ISOLATION above) — never the operator-cached
+    # chat session. Fresh: own queue, empty history, requested device/env.
+    session = gemini_create_task_session(operator, device_id, environment)
     session.status = "starting"
     session.user_message = prompt
 
@@ -307,16 +313,12 @@ async def _run_gemini_cu_task(task_id: str, operator: str, prompt: str,
     try:
         return await _drain_and_fold(session, session.agent_task, screenshots)
     finally:
-        # Drop the per-operator cached Gemini session. We rebound its event_queue
-        # to THIS worker thread's asyncio.run loop; GeminiCUSession — shared with
-        # the chat path (chat_routes.py:4393) — has NO fresh_event_queue(), so
-        # leaving it cached would make the next chat Gemini CU turn for this
-        # operator (within the 300s TTL) await a queue bound to a now-dead loop
-        # and crash with "bound to a different event loop". Dropping it forces
-        # the next turn to build a fresh session (headless tasks are one-shot, so
-        # discarding conversation_history is fine). Idempotent: no-op if already
-        # gone; destroy() also stops any still-running agent_task.
-        gemini_destroy_session(operator)
+        # Tear down ONLY this task's own session (drop from _sessions, stop its
+        # agent task). Never touches _operator_sessions, so the operator's
+        # interactive chat session survives. MUST be in the finally so it fires on
+        # failure and cancellation too (not just success) — a dropped task leaves
+        # no running pump behind.
+        gemini_destroy_task_session(session)
 
 
 async def run_cu_task(task_id: str, operator: str, prompt: str,
@@ -450,7 +452,26 @@ async def run_cu_task(task_id: str, operator: str, prompt: str,
         # so the Anthropic-shaped preamble below is skipped. Bridge its yielded
         # events onto the queue the shared fold drains (URL navigation, if any,
         # was handled by ensure_browser above — mirrors the Anthropic path).
-        agen = run_openai_cu_loop(session, prompt, model or None, system_prompt, None)
+        #
+        # Fossil context: unlike the Gemini driver (which retrieves internally),
+        # the OpenAI loop does NO retrieval, so — exactly as the Anthropic path
+        # and interactive OpenAI CU (chat_routes.py:4705-4709) do — build the
+        # system prompt WITH fossils here, or headless OpenAI is the only CU
+        # cohort running without memory.
+        from Orchestrator.openai_cu.agent_loop import (
+            _default_system_prompt as _openai_default_prompt,
+        )
+        oai_sys = system_prompt or _openai_default_prompt()
+        try:
+            cu_fossil_context, cu_provenance = build_cu_context(prompt, operator)
+        except Exception as e:
+            print(f"[CU-HEADLESS] build_cu_context failed (non-fatal): {e}")
+            cu_fossil_context, cu_provenance = "", {}
+        session.provenance = cu_provenance
+        if cu_fossil_context:
+            oai_sys += "\n\n" + cu_fossil_context
+            print(f"[CU-HEADLESS] Injected {len(cu_fossil_context)} chars of fossil context (openai)")
+        agen = run_openai_cu_loop(session, prompt, model or None, oai_sys, None)
         session.agent_task = asyncio.create_task(_pump_generator(session, agen))
         print(f"[CU-HEADLESS] OpenAI driver launched for task {task_id} ({operator})")
         return await _drain_and_fold(session, session.agent_task, screenshots)

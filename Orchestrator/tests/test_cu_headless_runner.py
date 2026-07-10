@@ -171,7 +171,7 @@ async def test_gemini_backend_dispatches_and_succeeds(runner_env, monkeypatch):
         holder["gemini_session"] = s
         return s
 
-    monkeypatch.setattr(headless, "gemini_get_or_create_session", fake_gem)
+    monkeypatch.setattr(headless, "gemini_create_task_session", fake_gem)
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
 
     def _boom(*a, **k):
@@ -248,7 +248,7 @@ async def test_gemini_token_fold_reads_input_output_keys(runner_env, monkeypatch
     completion_tokens}. The fold must read the {input, output} keys or every
     Gemini CU task silently records tokens {0, 0} while still passing the
     Anthropic-only golden test."""
-    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+    monkeypatch.setattr(headless, "gemini_create_task_session",
                         lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
     events = [
@@ -289,7 +289,7 @@ async def test_google_only_box_dispatches_without_anthropic_key(runner_env, monk
     key, and (post-T5) not hit any Anthropic-only guard. Moving the
     ANTHROPIC_API_KEY check back above resolve_backend() makes this fail (the
     task would die on 'ANTHROPIC_API_KEY not set')."""
-    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+    monkeypatch.setattr(headless, "gemini_create_task_session",
                         lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "ANTHROPIC_API_KEY", "")   # fresh box: no Anthropic credential
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake")  # only Google is provisioned
@@ -369,7 +369,7 @@ async def test_gemini_iteration_capped_synthesizes_result(runner_env, monkeypatc
     `usage` with NO `done` (gemini_cu/agent_loop.py:641). Without synthesis the
     runner reports FAILED with empty result_text despite real work; the fold must
     synthesize the result from accumulated `content` and report success."""
-    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+    monkeypatch.setattr(headless, "gemini_create_task_session",
                         lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
     events = [  # note: NO `done` event — the loop exhausted its step budget
@@ -423,39 +423,144 @@ def test_key_map_backends_match_cu_model_filters():
 
 
 @pytest.mark.asyncio
-async def test_headless_gemini_run_drops_poisoned_session(runner_env, monkeypatch):
-    """Regression (coordinator Issue 1 — the reviewer's flagged riskiest line).
-
-    The headless run rebinds the shared per-operator GeminiCUSession's
-    event_queue to the worker thread's asyncio.run loop. GeminiCUSession is
-    cached in gemini_cu.session_manager._operator_sessions AND shared with the
-    chat path, which does NOT rebind. Left cached, the next chat Gemini CU turn
-    for the same operator (within the 300s TTL) would await a queue bound to a
-    now-dead loop and crash with 'bound to a different event loop'. The runner
-    must drop the session after the run.
-
-    Uses the REAL Gemini factory (not the mock) so the session is genuinely
-    cached, then asserts it is gone afterward. Mutation-verified: removing the
-    finally teardown leaves get_session() != None and fails this test."""
+async def test_headless_gemini_uses_own_session_not_cached_chat(runner_env, monkeypatch):
+    """Issue 1 (a) + (c). A headless Gemini task must NOT borrow the operator's
+    cached CHAT session. Pre-seed a cached ANDROID chat session with history, then
+    run a headless task for device_id='blackbox': the task must run on a DISTINCT
+    session with the REQUESTED (blackbox/desktop) device+environment — NOT the
+    cached android one — and the operator's chat session must SURVIVE untouched.
+    Uses the REAL create_task_session (no mock) so the isolation is genuine.
+    Mutation-verified: swapping create_task_session for get_or_create_session
+    (borrowing) makes assertion (a) fail — the task runs against the phone."""
     import Orchestrator.gemini_cu.session_manager as gem_sm
-
-    op = "gem-teardown-op"
+    op = "gem-own-session-op"
     gem_sm.destroy_session(op)  # clean slate
-    assert gem_sm.get_session(op) is None
-    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
-    events = [{"type": "done", "data": {"content": "ok"}}]
-    monkeypatch.setattr(headless, "run_gemini_cu_loop", _scripted_agen(events, 1))
-
     try:
+        # Pre-seed a cached chat session: android device, with prior history.
+        chat = gem_sm.get_or_create_session(op, "pixel-9", "android")
+        chat.conversation_history = ["prior chat turn"]
+        chat_id = chat.session_id
+
+        monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+        captured = {}
+
+        async def fake_loop(session, *a, **k):
+            captured["session"] = session
+            captured["device_id"] = session.device_id
+            captured["environment"] = session.environment
+            captured["history_len"] = len(session.conversation_history)
+            session.current_step = 1
+            yield {"type": "done", "data": {"content": "ok"}}
+
+        monkeypatch.setattr(headless, "run_gemini_cu_loop", fake_loop)
+
         result = await headless.run_cu_task(
-            "t-gem-teardown", op, "hi",
+            "t-own", op, "hi", device_id="blackbox",
             model="gemini-2.5-computer-use-preview-10-2025")
 
         assert result["success"] is True
-        # The poisoned session must NOT remain cached for the next chat turn.
-        assert gem_sm.get_session(op) is None
+        # (a) ran on the REQUESTED device/environment, not the cached android one
+        assert captured["device_id"] == "blackbox"
+        assert captured["environment"] == "desktop"
+        # ran on a DISTINCT session object, not the cached chat session
+        assert captured["session"] is not chat
+        assert captured["session"].session_id != chat_id
+        # (b) fresh history -> driver's first-turn fossil retrieval fires
+        #     (is_first_turn = not conversation_history)
+        assert captured["history_len"] == 0
+        # (c) the operator's chat session SURVIVES the headless run, intact
+        surviving = gem_sm.get_session(op)
+        assert surviving is chat
+        assert surviving.conversation_history == ["prior chat turn"]
     finally:
-        gem_sm.destroy_session(op)  # belt-and-braces cleanup
+        gem_sm.destroy_session(op)  # cleanup
+
+
+@pytest.mark.asyncio
+async def test_headless_gemini_teardown_on_driver_raise(runner_env, monkeypatch):
+    """Issue 3 (failure path). When the Gemini loop RAISES, the task's own session
+    must still be dropped from _sessions (the teardown lives in a finally) and the
+    task reported as a clean failure — no leaked session, no leaked pump."""
+    import Orchestrator.gemini_cu.session_manager as gem_sm
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    captured = {}
+
+    async def boom_loop(session, *a, **k):
+        captured["session"] = session
+        session.current_step = 1
+        raise RuntimeError("driver exploded")
+        yield  # unreachable — makes this an async generator
+
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", boom_loop)
+
+    result = await headless.run_cu_task(
+        "t-gem-raise", "gem-raise-op", "hi",
+        model="gemini-2.5-computer-use-preview-10-2025")
+
+    assert result["success"] is False
+    assert "driver exploded" in result["result_text"]
+    assert captured["session"].session_id not in gem_sm._sessions  # dropped
+
+
+@pytest.mark.asyncio
+async def test_headless_gemini_teardown_on_cancellation(runner_env, monkeypatch):
+    """Issue 3 (cancellation path — the mutation-discriminating one). When the
+    outer run is CANCELLED mid-drain (the wait_for-timeout case), the task's own
+    session must STILL be dropped. A driver raise returns a failure DICT so the
+    teardown runs whether it is in the finally or inline; only cancellation, which
+    propagates an exception THROUGH the return, distinguishes them. Mutation-
+    verified: moving destroy_task_session out of the finally leaves the session in
+    _sessions here."""
+    import Orchestrator.gemini_cu.session_manager as gem_sm
+    monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
+    captured = {}
+    started = asyncio.Event()
+
+    async def hanging_loop(session, *a, **k):
+        captured["session"] = session
+        session.current_step = 1
+        yield {"type": "cu_step", "data": {"step": 1, "total": 40}}
+        started.set()
+        await asyncio.Event().wait()  # block until cancelled
+        yield {"type": "done", "data": {"content": "never reached"}}
+
+    monkeypatch.setattr(headless, "run_gemini_cu_loop", hanging_loop)
+
+    task = asyncio.create_task(headless.run_cu_task(
+        "t-gem-cancel", "gem-cancel-op", "hi",
+        model="gemini-2.5-computer-use-preview-10-2025"))
+    await started.wait()          # loop started + session created
+    await asyncio.sleep(0)        # let the drain settle on queue.get()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert captured["session"].session_id not in gem_sm._sessions  # dropped despite cancel
+
+
+@pytest.mark.asyncio
+async def test_openai_headless_injects_fossils(runner_env, monkeypatch):
+    """Issue 2. The OpenAI driver does NO internal fossil retrieval (unlike
+    Gemini's), so the runner must build the system prompt WITH fossils before
+    launching it — exactly as the Anthropic path and interactive OpenAI CU do.
+    Otherwise headless OpenAI is the only CU cohort running without memory."""
+    monkeypatch.setattr(headless, "OPENAI_API_KEY", "fake-openai-key")
+    monkeypatch.setattr(
+        chat_routes, "build_cu_context",
+        lambda prompt, operator: ("## RELEVANT MEMORY\nremember-this-fossil", {"snap": []}))
+    captured = {}
+
+    async def fake_loop(session, prompt, model=None, system_prompt=None, url=None):
+        captured["system_prompt"] = system_prompt
+        session.current_step = 1
+        yield {"type": "done", "data": {"content": "ok"}}
+
+    monkeypatch.setattr(headless, "run_openai_cu_loop", fake_loop)
+
+    result = await headless.run_cu_task("t-ofoss", "system", "do X", model="gpt-5.5")
+
+    assert result["success"] is True
+    assert "remember-this-fossil" in (captured["system_prompt"] or "")
 
 
 @pytest.mark.asyncio
@@ -472,7 +577,7 @@ async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypa
     def _no_gemini_session(*a, **k):
         raise AssertionError("Gemini session created despite desktop conflict")
 
-    monkeypatch.setattr(headless, "gemini_get_or_create_session", _no_gemini_session)
+    monkeypatch.setattr(headless, "gemini_create_task_session", _no_gemini_session)
     monkeypatch.setattr(bsm, "get_operator_session",
                         lambda operator: SimpleNamespace(status="running"))
 
@@ -491,11 +596,15 @@ async def test_gemini_desktop_blocked_by_running_browser_cu(runner_env, monkeypa
 
 
 def test_driver_signatures_match_runner_call():
-    """Issue 3 (mock-fidelity guard). The Gemini/OpenAI mocks take
-    (session, *args, **kwargs), so a real driver signature change would sail
-    through green. Bind the REAL driver signatures with EXACTLY the arguments
-    headless.py passes — this fails at commit time if a parameter is renamed or
-    removed, without running the driver. Keep these bind calls byte-for-byte in
+    """Mock-fidelity guard. The Gemini/OpenAI mocks take (session, *args,
+    **kwargs), so a driver signature change could sail through green. Binding the
+    REAL driver signatures with EXACTLY the args headless.py passes narrows that
+    hole — but only partially. What this DOES catch at commit time (without
+    running the driver): a REMOVED or REORDERED required parameter, or a required
+    parameter added such that the arg count no longer binds. What it does NOT
+    catch: a parameter RENAME (positional binding ignores names), nor a new middle
+    parameter WITH a default (the 5 positional args still bind to a 6-param
+    signature, silently shifting values). Keep these bind calls byte-for-byte in
     sync with the call sites (headless._run_gemini_cu_task / run_cu_task openai
     branch)."""
     import inspect
@@ -512,7 +621,7 @@ def test_driver_signatures_match_runner_call():
 async def test_gemini_dict_error_extracts_message(runner_env, monkeypatch):
     """FOLD gap 4: Gemini/OpenAI wrap errors as {"message": ...} (Anthropic sends
     a bare str). The fold must surface the message, not str(dict)."""
-    monkeypatch.setattr(headless, "gemini_get_or_create_session",
+    monkeypatch.setattr(headless, "gemini_create_task_session",
                         lambda *a, **k: _fresh_gemini_session())
     monkeypatch.setattr(headless, "GOOGLE_API_KEY", "fake-google-key")
     events = [{"type": "error", "data": {"message": "Gemini API error: quota exhausted"}}]
