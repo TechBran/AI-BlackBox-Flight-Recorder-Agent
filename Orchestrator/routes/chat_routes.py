@@ -1027,16 +1027,16 @@ def call_anthropic(messages: List[Dict], model: str, operator: str):
                         "content": result_message
                     })
                 elif tool_name == "use_computer":
-                    prompt = tool_input.get("prompt", "")
-                    url = tool_input.get("url")
-                    print(f"[ANTHROPIC] Executing use_computer: {prompt[:100]}")
-                    task = create_task(
-                        TaskType.USE_COMPUTER,
-                        operator=operator,
-                        prompt=prompt,
-                        result_data={"url": url} if url else {}
-                    )
-                    result_message = f"Computer Use task started. Task ID: {task.task_id}. The agent is now autonomously executing your request. Use get_task_status to check progress and see screenshots when complete."
+                    # Route through the ToolVault executor (like the other six
+                    # provider loops) so this branch inherits class resolution,
+                    # device_id, url, AND the structured retryable failure — never
+                    # the old inline create_task that dropped device_id + model.
+                    from Orchestrator.tools import BlackBoxToolExecutor
+                    executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                    import asyncio
+                    tool_result = asyncio.run(executor.execute("use_computer", tool_input))
+                    result_message = tool_result.result
+                    print(f"[ANTHROPIC] use_computer: {result_message[:100]}")
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
@@ -3534,23 +3534,28 @@ async def stream_anthropic_with_thinking(messages: List[Dict], model: str, opera
                                 })
                                 yield {"type": "tool_result", "data": f"Cron jobs: {result_message[:100]}"}
                             elif tool_name == "use_computer":
-                                prompt = tool_input.get("prompt", "")
-                                url = tool_input.get("url")
-                                print(f"[ANTHROPIC-STREAM] Executing use_computer: {prompt[:100]}")
-                                task = create_task(
-                                    TaskType.USE_COMPUTER,
-                                    operator=operator,
-                                    prompt=prompt,
-                                    result_data={"url": url} if url else {}
-                                )
-                                result_message = f"Computer Use task started. Task ID: {task.task_id}. The agent is now autonomously executing your request."
+                                # Route through the ToolVault executor (like the other six
+                                # provider loops) so this branch inherits class resolution,
+                                # device_id, url, AND the structured retryable failure — never
+                                # the old inline create_task that dropped device_id + model.
+                                from Orchestrator.tools import BlackBoxToolExecutor
+                                executor = BlackBoxToolExecutor(operator=operator, origin_device_id=_ORIGIN_DEVICE_ID.get())
+                                cu_result = await executor.execute("use_computer", tool_input)
+                                result_message = cu_result.result
+                                print(f"[ANTHROPIC-STREAM] use_computer: {result_message[:100]}")
                                 tool_results.append({
                                     "type": "tool_result",
                                     "tool_use_id": tool_id,
                                     "content": result_message
                                 })
-                                yield {"type": "tool_result", "data": f"Computer Use task: {task.task_id}"}
-                                yield {"type": "browser_task", "data": {"task_id": task.task_id, "prompt": prompt}}
+                                yield {"type": "tool_result", "data": f"Computer Use: {result_message[:80]}"}
+                                # Preserve the browser_task SSE event on SUCCESS only. The
+                                # executor returns the task_id in .data (same shape the media
+                                # catch-alls read); an unresolvable class fails with no task,
+                                # so .data carries no task_id and no browser_task is emitted.
+                                _cu_task_id = (getattr(cu_result, "data", None) or {}).get("task_id")
+                                if _cu_task_id:
+                                    yield {"type": "browser_task", "data": {"task_id": _cu_task_id, "prompt": tool_input.get("prompt", "")}}
                             elif tool_name in ("get_task_status", "get_snapshot", "list_recent_snapshots",
                                                "get_current_time",
                                                "analyze_image", "analyze_audio", "analyze_video",
