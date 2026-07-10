@@ -24,7 +24,36 @@ exits non-zero when ``not ok`` (a CI gate).
 import json
 import sys
 
-from . import embeddings, registry, resolvers, schema_spec
+from . import availability, embeddings, registry, resolvers, schema_spec
+
+
+def _x_availability_feature_errors(data) -> list:
+    """Guard: an ``x-availability.feature``, when present, MUST be a known
+    ``availability.FEATURES`` key.
+
+    schema_spec validates the gate's shape (provider/requires_env) but is kept
+    free of the FEATURES registry. This check lives here, next to that registry,
+    because an unknown feature is not a structural error — it is a *runtime
+    landmine*: ``availability.enabled_providers`` does ``FEATURES[feature]``, so a
+    bogus feature raises KeyError inside ``filter_available`` and takes down the
+    live injector AND makes the MCP ``list_tools`` return ZERO tools. Catching it
+    at validate time (CI gate) is the guard against the next person tagging a tool
+    with a feature the gate cannot serve.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict):
+        return []
+    gate = data.get("x-availability")
+    if not isinstance(gate, dict) or "feature" not in gate:
+        return []
+    feature = gate.get("feature")
+    if feature in availability.FEATURES:
+        return []
+    return [
+        f"x-availability.feature {feature!r} is not a known availability.FEATURES "
+        f"key; known features: {sorted(availability.FEATURES)}"
+    ]
 
 
 def validate_all() -> dict:
@@ -77,6 +106,9 @@ def validate_all() -> dict:
                     data, folder_name, known_sources=resolvers.KNOWN_SOURCES
                 )
             )
+            # An x-availability.feature must be a known FEATURES key (see the
+            # helper's docstring: an unknown one is a live-injector/MCP landmine).
+            folder_errors.extend(_x_availability_feature_errors(data))
 
         # Track the canonical name for embedding coverage (best effort —
         # even if other fields are invalid, a string name is what the store

@@ -1,0 +1,34 @@
+{
+  "name": "gemini_cli_task",
+  "description": "Run the Gemini CLI as an autonomous coding agent on THIS machine, in the operator's shell with FULL permissions - it can read and write files and run any command in the working directory. Asynchronous: it returns a task ID immediately; poll get_task_status for progress and the final result, and cancel it with the task cancel endpoint. Use it for real multi-step coding and system tasks in a working directory, not for quick questions.",
+  "category": "cli_agent",
+  "groups": [
+    "chat",
+    "realtime",
+    "gemini_live",
+    "grok_live"
+  ],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "The task for the coding agent, written in plain language (e.g. 'add a /health endpoint to app.py and run the test suite')."
+      },
+      "model": {
+        "type": "string",
+        "description": "Optional. A concrete model id passed to the Gemini CLI verbatim. This CLI does NOT resolve friendly class aliases, so give an exact model id or omit to use the CLI's own default model."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Optional. Absolute path of the working directory to run in. Omit to use the server's current working directory."
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "gemini_cli_task(prompt=\"add tests for the parser and run them\")"
+}
