@@ -1635,6 +1635,59 @@ def process_checkpoint_task(task: Task):
                    error_message=error_msg,
                    progress=0)
 
+def _mint_cu_failure_snapshot(task: Task, operator: str, error_text: str,
+                              steps=None):
+    """FAIL LOUDLY: mint a snapshot for a FAILED/timed-out CU task so the turn
+    is never lost (Brandon 2026-07-11).
+
+    The body carries everything the agent narrated up to the failure — the
+    reasoning_text transcript accumulated in the task ROW by _drain_and_fold
+    (re-read fresh here; the in-memory Task predates the run) — and ENDS with
+    the exact terminal error (429 quota / timeout / 500 ...), under an explicit
+    TASK FAILED header so retrieval can never mistake it for a success
+    (resolution-marker discipline: an unmarked partial rides semantic search as
+    ground truth and becomes a confabulation source).
+
+    NOT for CANCELLED tasks: an operator kill returns before the failure paths
+    (G2-T8 mint hygiene) — cancel is a decision, not an outcome to preserve.
+    BEST-EFFORT: a mint failure only logs; it never masks the original error.
+    Mirrors the success-path /chat/save mint (direct save + auto-mint, no LLM
+    round-trip); the transcript is already bounded (REASONING_MAX_CHARS).
+    """
+    try:
+        if is_cancel_requested(task.task_id):
+            return  # operator kill — never mint (G2-T8)
+        row = task_db.get_task(task.task_id)
+        transcript = (getattr(row, "reasoning_text", None) or "").strip()
+        last_line = (getattr(row, "progress_text", None) or "").strip()
+        step_str = str(steps) if steps is not None else (last_line or "unknown")
+        body = (
+            f"COMPUTER USE AGENT — TASK FAILED (incomplete — do not treat as done)\n\n"
+            f"Task ID: {task.task_id}\n"
+            f"Prompt: {(task.prompt or 'N/A')[:300]}\n"
+            f"Progress reached: {step_str}\n\n"
+            f"Agent narration up to the failure:\n"
+            f"{transcript if transcript else '(no narration was captured before the failure)'}\n\n"
+            f"TERMINAL ERROR: {str(error_text)[:600]}"
+        )
+        import requests as req
+        resp = req.post(
+            "http://localhost:9091/chat/save",
+            json={
+                "operator": operator,
+                "user_message": f"Computer Use task FAILED: {(task.prompt or '')[:300]}",
+                "assistant_response": body,
+                "model": "computer-use",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        print(f"[WORKER] Failure snapshot saved for CU task {task.task_id}")
+    except Exception as snap_err:  # noqa: BLE001 — never mask the real failure
+        print(f"[WORKER] Failure snapshot failed (non-fatal) for "
+              f"{task.task_id}: {snap_err}")
+
+
 def process_browser_use(task: Task):
     """Process a Computer Use task via the headless runner (one CU loop)."""
     import asyncio
@@ -1735,10 +1788,11 @@ def process_browser_use(task: Task):
             except Exception as snap_err:
                 print(f"[WORKER] Auto-snapshot failed (non-fatal): {snap_err}")
         else:
+            error_text = result.get("result_text", "Browser task failed")
             update_task(
                 task.task_id,
                 status=TaskStatus.FAILED,
-                error_message=result.get("result_text", "Browser task failed"),
+                error_message=error_text,
                 result_data={
                     **(task.result_data or {}),
                     "screenshots": result.get("screenshots", []),
@@ -1747,6 +1801,8 @@ def process_browser_use(task: Task):
                 progress=0,
             )
             print(f"[WORKER] Browser task {task.task_id} failed: {result.get('result_text')}")
+            _mint_cu_failure_snapshot(task, operator, error_text,
+                                      steps=result.get("steps"))
 
     except asyncio.TimeoutError:
         update_task(
@@ -1756,6 +1812,8 @@ def process_browser_use(task: Task):
             progress=0,
         )
         print(f"[WORKER] Browser task {task.task_id} timed out")
+        _mint_cu_failure_snapshot(task, task.operator or "system",
+                                  "Browser session timed out")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1766,6 +1824,7 @@ def process_browser_use(task: Task):
             progress=0,
         )
         print(f"[WORKER] Browser task {task.task_id} error: {e}")
+        _mint_cu_failure_snapshot(task, task.operator or "system", str(e))
 
 
 def process_cli_agent(task: Task):
