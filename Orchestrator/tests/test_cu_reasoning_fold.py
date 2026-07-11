@@ -59,6 +59,8 @@ def test_anthropic_token_deltas_folded_per_step(monkeypatch):
     assert "now typing Tokyo" in joined
     # tagged per step, first flush of each step only
     assert "[step 1]" in joined and "[step 2]" in joined
+    # the action is ALSO folded into the transcript ("→ left_click(...)")
+    assert "left_click" in joined and "→" in joined
     # the terse pill one-liner still carries the concrete action
     assert any("left_click" in line for _, line in progress)
 
@@ -72,18 +74,28 @@ def test_gemini_openai_lump_folded(monkeypatch):
     ]
     reasoning, progress, _ = _run_fold(events, monkeypatch)
     joined = "".join(c for _, c in reasoning)
-    assert "Opening maps and searching for coffee" in joined
+    assert "Opening maps and searching for coffee" in joined  # per-step lump folded
+    assert "click" in joined                                  # action line folded too
     assert any("click" in line for _, line in progress)
 
 
-def test_no_content_means_no_reasoning_writes(monkeypatch):
-    # A run that never emits `content` (pure action heartbeats) writes NO
-    # reasoning — so the transcript is genuinely narration, not step spam.
+def test_action_only_openai_like_still_populates_reasoning(monkeypatch):
+    # OpenAI CU often emits NO reasoning summary / no `content` for a step — just
+    # actions. The action fold is the floor: the transcript must STILL be non-empty
+    # (readable "what it's doing") so the frontend window isn't hidden as empty.
+    # Realistic dict params (what the drivers actually emit) so the transcript
+    # shows WHAT it did — the coordinates and the typed text, not just the verb.
     events = [
         {"type": "cu_step", "data": {"step": 1, "total": 5}},
-        {"type": "cu_action", "data": {"action": "screenshot", "params": {}, "step": 1}},
+        {"type": "cu_action", "data": {"action": "left_click", "params": {"coordinate": [10, 20]}, "step": 1}},
+        {"type": "cu_step", "data": {"step": 2, "total": 5}},
+        {"type": "cu_action", "data": {"action": "type", "params": {"text": "Tokyo"}, "step": 2}},
         {"type": "done", "data": {"content": "ok"}},
     ]
     reasoning, progress, _ = _run_fold(events, monkeypatch)
-    assert reasoning == []
-    assert any("screenshot" in line for _, line in progress)
+    joined = "".join(c for _, c in reasoning)
+    assert joined.strip() != ""          # NOT empty despite zero narration
+    assert "left_click" in joined and "type" in joined
+    assert "Tokyo" in joined             # the typed text is visible ("what it did")
+    assert "[step 1]" in joined and "[step 2]" in joined
+    assert any("left_click" in line for _, line in progress)

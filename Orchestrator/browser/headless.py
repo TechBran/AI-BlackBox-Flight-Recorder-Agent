@@ -208,13 +208,23 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
             return ""
         return f"step {step}/{_last_total} — " if _last_total else f"step {step} — "
 
-    # G3 live-narration fold: the model's natural-language commentary ("I'll click
-    # the search box, then type Tokyo…") rides the `content` event on ALL three
-    # backends (Anthropic per-token str deltas; Gemini/OpenAI per-step {text,step}
-    # lumps). Buffer it and flush to the ACCUMULATING reasoning_text transcript on
-    # step/action/done boundaries and past a size threshold, so the expanded pill
-    # renders a growing, scrollable per-step narration WITHOUT one DB write per
-    # token. This is separate from _emit_progress (the terse latest-line pill).
+    # G3 live-narration fold → the ACCUMULATING reasoning_text transcript the
+    # expanded pill renders. TWO things feed it, so the window is NEVER empty
+    # during an active run regardless of how chatty the backend is:
+    #   1. The model's natural-language commentary ("I'll click the search box…"),
+    #      which rides the `content` event on all 3 backends (Anthropic per-token
+    #      str deltas; Gemini/OpenAI per-step {text,step} lumps — for OpenAI this
+    #      is the reasoning-summary + assistant text collected in agent_loop). It
+    #      is buffered and flushed on step/action/done boundaries + past a size
+    #      threshold (no DB write per token).
+    #   2. A compact ACTION line ("→ left_click(243, 118)") folded on every
+    #      cu_action. This is the floor: OpenAI CU often emits NO reasoning summary
+    #      for a step, so without the action line the transcript would be empty and
+    #      the frontend window would stay hidden — which reads as "the feature does
+    #      nothing". The action line guarantees a readable "what it's doing" stream.
+    # Separate from _emit_progress (the terse latest-line pill, which shows only the
+    # newest action). _reason_write tags "[step N]" once per step so narration and
+    # its action line share one header.
     _reasoning_buf = []
     _last_reasoned_step = [None]
     _REASONING_FLUSH_CHARS = 400
@@ -222,21 +232,26 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
     def _buf_len() -> int:
         return sum(len(s) for s in _reasoning_buf)
 
+    def _reason_write(body: str, *, action: bool = False):
+        if not append_task_reasoning or not body:
+            return
+        if _last_step != _last_reasoned_step[0]:
+            _last_reasoned_step[0] = _last_step
+            prefix = f"\n[step {_last_step}] " if _last_step is not None else "\n"
+        else:
+            # continuation of the same step: action lines get their own indented
+            # line; a mid-step narration size-flush just continues inline.
+            prefix = "\n  " if action else " "
+        append_task_reasoning(task_id, prefix + body)
+
     def _flush_reasoning():
         nonlocal _reasoning_buf
-        if not append_task_reasoning or not _reasoning_buf:
+        if not _reasoning_buf:
             return
         text = "".join(_reasoning_buf)
         _reasoning_buf = []
-        if not text.strip():
-            return
-        # Tag with the step only on the FIRST flush of a new step (a mid-step
-        # size-threshold flush continues the same step, no repeated header).
-        if _last_step != _last_reasoned_step[0]:
-            _last_reasoned_step[0] = _last_step
-            header = f"\n[step {_last_step}] " if _last_step is not None else "\n"
-            text = header + text
-        append_task_reasoning(task_id, text)
+        if text.strip():
+            _reason_write(text)
 
     try:
         while True:
@@ -273,6 +288,10 @@ async def _drain_and_fold(session, agent_task, screenshots, task_id: str = None)
                 action = d.get("action") or "action"
                 inner = _format_cu_params(d.get("params"))
                 _emit_progress(f"{_step_prefix(s)}{action}({inner})")
+                # Fold the action into the transcript too (the floor that keeps it
+                # non-empty when a backend — notably OpenAI CU — emits no reasoning
+                # summary for the step). Reads "[step N] <reasoning>\n  → action(...)".
+                _reason_write(f"→ {action}({inner})", action=True)
             elif etype == "thinking":
                 # Extended-thinking deltas. Dormant for Anthropic here (the payload
                 # sets no `thinking` param) and unused by Gemini/OpenAI, but wired for
