@@ -19,7 +19,7 @@ from Orchestrator.browser.actions import ActionExecutor, COORD_SPACE_GEMINI
 
 from Orchestrator.gemini_cu.config import (
     DEFAULT_CU_MODEL, MAX_ITERATIONS, MAX_WALL_CLOCK,
-    BROWSER_ONLY_FUNCTIONS, GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT
+    BROWSER_ONLY_FUNCTIONS
 )
 from Orchestrator.gemini_cu.session_manager import GeminiCUSession
 from Orchestrator.config import GOOGLE_API_KEY
@@ -173,22 +173,23 @@ def _get_android_function_declarations() -> list:
 
 async def _capture_screenshot(session: GeminiCUSession) -> bytes:
     """Capture a screenshot from the target device.
-    For desktop/browser: captures at native res then resizes to Gemini's 1440x900.
-    For android: returns ADB screenshot as-is.
+    For desktop/browser: the NATIVE frame, unresized. For android: ADB as-is.
+
+    Deliberately NO resize (click-accuracy investigation 2026-07-11): the old
+    stretch of the 1280x720 (16:9) display into 1440x900 (16:10) showed the
+    model an 11%-vertically-distorted, LANCZOS-upscale-blurred frame on every
+    grounding decision. Google's RECOMMENDED_RESOLUTION (1440x900) describes
+    the ENVIRONMENT size in their Playwright example, not a stretch target;
+    the model accepts any frame size and returns 0-999 coords normalized to
+    what it SAW, so a full-frame native image round-trips through to_native
+    exactly. Sharp + undistorted beats "documented size".
     """
     if session.environment in ("browser", "desktop"):
-        from Orchestrator.browser.screenshot import (
-            capture_screenshot_display, resize_screenshot
-        )
+        from Orchestrator.browser.screenshot import capture_screenshot_display
         from Orchestrator.browser.config import ACTIVE_DISPLAY
-        # Capture at native resolution, then resize to Gemini's expected 1440x900
-        # (NOT 1280x720 which is Anthropic's resolution)
-        # to_thread: capture is a blocking subprocess + PIL resize — keep the
-        # event loop free for other Orchestrator requests during a CU step.
-        png_bytes = await asyncio.to_thread(capture_screenshot_display, ACTIVE_DISPLAY)
-        png_bytes = await asyncio.to_thread(
-            resize_screenshot, png_bytes, GEMINI_CU_WIDTH, GEMINI_CU_HEIGHT)
-        return png_bytes
+        # to_thread: capture is a blocking subprocess — keep the event loop
+        # free for other Orchestrator requests during a CU step.
+        return await asyncio.to_thread(capture_screenshot_display, ACTIVE_DISPLAY)
     elif session.environment == "android":
         from Orchestrator.adb.commands import ADBCommands
         cmds = ADBCommands(session.device_id)
@@ -381,6 +382,11 @@ def _default_system_prompt(session: GeminiCUSession) -> str:
             "The desktop is a real Linux machine. "
             "Your coordinates are normalized 0-999. (0,0) = top-left, (999,999) = bottom-right.\n\n"
             "Click in the CENTER of UI elements for best accuracy. "
+            "Locate every target VISUALLY in the CURRENT screenshot before each click — "
+            "never reuse coordinate numbers you computed on an earlier turn. "
+            "If a click did not have the intended effect, do NOT repeat the same "
+            "coordinates: re-examine the new screenshot, find the target again, and "
+            "derive fresh coordinates (your previous estimate was likely off).\n\n"
             "Complete the user's task step by step, taking a screenshot after each action "
             "to verify the result. If a page is loading, use wait_5_seconds before retrying."
         )
@@ -388,7 +394,12 @@ def _default_system_prompt(session: GeminiCUSession) -> str:
         base = (
             "You are a Computer Use agent controlling a web browser. "
             "You can see the screen through screenshots and interact via click, type, "
-            "scroll, and navigation actions. Complete the user's task step by step. "
+            "scroll, and navigation actions. "
+            "Locate every target VISUALLY in the CURRENT screenshot before each click — "
+            "never reuse coordinate numbers from an earlier turn, and after a click "
+            "that did not have the intended effect, derive FRESH coordinates from the "
+            "new screenshot instead of repeating the same numbers. "
+            "Complete the user's task step by step. "
             "If a page is loading, use wait_5_seconds before retrying."
         )
     return base + f"\n\nCurrent date/time: {datetime.now().isoformat(timespec='seconds')}"
