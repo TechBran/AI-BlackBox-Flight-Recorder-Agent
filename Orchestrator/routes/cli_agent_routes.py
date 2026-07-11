@@ -960,6 +960,44 @@ async def zellij_list_sessions(op: str = Query(...)):
     return {"sessions": out}
 
 
+@router.post("/zellij/send-key")
+async def zellij_send_key(body: dict = Body(...), op: str = Query(...)):
+    """Inject raw key bytes into a session's focused pane (Esc-key relay).
+
+    Body:: ``{"session": "<name>", "bytes": [27]}``
+
+    WHY: zellij-web's terminal-WS input parser holds a BARE ESC frame forever
+    waiting for an escape-sequence continuation (no ESC timeout on the web
+    path) — so the Android terminal's Esc button (a lone 0x1b frame) never
+    resolves to the Esc key, and Claude Code menus can't be dismissed. Typing
+    and complete sequences (arrows) are unaffected, which is exactly the
+    observed symptom. ``zellij action write`` bypasses that parser and was
+    live-validated by injecting 27 into a stuck real session.
+
+    Operator-scoped like every zellij route: the session name must carry the
+    ``{op}__`` prefix (the same ownership rule the sessions listing applies).
+    """
+    _check_operator_allowed(op)
+    _require_zellij_backend()
+
+    session = body.get("session") or ""
+    if not session.startswith(f"{op}__"):
+        raise HTTPException(403, "session does not belong to this operator")
+    codes = body.get("bytes")
+    if not isinstance(codes, list) or not codes:
+        raise HTTPException(400, "bytes must be a non-empty list of 0-255 ints")
+    try:
+        # subprocess is blocking — keep it off the event loop.
+        await asyncio.to_thread(zellij_client.send_key, session, codes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except zellij_client.ZellijBinaryMissing as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:  # noqa: BLE001 — surface the CLI failure honestly
+        raise HTTPException(502, f"zellij write failed: {exc}")
+    return {"ok": True, "session": session, "bytes": codes}
+
+
 @router.delete("/zellij/sessions/{name}", status_code=204)
 async def zellij_delete_session(name: str, op: str = Query(...)):
     """Kill a Zellij session + revoke its token + remove the state row.

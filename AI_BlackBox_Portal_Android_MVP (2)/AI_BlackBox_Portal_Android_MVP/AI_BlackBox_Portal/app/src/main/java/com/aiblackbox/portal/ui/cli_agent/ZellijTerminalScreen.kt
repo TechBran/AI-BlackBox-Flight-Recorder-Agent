@@ -271,6 +271,38 @@ fun ZellijTerminalScreen(
         }
     }
 
+    // --- Esc RELAY (2026-07-11) ---------------------------------------------
+    // zellij-web's terminal-WS input parser holds a BARE ESC frame forever
+    // waiting for an escape-sequence continuation (no ESC timeout on the web
+    // path) — a lone 0x1b frame NEVER resolves to the Esc key, so Claude Code
+    // menus could not be dismissed. Typing and complete sequences (arrows)
+    // are unaffected — exactly the observed symptom. Every key path (Esc
+    // button, hardware KEYCODE_ESCAPE, Ctrl+[) therefore routes a lone-ESC
+    // through the orchestrator's `zellij action write 27` injection (POST
+    // /cli-agent/zellij/send-key — live-validated on a real stuck session);
+    // anything else keeps the normal WS byte path. On relay failure the raw
+    // byte is sent as a fallback (better than swallowing the keypress).
+    val sendKeyInput: (ByteArray) -> Unit = { bytes ->
+        if (bytes.size == 1 && bytes[0] == 0x1b.toByte()) {
+            scrollScope.launch {
+                try {
+                    val enc = java.net.URLEncoder.encode(operator, "UTF-8")
+                    api.post(
+                        "/cli-agent/zellij/send-key?op=$enc",
+                        org.json.JSONObject()
+                            .put("session", session.name)
+                            .put("bytes", org.json.JSONArray().put(27))
+                            .toString()
+                    )
+                } catch (e: Exception) {
+                    client.sendBytes(bytes)
+                }
+            }
+        } else {
+            client.sendBytes(bytes)
+        }
+    }
+
     // --- Detach (NOT close) on dispose --------------------------------------
     //
     // Leaving composition (back nav, session swap) must DETACH only: stop
@@ -609,7 +641,9 @@ fun ZellijTerminalScreen(
                                 // its queued wheel backlog) must die with it.
                                 scrollEngine.stopAll()
                                 view.setTopRow(0)
-                                client.sendBytes(bytes)
+                                // Hardware KEYCODE_ESCAPE emits a lone 0x1b —
+                                // same relay as the Esc button (see sendKeyInput).
+                                sendKeyInput(bytes)
                                 return true
                             }
                             return false
@@ -636,7 +670,9 @@ fun ZellijTerminalScreen(
                             // Programmatic view reset → kill any live fling too.
                             scrollEngine.stopAll()
                             view.setTopRow(0)
-                            client.sendBytes(bytes)
+                            // Ctrl+[ maps to a lone 0x1b — same relay as Esc
+                            // (see sendKeyInput); all other input passes through.
+                            sendKeyInput(bytes)
                             return true
                         }
 
@@ -756,7 +792,7 @@ fun ZellijTerminalScreen(
                 // Programmatic view reset → kill any live fling too.
                 scrollEngine.stopAll()
                 terminalView?.setTopRow(0)
-                client.sendBytes(bytes)
+                sendKeyInput(bytes)  // lone-ESC → orchestrator relay (see above)
             },
             onScrollLines = { delta ->
                 // A deliberate button press takes over from any running fling

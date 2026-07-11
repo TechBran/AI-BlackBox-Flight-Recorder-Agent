@@ -188,6 +188,38 @@ def _run(
     return result
 
 
+_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9._\- ]+$")
+
+
+def send_key(session_name: str, byte_codes: list[int]) -> None:
+    """Inject raw key bytes into a session's focused pane via
+    ``zellij action write`` — the canonical programmatic key injection.
+
+    WHY THIS EXISTS (Esc-key fix, 2026-07-11): zellij-web's terminal-WS input
+    parser holds a BARE trailing ESC waiting for a possible escape-sequence
+    continuation (there is no ESC timeout on the web path), so a client that
+    sends Esc as its own 1-byte frame — the Android terminal's Esc button —
+    never resolves to the Esc key. Complete sequences (arrows) and printable
+    chars are unaffected, which is exactly the observed symptom. ``action
+    write`` bypasses that parser and delivers the byte(s) to the focused pane
+    directly; live-validated by injecting 27 into a real stuck claude session.
+
+    NOTE: requires at least one attached client on the session (a detached
+    session silently drops actions) — always true for the app's use (the
+    button is pressed FROM an attached terminal).
+    """
+    if not session_name or not _SESSION_NAME_RE.match(session_name):
+        raise ValueError(f"invalid zellij session name: {session_name!r}")
+    if not byte_codes or len(byte_codes) > 32:
+        raise ValueError("byte_codes must contain 1-32 bytes")
+    codes = []
+    for c in byte_codes:
+        if not isinstance(c, int) or not (0 <= c <= 255):
+            raise ValueError(f"byte out of range: {c!r}")
+        codes.append(str(c))
+    _run([_ZELLIJ_BIN, "--session", session_name, "action", "write", *codes])
+
+
 def _read_port_from_config() -> int:
     """Parse ~/.config/zellij/config.kdl for web_server_port. Falls back
     to the default port on any read/parse failure — the daemon may not
