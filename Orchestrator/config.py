@@ -186,7 +186,12 @@ CU_FRONTIER_OPENAI_MODEL    = CFG.get("computer_use", "frontier_openai_model",
 CU_NATIVE_MODE          = CFG.getboolean("computer_use", "native_mode", fallback=True)
 CU_CHROME_PATH          = CFG.get("computer_use", "chrome_path", fallback="/opt/google/chrome/chrome").strip()
 CU_MAX_ITERATIONS       = CFG.getint("computer_use", "max_iterations", fallback=150)
-CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallback=300)
+# Session budget for one CU run. MUST cover the drivers' 30-min wall-clock cap
+# (MAX_WALL_CLOCK=1800 fires first with a clean error event; the outer
+# tasks.py wait_for(SESSION_TIMEOUT+30) is only the backstop). The old 300s
+# default strangled healthy runs mid-task ("Browser session timed out" at
+# step 39/150 after ~5 min) while the step/wall-clock budgets said keep going.
+CU_SESSION_TIMEOUT      = CFG.getint("computer_use", "session_timeout_s", fallback=1800)
 
 # CU-CAPABILITY gates: which model ids from each vendor's live catalog can
 # drive the computer tool. These answer "can this model CLASS do CU at all?" —

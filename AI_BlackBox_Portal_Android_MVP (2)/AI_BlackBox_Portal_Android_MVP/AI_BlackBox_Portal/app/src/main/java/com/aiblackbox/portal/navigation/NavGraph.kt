@@ -162,7 +162,19 @@ fun BlackBoxNavGraph(
         composable(Routes.TTS) { PlaceholderScreen("Text-to-Speech") }
         composable(Routes.GOOGLE_SSML) { GoogleSsmlScreen(origin = origin) }
         composable(Routes.GEMINI_PRO_TTS) { GeminiProTtsScreen(origin = origin) }
-        composable(Routes.COMPUTER_USE) {
+        composable(
+            // Optional ?liveDevice= hand-off from the task pill's "Live" button:
+            // arrive with that device preselected and the live screenshot stream
+            // toggled ON. A plain navigate(Routes.COMPUTER_USE) (system menu)
+            // still matches — the arg defaults to "".
+            route = "${Routes.COMPUTER_USE}?liveDevice={liveDevice}",
+            arguments = listOf(navArgument("liveDevice") {
+                type = NavType.StringType
+                defaultValue = ""
+            })
+        ) { backStackEntry ->
+            val liveDevice =
+                backStackEntry.arguments?.getString("liveDevice").orEmpty()
             val vm = chatViewModel ?: viewModel<ChatViewModel>()
             val cuStep by vm.cuStep.collectAsState()
             val cuStepTotal by vm.cuStepTotal.collectAsState()
@@ -191,6 +203,7 @@ fun BlackBoxNavGraph(
                 messages = messages,
                 onSpeak = onSpeak,
                 onSpeakWithId = onSpeakWithId,
+                initialLiveDeviceId = liveDevice.ifBlank { null },
             )
         }
         composable(

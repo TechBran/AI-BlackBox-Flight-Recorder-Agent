@@ -8,7 +8,7 @@ with pixel coordinates in the space of the screenshot you send it.
 Docs: https://developers.openai.com/api/docs/guides/tools-computer-use
 """
 
-from Orchestrator.config import CU_MAX_ITERATIONS
+from Orchestrator.config import CU_MAX_ITERATIONS, CU_SESSION_TIMEOUT
 
 # Model — the default must match Orchestrator.config CU_MODEL_FILTERS["openai"]
 # so resolve_backend() routes it to this driver.
@@ -33,7 +33,8 @@ OPENAI_CU_ENVIRONMENT = "browser"
 # Orchestrator/config.py [computer_use] max_iterations, so all 3 CU backends share
 # ONE cap (was a hardcoded 50 — the ceiling a GPT-fallback run actually hit).
 MAX_ITERATIONS = CU_MAX_ITERATIONS
-SESSION_TIMEOUT = 300
+# Session budget: same single-source rule (the hardcoded-300 twin strangled runs).
+SESSION_TIMEOUT = CU_SESSION_TIMEOUT
 MAX_WALL_CLOCK = 1800
 
 # Tool type — bare "computer" (the legacy "computer_use_preview" tool type

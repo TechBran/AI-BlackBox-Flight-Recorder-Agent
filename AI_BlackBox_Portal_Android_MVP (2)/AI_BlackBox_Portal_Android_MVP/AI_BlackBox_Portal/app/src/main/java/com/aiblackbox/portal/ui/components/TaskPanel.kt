@@ -79,8 +79,10 @@ fun TaskPanel(
     tasks: List<TaskStatus>,
     visible: Boolean,
     onDismiss: () -> Unit,
-    // G3-T13 (M3.3): STOP any active pill (POST /tasks/{id}/cancel via the VM) and
-    // open the CU "Live" viewer for a processing CU task addressed at its device.
+    // G3-T13 (M3.3): STOP any active pill (POST /tasks/{id}/cancel via the VM).
+    // onLiveView(deviceId): open the NATIVE Computer Use screen with this device
+    // preselected and the live screenshot stream toggled ON (the host navigates
+    // Routes.COMPUTER_USE?liveDevice=… — never a browser/WebView surface).
     onStopTask: (String) -> Unit = {},
     onLiveView: (String) -> Unit = {},
     modifier: Modifier = Modifier

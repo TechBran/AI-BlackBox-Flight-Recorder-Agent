@@ -574,7 +574,10 @@ class NativeMainActivity : ComponentActivity() {
                     // Auto-set provider when on dedicated provider screens
                     LaunchedEffect(Unit) {
                         navController.currentBackStackEntryFlow.collect { entry ->
-                            val route = entry.destination.route
+                            // destination.route is the registered PATTERN — for
+                            // computer_use it now carries "?liveDevice={liveDevice}"
+                            // (the pill hand-off), so compare on the path segment.
+                            val route = entry.destination.route?.substringBefore('?')
                             if (route == Routes.COMPUTER_USE) {
                                 val currentProv = store.provider.first()
                                 if (currentProv != "computer-use") {
@@ -681,16 +684,24 @@ class NativeMainActivity : ComponentActivity() {
                     // Layer 3: TaskPanel floating above composer
                     val activeTasks by chatViewModel.activeTasks.collectAsState()
                     var showTaskPanel by remember { mutableStateOf(true) }
-                    // G3-T13: non-null ⇒ the CU Live-view WebView overlay is open for
-                    // this device_id (set by the pill "Live" button; see Layer 5).
-                    var liveViewDeviceId by remember { mutableStateOf<String?>(null) }
                     Box(modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 200.dp, end = 12.dp)) {
                         com.aiblackbox.portal.ui.components.TaskPanel(
                             tasks = activeTasks,
                             visible = showTaskPanel,
                             onDismiss = { showTaskPanel = false },
                             onStopTask = { taskId -> chatViewModel.cancelTask(taskId) },
-                            onLiveView = { devId -> liveViewDeviceId = devId }
+                            // Pill "Live" → the NATIVE Computer Use screen (the same
+                            // modal behind the system menu), device preselected and
+                            // the live screenshot stream auto-toggled ON via the
+                            // ?liveDevice hand-off. Replaces the old CU Live-view
+                            // WebView overlay (it bounced users into a browser
+                            // session — wrong surface for the Android MVP).
+                            onLiveView = { devId ->
+                                navController.navigate(
+                                    Routes.COMPUTER_USE +
+                                        "?liveDevice=" + android.net.Uri.encode(devId)
+                                )
+                            }
                         )
                     }
                     // Re-show panel when new tasks arrive
@@ -940,20 +951,6 @@ class NativeMainActivity : ComponentActivity() {
                         )
                     }
 
-                    // Layer 5 (G3-T13): CU Live-view WebView overlay — full-screen,
-                    // drawn last so it sits above every other layer (incl. Composer).
-                    // Opened by the TaskPanel "Live" button for a processing CU task;
-                    // loads ONLY the server Portal URL and opens cu-interact against
-                    // the task's device_id.
-                    liveViewDeviceId?.let { devId ->
-                        Box(modifier = Modifier.fillMaxSize()) {
-                            com.aiblackbox.portal.ui.webview.CuLiveWebViewScreen(
-                                origin = origin,
-                                deviceId = devId,
-                                onClose = { liveViewDeviceId = null }
-                            )
-                        }
-                    }
                 }
                 } // end CompositionLocalProvider(LocalEmberMode)
 

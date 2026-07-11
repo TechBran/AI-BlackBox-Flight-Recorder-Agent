@@ -506,6 +506,10 @@ fun CuScreen(
     messages: List<com.aiblackbox.portal.data.model.UiMessage> = emptyList(),
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
+    // Task-pill "Live" hand-off (?liveDevice= nav arg): arrive with this device
+    // preselected and the live screenshot stream toggled ON. Null (the system-menu
+    // entry) changes nothing.
+    initialLiveDeviceId: String? = null,
     modifier: Modifier = Modifier,
     viewModel: CuViewModel = viewModel()
 ) {
@@ -541,6 +545,19 @@ fun CuScreen(
     LaunchedEffect(origin) {
         viewModel.initialize(origin)
         com.aiblackbox.portal.ui.components.setChatBaseUrl(origin)
+    }
+
+    // Pill "Live" hand-off: preselect the task's device and toggle the live
+    // screenshot stream ON (this native viewer IS the live view — the button must
+    // never bounce out to a browser). Declared AFTER the origin effect so
+    // initialize(origin) has already built the api client. Keyed on the value:
+    // a later pill tap for a DIFFERENT device re-targets the open screen; the
+    // cuStatus effect below still stops the stream when the session ends.
+    LaunchedEffect(initialLiveDeviceId) {
+        if (!initialLiveDeviceId.isNullOrBlank()) {
+            viewModel.selectDevice(initialLiveDeviceId)
+            viewModel.startPolling()
+        }
     }
 
     // Auto-start polling when CU agent is running, stop when done
