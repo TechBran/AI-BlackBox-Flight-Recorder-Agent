@@ -3,20 +3,28 @@
 The bus fans a notification out to the operator's SUBSCRIBERS that are currently
 ONLINE on the tailnet (``reachable_subscribers`` — subscription-row reachability,
 NOT the Gemma attestation registry), fire-and-forget (short per-device timeout,
-never blocks the caller), and ALWAYS records the event as a snapshot — even when
-zero devices are reachable.
+never blocks the caller).
+
+INVARIANT (2026-07-11): notifications are TRANSIENT, deliver-to-device-only. The
+bus must NEVER mint a snapshot — the old always-mint "durable inbox" flooded the
+ledger (5,277 NOTIFY snapshots in one day's archives) and crowded real content
+out of the recent-snapshot context-retrieval window, while nothing ever read the
+inbox back. The autouse ``_mint_tripwire`` fixture patches
+``Orchestrator.checkpoint.mint_with_content`` and every test asserts it stays
+uncalled — reintroducing a mint through ANY path turns the whole suite red.
 
 These tests mock the two seams: ``reachable_subscribers`` (the
 subscription-row → online-target resolver) and the per-device POST (so nothing
-touches a real phone), plus ``mint_with_content`` (so nothing touches the real
-volume). The per-device POST seam receives the resolved ``device`` dict so a test
-can decide behaviour / assert the payload per device without parsing base_url.
+touches a real phone). The per-device POST seam receives the resolved ``device``
+dict so a test can decide behaviour / assert the payload per device without
+parsing base_url.
 """
 
 import asyncio
 
 import pytest
 
+import Orchestrator.checkpoint as checkpoint_mod
 import Orchestrator.notifications.bus as bus_mod
 from Orchestrator.notifications.bus import notify, NotifyResult
 
@@ -42,8 +50,12 @@ def _device(device_id, operator="Brandon"):
 
 
 @pytest.fixture(autouse=True)
-def _patch_record(monkeypatch):
-    """Capture mint_with_content calls without touching the real volume."""
+def _mint_tripwire(monkeypatch):
+    """Tripwire: record any mint_with_content call — the bus must make NONE.
+
+    Patched at the checkpoint module (the function's home), so a regression that
+    re-imports it into bus.py under any name still trips.
+    """
     calls = []
 
     def fake_mint(operator, content, reason="DIRECT", snap_type="normal"):
@@ -52,7 +64,7 @@ def _patch_record(monkeypatch):
         )
         return {"snap_id": "SNAP-TEST-0001"}
 
-    monkeypatch.setattr(bus_mod, "mint_with_content", fake_mint)
+    monkeypatch.setattr(checkpoint_mod, "mint_with_content", fake_mint)
     return calls
 
 
@@ -80,7 +92,7 @@ def _patch_targets(monkeypatch, devices):
 
 
 @pytest.mark.asyncio
-async def test_posts_to_resolved_targets(monkeypatch, posts):
+async def test_posts_to_resolved_targets(monkeypatch, posts, _mint_tripwire):
     """Every device the resolver returns (subscribed + online) gets a POST.
 
     The resolver already applies the subscribed ∩ online join, so a device that is
@@ -93,47 +105,34 @@ async def test_posts_to_resolved_targets(monkeypatch, posts):
 
     assert isinstance(result, NotifyResult)
     assert result.delivered == ["d-sub"]
-    assert result.recorded is True
+    assert result.recorded is False  # transient: never minted
     assert len(posts) == 1
     assert posts[0]["device_id"] == "d-sub"
     assert posts[0]["payload"]["title"] == "Hello"
     # A device the resolver excluded (unsubscribed or offline) appears nowhere.
     assert "d-unsub" not in result.delivered and "d-unsub" not in result.unreachable
     assert "d-offline" not in result.delivered
+    assert _mint_tripwire == []  # NO snapshot minted
 
 
 @pytest.mark.asyncio
-async def test_zero_online_subscribers_still_records_no_raise(monkeypatch, posts, _patch_record):
-    """Zero online subscribers (subscribed but offline) → recorded=True,
-    delivered=[], and no exception. The resolver returns [] when no subscriber's
-    tailnet_name is currently online."""
+async def test_zero_online_subscribers_no_mint_no_raise(monkeypatch, posts, _mint_tripwire):
+    """Zero online subscribers (subscribed but offline) → delivered=[], no
+    exception, and — the 2026-07-11 invariant — NO snapshot minted (the old
+    behavior minted the 'durable inbox' here; that flood is exactly what got
+    removed)."""
     _patch_targets(monkeypatch, [])
 
     result = await notify("Brandon", "T", "B")
 
     assert result.delivered == []
-    assert result.recorded is True
+    assert result.recorded is False
     assert len(posts) == 0
-    assert len(_patch_record) == 1
-    assert _patch_record[0]["operator"] == "Brandon"
+    assert _mint_tripwire == []
 
 
 @pytest.mark.asyncio
-async def test_no_targets_records(monkeypatch, posts, _patch_record):
-    """No resolved targets (nobody subscribed, or none online) → no POST, but the
-    event still records in the durable inbox."""
-    _patch_targets(monkeypatch, [])
-
-    result = await notify("Brandon", "T", "B")
-
-    assert result.delivered == []
-    assert result.recorded is True
-    assert len(posts) == 0
-    assert len(_patch_record) == 1
-
-
-@pytest.mark.asyncio
-async def test_one_failing_post_others_still_deliver_and_record(monkeypatch, _patch_record):
+async def test_one_failing_post_others_still_deliver(monkeypatch, _mint_tripwire):
     """A device POST that raises is counted unreachable; the rest still deliver."""
     _patch_targets(monkeypatch, [_device("d-ok"), _device("d-bad")])
 
@@ -148,12 +147,11 @@ async def test_one_failing_post_others_still_deliver_and_record(monkeypatch, _pa
 
     assert result.delivered == ["d-ok"]
     assert result.unreachable == ["d-bad"]
-    assert result.recorded is True
-    assert len(_patch_record) == 1  # still recorded exactly once
+    assert _mint_tripwire == []
 
 
 @pytest.mark.asyncio
-async def test_timeout_counts_unreachable_does_not_raise(monkeypatch, _patch_record):
+async def test_timeout_counts_unreachable_does_not_raise(monkeypatch, _mint_tripwire):
     """A per-device POST that times out is unreachable; notify() never raises."""
     _patch_targets(monkeypatch, [_device("d-slow")])
 
@@ -165,26 +163,26 @@ async def test_timeout_counts_unreachable_does_not_raise(monkeypatch, _patch_rec
     result = await notify("Brandon", "T", "B")
     assert result.delivered == []
     assert result.unreachable == ["d-slow"]
-    assert result.recorded is True
+    assert _mint_tripwire == []
 
 
 @pytest.mark.asyncio
-async def test_records_in_every_case(monkeypatch, posts, _patch_record):
-    """mint_with_content is called with [NOTIFY:category] content + the operator."""
+async def test_never_mints_a_snapshot(monkeypatch, posts, _mint_tripwire):
+    """THE invariant: a successful, fully-delivered notify() mints NOTHING.
+
+    (Inverts the old test_records_in_every_case — the 'durable inbox' mint is
+    deliberately gone; see bus.py module docstring.)"""
     _patch_targets(monkeypatch, [_device("d-1")])
 
-    await notify("Casey", "Deploy done", "All green", category="ops")
+    result = await notify("Casey", "Deploy done", "All green", category="ops")
 
-    assert len(_patch_record) == 1
-    rec = _patch_record[0]
-    assert rec["operator"] == "Casey"
-    assert "[NOTIFY:ops]" in rec["content"]
-    assert "Deploy done" in rec["content"]
-    assert "All green" in rec["content"]
+    assert result.delivered == ["d-1"]
+    assert result.recorded is False
+    assert _mint_tripwire == []
 
 
 @pytest.mark.asyncio
-async def test_dedup_key_drives_notif_id(monkeypatch, posts, _patch_record):
+async def test_dedup_key_drives_notif_id(monkeypatch, posts, _mint_tripwire):
     """A provided dedup_key yields a stable, derived notif_id (not random)."""
     _patch_targets(monkeypatch, [_device("d-1")])
 
@@ -195,7 +193,7 @@ async def test_dedup_key_drives_notif_id(monkeypatch, posts, _patch_record):
 
 
 @pytest.mark.asyncio
-async def test_metadata_only_across_operators(monkeypatch, posts, _patch_record):
+async def test_metadata_only_across_operators(monkeypatch, posts, _mint_tripwire):
     """A device subscribed via 'all' to a NON-owner operator gets metadata only.
 
     The device whose subscription explicitly names the event operator gets the
@@ -229,9 +227,9 @@ async def test_metadata_only_across_operators(monkeypatch, posts, _patch_record)
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_does_not_raise_still_records(monkeypatch, posts, _patch_record):
-    """If reachable_subscribers raises, notify() swallows it (no targets) and still
-    records — the durable inbox is never collateral damage to a Tailscale glitch."""
+async def test_resolver_raises_does_not_raise(monkeypatch, posts, _mint_tripwire):
+    """If reachable_subscribers raises, notify() swallows it (no targets) and
+    returns normally — and still mints nothing."""
     def boom(operator):
         raise RuntimeError("tailscale exploded")
 
@@ -240,23 +238,18 @@ async def test_resolver_raises_does_not_raise_still_records(monkeypatch, posts, 
     result = await notify("Brandon", "T", "B")
 
     assert result.delivered == []
-    assert result.recorded is True
-    assert len(posts) == 0
-    assert len(_patch_record) == 1
-
-
-@pytest.mark.asyncio
-async def test_mint_raises_does_not_raise_recorded_false(monkeypatch, posts):
-    """If mint_with_content raises, notify() never raises — it degrades to
-    recorded=False rather than breaking the caller."""
-    _patch_targets(monkeypatch, [])
-
-    def boom(*a, **k):
-        raise RuntimeError("volume offline")
-
-    monkeypatch.setattr(bus_mod, "mint_with_content", boom)
-
-    result = await notify("Brandon", "T", "B")
-
     assert result.recorded is False
-    assert result.delivered == []
+    assert len(posts) == 0
+    assert _mint_tripwire == []
+
+
+def test_bus_does_not_import_the_mint():
+    """Structural guard: bus.py must not re-grow a mint_with_content import.
+
+    The 'durable inbox' regression path is an innocent-looking one-line import +
+    call; this catches the import itself even if runtime paths are mocked. (The
+    docstring may MENTION the name when explaining the removal — only an actual
+    module attribute trips this.)"""
+    assert not hasattr(bus_mod, "mint_with_content"), (
+        "bus.py imports mint_with_content again — notifications must never mint"
+    )

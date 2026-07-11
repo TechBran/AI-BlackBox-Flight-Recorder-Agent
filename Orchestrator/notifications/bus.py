@@ -10,9 +10,16 @@ calls ``await notify(operator, title, body, category)`` and the bus:
      (notification-only) phone — which never attests — actually receive delivery.
   2. Fans the POST out to every target concurrently with a SHORT per-device
      timeout — one slow/dead device never stalls the others or the caller.
-  3. ALWAYS records the event as a searchable snapshot (the durable inbox), via
-     ``mint_with_content`` (in-process; bypasses the 3s mint debounce), regardless
-     of how many devices were reached — even when zero are reachable.
+
+Notifications are TRANSIENT, deliver-to-device-only. The bus deliberately does
+NOT record events into the snapshot volume: the original "durable inbox" design
+minted a snapshot per notify() (reason="NOTIFY"), and with task-completion
+notifications firing constantly that flooded the ledger (5,277 NOTIFY snapshots
+in one day's archives) and crowded real content out of the recent-snapshot
+context-retrieval window — while NOTHING ever read the inbox back (no endpoint,
+no UI consumed it). Removed 2026-07-11 per Brandon. Do NOT reintroduce a mint
+here; if a durable inbox is ever actually needed, build it as its own store,
+not as ledger snapshots.
 
 Two design contracts:
   * ``notify()`` MUST NEVER raise and never block past the per-device timeout.
@@ -36,7 +43,6 @@ from typing import List, Optional
 
 import aiohttp
 
-from Orchestrator.checkpoint import mint_with_content
 from Orchestrator.notifications.reachability import reachable_subscribers
 from Orchestrator.notifications.subscriptions import SubscriptionStore
 
@@ -53,8 +59,10 @@ REMOTE_NOTIFY_PORT = 8765
 class NotifyResult:
     """The outcome of a ``notify()`` call.
 
-    ``delivered`` / ``unreachable`` are device_ids. ``recorded`` is always True on
-    a successful return (the snapshot is the durable inbox and is never skipped).
+    ``delivered`` / ``unreachable`` are device_ids. ``recorded`` is retained for
+    wire-compat on /notifications/send but is now ALWAYS False — notifications are
+    transient, deliver-to-device-only, never minted into the snapshot volume (see
+    the module docstring for why the "durable inbox" mint was removed).
     """
 
     notif_id: str
@@ -148,23 +156,6 @@ async def _post_to_device(device: dict, payload: dict) -> dict:
                 return {"ok": True}
 
 
-def _record(operator: str, title: str, body: str, category: str, notif_id: str) -> bool:
-    """Always-record the event as a searchable snapshot (the durable inbox).
-
-    Uses mint_with_content (in-process; bypasses the 3s mint debounce). Built from
-    a single content string since that is mint_with_content's real signature —
-    ``[NOTIFY:category] title`` headline + the body. Never raises out: a record
-    failure is logged and degrades to recorded=False rather than breaking notify().
-    """
-    content = f"[NOTIFY:{category}] {title}\n\n{body}"
-    try:
-        mint_with_content(operator, content, reason="NOTIFY")
-        return True
-    except Exception as e:
-        logger.warning("[NOTIFY] snapshot record failed for op=%s: %s", operator, e)
-        return False
-
-
 async def notify(
     operator: str,
     title: str,
@@ -213,23 +204,22 @@ async def notify(
             else:
                 delivered.append(device_id)
 
-    # ALWAYS record — regardless of how many devices were reached.
-    recorded = _record(operator, title, body, category, notif_id)
-
+    # Deliver-only: deliberately NO snapshot record (see module docstring — the
+    # old always-mint "durable inbox" flooded the ledger and context retrieval).
     logger.info(
-        "[NOTIFY] op=%s cat=%s delivered=%d/%d recorded=%s",
+        "[NOTIFY] op=%s cat=%s delivered=%d/%d id=%s",
         operator,
         category,
         len(delivered),
         total,
-        notif_id if recorded else "FAILED",
+        notif_id,
     )
 
     return NotifyResult(
         notif_id=notif_id,
         delivered=delivered,
         unreachable=unreachable,
-        recorded=recorded,
+        recorded=False,
     )
 
 

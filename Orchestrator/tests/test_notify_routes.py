@@ -116,17 +116,21 @@ def test_delete_unsubscribes(client):
     ).status_code == 404
 
 
-def test_send_returns_recorded_result(client, monkeypatch):
+def test_send_returns_result_without_minting(client, monkeypatch):
     """POST /notifications/send drives notify() and returns the NotifyResult.
 
-    The device fan-out (target resolution + POST) and the snapshot record are
-    mocked so the test is fully offline.
+    Notifications are transient (2026-07-11): the wire shape keeps `recorded`
+    for compat but it is ALWAYS False, and no snapshot is minted — the tripwire
+    on checkpoint.mint_with_content must stay uncalled.
     """
+    import Orchestrator.checkpoint as checkpoint_mod
     import Orchestrator.notifications.bus as bus_mod
 
     monkeypatch.setattr(bus_mod, "reachable_subscribers", lambda operator: [])
+    mints = []
     monkeypatch.setattr(
-        bus_mod, "mint_with_content", lambda *a, **k: {"snap_id": "SNAP-TEST"}
+        checkpoint_mod, "mint_with_content",
+        lambda *a, **k: mints.append(a) or {"snap_id": "SNAP-TEST"},
     )
 
     resp = client.post(
@@ -135,6 +139,7 @@ def test_send_returns_recorded_result(client, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     out = resp.json()
-    assert out["recorded"] is True
+    assert out["recorded"] is False  # transient — never minted
     assert out["delivered"] == []
     assert out["notif_id"]
+    assert mints == []  # the ledger stayed untouched
