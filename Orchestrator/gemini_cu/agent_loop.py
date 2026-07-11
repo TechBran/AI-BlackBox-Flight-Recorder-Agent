@@ -387,6 +387,12 @@ def _default_system_prompt(session: GeminiCUSession) -> str:
             "If a click did not have the intended effect, do NOT repeat the same "
             "coordinates: re-examine the new screenshot, find the target again, and "
             "derive fresh coordinates (your previous estimate was likely off).\n\n"
+            "For targets that are CELLS in a grid, board, table, or calendar: do NOT "
+            "compute a cell's position by arithmetic offsets from another cell — grids "
+            "may be flipped, mirrored, or unevenly sized. Visually locate EACH cell "
+            "directly, and when the interface prints coordinate labels (file/rank "
+            "letters, row/column headers), READ those labels to identify the target "
+            "before clicking.\n\n"
             "Complete the user's task step by step, taking a screenshot after each action "
             "to verify the result. If a page is loading, use wait_5_seconds before retrying."
         )
