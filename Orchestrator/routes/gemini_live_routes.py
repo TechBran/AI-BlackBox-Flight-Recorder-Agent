@@ -76,6 +76,7 @@ from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_gemini_live_tools
+from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
@@ -237,6 +238,7 @@ async def configure_gemini_session(
     vad_sensitivity_start: Optional[str] = None,
     vad_sensitivity_end: Optional[str] = None,
     thinking_level: Optional[str] = None,
+    tool_group_override: Optional[str] = None,
 ):
     """
     Configure the Gemini Live session with tools and settings.
@@ -477,7 +479,8 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         # /toolvault/reload (and schema fixes) reach live voice without a
         # restart. The registry's mtime cache makes this cheap. grok/openai
         # routes get the same un-freeze in the hardening phase.
-        "tools": get_gemini_live_tools("gemini_live"),
+        # P4: a voice-agent preset can swap the tool group at configure time.
+        "tools": get_gemini_live_tools(tool_group_override or "gemini_live"),
         "contextWindowCompression": {
             "slidingWindow": {}
         },
@@ -1744,6 +1747,7 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     url_vad_sensitivity_start = websocket.query_params.get("vad_sensitivity_start")
     url_vad_sensitivity_end = websocket.query_params.get("vad_sensitivity_end")
     url_thinking_level = websocket.query_params.get("thinking_level")
+    url_agent = websocket.query_params.get("agent")
 
     # Check dependencies
     if not WEBSOCKETS_AVAILABLE:
@@ -1803,13 +1807,28 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                 # Merge rule: JSON connect message wins over Android URL-query
                 # fallbacks (web is interactive — JSON wins, URL fills missing).
                 # Mirrors T2 precedence at realtime_routes.py:1377-1391.
+                # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
+                agent_id = data.get("agent", url_agent)
+                preset = resolve_preset(agent_id, provider="gemini-live") if agent_id else None
+                if agent_id and preset is None:
+                    await _safe_ws_send(websocket, {
+                        "type": "warning",
+                        "data": f"Voice agent preset {agent_id!r} not found for provider 'gemini-live' — continuing without preset"
+                    })
+                merged = merge_connect_params({
+                    "model": data.get("model", url_model),
+                    "voice": data.get("voice", url_voice),
+                    "greeting": data.get("greeting", ""),
+                    "instructions": data.get("role", ""),
+                }, preset)
                 operator = data.get("operator", url_operator or "")
-                voice = data.get("voice", url_voice or GEMINI_LIVE_DEFAULT_VOICE)
-                greeting = data.get("greeting", "")
-                role = data.get("role", "")
+                voice = merged["voice"] or GEMINI_LIVE_DEFAULT_VOICE
+                greeting = merged["greeting"] or ""
+                role = merged["instructions"] or ""
+                model = merged["model"]
+                tool_group_override = merged["tool_group_override"]
                 # T3 new fields — passed through to configure_gemini_session,
                 # which validates against allowlists and emits payload extensions.
-                model = data.get("model", url_model)
                 vad_sensitivity_start = data.get("vad_sensitivity_start", url_vad_sensitivity_start)
                 vad_sensitivity_end = data.get("vad_sensitivity_end", url_vad_sensitivity_end)
                 thinking_level = data.get("thinking_level", url_thinking_level)
@@ -1833,6 +1852,7 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                         vad_sensitivity_start=vad_sensitivity_start,
                         vad_sensitivity_end=vad_sensitivity_end,
                         thinking_level=thinking_level,
+                        tool_group_override=tool_group_override,
                     )
 
                     # Emit provenance to the client once per session start so
