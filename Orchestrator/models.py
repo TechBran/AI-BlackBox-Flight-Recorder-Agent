@@ -101,6 +101,10 @@ class RealtimeSession:
     intentional_disconnect: bool = False       # User clicked disconnect
     listener_task: Optional[Any] = None        # asyncio.Task reading the upstream ws — cancelled+respawned on reconnect (P1b)
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
+    # P6a translation mode — persisted so reconnects rebuild the SAME session
+    # type instead of degrading into a full persona/tool session.
+    mode: str = ""                       # "" = normal, "translate" = translation mode
+    target_language: str = ""            # BCP-47 target when mode == "translate"
 
 # Global storage for Realtime sessions
 REALTIME_SESSIONS: Dict[str, RealtimeSession] = {}

@@ -157,3 +157,16 @@ async def test_openai_default_path_unchanged(stub_fossil_context):
     s = payload["session"]
     assert "tools" in s               # full tool catalog still declared
     assert len(s["instructions"]) > 1000  # persona/context build still runs
+
+
+# -----------------------------------------------------------------------------
+# P6.4 — RealtimeSession persists translate mode across reconnects
+# -----------------------------------------------------------------------------
+
+def test_realtime_session_persists_translate_fields():
+    from Orchestrator.models import RealtimeSession
+    s = RealtimeSession(session_id="t")
+    assert s.mode == "" and s.target_language == ""  # default = normal session
+    s.mode = "translate"
+    s.target_language = "es"
+    assert (s.mode, s.target_language) == ("translate", "es")

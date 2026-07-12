@@ -45,6 +45,7 @@ from Orchestrator.config import (
     OPENAI_REALTIME_URL,
     OPENAI_REALTIME_MODEL,
     OPENAI_REALTIME_MODELS,
+    OPENAI_REALTIME_TRANSLATE_MODEL,
     OPENAI_REALTIME_VOICES,
     OPENAI_REALTIME_DEFAULT_VOICE,
     OPENAI_REALTIME_VAD_TYPES,
@@ -1328,8 +1329,12 @@ async def openai_reconnect(session: RealtimeSession):
                 pass
             session.openai_ws = None
 
-        # Reconnect
-        if await connect_to_openai(session):
+        # Reconnect — translate sessions must rebind the translate model and
+        # must NOT degrade into a full persona/tool session (P6a).
+        if await connect_to_openai(
+            session,
+            model=OPENAI_REALTIME_TRANSLATE_MODEL if session.mode == "translate" else None,
+        ):
             # P1b (terminal guard): teardown may have run during the dial. If so,
             # close the socket we just opened and bail — do NOT respawn a
             # listener onto a session that is being torn down.
@@ -1344,7 +1349,12 @@ async def openai_reconnect(session: RealtimeSession):
                 return
 
             # Reconfigure session
-            await configure_openai_session(session, session.operator)
+            await configure_openai_session(
+                session,
+                session.operator,
+                mode=session.mode or None,
+                target_language=session.target_language or None,
+            )
 
             # Re-emit provenance after reconfigure so client UI stays in sync with the
             # newly-rebuilt system context (see Task 3 code review).
@@ -1515,6 +1525,10 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     url_operator = websocket.query_params.get("operator")
     url_voice = websocket.query_params.get("voice")
     url_model = websocket.query_params.get("model")
+    # P6a translation mode — same precedence as every other param
+    # (JSON connect message wins, URL query fills missing).
+    url_mode = websocket.query_params.get("mode")
+    url_target_language = websocket.query_params.get("target_language")
     url_vad_type = websocket.query_params.get("vad_type")
     url_vad_eagerness = websocket.query_params.get("vad_eagerness")
     url_agent = websocket.query_params.get("agent")
@@ -1626,6 +1640,17 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                 create_response = data.get("create_response", url_create_response)
                 noise_reduction = data.get("noise_reduction", url_noise_reduction)
                 transcription_delay = data.get("transcription_delay", url_transcription_delay)
+                mode = data.get("mode", url_mode)
+                target_language = data.get("target_language", url_target_language)
+                is_translate, _ = resolve_translate_params(
+                    mode, target_language, log_prefix="[REALTIME]")
+                if is_translate:
+                    # Translate sessions ALWAYS bind the dedicated translate
+                    # model — backend override beats any client model pick.
+                    model = OPENAI_REALTIME_TRANSLATE_MODEL
+                # Persist for reconnect (P6a — see reconnect path below)
+                session.mode = mode if is_translate else ""
+                session.target_language = target_language or "" if is_translate else ""
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1649,6 +1674,8 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                         create_response=create_response,
                         noise_reduction=noise_reduction,
                         transcription_delay=transcription_delay,
+                        mode=mode,
+                        target_language=target_language,
                     )
                     print(f"[REALTIME] Voice selected: {voice}; model={model or OPENAI_REALTIME_MODEL}; vad_type={vad_type or 'server_vad'}")
 
