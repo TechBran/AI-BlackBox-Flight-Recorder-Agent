@@ -23,4 +23,6 @@ data class VoiceSessionConfig(
     val thinkingLevel: String? = null,
     /** P3.12: voice-agent preset id → ?agent= on the WS URL (workstream 3). */
     val agentId: String? = null,
+    /** P3.19: Grok Live reasoning.effort (high|none, grok-voice-think-fast-1.0). */
+    val reasoningEffort: String? = null,
 )

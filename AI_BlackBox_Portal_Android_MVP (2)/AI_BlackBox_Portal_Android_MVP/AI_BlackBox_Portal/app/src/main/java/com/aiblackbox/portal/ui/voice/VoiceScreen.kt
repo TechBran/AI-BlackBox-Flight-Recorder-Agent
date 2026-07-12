@@ -148,6 +148,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val geminiVadEnd: StateFlow<String?> = _geminiVadEnd.asStateFlow()
     private val _geminiThinkingLevel = MutableStateFlow<String?>(null)
     val geminiThinkingLevel: StateFlow<String?> = _geminiThinkingLevel.asStateFlow()
+    private val _grokModel = MutableStateFlow(Constants.LIVE_MODEL_DEFAULTS["grok-live"] ?: "")
+    val grokModel: StateFlow<String> = _grokModel.asStateFlow()
+    private val _grokReasoningEffort = MutableStateFlow<String?>(null)
+    val grokReasoningEffort: StateFlow<String?> = _grokReasoningEffort.asStateFlow()
     private val _selectedPresetId = MutableStateFlow("")
     val selectedPresetId: StateFlow<String> = _selectedPresetId.asStateFlow()
     // P3.13: voice-agent preset roster from GET /voice-agents (P4 registry;
@@ -233,6 +237,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             store.getString("va_gem_vad_start").first().takeIf { it.isNotBlank() }?.let { _geminiVadStart.value = it }
             store.getString("va_gem_vad_end").first().takeIf { it.isNotBlank() }?.let { _geminiVadEnd.value = it }
             store.getString("va_gem_thinking").first().takeIf { it.isNotBlank() }?.let { _geminiThinkingLevel.value = it }
+            store.getString("va_model_grok-live").first().takeIf { it.isNotBlank() }?.let { _grokModel.value = it }
+            store.getString("va_grok_effort").first().takeIf { it.isNotBlank() }?.let { _grokReasoningEffort.value = it }
             store.getString("va_preset").first().takeIf { it.isNotBlank() }?.let { _selectedPresetId.value = it }
         }
     }
@@ -258,7 +264,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                                         if (store.getString("va_model_realtime").first().isBlank()) _realtimeModel.value = def
                                     VoiceBackend.GEMINI_LIVE ->
                                         if (store.getString("va_model_gemini-live").first().isBlank()) _geminiModel.value = def
-                                    VoiceBackend.GROK_LIVE -> Unit // P3.19
+                                    VoiceBackend.GROK_LIVE ->
+                                        if (store.getString("va_model_grok-live").first().isBlank()) _grokModel.value = def
                                 }
                             }
                             android.util.Log.d("VoiceVM", "Catalog ${b.id}: " +
@@ -370,6 +377,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun setGeminiVadStart(v: String?) { _geminiVadStart.value = v; persist("va_gem_vad_start", v ?: "") }
     fun setGeminiVadEnd(v: String?) { _geminiVadEnd.value = v; persist("va_gem_vad_end", v ?: "") }
     fun setGeminiThinkingLevel(v: String?) { _geminiThinkingLevel.value = v; persist("va_gem_thinking", v ?: "") }
+    fun setGrokModel(v: String) { _grokModel.value = v; persist("va_model_grok-live", v) }
+    fun setGrokReasoningEffort(v: String?) { _grokReasoningEffort.value = v; persist("va_grok_effort", v ?: "") }
     fun setPreset(id: String) { _selectedPresetId.value = id; persist("va_preset", id) }
 
     /** P3.13: assemble the per-provider session config from persisted settings. */
@@ -394,7 +403,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     agentId = preset,
                 )
             }
-            VoiceBackend.GROK_LIVE -> preset?.let { VoiceSessionConfig(agentId = it) } // model/effort: P3.19
+            VoiceBackend.GROK_LIVE -> VoiceSessionConfig(
+                model = _grokModel.value.takeIf { it.isNotBlank() },
+                reasoningEffort = _grokReasoningEffort.value,
+                agentId = preset,
+            )
         }
     }
 
@@ -921,6 +934,8 @@ fun VoiceScreen(
     val geminiVadStart by viewModel.geminiVadStart.collectAsState()
     val geminiVadEnd by viewModel.geminiVadEnd.collectAsState()
     val geminiThinkingLevel by viewModel.geminiThinkingLevel.collectAsState()
+    val grokModel by viewModel.grokModel.collectAsState()
+    val grokReasoningEffort by viewModel.grokReasoningEffort.collectAsState()
     val selectedPresetId by viewModel.selectedPresetId.collectAsState()
     val presets by viewModel.presets.collectAsState()
 
@@ -1098,7 +1113,15 @@ fun VoiceScreen(
                             thinkingLevel = geminiThinkingLevel,
                             onThinkingLevelChange = viewModel::setGeminiThinkingLevel,
                         )
-                        VoiceBackend.GROK_LIVE -> Unit // out of scope
+                        VoiceBackend.GROK_LIVE -> GrokConfigBlock(
+                            connected = isConnected,
+                            modelOptions = catalogs[VoiceBackend.GROK_LIVE]
+                                .modelsOrFallback(Constants.MODEL_CONFIG["grok-live"].orEmpty()),
+                            model = grokModel,
+                            onModelChange = viewModel::setGrokModel,
+                            reasoningEffort = grokReasoningEffort,
+                            onReasoningEffortChange = viewModel::setGrokReasoningEffort,
+                        )
                     }
                 }
             }
@@ -1432,4 +1455,32 @@ private fun GeminiConfigBlock(
             onSelect = { onThinkingLevelChange(toNullable(it)) },
         )
     }
+}
+
+/** P3.19: Grok Live config — model + reasoning.effort (high|none). */
+@Composable
+private fun GrokConfigBlock(
+    connected: Boolean,
+    modelOptions: List<Pair<String, String>>,
+    model: String,
+    onModelChange: (String) -> Unit,
+    reasoningEffort: String?,
+    onReasoningEffortChange: (String?) -> Unit,
+) {
+    LabeledDropdown(
+        label = "Model",
+        options = modelOptions,
+        selectedId = model,
+        enabled = !connected,  // bound at upstream WS connect time (?model=)
+        onSelect = onModelChange,
+    )
+    val effortOpts: List<Pair<String, String>> =
+        listOf("__auto__" to "auto") + Constants.GROK_LIVE_REASONING_EFFORTS.map { it to it }
+    LabeledDropdown(
+        label = "Reasoning effort",
+        options = effortOpts,
+        selectedId = reasoningEffort ?: "__auto__",
+        enabled = !connected,
+        onSelect = { onReasoningEffortChange(if (it == "__auto__") null else it) },
+    )
 }
