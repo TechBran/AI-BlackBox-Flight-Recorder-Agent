@@ -680,6 +680,7 @@ fun VoiceScreen(
     LaunchedEffect(voiceState) {
         val msg = when (voiceState) {
             VoiceState.CONNECTING -> "Connecting..."
+            VoiceState.RECONNECTING -> "Reconnecting..."
             VoiceState.CONNECTED -> "Connected — listening"
             VoiceState.SPEAKING -> null // Don't toast during speech
             VoiceState.LISTENING -> null

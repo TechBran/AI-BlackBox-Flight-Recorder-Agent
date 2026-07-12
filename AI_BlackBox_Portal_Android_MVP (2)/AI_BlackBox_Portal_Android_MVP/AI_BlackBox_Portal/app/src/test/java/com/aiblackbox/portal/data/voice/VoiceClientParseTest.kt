@@ -65,4 +65,23 @@ class VoiceClientParseTest {
             events.filterIsInstance<VoiceEvent.Status>().single().message
         )
     }
+
+    @Test
+    fun `server reconnecting drives RECONNECTING and reconnected restores CONNECTED`() = runTest {
+        startConnected()
+        serverSends("""{"type":"audio_delta","data":"AAAA"}""")
+        assertEquals(VoiceState.SPEAKING, voice.state.value)
+
+        serverSends("""{"type":"reconnecting","message":"Gemini connection lost - reconnecting"}""")
+        assertEquals(VoiceState.RECONNECTING, voice.state.value)
+        assertFalse(voice.isAISpeaking.value)
+        assertEquals(
+            "Gemini connection lost - reconnecting",
+            events.filterIsInstance<VoiceEvent.Reconnecting>().single().message
+        )
+
+        serverSends("""{"type":"reconnected"}""")
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        assertTrue(events.last() is VoiceEvent.Reconnected)
+    }
 }

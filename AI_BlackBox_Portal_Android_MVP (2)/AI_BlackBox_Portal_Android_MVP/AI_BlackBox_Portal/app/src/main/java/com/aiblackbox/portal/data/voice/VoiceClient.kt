@@ -29,7 +29,7 @@ enum class VoiceBackend(val id: String, val displayName: String, val wsPath: Str
     GROK_LIVE("grok-live", "Grok Live", "/ws/grok-live", "/grok-live/status")
 }
 
-enum class VoiceState { DISCONNECTED, CONNECTING, CONNECTED, SPEAKING, LISTENING, ERROR }
+enum class VoiceState { DISCONNECTED, CONNECTING, CONNECTED, SPEAKING, LISTENING, RECONNECTING, ERROR }
 
 sealed class VoiceEvent {
     data class Transcript(val text: String, val isFinal: Boolean = false, val role: String = "assistant") : VoiceEvent()
@@ -40,6 +40,11 @@ sealed class VoiceEvent {
 
     /** Informational server progress, e.g. "Connecting to Gemini Live..." (gemini_live_routes.py:1620). */
     data class Status(val message: String) : VoiceEvent()
+
+    /** Backend lost its upstream provider socket and is retrying (server frame OR client leg-drop). */
+    data class Reconnecting(val message: String) : VoiceEvent()
+    /** The session is live again after a reconnect. */
+    data object Reconnected : VoiceEvent()
 }
 
 class VoiceClient(
@@ -348,6 +353,25 @@ class VoiceClient(
                     val msg = obj["message"]?.jsonPrimitive?.content ?: data
                     if (msg.isNotBlank()) _events.emit(VoiceEvent.Status(msg))
                     android.util.Log.d("VoiceClient", "Server status: $msg")
+                }
+
+                "reconnecting" -> {
+                    // Backend lost its upstream (Gemini/OpenAI/xAI) socket and is
+                    // retrying — surface it instead of showing "Connected" forever.
+                    _isAISpeaking.value = false
+                    aiStoppedSpeakingAt = System.currentTimeMillis()
+                    _state.value = VoiceState.RECONNECTING
+                    val msg = obj["message"]?.jsonPrimitive?.content
+                        ?: data.ifBlank { "Reconnecting to voice backend..." }
+                    _events.emit(VoiceEvent.Reconnecting(msg))
+                    android.util.Log.w("VoiceClient", "Server reconnecting: $msg")
+                }
+
+                "reconnected" -> {
+                    lastPongTime = System.currentTimeMillis()
+                    _state.value = VoiceState.CONNECTED
+                    _events.emit(VoiceEvent.Reconnected)
+                    android.util.Log.i("VoiceClient", "Server reconnected upstream")
                 }
 
                 "error" -> {
