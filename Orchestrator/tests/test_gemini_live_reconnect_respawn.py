@@ -104,7 +104,11 @@ async def test_reconnect_bails_when_torn_down_during_reconfigure(monkeypatch):
         sess.gemini_ws = FakeGeminiWS()
         return True
 
-    async def fake_configure(sess, operator, voice):
+    async def fake_configure(sess, operator, voice, **kwargs):
+        # **kwargs tolerates the reconnect's evolving configure signature
+        # (P1.4 model/vad/thinking, P6a mode/target_language, …) so this
+        # teardown-during-reconfigure test doesn't break when new persisted
+        # config kwargs are threaded through gemini_reconnect.
         # Simulate the WS endpoint's finally running mid-reconfigure.
         sess.intentional_disconnect = True
 
