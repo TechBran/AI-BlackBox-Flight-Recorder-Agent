@@ -135,6 +135,16 @@ class GeminiLiveSession:
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
     intentional_disconnect: bool = False       # User clicked disconnect
+    # Persisted session config (P1.4) — configure_gemini_session writes the
+    # validated values here and falls back to them when a caller passes None,
+    # so gemini_reconnect's bare (session, operator, voice) reconfigure no
+    # longer reverts model/VAD/thinking/custom_role/phone_mode to defaults.
+    model: Optional[str] = None                  # Resolved model id (None until first configure)
+    vad_sensitivity_start: Optional[str] = None  # "LOW" | "MEDIUM" | "HIGH"
+    vad_sensitivity_end: Optional[str] = None    # "LOW" | "MEDIUM" | "HIGH"
+    thinking_level: Optional[str] = None         # "minimal" | "low" | "medium" | "high"
+    custom_role: str = ""                        # Outbound-call persona override
+    phone_mode: bool = False                     # Phone-tuned server VAD
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
 
 # Global storage for Gemini Live sessions

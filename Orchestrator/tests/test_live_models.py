@@ -74,6 +74,12 @@ def _make_gemini_session():
     session.provenance = {}
     session.context_injected = False
     session.voice = ""
+    session.model = None
+    session.vad_sensitivity_start = None
+    session.vad_sensitivity_end = None
+    session.thinking_level = None
+    session.custom_role = ""
+    session.phone_mode = False
     return session
 
 

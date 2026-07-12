@@ -210,8 +210,8 @@ async def configure_gemini_session(
     session: GeminiLiveSession,
     operator: str,
     voice: str,
-    custom_role: str = "",
-    phone_mode: bool = False,
+    custom_role: Optional[str] = None,
+    phone_mode: Optional[bool] = None,
     model: Optional[str] = None,
     vad_sensitivity_start: Optional[str] = None,
     vad_sensitivity_end: Optional[str] = None,
@@ -249,6 +249,25 @@ async def configure_gemini_session(
     """
     if not session.gemini_ws:
         return
+
+    # P1.4 — fall back to session-persisted values. None means "not specified
+    # by this caller": gemini_reconnect passes only (session, operator, voice),
+    # so before this fallback every reconnect silently reverted the session to
+    # the default model with default VAD/thinking and dropped custom_role/
+    # phone_mode (recon finding #5). Explicit values (including "" / False)
+    # still win over the persisted ones — phone bridge call sites unchanged.
+    if model is None:
+        model = session.model
+    if vad_sensitivity_start is None:
+        vad_sensitivity_start = session.vad_sensitivity_start
+    if vad_sensitivity_end is None:
+        vad_sensitivity_end = session.vad_sensitivity_end
+    if thinking_level is None:
+        thinking_level = session.thinking_level
+    if custom_role is None:
+        custom_role = session.custom_role
+    if phone_mode is None:
+        phone_mode = session.phone_mode
 
     # Allowlist validation of client-supplied fields.
     _allowed_model_ids = {m["id"] for m in GEMINI_LIVE_MODELS}
@@ -496,6 +515,14 @@ Do this BEFORE responding to the user - check what happened recently so you're c
     await session.gemini_ws.send(json.dumps(setup_message))
     session.context_injected = True
     session.voice = voice
+    # P1.4 — persist the validated config so the reconnect path reconfigures
+    # with exactly what this session was opened with.
+    session.model = resolved_model
+    session.vad_sensitivity_start = vad_sensitivity_start
+    session.vad_sensitivity_end = vad_sensitivity_end
+    session.thinking_level = thinking_level
+    session.custom_role = custom_role
+    session.phone_mode = phone_mode
     print(f"[GEMINI-LIVE] Session configured for operator {operator} with voice {voice}; model={resolved_model}")
 
 # =============================================================================
