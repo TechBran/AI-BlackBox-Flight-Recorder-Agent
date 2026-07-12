@@ -44,6 +44,8 @@ from Orchestrator.checkpoint import app
 from Orchestrator.config import (
     XAI_API_KEY,
     GROK_LIVE_URL,
+    GROK_LIVE_MODEL,
+    GROK_LIVE_MODELS,
     GROK_LIVE_VOICES,
     GROK_LIVE_DEFAULT_VOICE,
     GROK_LIVE_SAMPLE_RATE,
@@ -227,9 +229,15 @@ async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: D
 # xAI Grok Voice Agent API Connection
 # =============================================================================
 
-async def connect_to_grok(session: 'GrokLiveSession') -> bool:
+async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = None) -> bool:
     """
     Establish WebSocket connection to xAI Grok Voice Agent API.
+
+    Args:
+        model: Optional model id override, validated against GROK_LIVE_MODELS
+            (mirrors the OpenAI connect_to_openai / Gemini configure patterns).
+            Invalid values fall back to GROK_LIVE_MODEL with a logged warning.
+            Per xAI docs the model is bound at WS-connect via URL query.
 
     Returns True if connection successful, False otherwise.
     """
@@ -241,17 +249,26 @@ async def connect_to_grok(session: 'GrokLiveSession') -> bool:
         print("[GROK-LIVE] Cannot connect - XAI_API_KEY not set")
         return False
 
+    # Resolve + validate model (allowlist from GROK_LIVE_MODELS)
+    _allowed_model_ids = {m["id"] for m in GROK_LIVE_MODELS}
+    if model and model not in _allowed_model_ids:
+        print(f"[GROK-LIVE] WARNING: model {model!r} not in GROK_LIVE_MODELS allowlist; falling back to default {GROK_LIVE_MODEL!r}")
+        model = None
+    resolved_model = model or GROK_LIVE_MODEL
+    session.model = resolved_model
+
     try:
         headers = {
             "Authorization": f"Bearer {XAI_API_KEY}",
             "Content-Type": "application/json"
         }
 
-        print(f"[GROK-LIVE] Connecting to xAI: {GROK_LIVE_URL}")
+        url = f"{GROK_LIVE_URL}?model={resolved_model}"
+        print(f"[GROK-LIVE] Connecting to xAI: {url}")
         # websockets 15.x uses additional_headers instead of extra_headers
         # Add explicit ping settings to prevent connection drops
         session.grok_ws = await websockets.connect(
-            GROK_LIVE_URL,
+            url,
             additional_headers=headers,
             open_timeout=10,       # 10s max to establish connection (prevents indefinite hang)
             ping_interval=20,      # Send ping every 20 seconds
@@ -260,7 +277,7 @@ async def connect_to_grok(session: 'GrokLiveSession') -> bool:
         )
         session.status = "connected"
         session.last_activity = now_utc_iso()
-        print(f"[GROK-LIVE] Connected to xAI for session {session.session_id}")
+        print(f"[GROK-LIVE] Connected to xAI for session {session.session_id} (model={resolved_model})")
         return True
 
     except Exception as e:
