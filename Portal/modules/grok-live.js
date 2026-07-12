@@ -19,6 +19,7 @@
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
+import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
 
 // =============================================================================
 // Selector configuration
@@ -32,6 +33,7 @@ const SEL = {
     voiceSelect: 'grokVoiceSelect',
     modelSelect: 'grokModelSelect',
     reasoningSelect: 'grokReasoningSelect',
+    presetSelect: 'grokPresetSelect',
     connectButton: 'grokConnectBtn',
     disconnectButton: 'grokDisconnectBtn',
     micButton: 'grokMicBtn',
@@ -65,6 +67,7 @@ let selectedVoice = 'Ara';
  */
 let currentGrokModel = null;
 let currentGrokReasoningEffort = null;
+let currentGrokPresetId = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -790,6 +793,12 @@ export async function connect(operator) {
     const reasoningEffort = (reasoningSelect && reasoningSelect.value) ? reasoningSelect.value : undefined;
     currentGrokReasoningEffort = reasoningEffort || null;
 
+    // Voice Agent preset (P4 registry) — sent as `agent`; backend precedence
+    // is explicit params > preset > defaults, so sending both is safe.
+    const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+    const presetId = (presetSelect && presetSelect.value) ? presetSelect.value : undefined;
+    currentGrokPresetId = presetId || null;
+
     // Reset session state
     sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
@@ -819,6 +828,7 @@ export async function connect(operator) {
         };
         if (selectedModel) connectMsg.model = selectedModel;
         if (reasoningEffort) connectMsg.reasoning_effort = reasoningEffort;
+        if (presetId) connectMsg.agent = presetId;
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1132,6 +1142,7 @@ function reconnectToExistingSession() {
         };
         if (currentGrokModel) reconnectMsg.model = currentGrokModel;
         if (currentGrokReasoningEffort) reconnectMsg.reasoning_effort = currentGrokReasoningEffort;
+        if (currentGrokPresetId) reconnectMsg.agent = currentGrokPresetId;
         ws.send(JSON.stringify(reconnectMsg));
     };
 
@@ -1380,6 +1391,12 @@ export function initGrokLiveUI(config) {
     // Populate model dropdown from /grok-live/status (5min sessionStorage cache)
     fetchGrokLiveCatalog().then(catalog => {
         if (catalog) populateGrokModelDropdown(catalog);
+    });
+
+    // Preset dropdown from GET /voice-agents (P4 registry; row hidden pre-P4)
+    fetchVoicePresets().then(presets => {
+        const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+        populatePresetDropdown(presetSelect, filterPresetsByProvider(presets, ['grok', 'grok-live', 'xai']));
     });
 
     const micBtn = SEL.micButton ? $(SEL.micButton) : null;

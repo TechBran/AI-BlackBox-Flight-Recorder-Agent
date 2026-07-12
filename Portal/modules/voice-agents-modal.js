@@ -91,6 +91,7 @@ const GEMINI_SELECTORS = {
 const GROK_SELECTORS = {
     modelSelect: 'vaGrokModelSelect',
     reasoningSelect: 'vaGrokReasoningSelect',
+    presetSelect: 'vaGrokPresetSelect',
     voiceSelect: 'vaGrokVoiceSelect',
     connectButton: 'vaGrokConnect',
     micButton: 'vaGrokMic',

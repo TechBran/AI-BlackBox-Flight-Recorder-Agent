@@ -36,6 +36,9 @@ FILE_LITERALS = {
         "reconnectMsg.model",
         "connectMsg.reasoning_effort",
         "reconnectMsg.reasoning_effort",
+        "voice-presets.js",
+        "connectMsg.agent",
+        "reconnectMsg.agent",
     ],
     "modules/gpt-realtime.js": [
         "connectMsg.noise_reduction",
@@ -56,6 +59,7 @@ FILE_LITERALS = {
         "vaRealtimeNoiseSelect",
         "vaRealtimePresetSelect",
         "vaGeminiPresetSelect",
+        "vaGrokPresetSelect",
     ],
     "modules/voice-agents-modal.js": [
         "vaGrokModelSelect",
@@ -63,6 +67,7 @@ FILE_LITERALS = {
         "vaRealtimeNoiseSelect",
         "vaRealtimePresetSelect",
         "vaGeminiPresetSelect",
+        "vaGrokPresetSelect",
     ],
 }
 
