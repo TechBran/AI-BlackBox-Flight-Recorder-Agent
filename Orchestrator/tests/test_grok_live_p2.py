@@ -234,3 +234,18 @@ async def test_reasoning_absent_by_default(stub_grok_fossil_context):
     await configure_grok_session(session, "test_operator", voice="Ara")
     payload = _extract_grok_payload(session.grok_ws.send)
     assert "reasoning" not in payload["session"]
+
+
+# ---------------------------------------------------------------------------
+# Input transcription — explicit opt-in (user turns must reach saved transcripts)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_input_transcription_explicitly_configured(stub_grok_fossil_context):
+    """Recon 2026-07-11: session.update never configured input transcription —
+    user turns silently relied on an undocumented xAI default. Mirror
+    realtime_routes.py:531 (audio.input.transcription) explicitly."""
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    audio_input = _extract_grok_payload(session.grok_ws.send)["session"]["audio"]["input"]
+    assert isinstance(audio_input.get("transcription"), dict)

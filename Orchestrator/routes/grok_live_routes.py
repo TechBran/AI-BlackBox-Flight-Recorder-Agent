@@ -468,7 +468,14 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                     "format": {
                         "type": "audio/pcm",
                         "rate": GROK_LIVE_SAMPLE_RATE
-                    }
+                    },
+                    # Explicit input-transcription opt-in (P0.4 transcription_shape
+                    # probe 2026-07-11 — accepted shape echoed in session.updated).
+                    # Without it, conversation.item.input_audio_transcription.*
+                    # events are not guaranteed and saved transcripts lose all
+                    # user turns. Shape per docs.x.ai voice-agent session schema
+                    # (language_hint merged in by the ASR-biasing params task).
+                    "transcription": {}
                 },
                 "output": {
                     "format": {
