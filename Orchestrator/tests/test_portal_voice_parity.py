@@ -38,6 +38,12 @@ FILE_LITERALS = {
         "connectMsg.noise_reduction",
         "reconnectMsg.noise_reduction",
     ],
+    "modules/voice-presets.js": [
+        "/voice-agents",
+        "filterPresetsByProvider",
+        "populatePresetDropdown",
+        "None (manual config)",
+    ],
     "index.html": [
         "vaGrokModelSelect",
         "vaGrokReasoningSelect",
