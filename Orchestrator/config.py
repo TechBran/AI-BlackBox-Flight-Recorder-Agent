@@ -554,8 +554,26 @@ OPENAI_REALTIME_NOISE_REDUCTION_TYPES = ("near_field", "far_field", "off")
 # latency/accuracy trade-off knob, per developers.openai.com realtime-transcription.
 OPENAI_REALTIME_TRANSCRIPTION_DELAYS = ("minimal", "low", "medium", "high", "xhigh")
 
-# Google Gemini Live API (Gemini 2.5 voice conversations)
-GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+# Google Gemini Live API (Gemini 2.5/3.1 voice conversations).
+# The BidiGenerateContent endpoint exists on two API versions:
+#   v1beta  — default; all standard Live sessions
+#   v1alpha — required for enableAffectiveDialog + proactivity.proactiveAudio
+#             (2.5-native-audio family only; 3.1 rejects these setup fields)
+GEMINI_LIVE_URL_TEMPLATE = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.{version}.GenerativeService.BidiGenerateContent"
+)
+
+
+def gemini_live_url(version: str = "v1beta") -> str:
+    """Gemini Live WS endpoint for an API version. Allowlist: v1beta | v1alpha."""
+    if version not in ("v1beta", "v1alpha"):
+        raise ValueError(f"Unsupported Gemini Live API version: {version!r}")
+    return GEMINI_LIVE_URL_TEMPLATE.format(version=version)
+
+
+# Back-compat constant — existing imports (gemini_live_routes, phone bridge) keep working.
+GEMINI_LIVE_URL = gemini_live_url()
 GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")  # THE recommended Live model (research 2026-07-11); deliberate GA-rule exception, matches Android default. Env override wins.
 # P6a translation voice mode — dedicated Gemini Live translation model.
 # Single-source recon (google-gemini/gemini-skills), P0-probe-gated
@@ -678,6 +696,15 @@ GEMINI_LIVE_THINKING_LEVELS = ("minimal", "low", "medium", "high")  # google-gen
 # Per google-genai SDK 1.64.0 + 2026-05-19 model catalog research.
 GEMINI_LIVE_THINKING_CAPABLE_MODELS: frozenset = frozenset({
     "gemini-3.1-flash-live-preview",
+})
+
+# Model ids that support setup.enableAffectiveDialog + setup.proactivity.proactiveAudio.
+# v1alpha-ONLY features on the 2.5-native-audio family (DEPRECATED line, no shutdown
+# date announced). gemini-3.1-flash-live-preview REJECTS these setup fields — never
+# emit them for non-members. Per ai.google.dev/gemini-api/docs/live-guide (2026-07-11).
+GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS: frozenset = frozenset({
+    "gemini-2.5-flash-native-audio-latest",
+    "gemini-2.5-flash-native-audio-preview-12-2025",
 })
 
 # xAI Grok Voice Agent API (Grok real-time voice conversations)
