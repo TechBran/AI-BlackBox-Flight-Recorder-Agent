@@ -134,6 +134,7 @@ class GeminiLiveSession:
     reconnect_count: int = 0                   # Track reconnection attempts
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
+    listener_task: Optional[Any] = None        # CURRENT gemini_listener asyncio.Task — respawned by gemini_reconnect, cancelled at WS teardown (P1.5)
     intentional_disconnect: bool = False       # User clicked disconnect
     # Persisted session config (P1.4) — configure_gemini_session writes the
     # validated values here and falls back to them when a caller passes None,

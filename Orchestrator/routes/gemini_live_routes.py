@@ -787,6 +787,12 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
     # Check for setupComplete
     if "setupComplete" in event:
         print(f"[GEMINI-LIVE] Session setup complete")
+        # A listener just READ from the current Gemini socket — the connection
+        # is genuinely healthy. Reset the consecutive-failure counter HERE, not
+        # in gemini_reconnect: "setup sent" is not health — a rejected setup
+        # (e.g. WS close 1007) closes the socket right after, and resetting on
+        # send made max_reconnects unreachable (infinite mute-reconnect cycle).
+        session.reconnect_count = 0
         if session.portal_ws:
             await _safe_ws_send(session.portal_ws, {
                 "type": "setup_complete",
@@ -1408,7 +1414,9 @@ async def gemini_reconnect(session: GeminiLiveSession):
 
         # Reconnect
         if await connect_to_gemini(session):
-            # Reconfigure with resumption handle
+            # Reconfigure — configure_gemini_session falls back to the session-
+            # persisted model/VAD/thinking/custom_role/phone_mode (P1.4), so
+            # this bare call no longer reverts the session to defaults.
             await configure_gemini_session(session, session.operator, session.voice)
 
             # Re-emit provenance after reconfigure so client UI stays in sync with the
@@ -1419,8 +1427,18 @@ async def gemini_reconnect(session: GeminiLiveSession):
                     "data": session.provenance
                 })
 
-            # Reset state
-            session.reconnect_count = 0
+            # CRITICAL (recon finding #1): respawn the listener. The previous
+            # gemini_listener's `async for` was bound to the OLD closed socket
+            # and has already exited — without a new task NOTHING ever reads
+            # from the new connection (setupComplete, audio, tool calls pile
+            # up unread) while the client is told "reconnected". Pattern
+            # ported from phone/bridge.py:_gemini_listener_with_reconnect.
+            if session.listener_task and not session.listener_task.done():
+                session.listener_task.cancel()
+            session.listener_task = asyncio.create_task(gemini_listener(session))
+
+            # NOTE: reconnect_count is NOT reset here — see setupComplete in
+            # handle_gemini_message (consecutive-failure semantics).
             session.is_reconnecting = False
             session.last_ai_message_time = time.time()
             session.status = "connected"
@@ -1600,7 +1618,6 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     session.portal_ws = websocket
     session.last_activity = now_utc_iso()
 
-    gemini_task = None
     keepalive_task = None
 
     try:
@@ -1686,8 +1703,12 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                         except Exception as e:
                             print(f"[GEMINI-LIVE] Greeting injection failed: {e}")
 
-                    # Start Gemini listener task and keepalive
-                    gemini_task = asyncio.create_task(gemini_listener(session))
+                    # Start Gemini listener task and keepalive. The listener
+                    # task lives on the SESSION (session.listener_task): the
+                    # reconnect path respawns it, so a local variable here
+                    # would go stale after the first reconnect and leak the
+                    # live task at teardown.
+                    session.listener_task = asyncio.create_task(gemini_listener(session))
                     keepalive_task = asyncio.create_task(gemini_keepalive_loop(session))
 
                     await _safe_ws_send(websocket, {
@@ -1733,13 +1754,15 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
-        # Cleanup
-        if gemini_task:
-            gemini_task.cancel()
+        # Cleanup — cancel whichever listener task is CURRENT (reconnects
+        # respawn it; see session.listener_task).
+        if session.listener_task:
+            session.listener_task.cancel()
             try:
-                await gemini_task
+                await session.listener_task
             except asyncio.CancelledError:
                 pass
+            session.listener_task = None
 
         if keepalive_task:
             keepalive_task.cancel()
