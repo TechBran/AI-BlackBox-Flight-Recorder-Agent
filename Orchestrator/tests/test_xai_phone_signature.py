@@ -184,3 +184,42 @@ def test_secret_never_leaked_in_reason():
         assert not ok
         assert marker not in reason
         assert inner not in reason
+
+
+
+# --- P5.1 security-review fixes (HIGH non-ASCII sig; MED replay lock; LOW strict ts) ---
+
+def test_non_ascii_signature_fails_closed_no_crash():
+    """HIGH: a non-ASCII byte in webhook-signature fails closed, never raises
+    TypeError on the auth path (str compare_digest rejects non-ASCII)."""
+    h = {"webhook-id": "msg_x", "webhook-timestamp": str(int(NOW)),
+         "webhook-signature": "v1,caféé"}
+    ok, reason = verify_signature(SECRET, h, BODY, now=NOW, replay_cache=_fresh())
+    assert ok is False and reason == "signature mismatch"
+
+
+def test_valid_signature_survives_trailing_non_ascii_candidate():
+    """HIGH: a valid sig followed by a poisoned non-ASCII candidate still
+    verifies True — the loop must break on match and never crash."""
+    h = sign(BODY, msg_id="msg_ok")
+    h["webhook-signature"] = h["webhook-signature"] + " v1,caféé"
+    ok, reason = verify_signature(SECRET, h, BODY, now=NOW, replay_cache=_fresh())
+    assert ok is True, reason
+
+
+def test_lax_timestamp_forms_rejected():
+    """LOW: int() accepts spaces/underscores/'+'/unicode-digits/newline; strict
+    digit-only parse rejects them (log-injection + spec-laxity defense)."""
+    base = str(int(NOW))
+    for bad in (f" {base} ", f"+{base}", f"{base}\n", "1_800_000_000", "١٨"):
+        h = {"webhook-id": "m", "webhook-timestamp": bad, "webhook-signature": "v1,x"}
+        ok, reason = verify_signature(SECRET, h, BODY, now=NOW, replay_cache=_fresh())
+        assert ok is False and reason == "malformed timestamp", (bad, reason)
+
+
+def test_replay_cache_seen_before_is_locked():
+    """MED: the replay cache guards check-then-insert with a lock."""
+    c = ReplayCache()
+    assert hasattr(c, "_lock")
+    assert c.seen_before("id-1") is False
+    assert c.seen_before("id-1") is True
