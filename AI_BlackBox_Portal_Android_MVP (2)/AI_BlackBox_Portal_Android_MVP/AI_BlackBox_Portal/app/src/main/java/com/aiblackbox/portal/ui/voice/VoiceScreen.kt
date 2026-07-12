@@ -471,6 +471,20 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         _transcript.value = mergeTranscript(_serverTranscript.value, _localEntries.value)
     }
 
+    /** P3.18: typed text during a voice session — shows as a local user bubble. */
+    fun sendTypedText(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        try {
+            voiceClient?.sendText(t)
+        } catch (e: Exception) {
+            android.util.Log.e("VoiceVM", "sendText: ${e.message}")
+            _error.value = "Send failed: ${e.message}"
+            return
+        }
+        addLocalEntry(TranscriptEntry(role = "user", text = t))
+    }
+
     // -------------------------------------------------------------------------
     // Mic input — AudioRecord -> base64 PCM16 -> WebSocket
     // -------------------------------------------------------------------------
@@ -1200,6 +1214,35 @@ fun VoiceScreen(
             )
         }
         Spacer(Modifier.height(12.dp))
+
+        // P3.18: typed input to the live agent (VoiceClient.sendText).
+        if (isConnected) {
+            var typedText by remember { mutableStateOf("") }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = typedText,
+                    onValueChange = { typedText = it },
+                    placeholder = { Text("Type to the agent…", color = Neutral500) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = BbxWhite,
+                        unfocusedTextColor = BbxWhite,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = {
+                    val t = typedText.trim()
+                    if (t.isNotEmpty()) {
+                        viewModel.sendTypedText(t)
+                        typedText = ""
+                    }
+                }) {
+                    Text("➤", color = BbxAccent, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
 
         // Plan Task 10: retrieval provenance from voice WS dispatcher.
         // Renders above transcript because voice has no per-turn bubble.
