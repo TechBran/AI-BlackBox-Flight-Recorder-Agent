@@ -228,3 +228,64 @@ def delete_preset(preset_id: str) -> None:
             raise KeyError(f"No voice agent preset with id {preset_id!r}")
         data["agents"] = remaining
         _write(data)
+
+
+# ----------------------------------------------------------------- resolution
+
+def resolve_preset(agent_id: str | None, provider: str | None = None) -> dict | None:
+    """Fresh-read a preset by id for apply-at-configure.
+
+    Returns None (never raises) for a missing/unknown id, or when `provider`
+    is given and doesn't match the preset — callers surface a loud client
+    warning and continue without the preset (fresh-box graceful degradation).
+    """
+    if not agent_id:
+        return None
+    preset = get_preset(agent_id)
+    if preset is None:
+        logger.warning("voice_agents: unknown preset id %r", agent_id)
+        return None
+    if provider is not None and preset.get("provider") != provider:
+        logger.warning("voice_agents: preset %r is provider=%r, requested %r — ignoring",
+                       agent_id, preset.get("provider"), provider)
+        return None
+    return preset
+
+
+def merge_connect_params(explicit: dict, preset: dict | None) -> dict:
+    """Precedence merge for WS connect handling: explicit > preset > None.
+
+    Empty values ("", None, [], {}) in `explicit` fall through to the preset;
+    empty preset values yield None so each route's existing defaults apply
+    unchanged. Returns a dict covering every PRESET_CONNECT_FIELDS key.
+    """
+    _EMPTYISH = (None, "", [], {})
+    merged: dict = {}
+    for field in PRESET_CONNECT_FIELDS:
+        value = explicit.get(field)
+        if value in _EMPTYISH:
+            value = (preset or {}).get(field)
+        merged[field] = value if value not in _EMPTYISH else None
+    return merged
+
+
+def resolve_phone_role(role: str, backend: str, greeting: str) -> tuple[str, str, str]:
+    """make_phone_call server-side 'preset:<id>' resolution.
+
+    Selecting a preset IS the explicit agent choice: its instructions become
+    the call persona and its provider determines the phone backend. An
+    explicit greeting still wins over the preset's. Non-preset roles pass
+    through untouched. Unknown preset id -> KeyError (fail loudly — never
+    silently place a call with the literal string 'preset:...' as persona).
+    """
+    if not (isinstance(role, str) and role.startswith("preset:")):
+        return role, backend, greeting
+    preset_id = role[len("preset:"):].strip()
+    preset = get_preset(preset_id)
+    if preset is None:
+        raise KeyError(f"Unknown voice agent preset {preset_id!r}")
+    return (
+        preset.get("instructions") or "",
+        PROVIDER_PHONE_BACKENDS.get(preset.get("provider"), backend),
+        greeting or preset.get("greeting") or "",
+    )
