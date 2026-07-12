@@ -2,7 +2,7 @@
  * voice-lab.js
  * ElevenLabs "Voice Lab" panel (Task 24).
  *
- * Three zones in one modal (stacked sections):
+ * Four zones in one modal (stacked sections):
  *   1. Clone a voice  — record (MediaRecorder) OR upload audio files, name +
  *      optional description + an explicit consent checkbox. Clone is disabled
  *      until name AND audio AND consent are all present.
@@ -17,6 +17,7 @@
  *   3. My Voices      — list account voices with preview + delete.
  *        GET    /elevenlabs/voices             -> {my_voices:[...], premade:[...]}
  *        DELETE /elevenlabs/voices/{voice_id}  -> {ok, in_use:[operator names]}
+ *   4. Grok (xAI) voices — clone (≤120s clip + consent) / list / delete via /xai/voices; gated on GET /xai/voices configured.
  *
  * Key stays server-side — everything routes through the Orchestrator proxy. The
  * whole feature is gated on GET /elevenlabs/status `configured` (the trigger
@@ -170,6 +171,26 @@ function ensureModal() {
               <div id="vlabMyList" class="vlab-my-list"></div>
             </section>
 
+            <!-- ── Zone 4: Grok (xAI) voices — hidden until GET /xai/voices says configured ── -->
+            <section class="vlab-zone" id="vlabXaiZone" hidden>
+              <h4 class="vlab-zone-title">Grok (xAI) voices</h4>
+              <p class="vlab-zone-hint">Clone a voice for Grok voice sessions — one clip, max 120 seconds.
+                Cloned voices are selectable in Grok voice mode (not the TTS picker).</p>
+              <input id="vlabXaiFile" class="vlab-file-input" type="file"
+                     accept="audio/wav,audio/mpeg,audio/mp3,audio/x-m4a,audio/mp4,audio/webm,.wav,.mp3,.m4a,.webm" />
+              <input id="vlabXaiName" class="vlab-input" type="text" placeholder="Name this voice" autocomplete="off" />
+              <input id="vlabXaiDesc" class="vlab-input" type="text" placeholder="Description (optional)" autocomplete="off" />
+              <label class="vlab-consent">
+                <input id="vlabXaiConsent" type="checkbox" />
+                <span>I confirm I own this voice or have permission to clone it.</span>
+              </label>
+              <div class="vlab-row vlab-row-end">
+                <button id="vlabXaiCloneBtn" class="vlab-btn vlab-btn-accent" type="button" disabled>Clone Grok voice</button>
+              </div>
+              <div id="vlabXaiStatus" class="vlab-status"></div>
+              <div id="vlabXaiList" class="vlab-my-list"></div>
+            </section>
+
             <p class="vlab-foot-hint">Previews play one at a time. Cloning/designing adds a voice to
               your account (your plan has a voice limit) and it appears in the TTS picker.</p>
           </div>
@@ -184,6 +205,12 @@ function ensureModal() {
     // ── Design zone wiring (static; the clone zone is rebuilt per-open) ──
     modal.querySelector('#vlabDesignGenBtn').addEventListener('click', runDesign);
     modal.querySelector('#vlabDesignSaveBtn').addEventListener('click', saveDesign);
+
+    // ── xAI zone wiring (static; gate/list is refreshed per-open) ──
+    modal.querySelector('#vlabXaiFile').addEventListener('change', refreshXaiCloneButton);
+    modal.querySelector('#vlabXaiName').addEventListener('input', refreshXaiCloneButton);
+    modal.querySelector('#vlabXaiConsent').addEventListener('change', refreshXaiCloneButton);
+    modal.querySelector('#vlabXaiCloneBtn').addEventListener('click', submitXaiClone);
 
     return modal;
 }
@@ -636,6 +663,120 @@ async function deleteVoice(v, btn) {
 }
 
 // =============================================================================
+// Zone 4 — Grok (xAI) voices (clone / list / delete). Gated on GET /xai/voices
+// `configured` — no XAI key, or xAI unreachable, hides the whole zone. Cloned
+// ids are Grok SESSION voices, so no populateVoiceCatalog() refresh here.
+// =============================================================================
+
+/** Clone button enabled only when name AND one file AND consent (mirrors Zone 1). */
+function refreshXaiCloneButton() {
+    const btn = document.getElementById('vlabXaiCloneBtn');
+    if (!btn) return;
+    const name = (document.getElementById('vlabXaiName')?.value || '').trim();
+    const consent = !!document.getElementById('vlabXaiConsent')?.checked;
+    const hasFile = !!(document.getElementById('vlabXaiFile')?.files || []).length;
+    btn.disabled = !(name && consent && hasFile);
+}
+
+async function submitXaiClone() {
+    const btn = document.getElementById('vlabXaiCloneBtn');
+    if (!btn || btn.disabled) return;
+    const name = (document.getElementById('vlabXaiName').value || '').trim();
+    const description = (document.getElementById('vlabXaiDesc').value || '').trim();
+    const file = document.getElementById('vlabXaiFile').files[0];
+
+    const fd = new FormData();
+    fd.append('name', name);
+    fd.append('consent', 'true');
+    if (description) fd.append('description', description);
+    fd.append('file', file, file.name);
+
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Cloning…';
+    try {
+        const res = await fetch('/xai/voices', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            const msg = (data && data.detail) ? data.detail : `HTTP ${res.status}`;
+            toastError(`Clone failed: ${msg}`);
+            btn.disabled = false;
+            btn.textContent = original;
+            return;
+        }
+        toastSuccess(`Cloned "${name}" — selectable as a Grok voice`);
+        document.getElementById('vlabXaiName').value = '';
+        document.getElementById('vlabXaiDesc').value = '';
+        document.getElementById('vlabXaiFile').value = '';
+        document.getElementById('vlabXaiConsent').checked = false;
+        btn.textContent = original;
+        await loadXaiVoices();
+    } catch (err) {
+        toastError(`Clone failed: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
+/** Fetch /xai/voices; show the zone only when the box has a working XAI key. */
+async function loadXaiVoices() {
+    const zone = document.getElementById('vlabXaiZone');
+    const listEl = document.getElementById('vlabXaiList');
+    const statusEl = document.getElementById('vlabXaiStatus');
+    if (!zone || !listEl) return;
+    try {
+        const res = await fetch('/xai/voices');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.configured) { zone.hidden = true; return; }
+        zone.hidden = false;
+        const voices = data.voices || [];
+        if (statusEl) statusEl.textContent = voices.length
+            ? `${voices.length} cloned voice${voices.length === 1 ? '' : 's'}` : '';
+        listEl.innerHTML = voices.length ? '' : '<div class="vlab-empty">No cloned Grok voices yet.</div>';
+        for (const v of voices) renderXaiVoiceRow(v, listEl);
+    } catch {
+        zone.hidden = true;   // fail quiet — unreachable == unconfigured for the UI
+    }
+}
+
+function renderXaiVoiceRow(v, listEl) {
+    const id = v.voice_id || v.id || '';
+    const row = document.createElement('div');
+    row.className = 'vlab-voice-row';
+    row.innerHTML = `
+        <div class="vlab-voice-main">
+          <div class="vlab-voice-name">${escapeHtml(v.name || 'Unnamed voice')}</div>
+          <div class="vlab-voice-desc">${escapeHtml(id)}</div>
+        </div>
+        <button class="vlab-btn vlab-delete-btn" type="button">Delete</button>`;
+    row.querySelector('.vlab-delete-btn').addEventListener('click',
+        (e) => deleteXaiVoice(id, v.name, e.currentTarget));
+    listEl.appendChild(row);
+}
+
+async function deleteXaiVoice(voiceId, name, btn) {
+    if (btn.disabled) return;
+    if (!window.confirm(`Delete Grok voice "${name || voiceId}"? This cannot be undone.`)) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/xai/voices/${encodeURIComponent(voiceId)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+            const msg = (data && data.detail) ? data.detail : `HTTP ${res.status}`;
+            toastError(`Delete failed: ${msg}`);
+            btn.disabled = false;
+            return;
+        }
+        toastSuccess(`Deleted "${name || voiceId}"`);
+        await loadXaiVoices();
+    } catch (err) {
+        toastError(`Delete failed: ${err.message}`);
+        btn.disabled = false;
+    }
+}
+
+// =============================================================================
 // Open / close
 // =============================================================================
 
@@ -659,6 +800,9 @@ export async function openVoiceLab() {
 
     // Load the account's voices for the manage zone.
     loadMyVoices();
+
+    // Gate + load the Grok (xAI) zone — hidden when no XAI key.
+    loadXaiVoices();
 }
 
 export function closeVoiceLab() {
