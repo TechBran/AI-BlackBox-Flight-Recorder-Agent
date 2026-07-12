@@ -11,12 +11,15 @@ Orchestrator/app.py.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from Orchestrator.xai_phone import provisioning
+from Orchestrator.xai_phone.signature import verify_signature
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +81,63 @@ async def xai_phone_provision(payload: dict):
                             detail=f"xAI API error {exc.response.status_code}: {exc.response.text[:200]}")
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"xAI API unreachable: {exc}")
+
+
+# =============================================================================
+# Signed telephony webhook (the ONLY publicly exposed path — see
+# scripts/xai_phone_funnel.sh; everything else on :9091 stays tailnet-only)
+# =============================================================================
+
+def _spawn_attach(call_id: str, event: dict) -> None:
+    """Fire-and-forget call attach. Module-level so tests monkeypatch it;
+    late import keeps the route importable without the grok stack."""
+    from Orchestrator.xai_phone.call_bridge import attach_call
+    asyncio.create_task(attach_call(call_id, event))
+
+
+@router.post("/voice/incoming")
+async def xai_voice_incoming(request: Request):
+    """xAI telephony webhook (Standard Webhooks HMAC scheme).
+
+    Verification order is deliberate: raw body read -> signature check
+    (constant-time, ±5min tolerance, replay-guarded) -> ONLY then JSON parse.
+    Unsigned/stale/replayed requests get a generic 401 (reason logged
+    server-side, never echoed). A webhook must be answered fast — the call
+    attach runs as a background task.
+    """
+    body = await request.body()
+
+    secret = provisioning.get_signing_secret()
+    if not secret:
+        # Fail closed, but distinguishable from a bad signature so a funnel
+        # preflight against an unprovisioned box is diagnosable.
+        raise HTTPException(status_code=503, detail="xAI phone line not provisioned")
+
+    # Defense-in-depth (P5.1 caller advisory): ANY verify error => reject 401.
+    # The RAW body bytes are what we verify AND what we later parse (json.loads
+    # below) — never re-read the request as JSON, or the signature would cover
+    # different bytes than we act on.
+    try:
+        ok, reason = verify_signature(secret, dict(request.headers), body)
+    except Exception as exc:  # noqa: BLE001 — auth path must never crash-open
+        ok, reason = False, f"verify raised {exc.__class__.__name__}"
+    if not ok:
+        logger.warning("[XAI-PHONE] rejected webhook: %s", reason)
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    try:
+        event = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    event_type = str(event.get("type", ""))
+    if event_type != "realtime.call.incoming":
+        logger.info("[XAI-PHONE] ignoring webhook event type %r", event_type)
+        return {"ok": True, "handled": False}
+
+    call_id = str(event.get("call_id") or (event.get("data") or {}).get("call_id") or "")
+    if not call_id:
+        raise HTTPException(status_code=400, detail="missing call_id")
+
+    _spawn_attach(call_id, event)
+    return {"ok": True, "handled": True, "session_id": f"phone-xai-{call_id}"}
