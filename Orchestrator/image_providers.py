@@ -75,6 +75,7 @@ def _local_images(prompt, options):
             "No local image model available -- add an OpenAI-compatible server "
             "hosting an image model (e.g. z-image) in the onboarding wizard.")
     srv, model = resolved
+    options["_resolved_image_model"] = model  # surface to the worker for accurate provenance
     n = int(options.get("numberOfImages") or options.get("n") or 1)
     body = {"model": model, "prompt": prompt, "n": n, "output_format": "png"}
     if options.get("size"):
@@ -86,7 +87,18 @@ def _local_images(prompt, options):
     r = requests.post(f"{srv['base_url']}/images/generations",
                       headers=headers, json=body, timeout=180)
     r.raise_for_status()
-    return [base64.b64decode(d["b64_json"]) for d in r.json().get("data", []) if d.get("b64_json")]
+    out = []
+    for d in r.json().get("data", []):
+        if d.get("b64_json"):
+            out.append(base64.b64decode(d["b64_json"]))
+        elif d.get("url"):
+            img = requests.get(d["url"], timeout=120)  # some sd.cpp/other builds return a URL
+            img.raise_for_status()
+            out.append(img.content)
+    if not out:
+        # Fail LOUDLY -- a zero-image response must not save nothing and "succeed".
+        raise RuntimeError("Local image server returned no decodable image data")
+    return out
 
 
 IMAGE_PROVIDERS = {"gemini": _gemini_images, "openai": _openai_images,

@@ -893,6 +893,8 @@ async def handle_openai_message(session: RealtimeSession, event: Dict):
                 "numberOfImages": num_images,
                 "provider": provider,
             }
+            if arguments.get("size"):  # openai gpt-image / local z-image size
+                image_options["size"] = arguments["size"]
             if reference_images:
                 image_options["reference_images"] = reference_images
 

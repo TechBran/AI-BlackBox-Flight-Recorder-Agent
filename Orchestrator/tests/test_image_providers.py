@@ -98,6 +98,9 @@ def _route_harness(monkeypatch, tmp_path, options):
     def make_stub(tag):
         def stub(prompt, opts):
             calls["provider_calls"].append(tag)
+            if tag == "local":
+                # mirror _local_images: surface the resolved model for provenance
+                opts["_resolved_image_model"] = "flux.2-klein-4b"
             return [b"BYTES"]
         return stub
 
@@ -158,5 +161,6 @@ def test_routing_local(monkeypatch, tmp_path):
     assert calls["provider_calls"] == ["local"]
     assert list(tmp_path.glob("*.png"))
     meta = calls["media"][0]["extra_metadata"]
-    assert meta["model"] == "z-image"        # provenance not gemini's model
+    # provenance uses the adapter-RESOLVED model, not the hardcoded _IMAGE_MODELS default
+    assert meta["model"] == "flux.2-klein-4b"
     assert meta["size"] == "768x768"

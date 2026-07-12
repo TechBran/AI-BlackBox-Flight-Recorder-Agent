@@ -48,3 +48,23 @@ def test_list_image_models_qualified(monkeypatch):
          "last_models": ["gemma-31b", "z-image", "flux.2-klein-4b"]},
     ])
     assert cs.list_image_models() == ["box::z-image", "box::flux.2-klein-4b"]
+
+
+def test_resolve_image_server_honors_hosted_qualified_model(monkeypatch):
+    _fake_servers(monkeypatch, [
+        {"alias": "box", "base_url": "http://h/v1", "enabled": True,
+         "last_models": ["gemma-31b", "z-image", "flux.2-klein-4b"]},
+    ])
+    srv, model = cs.resolve_image_server("box::flux.2-klein-4b")
+    assert model == "flux.2-klein-4b"
+
+
+def test_resolve_image_server_ignores_unhosted_model(monkeypatch):
+    # A model the server does NOT host must not be POSTed (would 400 far-end); fall
+    # through to the first hosted image model instead.
+    _fake_servers(monkeypatch, [
+        {"alias": "box", "base_url": "http://h/v1", "enabled": True,
+         "last_models": ["gemma-31b", "z-image"]},
+    ])
+    srv, model = cs.resolve_image_server("flux.2-klein-4b")
+    assert model == "z-image"

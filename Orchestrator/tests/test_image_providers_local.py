@@ -27,13 +27,15 @@ def test_local_adapter_posts_openai_images_shape(monkeypatch):
                         lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "z-image"))
     monkeypatch.setattr(image_providers.requests, "post", fake_post)
 
-    out = image_providers._local_images("a fox", {"size": "768x768", "numberOfImages": 2})
+    opts = {"size": "768x768", "numberOfImages": 2}
+    out = image_providers._local_images("a fox", opts)
     assert out == [b"PNG"]
     assert captured["url"] == "http://h/v1/images/generations"
     assert captured["json"] == {"model": "z-image", "prompt": "a fox",
                                 "n": 2, "output_format": "png", "size": "768x768"}
     assert captured["headers"]["Authorization"] == "Bearer k"
     assert captured["timeout"] == 180
+    assert opts["_resolved_image_model"] == "z-image"   # surfaced to the worker for provenance
 
 
 def test_local_adapter_no_size_omits_field(monkeypatch):
@@ -73,3 +75,30 @@ def test_local_adapter_raises_when_no_server(monkeypatch):
 def test_local_registered():
     assert image_providers.IMAGE_PROVIDERS.get("local") is image_providers._local_images
     assert image_providers.IMAGE_TOOL_PROVIDERS.get("local_image") == "local"
+
+
+def test_local_adapter_url_fallback(monkeypatch):
+    """Some sd.cpp / other builds return {url:...} instead of inline b64."""
+    def fake_post(url, headers=None, json=None, timeout=None, **kw):
+        return _Resp([{"url": "http://h/img/1.png"}])
+
+    class _G:
+        content = b"URLIMG"
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(custom_servers, "resolve_image_server",
+                        lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "z-image"))
+    monkeypatch.setattr(image_providers.requests, "post", fake_post)
+    monkeypatch.setattr(image_providers.requests, "get", lambda url, timeout=None, **kw: _G())
+    assert image_providers._local_images("x", {}) == [b"URLIMG"]
+
+
+def test_local_adapter_raises_on_no_decodable_image(monkeypatch):
+    """A response with data but no b64/url must FAIL loudly, not save nothing."""
+    monkeypatch.setattr(custom_servers, "resolve_image_server",
+                        lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "z-image"))
+    monkeypatch.setattr(image_providers.requests, "post",
+                        lambda *a, **k: _Resp([{"revised_prompt": "x"}]))
+    with pytest.raises(RuntimeError):
+        image_providers._local_images("x", {})

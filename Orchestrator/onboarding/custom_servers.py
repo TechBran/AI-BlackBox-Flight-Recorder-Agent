@@ -384,7 +384,9 @@ def resolve_image_server(model: str | None = None) -> tuple[dict, str] | None:
     is available. Reads the registry fresh (no import-time cache)."""
     if model:
         srv, bare = resolve_model(model)
-        if srv is not None and is_image_model(bare):
+        # Honor an explicit model only if it's an image model the resolved server
+        # actually hosts -- else fall through to auto-pick (never POST a bogus id).
+        if srv is not None and is_image_model(bare) and bare in (srv.get("last_models") or []):
             return srv, bare
     for srv in list_servers(enabled_only=True):
         for m in (srv.get("last_models") or []):

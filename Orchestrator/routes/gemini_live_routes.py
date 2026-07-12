@@ -1155,6 +1155,8 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                     "numberOfImages": num_images,
                     "provider": provider,
                 }
+                if args.get("size"):  # openai gpt-image / local z-image size
+                    image_options["size"] = args["size"]
                 if reference_images:
                     image_options["reference_images"] = reference_images
 

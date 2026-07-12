@@ -848,7 +848,7 @@ def process_image_generation(task: Task):
         "grok": XAI_IMAGE_MODEL,
         "local": "z-image",   # v1 default local model; provenance best-effort
     }
-    recorded_model = _IMAGE_MODELS.get(provider, GOOGLE_IMAGEN_MODEL)
+    recorded_model = options.get("_resolved_image_model") or _IMAGE_MODELS.get(provider, GOOGLE_IMAGEN_MODEL)
     _num_images = options.get("numberOfImages", 1)
     if provider == "openai":
         image_metadata = {
