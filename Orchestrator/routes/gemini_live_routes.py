@@ -59,7 +59,6 @@ from Orchestrator.config import (
     GEMINI_LIVE_DEFAULT_VOICE,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
-    GEMINI_MODEL_DEFAULT,
     VOL_PATH
 )
 from Orchestrator.models import GeminiLiveSession, GEMINI_LIVE_SESSIONS, TaskType
@@ -79,6 +78,7 @@ from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_gemini_live_tools
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_ws_shared import save_voice_transcript
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -651,35 +651,19 @@ Messages: {len(session.conversation)}
 
     print(f"[GEMINI-LIVE] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
 
-    try:
-        # Use aiohttp to call /chat endpoint
-        async with aiohttp.ClientSession() as http_session:
-            async with http_session.post(
-                "http://localhost:9091/chat",
-                json={
-                    "operator": session.operator,
-                    "messages": [{
-                        "role": "user",
-                        "content": f"[Voice Session Transcript]\n{session_summary}"
-                    }],
-                    "provider": "google",
-                    "model": GEMINI_MODEL_DEFAULT,
-                    "streaming": False,
-                    "auto_checkpoint": False
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status == 200:
-                    print(f"[GEMINI-LIVE] Session {session.session_id} saved to BlackBox")
-                else:
-                    error = await resp.text()
-                    print(f"[GEMINI-LIVE] Failed to save session: {resp.status} - {error[:200]}")
+    saved = await save_voice_transcript(
+        operator=session.operator,
+        user_message=f"[Voice Session Transcript] Gemini Live voice session {session.session_id}",
+        session_summary=session_summary,
+        model_label="gemini-live-voice",
+        log_prefix="[GEMINI-LIVE]",
+    )
 
-    except Exception as e:
-        print(f"[GEMINI-LIVE] Error saving session to BlackBox: {e}")
-
-    # Clear conversation after saving
-    session.conversation = []
+    # Clear ONLY after a confirmed 200 (P1b cross-route contract).
+    if saved:
+        session.conversation = []
+    else:
+        print(f"[GEMINI-LIVE] Save FAILED — keeping {len(session.conversation)} turns for a later retry")
 
 
 async def handle_portal_message(session: GeminiLiveSession, data: Dict):
