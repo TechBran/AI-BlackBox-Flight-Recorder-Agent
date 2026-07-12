@@ -259,6 +259,8 @@ class VoiceClient(
             cfg.vadStart?.let { append("&vad_sensitivity_start=").append(it) }
             cfg.vadEnd?.let { append("&vad_sensitivity_end=").append(it) }
             cfg.thinkingLevel?.let { append("&thinking_level=").append(it) }
+            cfg.mode?.let { append("&mode=").append(it) }
+            cfg.targetLanguage?.let { append("&target_language=").append(it) }
             cfg.agentId?.let { append("&agent=").append(it) }
             cfg.reasoningEffort?.let { append("&reasoning_effort=").append(it) }
         }

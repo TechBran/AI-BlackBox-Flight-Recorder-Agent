@@ -10,6 +10,8 @@ package com.aiblackbox.portal.data.voice
  *   (low|medium|high|auto for semantic_vad), idleTimeoutMs (server_vad only).
  * - Gemini Live: model, vadStart/vadEnd (UPPERCASE LOW|MEDIUM|HIGH),
  *   thinkingLevel (lowercase minimal|low|medium|high, 3.1 model only).
+ * - P6a translate mode: mode ("translate"|null) + targetLanguage (BCP-47);
+ *   OpenAI + Gemini only (Grok has no translate model).
  *
  * Per docs/plans/2026-05-19-live-models-upgrade.md T11 + audit M2.
  */
@@ -25,4 +27,6 @@ data class VoiceSessionConfig(
     val agentId: String? = null,
     /** P3.19: Grok Live reasoning.effort (high|none, grok-voice-think-fast-1.0). */
     val reasoningEffort: String? = null,
+    val mode: String? = null,            // P6a: "translate" | null (normal session)
+    val targetLanguage: String? = null,  // P6a: BCP-47 target when mode == "translate"
 )

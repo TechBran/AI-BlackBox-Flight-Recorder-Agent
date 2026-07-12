@@ -47,6 +47,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.Composable
@@ -154,6 +155,14 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val grokReasoningEffort: StateFlow<String?> = _grokReasoningEffort.asStateFlow()
     private val _selectedPresetId = MutableStateFlow("")
     val selectedPresetId: StateFlow<String> = _selectedPresetId.asStateFlow()
+    // ── Translation mode (P6a) — OpenAI + Gemini only; Grok has no translate model.
+    // DataStore-persisted like every sibling setting (P3.13 pattern; keys "va_").
+    private val _translateEnabled = MutableStateFlow(false)
+    val translateEnabled: StateFlow<Boolean> = _translateEnabled.asStateFlow()
+    private val _translateLang = MutableStateFlow("es")
+    val translateLang: StateFlow<String> = _translateLang.asStateFlow()
+    private val _translateLangOther = MutableStateFlow("")
+    val translateLangOther: StateFlow<String> = _translateLangOther.asStateFlow()
     // P3.13: voice-agent preset roster from GET /voice-agents (P4 registry;
     // 404-tolerant — empty list pre-P4, dropdown hides). P4.11 builds on this fetch.
     private val _presets = MutableStateFlow<List<VoiceAgentPreset>>(emptyList())
@@ -240,6 +249,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             store.getString("va_model_grok-live").first().takeIf { it.isNotBlank() }?.let { _grokModel.value = it }
             store.getString("va_grok_effort").first().takeIf { it.isNotBlank() }?.let { _grokReasoningEffort.value = it }
             store.getString("va_preset").first().takeIf { it.isNotBlank() }?.let { _selectedPresetId.value = it }
+            _translateEnabled.value = store.getString("va_translate_on").first() == "true"
+            store.getString("va_translate_lang").first().takeIf { it.isNotBlank() }?.let { _translateLang.value = it }
+            store.getString("va_translate_lang_other").first().takeIf { it.isNotBlank() }?.let { _translateLangOther.value = it }
         }
     }
 
@@ -380,6 +392,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun setGrokModel(v: String) { _grokModel.value = v; persist("va_model_grok-live", v) }
     fun setGrokReasoningEffort(v: String?) { _grokReasoningEffort.value = v; persist("va_grok_effort", v ?: "") }
     fun setPreset(id: String) { _selectedPresetId.value = id; persist("va_preset", id) }
+    fun setTranslateEnabled(v: Boolean) { _translateEnabled.value = v; persist("va_translate_on", if (v) "true" else "false") }
+    fun setTranslateLang(v: String) { _translateLang.value = v; persist("va_translate_lang", v) }
+    fun setTranslateLangOther(v: String) { _translateLangOther.value = v; persist("va_translate_lang_other", v) }
+
+    private fun resolvedTranslateLang(): String =
+        if (_translateLang.value == "__other__") _translateLangOther.value.trim().ifBlank { "en" }
+        else _translateLang.value
 
     /** P3.13: assemble the per-provider session config from persisted settings. */
     fun buildSessionConfig(): VoiceSessionConfig? {
@@ -392,6 +411,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 idleTimeoutMs = if (_realtimeVadType.value == "server_vad")
                     _realtimeIdleTimeoutText.value.trim().toIntOrNull() else null,
                 agentId = preset,
+                mode = if (_translateEnabled.value) "translate" else null,
+                targetLanguage = if (_translateEnabled.value) resolvedTranslateLang() else null,
             )
             VoiceBackend.GEMINI_LIVE -> {
                 val thinkingAllowed = _geminiModel.value in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS
@@ -401,6 +422,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     vadEnd = _geminiVadEnd.value,
                     thinkingLevel = if (thinkingAllowed) _geminiThinkingLevel.value else null,
                     agentId = preset,
+                    mode = if (_translateEnabled.value) "translate" else null,
+                    targetLanguage = if (_translateEnabled.value) resolvedTranslateLang() else null,
                 )
             }
             VoiceBackend.GROK_LIVE -> VoiceSessionConfig(
@@ -937,6 +960,9 @@ fun VoiceScreen(
     val grokModel by viewModel.grokModel.collectAsState()
     val grokReasoningEffort by viewModel.grokReasoningEffort.collectAsState()
     val selectedPresetId by viewModel.selectedPresetId.collectAsState()
+    val translateEnabled by viewModel.translateEnabled.collectAsState()
+    val translateLang by viewModel.translateLang.collectAsState()
+    val translateLangOther by viewModel.translateLangOther.collectAsState()
     val presets by viewModel.presets.collectAsState()
 
     // Pulse animation for mic recording + AI speaking
@@ -1080,6 +1106,54 @@ fun VoiceScreen(
                             enabled = !isConnected,
                             onSelect = viewModel::setPreset,
                         )
+                    }
+
+                    // ── Translation mode (P6a) — greyed out for Grok (no translate model) ──
+                    val translateSupported = backend != VoiceBackend.GROK_LIVE
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            if (translateSupported) "Translate mode" else "Translate mode (not supported)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (translateSupported) BbxDim else Neutral500,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            checked = translateEnabled && translateSupported,
+                            onCheckedChange = viewModel::setTranslateEnabled,
+                            enabled = translateSupported && !isConnected,
+                        )
+                    }
+                    if (translateEnabled && translateSupported) {
+                        val langOpts = Constants.TRANSLATE_LANGUAGES
+                            .map { (id, label) -> id to "$label ($id)" } +
+                            ("__other__" to "Other (type below)")
+                        LabeledDropdown(
+                            label = "Target language",
+                            options = langOpts,
+                            selectedId = translateLang,
+                            enabled = !isConnected,
+                            onSelect = viewModel::setTranslateLang,
+                        )
+                        if (translateLang == "__other__") {
+                            OutlinedTextField(
+                                value = translateLangOther,
+                                onValueChange = { new ->
+                                    viewModel.setTranslateLangOther(
+                                        new.filter { it.isLetterOrDigit() || it == '-' }.take(12))
+                                },
+                                placeholder = { Text("BCP-47, e.g. sw", color = Neutral500) },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = BbxWhite,
+                                    unfocusedTextColor = BbxWhite,
+                                ),
+                                modifier = Modifier.fillMaxWidth().widthIn(max = 200.dp),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                        }
                     }
 
                     // ── Per-provider live-models config (T13 plan 2026-05-19) ──

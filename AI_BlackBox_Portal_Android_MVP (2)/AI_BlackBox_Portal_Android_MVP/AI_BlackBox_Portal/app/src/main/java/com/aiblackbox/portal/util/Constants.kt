@@ -222,4 +222,15 @@ object Constants {
 
     /** Model ids that support thinkingLevel (3.1-only currently). */
     val GEMINI_LIVE_THINKING_CAPABLE_MODELS: Set<String> = setOf("gemini-3.1-flash-live-preview")
+
+    /** P6a — translation target languages: top-20 BCP-47 + free-text "Other"
+     *  handled in VoiceScreen. Mirrors Portal/modules/voice-agents-modal.js. */
+    val TRANSLATE_LANGUAGES: List<Pair<String, String>> = listOf(
+        "en" to "English", "es" to "Spanish", "fr" to "French", "de" to "German",
+        "it" to "Italian", "pt-BR" to "Portuguese (Brazil)", "ja" to "Japanese",
+        "ko" to "Korean", "zh-CN" to "Chinese (Simplified)", "zh-TW" to "Chinese (Traditional)",
+        "ar" to "Arabic", "hi" to "Hindi", "ru" to "Russian", "nl" to "Dutch",
+        "pl" to "Polish", "tr" to "Turkish", "vi" to "Vietnamese", "th" to "Thai",
+        "id" to "Indonesian", "uk" to "Ukrainian",
+    )
 }
