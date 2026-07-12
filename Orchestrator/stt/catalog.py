@@ -1,5 +1,5 @@
 from Orchestrator import config
-from Orchestrator.stt.resolve import stt_availability
+from Orchestrator.stt.resolve import stt_availability, local_stt_available
 
 
 def build_stt_catalog() -> list:
@@ -10,7 +10,7 @@ def build_stt_catalog() -> list:
     LIVE via stt_availability() (fresh .env + filesystem) so a just-saved key or
     credential shows as available without a service restart."""
     openai_ok, google_ok, elevenlabs_ok = stt_availability()
-    return [
+    providers = [
         {
             "id": "openai",
             "label": "OpenAI",
@@ -31,3 +31,13 @@ def build_stt_catalog() -> list:
             "models": {"streaming": config.ELEVENLABS_STT_STREAM_MODEL, "file": config.ELEVENLABS_STT_FILE_MODEL},
         },
     ]
+    # Local (custom-server) STT — appended only when a registered server hosts an
+    # STT model. File transcription only (live streaming needs the OpenAI realtime
+    # WS protocol, which local whisper.cpp servers almost never speak).
+    if local_stt_available():
+        providers.append({
+            "id": "local", "label": "Local (free)", "available": True,
+            "blurb": "A local OpenAI-compatible speech-to-text model (e.g. whisper.cpp). File transcription only; free + private.",
+            "models": {"streaming": None, "file": "local"},
+        })
+    return providers

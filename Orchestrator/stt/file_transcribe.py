@@ -30,6 +30,8 @@ def transcribe_bytes(audio_bytes: bytes, content_type: str, *, provider: str | N
     provider = provider or resolve_stt_provider()
     if not provider:
         raise RuntimeError("no STT provider configured")
+    if provider == "local":
+        return _local_transcribe(audio_bytes, content_type, filename)
     if provider == "elevenlabs":
         return _elevenlabs_transcribe(audio_bytes, filename)
     if provider == "google":
@@ -74,6 +76,31 @@ def _openai_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> 
     try:
         j = r.json()
         return (j.get("text") or "").strip()
+    except Exception:
+        return r.text.strip()
+
+
+def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
+    """Transcribe via a registered local /v1/audio/transcriptions model (OpenAI-shaped)."""
+    from Orchestrator.onboarding.custom_servers import resolve_stt_server
+    resolved = resolve_stt_server()
+    if not resolved:
+        raise RuntimeError("no local speech-to-text model available")
+    srv, model = resolved
+    headers = {}
+    if srv.get("api_key"):
+        headers["Authorization"] = f"Bearer {srv['api_key']}"
+    files = {"file": (filename, audio_bytes, content_type)}
+    r = requests.post(f"{srv['base_url']}/audio/transcriptions",
+                      headers=headers, data={"model": model}, files=files, timeout=120)
+    if r.status_code != 200:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise RuntimeError(f"Local STT error: {detail}")
+    try:
+        return (r.json().get("text") or "").strip()
     except Exception:
         return r.text.strip()
 

@@ -33,6 +33,16 @@ def stt_availability():
     return openai_ok, google_ok, elevenlabs_ok
 
 
+def local_stt_available() -> bool:
+    """True iff a registered custom server hosts a speech-to-text model.
+    Lazy + fail-soft so a registry hiccup never breaks STT resolution."""
+    try:
+        from Orchestrator.onboarding.custom_servers import has_modality_model
+        return has_modality_model("stt")
+    except Exception:
+        return False
+
+
 def _fresh_stt_provider():
     """Fresh-read the saved STT_PROVIDER (wizard selection) from .env so it takes
     effect WITHOUT a service restart. The web/Android client sends provider:""
@@ -47,8 +57,8 @@ def _fresh_stt_provider():
         return (config.STT_PROVIDER or "").strip().lower()
 
 
-def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None):
-    """Return 'openai' | 'google' | 'elevenlabs' | None.
+def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, elevenlabs_ok=None, local_ok=None):
+    """Return 'openai' | 'google' | 'elevenlabs' | 'local' | None.
 
     Explicit choice wins if its credential is available; otherwise the single
     available provider; otherwise None. When multiple are available and no explicit
@@ -69,7 +79,10 @@ def resolve_stt_provider(provided=None, *, openai_ok=None, google_ok=None, eleve
         openai_ok = live_openai if openai_ok is None else openai_ok
         google_ok = live_google if google_ok is None else google_ok
         elevenlabs_ok = live_elevenlabs if elevenlabs_ok is None else elevenlabs_ok
-    avail = {"openai": openai_ok, "google": google_ok, "elevenlabs": bool(elevenlabs_ok)}
+        local_ok = local_stt_available() if local_ok is None else local_ok
+    # local STT is file-only + a fallback, so it sits LAST in the tie-break order.
+    avail = {"openai": openai_ok, "google": google_ok,
+             "elevenlabs": bool(elevenlabs_ok), "local": bool(local_ok)}
     if provided in avail and avail[provided]:
         return provided
     live = [p for p, ok in avail.items() if ok]

@@ -6,6 +6,7 @@ def test_runtime_empty_provided_honors_saved_provider(monkeypatch):
     # Client sends provider:""; the runtime path must fresh-read the saved
     # STT_PROVIDER (wizard pick) rather than falling to the openai tie-break.
     monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, True, False))
+    monkeypatch.setattr(stt_resolve, "local_stt_available", lambda: False)  # hermetic vs registry
     monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "google")
     assert resolve_stt_provider("") == "google"
     monkeypatch.setattr(stt_resolve, "_fresh_stt_provider", lambda: "")
@@ -40,6 +41,7 @@ def test_elevenlabs_only_available_auto():
 
 def test_defaults_follow_stt_availability(monkeypatch):
     # With NO explicit kwargs, resolve reflects live stt_availability().
+    monkeypatch.setattr(stt_resolve, "local_stt_available", lambda: False)  # hermetic vs registry
     monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (True, False, False))
     assert resolve_stt_provider("") == "openai"
     monkeypatch.setattr(stt_resolve, "stt_availability", lambda: (False, True, False))

@@ -1,7 +1,8 @@
 from Orchestrator.stt import catalog as stt_catalog
 from Orchestrator.stt.catalog import build_stt_catalog
 
-def test_three_providers_in_order():
+def test_three_providers_in_order(monkeypatch):
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
     assert [p["id"] for p in build_stt_catalog()] == ["openai", "google", "elevenlabs"]
 
 def test_provider_shape():
@@ -31,7 +32,8 @@ def test_available_flags_follow_stt_availability(monkeypatch):
     assert g["google"]["available"] is True
     assert g["elevenlabs"]["available"] is True
 
-def test_catalog_route_ok():
+def test_catalog_route_ok(monkeypatch):
+    monkeypatch.setattr(stt_catalog, "local_stt_available", lambda: False)  # hermetic vs registry
     import Orchestrator.app  # noqa: F401  -- side-effect: registers routes onto the shared app
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app
