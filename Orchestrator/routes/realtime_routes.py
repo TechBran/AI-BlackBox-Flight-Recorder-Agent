@@ -1188,6 +1188,16 @@ async def openai_reconnect(session: RealtimeSession):
             "data": "Connection lost after multiple reconnection attempts"
         })
         await save_session_to_blackbox(session)
+        # P1b: null the closed-but-non-None socket so the keepalive loop's
+        # `if not session.openai_ws: break` fires once, instead of spinning on
+        # the dead socket and re-triggering openai_reconnect every stale cycle
+        # (each re-hitting this give-up branch → a redundant BlackBox save).
+        if session.openai_ws:
+            try:
+                await session.openai_ws.close()
+            except Exception:
+                pass
+            session.openai_ws = None
         return
 
     session.is_reconnecting = True
@@ -1206,7 +1216,23 @@ async def openai_reconnect(session: RealtimeSession):
 
     await asyncio.sleep(delay)
 
+    # P1b (terminal guard): this coroutine runs DETACHED (bare create_task at
+    # every trigger site) and just slept, so the WS endpoint may have torn the
+    # session down during the backoff. Re-check here — otherwise a Portal drop
+    # mid-reconnect would re-dial + respawn a listener + flip status back to
+    # "connected", resurrecting a clientless session the reaper can never evict.
+    if session.intentional_disconnect:
+        print(f"[REALTIME] Session closed during backoff — abandoning reconnect")
+        session.is_reconnecting = False
+        return
+
     try:
+        # P1b: cancel the old listener FIRST — it is bound to the OLD ws
+        # object; left running it would observe our close() below and emit a
+        # spurious "disconnected" to the client mid-recovery.
+        if session.listener_task and not session.listener_task.done():
+            session.listener_task.cancel()
+
         # Close old connection
         if session.openai_ws:
             try:
@@ -1217,6 +1243,19 @@ async def openai_reconnect(session: RealtimeSession):
 
         # Reconnect
         if await connect_to_openai(session):
+            # P1b (terminal guard): teardown may have run during the dial. If so,
+            # close the socket we just opened and bail — do NOT respawn a
+            # listener onto a session that is being torn down.
+            if session.intentional_disconnect:
+                if session.openai_ws:
+                    try:
+                        await session.openai_ws.close()
+                    except Exception:
+                        pass
+                    session.openai_ws = None
+                session.is_reconnecting = False
+                return
+
             # Reconfigure session
             await configure_openai_session(session, session.operator)
 
@@ -1227,6 +1266,29 @@ async def openai_reconnect(session: RealtimeSession):
                     "type": "provenance",
                     "data": session.provenance
                 })
+
+            # P1b (terminal guard): final check at the point of no return.
+            # configure + provenance each await, so teardown could have completed
+            # during them — re-check before we respawn a listener and flip status
+            # to "connected". This is the last guard; past it the session is live
+            # again, so a hole here would still resurrect a reaper-immune session.
+            if session.intentional_disconnect:
+                if session.openai_ws:
+                    try:
+                        await session.openai_ws.close()
+                    except Exception:
+                        pass
+                    session.openai_ws = None
+                session.is_reconnecting = False
+                return
+
+            # P1b: respawn the listener on the NEW upstream ws. Without this
+            # the previous openai_listener's `async for` (bound to the OLD closed
+            # socket) has already exited, so NOTHING reads the new connection —
+            # the session is a permanently mute one-way pipe still reporting
+            # "reconnected" (same defect class as the Gemini P1a fix; the phone
+            # bridge always had its own respawn loop).
+            session.listener_task = asyncio.create_task(openai_listener(session))
 
             # Reset state
             session.reconnect_count = 0
@@ -1486,8 +1548,12 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                             "data": session.provenance
                         })
 
-                    # Start OpenAI listener task and keepalive
+                    # Start OpenAI listener task and keepalive. The listener task
+                    # lives on the SESSION (session.listener_task): openai_reconnect
+                    # respawns it, so this local would go stale after the first
+                    # reconnect and leak the live task at teardown.
                     openai_task = asyncio.create_task(openai_listener(session))
+                    session.listener_task = openai_task
                     keepalive_task = asyncio.create_task(openai_keepalive_loop(session))
 
                     # If greeting provided (outbound call), inject it so the AI speaks first
@@ -1549,17 +1615,29 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
+        # P1b (terminal guard): mark the session terminal FIRST — before the
+        # save await and before cancelling tasks — so any in-flight, detached
+        # openai_reconnect (bare create_task, not tracked here) bails after its
+        # backoff sleep instead of re-dialing and flipping status back to
+        # "connected", which would resurrect a clientless session the reaper can
+        # never evict (it only reaps status=="disconnected").
+        session.intentional_disconnect = True
+
         # Save session to BlackBox before cleanup
         if session.conversation:
             await save_session_to_blackbox(session)
 
-        # Cleanup
-        if openai_task:
-            openai_task.cancel()
+        # Cleanup — cancel the CURRENT listener; after a reconnect this is a
+        # different task than the locally-captured openai_task, so cancelling
+        # only the local would leak the live listener.
+        listener = session.listener_task or openai_task
+        if listener:
+            listener.cancel()
             try:
-                await openai_task
+                await listener
             except asyncio.CancelledError:
                 pass
+        session.listener_task = None
 
         if keepalive_task:
             keepalive_task.cancel()
