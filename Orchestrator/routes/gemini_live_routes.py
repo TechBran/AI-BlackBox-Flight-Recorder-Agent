@@ -1457,6 +1457,22 @@ async def gemini_reconnect(session: GeminiLiveSession):
                     "data": session.provenance
                 })
 
+            # P1.5-fix: final terminal check at the point of no return. configure
+            # + provenance above each await, so teardown could have completed
+            # during them — re-check before we respawn a listener and flip status
+            # to "connected". This is the last guard; past it the session is live
+            # again, so leaving a hole here would still resurrect a torn-down,
+            # reaper-immune session (just via a narrower window).
+            if session.intentional_disconnect:
+                if session.gemini_ws:
+                    try:
+                        await session.gemini_ws.close()
+                    except Exception:
+                        pass
+                    session.gemini_ws = None
+                session.is_reconnecting = False
+                return
+
             # CRITICAL (recon finding #1): respawn the listener. The previous
             # gemini_listener's `async for` was bound to the OLD closed socket
             # and has already exited — without a new task NOTHING ever reads

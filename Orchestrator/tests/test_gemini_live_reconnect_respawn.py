@@ -85,3 +85,43 @@ async def test_reconnect_bails_when_session_torn_down(monkeypatch):
     assert listener_spawned == []          # no listener respawned
     assert session.listener_task is None
     assert session.is_reconnecting is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_bails_when_torn_down_during_reconfigure(monkeypatch):
+    """P1.5-fix (final guard): if teardown completes DURING the reconfigure
+    (after the dial succeeds but before the status flip), the reconnect must
+    still bail — not respawn a listener or flip status to 'connected'. The
+    after-sleep and after-dial guards don't cover this window; the point-of-
+    no-return guard does."""
+    session = make_session()
+    session.gemini_ws = None
+    session.status = "reconnecting"
+
+    async def fake_connect(sess):
+        # connect_to_gemini only establishes the socket; the "connected" flip is
+        # in gemini_reconnect's success branch, which the guard must prevent.
+        sess.gemini_ws = FakeGeminiWS()
+        return True
+
+    async def fake_configure(sess, operator, voice):
+        # Simulate the WS endpoint's finally running mid-reconfigure.
+        sess.intentional_disconnect = True
+
+    listener_spawned = []
+
+    async def fake_listener(sess):
+        listener_spawned.append(sess)
+
+    monkeypatch.setattr(glr, "connect_to_gemini", fake_connect)
+    monkeypatch.setattr(glr, "configure_gemini_session", fake_configure)
+    monkeypatch.setattr(glr, "gemini_listener", fake_listener)
+
+    await glr.gemini_reconnect(session)
+    await asyncio.sleep(0)
+
+    assert listener_spawned == [], "must not respawn a listener onto a torn-down session"
+    assert session.listener_task is None
+    assert session.status != "connected", "must not flip a torn-down session back to connected"
+    assert session.gemini_ws is None, "the socket opened during the dial must be closed"
+    assert session.is_reconnecting is False
