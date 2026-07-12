@@ -1478,6 +1478,8 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     url_create_response: Optional[bool] = (
         _create_str.lower() == "true" if _create_str is not None else None
     )
+    url_noise_reduction = websocket.query_params.get("noise_reduction")
+    url_transcription_delay = websocket.query_params.get("transcription_delay")
 
     # Check dependencies
     if not WEBSOCKETS_AVAILABLE:
@@ -1549,6 +1551,8 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                 idle_timeout_ms = data.get("idle_timeout_ms", url_idle_timeout_ms)
                 interrupt_response = data.get("interrupt_response", url_interrupt_response)
                 create_response = data.get("create_response", url_create_response)
+                noise_reduction = data.get("noise_reduction", url_noise_reduction)
+                transcription_delay = data.get("transcription_delay", url_transcription_delay)
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1569,6 +1573,8 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                         idle_timeout_ms=idle_timeout_ms,
                         interrupt_response=interrupt_response,
                         create_response=create_response,
+                        noise_reduction=noise_reduction,
+                        transcription_delay=transcription_delay,
                     )
                     print(f"[REALTIME] Voice selected: {voice}; model={model or OPENAI_REALTIME_MODEL}; vad_type={vad_type or 'server_vad'}")
 
