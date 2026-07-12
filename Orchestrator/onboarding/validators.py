@@ -155,7 +155,16 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
             ) as client:
                 models = client.models.list()
                 ids = [m.id for m in models.data]
-                return {"model_count": len(ids), "models": ids[:50]}
+                # Auto-detect: seed each discovered model's modality (chat/image/
+                # tts/stt/...) so the wizard can confirm + route it with no manual
+                # per-modality step. Name-pattern only (zero-cost; no endpoint probe
+                # that could trigger a model load). The wizard-confirmed map wins.
+                from Orchestrator.onboarding.custom_servers import classify_models
+                shown = ids[:50]
+                modalities = classify_models(shown)
+                return {"model_count": len(ids), "models": shown,
+                        "model_modalities": modalities,
+                        "capabilities": sorted(set(modalities.values()))}
         except AuthenticationError as e:
             raise RuntimeError(f"API key rejected (401) by {base_url}") from e
         except APIStatusError as e:

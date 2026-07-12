@@ -323,19 +323,23 @@ def delete_config_value(key: str) -> dict:
 # ── Custom model servers (provider "custom") — registry CRUD ──
 
 class CustomServerCreate(BaseModel):
+    model_config = {"protected_namespaces": ()}   # allow the model_modalities field
     alias: str
     base_url: str
     api_key: str = ""          # default "" — custom_servers.add_server rejects None
     context_tokens: int = custom_servers.DEFAULT_CONTEXT_TOKENS
+    model_modalities: dict | None = None   # wizard-confirmed {model_id: modality}
 
 
 class CustomServerPatch(BaseModel):
     """Partial update — omitted (None) fields are left unchanged."""
+    model_config = {"protected_namespaces": ()}
     alias: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     enabled: bool | None = None
     context_tokens: int | None = None
+    model_modalities: dict | None = None   # manage-screen modality corrections
 
 
 @router.get("/custom-servers")
@@ -356,6 +360,7 @@ def add_custom_server(req: CustomServerCreate) -> dict:
         srv = custom_servers.add_server(
             alias=req.alias, base_url=req.base_url,
             api_key=req.api_key, context_tokens=req.context_tokens,
+            model_modalities=req.model_modalities,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -501,7 +506,7 @@ def validate(req: ValidateRequest) -> ValidateResponse:
             # single source — do not re-derive it from req.credentials here).
             if server_id:
                 try:
-                    custom_servers.update_server(server_id, {
+                    stamp = {
                         "validated_at": datetime.now(timezone.utc).isoformat(),
                         "last_models": list((result.detail or {}).get("models") or []),
                         # Re-validate = "the server config may have changed":
@@ -510,7 +515,16 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                         # corrects downward — an under-budget never errors).
                         # Still-smaller windows re-learn on the next overflow.
                         "model_context": {},
-                    })
+                    }
+                    # Seed the modality map on FIRST validation only; never clobber
+                    # a user's wizard corrections on re-validate (new models fall
+                    # back to name-pattern classify at read time).
+                    existing = custom_servers.get_server(server_id) or {}
+                    if not existing.get("model_modalities"):
+                        seed = (result.detail or {}).get("model_modalities") or {}
+                        if seed:
+                            stamp["model_modalities"] = seed
+                    custom_servers.update_server(server_id, stamp)
                     _state.record_validation(f"custom:{server_id}")
                 except (KeyError, ValueError):
                     logger.warning(
