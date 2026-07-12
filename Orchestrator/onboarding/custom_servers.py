@@ -40,6 +40,7 @@ MSG_UNKNOWN_ALIAS = "Custom model '{model}' names an unknown or disabled server 
 _PATCHABLE_FIELDS = {
     "alias", "base_url", "api_key", "enabled",
     "context_tokens", "validated_at", "last_models", "model_context",
+    "model_modalities",
 }
 _EMPTY = {"version": 1, "servers": []}
 
@@ -172,6 +173,12 @@ def _validate_field_types(fields: dict) -> None:
             raise ValueError(
                 "model_context must be a dict of {model_id: positive int tokens}"
             )
+    if "model_modalities" in fields:
+        v = fields["model_modalities"]
+        if not isinstance(v, dict) or not all(
+            isinstance(k, str) and isinstance(val, str) for k, val in v.items()
+        ):
+            raise ValueError("model_modalities must be a dict of {model_id: modality}")
 
 
 # ------------------------------------------------------------------ read API
@@ -211,11 +218,15 @@ def list_servers_redacted() -> list[dict]:
 # -------------------------------------------------------------- mutation API
 
 def add_server(alias: str, base_url: str, api_key: str = "",
-               context_tokens: int = DEFAULT_CONTEXT_TOKENS) -> dict:
+               context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+               model_modalities: dict | None = None) -> dict:
     """Register a new server. Returns the created record (a copy)."""
     if isinstance(alias, str):
         alias = alias.strip()
-    _validate_field_types({"api_key": api_key, "context_tokens": context_tokens})
+    fields = {"api_key": api_key, "context_tokens": context_tokens}
+    if model_modalities is not None:
+        fields["model_modalities"] = model_modalities
+    _validate_field_types(fields)
     with _LOCK:
         data = _read()
         _validate_alias(alias, data["servers"])
@@ -234,6 +245,9 @@ def add_server(alias: str, base_url: str, api_key: str = "",
             "added_at": datetime.now(timezone.utc).isoformat(),
             "validated_at": None,
             "last_models": [],
+            # Wizard-confirmed {model_id: modality} map (chat/image/tts/stt/...);
+            # empty = fall back to name-pattern classify_model() at read time.
+            "model_modalities": model_modalities or {},
         }
         data["servers"].append(srv)
         _write(data)
@@ -348,51 +362,88 @@ def window_guard_tokens(server: dict | None, model: str | None = None) -> int:
     return max(4000, int(ctx * 0.6))
 
 
-# ------------------------------------------------------------- image models
-# Name-pattern allowlist (Brandon-approved v1 classification). A model served on
-# an OpenAI-compatible endpoint carries NO modality flag, so we classify by id.
-# EDIT HERE to teach the box a new local text-to-image family.
-IMAGE_MODEL_PATTERNS = (
-    "z-image", "zimage", "flux", "qwen-image", "sdxl", "sd3", "sd-turbo",
-    "stable-diffusion", "playground-v", "kolors", "hidream", "pixart",
-)
+# ----------------------------------------------------- model modality (v1)
+# OpenAI /v1/models carries NO modality flag, so we classify each discovered
+# model by id (SEED); the wizard-confirmed model_modalities map overrides at
+# runtime via model_modality(). EDIT the patterns to teach a new local family.
+MODALITY_PATTERNS = {
+    "image": ("z-image", "zimage", "flux", "qwen-image", "sdxl", "sd3", "sd-turbo",
+              "stable-diffusion", "playground-v", "kolors", "hidream", "pixart"),
+    "tts":   ("tts", "-speech", "speech-", "kokoro", "piper", "xtts", "bark",
+              "vibevoice", "orpheus", "parler", "styletts", "melotts", "chatterbox"),
+    "stt":   ("whisper", "-stt", "stt-", "transcrib", "parakeet", "scribe",
+              "distil-whisper", "faster-whisper", "canary", "moonshine"),
+    "embedding": ("embed", "bge", "gte", "e5-", "nomic-embed", "mxbai", "jina-embed",
+                  "arctic-embed", "snowflake-arctic-embed"),
+}
+_ROUTABLE_MODALITIES = ("image", "tts", "stt", "embedding")  # precedence; else -> chat
+
+
+def classify_model(model_id: object) -> str:
+    """Seed modality for a bare model id: 'image'|'tts'|'stt'|'embedding'|'chat'.
+
+    Name-pattern allowlist + an ``*-image`` suffix fallback; default 'chat'. Only
+    a SEED -- the persisted model_modalities map (wizard-confirmed) wins at runtime
+    via model_modality(). OpenAI /v1/models has no modality flag, so a
+    misclassification is expected and correctable in the wizard."""
+    if not isinstance(model_id, str):
+        return "chat"
+    m = model_id.lower()
+    for modality in _ROUTABLE_MODALITIES:
+        if any(p in m for p in MODALITY_PATTERNS[modality]):
+            return modality
+    if m.endswith("-image") or m.endswith("_image"):
+        return "image"
+    return "chat"
+
+
+def classify_models(model_ids: list) -> dict:
+    """Seed map {model_id: modality} for a discovered model list (used by /validate)."""
+    return {m: classify_model(m) for m in model_ids if isinstance(m, str)}
 
 
 def is_image_model(model_id: object) -> bool:
-    """Heuristic: does this bare model id name a text-to-image model?
-
-    Used to (a) gate/route the local image provider and (b) keep image models
-    out of the CHAT model catalog. Name-pattern allowlist + an ``*-image`` /
-    ``*_image`` suffix fallback. Chat models (gemma-*, llama-*, qwen3-*) do not
-    match. There is no server capability flag to key off, so misclassification
-    risk is accepted (see the design doc)."""
-    if not isinstance(model_id, str):
-        return False
-    m = model_id.lower()
-    if any(p in m for p in IMAGE_MODEL_PATTERNS):
-        return True
-    return m.endswith("-image") or m.endswith("_image")
+    """Back-compat wrapper (shipped image callers). Prefer model_modality()."""
+    return classify_model(model_id) == "image"
 
 
-def resolve_image_server(model: str | None = None) -> tuple[dict, str] | None:
-    """Pick the custom (server, bare_model) for a local image request.
+def model_modality(server: dict, model_id: str) -> str:
+    """AUTHORITATIVE modality for a model on a server: the wizard-confirmed
+    model_modalities map first, name-pattern classify() as fallback (servers
+    registered before the confirm feature, or models discovered since)."""
+    mm = server.get("model_modalities") if isinstance(server, dict) else None
+    if isinstance(mm, dict):
+        val = mm.get(model_id)
+        if isinstance(val, str) and val:
+            return val
+    return classify_model(model_id)
 
-    ``model`` (optional, may be alias-qualified) is honored when it resolves to
-    a real enabled server AND is an image model. Otherwise: the first enabled
-    server that hosts a name-matched image model, and its first such model.
-    Returns ``(server_dict, bare_model)`` or ``None`` when no local image model
-    is available. Reads the registry fresh (no import-time cache)."""
+
+def resolve_modality_server(modality: str, model: str | None = None) -> tuple[dict, str] | None:
+    """Pick the (server, bare_model) for a request of ``modality``.
+
+    An explicit ``model`` is honored only if it IS that modality AND the resolved
+    server hosts it; otherwise the first enabled server hosting a model of that
+    modality, and its first such model. ``None`` when unavailable. Fresh read."""
     if model:
         srv, bare = resolve_model(model)
-        # Honor an explicit model only if it's an image model the resolved server
-        # actually hosts -- else fall through to auto-pick (never POST a bogus id).
-        if srv is not None and is_image_model(bare) and bare in (srv.get("last_models") or []):
+        if srv is not None and model_modality(srv, bare) == modality and bare in (srv.get("last_models") or []):
             return srv, bare
     for srv in list_servers(enabled_only=True):
         for m in (srv.get("last_models") or []):
-            if isinstance(m, str) and is_image_model(m):
+            if isinstance(m, str) and model_modality(srv, m) == modality:
                 return srv, m
     return None
+
+
+def has_modality_model(modality: str) -> bool:
+    """True iff any enabled custom server hosts a model of ``modality``."""
+    return resolve_modality_server(modality) is not None
+
+
+def resolve_image_server(model: str | None = None) -> tuple[dict, str] | None:
+    """Back-compat wrapper -> resolve_modality_server('image')."""
+    return resolve_modality_server("image", model)
 
 
 def list_image_models() -> list[str]:
@@ -402,6 +453,6 @@ def list_image_models() -> list[str]:
     for srv in list_servers(enabled_only=True):
         alias = srv.get("alias", "")
         for m in (srv.get("last_models") or []):
-            if isinstance(m, str) and is_image_model(m):
+            if isinstance(m, str) and model_modality(srv, m) == "image":
                 out.append(qualify(alias, m))
     return out
