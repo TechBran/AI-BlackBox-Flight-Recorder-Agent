@@ -281,3 +281,55 @@ async def test_conversation_created_without_id_is_harmless():
     session = GrokLiveSession(session_id="t-resume-2", created_at="")
     await handle_grok_message(session, {"type": "conversation.created"})
     assert session.conversation_id is None
+
+
+# ---------------------------------------------------------------------------
+# Reconnect resumes the server-side conversation (no context rebuild)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_connect_to_grok_appends_conversation_id(fake_grok_dial):
+    from Orchestrator.routes.grok_live_routes import connect_to_grok
+    session = GrokLiveSession(session_id="t-resume-url", created_at="")
+    assert await connect_to_grok(session, model="grok-voice-latest",
+                                 conversation_id="conv_xyz") is True
+    assert fake_grok_dial["url"] == (
+        "wss://api.x.ai/v1/realtime?model=grok-voice-latest&conversation_id=conv_xyz"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconnect_with_conversation_id_skips_rebuild(monkeypatch):
+    import Orchestrator.routes.grok_live_routes as gl
+    session = GrokLiveSession(session_id="t-rc-1", created_at="")
+    session.model = "grok-voice-latest"
+    session.conversation_id = "conv_resume_me"
+    session.operator = "test_operator"
+
+    connect_mock = AsyncMock(return_value=True)
+    configure_mock = AsyncMock()
+    monkeypatch.setattr(gl, "connect_to_grok", connect_mock)
+    monkeypatch.setattr(gl, "configure_grok_session", configure_mock)
+
+    await gl.grok_reconnect(session)
+
+    assert connect_mock.await_args.kwargs["conversation_id"] == "conv_resume_me"
+    assert connect_mock.await_args.kwargs["model"] == "grok-voice-latest"
+    configure_mock.assert_not_awaited()  # resumed — no context rebuild
+    assert session.status == "connected"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_without_conversation_id_rebuilds(monkeypatch):
+    import Orchestrator.routes.grok_live_routes as gl
+    session = GrokLiveSession(session_id="t-rc-2", created_at="")
+    session.operator = "test_operator"
+
+    connect_mock = AsyncMock(return_value=True)
+    configure_mock = AsyncMock()
+    monkeypatch.setattr(gl, "connect_to_grok", connect_mock)
+    monkeypatch.setattr(gl, "configure_grok_session", configure_mock)
+
+    await gl.grok_reconnect(session)
+
+    configure_mock.assert_awaited_once()  # legacy full-rebuild path preserved

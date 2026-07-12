@@ -231,7 +231,7 @@ async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: D
 # xAI Grok Voice Agent API Connection
 # =============================================================================
 
-async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = None) -> bool:
+async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = None, conversation_id: Optional[str] = None) -> bool:
     """
     Establish WebSocket connection to xAI Grok Voice Agent API.
 
@@ -266,6 +266,9 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
         }
 
         url = f"{GROK_LIVE_URL}?model={resolved_model}"
+        if conversation_id:
+            # Resumption: xAI replays cached turns for this conversation
+            url += f"&conversation_id={conversation_id}"
         print(f"[GROK-LIVE] Connecting to xAI: {url}")
         # websockets 15.x uses additional_headers instead of extra_headers
         # Add explicit ping settings to prevent connection drops
@@ -1231,8 +1234,11 @@ async def grok_reconnect(session: 'GrokLiveSession'):
                 pass
             session.grok_ws = None
 
-        # Reconnect
-        if await connect_to_grok(session):
+        # Reconnect — resume the server-side conversation when we have an id
+        # (xAI replays cached turns; avoids a full context rebuild).
+        resume_id = session.conversation_id
+        if await connect_to_grok(session, model=session.model or None,
+                                 conversation_id=resume_id):
             # P1b (terminal guard): teardown may have run during the dial. If so,
             # close the socket we just opened and bail — do NOT respawn a
             # listener onto a session that is being torn down.
@@ -1246,16 +1252,19 @@ async def grok_reconnect(session: 'GrokLiveSession'):
                 session.is_reconnecting = False
                 return
 
-            # Reconfigure session
-            await configure_grok_session(session, session.operator, session.voice)
+            if resume_id:
+                print(f"[GROK-LIVE] Resumed conversation {resume_id} — session rebuild skipped")
+            else:
+                # No resumption id — full reconfigure (rebuilds context)
+                await configure_grok_session(session, session.operator, session.voice)
 
-            # Re-emit provenance after reconfigure so client UI stays in sync with the
-            # newly-rebuilt system context (see Task 3 code review).
-            if session.provenance:
-                await _safe_ws_send(session.portal_ws, {
-                    "type": "provenance",
-                    "data": session.provenance
-                })
+                # Re-emit provenance after reconfigure so client UI stays in sync
+                # with the newly-rebuilt system context (see Task 3 code review).
+                if session.provenance:
+                    await _safe_ws_send(session.portal_ws, {
+                        "type": "provenance",
+                        "data": session.provenance
+                    })
 
             # P1b (terminal guard): final check at the point of no return.
             # configure + provenance each await, so teardown could have completed
