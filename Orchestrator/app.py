@@ -137,6 +137,9 @@ app.include_router(credentials_router)
 from Orchestrator.routes.mcp_routes import router as mcp_router
 app.include_router(mcp_router)
 
+from Orchestrator.routes.xai_phone_routes import router as xai_phone_router
+app.include_router(xai_phone_router)
+
 from Orchestrator.routes.voice_agent_routes import router as voice_agent_router
 app.include_router(voice_agent_router)
 
