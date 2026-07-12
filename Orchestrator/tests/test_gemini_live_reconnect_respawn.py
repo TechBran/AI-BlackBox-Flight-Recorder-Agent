@@ -59,3 +59,29 @@ async def test_setup_complete_resets_failure_count():
     await glr.handle_gemini_message(session, {"setupComplete": {}})
 
     assert session.reconnect_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_bails_when_session_torn_down(monkeypatch):
+    """P1.5-fix: a detached reconnect that resumes after teardown must NOT
+    re-dial or respawn a listener (which would resurrect a clientless session
+    the reaper can't evict)."""
+    session = make_session()
+    session.intentional_disconnect = True  # teardown already ran
+
+    connect = AsyncMock(return_value=True)
+    listener_spawned = []
+
+    async def fake_listener(sess):
+        listener_spawned.append(sess)
+
+    monkeypatch.setattr(glr, "connect_to_gemini", connect)
+    monkeypatch.setattr(glr, "configure_gemini_session", AsyncMock())
+    monkeypatch.setattr(glr, "gemini_listener", fake_listener)
+
+    await glr.gemini_reconnect(session)
+
+    connect.assert_not_awaited()          # bailed after backoff, before dialing
+    assert listener_spawned == []          # no listener respawned
+    assert session.listener_task is None
+    assert session.is_reconnecting is False

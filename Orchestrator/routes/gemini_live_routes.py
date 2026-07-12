@@ -1385,6 +1385,15 @@ async def gemini_reconnect(session: GeminiLiveSession):
         })
         # Save conversation before giving up
         await save_session_to_blackbox(session)
+        # P1.5-fix: null the closed-but-non-None socket so the keepalive loop's
+        # `if not session.gemini_ws: break` fires once, instead of sending on the
+        # dead socket and triggering a redundant give-up (double BlackBox save).
+        if session.gemini_ws:
+            try:
+                await session.gemini_ws.close()
+            except Exception:
+                pass
+            session.gemini_ws = None
         return
 
     session.is_reconnecting = True
@@ -1403,6 +1412,14 @@ async def gemini_reconnect(session: GeminiLiveSession):
 
     await asyncio.sleep(delay)
 
+    # P1.5-fix: the session may have been torn down during the backoff sleep.
+    # This coroutine runs DETACHED (bare create_task at every trigger site), so
+    # the caller-side intentional_disconnect guards don't cover it — re-check here.
+    if session.intentional_disconnect:
+        print(f"[GEMINI-LIVE] Session closed during backoff — abandoning reconnect")
+        session.is_reconnecting = False
+        return
+
     try:
         # Close old connection
         if session.gemini_ws:
@@ -1414,6 +1431,19 @@ async def gemini_reconnect(session: GeminiLiveSession):
 
         # Reconnect
         if await connect_to_gemini(session):
+            # P1.5-fix: teardown may have run during the dial. If so, close the
+            # socket we just opened and bail — do NOT respawn a listener onto a
+            # session that's being torn down.
+            if session.intentional_disconnect:
+                if session.gemini_ws:
+                    try:
+                        await session.gemini_ws.close()
+                    except Exception:
+                        pass
+                    session.gemini_ws = None
+                session.is_reconnecting = False
+                return
+
             # Reconfigure — configure_gemini_session falls back to the session-
             # persisted model/VAD/thinking/custom_role/phone_mode (P1.4), so
             # this bare call no longer reverts the session to defaults.
@@ -1754,6 +1784,13 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
+        # P1.5-fix: mark the session terminal FIRST so any in-flight, detached
+        # gemini_reconnect task (spawned via bare create_task, not tracked here)
+        # bails after its backoff sleep instead of re-dialing and flipping
+        # status back to "connected" — which would resurrect a clientless
+        # session the reaper can never evict (it only reaps status=="disconnected").
+        session.intentional_disconnect = True
+
         # Cleanup — cancel whichever listener task is CURRENT (reconnects
         # respawn it; see session.listener_task).
         if session.listener_task:
