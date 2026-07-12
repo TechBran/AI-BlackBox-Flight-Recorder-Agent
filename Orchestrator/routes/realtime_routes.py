@@ -52,7 +52,6 @@ from Orchestrator.config import (
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
-    GEMINI_MODEL_DEFAULT,
     VOL_PATH
 )
 from Orchestrator.models import RealtimeSession, REALTIME_SESSIONS, TaskType
@@ -72,6 +71,7 @@ from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_ws_shared import save_voice_transcript
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -96,8 +96,13 @@ REALTIME_TOOLS = get_openai_realtime_tools("realtime")
 
 async def save_session_to_blackbox(session: RealtimeSession):
     """
-    Save the GPT Realtime session conversation to BlackBox.
-    Called on disconnect/cleanup to ensure all messages are captured.
+    Save the OpenAI Realtime session conversation to the BlackBox ledger.
+
+    Called on disconnect/cleanup (endpoint finally, reconnect exhaustion,
+    phone bridge teardown). P1b: persists via POST /chat/save (direct
+    persistence + auto-mint; no LLM round-trip) and clears
+    session.conversation ONLY after a confirmed 200 so a failed save can be
+    retried by a later teardown path.
     """
     if not session.conversation:
         print(f"[REALTIME] No conversation to save for session {session.session_id}")
@@ -121,7 +126,7 @@ async def save_session_to_blackbox(session: RealtimeSession):
 
     transcript = "\n\n".join(transcript_lines)
 
-    session_summary = f"""=== GPT-4o Realtime Voice Session ===
+    session_summary = f"""=== OpenAI Realtime Voice Session ===
 Session ID: {session.session_id}
 Timestamp: {now_utc_iso()}
 Messages: {len(session.conversation)}
@@ -132,35 +137,20 @@ Messages: {len(session.conversation)}
 
     print(f"[REALTIME] Saving session {session.session_id} with {len(session.conversation)} messages to BlackBox")
 
-    try:
-        # Use aiohttp to call /chat endpoint
-        async with aiohttp.ClientSession() as http_session:
-            async with http_session.post(
-                "http://localhost:9091/chat",
-                json={
-                    "operator": session.operator,
-                    "messages": [{
-                        "role": "user",
-                        "content": f"[Voice Session Transcript]\n{session_summary}"
-                    }],
-                    "provider": "google",
-                    "model": GEMINI_MODEL_DEFAULT,
-                    "streaming": False,
-                    "auto_checkpoint": False
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status == 200:
-                    print(f"[REALTIME] Session {session.session_id} saved to BlackBox")
-                else:
-                    error = await resp.text()
-                    print(f"[REALTIME] Failed to save session: {resp.status} - {error[:200]}")
+    saved = await save_voice_transcript(
+        operator=session.operator,
+        user_message=f"[Voice Session Transcript] OpenAI Realtime voice session {session.session_id}",
+        session_summary=session_summary,
+        model_label="openai-realtime-voice",
+        log_prefix="[REALTIME]",
+    )
 
-    except Exception as e:
-        print(f"[REALTIME] Error saving session to BlackBox: {e}")
-
-    # Clear conversation after saving
-    session.conversation = []
+    # Clear ONLY after a confirmed 200 (previously cleared unconditionally,
+    # permanently losing the transcript after a failed save).
+    if saved:
+        session.conversation = []
+    else:
+        print(f"[REALTIME] Save FAILED — keeping {len(session.conversation)} turns for a later retry")
 
 
 # =============================================================================
