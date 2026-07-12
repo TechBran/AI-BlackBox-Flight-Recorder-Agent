@@ -43,3 +43,21 @@ def test_local_image_available_is_failsoft(monkeypatch):
     monkeypatch.setattr(cs, "list_servers",
                         lambda enabled_only=False: (_ for _ in ()).throw(RuntimeError("boom")))
     assert av._local_image_available() is False
+
+
+def test_local_image_available_respects_persisted_map(monkeypatch):
+    # a bland-named model TAGGED image via the wizard map counts as available
+    import Orchestrator.onboarding.custom_servers as cs
+    monkeypatch.setattr(cs, "list_servers", lambda enabled_only=False: [
+        {"alias": "box", "enabled": True, "last_models": ["gemma-31b", "my-render"],
+         "model_modalities": {"my-render": "image"}}])
+    assert av._local_image_available() is True
+
+
+def test_local_image_available_false_when_image_name_tagged_chat(monkeypatch):
+    # a z-image-NAMED model the user re-tagged chat is NOT image-available
+    import Orchestrator.onboarding.custom_servers as cs
+    monkeypatch.setattr(cs, "list_servers", lambda enabled_only=False: [
+        {"alias": "box", "enabled": True, "last_models": ["z-image"],
+         "model_modalities": {"z-image": "chat"}}])
+    assert av._local_image_available() is False

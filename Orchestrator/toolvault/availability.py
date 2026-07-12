@@ -97,14 +97,10 @@ def _local_image_available() -> bool:
     feedback-mcp-lean-venv lesson). Any failure -> False (local image simply off
     in that context)."""
     try:
-        from Orchestrator.onboarding.custom_servers import list_servers, is_image_model
-        for srv in list_servers(enabled_only=True):
-            for m in (srv.get("last_models") or []):
-                if isinstance(m, str) and is_image_model(m):
-                    return True
+        from Orchestrator.onboarding.custom_servers import has_modality_model
+        return has_modality_model("image")   # persisted-map-aware (wizard-confirmed wins)
     except Exception:
         return False
-    return False
 
 
 def enabled_providers(feature: str = "web_search") -> set:
