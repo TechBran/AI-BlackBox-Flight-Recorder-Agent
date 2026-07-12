@@ -51,6 +51,8 @@ from Orchestrator.config import (
     GROK_LIVE_VOICES,
     GROK_LIVE_DEFAULT_VOICE,
     GROK_LIVE_SAMPLE_RATE,
+    GROK_LIVE_INPUT_SAMPLE_RATE,
+    GROK_LIVE_OUTPUT_SAMPLE_RATE,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     VOL_PATH
@@ -502,7 +504,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                 "input": {
                     "format": {
                         "type": "audio/pcm",
-                        "rate": GROK_LIVE_SAMPLE_RATE
+                        "rate": GROK_LIVE_INPUT_SAMPLE_RATE
                     },
                     # Explicit input-transcription opt-in (P0.4 transcription_shape
                     # probe 2026-07-11 — accepted shape echoed in session.updated).
@@ -515,7 +517,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                 "output": {
                     "format": {
                         "type": "audio/pcm",
-                        "rate": GROK_LIVE_SAMPLE_RATE
+                        "rate": GROK_LIVE_OUTPUT_SAMPLE_RATE
                     }
                 }
             },
@@ -1378,11 +1380,11 @@ async def grok_keepalive_loop(session: 'GrokLiveSession'):
                     asyncio.create_task(grok_reconnect(session))
                 continue
 
-            # Send keepalive: 20ms of silence as PCM16@24kHz
+            # Send keepalive: 20ms of silence as PCM16@16kHz (input rate)
             try:
                 if session.grok_ws:
-                    # 20ms at 24kHz = 480 samples, PCM16 = 960 bytes of zeros
-                    silence_bytes = b'\x00' * 960
+                    # 20ms at 16kHz (input rate) = 320 samples, PCM16 = 640 bytes of zeros
+                    silence_bytes = b'\x00' * 640
                     silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
                     await session.grok_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
@@ -1673,6 +1675,8 @@ async def grok_live_status():
         "voices": GROK_LIVE_VOICES,
         "default_voice": GROK_LIVE_DEFAULT_VOICE,
         "sample_rate": GROK_LIVE_SAMPLE_RATE,
+        "input_sample_rate": GROK_LIVE_INPUT_SAMPLE_RATE,
+        "output_sample_rate": GROK_LIVE_OUTPUT_SAMPLE_RATE,
         "active_sessions": len([s for s in GROK_LIVE_SESSIONS.values() if s.status == "connected"])
     }
 

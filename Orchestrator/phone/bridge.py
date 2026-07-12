@@ -507,7 +507,7 @@ class PhoneAIBridge:
             try:
                 # Send a tiny amount of silence
                 silence = AudioConverter.generate_silence(duration_ms=20, sample_rate=8000)
-                pcm_data = AudioConverter.phone_to_ai(silence, 24000)
+                pcm_data = AudioConverter.phone_to_ai(silence, 16000)
                 audio_b64 = base64.b64encode(pcm_data).decode('ascii')
                 await self._ai_session.grok_ws.send(json.dumps({
                     "type": "input_audio_buffer.append",
@@ -654,8 +654,8 @@ class PhoneAIBridge:
                 self._audio_chunks_sent += 1
 
             elif backend == AIBackend.GROK_LIVE:
-                # Grok: 24kHz PCM16 (same format as OpenAI)
-                target_rate = 24000
+                # Grok: 16kHz PCM16 input (backend session declares 16k; P2.15)
+                target_rate = 16000
                 if source_rate != target_rate:
                     samples = np.frombuffer(pcm16_data, dtype=np.int16)
                     num_out = int(len(samples) * target_rate / source_rate)

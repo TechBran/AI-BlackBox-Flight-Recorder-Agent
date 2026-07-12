@@ -393,3 +393,25 @@ async def test_empty_contact_book_omits_keyterms(stub_grok_fossil_context, monke
     await configure_grok_session(session, "test_operator", voice="Ara")
     payload = _extract_grok_payload(session.grok_ws.send)
     assert "keyterms" not in payload["session"]
+
+
+# ---------------------------------------------------------------------------
+# Sample rates — ONE truth: 16k input (matches Android capture), 24k output
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_session_declares_16k_input_24k_output(stub_grok_fossil_context):
+    from Orchestrator.config import GROK_LIVE_INPUT_SAMPLE_RATE, GROK_LIVE_OUTPUT_SAMPLE_RATE
+    assert GROK_LIVE_INPUT_SAMPLE_RATE == 16000
+    assert GROK_LIVE_OUTPUT_SAMPLE_RATE == 24000
+
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    audio = _extract_grok_payload(session.grok_ws.send)["session"]["audio"]
+    assert audio["input"]["format"]["rate"] == 16000
+    assert audio["output"]["format"]["rate"] == 24000
+
+
+def test_asterisk_map_matches_declared_input_rate():
+    from Orchestrator.asterisk.voice_bridge import AsteriskVoiceBridge
+    assert AsteriskVoiceBridge.INPUT_RATES["grok_live"] == 16000

@@ -689,7 +689,9 @@ GROK_LIVE_REASONING_CAPABLE_MODELS: frozenset = frozenset({
 })
 GROK_LIVE_VOICES = ["Ara", "Rex", "Sal", "Eve", "Leo"]  # Available voices
 GROK_LIVE_DEFAULT_VOICE = "Rex"         # Default voice for phone
-GROK_LIVE_SAMPLE_RATE = 24000           # PCM16 audio at 24kHz (same as OpenAI Realtime)
+GROK_LIVE_INPUT_SAMPLE_RATE = 16000     # PCM16 mic input — matches Android capture (VoiceScreen.kt); P0 probe-verified xAI accepts 16k
+GROK_LIVE_OUTPUT_SAMPLE_RATE = 24000    # PCM16 AI output — matches Portal/Android/phone playback (unchanged)
+GROK_LIVE_SAMPLE_RATE = GROK_LIVE_OUTPUT_SAMPLE_RATE  # legacy alias — status back-compat only
 
 # =============================================================================
 # Phone Integration (3CX + Drachtio + FreeSwitch)

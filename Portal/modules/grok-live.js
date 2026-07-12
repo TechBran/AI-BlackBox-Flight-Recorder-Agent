@@ -210,13 +210,13 @@ function lowPassFilter(input, cutoffRatio = 0.4) {
 }
 
 /**
- * Resample audio from source rate to 24kHz for Grok
+ * Resample audio from source rate to 16kHz for Grok input
  * @param {Float32Array} input - Input samples
  * @param {number} sourceRate - Source sample rate
- * @returns {Float32Array} Resampled audio at 24kHz
+ * @returns {Float32Array} Resampled audio at 16kHz
  */
 function resampleTo24kHz(input, sourceRate) {
-    const targetRate = 24000;  // Grok expects 24kHz
+    const targetRate = 16000;  // Grok input rate — must match the backend's session.update audio.input.format.rate (16k)
 
     if (sourceRate === targetRate) {
         return input;

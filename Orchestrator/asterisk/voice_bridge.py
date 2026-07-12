@@ -71,7 +71,7 @@ class AsteriskVoiceBridge:
     INPUT_RATES = {
         "openai_realtime": 24000,
         "gemini_live": 16000,
-        "grok_live": 24000,
+        "grok_live": 16000,
     }
 
     OUTPUT_RATE = 24000
