@@ -17,6 +17,8 @@ three voice routes and, through them, the phone bridge chain.
 """
 
 import json
+
+import aiohttp
 from typing import Dict, Optional, Set
 
 from starlette.websockets import WebSocketState
@@ -130,3 +132,46 @@ async def send_gemini_tool_error(gemini_ws, portal_ws, event: Dict,
             "data": {"name": fc.get("name", ""), "result_length": 0, "error": True},
         })
     return sent
+
+
+CHAT_SAVE_URL = "http://localhost:9091/chat/save"
+
+
+async def save_voice_transcript(operator: str, user_message: str,
+                                session_summary: str, model_label: str,
+                                log_prefix: str) -> bool:
+    """Persist a voice-session transcript via POST /chat/save.
+
+    Direct persistence: the backend's turns_threshold=1 auto-mint fires
+    perform_mint() inline (embedding included), so the snapshot is searchable
+    when the 200 returns. NEVER POST /chat here (full LLM round-trip) and
+    NEVER call /mint afterward (duplicate snapshot).
+
+    Returns True ONLY on HTTP 200 — callers must clear their conversation
+    buffer only when this returns True, so a failed save can be retried by
+    a later teardown path.
+    """
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
+                CHAT_SAVE_URL,
+                json={
+                    "operator": operator,
+                    "user_message": user_message,
+                    "assistant_response": session_summary,
+                    "model": model_label,
+                    "tokens": {"prompt": 0, "completion": 0},
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    print(f"{log_prefix} Transcript saved via /chat/save "
+                          f"(minted={body.get('minted')}, snap_id={body.get('snap_id')})")
+                    return True
+                error = await resp.text()
+                print(f"{log_prefix} /chat/save failed: {resp.status} - {error[:200]}")
+                return False
+    except Exception as e:
+        print(f"{log_prefix} /chat/save error: {e}")
+        return False
