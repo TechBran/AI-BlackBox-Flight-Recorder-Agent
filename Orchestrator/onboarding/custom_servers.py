@@ -346,3 +346,60 @@ def window_guard_tokens(server: dict | None, model: str | None = None) -> int:
         if isinstance(learned, int) and not isinstance(learned, bool) and learned > 0:
             ctx = learned
     return max(4000, int(ctx * 0.6))
+
+
+# ------------------------------------------------------------- image models
+# Name-pattern allowlist (Brandon-approved v1 classification). A model served on
+# an OpenAI-compatible endpoint carries NO modality flag, so we classify by id.
+# EDIT HERE to teach the box a new local text-to-image family.
+IMAGE_MODEL_PATTERNS = (
+    "z-image", "zimage", "flux", "qwen-image", "sdxl", "sd3", "sd-turbo",
+    "stable-diffusion", "playground-v", "kolors", "hidream", "pixart",
+)
+
+
+def is_image_model(model_id: object) -> bool:
+    """Heuristic: does this bare model id name a text-to-image model?
+
+    Used to (a) gate/route the local image provider and (b) keep image models
+    out of the CHAT model catalog. Name-pattern allowlist + an ``*-image`` /
+    ``*_image`` suffix fallback. Chat models (gemma-*, llama-*, qwen3-*) do not
+    match. There is no server capability flag to key off, so misclassification
+    risk is accepted (see the design doc)."""
+    if not isinstance(model_id, str):
+        return False
+    m = model_id.lower()
+    if any(p in m for p in IMAGE_MODEL_PATTERNS):
+        return True
+    return m.endswith("-image") or m.endswith("_image")
+
+
+def resolve_image_server(model: str | None = None) -> tuple[dict, str] | None:
+    """Pick the custom (server, bare_model) for a local image request.
+
+    ``model`` (optional, may be alias-qualified) is honored when it resolves to
+    a real enabled server AND is an image model. Otherwise: the first enabled
+    server that hosts a name-matched image model, and its first such model.
+    Returns ``(server_dict, bare_model)`` or ``None`` when no local image model
+    is available. Reads the registry fresh (no import-time cache)."""
+    if model:
+        srv, bare = resolve_model(model)
+        if srv is not None and is_image_model(bare):
+            return srv, bare
+    for srv in list_servers(enabled_only=True):
+        for m in (srv.get("last_models") or []):
+            if isinstance(m, str) and is_image_model(m):
+                return srv, m
+    return None
+
+
+def list_image_models() -> list[str]:
+    """Alias-qualified ids ('alias::model') of every image model on every enabled
+    server -- the future source for a local-model picker; today used by tests."""
+    out = []
+    for srv in list_servers(enabled_only=True):
+        alias = srv.get("alias", "")
+        for m in (srv.get("last_models") or []):
+            if isinstance(m, str) and is_image_model(m):
+                out.append(qualify(alias, m))
+    return out
