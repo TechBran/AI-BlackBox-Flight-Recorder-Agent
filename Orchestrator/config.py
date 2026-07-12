@@ -670,6 +670,15 @@ GEMINI_LIVE_THINKING_CAPABLE_MODELS: frozenset = frozenset({
 
 # xAI Grok Voice Agent API (Grok real-time voice conversations)
 GROK_LIVE_URL = "wss://api.x.ai/v1/realtime"
+GROK_LIVE_MODEL = os.getenv("GROK_LIVE_MODEL", "grok-voice-latest")  # alias -> newest (currently grok-voice-think-fast-1.0)
+# Grok voice model catalog — P0 WS-probe-verified 2026-07-11 (see
+# diagnostics/voice_probes/results/). grok-voice-fast-1.0 is deprecated
+# upstream; the legacy "grok-voice-agent" string was a cosmetic label, never
+# a real model id — the code previously sent NO model at all.
+GROK_LIVE_MODELS: List[Dict] = [
+    {"id": "grok-voice-latest", "name": "Grok Voice (Latest alias)", "default": True},
+    {"id": "grok-voice-think-fast-1.0", "name": "Grok Voice Think Fast 1.0 (flagship pin)"},
+]
 GROK_LIVE_VOICES = ["Ara", "Rex", "Sal", "Eve", "Leo"]  # Available voices
 GROK_LIVE_DEFAULT_VOICE = "Rex"         # Default voice for phone
 GROK_LIVE_SAMPLE_RATE = 24000           # PCM16 audio at 24kHz (same as OpenAI Realtime)
