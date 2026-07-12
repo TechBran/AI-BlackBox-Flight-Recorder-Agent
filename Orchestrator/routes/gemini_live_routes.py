@@ -78,7 +78,10 @@ from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_gemini_live_tools
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
-from Orchestrator.routes.voice_ws_shared import save_voice_transcript
+from Orchestrator.routes.voice_ws_shared import (
+    save_voice_transcript,
+    send_gemini_tool_error,
+)
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -986,6 +989,10 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
         session.pending_tool_call = True
         print(f"[GEMINI-LIVE] Tool call detected")
 
+        # P1b: reset per-event answered-id tracking. The listener-level error
+        # responder uses this to answer ONLY dangling ids after a mid-loop crash.
+        session.answered_tool_call_ids = set()
+
         for fc in function_calls:
             call_id = fc.get("id", "")
             name = fc.get("name", "")
@@ -1355,6 +1362,7 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                 }
                 await session.gemini_ws.send(json.dumps(tool_response))
                 print(f"[GEMINI-LIVE] Sent tool response for {name}: {len(result)} chars")
+                session.answered_tool_call_ids.add(call_id)
 
             # Notify Portal
             if session.portal_ws:
@@ -1650,6 +1658,11 @@ async def gemini_listener(session: GeminiLiveSession):
                 print(f"[GEMINI-LIVE] Invalid JSON from Gemini: {message[:100]}")
             except Exception as e:
                 print(f"[GEMINI-LIVE] Error handling Gemini message: {e}")
+                # P1b: never dangle a functionCall — answer every id this event
+                # carried that the dispatch loop did not already answer.
+                await send_gemini_tool_error(
+                    session.gemini_ws, session.portal_ws, event, e,
+                    getattr(session, "answered_tool_call_ids", None))
     except websockets.exceptions.ConnectionClosed as e:
         rcvd = getattr(e, "rcvd", None)
         close_code = getattr(rcvd, "code", None)

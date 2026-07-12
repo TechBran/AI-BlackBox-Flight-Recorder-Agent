@@ -114,3 +114,43 @@ def test_grok_listener_answers_dangling_call_on_dispatch_crash(monkeypatch):
         assert item["call_id"] == "call-10"
         assert "executor exploded" in item["output"]
     asyncio.run(run())
+
+
+import Orchestrator.routes.gemini_live_routes as gm
+from Orchestrator.models import GeminiLiveSession
+
+
+def test_gemini_listener_answers_dangling_calls_on_dispatch_crash(monkeypatch):
+    async def crash(session, event):
+        raise RuntimeError("executor exploded")
+    monkeypatch.setattr(gm, "handle_gemini_message", crash)
+
+    async def run():
+        session = GeminiLiveSession(session_id="t-gm-crash", operator="system")
+        event = {"toolCall": {"functionCalls": [
+            {"id": "fc-a", "name": "web_fetch", "args": {"url": "https://x"}},
+            {"id": "fc-b", "name": "roll_dice", "args": {}},
+        ]}}
+        ws = FakeStreamWS([json.dumps(event)])
+        session.gemini_ws = ws
+        await gm.gemini_listener(session)
+        assert len(ws.sent) == 1, "crash must produce ONE toolResponse frame"
+        responses = ws.sent[0]["toolResponse"]["functionResponses"]
+        assert [r["id"] for r in responses] == ["fc-a", "fc-b"]
+        assert all("executor exploded" in r["response"]["result"] for r in responses)
+    asyncio.run(run())
+
+
+def test_gemini_dispatch_records_answered_ids():
+    async def run():
+        session = GeminiLiveSession(session_id="t-gm-ids", operator="system")
+        session.gemini_ws = FakeUpstreamWS()
+        event = {"toolCall": {"functionCalls": [
+            {"id": "fc-t", "name": "get_current_time", "args": {}},
+        ]}}
+        await gm.handle_gemini_message(session, event)
+        assert session.answered_tool_call_ids == {"fc-t"}, \
+            "dispatch must record answered ids so the error responder never double-answers"
+        responses = session.gemini_ws.sent[0]["toolResponse"]["functionResponses"]
+        assert responses[0]["id"] == "fc-t"
+    asyncio.run(run())
