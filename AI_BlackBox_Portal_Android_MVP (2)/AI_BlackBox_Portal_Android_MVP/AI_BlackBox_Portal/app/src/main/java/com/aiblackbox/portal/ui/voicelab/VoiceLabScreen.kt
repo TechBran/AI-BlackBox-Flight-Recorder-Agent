@@ -98,6 +98,7 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 //   2) Design  — description → 3 preview cards (AudioPlayerBar) → "Use this" →
 //                name → save.
 //   3) Manage  — my_voices list with delete (confirm; in_use warning via snackbar).
+//   4) Grok (xAI) — clone one ≤120s clip + consent → cloned voice_ids usable in Grok voice sessions (own /xai/voices gate).
 //
 // Gating (GET /elevenlabs/status):
 //   - not configured  → "Configure ElevenLabs in the Portal" empty state.
@@ -172,6 +173,10 @@ fun VoiceLabScreen(
                     ManageZone(viewModel, view)
                 }
             }
+
+            // Grok (xAI) voices — own gate (GET /xai/voices configured), independent
+            // of the ElevenLabs key. Renders nothing when unconfigured.
+            XaiZone(viewModel, view)
         }
     }
 }
@@ -837,6 +842,152 @@ private fun ManageZone(viewModel: VoiceLabViewModel, view: android.view.View) {
             containerColor = Neutral100,
             tonalElevation = 0.dp,
         )
+    }
+}
+
+// =============================================================================
+// Zone: Grok (xAI) voices — clone (one ≤120s clip + consent) / list / delete.
+// Gated on GET /xai/voices `configured`; cloned ids are Grok SESSION voices.
+// =============================================================================
+
+@Composable
+private fun XaiZone(viewModel: VoiceLabViewModel, view: android.view.View) {
+    val configured by viewModel.xaiConfigured.collectAsState()
+    if (!configured) return
+
+    val voices by viewModel.xaiVoices.collectAsState()
+    val cloneState by viewModel.xaiCloneState.collectAsState()
+    val cloneError by viewModel.xaiCloneError.collectAsState()
+    val part by viewModel.xaiClonePart.collectAsState()
+
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var consent by remember { mutableStateOf(false) }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri -> uri?.let { viewModel.addXaiPickedFile(it) } }
+
+    Spacer(Modifier.height(16.dp))
+    SectionCard(title = "🤖  Grok (xAI) voices") {
+        Text(
+            "Clone a voice for Grok voice sessions — one clip, max 120 seconds.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Neutral500,
+        )
+        Spacer(Modifier.height(10.dp))
+
+        // ── One reference clip ──
+        PillAction(
+            label = if (part == null) "Pick audio" else "Replace audio",
+            enabled = cloneState != CloneState.SUBMITTING,
+            onClick = { filePicker.launch("audio/*") },
+        )
+        part?.let { p ->
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(RadiusSm))
+                    .background(Neutral150OrSurface())
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    p.displayName,
+                    color = BbxWhite,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickFeedback(enabled = cloneState != CloneState.SUBMITTING) {
+                            viewModel.clearXaiPart()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove", tint = Neutral700, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        FieldLabel("Voice name")
+        InputBox(
+            value = name,
+            onValueChange = { name = it },
+            placeholder = "e.g. My Grok Voice",
+            enabled = true,
+            singleLine = true,
+        )
+
+        Spacer(Modifier.height(12.dp))
+        FieldLabel("Description (optional)")
+        InputBox(
+            value = description,
+            onValueChange = { description = it },
+            placeholder = "Tone, accent, intended use…",
+            enabled = true,
+            minHeight = 56.dp,
+        )
+
+        Spacer(Modifier.height(12.dp))
+        ConsentRow(checked = consent, enabled = true, onToggle = { consent = !consent })
+
+        Spacer(Modifier.height(16.dp))
+        val canSubmit = name.isNotBlank() && part != null && consent &&
+            cloneState != CloneState.SUBMITTING
+        PrimaryButton(
+            label = if (cloneState == CloneState.SUBMITTING) "Cloning…" else "Clone Grok voice",
+            enabled = canSubmit,
+            loading = cloneState == CloneState.SUBMITTING,
+            onClick = { viewModel.submitXaiClone(name, description, consent) },
+        )
+        AnimatedVisibility(visible = cloneError != null) {
+            cloneError?.let { ErrorText(it) }
+        }
+
+        // ── Cloned voices list + delete ──
+        Spacer(Modifier.height(16.dp))
+        FieldLabel("My Grok voices")
+        if (voices.isEmpty()) {
+            Text(
+                "No cloned Grok voices yet.",
+                color = Neutral500,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            voices.forEach { v ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                        .clip(RoundedCornerShape(RadiusSm))
+                        .background(Neutral150OrSurface())
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(v.name, color = BbxWhite, style = MaterialTheme.typography.bodyMedium)
+                        Text(v.voiceId, color = Neutral500, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .clickFeedback(enabled = true) {
+                                view.performPressFeedback()
+                                viewModel.deleteXaiVoice(v.voiceId)
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete", tint = BbxRed, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
     }
 }
 
