@@ -73,8 +73,11 @@ import com.aiblackbox.portal.data.voice.VoiceAgentPreset
 import com.aiblackbox.portal.data.voice.VoiceAgentPresets
 import com.aiblackbox.portal.data.voice.VoiceBackend
 import com.aiblackbox.portal.data.voice.VoiceCatalog
+import com.aiblackbox.portal.data.voice.isChipRole
+import com.aiblackbox.portal.data.voice.mergeTranscript
 import com.aiblackbox.portal.data.voice.modelsOrFallback
 import com.aiblackbox.portal.data.voice.shouldHoldMic
+import com.aiblackbox.portal.data.voice.toolChipText
 import com.aiblackbox.portal.data.voice.voicesOrFallback
 import com.aiblackbox.portal.data.voice.VoiceClient
 import com.aiblackbox.portal.data.voice.VoiceEvent
@@ -157,6 +160,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _transcript = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val transcript: StateFlow<List<TranscriptEntry>> = _transcript.asStateFlow()
+
+    // P3.17: server transcript + locally-injected entries (tool chips, typed text).
+    private val _serverTranscript = MutableStateFlow<List<TranscriptEntry>>(emptyList())
+    private val _localEntries = MutableStateFlow<List<TranscriptEntry>>(emptyList())
 
     // Plan Task 10: typed retrieval provenance from the voice WS dispatcher.
     private val _provenance = MutableStateFlow<Provenance?>(null)
@@ -298,9 +305,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-            // Collect transcripts
+            // Collect transcripts (P3.17: server transcript merged with local chips/typed text)
             viewModelScope.launch {
-                voiceClient?.transcript?.collect { _transcript.value = it }
+                voiceClient?.transcript?.collect {
+                    _serverTranscript.value = it
+                    _transcript.value = mergeTranscript(it, _localEntries.value)
+                }
             }
             // Plan Task 10: collect retrieval provenance pushed by the WS dispatcher
             viewModelScope.launch {
@@ -312,6 +322,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     when (event) {
                         is VoiceEvent.Error -> _error.value = event.message
                         is VoiceEvent.Status -> _statusText.value = event.message
+                        is VoiceEvent.Tool -> addLocalEntry(
+                            TranscriptEntry(role = event.kind,
+                                text = toolChipText(event.kind, event.name, event.detail))
+                        )
                         else -> Unit
                     }
                 }
@@ -390,6 +404,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         stopMic()
         stopAudioPlayback()
         _transcript.value = emptyList()
+        _serverTranscript.value = emptyList()
+        _localEntries.value = emptyList()
         _provenance.value = null
         // Enable communication mode for strong system-level AEC
         audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
@@ -448,6 +464,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         }
         _amplitude.value = 0f
         _waveSpeaker.value = WaveSpeaker.IDLE
+    }
+
+    private fun addLocalEntry(entry: TranscriptEntry) {
+        _localEntries.value = _localEntries.value + entry
+        _transcript.value = mergeTranscript(_serverTranscript.value, _localEntries.value)
     }
 
     // -------------------------------------------------------------------------
@@ -1206,20 +1227,35 @@ fun VoiceScreen(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             items(transcript) { entry ->
-                val isUser = entry.role == "user"
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .widthIn(max = 280.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isUser) Neutral250 else Neutral100)
-                            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-                            .padding(10.dp)
+                if (isChipRole(entry.role)) {
+                    // P3.17: compact tool-activity chip
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Neutral200)
+                                .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                                .padding(horizontal = 12.dp, vertical = 5.dp)
+                        ) {
+                            Text(entry.text, style = MaterialTheme.typography.labelSmall, color = BbxDim)
+                        }
+                    }
+                } else {
+                    val isUser = entry.role == "user"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
                     ) {
-                        Text(entry.text, style = MaterialTheme.typography.bodyMedium, color = BbxWhite)
+                        Box(
+                            modifier = Modifier
+                                .widthIn(max = 280.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isUser) Neutral250 else Neutral100)
+                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                                .padding(10.dp)
+                        ) {
+                            Text(entry.text, style = MaterialTheme.typography.bodyMedium, color = BbxWhite)
+                        }
                     }
                 }
             }
