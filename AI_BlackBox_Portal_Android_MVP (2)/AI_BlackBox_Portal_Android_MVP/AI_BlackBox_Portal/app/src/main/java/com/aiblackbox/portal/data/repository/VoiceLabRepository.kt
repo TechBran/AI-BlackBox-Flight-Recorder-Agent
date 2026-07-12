@@ -104,6 +104,30 @@ data class SharedVoice(
     val description: String = "",
 )
 
+/** One xAI custom (cloned) Grok voice. Tolerates voice_id|id key naming. */
+data class XaiVoice(val voiceId: String, val name: String)
+
+/** GET /xai/voices → gating (configured=false hides the zone) + cloned voices. */
+data class XaiVoicesResult(val configured: Boolean, val voices: List<XaiVoice>)
+
+/** Top-level so the offline unit test can exercise the wire contract directly. */
+internal fun parseXaiVoicesResponse(raw: String): XaiVoicesResult {
+    val j = Json { ignoreUnknownKeys = true; isLenient = true }
+    val o = j.parseToJsonElement(raw).jsonObject
+    val configured = o["configured"]?.jsonPrimitive?.content?.toBoolean() ?: false
+    val voices = (o["voices"]?.jsonArray ?: JsonArray(emptyList())).mapNotNull { el ->
+        val vo = el.jsonObject
+        val id = vo["voice_id"]?.jsonPrimitive?.contentOrNull
+            ?: vo["id"]?.jsonPrimitive?.contentOrNull
+            ?: return@mapNotNull null
+        XaiVoice(
+            voiceId = id,
+            name = vo["name"]?.jsonPrimitive?.contentOrNull ?: id,
+        )
+    }
+    return XaiVoicesResult(configured, voices)
+}
+
 class VoiceLabRepository(private val api: BlackBoxApi) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -300,6 +324,58 @@ class VoiceLabRepository(private val api: BlackBoxApi) {
         val raw = postOrThrow("/elevenlabs/library/add", payload)
         val o = json.parseToJsonElement(raw).jsonObject
         return o["voice_id"]?.jsonPrimitive?.contentOrNull ?: ""
+    }
+
+    // -------------------------------------------------------------------------
+    // xAI (Grok) custom voices — GET/POST/DELETE /xai/voices
+    //   Cloned ids are Grok SESSION voices (not TTS-picker voices). The clone
+    //   path mirrors cloneVoice()'s manual multipart; the backend consent gate
+    //   422s unless consent == "true".
+    // -------------------------------------------------------------------------
+    suspend fun fetchXaiVoices(): XaiVoicesResult =
+        parseXaiVoicesResponse(api.get("/xai/voices"))
+
+    suspend fun cloneXaiVoice(
+        name: String,
+        file: File,
+        consent: Boolean,
+        description: String = "",
+    ): String {
+        val builder = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("name", name)
+            .addFormDataPart("consent", if (consent) "true" else "false")
+        if (description.isNotBlank()) builder.addFormDataPart("description", description)
+        builder.addFormDataPart("file", file.name, file.asRequestBody(mediaTypeFor(file.name)))
+        val request = Request.Builder()
+            .url("${api.getBaseUrl()}/xai/voices")
+            .header("X-BlackBox-Client", "native-android/1.0")
+            .post(builder.build())
+            .build()
+        api.getClient().newCall(request).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                throw VoiceLabException(response.code, extractError(body, response.code))
+            }
+            val o = json.parseToJsonElement(body).jsonObject
+            return o["voice_id"]?.jsonPrimitive?.contentOrNull ?: ""
+        }
+    }
+
+    suspend fun deleteXaiVoice(voiceId: String): Boolean {
+        val request = Request.Builder()
+            .url("${api.getBaseUrl()}/xai/voices/$voiceId")
+            .header("X-BlackBox-Client", "native-android/1.0")
+            .delete()
+            .build()
+        api.getClient().newCall(request).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            if (!response.isSuccessful) {
+                throw VoiceLabException(response.code, extractError(body, response.code))
+            }
+            val o = json.parseToJsonElement(body).jsonObject
+            return o["ok"]?.jsonPrimitive?.content?.toBoolean() ?: false
+        }
     }
 
     // -------------------------------------------------------------------------
