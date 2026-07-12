@@ -1,0 +1,37 @@
+{
+  "name": "local_image",
+  "description": "Generate images for FREE on your own local GPU (Z-Image Turbo via stable-diffusion.cpp on the LAN inference box). No API cost, no rate limits, fully private -- nothing leaves your network. Photorealistic, strong at in-image text (English + Chinese). Slower than cloud (~20-35s/image; the first image after idle warms up the model). Prefer this for casual, bulk, or privacy-sensitive image generation where cost matters more than latency; use a cloud image tool when speed is critical. Returns a task_id that completes asynchronously.",
+  "category": "media_generation",
+  "groups": ["chat", "chat_cu", "realtime", "gemini_live", "grok_live", "phone", "mcp"],
+  "tier": 2,
+  "x-availability": {
+    "feature": "image",
+    "provider": "local"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Detailed description of the image. Be specific about subjects, style, composition, lighting, colors, and mood. English or Chinese; in-image text is supported."
+      },
+      "size": {
+        "type": "string",
+        "description": "Image size. '1024x1024' (native/best), '768x768' (faster), '1024x768' (landscape), '768x1024' (portrait). Default '1024x1024'.",
+        "enum": ["1024x1024", "768x768", "1024x768", "768x1024"],
+        "default": "1024x1024"
+      },
+      "numberOfImages": {
+        "type": "integer",
+        "description": "Number of images (1-4). Generated sequentially on one GPU, so keep small. Default 1.",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      }
+    },
+    "required": ["prompt"]
+  },
+  "returns": "task_id (string) for async status tracking via get_task_status",
+  "example": "local_image(prompt=\"a red fox in a snowy forest, golden hour, photorealistic\", size=\"1024x1024\")",
+  "notes": "Async, free, on-device. No API key -- availability is gated on a registered custom server hosting an image model (e.g. z-image). Cold start ~35s; warm ~20-25s."
+}
