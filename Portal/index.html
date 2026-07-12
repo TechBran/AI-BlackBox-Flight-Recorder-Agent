@@ -1877,6 +1877,15 @@
             <label for="vaRealtimeIdleTimeoutInput">Idle timeout (ms)</label>
             <input type="number" id="vaRealtimeIdleTimeoutInput" min="5000" max="300000" placeholder="30000">
           </div>
+          <div class="va-row">
+            <label for="vaRealtimeNoiseSelect">Noise reduction</label>
+            <select id="vaRealtimeNoiseSelect">
+              <option value="" selected>Server default</option>
+              <option value="near_field">near_field (headset / handheld)</option>
+              <option value="far_field">far_field (laptop / room mic)</option>
+              <option value="off">off</option>
+            </select>
+          </div>
           <div class="va-controls">
             <button id="vaRealtimeConnect" class="btn btn-primary" type="button">Connect</button>
             <button id="vaRealtimeMic" class="btn" type="button" disabled>🎤 Mic</button>

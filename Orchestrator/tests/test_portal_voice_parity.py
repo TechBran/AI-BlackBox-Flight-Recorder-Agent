@@ -34,13 +34,19 @@ FILE_LITERALS = {
         "connectMsg.reasoning_effort",
         "reconnectMsg.reasoning_effort",
     ],
+    "modules/gpt-realtime.js": [
+        "connectMsg.noise_reduction",
+        "reconnectMsg.noise_reduction",
+    ],
     "index.html": [
         "vaGrokModelSelect",
         "vaGrokReasoningSelect",
+        "vaRealtimeNoiseSelect",
     ],
     "modules/voice-agents-modal.js": [
         "vaGrokModelSelect",
         "vaGrokReasoningSelect",
+        "vaRealtimeNoiseSelect",
     ],
 }
 

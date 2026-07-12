@@ -35,6 +35,7 @@ const SEL = {
     eagernessRow: null,        // optional row wrapper for eagerness
     idleTimeoutInput: 'realtimeIdleTimeout',
     idleRow: null,             // optional row wrapper for idle timeout
+    noiseSelect: 'realtimeNoiseSelect',
     connectButton: 'realtimeConnect',
     disconnectButton: 'realtimeDisconnect',
     micButton: 'realtimeMic',
@@ -69,6 +70,7 @@ let currentRealtimeModel = null;
 let currentRealtimeVadType = null;
 let currentRealtimeVadEagerness = null;
 let currentRealtimeIdleTimeoutMs = null;
+let currentRealtimeNoiseReduction = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -1196,6 +1198,10 @@ export async function connect(operator) {
         ? parseInt(idleTimeoutInput.value, 10) : NaN;
     const idleTimeoutMs = Number.isFinite(idleTimeoutRaw) ? idleTimeoutRaw : undefined;
 
+    // noise_reduction (near_field|far_field|off) — gpt-realtime-2.1 feature (P2)
+    const noiseSelect = SEL.noiseSelect ? $(SEL.noiseSelect) : null;
+    const noiseReduction = (noiseSelect && noiseSelect.value) ? noiseSelect.value : undefined;
+
     // Capture v2 config into module state so reconnect can replay it
     // (otherwise reconnect rebuilds with only {type, operator, voice} and
     // the backend silently falls back to env defaults — T14 F1).
@@ -1203,6 +1209,7 @@ export async function connect(operator) {
     currentRealtimeVadType = vadType || null;
     currentRealtimeVadEagerness = vadEagerness || null;
     currentRealtimeIdleTimeoutMs = (idleTimeoutMs !== undefined) ? idleTimeoutMs : null;
+    currentRealtimeNoiseReduction = noiseReduction || null;
 
     sessionId = crypto.randomUUID();
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1229,6 +1236,7 @@ export async function connect(operator) {
         if (vadType) connectMsg.vad_type = vadType;
         if (vadEagerness) connectMsg.vad_eagerness = vadEagerness;
         if (idleTimeoutMs !== undefined) connectMsg.idle_timeout_ms = idleTimeoutMs;
+        if (noiseReduction) connectMsg.noise_reduction = noiseReduction;
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1611,6 +1619,7 @@ function reconnectToExistingSession() {
         if (currentRealtimeVadType) reconnectMsg.vad_type = currentRealtimeVadType;
         if (currentRealtimeVadEagerness) reconnectMsg.vad_eagerness = currentRealtimeVadEagerness;
         if (currentRealtimeIdleTimeoutMs !== null) reconnectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
+        if (currentRealtimeNoiseReduction) reconnectMsg.noise_reduction = currentRealtimeNoiseReduction;
         ws.send(JSON.stringify(reconnectMsg));
     };
 

@@ -54,6 +54,7 @@ const REALTIME_SELECTORS = {
     eagernessRow: 'vaRealtimeEagernessRow',
     idleTimeoutInput: 'vaRealtimeIdleTimeoutInput',
     idleRow: 'vaRealtimeIdleRow',
+    noiseSelect: 'vaRealtimeNoiseSelect',
     connectButton: 'vaRealtimeConnect',
     micButton: 'vaRealtimeMic',
     disconnectButton: 'vaRealtimeDisconnect',
