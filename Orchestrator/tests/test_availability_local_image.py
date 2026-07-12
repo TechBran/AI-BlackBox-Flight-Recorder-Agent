@@ -22,6 +22,14 @@ def test_local_image_tool_available(monkeypatch):
     assert av.is_available(entry) is True
 
 
+def test_local_additive_even_with_explicit_image_enabled(monkeypatch):
+    # local is registry-governed, NOT part of the cloud IMAGE_ENABLED list, so an
+    # explicit pref (written by the onboarding image step) must not disable it.
+    monkeypatch.setattr(av, "_read_env", lambda: {"IMAGE_ENABLED": "gemini,openai"})
+    monkeypatch.setattr(av, "_local_image_available", lambda: True)
+    assert av.enabled_providers("image") == {"gemini", "openai", "local"}
+
+
 def test_local_not_leaking_into_web_search(monkeypatch):
     # The registry gate must be image-only; web_search must be unaffected.
     monkeypatch.setattr(av, "_read_env", lambda: {})

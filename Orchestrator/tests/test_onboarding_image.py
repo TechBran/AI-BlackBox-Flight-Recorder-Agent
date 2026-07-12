@@ -52,6 +52,10 @@ def tmp_env(tmp_path, monkeypatch):
     for k in img_keys + ["IMAGE_ENABLED", "IMAGE_DEFAULT", "GEMINI_API_KEY"]:
         if k:
             monkeypatch.delenv(k, raising=False)
+    # Registry-gated 'local' reads the real custom_models.json; keep it out of
+    # these cloud-provider onboarding assertions (it's managed in the custom-
+    # server wizard, not the image step).
+    monkeypatch.setattr(availability, "_local_image_available", lambda: False)
 
     def write(mapping: dict):
         secrets_writer.update_env(mapping)

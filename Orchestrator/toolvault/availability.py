@@ -37,7 +37,6 @@ FEATURES = {
         "default_pref": "IMAGE_DEFAULT",
         "provider_env": {
             "gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY", "grok": "XAI_API_KEY",
-            "local": None,   # registry-gated (no API-key env) -- see _local_image_available
         },
         "provider_tool": {
             "gemini": "gemini_image", "openai": "openai_image", "grok": "grok_image",
@@ -111,20 +110,26 @@ def _local_image_available() -> bool:
 def enabled_providers(feature: str = "web_search") -> set:
     """Resolve the enabled provider set for ``feature``.
 
-    Explicit ``<FEATURE>_ENABLED`` pref wins; otherwise default to every provider
-    whose key is present, plus the feature's keyless floor (web_search ->
-    duckduckgo; image -> none)."""
+    Explicit ``<FEATURE>_ENABLED`` pref wins for the env-keyed cloud providers;
+    otherwise default to every provider whose key is present, plus the feature's
+    keyless floor (web_search -> duckduckgo; image -> none). The image feature
+    ADDITIONALLY includes the registry-gated 'local' provider whenever a custom
+    server hosts an image model -- additive regardless of the pref, since local is
+    governed by the custom-server registry, not the cloud enable list."""
     spec = FEATURES[feature]
     env = _read_env()
     raw = (env.get(spec["enabled_pref"]) or "").strip()
     if raw:
-        return {p.strip() for p in raw.split(",") if p.strip()}
-    enabled = set(spec["keyless_floor"])
-    for prov, key in spec["provider_env"].items():
-        if key and env.get(key):
-            enabled.add(prov)
-    # Registry-gated providers (no env key): the local image server is enabled
-    # iff a registered+enabled custom server actually hosts an image model.
+        enabled = {p.strip() for p in raw.split(",") if p.strip()}
+    else:
+        enabled = set(spec["keyless_floor"])
+        for prov, key in spec["provider_env"].items():
+            if key and env.get(key):
+                enabled.add(prov)
+    # Registry-gated providers (no env key): the local image server is enabled iff
+    # a registered+enabled custom server hosts an image model -- ADDITIVE even under
+    # an explicit IMAGE_ENABLED, so configuring cloud image providers in the wizard
+    # can't accidentally disable local image generation.
     if feature == "image" and _local_image_available():
         enabled.add("local")
     return enabled
