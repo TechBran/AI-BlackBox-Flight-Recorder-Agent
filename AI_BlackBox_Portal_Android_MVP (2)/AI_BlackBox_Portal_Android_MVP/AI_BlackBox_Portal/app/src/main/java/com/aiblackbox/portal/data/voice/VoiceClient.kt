@@ -298,6 +298,17 @@ class VoiceClient(
         return ok
     }
 
+    /** P3.14 barge-in: ask the server to cancel the in-flight AI response.
+     *  All three bridges accept {"type":"interrupt"} (gemini_live_routes.py:645,
+     *  realtime response.cancel realtime_routes.py:614, grok equivalent). */
+    fun sendInterrupt() {
+        val msg = buildJsonObject { put("type", "interrupt") }
+        wsClient.send(msg.toString())
+        _isAISpeaking.value = false
+        aiStoppedSpeakingAt = System.currentTimeMillis()
+        android.util.Log.d("VoiceClient", "Sent interrupt")
+    }
+
     // A failed send on a session we believe is live = dead socket. Close the leg so
     // the transport surfaces Disconnected NOW (and, after P3.8, the reconnect loop
     // resumes) instead of waiting for the keepalive pong timeout.

@@ -423,6 +423,25 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         if (isRecordingAudio) stopMic() else startMic()
     }
 
+    /** P3.14 barge-in: flush queued AI audio locally + cancel the response server-side. */
+    fun interrupt() {
+        try { voiceClient?.sendInterrupt() } catch (e: Exception) {
+            android.util.Log.e("VoiceVM", "interrupt: ${e.message}")
+        }
+        audioPlaybackQueue.clear()
+        preBufferAccumulated = 0
+        preBufferReady = false
+        synchronized(audioTrackLock) {
+            try {
+                audioTrack?.pause()
+                audioTrack?.flush()
+                audioTrack?.play()
+            } catch (_: Exception) {}
+        }
+        _amplitude.value = 0f
+        _waveSpeaker.value = WaveSpeaker.IDLE
+    }
+
     // -------------------------------------------------------------------------
     // Mic input — AudioRecord -> base64 PCM16 -> WebSocket
     // -------------------------------------------------------------------------
@@ -1092,12 +1111,18 @@ fun VoiceScreen(
         }
         Spacer(Modifier.height(16.dp))
 
-        // ── HD flowing-ribbon waveform (real amplitude) ──
-        VoiceWaveform(
-            amplitude = amplitude,
-            speaker = waveSpeaker,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // ── HD flowing-ribbon waveform — tap to barge-in while the AI speaks (P3.14) ──
+        Box(
+            modifier = Modifier.fillMaxWidth().clickFeedback {
+                if (voiceState == VoiceState.SPEAKING) viewModel.interrupt()
+            }
+        ) {
+            VoiceWaveform(
+                amplitude = amplitude,
+                speaker = waveSpeaker,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(Modifier.height(12.dp))
 
         // Plan Task 10: retrieval provenance from voice WS dispatcher.
