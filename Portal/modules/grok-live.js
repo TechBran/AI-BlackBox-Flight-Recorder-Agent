@@ -30,6 +30,7 @@ import { addBubble, appendBubble } from './chat-bubbles.js';
 // Defaults preserved for backward-compat; production uses modal-supplied ids.
 const SEL = {
     voiceSelect: 'grokVoiceSelect',
+    modelSelect: 'grokModelSelect',
     connectButton: 'grokConnectBtn',
     disconnectButton: 'grokDisconnectBtn',
     micButton: 'grokMicBtn',
@@ -56,6 +57,12 @@ let sessionId = null;
 
 /** Selected voice */
 let selectedVoice = 'Ara';
+
+/**
+ * Config captured at connect, replayed on reconnect — prevents silent
+ * server-default downgrade on network blip (T14 F1 pattern, gpt-realtime.js).
+ */
+let currentGrokModel = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -771,6 +778,11 @@ export async function connect(operator) {
     const voiceSelect = SEL.voiceSelect ? $(SEL.voiceSelect) : null;
     selectedVoice = voiceSelect ? voiceSelect.value : 'Ara';
 
+    // Read model from dropdown (hydrated from /grok-live/status models[] — P2)
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
+    currentGrokModel = selectedModel || null;
+
     // Reset session state
     sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
@@ -792,12 +804,14 @@ export async function connect(operator) {
         currentOperator = operator;
         intentionalDisconnect = false;
 
-        // Send connect message with operator and voice
-        ws.send(JSON.stringify({
+        // Build connect message; omit undefined fields to keep the wire clean
+        const connectMsg = {
             type: 'connect',
             operator: operator,
             voice: selectedVoice
-        }));
+        };
+        if (selectedModel) connectMsg.model = selectedModel;
+        ws.send(JSON.stringify(connectMsg));
     };
 
     ws.onmessage = (event) => {
@@ -1101,11 +1115,15 @@ function reconnectToExistingSession() {
     ws.onopen = () => {
         console.log('[GROK-LIVE] Reconnect WebSocket opened');
         intentionalDisconnect = false;
-        ws.send(JSON.stringify({
+        // Restore config from module state — prevents silent server-default
+        // downgrade on network blip (T14 F1 pattern from gpt-realtime.js).
+        const reconnectMsg = {
             type: 'connect',
             operator: currentOperator,
             voice: selectedVoice
-        }));
+        };
+        if (currentGrokModel) reconnectMsg.model = currentGrokModel;
+        ws.send(JSON.stringify(reconnectMsg));
     };
 
     ws.onmessage = (event) => {
@@ -1281,6 +1299,58 @@ export async function checkGrokLiveAvailable() {
     }
 }
 
+/**
+ * Fetch Grok Live catalog from /grok-live/status with 5min sessionStorage
+ * cache. Mirrors gpt-realtime.js fetchRealtimeCatalog() (audit M3 — no
+ * JS-side catalog).
+ * @returns {Promise<Object|null>} status/catalog object, or null on failure
+ */
+async function fetchGrokLiveCatalog() {
+    const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
+    const cacheKey = 'bb_grok_live_catalog';
+
+    try {
+        const cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
+        if (cached && Date.now() - cached.ts < CACHE_TTL_MS && cached.data) {
+            console.log(`[GROK-LIVE] Catalog cache hit (age ${Math.round((Date.now() - cached.ts) / 1000)}s)`);
+            return cached.data;
+        }
+    } catch (_) { /* corrupted cache — fall through */ }
+
+    try {
+        const res = await fetch('/grok-live/status');
+        if (res.ok) {
+            const data = await res.json();
+            try {
+                sessionStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+            } catch (_) { /* sessionStorage full or disabled */ }
+            return data;
+        }
+    } catch (err) {
+        console.error('[GROK-LIVE] Failed to fetch catalog:', err);
+    }
+    return null;
+}
+
+/**
+ * Populate the Grok model dropdown from catalog models[] (P2 contract:
+ * models: [{id, name}], model_default). No-op when fields absent (pre-P2
+ * backend): connect() then omits `model` and the backend default applies.
+ */
+function populateGrokModelDropdown(catalog) {
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    if (!modelSelect || !catalog || !Array.isArray(catalog.models)) return;
+    modelSelect.innerHTML = '';
+    catalog.models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name || m.id;
+        if (m.id === catalog.model_default) opt.selected = true;
+        modelSelect.appendChild(opt);
+    });
+    console.log(`[GROK-LIVE] Model dropdown populated with ${catalog.models.length} entries, default=${catalog.model_default}`);
+}
+
 // =============================================================================
 // UI Initialization
 // =============================================================================
@@ -1297,6 +1367,11 @@ export function initGrokLiveUI(config) {
         Object.assign(SEL, config.selectors);
     }
     console.log('[GROK-LIVE] Initializing UI...');
+
+    // Populate model dropdown from /grok-live/status (5min sessionStorage cache)
+    fetchGrokLiveCatalog().then(catalog => {
+        if (catalog) populateGrokModelDropdown(catalog);
+    });
 
     const micBtn = SEL.micButton ? $(SEL.micButton) : null;
     const connectBtn = SEL.connectButton ? $(SEL.connectButton) : null;

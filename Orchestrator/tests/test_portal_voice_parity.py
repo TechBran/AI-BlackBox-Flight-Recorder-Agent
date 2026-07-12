@@ -25,6 +25,19 @@ FILE_LITERALS = {
         "case 'speech_stopped':",
         "appendBubble",
     ],
+    "modules/grok-live.js": [
+        "populateGrokModelDropdown",
+        "bb_grok_live_catalog",
+        "model_default",
+        "connectMsg.model",
+        "reconnectMsg.model",
+    ],
+    "index.html": [
+        "vaGrokModelSelect",
+    ],
+    "modules/voice-agents-modal.js": [
+        "vaGrokModelSelect",
+    ],
 }
 
 CASES = [(f, lit) for f, lits in FILE_LITERALS.items() for lit in lits]
