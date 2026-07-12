@@ -124,6 +124,8 @@ class GeminiLiveSession:
     is_recording: bool = False           # Whether client is currently recording
     is_speaking: bool = False            # Whether AI is currently speaking
     transcript_buffer: str = ""          # Buffer for current response transcript
+    input_transcript_buffer: str = ""            # Native inputTranscription accumulation, flushed per turn (P1.8)
+    native_transcription_active: bool = False    # True once native transcription observed — Whisper is fallback-only (P1.8)
     voice: str = "Charon"                # Selected voice for this session
     pending_tool_call: bool = False      # Whether waiting for tool call to complete (prevents duplicate responses)
     user_audio_buffer: List[str] = field(default_factory=list)  # Buffer for user audio chunks (base64 PCM16) for Whisper transcription

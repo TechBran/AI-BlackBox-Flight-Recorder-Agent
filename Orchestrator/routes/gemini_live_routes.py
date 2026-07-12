@@ -477,7 +477,12 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         "tools": get_gemini_live_tools("gemini_live"),
         "contextWindowCompression": {
             "slidingWindow": {}
-        }
+        },
+        # P1.8 — native transcription for both directions: Google transcribes
+        # in-session, so the post-hoc Whisper /stt/json hop is fallback-only
+        # (removes the STT quota dependency from the voice path).
+        "inputAudioTranscription": {},
+        "outputAudioTranscription": {}
     }
 
     # Add session resumption if we have a handle from a previous connection
@@ -726,25 +731,31 @@ async def handle_portal_message(session: GeminiLiveSession, data: Dict):
         # NOTE: Gemini Live user transcript is post-hoc Whisper file STT (no
         # interim deltas), so it is final-only by design — no user_transcript_delta
         # here (unlike the GPT Realtime + Grok live agents which emit interims).
-        transcript = await transcribe_user_audio(session)
-        if transcript:
-            # Add to session conversation for BlackBox snapshot
-            # Use commit_timestamp (when user stopped speaking) for correct chronological order
-            session.conversation.append({
-                "role": "user",
-                "content": transcript,
-                "timestamp": commit_timestamp,
-                "source": "voice"
-            })
-            # Also notify Portal (may or may not arrive before disconnect)
-            if session.portal_ws:
-                if await _safe_ws_send(session.portal_ws, {
-                    "type": "user_transcript",
-                    "data": transcript
-                }):
-                    print(f"[GEMINI-LIVE] Sent user_transcript to Portal")
-                else:
-                    print(f"[GEMINI-LIVE] Could not send user_transcript (ws closed?)")
+        if session.native_transcription_active:
+            # P1.8 — native transcription owns the user transcript: skip the
+            # Whisper hop entirely and drop the buffered audio.
+            session.user_audio_buffer = []
+        else:
+            # FALLBACK ONLY: post-hoc Whisper via /stt/json.
+            transcript = await transcribe_user_audio(session)
+            if transcript:
+                # Add to session conversation for BlackBox snapshot
+                # Use commit_timestamp (when user stopped speaking) for correct chronological order
+                session.conversation.append({
+                    "role": "user",
+                    "content": transcript,
+                    "timestamp": commit_timestamp,
+                    "source": "voice"
+                })
+                # Also notify Portal (may or may not arrive before disconnect)
+                if session.portal_ws:
+                    if await _safe_ws_send(session.portal_ws, {
+                        "type": "user_transcript",
+                        "data": transcript
+                    }):
+                        print(f"[GEMINI-LIVE] Sent user_transcript to Portal")
+                    else:
+                        print(f"[GEMINI-LIVE] Could not send user_transcript (ws closed?)")
 
     elif msg_type == "text_input":
         # Send text message using BidiGenerateContentClientContent
@@ -822,23 +833,30 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
     if "serverContent" in event:
         server_content = event["serverContent"]
 
-        # Log all keys in serverContent to discover user transcription field
-        sc_keys = list(server_content.keys())
-        if sc_keys and sc_keys != ['modelTurn'] and sc_keys != ['turnComplete']:
-            print(f"[GEMINI-LIVE] serverContent keys: {sc_keys}")
-
-        # Handle input audio transcription (user's speech) - check various possible field names
-        user_transcript = None
-        for field in ["inputTranscript", "inputAudioTranscript", "userTranscript", "transcript"]:
-            if field in server_content:
-                user_transcript = server_content[field]
-                print(f"[GEMINI-LIVE] Found user transcript in '{field}': {user_transcript[:100] if user_transcript else 'empty'}...")
-                break
-
-        if user_transcript and session.portal_ws:
+        # Native transcription (P1.8): BidiGenerateContentTranscription objects
+        # with a .text field — the REAL field names (the old code sniffed
+        # inputTranscript/userTranscript/etc., none of which exist, and would
+        # have crashed slicing a dict — recon finding #14).
+        input_tx = server_content.get("inputTranscription")
+        if isinstance(input_tx, dict) and input_tx.get("text"):
+            session.native_transcription_active = True
+            session.input_transcript_buffer += input_tx["text"]
+            session.user_audio_buffer = []  # native owns the transcript — drop the Whisper buffer
             await _safe_ws_send(session.portal_ws, {
-                "type": "user_transcript",
-                "data": user_transcript
+                "type": "user_transcript_delta",
+                "data": input_tx["text"]
+            })
+
+        output_tx = server_content.get("outputTranscription")
+        if isinstance(output_tx, dict) and output_tx.get("text"):
+            session.native_transcription_active = True
+            # Feed the same buffer part.text used to fill — native-audio models
+            # are NOT guaranteed to emit part.text (recon: empty assistant
+            # lines in saved transcripts).
+            session.transcript_buffer += output_tx["text"]
+            await _safe_ws_send(session.portal_ws, {
+                "type": "transcript_delta",
+                "data": output_tx["text"]
             })
 
         # Check if turn is complete
@@ -868,7 +886,7 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
 
                     # CONTINUOUS LISTENING FIX: When AI starts speaking, transcribe user audio
                     # This ensures each user turn is captured as a separate message
-                    if not session.is_speaking and session.user_audio_buffer:
+                    if not session.is_speaking and session.user_audio_buffer and not session.native_transcription_active:
                         # AI just started responding - user's turn is complete
                         # Capture timestamp NOW (when user's turn ended)
                         user_turn_timestamp = now_utc_iso()
@@ -933,6 +951,22 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
         # Handle turn/generation complete
         if turn_complete or generation_complete:
             session.is_speaking = False
+
+            # P1.8 — flush the native user transcript FIRST so the ledger
+            # conversation stays user → assistant ordered.
+            if session.input_transcript_buffer.strip():
+                user_text = session.input_transcript_buffer.strip()
+                session.conversation.append({
+                    "role": "user",
+                    "content": user_text,
+                    "timestamp": now_utc_iso(),
+                    "source": "voice"
+                })
+                await _safe_ws_send(session.portal_ws, {
+                    "type": "user_transcript",
+                    "data": user_text
+                })
+                session.input_transcript_buffer = ""
 
             # Add AI response to conversation for BlackBox snapshot
             if session.transcript_buffer.strip():

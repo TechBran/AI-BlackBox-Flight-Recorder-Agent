@@ -78,6 +78,8 @@ def release_payload(session: Any) -> None:
         session.user_audio_buffer = []
     if hasattr(session, "transcript_buffer"):
         session.transcript_buffer = ""
+    if hasattr(session, "input_transcript_buffer"):
+        session.input_transcript_buffer = ""
 
 
 def reap(sessions: dict, now: Optional[float] = None, *, grace: float = DISCONNECTED_GRACE_SEC) -> list[str]:
