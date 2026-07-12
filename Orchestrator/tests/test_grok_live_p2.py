@@ -333,3 +333,63 @@ async def test_reconnect_without_conversation_id_rebuilds(monkeypatch):
     await gl.grok_reconnect(session)
 
     configure_mock.assert_awaited_once()  # legacy full-rebuild path preserved
+
+
+# ---------------------------------------------------------------------------
+# ASR biasing — replace / keyterms (contact-seeded) / language_hint
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def stub_contacts(monkeypatch):
+    def _fake_load():
+        return {
+            "test_operator": {
+                "id1": {"name": "Ada Lovelace", "phone": "+15550001"},
+                "id2": {"name": "", "phone": "+15550002"},          # empty — skipped
+                "id3": {"name": "Zed", "phone": "+15550003"},
+            }
+        }
+    monkeypatch.setattr("Orchestrator.contacts.load_contacts", _fake_load)
+
+
+@pytest.mark.asyncio
+async def test_keyterms_seeded_from_contact_names(stub_grok_fossil_context, stub_contacts):
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert payload["session"]["keyterms"] == ["Ada Lovelace", "Zed"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_keyterms_override_contacts_and_are_capped(stub_grok_fossil_context, stub_contacts):
+    session = _make_grok_session()
+    over_limit = [f"term{i}" for i in range(120)] + ["x" * 51]  # >100 + >50 chars
+    await configure_grok_session(session, "test_operator", voice="Ara",
+                                 keyterms=over_limit)
+    payload = _extract_grok_payload(session.grok_ws.send)
+    keyterms = payload["session"]["keyterms"]
+    assert len(keyterms) == 100                # xAI cap: 100 terms
+    assert all(len(k) <= 50 for k in keyterms) # xAI cap: 50 chars
+    assert "Ada Lovelace" not in keyterms      # explicit list wins over seeding
+
+
+@pytest.mark.asyncio
+async def test_replace_and_language_hint_emitted(stub_grok_fossil_context, stub_contacts):
+    session = _make_grok_session()
+    await configure_grok_session(
+        session, "test_operator", voice="Ara",
+        replace_map={"BlackBox": "black box"}, language_hint="en-US",
+    )
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert payload["session"]["replace"] == {"BlackBox": "black box"}
+    assert payload["session"]["audio"]["input"]["transcription"]["language_hint"] == "en-US"
+
+
+@pytest.mark.asyncio
+async def test_empty_contact_book_omits_keyterms(stub_grok_fossil_context, monkeypatch):
+    """Fresh-box gate: empty book / unknown operator -> no keyterms field at all."""
+    monkeypatch.setattr("Orchestrator.contacts.load_contacts", lambda: {})
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert "keyterms" not in payload["session"]

@@ -290,7 +290,33 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
         session.status = "error"
         return False
 
-async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = "", reasoning_effort: Optional[str] = None):
+def _contact_keyterms(operator: str, limit: int = 100) -> list:
+    """Operator's contact names for xAI ASR keyterm biasing (caps: 100 x 50 chars).
+
+    Best-effort — any failure (missing file, fresh box, unknown operator)
+    returns []. Uses load_contacts (read-only; no seed-book write)."""
+    try:
+        from Orchestrator.contacts import load_contacts
+        book = load_contacts().get(operator, {}) or {}
+        names: list = []
+        for contact in book.values():
+            if not isinstance(contact, dict):
+                continue
+            name = (contact.get("name") or "").strip()
+            if name and len(name) <= 50 and name not in names:
+                names.append(name)
+            if len(names) >= limit:
+                break
+        return names
+    except Exception as e:
+        print(f"[GROK-LIVE] contact keyterms unavailable: {e}")
+        return []
+
+
+async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = "", reasoning_effort: Optional[str] = None,
+                                 replace_map: Optional[Dict[str, str]] = None,
+                                 keyterms: Optional[list] = None,
+                                 language_hint: Optional[str] = None):
     """
     Configure the Grok Voice Agent session with tools and settings.
     Injects operator-specific context and personalization.
@@ -316,6 +342,12 @@ async def configure_grok_session(session: 'GrokLiveSession', operator: str, voic
     if reasoning_effort is not None and session.model not in GROK_LIVE_REASONING_CAPABLE_MODELS:
         print(f"[GROK-LIVE] reasoning_effort ignored — model {session.model!r} is not reasoning-capable")
         reasoning_effort = None
+
+    # ASR biasing — seed keyterms from the operator's contact book when the
+    # client didn't supply any (names are what voice ASR most often mangles).
+    if keyterms is None:
+        keyterms = _contact_keyterms(operator)
+    keyterms = [k for k in keyterms if isinstance(k, str) and 0 < len(k) <= 50][:100]
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -497,6 +529,13 @@ Do this BEFORE responding to the user - check what happened recently so you're c
 
     if reasoning_effort is not None:
         config_event["session"]["reasoning"] = {"effort": reasoning_effort}
+
+    if keyterms:
+        config_event["session"]["keyterms"] = keyterms
+    if replace_map and isinstance(replace_map, dict):
+        config_event["session"]["replace"] = replace_map
+    if language_hint:
+        config_event["session"]["audio"]["input"]["transcription"]["language_hint"] = language_hint
 
     print(f"[GROK-LIVE] ===== SENDING SESSION CONFIG =====")
     print(f"[GROK-LIVE] Number of tools: {len(grok_live_tools)}")
@@ -1481,6 +1520,9 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 # (same merge rule as /ws/realtime — Android uses query params).
                 model = data.get("model", websocket.query_params.get("model"))
                 reasoning_effort = data.get("reasoning_effort", websocket.query_params.get("reasoning_effort"))
+                language_hint = data.get("language_hint", websocket.query_params.get("language_hint"))
+                replace_map = data.get("replace") if isinstance(data.get("replace"), dict) else None
+                keyterms = data.get("keyterms") if isinstance(data.get("keyterms"), list) else None
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1491,7 +1533,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 # Connect to Grok
                 if await connect_to_grok(session, model=model):
                     # Configure session with tools, context, and voice
-                    await configure_grok_session(session, operator, voice, custom_role=role, reasoning_effort=reasoning_effort)
+                    await configure_grok_session(session, operator, voice, custom_role=role, reasoning_effort=reasoning_effort, replace_map=replace_map, keyterms=keyterms, language_hint=language_hint)
                     print(f"[GROK-LIVE] Voice selected: {voice}")
 
                     # Emit provenance to the client once per session start so
