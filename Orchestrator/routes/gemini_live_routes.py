@@ -639,6 +639,24 @@ Do this BEFORE responding to the user - check what happened recently so you're c
     elif thinking_level is not None:
         print(f"[GEMINI-LIVE] thinking_level={thinking_level!r} ignored — model {resolved_model!r} does not support thinkingConfig (not in GEMINI_LIVE_THINKING_CAPABLE_MODELS)")
 
+    # Affective dialog + proactive audio (v1alpha, 2.5-native-audio family ONLY).
+    # Flags were validated + persisted onto the session by the WS connect handler
+    # (resolve_affective_flags) BEFORE connect_to_gemini chose the v1alpha URL; a
+    # reconnect reconfigure re-reads them here so the rebuilt session is identical.
+    # The capability re-check is defense in depth — 3.1 rejects these setup fields
+    # and would close the WS, so never emit them for non-capable models.
+    if session.affective_dialog or session.proactive_audio:
+        if resolved_model in GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS:
+            if session.affective_dialog:
+                setup_config["enableAffectiveDialog"] = True
+            if session.proactive_audio:
+                setup_config["proactivity"] = {"proactiveAudio": True}
+            print(f"[GEMINI-LIVE] affective_dialog={session.affective_dialog} "
+                  f"proactive_audio={session.proactive_audio} enabled for {resolved_model} (v1alpha)")
+        else:
+            print(f"[GEMINI-LIVE] affective/proactive flags ignored — model "
+                  f"{resolved_model!r} not in GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS")
+
     setup_message = {"setup": setup_config}
 
     await session.gemini_ws.send(json.dumps(setup_message))

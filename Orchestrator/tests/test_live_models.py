@@ -80,6 +80,8 @@ def _make_gemini_session():
     session.thinking_level = None
     session.custom_role = ""
     session.phone_mode = False
+    session.affective_dialog = False   # explicit: bare MagicMock attrs are truthy
+    session.proactive_audio = False
     return session
 
 

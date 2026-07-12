@@ -113,3 +113,82 @@ async def test_connect_url_version_selection(monkeypatch):
     s3.proactive_audio = True
     assert await glr.connect_to_gemini(s3) is True
     assert ".v1alpha." in captured["url"]
+
+
+@pytest.fixture
+def stub_fossil_context(monkeypatch):
+    """Stub snapshot retrieval (same pattern as test_live_models.py)."""
+    def _stub(user_text, operator, log_prefix=""):
+        return ("", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []})
+    monkeypatch.setattr(
+        "Orchestrator.routes.gemini_live_routes.build_fossil_context", _stub)
+
+
+def _make_gemini_session(affective=False, proactive=False):
+    session = MagicMock()
+    session.gemini_ws = MagicMock()
+    session.gemini_ws.send = AsyncMock()
+    session.resumption_handle = None
+    session.provenance = {}
+    session.context_injected = False
+    session.voice = ""
+    # Explicit bools — a bare MagicMock attribute is truthy and would fake-enable
+    session.affective_dialog = affective
+    session.proactive_audio = proactive
+    return session
+
+
+def _sent_setup(session):
+    raw = session.gemini_ws.send.await_args.args[0]
+    return json.loads(raw)["setup"]
+
+
+@pytest.mark.asyncio
+async def test_configure_emits_affective_fields_on_25(stub_fossil_context):
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    session = _make_gemini_session(affective=True, proactive=True)
+    await configure_gemini_session(
+        session, "test_operator", "Charon",
+        model="gemini-2.5-flash-native-audio-latest")
+    setup = _sent_setup(session)
+    assert setup["enableAffectiveDialog"] is True
+    assert setup["proactivity"] == {"proactiveAudio": True}
+
+
+@pytest.mark.asyncio
+async def test_configure_emits_affective_only(stub_fossil_context):
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    session = _make_gemini_session(affective=True, proactive=False)
+    await configure_gemini_session(
+        session, "test_operator", "Charon",
+        model="gemini-2.5-flash-native-audio-latest")
+    setup = _sent_setup(session)
+    assert setup["enableAffectiveDialog"] is True
+    assert "proactivity" not in setup
+
+
+@pytest.mark.asyncio
+async def test_configure_suppresses_affective_on_31(stub_fossil_context, capsys):
+    # Defense in depth: even if flags land on the session, NEVER emit at 3.1
+    # (Google closes the WS on unknown setup fields — the June silent-failure class).
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    session = _make_gemini_session(affective=True, proactive=True)
+    await configure_gemini_session(
+        session, "test_operator", "Charon",
+        model="gemini-3.1-flash-live-preview")
+    setup = _sent_setup(session)
+    assert "enableAffectiveDialog" not in setup
+    assert "proactivity" not in setup
+    assert "ignored" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_configure_default_session_emits_nothing(stub_fossil_context):
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    session = _make_gemini_session()
+    await configure_gemini_session(
+        session, "test_operator", "Charon",
+        model="gemini-2.5-flash-native-audio-latest")
+    setup = _sent_setup(session)
+    assert "enableAffectiveDialog" not in setup
+    assert "proactivity" not in setup
