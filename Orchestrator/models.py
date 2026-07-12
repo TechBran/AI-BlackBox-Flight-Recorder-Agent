@@ -185,6 +185,7 @@ class GrokLiveSession:
     intentional_disconnect: bool = False       # User clicked disconnect
     listener_task: Optional[Any] = None        # asyncio.Task reading the upstream ws — cancelled+respawned on reconnect (P1b)
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
+    call_id: str = ""                    # xAI SIP call id (phone-xai-* sessions); reconnects reuse it
 
 # Global storage for Grok Live sessions
 GROK_LIVE_SESSIONS: Dict[str, GrokLiveSession] = {}

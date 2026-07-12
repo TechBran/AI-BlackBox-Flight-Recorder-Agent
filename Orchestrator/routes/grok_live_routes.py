@@ -234,18 +234,43 @@ async def execute_grok_search_snapshots(session: 'GrokLiveSession', arguments: D
 # xAI Grok Voice Agent API Connection
 # =============================================================================
 
-async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = None, conversation_id: Optional[str] = None) -> bool:
+async def connect_to_grok(session: 'GrokLiveSession',
+                          model: Optional[str] = None,
+                          conversation_id: Optional[str] = None,
+                          call_id: Optional[str] = None) -> bool:
     """
     Establish WebSocket connection to xAI Grok Voice Agent API.
 
-    Args:
-        model: Optional model id override, validated against GROK_LIVE_MODELS
-            (mirrors the OpenAI connect_to_openai / Gemini configure patterns).
-            Invalid values fall back to GROK_LIVE_MODEL with a logged warning.
-            Per xAI docs the model is bound at WS-connect via URL query.
+    URL parameterization — call attach XOR model dial:
+      * call_id — attach to a live SIP call (wss://.../realtime?call_id=...).
+        The call_id session IS the call's audio path: audio flows xAI-side,
+        there is no local audio pump, and xAI binds the model + conversation
+        server-side — so model/conversation_id are EXCLUDED from the URL.
+        Passing call_id together with model or conversation_id raises
+        ValueError (caller bug). Persisted to session.call_id so reconnects
+        rejoin the SAME call.
+      * model — validated against GROK_LIVE_MODELS (P2.8); invalid values
+        fall back to GROK_LIVE_MODEL with a logged warning; the resolved id
+        is stamped on session.model and bound at the WS URL (?model=).
+      * conversation_id — xAI session resumption (P2.13): appended as
+        &conversation_id= so xAI replays cached turns.
+
+    Fallback precedence: when call_id is NOT passed but session.call_id is
+    set (a phone-xai-* session), the call attach WINS over any
+    model/conversation_id args — grok_reconnect's post-P2.13 call shape
+    (model=session.model or None, conversation_id=resume_id) must rejoin the
+    live call, never silently demote it to a non-call ?model= session. The
+    swallowed args are logged, not raised (they come from generic reconnect
+    code, not a caller bug).
 
     Returns True if connection successful, False otherwise.
     """
+    if call_id and (model or conversation_id):
+        raise ValueError(
+            "connect_to_grok: call_id is mutually exclusive with "
+            "model/conversation_id (a SIP call attach carries no model or "
+            "resumption params — xAI binds them server-side)")
+
     if not WEBSOCKETS_AVAILABLE:
         print("[GROK-LIVE] Cannot connect - websockets library not installed")
         return False
@@ -254,13 +279,21 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
         print("[GROK-LIVE] Cannot connect - XAI_API_KEY not set")
         return False
 
-    # Resolve + validate model (allowlist from GROK_LIVE_MODELS)
-    _allowed_model_ids = {m["id"] for m in GROK_LIVE_MODELS}
-    if model and model not in _allowed_model_ids:
-        print(f"[GROK-LIVE] WARNING: model {model!r} not in GROK_LIVE_MODELS allowlist; falling back to default {GROK_LIVE_MODEL!r}")
-        model = None
-    resolved_model = model or GROK_LIVE_MODEL
-    session.model = resolved_model
+    effective_call_id = call_id or getattr(session, "call_id", "")
+    resolved_model = ""
+    if effective_call_id:
+        if model or conversation_id:
+            print(f"[GROK-LIVE] session {session.session_id} has "
+                  f"call_id={effective_call_id!r} — ignoring model/conversation_id "
+                  f"(call-attach precedence)")
+    else:
+        # Resolve + validate model (allowlist from GROK_LIVE_MODELS) — P2.8
+        _allowed_model_ids = {m["id"] for m in GROK_LIVE_MODELS}
+        if model and model not in _allowed_model_ids:
+            print(f"[GROK-LIVE] WARNING: model {model!r} not in GROK_LIVE_MODELS allowlist; falling back to default {GROK_LIVE_MODEL!r}")
+            model = None
+        resolved_model = model or GROK_LIVE_MODEL
+        session.model = resolved_model
 
     try:
         headers = {
@@ -268,10 +301,16 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
             "Content-Type": "application/json"
         }
 
-        url = f"{GROK_LIVE_URL}?model={resolved_model}"
-        if conversation_id:
-            # Resumption: xAI replays cached turns for this conversation
-            url += f"&conversation_id={conversation_id}"
+        if effective_call_id:
+            # SIP call attach — call_id is the ONLY query param (XOR above).
+            url = f"{GROK_LIVE_URL}?call_id={effective_call_id}"
+            session.call_id = effective_call_id
+        else:
+            url = f"{GROK_LIVE_URL}?model={resolved_model}"
+            if conversation_id:
+                # Resumption: xAI replays cached turns for this conversation — P2.13
+                url += f"&conversation_id={conversation_id}"
+
         print(f"[GROK-LIVE] Connecting to xAI: {url}")
         # websockets 15.x uses additional_headers instead of extra_headers
         # Add explicit ping settings to prevent connection drops
@@ -285,7 +324,10 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
         )
         session.status = "connected"
         session.last_activity = now_utc_iso()
-        print(f"[GROK-LIVE] Connected to xAI for session {session.session_id} (model={resolved_model})")
+        if effective_call_id:
+            print(f"[GROK-LIVE] Connected to xAI for session {session.session_id} (call_id={effective_call_id})")
+        else:
+            print(f"[GROK-LIVE] Connected to xAI for session {session.session_id} (model={resolved_model})")
         return True
 
     except Exception as e:
