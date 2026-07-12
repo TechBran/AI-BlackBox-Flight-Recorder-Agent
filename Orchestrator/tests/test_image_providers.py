@@ -105,6 +105,7 @@ def _route_harness(monkeypatch, tmp_path, options):
         "gemini": make_stub("gemini"),
         "openai": make_stub("openai"),
         "grok": make_stub("grok"),
+        "local": make_stub("local"),
     }
     monkeypatch.setattr(tasks, "IMAGE_PROVIDERS", fake_providers, raising=False)
     monkeypatch.setattr(tasks, "DEFAULT_IMAGE_PROVIDER", "gemini", raising=False)
@@ -150,3 +151,12 @@ def test_routing_untagged_defaults(monkeypatch, tmp_path):
     calls = _route_harness(monkeypatch, tmp_path, {})
     assert calls["provider_calls"] == ["gemini"]
     assert list(tmp_path.glob("*.png"))
+
+
+def test_routing_local(monkeypatch, tmp_path):
+    calls = _route_harness(monkeypatch, tmp_path, {"provider": "local", "size": "768x768"})
+    assert calls["provider_calls"] == ["local"]
+    assert list(tmp_path.glob("*.png"))
+    meta = calls["media"][0]["extra_metadata"]
+    assert meta["model"] == "z-image"        # provenance not gemini's model
+    assert meta["size"] == "768x768"

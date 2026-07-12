@@ -846,6 +846,7 @@ def process_image_generation(task: Task):
         "gemini": GOOGLE_IMAGEN_MODEL,
         "openai": OPENAI_IMAGE_MODEL,
         "grok": XAI_IMAGE_MODEL,
+        "local": "z-image",   # v1 default local model; provenance best-effort
     }
     recorded_model = _IMAGE_MODELS.get(provider, GOOGLE_IMAGEN_MODEL)
     _num_images = options.get("numberOfImages", 1)
@@ -859,6 +860,12 @@ def process_image_generation(task: Task):
     elif provider == "grok":
         image_metadata = {
             "aspect_ratio": options.get("aspectRatio", "16:9"),
+            "numberOfImages": _num_images,
+            "model": recorded_model,
+        }
+    elif provider == "local":
+        image_metadata = {
+            "size": options.get("size", "1024x1024"),
             "numberOfImages": _num_images,
             "model": recorded_model,
         }
