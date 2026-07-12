@@ -110,12 +110,14 @@ object Constants {
         "gemini-agents" to listOf(
             "gemini-3.1-pro-preview" to "Gemini 3.1 Pro"
         ),
-        // Empirically WS-connection-verified 2026-05-19 against the GA endpoint
-        // (no OpenAI-Beta header). gpt-realtime-2 is the newest GA default;
-        // gpt-realtime-2025-08-28 remains REJECTED at the WS endpoint (close
-        // code 4000) and is intentionally absent. See docs/plans/2026-05-19-live-api-ga-migration.md.
+        // OFFLINE FALLBACKS ONLY (P3.11) — the live rosters hydrate from
+        // GET /realtime/status | /grok-live/status at voice-screen open
+        // (VoiceViewModel catalog fetch; provider-API-as-SoT). 2.1 family per
+        // design 2026-07-11 (GA 2026-07-06); backend P0/P2 probes gate the catalog.
         "realtime" to listOf(
-            "gpt-realtime-2" to "GPT Realtime 2 (Newest GA)",
+            "gpt-realtime-2.1" to "GPT Realtime 2.1 (Newest GA)",
+            "gpt-realtime-2.1-mini" to "GPT Realtime 2.1 Mini",
+            "gpt-realtime-2" to "GPT Realtime 2",
             "gpt-realtime" to "GPT Realtime (GA alias)",
             "gpt-realtime-1.5" to "GPT Realtime 1.5 (pinned)",
             "gpt-realtime-mini" to "GPT Realtime Mini (cheap, alias)",
@@ -127,7 +129,9 @@ object Constants {
             "gemini-2.5-flash-native-audio-preview-12-2025" to "Gemini 2.5 Flash Live (Dec 2025 pin)"
         ),
         "grok-live" to listOf(
-            "" to "Grok Live"
+            "" to "Auto (grok-voice-latest)",
+            "grok-voice-latest" to "Grok Voice (latest alias)",
+            "grok-voice-think-fast-1.0" to "Grok Voice Think Fast 1.0 (pinned)"
         ),
         // Offline fallback only — replaced by GET /models/computer-use hydration
         // (ChatViewModel.fetchLiveModels, CU production pass 2026-06). Mirrors the
@@ -159,10 +163,11 @@ object Constants {
     // Catalogs + allowlists for OpenAI Realtime + Gemini Live. Constants.kt is
     // the SoT — VoiceScreen.kt and VoiceClient.kt must consume from here.
 
-    /** Default model id per live provider — first item the dropdown picks if no user pref. */
+    /** Default model id per live provider — offline fallback; catalog model_default overrides. */
     val LIVE_MODEL_DEFAULTS: Map<String, String> = mapOf(
-        "realtime" to "gpt-realtime-2",
+        "realtime" to "gpt-realtime-2.1",
         "gemini-live" to "gemini-3.1-flash-live-preview",
+        "grok-live" to "",  // Auto — backend resolves grok-voice-latest
     )
 
     /** OpenAI Realtime voices (10 GA voices, 2026-05-19 verified). */
@@ -181,6 +186,13 @@ object Constants {
         "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
     )
     const val DEFAULT_GEMINI_LIVE_VOICE = "Orus"
+
+    /** Grok Live voices — offline fallback (hydrated from GET /grok-live/status). */
+    val VOICES_GROK_LIVE: List<String> = listOf("Ara", "Rex", "Sal", "Eve", "Leo")
+    const val DEFAULT_GROK_LIVE_VOICE = "Ara"
+
+    /** Grok Live reasoning.effort values (grok-voice-think-fast-1.0 background reasoning). */
+    val GROK_LIVE_REASONING_EFFORTS: List<String> = listOf("high", "none")
 
     /** Gemini voice character descriptors (1:1 with VOICES_GEMINI_LIVE). */
     val GEMINI_VOICE_DESCRIPTORS: Map<String, String> = mapOf(
