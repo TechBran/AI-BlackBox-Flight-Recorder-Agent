@@ -130,4 +130,23 @@ class VoiceClientParseTest {
         runCurrent()
         assertEquals(VoiceState.CONNECTED, voice.state.value)
     }
+
+    @Test
+    fun `audio send failure on a live session returns false and drops the socket`() = runTest {
+        startConnected()
+        fake.sendResult = false
+        val ok = voice.sendAudioChunk("QUJD")
+        runCurrent()
+        assertFalse(ok)
+        assertEquals(1, fake.closeCount)
+    }
+
+    @Test
+    fun `audio send success returns true and keeps the socket`() = runTest {
+        startConnected()
+        assertTrue(voice.sendAudioChunk("QUJD"))
+        runCurrent()
+        assertEquals(0, fake.closeCount)
+        assertTrue(fake.sent.any { it.contains("\"type\":\"audio_input\"") })
+    }
 }

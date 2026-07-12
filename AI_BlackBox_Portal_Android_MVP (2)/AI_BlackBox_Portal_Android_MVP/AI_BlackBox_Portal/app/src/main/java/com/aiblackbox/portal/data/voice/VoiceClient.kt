@@ -210,20 +210,41 @@ class VoiceClient(
         _provenance.value = null
     }
 
-    /** Send a base64-encoded PCM16 audio chunk to the server (mic input). */
-    fun sendAudioChunk(base64Audio: String) {
+    /**
+     * Send a base64-encoded PCM16 audio chunk (mic input). Returns delivery result —
+     * recon 2026-07-11 silent-failure #5: send() was fire-and-forget, so on a dead
+     * socket every mic chunk dropped silently for 15-30s until the keepalive noticed
+     * (SttStreamClient.kt:369-372 is the proven contrast). The Phase 3b mic loop
+     * breaks on false; the client itself drops the dead leg immediately.
+     */
+    fun sendAudioChunk(base64Audio: String): Boolean {
         val msg = buildJsonObject {
             put("type", "audio_input")
             put("data", base64Audio)
         }
-        wsClient.send(msg.toString())
+        val ok = wsClient.send(msg.toString())
+        if (!ok) onSendFailure("audio_input")
+        return ok
     }
 
     /** Signal end of user speech turn — server triggers AI response. */
-    fun sendAudioCommit() {
+    fun sendAudioCommit(): Boolean {
         val msg = buildJsonObject { put("type", "audio_commit") }
-        wsClient.send(msg.toString())
-        android.util.Log.d("VoiceClient", "Sent audio_commit")
+        val ok = wsClient.send(msg.toString())
+        android.util.Log.d("VoiceClient", "Sent audio_commit (delivered=$ok)")
+        if (!ok) onSendFailure("audio_commit")
+        return ok
+    }
+
+    // A failed send on a session we believe is live = dead socket. Close the leg so
+    // the transport surfaces Disconnected NOW (and, after P3.8, the reconnect loop
+    // resumes) instead of waiting for the keepalive pong timeout.
+    private fun onSendFailure(frameType: String) {
+        val s = _state.value
+        if (s == VoiceState.CONNECTED || s == VoiceState.SPEAKING || s == VoiceState.LISTENING) {
+            android.util.Log.w("VoiceClient", "$frameType send failed — socket dead, dropping leg")
+            wsClient.close()
+        }
     }
 
     fun sendText(text: String) {
