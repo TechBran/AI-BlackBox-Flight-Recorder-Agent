@@ -73,3 +73,29 @@ def test_gemini_custom_role_and_tool_group_override(quiet_gemini_context):
     assert "setup" in cfg
     assert "You are Pepper the pizza-order bot." in json.dumps(cfg)
     assert cfg["setup"]["tools"] == gm.get_gemini_live_tools("realtime")
+
+
+# ------------------------------------------------------------------ grok live
+
+from Orchestrator.models import GrokLiveSession
+from Orchestrator.routes import grok_live_routes as gk
+
+
+@pytest.fixture
+def quiet_grok_context(monkeypatch):
+    monkeypatch.setattr(gk, "build_context_for_operator",
+                        lambda operator, user_text="": ("", {}))
+
+
+def test_grok_custom_role_and_tool_group_override(quiet_grok_context):
+    session = GrokLiveSession(session_id="t-p4-gk")
+    session.grok_ws = FakeWS()
+    asyncio.run(gk.configure_grok_session(
+        session, "system", "Rex",
+        custom_role="You are Pepper the pizza-order bot.",
+        tool_group_override="realtime"))
+    cfg = session.grok_ws.sent[0]
+    assert cfg["type"] == "session.update"
+    assert "You are Pepper the pizza-order bot." in json.dumps(cfg)
+    sent = [t["name"] for t in cfg["session"]["tools"]]
+    assert sent == [t["name"] for t in gk.get_openai_realtime_tools("realtime")]

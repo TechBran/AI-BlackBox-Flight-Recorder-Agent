@@ -72,6 +72,7 @@ from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
+from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
@@ -318,7 +319,8 @@ def _contact_keyterms(operator: str, limit: int = 100) -> list:
 async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = "", reasoning_effort: Optional[str] = None,
                                  replace_map: Optional[Dict[str, str]] = None,
                                  keyterms: Optional[list] = None,
-                                 language_hint: Optional[str] = None):
+                                 language_hint: Optional[str] = None,
+                                 tool_group_override: Optional[str] = None):
     """
     Configure the Grok Voice Agent session with tools and settings.
     Injects operator-specific context and personalization.
@@ -486,7 +488,8 @@ This is essential because:
 Do this BEFORE responding to the user - check what happened recently so you're caught up."""
 
     # P1b: read tools FRESH (not at import) so /toolvault/reload reaches voice.
-    grok_live_tools = get_openai_realtime_tools("grok_live")
+    # P4: a voice-agent preset can swap the tool group at configure time.
+    grok_live_tools = get_openai_realtime_tools(tool_group_override or "grok_live")
 
     # Configure session - Grok uses nested audio format structure
     config_event = {
@@ -1458,6 +1461,10 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     print(f"[GROK-LIVE] WebSocket accepted for session: {session_id}")
 
+    # P4: Grok route reads only the preset id from the URL (other Grok URL
+    # params are Phase 3 scope).
+    url_agent = websocket.query_params.get("agent")
+
     # Check dependencies
     if not WEBSOCKETS_AVAILABLE:
         await _safe_ws_send(websocket, {
@@ -1514,17 +1521,36 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
 
             if msg_type == "connect":
                 # Initial connection - establish Grok WebSocket
+                # Voice-agent preset (P4) — precedence: explicit > preset > defaults.
+                # Client model/voice/greeting/role plus the Grok-specific
+                # language_hint/keyterms feed the merge as the explicit inputs
+                # (model keeps its JSON-wins-over-URL fallback — Android sends it
+                # via query param), so an explicit value still wins over a
+                # preset-supplied one. reasoning_effort/replace_map are not preset
+                # fields — derived as before.
+                agent_id = data.get("agent", url_agent)
+                preset = resolve_preset(agent_id, provider="grok-live") if agent_id else None
+                if agent_id and preset is None:
+                    await _safe_ws_send(websocket, {
+                        "type": "warning",
+                        "data": f"Voice agent preset {agent_id!r} not found for provider 'grok-live' — continuing without preset"
+                    })
+                merged = merge_connect_params({
+                    "model": data.get("model", websocket.query_params.get("model")),
+                    "voice": data.get("voice"),
+                    "greeting": data.get("greeting", ""),
+                    "instructions": data.get("role", ""),
+                    "language": data.get("language_hint", websocket.query_params.get("language_hint")),
+                    "keyterms": data.get("keyterms") if isinstance(data.get("keyterms"), list) else None,
+                }, preset)
                 operator = data.get("operator", "")
-                voice = data.get("voice", GROK_LIVE_DEFAULT_VOICE)
-                greeting = data.get("greeting", "")
-                role = data.get("role", "")
-                # Model: JSON connect message wins over URL query param
-                # (same merge rule as /ws/realtime — Android uses query params).
-                model = data.get("model", websocket.query_params.get("model"))
+                voice = merged["voice"] or GROK_LIVE_DEFAULT_VOICE
+                greeting = merged["greeting"] or ""
+                role = merged["instructions"] or ""
+                model = merged["model"]
+                tool_group_override = merged["tool_group_override"]
                 reasoning_effort = data.get("reasoning_effort", websocket.query_params.get("reasoning_effort"))
-                language_hint = data.get("language_hint", websocket.query_params.get("language_hint"))
                 replace_map = data.get("replace") if isinstance(data.get("replace"), dict) else None
-                keyterms = data.get("keyterms") if isinstance(data.get("keyterms"), list) else None
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1535,7 +1561,10 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 # Connect to Grok
                 if await connect_to_grok(session, model=model):
                     # Configure session with tools, context, and voice
-                    await configure_grok_session(session, operator, voice, custom_role=role, reasoning_effort=reasoning_effort, replace_map=replace_map, keyterms=keyterms, language_hint=language_hint)
+                    await configure_grok_session(session, operator, voice, custom_role=role,
+                                                 reasoning_effort=reasoning_effort, replace_map=replace_map,
+                                                 keyterms=merged["keyterms"], language_hint=merged["language"],
+                                                 tool_group_override=tool_group_override)
                     print(f"[GROK-LIVE] Voice selected: {voice}")
 
                     # Emit provenance to the client once per session start so
