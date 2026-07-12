@@ -71,6 +71,7 @@ from Orchestrator.tasks import create_task
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
+from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
 from Orchestrator.routes.voice_ws_shared import (
@@ -305,6 +306,7 @@ async def configure_openai_session(
     create_response: Optional[bool] = None,
     noise_reduction: Optional[str] = None,
     transcription_delay: Optional[str] = None,
+    tool_group_override: Optional[str] = None,
 ):
     """
     Configure the OpenAI Realtime session with tools and settings.
@@ -525,7 +527,8 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             turn_detection["create_response"] = create_response
 
     # P1b: read tools FRESH (not at import) so /toolvault/reload reaches voice.
-    realtime_tools = get_openai_realtime_tools("realtime")
+    # P4: a voice-agent preset can swap the tool group at configure time.
+    realtime_tools = get_openai_realtime_tools(tool_group_override or "realtime")
 
     # Configure session — GA wire format (Beta deprecated 2026-05-19).
     # Per empirical probe of OpenAI Realtime GA endpoint without OpenAI-Beta header:
@@ -1462,6 +1465,7 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
     url_model = websocket.query_params.get("model")
     url_vad_type = websocket.query_params.get("vad_type")
     url_vad_eagerness = websocket.query_params.get("vad_eagerness")
+    url_agent = websocket.query_params.get("agent")
     _idle_str = websocket.query_params.get("idle_timeout_ms")
     if _idle_str and _idle_str.strip().isdigit():
         url_idle_timeout_ms: Optional[int] = int(_idle_str.strip())
@@ -1538,13 +1542,31 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                 # Initial connection - establish OpenAI WebSocket.
                 # Merge rule: JSON connect message wins over Android URL-query
                 # fallbacks (web is interactive — last write wins).
+                # Voice-agent preset (P4): ?agent=<id> or "agent" in the JSON
+                # connect message. Precedence: explicit params > preset fields
+                # > defaults. Unknown/mismatched preset -> loud client warning,
+                # session continues without it (fresh-box degradation).
+                agent_id = data.get("agent", url_agent)
+                preset = resolve_preset(agent_id, provider="realtime") if agent_id else None
+                if agent_id and preset is None:
+                    await _safe_ws_send(websocket, {
+                        "type": "warning",
+                        "data": f"Voice agent preset {agent_id!r} not found for provider 'realtime' — continuing without preset"
+                    })
+                merged = merge_connect_params({
+                    "model": data.get("model", url_model),
+                    "voice": data.get("voice", url_voice),
+                    "greeting": data.get("greeting", ""),
+                    "instructions": data.get("role", ""),
+                }, preset)
                 operator = data.get("operator", url_operator or "")
-                voice = data.get("voice", url_voice or "ash")  # Default to ash if not specified
-                greeting = data.get("greeting", "")
-                role = data.get("role", "")
+                voice = merged["voice"] or "ash"          # route default unchanged
+                greeting = merged["greeting"] or ""
+                role = merged["instructions"] or ""       # preset instructions ride the custom_role branch
+                tool_group_override = merged["tool_group_override"]
                 # T2 new fields — model goes to connect_to_openai (URL query),
                 # vad/timeout/response fields go to configure_openai_session (session.update).
-                model = data.get("model", url_model)
+                model = merged["model"]
                 vad_type = data.get("vad_type", url_vad_type)
                 vad_eagerness = data.get("vad_eagerness", url_vad_eagerness)
                 idle_timeout_ms = data.get("idle_timeout_ms", url_idle_timeout_ms)
@@ -1567,6 +1589,7 @@ async def realtime_websocket(websocket: WebSocket, session_id: str):
                         operator,
                         voice,
                         custom_role=role,
+                        tool_group_override=tool_group_override,
                         vad_type=vad_type,
                         vad_eagerness=vad_eagerness,
                         idle_timeout_ms=idle_timeout_ms,
