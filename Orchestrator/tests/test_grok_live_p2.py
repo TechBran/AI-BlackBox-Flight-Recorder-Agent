@@ -165,3 +165,72 @@ def test_model_query_param_fallback(grok_relay_stubs):
         ws.send_text(json.dumps({"type": "disconnect"}))
 
     assert connected["data"]["model"] == "grok-voice-think-fast-1.0"
+
+
+# ---------------------------------------------------------------------------
+# reasoning.effort — think-fast models only (mirror Gemini thinkingLevel gate)
+# ---------------------------------------------------------------------------
+
+from Orchestrator.routes.grok_live_routes import configure_grok_session
+
+
+@pytest.fixture
+def stub_grok_fossil_context(monkeypatch):
+    def _stub(user_text, operator, log_prefix=""):
+        return ("", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []})
+    monkeypatch.setattr(
+        "Orchestrator.routes.grok_live_routes.build_fossil_context", _stub
+    )
+
+
+def _make_grok_session(model="grok-voice-latest"):
+    session = MagicMock()
+    session.session_id = "test-grok"
+    session.grok_ws = MagicMock()
+    session.grok_ws.send = AsyncMock()
+    session.model = model
+    session.provenance = {}
+    session.context_injected = False
+    return session
+
+
+def _extract_grok_payload(send_mock):
+    assert send_mock.await_count == 1
+    return json.loads(send_mock.await_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_emitted_for_capable_model(stub_grok_fossil_context):
+    session = _make_grok_session(model="grok-voice-think-fast-1.0")
+    await configure_grok_session(session, "test_operator", voice="Ara",
+                                 reasoning_effort="high")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert payload["session"]["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_suppressed_for_unknown_model(stub_grok_fossil_context, capsys):
+    session = _make_grok_session(model="")  # legacy session with no resolved model
+    await configure_grok_session(session, "test_operator", voice="Ara",
+                                 reasoning_effort="high")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert "reasoning" not in payload["session"]
+    assert "reasoning" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_invalid_value_ignored(stub_grok_fossil_context, capsys):
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara",
+                                 reasoning_effort="maximum_overdrive")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert "reasoning" not in payload["session"]
+    assert "WARNING" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_reasoning_absent_by_default(stub_grok_fossil_context):
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert "reasoning" not in payload["session"]

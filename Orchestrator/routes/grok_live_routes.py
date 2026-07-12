@@ -46,6 +46,8 @@ from Orchestrator.config import (
     GROK_LIVE_URL,
     GROK_LIVE_MODEL,
     GROK_LIVE_MODELS,
+    GROK_LIVE_REASONING_EFFORTS,
+    GROK_LIVE_REASONING_CAPABLE_MODELS,
     GROK_LIVE_VOICES,
     GROK_LIVE_DEFAULT_VOICE,
     GROK_LIVE_SAMPLE_RATE,
@@ -285,7 +287,7 @@ async def connect_to_grok(session: 'GrokLiveSession', model: Optional[str] = Non
         session.status = "error"
         return False
 
-async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = ""):
+async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = "", reasoning_effort: Optional[str] = None):
     """
     Configure the Grok Voice Agent session with tools and settings.
     Injects operator-specific context and personalization.
@@ -303,6 +305,14 @@ async def configure_grok_session(session: 'GrokLiveSession', operator: str, voic
     if voice not in GROK_LIVE_VOICES:
         voice = GROK_LIVE_DEFAULT_VOICE
     session.voice = voice
+
+    # reasoning.effort — allowlist + capability gate (think-fast generation only).
+    if reasoning_effort is not None and reasoning_effort not in GROK_LIVE_REASONING_EFFORTS:
+        print(f"[GROK-LIVE] WARNING: reasoning_effort {reasoning_effort!r} not in {GROK_LIVE_REASONING_EFFORTS}; ignoring")
+        reasoning_effort = None
+    if reasoning_effort is not None and session.model not in GROK_LIVE_REASONING_CAPABLE_MODELS:
+        print(f"[GROK-LIVE] reasoning_effort ignored — model {session.model!r} is not reasoning-capable")
+        reasoning_effort = None
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -471,6 +481,9 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             "tool_choice": "auto"  # Force Grok to actually use tools when appropriate
         }
     }
+
+    if reasoning_effort is not None:
+        config_event["session"]["reasoning"] = {"effort": reasoning_effort}
 
     print(f"[GROK-LIVE] ===== SENDING SESSION CONFIG =====")
     print(f"[GROK-LIVE] Number of tools: {len(grok_live_tools)}")
@@ -1442,6 +1455,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 # Model: JSON connect message wins over URL query param
                 # (same merge rule as /ws/realtime — Android uses query params).
                 model = data.get("model", websocket.query_params.get("model"))
+                reasoning_effort = data.get("reasoning_effort", websocket.query_params.get("reasoning_effort"))
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1452,7 +1466,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 # Connect to Grok
                 if await connect_to_grok(session, model=model):
                     # Configure session with tools, context, and voice
-                    await configure_grok_session(session, operator, voice, custom_role=role)
+                    await configure_grok_session(session, operator, voice, custom_role=role, reasoning_effort=reasoning_effort)
                     print(f"[GROK-LIVE] Voice selected: {voice}")
 
                     # Emit provenance to the client once per session start so

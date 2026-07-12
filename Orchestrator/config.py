@@ -679,6 +679,14 @@ GROK_LIVE_MODELS: List[Dict] = [
     {"id": "grok-voice-latest", "name": "Grok Voice (Latest alias)", "default": True},
     {"id": "grok-voice-think-fast-1.0", "name": "Grok Voice Think Fast 1.0 (flagship pin)"},
 ]
+# reasoning.effort exists ONLY on the newest voice generation (think-fast).
+# Emitting it on other models risks an upstream reject — capability-gate like
+# GEMINI_LIVE_THINKING_CAPABLE_MODELS.
+GROK_LIVE_REASONING_EFFORTS = ("high", "none")
+GROK_LIVE_REASONING_CAPABLE_MODELS: frozenset = frozenset({
+    "grok-voice-latest",            # alias currently resolves to think-fast-1.0
+    "grok-voice-think-fast-1.0",
+})
 GROK_LIVE_VOICES = ["Ara", "Rex", "Sal", "Eve", "Leo"]  # Available voices
 GROK_LIVE_DEFAULT_VOICE = "Rex"         # Default voice for phone
 GROK_LIVE_SAMPLE_RATE = 24000           # PCM16 audio at 24kHz (same as OpenAI Realtime)
