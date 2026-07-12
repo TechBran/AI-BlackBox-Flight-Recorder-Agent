@@ -10,14 +10,17 @@ Format converters generate correct schemas for any AI provider:
   - Gemini Live (functionDeclarations, camelCase)
   - MCP (Tool objects with inputSchema)
 
-Groups control which tools appear for each consumer:
-  chat         - REST chat handlers (all providers, ~32 tools)
+Groups control which tools appear for each consumer. Membership is declared
+per-tool in ToolVault/tools/<name>/schema.json "groups" arrays; counts drift
+as tools land, so none are baked in here (each of the three voice groups
+carried 56 tools as of 2026-07-11 — NOT the ~21 this docstring once claimed):
+  chat         - REST chat handlers (all providers)
   chat_cu      - Computer Use agent (chat minus use_computer itself)
-  realtime     - OpenAI Realtime voice WebSocket (~21 tools)
-  gemini_live  - Gemini Live voice WebSocket (~21 tools)
-  grok_live    - Grok Live voice WebSocket (~21 tools)
-  phone        - Phone bridge / blackbox_tools.py (~24 tools)
-  mcp          - MCP server for Claude Code (~30 tools)
+  realtime     - OpenAI Realtime voice WebSocket
+  gemini_live  - Gemini Live voice WebSocket
+  grok_live    - Grok Live voice WebSocket
+  phone        - Phone bridge / blackbox_tools.py
+  mcp          - MCP server for Claude Code
 """
 
 from typing import Dict, List, Optional, Any

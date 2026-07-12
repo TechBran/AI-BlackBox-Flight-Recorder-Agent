@@ -74,11 +74,11 @@ APP_REGISTRY: Dict[str, RegisteredApp] = {}
 PERSISTED_AGENT_SESSIONS: Dict[str, dict] = {}
 
 # -----------------------------------------------------------------------------
-# GPT-4o Realtime API Session Management
+# OpenAI Realtime API Session Management
 # -----------------------------------------------------------------------------
 @dataclass
 class RealtimeSession:
-    """Represents a GPT-4o Realtime API session for an operator."""
+    """Represents an OpenAI Realtime API session for an operator."""
     session_id: str
     operator: str = ""
     openai_ws: Optional[Any] = None      # websockets connection to OpenAI Realtime API
