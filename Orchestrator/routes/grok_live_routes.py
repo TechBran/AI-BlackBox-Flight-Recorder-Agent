@@ -1127,6 +1127,16 @@ async def grok_reconnect(session: 'GrokLiveSession'):
             "data": "Connection lost after multiple reconnection attempts"
         })
         await save_grok_session_to_blackbox(session)
+        # P1b: null the closed-but-non-None socket so the keepalive loop's
+        # `if not session.grok_ws: break` fires once, instead of spinning on the
+        # dead socket and re-triggering grok_reconnect every stale cycle (each
+        # re-hitting this give-up branch → a redundant BlackBox save).
+        if session.grok_ws:
+            try:
+                await session.grok_ws.close()
+            except Exception:
+                pass
+            session.grok_ws = None
         return
 
     session.is_reconnecting = True
@@ -1145,7 +1155,23 @@ async def grok_reconnect(session: 'GrokLiveSession'):
 
     await asyncio.sleep(delay)
 
+    # P1b (terminal guard): this coroutine runs DETACHED (bare create_task at
+    # every trigger site) and just slept, so the WS endpoint may have torn the
+    # session down during the backoff. Re-check here — otherwise a Portal drop
+    # mid-reconnect would re-dial + respawn a listener + flip status back to
+    # "connected", resurrecting a clientless session the reaper can never evict.
+    if session.intentional_disconnect:
+        print(f"[GROK-LIVE] Session closed during backoff — abandoning reconnect")
+        session.is_reconnecting = False
+        return
+
     try:
+        # P1b: cancel the old listener FIRST — it is bound to the OLD ws
+        # object; left running it would observe our close() below and emit a
+        # spurious "disconnected" to the client mid-recovery.
+        if session.listener_task and not session.listener_task.done():
+            session.listener_task.cancel()
+
         # Close old connection
         if session.grok_ws:
             try:
@@ -1156,6 +1182,19 @@ async def grok_reconnect(session: 'GrokLiveSession'):
 
         # Reconnect
         if await connect_to_grok(session):
+            # P1b (terminal guard): teardown may have run during the dial. If so,
+            # close the socket we just opened and bail — do NOT respawn a
+            # listener onto a session that is being torn down.
+            if session.intentional_disconnect:
+                if session.grok_ws:
+                    try:
+                        await session.grok_ws.close()
+                    except Exception:
+                        pass
+                    session.grok_ws = None
+                session.is_reconnecting = False
+                return
+
             # Reconfigure session
             await configure_grok_session(session, session.operator, session.voice)
 
@@ -1166,6 +1205,29 @@ async def grok_reconnect(session: 'GrokLiveSession'):
                     "type": "provenance",
                     "data": session.provenance
                 })
+
+            # P1b (terminal guard): final check at the point of no return.
+            # configure + provenance each await, so teardown could have completed
+            # during them — re-check before we respawn a listener and flip status
+            # to "connected". This is the last guard; past it the session is live
+            # again, so a hole here would still resurrect a reaper-immune session.
+            if session.intentional_disconnect:
+                if session.grok_ws:
+                    try:
+                        await session.grok_ws.close()
+                    except Exception:
+                        pass
+                    session.grok_ws = None
+                session.is_reconnecting = False
+                return
+
+            # P1b: respawn the listener on the NEW upstream ws. Without this the
+            # previous grok_listener's `async for` (bound to the OLD closed
+            # socket) has already exited, so NOTHING reads the new connection —
+            # the session is a permanently mute one-way pipe still reporting
+            # "reconnected" (parity with the OpenAI/Gemini fixes; the phone
+            # bridge always had its own respawn loop).
+            session.listener_task = asyncio.create_task(grok_listener(session))
 
             # Reset state
             session.reconnect_count = 0
@@ -1377,8 +1439,12 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                             "data": session.provenance
                         })
 
-                    # Start Grok listener task and keepalive
+                    # Start Grok listener task and keepalive. The listener task
+                    # lives on the SESSION (session.listener_task): grok_reconnect
+                    # respawns it, so this local would go stale after the first
+                    # reconnect and leak the live task at teardown.
                     grok_task = asyncio.create_task(grok_listener(session))
+                    session.listener_task = grok_task
                     keepalive_task = asyncio.create_task(grok_keepalive_loop(session))
 
                     # If greeting provided (outbound call), inject it so the AI speaks first
@@ -1441,17 +1507,29 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
         })
 
     finally:
+        # P1b (terminal guard): mark the session terminal FIRST — before the
+        # save await and before cancelling tasks — so any in-flight, detached
+        # grok_reconnect (bare create_task, not tracked here) bails after its
+        # backoff sleep instead of re-dialing and flipping status back to
+        # "connected", which would resurrect a clientless session the reaper can
+        # never evict (it only reaps status=="disconnected").
+        session.intentional_disconnect = True
+
         # Save session to BlackBox before cleanup
         if session.conversation:
             await save_grok_session_to_blackbox(session)
 
-        # Cleanup
-        if grok_task:
-            grok_task.cancel()
+        # Cleanup — cancel the CURRENT listener; after a reconnect this is a
+        # different task than the locally-captured grok_task, so cancelling only
+        # the local would leak the live listener.
+        listener = session.listener_task or grok_task
+        if listener:
+            listener.cancel()
             try:
-                await grok_task
+                await listener
             except asyncio.CancelledError:
                 pass
+        session.listener_task = None
 
         if keepalive_task:
             keepalive_task.cancel()

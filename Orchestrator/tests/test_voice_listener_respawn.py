@@ -155,3 +155,27 @@ def test_openai_reconnect_bails_during_reconfigure(monkeypatch):
     _bail_during_reconfigure_check(monkeypatch, rt, session, rt.openai_reconnect,
                                    "openai_listener", "connect_to_openai",
                                    "configure_openai_session", "openai_ws")
+
+
+# ---------------------------------------------------------------------------
+# Grok (grok_live_routes) — P1.30
+# ---------------------------------------------------------------------------
+def test_grok_reconnect_respawns_listener(monkeypatch):
+    session = GrokLiveSession(session_id="t-gk-respawn", operator="system")
+    _respawn_check(monkeypatch, gk, session, gk.grok_reconnect,
+                   "grok_listener", "connect_to_grok",
+                   "configure_grok_session", "grok_ws")
+
+
+def test_grok_reconnect_bails_when_torn_down(monkeypatch):
+    session = GrokLiveSession(session_id="t-gk-bail", operator="system")
+    _bail_after_teardown_check(monkeypatch, gk, session, gk.grok_reconnect,
+                               "grok_listener", "connect_to_grok",
+                               "configure_grok_session")
+
+
+def test_grok_reconnect_bails_during_reconfigure(monkeypatch):
+    session = GrokLiveSession(session_id="t-gk-bail2", operator="system")
+    _bail_during_reconfigure_check(monkeypatch, gk, session, gk.grok_reconnect,
+                                   "grok_listener", "connect_to_grok",
+                                   "configure_grok_session", "grok_ws")

@@ -181,6 +181,7 @@ class GrokLiveSession:
     max_reconnects: int = 5                    # Max before giving up
     is_reconnecting: bool = False              # Guard against concurrent reconnects
     intentional_disconnect: bool = False       # User clicked disconnect
+    listener_task: Optional[Any] = None        # asyncio.Task reading the upstream ws — cancelled+respawned on reconnect (P1b)
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
 
 # Global storage for Grok Live sessions
