@@ -45,6 +45,9 @@ sealed class VoiceEvent {
     data class Reconnecting(val message: String) : VoiceEvent()
     /** The session is live again after a reconnect. */
     data object Reconnected : VoiceEvent()
+
+    /** TERMINAL: backend gave up on its upstream connection. The session is dead. */
+    data class ServerDisconnected(val reason: String) : VoiceEvent()
 }
 
 class VoiceClient(
@@ -98,6 +101,11 @@ class VoiceClient(
     @Volatile
     private var lastPongTime: Long = 0L
 
+    // Set when the server declares the session terminally dead ({"type":"disconnected"});
+    // the reconnect loop (P3.8) must NOT resurrect a server-declared-dead session.
+    @Volatile
+    private var serverTerminal = false
+
     companion object {
         const val POST_SPEECH_DELAY_MS = 1200L  // 1.2s — generous for speaker echo to die down
         const val KEEPALIVE_INTERVAL_MS = 15_000L
@@ -114,6 +122,7 @@ class VoiceClient(
         this.scope = scope
         currentOperator = operator
         currentVoice = voice
+        serverTerminal = false
         _state.value = VoiceState.CONNECTING
         connectionJob?.cancel()
         keepaliveJob?.cancel()
@@ -170,7 +179,10 @@ class VoiceClient(
                         _events.emit(VoiceEvent.Error(msg.error.message ?: "Connection error"))
                     }
                     is WsMessage.Disconnected -> {
-                        _state.value = VoiceState.DISCONNECTED
+                        // Preserve a terminal ERROR (server-declared disconnect or
+                        // connect timeout): the socket close that FOLLOWS the failure
+                        // must not repaint it as a clean disconnect.
+                        if (_state.value != VoiceState.ERROR) _state.value = VoiceState.DISCONNECTED
                         _isAISpeaking.value = false
                         _currentAiText.value = ""
                         _events.emit(VoiceEvent.Disconnected)
@@ -372,6 +384,26 @@ class VoiceClient(
                     _state.value = VoiceState.CONNECTED
                     _events.emit(VoiceEvent.Reconnected)
                     android.util.Log.i("VoiceClient", "Server reconnected upstream")
+                }
+
+                "disconnected" -> {
+                    // TERMINAL: e.g. "Connection lost after multiple reconnection
+                    // attempts" (gemini_live_routes.py:1350-1354). Without this case
+                    // the UI showed "Connected — listening" forever while the mic
+                    // streamed into a dead pipe (the silent Gemini failure,
+                    // design doc 2026-07-11).
+                    val reason = obj["message"]?.jsonPrimitive?.content
+                        ?: data.ifBlank { "Voice backend disconnected" }
+                    serverTerminal = true
+                    _isAISpeaking.value = false
+                    _currentAiText.value = ""
+                    _state.value = VoiceState.ERROR
+                    _events.emit(VoiceEvent.ServerDisconnected(reason))
+                    // Also emit Error so existing VoiceScreen surfacing (persistent
+                    // text + toast + haptic) fires with zero UI changes.
+                    _events.emit(VoiceEvent.Error(reason))
+                    android.util.Log.e("VoiceClient", "Server terminal disconnect: $reason")
+                    wsClient.close()
                 }
 
                 "error" -> {

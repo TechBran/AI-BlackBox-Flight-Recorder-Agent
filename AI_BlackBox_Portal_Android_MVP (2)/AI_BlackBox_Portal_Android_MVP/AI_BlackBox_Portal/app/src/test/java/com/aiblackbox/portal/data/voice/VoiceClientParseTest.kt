@@ -84,4 +84,18 @@ class VoiceClientParseTest {
         assertEquals(VoiceState.CONNECTED, voice.state.value)
         assertTrue(events.last() is VoiceEvent.Reconnected)
     }
+
+    @Test
+    fun `terminal disconnected flips to ERROR closes socket and surfaces reason`() = runTest {
+        startConnected()
+        serverSends("""{"type":"disconnected","data":"Connection lost after multiple reconnection attempts"}""")
+        assertEquals(VoiceState.ERROR, voice.state.value)
+        assertEquals(
+            "Connection lost after multiple reconnection attempts",
+            events.filterIsInstance<VoiceEvent.ServerDisconnected>().single().reason
+        )
+        // Error also emitted so existing VoiceScreen error surfacing fires unchanged
+        assertTrue(events.any { it is VoiceEvent.Error })
+        assertEquals(1, fake.closeCount)
+    }
 }
