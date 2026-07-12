@@ -1,0 +1,32 @@
+{
+  "name": "xai_clone_voice",
+  "description": "Clone a voice from ONE local audio sample file (max 120 seconds) using xAI Custom Voices. The cloned voice_id becomes selectable as a Grok realtime voice-session voice (and on the xAI phone line) — it is NOT a TTS-picker voice. Use when the user wants a custom Grok voice from a recording they provide (e.g. an uploaded audio sample). REQUIRES explicit consent: you must first confirm the user owns or has permission to clone the voice, then pass confirm_consent=true.",
+  "category": "audio",
+  "groups": ["chat", "chat_cu", "mcp"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Display name for the cloned voice (how it will appear in the Grok voice list)."
+      },
+      "audio_path": {
+        "type": "string",
+        "description": "Local file path to ONE audio sample to clone from, at most 120 seconds long (e.g. a session-upload path)."
+      },
+      "confirm_consent": {
+        "type": "boolean",
+        "description": "Set true ONLY after the user has explicitly confirmed they own or have permission to clone this voice. You MUST ask and get confirmation first — refuse otherwise."
+      },
+      "description": {
+        "type": "string",
+        "description": "Optional short description of the voice."
+      }
+    },
+    "required": ["name", "audio_path", "confirm_consent"]
+  },
+  "returns": "The cloned voice's xAI voice_id and a confirmation it is selectable as a Grok session voice.",
+  "example": "xai_clone_voice(name=\"My Narrator\", audio_path=\"/path/to/sample.mp3\", confirm_consent=true)",
+  "notes": "Consent gate is enforced in the executor: without confirm_consent=true NO voice is created. xAI accepts ONE reference clip of at most 120 seconds (enforced server-side). The cloned id is a Grok session voice, not an ElevenLabs/TTS voice."
+}
