@@ -2,6 +2,7 @@
 module. httpx is mocked at the module seam (xai_voices calls httpx.get/post/delete
 as module attributes), so no live xAI call ever happens."""
 import json
+import time as time_module
 
 import pytest
 
@@ -89,3 +90,79 @@ def test_delete_hits_id_url(monkeypatch):
                         lambda url, **kw: (seen.update(url=url), FakeResp(200, {"ok": True}))[1])
     xv.delete_voice("cv-1")
     assert seen["url"] == f"{xv.XAI_VOICES_URL}/cv-1"
+
+
+# =============================================================================
+# is_custom_voice — 60s cache + fail-open (design: workstream 5 / scope item 3)
+# =============================================================================
+
+def test_is_custom_voice_hits_and_misses(monkeypatch):
+    monkeypatch.setattr(xv.httpx, "get", lambda url, **kw: FakeResp(
+        200, {"voices": [{"voice_id": "cv-1", "name": "N"}]}))
+    assert xv.is_custom_voice("cv-1") is True
+    assert xv.is_custom_voice("not-a-voice") is False
+
+
+def test_is_custom_voice_caches_for_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    def counting_get(url, **kw):
+        calls["n"] += 1
+        return FakeResp(200, {"voices": [{"voice_id": "cv-1"}]})
+
+    monkeypatch.setattr(xv.httpx, "get", counting_get)
+    assert xv.is_custom_voice("cv-1") is True
+    assert xv.is_custom_voice("cv-1") is True
+    assert xv.is_custom_voice("cv-2") is False
+    assert calls["n"] == 1  # ONE fetch inside the 60s window
+
+
+def test_is_custom_voice_refetches_after_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    def counting_get(url, **kw):
+        calls["n"] += 1
+        return FakeResp(200, {"voices": [{"voice_id": "cv-1"}]})
+
+    monkeypatch.setattr(xv.httpx, "get", counting_get)
+    assert xv.is_custom_voice("cv-1") is True
+    xv._cache["ts"] = time_module.time() - 61  # age the cache past TTL
+    assert xv.is_custom_voice("cv-1") is True
+    assert calls["n"] == 2
+
+
+def test_is_custom_voice_fail_open_when_unreachable(monkeypatch):
+    def boom(url, **kw):
+        raise Exception("connection refused")
+
+    monkeypatch.setattr(xv.httpx, "get", boom)
+    assert xv.is_custom_voice("cv-1") is False  # empty cache + unreachable -> catalog-only
+
+
+def test_is_custom_voice_keeps_stale_ids_on_refresh_failure(monkeypatch):
+    monkeypatch.setattr(xv.httpx, "get", lambda url, **kw: FakeResp(
+        200, {"voices": [{"voice_id": "cv-1"}]}))
+    assert xv.is_custom_voice("cv-1") is True
+    xv._cache["ts"] = time_module.time() - 61
+
+    def boom(url, **kw):
+        raise Exception("xai down")
+
+    monkeypatch.setattr(xv.httpx, "get", boom)
+    assert xv.is_custom_voice("cv-1") is True  # stale set survives the outage
+
+
+def test_is_custom_voice_no_key_is_false(monkeypatch):
+    monkeypatch.setattr(xv, "resolve_api_key", lambda: "")
+    assert xv.is_custom_voice("cv-1") is False
+
+
+def test_clone_and_delete_bust_the_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(xv.httpx, "get", lambda url, **kw: FakeResp(200, {"voices": []}))
+    xv.is_custom_voice("cv-1")
+    assert xv._cache["ts"] > 0
+    sample = tmp_path / "s.mp3"
+    sample.write_bytes(b"x")
+    monkeypatch.setattr(xv.httpx, "post", lambda *a, **k: FakeResp(200, {"voice_id": "cv-9"}))
+    xv.clone_voice("V", str(sample))
+    assert xv._cache["ts"] == 0.0
