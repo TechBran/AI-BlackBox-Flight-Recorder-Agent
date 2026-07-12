@@ -39,8 +39,15 @@ sealed class VoiceEvent {
     data object Disconnected : VoiceEvent()
 }
 
-class VoiceClient(private val client: OkHttpClient, private val baseWsUrl: String) {
-    private val wsClient = WebSocketClient(client)
+class VoiceClient(
+    private val client: OkHttpClient,
+    private val baseWsUrl: String,
+    // Testability seam (voice upgrade pass P3.1): production uses the real
+    // WebSocketClient; unit tests inject FakeWebSocketClient. The reconnect
+    // loop (P3.8) also uses this to open a fresh socket per leg.
+    private val wsFactory: (OkHttpClient) -> WebSocketClient = { WebSocketClient(it) },
+) {
+    private var wsClient = wsFactory(client)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val _state = MutableStateFlow(VoiceState.DISCONNECTED)

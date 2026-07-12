@@ -24,7 +24,7 @@ sealed class WsMessage {
     data object Disconnected : WsMessage()
 }
 
-class WebSocketClient(baseClient: OkHttpClient) {
+open class WebSocketClient(baseClient: OkHttpClient) {
 
     // WS-specific client matching OverlayService's proven config
     private val client: OkHttpClient = baseClient.newBuilder()
@@ -35,7 +35,7 @@ class WebSocketClient(baseClient: OkHttpClient) {
 
     private var webSocket: WebSocket? = null
 
-    fun connect(url: String): Flow<WsMessage> = flow {
+    open fun connect(url: String): Flow<WsMessage> = flow {
         android.util.Log.d("WebSocket", "Connecting to: $url")
         emitAll(connectInternal(url))
     }.catch { e ->
@@ -90,9 +90,9 @@ class WebSocketClient(baseClient: OkHttpClient) {
         }
     }
 
-    fun send(text: String): Boolean = webSocket?.send(text) ?: false
+    open fun send(text: String): Boolean = webSocket?.send(text) ?: false
 
-    fun close() {
+    open fun close() {
         try {
             webSocket?.close(1000, "Client closed")
         } catch (_: Exception) {}
