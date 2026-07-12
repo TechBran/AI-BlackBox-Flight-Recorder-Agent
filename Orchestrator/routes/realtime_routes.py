@@ -88,10 +88,11 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
     return False
 
 # =============================================================================
-# Tool Definitions for GPT Realtime
+# Tool Definitions — read FRESH at session-configure time (P1b)
 # =============================================================================
-
-REALTIME_TOOLS = get_openai_realtime_tools("realtime")
+# No import-time snapshot here: get_openai_realtime_tools("realtime") is called
+# inside configure_openai_session, so POST /toolvault/reload (which busts the
+# registry cache) reaches the NEXT voice session/reconnect without a restart.
 
 # =============================================================================
 # Session Saving
@@ -504,6 +505,9 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         if create_response is not None:
             turn_detection["create_response"] = create_response
 
+    # P1b: read tools FRESH (not at import) so /toolvault/reload reaches voice.
+    realtime_tools = get_openai_realtime_tools("realtime")
+
     # Configure session — GA wire format (Beta deprecated 2026-05-19).
     # Per empirical probe of OpenAI Realtime GA endpoint without OpenAI-Beta header:
     # - session.type "realtime" is now required
@@ -530,7 +534,7 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                     "speed": 1.0,
                 },
             },
-            "tools": REALTIME_TOOLS,
+            "tools": realtime_tools,
             "tool_choice": "auto",
         }
     }

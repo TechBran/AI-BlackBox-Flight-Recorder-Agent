@@ -85,10 +85,11 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
     return False
 
 # =============================================================================
-# Tool Definitions for Grok Voice Agent
+# Tool Definitions — read FRESH at session-configure time (P1b)
 # =============================================================================
-
-GROK_LIVE_TOOLS = get_openai_realtime_tools("grok_live")
+# No import-time snapshot here: get_openai_realtime_tools("grok_live") is
+# called inside configure_grok_session, so POST /toolvault/reload reaches the
+# NEXT voice session/reconnect without a restart.
 
 # =============================================================================
 # Session Saving
@@ -420,6 +421,9 @@ This is essential because:
 
 Do this BEFORE responding to the user - check what happened recently so you're caught up."""
 
+    # P1b: read tools FRESH (not at import) so /toolvault/reload reaches voice.
+    grok_live_tools = get_openai_realtime_tools("grok_live")
+
     # Configure session - Grok uses nested audio format structure
     config_event = {
         "type": "session.update",
@@ -446,14 +450,14 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                     }
                 }
             },
-            "tools": GROK_LIVE_TOOLS,
+            "tools": grok_live_tools,
             "tool_choice": "auto"  # Force Grok to actually use tools when appropriate
         }
     }
 
     print(f"[GROK-LIVE] ===== SENDING SESSION CONFIG =====")
-    print(f"[GROK-LIVE] Number of tools: {len(GROK_LIVE_TOOLS)}")
-    print(f"[GROK-LIVE] Tool names: {[t['name'] for t in GROK_LIVE_TOOLS]}")
+    print(f"[GROK-LIVE] Number of tools: {len(grok_live_tools)}")
+    print(f"[GROK-LIVE] Tool names: {[t['name'] for t in grok_live_tools]}")
     print(f"[GROK-LIVE] Full config: {json.dumps(config_event, indent=2)}")
 
     await session.grok_ws.send(json.dumps(config_event))
