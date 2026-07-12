@@ -1344,11 +1344,19 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
             print(f"[GEMINI-LIVE] Session resumption handle updated")
         return
 
-    # Check for goAway (server disconnecting - reconnect transparently)
+    # Check for goAway (server will drop this connection at timeLeft — schedule
+    # a graceful reconnect BEFORE the deadline instead of waiting for the cut)
     if "goAway" in event:
-        print(f"[GEMINI-LIVE] Server sending goAway - triggering transparent reconnect")
+        goaway = event.get("goAway") or {}
+        delay = _goaway_delay_seconds(goaway)
+        print(f"[GEMINI-LIVE] Server sending goAway (timeLeft={goaway.get('timeLeft')!r}) - graceful reconnect in {delay:.1f}s")
         if not session.intentional_disconnect and not session.is_reconnecting:
-            asyncio.create_task(gemini_reconnect(session))
+            async def _goaway_reconnect():
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if not session.intentional_disconnect and not session.is_reconnecting:
+                    await gemini_reconnect(session)
+            asyncio.create_task(_goaway_reconnect())
         return
 
     # Check for error in response
@@ -1366,6 +1374,29 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
 # =============================================================================
 # Reconnection and Keepalive
 # =============================================================================
+
+GOAWAY_RECONNECT_MARGIN_SEC = 2.0  # reconnect this many seconds BEFORE Google's stated deadline
+
+
+def _goaway_delay_seconds(goaway: dict) -> float:
+    """Seconds to wait before the graceful pre-deadline reconnect.
+
+    ``goAway.timeLeft`` is a protobuf Duration, JSON-encoded as a string like
+    "10s" / "9.5s" (a {"seconds": N, "nanos": M} dict is tolerated for safety).
+    Returns max(0, timeLeft - margin); 0 (reconnect immediately — the pre-P1.6
+    behavior) when the field is missing or unparseable. Never raises.
+    """
+    time_left = (goaway or {}).get("timeLeft")
+    seconds = 0.0
+    try:
+        if isinstance(time_left, str) and time_left.endswith("s"):
+            seconds = float(time_left[:-1])
+        elif isinstance(time_left, dict):
+            seconds = float(time_left.get("seconds", 0)) + float(time_left.get("nanos", 0)) / 1e9
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return max(0.0, seconds - GOAWAY_RECONNECT_MARGIN_SEC)
+
 
 async def gemini_reconnect(session: GeminiLiveSession):
     """
