@@ -43,11 +43,6 @@ def test_gemini_bare_setup_completes():
 
 
 @pytest.mark.skipif(not get_key("GOOGLE_API_KEY"), reason="GOOGLE_API_KEY not in service env")
-@pytest.mark.xfail(
-    reason="known 1007: update_sheet_values inner array lacks items — "
-    "P1.1 fixes the schema; P1.10's verification step removes this xfail",
-    strict=False,
-)
 def test_gemini_full_toolgroup_setup_completes():
     """The full gemini_live tool group must be accepted by setup (WS1 guard)."""
     from Orchestrator.tools.tool_registry import get_gemini_live_tools

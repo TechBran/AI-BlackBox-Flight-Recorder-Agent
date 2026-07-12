@@ -1,5 +1,5 @@
 {
-  "generated": "2026-07-11T21:57:46-0400",
+  "generated": "2026-07-11T22:50:46-0400",
   "name": "gemini-tools",
   "results": [
     {
@@ -12,7 +12,7 @@
       "close_reason": "",
       "error": "",
       "notes": "",
-      "ts": "2026-07-11T21:57:45-0400",
+      "ts": "2026-07-11T22:50:45-0400",
       "events": [
         {
           "setupComplete": {}
@@ -29,7 +29,7 @@
       "close_reason": "",
       "error": "",
       "notes": "56 functionDeclarations",
-      "ts": "2026-07-11T21:57:46-0400",
+      "ts": "2026-07-11T22:50:45-0400",
       "events": [
         {
           "setupComplete": {}
@@ -46,7 +46,7 @@
       "close_reason": "",
       "error": "",
       "notes": "56 functionDeclarations",
-      "ts": "2026-07-11T21:57:46-0400",
+      "ts": "2026-07-11T22:50:46-0400",
       "events": [
         {
           "setupComplete": {}
