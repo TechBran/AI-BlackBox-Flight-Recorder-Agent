@@ -110,6 +110,12 @@ def test_service_secrets_includes_process_env(tmp_path, monkeypatch):
     secrets = harness.service_secrets()
     assert "envonlysecret99" in secrets
     assert "fileonlysecret1" in secrets
+    # same NAME in both sources with different values: BOTH must sweep (rotated key)
+    monkeypatch.setenv("SHARED_API_KEY", "newrotated99")
+    monkeypatch.setattr(harness, "load_service_env",
+                        lambda: {"OLD_API_KEY": "fileonlysecret1", "SHARED_API_KEY": "oldrotated88"})
+    secrets = harness.service_secrets()
+    assert "newrotated99" in secrets and "oldrotated88" in secrets
 
 
 def test_redact_text_falsy_and_prefix_safe():

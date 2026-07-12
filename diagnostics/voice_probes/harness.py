@@ -80,11 +80,12 @@ def service_secrets() -> List[str]:
     """Every plausible secret value from the service .env AND os.environ.
 
     Sweeps both sources because get_key() prefers the process env — a rotated
-    key living only in os.environ must still be redacted from results.
+    key living only in os.environ must still be redacted from results; when the
+    same name carries divergent values in the two sources, BOTH values sweep.
     """
-    sources = {**load_service_env(), **os.environ}
+    candidates = [*load_service_env().items(), *os.environ.items()]
     return [
-        v for k, v in sources.items()
+        v for k, v in candidates
         if v and len(v) >= 8
         and any(t in k for t in ("KEY", "SECRET", "TOKEN", "PASSWORD"))
     ]

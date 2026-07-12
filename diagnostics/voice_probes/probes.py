@@ -45,7 +45,7 @@ def _capture_failure(result: ProbeResult, exc: BaseException) -> None:
     elif isinstance(exc, websockets.exceptions.InvalidStatus):
         body = ""
         try:
-            body = exc.response.body.decode("utf-8", "replace")[:500]
+            body = redact_text(exc.response.body.decode("utf-8", "replace"))[:500]
         except Exception:
             pass
         result.error = redact_text(f"HTTP {exc.response.status_code} at WS upgrade: {body}")
