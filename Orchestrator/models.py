@@ -153,6 +153,11 @@ class GeminiLiveSession:
     thinking_level: Optional[str] = None         # "minimal" | "low" | "medium" | "high"
     custom_role: str = ""                        # Outbound-call persona override
     phone_mode: bool = False                     # Phone-tuned server VAD
+    # Affective dialog + proactive audio (P6 — 2.5-native-audio family, v1alpha only).
+    # Persisted on the session so the reconnect path (P1a) picks the same URL
+    # version and reconfigures identically. Defaults False = v1beta everywhere.
+    affective_dialog: bool = False
+    proactive_audio: bool = False
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
     # P6a translation mode — persisted so reconnects rebuild the SAME session
     # type instead of degrading into a full persona/tool session.

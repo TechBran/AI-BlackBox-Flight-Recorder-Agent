@@ -42,3 +42,41 @@ def test_affective_capable_models_exact():
         "gemini-2.5-flash-native-audio-preview-12-2025",
     })
     assert "gemini-3.1-flash-live-preview" not in GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS
+
+
+from Orchestrator.models import GeminiLiveSession
+from Orchestrator.routes.gemini_live_routes import resolve_affective_flags
+
+
+def test_session_persists_affective_flags_default_false():
+    s = GeminiLiveSession(session_id="t1")
+    assert s.affective_dialog is False
+    assert s.proactive_audio is False
+
+
+def test_resolve_flags_accepted_on_25():
+    # JSON-bool and query-string forms both accepted
+    a, p, err = resolve_affective_flags(
+        "gemini-2.5-flash-native-audio-latest", "true", True)
+    assert (a, p, err) == (True, True, None)
+
+
+def test_resolve_flags_off_by_default():
+    a, p, err = resolve_affective_flags(
+        "gemini-2.5-flash-native-audio-latest", None, None)
+    assert (a, p, err) == (False, False, None)
+
+
+def test_resolve_flags_rejected_on_31():
+    a, p, err = resolve_affective_flags(
+        "gemini-3.1-flash-live-preview", "true", "false")
+    assert (a, p) == (False, False)
+    assert err is not None
+    assert "gemini-3.1-flash-live-preview" in err
+    assert "2.5" in err
+
+
+def test_resolve_flags_garbage_treated_false():
+    a, p, err = resolve_affective_flags(
+        "gemini-2.5-flash-native-audio-latest", "DROP TABLE", {"x": 1})
+    assert (a, p, err) == (False, False, None)

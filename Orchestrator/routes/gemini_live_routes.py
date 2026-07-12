@@ -55,6 +55,7 @@ from Orchestrator.config import (
     GEMINI_LIVE_VAD_SENSITIVITIES,
     GEMINI_LIVE_THINKING_LEVELS,
     GEMINI_LIVE_THINKING_CAPABLE_MODELS,
+    GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS,
     GEMINI_LIVE_INPUT_SAMPLE_RATE,
     GEMINI_LIVE_OUTPUT_SAMPLE_RATE,
     GEMINI_LIVE_DEFAULT_VOICE,
@@ -232,6 +233,53 @@ async def connect_to_gemini(session: GeminiLiveSession) -> bool:
         print(f"[GEMINI-LIVE] Connection failed: {e}")
         session.status = "error"
         return False
+
+
+def _parse_ws_bool(value) -> bool:
+    """Allowlist-parse a boolean that arrives as JSON bool or URL-query string.
+
+    Accepts bool, "true"/"1"/"yes", "false"/"0"/"no"/""/None. Anything else
+    (attacker-shaped strings, dicts) logs a warning and resolves False —
+    mirrors the warn-and-fallback convention of the other Gemini allowlists.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes"):
+            return True
+        if v in ("false", "0", "no", ""):
+            return False
+    print(f"[GEMINI-LIVE] WARNING: unrecognized boolean flag {value!r}; treating as False")
+    return False
+
+
+def resolve_affective_flags(model, affective_raw, proactive_raw):
+    """Validate affective-dialog / proactive-audio request flags against the model.
+
+    Returns (affective: bool, proactive: bool, error: Optional[str]).
+    `error` is a client-facing message when either flag is requested on a model
+    outside GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS (3.1 rejects these v1alpha-only
+    setup fields); both flags resolve False in that case. Model resolution
+    mirrors configure_gemini_session: unknown/None -> GEMINI_LIVE_MODEL default.
+    """
+    affective = _parse_ws_bool(affective_raw)
+    proactive = _parse_ws_bool(proactive_raw)
+    if not (affective or proactive):
+        return False, False, None
+    _allowed_model_ids = {m["id"] for m in GEMINI_LIVE_MODELS}
+    resolved_model = model if model in _allowed_model_ids else GEMINI_LIVE_MODEL
+    if resolved_model not in GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS:
+        return False, False, (
+            f"Affective dialog / proactive audio are not supported by {resolved_model}. "
+            f"They require a Gemini 2.5 native-audio model "
+            f"({', '.join(sorted(GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS))} — deprecated line, "
+            "v1alpha endpoint only). Turn the toggles off or switch model."
+        )
+    return affective, proactive, None
+
 
 async def configure_gemini_session(
     session: GeminiLiveSession,
