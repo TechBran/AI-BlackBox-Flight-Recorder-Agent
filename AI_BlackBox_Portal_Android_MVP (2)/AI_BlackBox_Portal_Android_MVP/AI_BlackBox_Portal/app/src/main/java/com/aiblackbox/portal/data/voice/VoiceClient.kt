@@ -412,6 +412,11 @@ class VoiceClient(
                     _state.value = VoiceState.ERROR
                     android.util.Log.e("VoiceClient", "Server error: $msg")
                 }
+
+                else -> android.util.Log.w(
+                    "VoiceClient",
+                    "Unhandled server message type '$type': ${raw.take(160)}"
+                )
             }
         } catch (e: Exception) {
             android.util.Log.e("VoiceClient", "Parse error: ${e.message}")

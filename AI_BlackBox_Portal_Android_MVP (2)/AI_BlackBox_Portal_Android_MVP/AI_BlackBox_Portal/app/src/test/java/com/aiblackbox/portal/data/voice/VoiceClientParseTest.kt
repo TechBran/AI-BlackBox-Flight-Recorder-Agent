@@ -98,4 +98,17 @@ class VoiceClientParseTest {
         assertTrue(events.any { it is VoiceEvent.Error })
         assertEquals(1, fake.closeCount)
     }
+
+    @Test
+    fun `unknown message types are inert - no state change no events no crash`() = runTest {
+        startConnected()
+        val eventsBefore = events.size
+        // NOT in this list: tool_call / tool_result / image_task / video_task /
+        // music_task — those five get real parsing (VoiceEvent.Tool) in P3.9a.
+        serverSends("""{"type":"some_future_frame","data":"x"}""")
+        serverSends("""{"type":"session_stats","data":{"turns":3}}""")
+        serverSends("""not even json""")
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        assertEquals(eventsBefore, events.size)
+    }
 }
