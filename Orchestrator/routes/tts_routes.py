@@ -356,8 +356,32 @@ async def tts_batch(body: dict = Body(...)):
         # ElevenLabs returns MP3; concatenated frames play fine (no WAV stitch).
         audio_format = "mp3"
 
+    # --- Local (custom server) provider: /v1/audio/speech, OpenAI-shaped ---
+    elif provider == "local":
+        from Orchestrator.onboarding.custom_servers import resolve_tts_server
+        resolved = resolve_tts_server(model or None)
+        if not resolved:
+            raise HTTPException(400, "No local text-to-speech model available (register an OpenAI-compatible server hosting a TTS model)")
+        _srv, _model = resolved
+        _bare_voice = voice.split(":", 1)[1] if voice.startswith("local:") else voice
+
+        def _local_tts_chunk(chunk_text: str) -> bytes:
+            req = {"model": _model, "input": chunk_text, "voice": _bare_voice,
+                   "response_format": audio_format}
+            headers = {"Content-Type": "application/json"}
+            if _srv.get("api_key"):
+                headers["Authorization"] = f"Bearer {_srv['api_key']}"
+            r = requests.post(f"{_srv['base_url']}/audio/speech", json=req,
+                              headers=headers, timeout=TTS_TIMEOUT / 1000.0)
+            if r.status_code != 200:
+                raise HTTPException(502, f"Local TTS failed (HTTP {r.status_code}): {r.text[:200]}")
+            return r.content
+
+        futures = [loop.run_in_executor(_tts_executor, _local_tts_chunk, chunk) for chunk in chunks]
+        results = await asyncio.gather(*futures, return_exceptions=True)
+
     else:
-        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', or 'elevenlabs'.")
+        raise HTTPException(400, f"Unknown provider: {provider}. Use 'openai', 'gemini-pro', 'gemini-flash', 'elevenlabs', or 'local'.")
 
     # Check for errors in results
     errors = [(i, r) for i, r in enumerate(results) if isinstance(r, Exception)]
@@ -974,6 +998,21 @@ async def tts_catalog():
                 groups.append({"id": "elevenlabs", "label": "ElevenLabs", "dynamic": True, "voices": voices})
     except Exception:
         pass  # fail-open: ElevenLabs group simply absent if catalog unreachable
+    # Local (custom-server) TTS group — appended when a registered server hosts a
+    # text-to-speech model. Fail-open, same as ElevenLabs.
+    try:
+        from Orchestrator.onboarding.custom_servers import (
+            has_modality_model, resolve_tts_server, list_local_tts_voices)
+        if has_modality_model("tts"):
+            resolved = resolve_tts_server()
+            if resolved:
+                _srv, _m = resolved
+                voices = list_local_tts_voices(_srv)
+                groups.append({"id": "local", "label": "Local (free)", "dynamic": True,
+                               "voices": [{"id": f"local:{v}", "name": v,
+                                           "description": "Local TTS"} for v in voices]})
+    except Exception:
+        pass  # fail-open
     return {"groups": groups}
 
 @app.get("/stt/catalog")

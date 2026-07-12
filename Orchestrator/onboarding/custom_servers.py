@@ -456,3 +456,43 @@ def list_image_models() -> list[str]:
             if isinstance(m, str) and model_modality(srv, m) == "image":
                 out.append(qualify(alias, m))
     return out
+
+
+def resolve_tts_server(model: str | None = None) -> tuple[dict, str] | None:
+    """(server, bare_model) for a local text-to-speech request."""
+    return resolve_modality_server("tts", model)
+
+
+def resolve_stt_server(model: str | None = None) -> tuple[dict, str] | None:
+    """(server, bare_model) for a local speech-to-text request."""
+    return resolve_modality_server("stt", model)
+
+
+def list_local_tts_voices(server: dict) -> list[str]:
+    """Voice ids a local /v1/audio/speech server offers. Probe the (non-standard)
+    GET {base_url}/audio/voices; fail-soft to ['default'] (OpenAI-compat TTS
+    servers accept a ``voice`` param but rarely advertise a list). Lazy ``requests``
+    import keeps this module stdlib-only at import time (lean-venv-safe)."""
+    base_url = (server or {}).get("base_url", "")
+    if not base_url:
+        return ["default"]
+    import requests as _rq
+    headers = {}
+    if server.get("api_key"):
+        headers["Authorization"] = f"Bearer {server['api_key']}"
+    try:
+        r = _rq.get(f"{base_url}/audio/voices", headers=headers, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("voices") if isinstance(data, dict) else data
+        out = []
+        for it in (items or []):
+            if isinstance(it, str):
+                out.append(it)
+            elif isinstance(it, dict):
+                vid = it.get("id") or it.get("voice") or it.get("name")
+                if isinstance(vid, str):
+                    out.append(vid)
+        return out or ["default"]
+    except Exception:
+        return ["default"]
