@@ -12,6 +12,7 @@ import com.aiblackbox.portal.data.repository.ElevenVoice
 import com.aiblackbox.portal.data.repository.SharedVoice
 import com.aiblackbox.portal.data.repository.VoiceLabException
 import com.aiblackbox.portal.data.repository.VoiceLabRepository
+import com.aiblackbox.portal.data.repository.XaiVoice
 import com.aiblackbox.portal.data.voice.AudioRecorderManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -113,6 +114,18 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
     private val _libraryAddingId = MutableStateFlow<String?>(null)
     val libraryAddingId: StateFlow<String?> = _libraryAddingId.asStateFlow()
 
+    // ── xAI (Grok) custom voices zone ────────────────────────────────────────
+    private val _xaiConfigured = MutableStateFlow(false)
+    val xaiConfigured: StateFlow<Boolean> = _xaiConfigured.asStateFlow()
+    private val _xaiVoices = MutableStateFlow<List<XaiVoice>>(emptyList())
+    val xaiVoices: StateFlow<List<XaiVoice>> = _xaiVoices.asStateFlow()
+    private val _xaiCloneState = MutableStateFlow(CloneState.IDLE)
+    val xaiCloneState: StateFlow<CloneState> = _xaiCloneState.asStateFlow()
+    private val _xaiCloneError = MutableStateFlow<String?>(null)
+    val xaiCloneError: StateFlow<String?> = _xaiCloneError.asStateFlow()
+    private val _xaiClonePart = MutableStateFlow<ClonePart?>(null)
+    val xaiClonePart: StateFlow<ClonePart?> = _xaiClonePart.asStateFlow()
+
     companion object {
         private const val MAX_RECORD_MS = 5 * 60_000L // 5 min cap
     }
@@ -123,6 +136,7 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         api = BlackBoxApi(origin)
         repo = VoiceLabRepository(api!!)
         refreshStatus()
+        loadXaiVoices()   // xAI zone gates on its own key, independent of ElevenLabs
     }
 
     /** Prefix relative preview/audio urls with the server origin (for playback). */
@@ -401,11 +415,88 @@ class VoiceLabViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // ── xAI (Grok) custom voices ───────────────────────────────────────────────
+    fun loadXaiVoices() {
+        val repo = repo ?: return
+        viewModelScope.launch {
+            try {
+                val res = repo.fetchXaiVoices()
+                _xaiConfigured.value = res.configured
+                _xaiVoices.value = res.voices
+            } catch (_: Exception) {
+                _xaiConfigured.value = false   // unreachable == unconfigured (zone hides)
+            }
+        }
+    }
+
+    /** Queue ONE picked clip (xAI clones from a single ≤120s reference). */
+    fun addXaiPickedFile(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val part = withContext(Dispatchers.IO) { copyUriToCache(uri) }
+                _xaiClonePart.value?.let { runCatching { it.file.delete() } }
+                _xaiClonePart.value = part
+                _xaiCloneError.value = null
+            } catch (e: Exception) {
+                _message.value = "Couldn't read file: ${e.message}"
+            }
+        }
+    }
+
+    fun clearXaiPart() {
+        _xaiClonePart.value?.let { runCatching { it.file.delete() } }
+        _xaiClonePart.value = null
+    }
+
+    fun submitXaiClone(name: String, description: String, consent: Boolean) {
+        val repo = repo ?: return
+        val part = _xaiClonePart.value
+        if (name.isBlank() || part == null || !consent) {
+            _xaiCloneError.value = "Name, one clip (max 120s), and consent are required."
+            return
+        }
+        _xaiCloneState.value = CloneState.SUBMITTING
+        _xaiCloneError.value = null
+        viewModelScope.launch {
+            try {
+                repo.cloneXaiVoice(name.trim(), part.file, consent, description.trim())
+                _xaiCloneState.value = CloneState.IDLE
+                _message.value = "Grok voice \"${name.trim()}\" cloned."
+                clearXaiPart()
+                loadXaiVoices()
+            } catch (e: VoiceLabException) {
+                _xaiCloneState.value = CloneState.IDLE
+                _xaiCloneError.value = when (e.status) {
+                    422 -> "Consent is required to clone a voice."
+                    400 -> "Clone rejected: ${e.message}"
+                    else -> e.message
+                }
+            } catch (e: Exception) {
+                _xaiCloneState.value = CloneState.IDLE
+                _xaiCloneError.value = e.message ?: "Clone failed"
+            }
+        }
+    }
+
+    fun deleteXaiVoice(voiceId: String) {
+        val repo = repo ?: return
+        viewModelScope.launch {
+            try {
+                repo.deleteXaiVoice(voiceId)
+                _message.value = "Grok voice deleted."
+                loadXaiVoices()
+            } catch (e: Exception) {
+                _message.value = "Delete failed: ${e.message}"
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         recordTicker?.cancel()
         if (recorder.isCurrentlyRecording()) recorder.stopRecording()
         // Drop any un-submitted clips.
         _cloneParts.value.forEach { runCatching { it.file.delete() } }
+        _xaiClonePart.value?.let { runCatching { it.file.delete() } }
     }
 }
