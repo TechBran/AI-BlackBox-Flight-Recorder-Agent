@@ -1871,6 +1871,8 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     url_vad_sensitivity_start = websocket.query_params.get("vad_sensitivity_start")
     url_vad_sensitivity_end = websocket.query_params.get("vad_sensitivity_end")
     url_thinking_level = websocket.query_params.get("thinking_level")
+    url_affective = websocket.query_params.get("affective")
+    url_proactive = websocket.query_params.get("proactive")
     # P6a translation mode — same precedence as every other param
     # (JSON connect message wins, URL query fills missing).
     url_mode = websocket.query_params.get("mode")
@@ -1969,6 +1971,24 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                 session.target_language = target_language or "" if is_translate else ""
                 session.operator = operator
 
+                # P6 — affective dialog + proactive audio flags. JSON connect wins,
+                # URL query fills missing (same precedence as model/vad/thinking).
+                affective_raw = data.get("affective", url_affective)
+                proactive_raw = data.get("proactive", url_proactive)
+                affective, proactive, affective_error = resolve_affective_flags(
+                    model, affective_raw, proactive_raw
+                )
+                if affective_error:
+                    # Clear client error: requested on a model that rejects the
+                    # fields (e.g. 3.1). Do NOT proceed to connect.
+                    await _safe_ws_send(websocket, {"type": "error", "data": affective_error})
+                    continue
+                # Persist BEFORE connect_to_gemini — the flags select the v1alpha
+                # endpoint there, and the P1a reconnect path re-reads them so a
+                # reconnected session reconfigures identically.
+                session.affective_dialog = affective
+                session.proactive_audio = proactive
+
                 await _safe_ws_send(websocket, {
                     "type": "status",
                     "data": "Connecting to Gemini Live..."
@@ -2030,7 +2050,9 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                             "session_id": session_id,
                             "operator": operator,
                             "model": model or GEMINI_LIVE_MODEL,
-                            "voice": voice
+                            "voice": voice,
+                            "affective_dialog": session.affective_dialog,
+                            "proactive_audio": session.proactive_audio
                         }
                     })
                 else:
