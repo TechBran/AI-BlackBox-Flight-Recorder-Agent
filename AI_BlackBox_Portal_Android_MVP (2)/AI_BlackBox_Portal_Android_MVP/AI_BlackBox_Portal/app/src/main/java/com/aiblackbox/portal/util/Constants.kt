@@ -223,6 +223,13 @@ object Constants {
     /** Model ids that support thinkingLevel (3.1-only currently). */
     val GEMINI_LIVE_THINKING_CAPABLE_MODELS: Set<String> = setOf("gemini-3.1-flash-live-preview")
 
+    /** Model ids supporting affective dialog + proactive audio (2.5 native-audio family,
+     *  v1alpha, DEPRECATED line). Mirrors backend GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS. */
+    val GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS: Set<String> = setOf(
+        "gemini-2.5-flash-native-audio-latest",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+    )
+
     /** P6a — translation target languages: top-20 BCP-47 + free-text "Other"
      *  handled in VoiceScreen. Mirrors Portal/modules/voice-agents-modal.js. */
     val TRANSLATE_LANGUAGES: List<Pair<String, String>> = listOf(

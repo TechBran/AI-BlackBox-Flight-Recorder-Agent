@@ -163,6 +163,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val translateLang: StateFlow<String> = _translateLang.asStateFlow()
     private val _translateLangOther = MutableStateFlow("")
     val translateLangOther: StateFlow<String> = _translateLangOther.asStateFlow()
+    // ── Gemini affective dialog + proactive audio (P6b) — 2.5 native-audio only.
+    // DataStore-persisted like every sibling setting (P3.13 pattern; keys "va_").
+    private val _geminiAffective = MutableStateFlow(false)
+    val geminiAffective: StateFlow<Boolean> = _geminiAffective.asStateFlow()
+    private val _geminiProactive = MutableStateFlow(false)
+    val geminiProactive: StateFlow<Boolean> = _geminiProactive.asStateFlow()
     // P3.13: voice-agent preset roster from GET /voice-agents (P4 registry;
     // 404-tolerant — empty list pre-P4, dropdown hides). P4.11 builds on this fetch.
     private val _presets = MutableStateFlow<List<VoiceAgentPreset>>(emptyList())
@@ -252,6 +258,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             _translateEnabled.value = store.getString("va_translate_on").first() == "true"
             store.getString("va_translate_lang").first().takeIf { it.isNotBlank() }?.let { _translateLang.value = it }
             store.getString("va_translate_lang_other").first().takeIf { it.isNotBlank() }?.let { _translateLangOther.value = it }
+            _geminiAffective.value = store.getString("va_gem_affective").first() == "true"
+            _geminiProactive.value = store.getString("va_gem_proactive").first() == "true"
         }
     }
 
@@ -395,6 +403,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun setTranslateEnabled(v: Boolean) { _translateEnabled.value = v; persist("va_translate_on", if (v) "true" else "false") }
     fun setTranslateLang(v: String) { _translateLang.value = v; persist("va_translate_lang", v) }
     fun setTranslateLangOther(v: String) { _translateLangOther.value = v; persist("va_translate_lang_other", v) }
+    fun setGeminiAffective(v: Boolean) { _geminiAffective.value = v; persist("va_gem_affective", if (v) "true" else "false") }
+    fun setGeminiProactive(v: Boolean) { _geminiProactive.value = v; persist("va_gem_proactive", if (v) "true" else "false") }
 
     private fun resolvedTranslateLang(): String =
         if (_translateLang.value == "__other__") _translateLangOther.value.trim().ifBlank { "en" }
@@ -416,11 +426,14 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             )
             VoiceBackend.GEMINI_LIVE -> {
                 val thinkingAllowed = _geminiModel.value in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS
+                val affectiveAllowed = _geminiModel.value in Constants.GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS
                 VoiceSessionConfig(
                     model = _geminiModel.value.takeIf { it.isNotBlank() },
                     vadStart = _geminiVadStart.value,
                     vadEnd = _geminiVadEnd.value,
                     thinkingLevel = if (thinkingAllowed) _geminiThinkingLevel.value else null,
+                    affective = if (affectiveAllowed && _geminiAffective.value) true else null,
+                    proactive = if (affectiveAllowed && _geminiProactive.value) true else null,
                     agentId = preset,
                     mode = if (_translateEnabled.value) "translate" else null,
                     targetLanguage = if (_translateEnabled.value) resolvedTranslateLang() else null,
@@ -957,6 +970,8 @@ fun VoiceScreen(
     val geminiVadStart by viewModel.geminiVadStart.collectAsState()
     val geminiVadEnd by viewModel.geminiVadEnd.collectAsState()
     val geminiThinkingLevel by viewModel.geminiThinkingLevel.collectAsState()
+    val geminiAffective by viewModel.geminiAffective.collectAsState()
+    val geminiProactive by viewModel.geminiProactive.collectAsState()
     val grokModel by viewModel.grokModel.collectAsState()
     val grokReasoningEffort by viewModel.grokReasoningEffort.collectAsState()
     val selectedPresetId by viewModel.selectedPresetId.collectAsState()
@@ -1186,6 +1201,10 @@ fun VoiceScreen(
                             onVadEndChange = viewModel::setGeminiVadEnd,
                             thinkingLevel = geminiThinkingLevel,
                             onThinkingLevelChange = viewModel::setGeminiThinkingLevel,
+                            affective = geminiAffective,
+                            onAffectiveChange = viewModel::setGeminiAffective,
+                            proactive = geminiProactive,
+                            onProactiveChange = viewModel::setGeminiProactive,
                         )
                         VoiceBackend.GROK_LIVE -> GrokConfigBlock(
                             connected = isConnected,
@@ -1489,6 +1508,10 @@ private fun GeminiConfigBlock(
     onVadEndChange: (String?) -> Unit,
     thinkingLevel: String?,
     onThinkingLevelChange: (String?) -> Unit,
+    affective: Boolean,
+    onAffectiveChange: (Boolean) -> Unit,
+    proactive: Boolean,
+    onProactiveChange: (Boolean) -> Unit,
 ) {
     LabeledDropdown(
         label = "Model",
@@ -1527,6 +1550,35 @@ private fun GeminiConfigBlock(
             selectedId = toSelectedId(thinkingLevel),
             enabled = true,  // hot-swappable mid-session (per plan: voice/eagerness/idle/thinking always enabled)
             onSelect = { onThinkingLevelChange(toNullable(it)) },
+        )
+    }
+    // Affective dialog + proactive audio — 2.5 native-audio family only (v1alpha,
+    // deprecated line). Setup+URL-version binding: locked while connected (audit I4).
+    val affectiveCapable = model in Constants.GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "Affective dialog — 2.5 only (deprecated line)",
+            style = MaterialTheme.typography.labelLarge,
+            color = BbxDim,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = affective && affectiveCapable,
+            onCheckedChange = onAffectiveChange,
+            enabled = !connected && affectiveCapable,
+        )
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "Proactive audio — 2.5 only (deprecated line)",
+            style = MaterialTheme.typography.labelLarge,
+            color = BbxDim,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(
+            checked = proactive && affectiveCapable,
+            onCheckedChange = onProactiveChange,
+            enabled = !connected && affectiveCapable,
         )
     }
 }

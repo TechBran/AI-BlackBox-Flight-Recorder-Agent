@@ -23,6 +23,9 @@ data class VoiceSessionConfig(
     val vadStart: String? = null,
     val vadEnd: String? = null,
     val thinkingLevel: String? = null,
+    /** Gemini affective dialog / proactive audio — 2.5 native-audio only; null = omit. */
+    val affective: Boolean? = null,
+    val proactive: Boolean? = null,
     /** P3.12: voice-agent preset id → ?agent= on the WS URL (workstream 3). */
     val agentId: String? = null,
     /** P3.19: Grok Live reasoning.effort (high|none, grok-voice-think-fast-1.0). */
