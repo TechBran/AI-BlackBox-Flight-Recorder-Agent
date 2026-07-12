@@ -46,7 +46,7 @@ from starlette.websockets import WebSocketState
 from Orchestrator.checkpoint import app
 from Orchestrator.config import (
     GOOGLE_API_KEY,
-    GEMINI_LIVE_URL,
+    gemini_live_url,
     GEMINI_LIVE_MODEL,
     GEMINI_LIVE_MODELS,
     GEMINI_LIVE_TRANSLATE_MODEL,
@@ -212,10 +212,16 @@ async def connect_to_gemini(session: GeminiLiveSession) -> bool:
         return False
 
     try:
-        # Gemini Live uses API key in URL query parameter
-        url = f"{GEMINI_LIVE_URL}?key={GOOGLE_API_KEY}"
+        # Gemini Live uses API key in URL query parameter.
+        # v1alpha endpoint is REQUIRED when affective dialog / proactive audio were
+        # requested for this session (flags validated + persisted by the WS handler
+        # via resolve_affective_flags BEFORE this call); all other sessions stay on
+        # v1beta. Reading session state (not request params) keeps the P1a
+        # reconnect path on the identical endpoint.
+        api_version = "v1alpha" if (session.affective_dialog or session.proactive_audio) else "v1beta"
+        url = f"{gemini_live_url(api_version)}?key={GOOGLE_API_KEY}"
 
-        print(f"[GEMINI-LIVE] Connecting to Gemini Live API...")
+        print(f"[GEMINI-LIVE] Connecting to Gemini Live API ({api_version})...")
         # Add explicit ping settings to prevent connection drops
         session.gemini_ws = await websockets.connect(
             url,

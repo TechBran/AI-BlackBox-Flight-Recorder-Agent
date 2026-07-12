@@ -80,3 +80,36 @@ def test_resolve_flags_garbage_treated_false():
     a, p, err = resolve_affective_flags(
         "gemini-2.5-flash-native-audio-latest", "DROP TABLE", {"x": 1})
     assert (a, p, err) == (False, False, None)
+
+
+@pytest.mark.asyncio
+async def test_connect_url_version_selection(monkeypatch):
+    import Orchestrator.routes.gemini_live_routes as glr
+
+    captured = {}
+
+    async def fake_connect(url, **kwargs):
+        captured["url"] = url
+        return MagicMock()
+
+    monkeypatch.setattr(glr, "websockets", SimpleNamespace(connect=fake_connect))
+    monkeypatch.setattr(glr, "WEBSOCKETS_AVAILABLE", True)
+    monkeypatch.setattr(glr, "GOOGLE_API_KEY", "test-key")
+
+    # Default flags (False/False) -> v1beta
+    s = GeminiLiveSession(session_id="t-beta")
+    assert await glr.connect_to_gemini(s) is True
+    assert ".v1beta." in captured["url"]
+    assert "key=test-key" in captured["url"]
+
+    # Either flag set -> v1alpha (real dataclass: proves P1a reconnect re-derives
+    # the same URL from persisted session state, not from request plumbing)
+    s2 = GeminiLiveSession(session_id="t-alpha")
+    s2.affective_dialog = True
+    assert await glr.connect_to_gemini(s2) is True
+    assert ".v1alpha." in captured["url"]
+
+    s3 = GeminiLiveSession(session_id="t-alpha-2")
+    s3.proactive_audio = True
+    assert await glr.connect_to_gemini(s3) is True
+    assert ".v1alpha." in captured["url"]
