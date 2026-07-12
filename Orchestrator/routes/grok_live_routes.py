@@ -1439,6 +1439,9 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 voice = data.get("voice", GROK_LIVE_DEFAULT_VOICE)
                 greeting = data.get("greeting", "")
                 role = data.get("role", "")
+                # Model: JSON connect message wins over URL query param
+                # (same merge rule as /ws/realtime — Android uses query params).
+                model = data.get("model", websocket.query_params.get("model"))
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1447,7 +1450,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                 })
 
                 # Connect to Grok
-                if await connect_to_grok(session):
+                if await connect_to_grok(session, model=model):
                     # Configure session with tools, context, and voice
                     await configure_grok_session(session, operator, voice, custom_role=role)
                     print(f"[GROK-LIVE] Voice selected: {voice}")
@@ -1491,7 +1494,7 @@ async def grok_live_websocket(websocket: WebSocket, session_id: str):
                         "data": {
                             "session_id": session_id,
                             "operator": operator,
-                            "model": "grok-voice-agent",
+                            "model": session.model,
                             "voice": voice
                         }
                     })
@@ -1584,6 +1587,8 @@ async def grok_live_status():
         "available": WEBSOCKETS_AVAILABLE and bool(XAI_API_KEY),
         "websockets_installed": WEBSOCKETS_AVAILABLE,
         "api_key_configured": bool(XAI_API_KEY),
+        "model_default": GROK_LIVE_MODEL,
+        "models": GROK_LIVE_MODELS,
         "voices": GROK_LIVE_VOICES,
         "default_voice": GROK_LIVE_DEFAULT_VOICE,
         "sample_rate": GROK_LIVE_SAMPLE_RATE,

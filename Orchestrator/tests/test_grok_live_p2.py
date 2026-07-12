@@ -86,3 +86,82 @@ async def test_connect_to_grok_invalid_model_falls_back(fake_grok_dial, capsys):
     assert session.model == "grok-voice-latest"
     out = capsys.readouterr().out
     assert "WARNING" in out and "grok-voice-agent" in out
+
+
+# ---------------------------------------------------------------------------
+# Endpoint plumbing + /grok-live/status catalog surface
+# ---------------------------------------------------------------------------
+
+from fastapi.testclient import TestClient
+
+from Orchestrator.checkpoint import app
+from Orchestrator.routes.grok_live_routes import grok_live_status
+
+
+@pytest.mark.asyncio
+async def test_grok_status_serves_models_and_default():
+    resp = await grok_live_status()
+    assert resp["model_default"] == "grok-voice-latest"
+    assert {m["id"] for m in resp["models"]} == {
+        "grok-voice-latest", "grok-voice-think-fast-1.0",
+    }
+    # Existing contract stays additive (3-surface rule)
+    assert resp["voices"] == GROK_LIVE_VOICES
+    assert "default_voice" in resp and "sample_rate" in resp
+
+
+@pytest.fixture
+def grok_relay_stubs(monkeypatch):
+    import Orchestrator.routes.grok_live_routes as gl
+    monkeypatch.setattr(gl, "XAI_API_KEY", "test-key")
+    monkeypatch.setattr(gl, "WEBSOCKETS_AVAILABLE", True)
+
+    connect_mock = AsyncMock()
+
+    async def fake_connect(session, model=None):
+        session.model = model or gl.GROK_LIVE_MODEL
+        session.status = "connected"
+        connect_mock(session, model=model)
+        return True
+
+    configure_mock = AsyncMock()
+    monkeypatch.setattr(gl, "connect_to_grok", fake_connect)
+    monkeypatch.setattr(gl, "configure_grok_session", configure_mock)
+    monkeypatch.setattr(gl, "save_grok_session_to_blackbox", AsyncMock())
+
+    async def _noop(session):
+        return None
+
+    monkeypatch.setattr(gl, "grok_listener", _noop)
+    monkeypatch.setattr(gl, "grok_keepalive_loop", _noop)
+    return connect_mock, configure_mock
+
+
+def test_connected_event_reports_resolved_model(grok_relay_stubs):
+    connect_mock, _ = grok_relay_stubs
+    client = TestClient(app)
+    with client.websocket_connect("/ws/grok-live/p2-grok-ep-1") as ws:
+        ws.send_text(json.dumps({
+            "type": "connect", "operator": "test_operator",
+            "model": "grok-voice-think-fast-1.0",
+        }))
+        assert ws.receive_json()["type"] == "status"
+        connected = ws.receive_json()
+        ws.send_text(json.dumps({"type": "disconnect"}))
+
+    assert connected["type"] == "connected"
+    # The cosmetic "grok-voice-agent" label is dead — real resolved model only.
+    assert connected["data"]["model"] == "grok-voice-think-fast-1.0"
+    assert connect_mock.call_args.kwargs["model"] == "grok-voice-think-fast-1.0"
+
+
+def test_model_query_param_fallback(grok_relay_stubs):
+    connect_mock, _ = grok_relay_stubs
+    client = TestClient(app)
+    with client.websocket_connect("/ws/grok-live/p2-grok-ep-2?model=grok-voice-think-fast-1.0") as ws:
+        ws.send_text(json.dumps({"type": "connect", "operator": "test_operator"}))
+        ws.receive_json()
+        connected = ws.receive_json()
+        ws.send_text(json.dumps({"type": "disconnect"}))
+
+    assert connected["data"]["model"] == "grok-voice-think-fast-1.0"
