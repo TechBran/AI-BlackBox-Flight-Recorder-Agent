@@ -17,8 +17,11 @@
       },
       "values": {
         "type": "array",
-        "items": {"type": "array"},
-        "description": "A 2D array of cell values: an array of rows, each row an array of cell values (strings/numbers/formulas). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]]."
+        "items": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "description": "A 2D array of cell values: an array of rows, each row an array of cell strings. Send every cell as a string — Sheets USER_ENTERED parsing coerces it (\"42\" becomes a number, \"=B2*1.1\" a formula, \"5/1/2026\" a date). E.g. [[\"Name\", \"Total\"], [\"Widget\", \"=B2*1.1\"]]."
       },
       "operator": {
         "type": "string",
@@ -29,6 +32,6 @@
     "required": ["spreadsheet_id", "range", "values"]
   },
   "returns": "JSON with updated_range and updated_cells (or an error string).",
-  "example": "update_sheet_values(spreadsheet_id=\"1AbC...\", range=\"Sheet1!A1\", values=[[\"Name\", \"Total\"], [\"Widget\", 42]])",
+  "example": "update_sheet_values(spreadsheet_id=\"1AbC...\", range=\"Sheet1!A1\", values=[[\"Name\", \"Total\"], [\"Widget\", \"42\"]])",
   "notes": "valueInputOption is USER_ENTERED, so a string like \"=SUM(A1:A5)\" becomes a formula and \"5/1/2026\" becomes a date. For structural edits (add/delete sheets, formatting, merges) use sheets_batch_update instead."
 }
