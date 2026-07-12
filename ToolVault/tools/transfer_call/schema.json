@@ -1,0 +1,24 @@
+{
+  "name": "transfer_call",
+  "description": "Transfer the CURRENT live xAI phone-line call to another phone number or SIP destination (SIP REFER). Only works while an xAI sovereign-line call is active — use when the caller asks to be transferred, e.g. 'put me through to +1-555-0100'. Does NOT control Twilio calls.",
+  "category": "telephony",
+  "groups": ["chat", "grok_live"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "target_uri": {
+        "type": "string",
+        "description": "Transfer destination: tel:+15550100 or sip:agent@example.com."
+      },
+      "call_id": {
+        "type": "string",
+        "description": "xAI call id. Omit to target the single active call (the normal case)."
+      }
+    },
+    "required": ["target_uri"]
+  },
+  "returns": "Confirmation the transfer was accepted, or a clear failure reason.",
+  "example": "transfer_call(target_uri=\"tel:+15550100\")",
+  "notes": "Scoped to the xAI sovereign phone line (phone-xai-* sessions): fails gracefully when no xAI call is active, and requires an explicit call_id if more than one call is live."
+}

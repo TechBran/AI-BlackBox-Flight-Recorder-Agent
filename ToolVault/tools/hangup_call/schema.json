@@ -1,0 +1,20 @@
+{
+  "name": "hangup_call",
+  "description": "End the CURRENT live xAI phone-line call. Only works while an xAI sovereign-line call is active — use when the conversation is complete or the caller asks to hang up. Does NOT control Twilio calls.",
+  "category": "telephony",
+  "groups": ["chat", "grok_live"],
+  "tier": 2,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "call_id": {
+        "type": "string",
+        "description": "xAI call id. Omit to target the single active call (the normal case)."
+      }
+    },
+    "required": []
+  },
+  "returns": "Confirmation the hangup was accepted, or a clear failure reason.",
+  "example": "hangup_call()",
+  "notes": "Scoped to the xAI sovereign phone line (phone-xai-* sessions): fails gracefully when no xAI call is active, and requires an explicit call_id if more than one call is live."
+}
