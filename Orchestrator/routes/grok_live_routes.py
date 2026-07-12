@@ -358,6 +358,24 @@ def _contact_keyterms(operator: str, limit: int = 100) -> list:
         return []
 
 
+async def resolve_grok_voice(voice: str) -> str:
+    """Resolve a requested session voice: a built-in catalog voice passes
+    through; any other id is accepted ONLY if it verifies as a cloned xAI
+    custom voice (GET /v1/custom-voices via xai_voices.is_custom_voice —
+    60s cache, FAIL-OPEN to the catalog default when xAI is unreachable or
+    unconfigured). Anything unverifiable falls back to the default voice.
+    """
+    if voice in GROK_LIVE_VOICES:
+        return voice
+    from Orchestrator import xai_voices
+    try:
+        if await asyncio.to_thread(xai_voices.is_custom_voice, voice):
+            return voice
+    except Exception:
+        pass  # fail-open to catalog-only
+    return GROK_LIVE_DEFAULT_VOICE
+
+
 async def configure_grok_session(session: 'GrokLiveSession', operator: str, voice: str = "Ara", custom_role: str = "", reasoning_effort: Optional[str] = None,
                                  replace_map: Optional[Dict[str, str]] = None,
                                  keyterms: Optional[list] = None,
@@ -376,9 +394,8 @@ async def configure_grok_session(session: 'GrokLiveSession', operator: str, voic
     if not session.grok_ws:
         return
 
-    # Validate voice
-    if voice not in GROK_LIVE_VOICES:
-        voice = GROK_LIVE_DEFAULT_VOICE
+    # Validate voice — built-in catalog OR a verified cloned xAI custom voice id.
+    voice = await resolve_grok_voice(voice)
     session.voice = voice
 
     # reasoning.effort — allowlist + capability gate (think-fast generation only).
