@@ -99,4 +99,27 @@ class VoiceClientReconnectTest {
         assertEquals(1, fakes.size)  // server said dead — stay dead
         assertEquals(VoiceState.ERROR, voice.state.value)
     }
+
+    @Test
+    fun `keepalive decision table`() {
+        assertEquals(KeepaliveAction.BREAK, VoiceClient.keepaliveDecision(VoiceState.DISCONNECTED, 0))
+        assertEquals(KeepaliveAction.BREAK, VoiceClient.keepaliveDecision(VoiceState.ERROR, 0))
+        // No socket to ping between legs — and a stale pong must not kill the reconnect
+        assertEquals(KeepaliveAction.SKIP, VoiceClient.keepaliveDecision(VoiceState.RECONNECTING, 999_999))
+        assertEquals(KeepaliveAction.DROP_LEG,
+            VoiceClient.keepaliveDecision(VoiceState.CONNECTED, VoiceClient.PONG_TIMEOUT_MS + 1))
+        assertEquals(KeepaliveAction.PING, VoiceClient.keepaliveDecision(VoiceState.CONNECTED, 0))
+        assertEquals(KeepaliveAction.PING, VoiceClient.keepaliveDecision(VoiceState.SPEAKING, 0))
+        assertEquals(KeepaliveAction.PING, VoiceClient.keepaliveDecision(VoiceState.CONNECTING, 0))
+    }
+
+    @Test
+    fun `ping send failure drops the leg and reconnects instead of terminal ERROR`() = runTest {
+        startConfirmed()
+        fakes[0].sendResult = false
+        advanceTimeBy(VoiceClient.KEEPALIVE_INTERVAL_MS + 1); runCurrent()
+        // Failed ping -> leg closed -> reconnect loop takes over (NOT ERROR)
+        assertEquals(1, fakes[0].closeCount)
+        assertEquals(VoiceState.RECONNECTING, voice.state.value)
+    }
 }

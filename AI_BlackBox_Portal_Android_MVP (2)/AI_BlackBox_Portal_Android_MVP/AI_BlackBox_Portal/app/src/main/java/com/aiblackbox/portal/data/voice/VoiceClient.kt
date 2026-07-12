@@ -50,6 +50,9 @@ sealed class VoiceEvent {
     data class ServerDisconnected(val reason: String) : VoiceEvent()
 }
 
+/** What the keepalive tick should do — pure decision, unit-tested directly. */
+internal enum class KeepaliveAction { BREAK, SKIP, DROP_LEG, PING }
+
 class VoiceClient(
     private val client: OkHttpClient,
     private val baseWsUrl: String,
@@ -130,6 +133,20 @@ class VoiceClient(
         // success is how the server-side loop defeated its own max_reconnects).
         const val MAX_RECONNECTS = 10
         const val RECONNECT_BASE_DELAY_MS = 1_000L
+
+        /**
+         * Keepalive tick decision (pure — testable without a clock seam; the loop
+         * feeds it real elapsed-since-pong). RECONNECTING skips: there is no leg
+         * socket to ping, and the reconnect loop owns recovery. Pong timeout and
+         * ping failure DROP THE LEG so the reconnect loop resumes the session —
+         * pre-P3.9 they flipped terminal ERROR and stranded the user.
+         */
+        internal fun keepaliveDecision(state: VoiceState, timeSincePongMs: Long): KeepaliveAction = when {
+            state == VoiceState.DISCONNECTED || state == VoiceState.ERROR -> KeepaliveAction.BREAK
+            state == VoiceState.RECONNECTING -> KeepaliveAction.SKIP
+            timeSincePongMs > PONG_TIMEOUT_MS -> KeepaliveAction.DROP_LEG
+            else -> KeepaliveAction.PING
+        }
     }
 
     fun connect(
@@ -288,31 +305,27 @@ class VoiceClient(
         wsClient.send(msg.toString())
     }
 
-    // Application-level keepalive matching Portal pattern
+    // Application-level keepalive matching Portal pattern. Dead-leg detection hands
+    // off to the reconnect loop (close the leg) rather than declaring terminal ERROR.
     private fun startKeepalive() {
         keepaliveJob?.cancel()
         keepaliveJob = scope?.launch {
             while (isActive) {
                 delay(KEEPALIVE_INTERVAL_MS)
-                if (_state.value == VoiceState.DISCONNECTED || _state.value == VoiceState.ERROR) break
-
-                // Check for pong timeout
-                val timeSincePong = System.currentTimeMillis() - lastPongTime
-                if (timeSincePong > PONG_TIMEOUT_MS) {
-                    android.util.Log.w("VoiceClient", "No pong in ${timeSincePong}ms — closing for reconnect")
-                    _state.value = VoiceState.ERROR
-                    _events.emit(VoiceEvent.Error("Connection timed out"))
-                    wsClient.close()
-                    break
-                }
-
-                // Send application-level ping
-                val ping = buildJsonObject { put("type", "ping") }
-                if (!wsClient.send(ping.toString())) {
-                    android.util.Log.w("VoiceClient", "Ping send failed — connection dead")
-                    _state.value = VoiceState.ERROR
-                    _events.emit(VoiceEvent.Error("Connection lost"))
-                    break
+                when (keepaliveDecision(_state.value, System.currentTimeMillis() - lastPongTime)) {
+                    KeepaliveAction.BREAK -> break
+                    KeepaliveAction.SKIP -> continue
+                    KeepaliveAction.DROP_LEG -> {
+                        android.util.Log.w("VoiceClient", "No pong in ${System.currentTimeMillis() - lastPongTime}ms — dropping leg for reconnect")
+                        wsClient.close()
+                    }
+                    KeepaliveAction.PING -> {
+                        val ping = buildJsonObject { put("type", "ping") }
+                        if (!wsClient.send(ping.toString())) {
+                            android.util.Log.w("VoiceClient", "Ping send failed — dropping leg for reconnect")
+                            wsClient.close()
+                        }
+                    }
                 }
             }
         }
