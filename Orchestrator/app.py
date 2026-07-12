@@ -97,6 +97,7 @@ from Orchestrator.routes.gmail_routes import *
 from Orchestrator.routes.local_routes import *
 from Orchestrator.routes.toolvault_routes import *
 from Orchestrator.routes.elevenlabs_routes import *
+from Orchestrator.routes.xai_voice_routes import *
 
 from Orchestrator.routes.device_routes import router as device_router
 app.include_router(device_router)
