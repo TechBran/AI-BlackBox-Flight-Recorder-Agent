@@ -18,7 +18,7 @@
 
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
-import { addBubble } from './chat-bubbles.js';
+import { addBubble, appendBubble } from './chat-bubbles.js';
 
 // =============================================================================
 // Selector configuration
@@ -111,6 +111,12 @@ let currentAudioSource = null;
 
 /** Transcript buffer for current response */
 let transcriptBuffer = '';
+
+/** Accumulated interim user-transcript text for the in-progress utterance */
+let userTranscriptBuffer = '';
+
+/** Transient (non-persisted) live user bubble built from interim deltas */
+let liveUserBubble = null;
 
 /** Full session conversation log for BlackBox capture */
 let sessionConversation = [];
@@ -1050,6 +1056,13 @@ function handleMessage(msg) {
             updateTranscript(transcriptBuffer);
             break;
 
+        case 'text_delta':
+            // Text-modality delta (backend may emit for text-only turns) —
+            // same accumulation path as transcript_delta.
+            transcriptBuffer += msg.data;
+            updateTranscript(transcriptBuffer);
+            break;
+
         case 'response_complete':
             // Mark response as complete - but audio may still be playing
             responseCompleteReceived = true;
@@ -1117,9 +1130,34 @@ function handleMessage(msg) {
             });
             break;
 
+        case 'user_transcript_delta':
+            // Incremental (interim) user transcription chunk — live word-by-
+            // word. Mirrors grok-live.js/gpt-realtime.js: accumulate into a
+            // buffer and render a transient (non-persisted) user bubble that
+            // updates as chunks arrive; the final user_transcript commits it.
+            // Pre-native-transcription backends never emit this — unchanged.
+            if (msg.data) {
+                userTranscriptBuffer += msg.data;
+                if (!liveUserBubble) {
+                    // appendBubble adds to the DOM WITHOUT persisting to
+                    // history, so interim chunks don't spam localStorage.
+                    liveUserBubble = appendBubble('user', userTranscriptBuffer);
+                } else {
+                    const span = liveUserBubble.querySelector('.bubble-text');
+                    if (span) span.textContent = userTranscriptBuffer;
+                }
+            }
+            break;
+
         case 'user_transcript':
             if (msg.data) {
                 console.log('[GEMINI-LIVE] User voice transcript:', msg.data);
+                if (liveUserBubble) {
+                    // Drop the transient live bubble, then persist via
+                    // addBubble so there's exactly one final bubble.
+                    liveUserBubble.remove();
+                    liveUserBubble = null;
+                }
                 addBubble('user', msg.data);
                 sessionConversation.push({
                     role: 'user',
@@ -1128,6 +1166,16 @@ function handleMessage(msg) {
                     source: 'voice'
                 });
             }
+            // Reset for the next utterance (covers delta-less backends too).
+            userTranscriptBuffer = '';
+            break;
+
+        case 'speech_started':
+            console.log('[GEMINI-LIVE] User speech detected');
+            break;
+
+        case 'speech_stopped':
+            console.log('[GEMINI-LIVE] User speech stopped');
             break;
 
         case 'error':
