@@ -37,6 +37,9 @@ sealed class VoiceEvent {
     data class Error(val message: String) : VoiceEvent()
     data object Connected : VoiceEvent()
     data object Disconnected : VoiceEvent()
+
+    /** Informational server progress, e.g. "Connecting to Gemini Live..." (gemini_live_routes.py:1620). */
+    data class Status(val message: String) : VoiceEvent()
 }
 
 class VoiceClient(
@@ -337,6 +340,14 @@ class VoiceClient(
                             android.util.Log.w("VoiceClient", "provenance unparseable: ${raw.take(200)}")
                         }
                     }
+                }
+
+                // ---- Session-health frames (2026-07-11 voice upgrade pass) ----
+
+                "status" -> {
+                    val msg = obj["message"]?.jsonPrimitive?.content ?: data
+                    if (msg.isNotBlank()) _events.emit(VoiceEvent.Status(msg))
+                    android.util.Log.d("VoiceClient", "Server status: $msg")
                 }
 
                 "error" -> {

@@ -54,4 +54,15 @@ class VoiceClientParseTest {
         serverSends("""{"type":"connected"}""")
         assertEquals(VoiceState.CONNECTED, voice.state.value)
     }
+
+    @Test
+    fun `status frame emits Status event without changing state`() = runTest {
+        startConnected()
+        serverSends("""{"type":"status","message":"Connecting to Gemini Live..."}""")
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        assertEquals(
+            "Connecting to Gemini Live...",
+            events.filterIsInstance<VoiceEvent.Status>().single().message
+        )
+    }
 }
