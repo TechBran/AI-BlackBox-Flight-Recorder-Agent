@@ -91,12 +91,6 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
         pass
     return False
 
-# =============================================================================
-# Tool Definitions for Gemini Live
-# =============================================================================
-
-GEMINI_LIVE_TOOLS = get_gemini_live_tools("gemini_live")
-
 
 # =============================================================================
 # Context Injection
@@ -439,7 +433,11 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         "systemInstruction": {
             "parts": [{"text": system_instructions}]
         },
-        "tools": GEMINI_LIVE_TOOLS,
+        # P1.3 — read the tool group FRESH per session-configure so
+        # /toolvault/reload (and schema fixes) reach live voice without a
+        # restart. The registry's mtime cache makes this cheap. grok/openai
+        # routes get the same un-freeze in the hardening phase.
+        "tools": get_gemini_live_tools("gemini_live"),
         "contextWindowCompression": {
             "slidingWindow": {}
         }
