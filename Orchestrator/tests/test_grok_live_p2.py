@@ -249,3 +249,35 @@ async def test_input_transcription_explicitly_configured(stub_grok_fossil_contex
     await configure_grok_session(session, "test_operator", voice="Ara")
     audio_input = _extract_grok_payload(session.grok_ws.send)["session"]["audio"]["input"]
     assert isinstance(audio_input.get("transcription"), dict)
+
+
+# ---------------------------------------------------------------------------
+# Session resumption — resumption.enabled + conversation.id capture
+# ---------------------------------------------------------------------------
+
+from Orchestrator.routes.grok_live_routes import handle_grok_message
+
+
+@pytest.mark.asyncio
+async def test_resumption_enabled_in_session_update(stub_grok_fossil_context):
+    session = _make_grok_session()
+    await configure_grok_session(session, "test_operator", voice="Ara")
+    payload = _extract_grok_payload(session.grok_ws.send)
+    assert payload["session"]["resumption"] == {"enabled": True}
+
+
+@pytest.mark.asyncio
+async def test_conversation_created_captures_id():
+    session = GrokLiveSession(session_id="t-resume", created_at="")
+    await handle_grok_message(session, {
+        "type": "conversation.created",
+        "conversation": {"id": "conv_abc123"},
+    })
+    assert session.conversation_id == "conv_abc123"
+
+
+@pytest.mark.asyncio
+async def test_conversation_created_without_id_is_harmless():
+    session = GrokLiveSession(session_id="t-resume-2", created_at="")
+    await handle_grok_message(session, {"type": "conversation.created"})
+    assert session.conversation_id is None

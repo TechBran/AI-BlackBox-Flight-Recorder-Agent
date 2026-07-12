@@ -485,7 +485,10 @@ Do this BEFORE responding to the user - check what happened recently so you're c
                 }
             },
             "tools": grok_live_tools,
-            "tool_choice": "auto"  # Force Grok to actually use tools when appropriate
+            "tool_choice": "auto",  # Force Grok to actually use tools when appropriate
+            # Session resumption (xAI): reconnect with ?conversation_id= replays
+            # cached turns server-side instead of a full context rebuild.
+            "resumption": {"enabled": True}
         }
     }
 
@@ -1131,8 +1134,14 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
         print(f"[GROK-LIVE] Full session data: {json.dumps(session_data, indent=2)}")
 
     elif event_type == "conversation.created":
-        # Conversation initialized
-        print(f"[GROK-LIVE] Conversation created")
+        # Conversation initialized — capture the id for session resumption
+        # (grok_reconnect dials ?conversation_id= to replay cached turns).
+        conv_id = (event.get("conversation") or {}).get("id") or event.get("conversation_id")
+        if conv_id:
+            session.conversation_id = conv_id
+            print(f"[GROK-LIVE] Conversation created: {conv_id} (resumption armed)")
+        else:
+            print(f"[GROK-LIVE] Conversation created (no id in event)")
 
     elif event_type == "error":
         # Error from Grok

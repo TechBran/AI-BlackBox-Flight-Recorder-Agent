@@ -175,6 +175,7 @@ class GrokLiveSession:
     transcript_buffer: str = ""          # Buffer for current response transcript
     voice: str = "Ara"                   # Selected voice for this session (Ara, Rex, Sal, Eve, Leo)
     model: str = ""                      # Resolved xAI model id (set by connect_to_grok)
+    conversation_id: Optional[str] = None  # xAI conversation.id (session resumption; set by conversation.created)
     conversation: List[Dict] = field(default_factory=list)  # Full conversation log for BlackBox snapshot
     # Reconnection state
     last_ai_message_time: float = 0.0          # For stale connection detection
