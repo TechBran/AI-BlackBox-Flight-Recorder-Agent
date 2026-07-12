@@ -1,0 +1,245 @@
+{
+  "generated": "2026-07-11T21:00:52-0400",
+  "name": "openai-models",
+  "results": [
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-2.1",
+      "probe": "handshake",
+      "ok": true,
+      "resolved_model": "gpt-realtime-2.1",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:00:37-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "event_E0cqdGjrmBtGiA2lpWRjO",
+          "session": {
+            "type": "realtime",
+            "object": "realtime.session",
+            "id": "sess_E0cqcMuNwRU513w85JHCb",
+            "model": "gpt-realtime-2.1",
+            "output_modalities": [
+              "audio"
+            ],
+            "instructions": "Your knowledge cutoff is 2023-10. You are a helpful, witty, and friendly AI. Act like a human, but remember that you aren't a human and that you can't do human things in the real world. Your voice and personality should be warm and engaging, with a lively and playful tone. If interacting in a non-En...<truncated 505 chars>",
+            "tools": [],
+            "tool_choice": "auto",
+            "max_output_tokens": "inf",
+            "tracing": null,
+            "truncation": "auto",
+            "prompt": null,
+            "expires_at": 1783821639,
+            "audio": {
+              "input": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "transcription": null,
+                "noise_reduction": null,
+                "turn_detection": {
+                  "type": "server_vad",
+                  "threshold": 0.5,
+                  "prefix_padding_ms": 300,
+                  "silence_duration_ms": 500,
+                  "idle_timeout_ms": null,
+                  "create_response": true,
+                  "interrupt_response": true
+                }
+              },
+              "output": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "voice": "marin",
+                "speed": 1.0
+              }
+            },
+            "include": null
+          }
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-2.1-mini",
+      "probe": "handshake",
+      "ok": true,
+      "resolved_model": "gpt-realtime-2.1-mini",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:00:41-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "event_E0cqgv2NwLmBqKyYvZ9y2",
+          "session": {
+            "type": "realtime",
+            "object": "realtime.session",
+            "id": "sess_E0cqgvdYn2lbH0zr8qpO4",
+            "model": "gpt-realtime-2.1-mini",
+            "output_modalities": [
+              "audio"
+            ],
+            "instructions": "Your knowledge cutoff is 2023-10. You are a helpful, witty, and friendly AI. Act like a human, but remember that you aren't a human and that you can't do human things in the real world. Your voice and personality should be warm and engaging, with a lively and playful tone. If interacting in a non-En...<truncated 505 chars>",
+            "tools": [],
+            "tool_choice": "auto",
+            "max_output_tokens": "inf",
+            "tracing": null,
+            "truncation": "auto",
+            "prompt": null,
+            "expires_at": 1783821642,
+            "audio": {
+              "input": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "transcription": null,
+                "noise_reduction": null,
+                "turn_detection": {
+                  "type": "server_vad",
+                  "threshold": 0.5,
+                  "prefix_padding_ms": 300,
+                  "silence_duration_ms": 500,
+                  "idle_timeout_ms": null,
+                  "create_response": true,
+                  "interrupt_response": true
+                }
+              },
+              "output": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "voice": "marin",
+                "speed": 1.0
+              }
+            },
+            "include": null
+          }
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-2025-08-28",
+      "probe": "handshake",
+      "ok": true,
+      "resolved_model": "gpt-realtime-2025-08-28",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:00:44-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "event_E0cqjYLxknZ0kVXSPQbkx",
+          "session": {
+            "type": "realtime",
+            "object": "realtime.session",
+            "id": "sess_E0cqjFXF7L1EAEG0AXMDo",
+            "model": "gpt-realtime-2025-08-28",
+            "output_modalities": [
+              "audio"
+            ],
+            "instructions": "Your knowledge cutoff is 2023-10. You are a helpful, witty, and friendly AI. Act like a human, but remember that you aren't a human and that you can't do human things in the real world. Your voice and personality should be warm and engaging, with a lively and playful tone. If interacting in a non-En...<truncated 505 chars>",
+            "tools": [],
+            "tool_choice": "auto",
+            "max_output_tokens": "inf",
+            "tracing": null,
+            "truncation": "auto",
+            "prompt": null,
+            "expires_at": 1783821645,
+            "audio": {
+              "input": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "transcription": null,
+                "noise_reduction": null,
+                "turn_detection": {
+                  "type": "server_vad",
+                  "threshold": 0.5,
+                  "prefix_padding_ms": 300,
+                  "silence_duration_ms": 200,
+                  "idle_timeout_ms": null,
+                  "create_response": true,
+                  "interrupt_response": true
+                }
+              },
+              "output": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "voice": "alloy",
+                "speed": 1.0
+              }
+            },
+            "include": null
+          }
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-live-1",
+      "probe": "handshake",
+      "ok": false,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=error",
+      "ts": "2026-07-11T21:00:47-0400",
+      "events": [
+        {
+          "type": "error",
+          "event_id": "event_E0cqlrBEsyxvP87MBe2ta",
+          "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_model",
+            "message": "Model \"gpt-live-1\" is not supported in realtime mode. See https://platform.openai.com/docs/models for a list of supported models.",
+            "param": null,
+            "event_id": null
+          }
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-live-1-mini",
+      "probe": "handshake",
+      "ok": false,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=error",
+      "ts": "2026-07-11T21:00:49-0400",
+      "events": [
+        {
+          "type": "error",
+          "event_id": "event_E0cqoJY9jIHVQ1cbFGb10",
+          "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_model",
+            "message": "Model \"gpt-live-1-mini\" is not supported in realtime mode. See https://platform.openai.com/docs/models for a list of supported models.",
+            "param": null,
+            "event_id": null
+          }
+        }
+      ]
+    }
+  ]
+}
