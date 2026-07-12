@@ -63,8 +63,36 @@ def _gemini_images(prompt, options):
     return call_imagen(prompt, GOOGLE_IMAGEN_MODEL, options)
 
 
-IMAGE_PROVIDERS = {"gemini": _gemini_images, "openai": _openai_images, "grok": _xai_images}
+def _local_images(prompt, options):
+    """FREE local text-to-image via a registered OpenAI-compatible LAN server
+    (Z-Image Turbo / stable-diffusion.cpp). Credentials come from the custom-
+    server registry (custom_models.json) -- never hardcoded. 180s timeout absorbs
+    a cold llama-swap swap (~35s); the server queues one request at a time."""
+    from Orchestrator.onboarding.custom_servers import resolve_image_server  # lazy: no import-time cost / cycle
+    resolved = resolve_image_server(options.get("model"))
+    if not resolved:
+        raise RuntimeError(
+            "No local image model available -- add an OpenAI-compatible server "
+            "hosting an image model (e.g. z-image) in the onboarding wizard.")
+    srv, model = resolved
+    n = int(options.get("numberOfImages") or options.get("n") or 1)
+    body = {"model": model, "prompt": prompt, "n": n, "output_format": "png"}
+    if options.get("size"):
+        body["size"] = options["size"]
+    headers = {"Content-Type": "application/json"}
+    api_key = srv.get("api_key")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    r = requests.post(f"{srv['base_url']}/images/generations",
+                      headers=headers, json=body, timeout=180)
+    r.raise_for_status()
+    return [base64.b64decode(d["b64_json"]) for d in r.json().get("data", []) if d.get("b64_json")]
+
+
+IMAGE_PROVIDERS = {"gemini": _gemini_images, "openai": _openai_images,
+                   "grok": _xai_images, "local": _local_images}
 DEFAULT_IMAGE_PROVIDER = "gemini"
 
 # tool name -> provider (dispatch sites map the called image tool to its provider)
-IMAGE_TOOL_PROVIDERS = {"gemini_image": "gemini", "openai_image": "openai", "grok_image": "grok"}
+IMAGE_TOOL_PROVIDERS = {"gemini_image": "gemini", "openai_image": "openai",
+                        "grok_image": "grok", "local_image": "local"}
