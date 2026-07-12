@@ -3,8 +3,7 @@
 realtime_routes.py - OpenAI Realtime API (GA) WebSocket Bridge
 
 This module provides a WebSocket bridge between the Portal frontend and
-OpenAI's Realtime API (gpt-realtime model family; the GPT-4o Realtime line
-shut down 2026-05-07), enabling real-time voice conversations with
+OpenAI's Realtime API (gpt-realtime-2.1 generation), enabling real-time voice conversations with
 semantic search capabilities over the BlackBox snapshot volume.
 
 Architecture:

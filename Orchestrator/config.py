@@ -495,7 +495,7 @@ LYRIA_MUSIC_URL = "https://us-central1-aiplatform.googleapis.com/v1/projects/{pr
 OPENAI_STT_URL  = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 
-# OpenAI Realtime API (GPT-4o voice conversations)
+# OpenAI Realtime API (gpt-realtime voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")  # Newest GA (2026-07-06), P0 WS-probe-verified 2026-07-11
 REALTIME_CONTEXT_MAX_CHARS = 50000    # ~20K tokens budget for initial context
