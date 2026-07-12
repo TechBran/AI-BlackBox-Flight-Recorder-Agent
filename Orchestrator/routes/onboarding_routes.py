@@ -516,14 +516,15 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                         # Still-smaller windows re-learn on the next overflow.
                         "model_context": {},
                     }
-                    # Seed the modality map on FIRST validation only; never clobber
-                    # a user's wizard corrections on re-validate (new models fall
-                    # back to name-pattern classify at read time).
+                    # Merge the fresh seed UNDER the existing map: a user's wizard
+                    # corrections WIN, and models discovered since the first
+                    # validation get their name-pattern seed so the persisted map
+                    # stays complete (never clobbers a correction on re-validate).
                     existing = custom_servers.get_server(server_id) or {}
-                    if not existing.get("model_modalities"):
-                        seed = (result.detail or {}).get("model_modalities") or {}
-                        if seed:
-                            stamp["model_modalities"] = seed
+                    seed = (result.detail or {}).get("model_modalities") or {}
+                    merged = {**seed, **(existing.get("model_modalities") or {})}
+                    if merged:
+                        stamp["model_modalities"] = merged
                     custom_servers.update_server(server_id, stamp)
                     _state.record_validation(f"custom:{server_id}")
                 except (KeyError, ValueError):

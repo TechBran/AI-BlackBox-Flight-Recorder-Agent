@@ -40,6 +40,15 @@ def test_resolve_local_is_last_tiebreak():
                                             elevenlabs_ok=False, local_ok=True) == "openai"
 
 
+def test_resolve_local_excluded_when_local_ok_false():
+    # The STREAMING path passes local_ok=False (no local realtime bridge); local
+    # must NOT resolve even when it's the only option, and even if explicitly asked.
+    assert stt_resolve.resolve_stt_provider("", openai_ok=False, google_ok=False,
+                                            elevenlabs_ok=False, local_ok=False) is None
+    assert stt_resolve.resolve_stt_provider("local", openai_ok=False, google_ok=False,
+                                            elevenlabs_ok=False, local_ok=False) is None
+
+
 def test_transcribe_bytes_local(monkeypatch):
     monkeypatch.setattr(cs, "resolve_stt_server",
                         lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "whisper-1"))

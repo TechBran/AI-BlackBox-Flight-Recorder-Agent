@@ -121,7 +121,9 @@ async def ws_stt(websocket: WebSocket):
         if start.get("type") != "stt_start":
             await websocket.send_json({"type": "stt_error", "message": "expected stt_start"})
             return
-        provider = resolve_stt_provider(start.get("provider"))
+        # Local STT is FILE-transcribe only (no OpenAI-realtime WS bridge on
+        # llama.cpp/whisper.cpp), so it must never win STREAMING resolution.
+        provider = resolve_stt_provider(start.get("provider"), local_ok=False)
         if not provider:
             await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
             return
@@ -161,8 +163,12 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
         await _google_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "elevenlabs":
         await _elevenlabs_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
-    else:
+    elif provider == "openai":
         await _openai_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
+    else:
+        # No silent OpenAI fallback: an unknown/local provider must fail loudly,
+        # not get mis-routed to the OpenAI realtime bridge.
+        raise RuntimeError(f"live streaming is not supported for STT provider '{provider}'")
 
 
 # =============================================================================

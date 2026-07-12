@@ -909,8 +909,12 @@ function applyCustomValidateResult(row, result) {
         // Seed / refresh the detected per-model modality map so the "Detected
         // models" block renders (and can be corrected) without a re-fetch.
         // Prefer the fresh seed; otherwise keep whatever was persisted before.
-        row.server.model_modalities =
-            (result.detail && result.detail.model_modalities) || row.server.model_modalities || {};
+        // Merge the fresh name-pattern seed UNDER any existing (wizard-confirmed)
+        // map so a user's correction survives re-validate — matches the backend
+        // seed-merge: the persisted map wins, and new models get their seed.
+        row.server.model_modalities = Object.assign(
+            {}, (result.detail && result.detail.model_modalities) || {},
+            row.server.model_modalities || {});
         const detailText = formatCustomDetail(result.detail);
         setCustomStatus(row, "ok", `
             <span class="ob-status-pill ob-status-pill-ok">
