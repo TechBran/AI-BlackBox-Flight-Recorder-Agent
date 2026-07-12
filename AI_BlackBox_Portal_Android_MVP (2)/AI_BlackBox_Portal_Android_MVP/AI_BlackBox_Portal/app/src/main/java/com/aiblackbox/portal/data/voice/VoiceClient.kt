@@ -112,6 +112,9 @@ class VoiceClient(
     private var connectTimeoutJob: Job? = null
     private var currentOperator = ""
     private var currentVoice = ""
+    // P3.15: which backend this session runs — gates client-side echo suppression
+    // (Grok holds the mic + drops echo transcripts; OpenAI/Gemini open-mic behind AEC).
+    private var currentBackend: VoiceBackend? = null
     private var scope: CoroutineScope? = null
 
     // Pong tracking for connection health monitoring
@@ -167,6 +170,7 @@ class VoiceClient(
         this.scope = scope
         currentOperator = operator
         currentVoice = voice
+        currentBackend = backend
         serverTerminal = false
         _state.value = VoiceState.CONNECTING
         connectionJob?.cancel()
@@ -411,9 +415,12 @@ class VoiceClient(
                     // this transcript is likely the AI's own words picked up by the mic
                     val timeSinceAiStopped = System.currentTimeMillis() - aiStoppedSpeakingAt
                     val isEchoWindow = _isAISpeaking.value || timeSinceAiStopped < POST_SPEECH_DELAY_MS
-                    if (data.isNotBlank() && !isEchoWindow) {
+                    // P3.15: only Grok runs client-muted; elsewhere a transcript during
+                    // AI speech is a genuine barge-in, not echo.
+                    val suppress = currentBackend == VoiceBackend.GROK_LIVE && isEchoWindow
+                    if (data.isNotBlank() && !suppress) {
                         _transcript.value = _transcript.value + TranscriptEntry(role = "user", text = data)
-                    } else if (isEchoWindow) {
+                    } else if (suppress) {
                         android.util.Log.d("VoiceClient", "Suppressed echo transcript: ${data.take(50)}")
                     }
                 }

@@ -74,6 +74,7 @@ import com.aiblackbox.portal.data.voice.VoiceAgentPresets
 import com.aiblackbox.portal.data.voice.VoiceBackend
 import com.aiblackbox.portal.data.voice.VoiceCatalog
 import com.aiblackbox.portal.data.voice.modelsOrFallback
+import com.aiblackbox.portal.data.voice.shouldHoldMic
 import com.aiblackbox.portal.data.voice.voicesOrFallback
 import com.aiblackbox.portal.data.voice.VoiceClient
 import com.aiblackbox.portal.data.voice.VoiceEvent
@@ -515,17 +516,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                         val readCount = record.read(buffer, 0, buffer.size)
                         if (readCount > 0) {
                             val amp = rmsAmplitude(buffer, readCount)
-                            // Auto-mute while AI is speaking WITH post-speech delay
+                            // P3.15: provider-conditional mic hold — Grok holds during AI
+                            // speech (echo-prone); OpenAI/Gemini stay open behind AEC so
+                            // server VAD hears barge-ins. Do NOT send audio_commit here.
                             val client = voiceClient
                             if (client != null) {
-                                val isSpeaking = client.isAISpeaking.value
                                 val timeSinceStop = System.currentTimeMillis() - client.aiStoppedSpeakingAt
-                                val inPostSpeechDelay = !isSpeaking && timeSinceStop < VoiceClient.POST_SPEECH_DELAY_MS
-
-                                if (isSpeaking || inPostSpeechDelay) {
-                                    // Just skip sending — do NOT send audio_commit here.
-                                    // GPT/Grok have server-side VAD that auto-detects turns.
-                                    // Sending audio_commit mid-stream triggers duplicate responses.
+                                if (shouldHoldMic(_backend.value, client.isAISpeaking.value, timeSinceStop)) {
                                     wasSendingAudio = false
                                     continue
                                 }
