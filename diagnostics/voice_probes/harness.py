@@ -15,6 +15,7 @@ here so the harness never imports the service config.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -76,17 +77,24 @@ def truncate_deep(obj: Any, max_str: int = MAX_STR) -> Any:
 
 
 def service_secrets() -> List[str]:
-    """Every plausible secret value from the service .env, for redaction."""
-    env = load_service_env()
+    """Every plausible secret value from the service .env AND os.environ.
+
+    Sweeps both sources because get_key() prefers the process env — a rotated
+    key living only in os.environ must still be redacted from results.
+    """
+    sources = {**load_service_env(), **os.environ}
     return [
-        v for k, v in env.items()
+        v for k, v in sources.items()
         if v and len(v) >= 8
         and any(t in k for t in ("KEY", "SECRET", "TOKEN", "PASSWORD"))
     ]
 
 
 def redact_text(text: str, secrets: Optional[List[str]] = None) -> str:
-    for s in (secrets if secrets is not None else service_secrets()):
+    candidates = secrets if secrets is not None else service_secrets()
+    # Longest-first so a secret that is a prefix of another leaves no
+    # fragment; falsy entries skipped ("".replace would garble the text).
+    for s in sorted((s for s in candidates if s), key=len, reverse=True):
         text = text.replace(s, REDACTED)
     return text
 

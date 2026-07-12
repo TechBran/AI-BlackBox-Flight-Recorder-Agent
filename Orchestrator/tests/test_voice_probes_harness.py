@@ -100,3 +100,22 @@ def test_probe_result_event_cap_and_summary():
     assert len(r.events) == 60  # MAX_EVENTS cap
     s = r.summary()
     assert "(default)" in s and "resolved=grok-voice-think-fast-1.0" in s and "OK" in s
+
+
+def test_service_secrets_includes_process_env(tmp_path, monkeypatch):
+    # os.environ divergence must still be swept (P0.1 review issue #1)
+    monkeypatch.setenv("ROTATED_API_KEY", "envonlysecret99")
+    from diagnostics.voice_probes import harness
+    monkeypatch.setattr(harness, "load_service_env", lambda: {"OLD_API_KEY": "fileonlysecret1"})
+    secrets = harness.service_secrets()
+    assert "envonlysecret99" in secrets
+    assert "fileonlysecret1" in secrets
+
+
+def test_redact_text_falsy_and_prefix_safe():
+    from diagnostics.voice_probes.harness import redact_text
+    # falsy entries are skipped, not applied
+    assert redact_text("hello", ["", None]) == "hello"
+    # longer secret redacts first so its prefix-secret leaves no fragment
+    out = redact_text("token=abcdef12XYZ", ["abcdef12", "abcdef12XYZ"])
+    assert out == "token=***REDACTED***"
