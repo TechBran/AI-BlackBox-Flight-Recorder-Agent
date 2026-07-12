@@ -91,3 +91,39 @@ async def test_noise_reduction_invalid_ignored_with_warning(stub_fossil_context,
     assert "noise_reduction" not in audio_input
     out = capsys.readouterr().out
     assert "noise_reduction" in out and "WARNING" in out
+
+
+# ---------------------------------------------------------------------------
+# transcription delay (gpt-realtime-whisper: minimal|low|medium|high|xhigh)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_transcription_delay_emitted_when_valid(stub_fossil_context):
+    session = _make_openai_session()
+    await configure_openai_session(
+        session=session, operator="test_operator", voice="ash",
+        transcription_delay="low",
+    )
+    transcription = _extract_payload(session.openai_ws.send)["session"]["audio"]["input"]["transcription"]
+    assert transcription["delay"] == "low"
+    assert "model" in transcription  # STT_OPENAI_STREAM still present
+
+
+@pytest.mark.asyncio
+async def test_transcription_delay_absent_by_default(stub_fossil_context):
+    session = _make_openai_session()
+    await configure_openai_session(session=session, operator="test_operator", voice="ash")
+    transcription = _extract_payload(session.openai_ws.send)["session"]["audio"]["input"]["transcription"]
+    assert "delay" not in transcription
+
+
+@pytest.mark.asyncio
+async def test_transcription_delay_invalid_ignored(stub_fossil_context, capsys):
+    session = _make_openai_session()
+    await configure_openai_session(
+        session=session, operator="test_operator", voice="ash",
+        transcription_delay="warp_speed",
+    )
+    transcription = _extract_payload(session.openai_ws.send)["session"]["audio"]["input"]["transcription"]
+    assert "delay" not in transcription
+    assert "transcription_delay" in capsys.readouterr().out

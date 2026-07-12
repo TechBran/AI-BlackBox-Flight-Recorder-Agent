@@ -51,6 +51,7 @@ from Orchestrator.config import (
     OPENAI_REALTIME_VAD_TYPES,
     OPENAI_REALTIME_VAD_EAGERNESS,
     OPENAI_REALTIME_NOISE_REDUCTION_TYPES,
+    OPENAI_REALTIME_TRANSCRIPTION_DELAYS,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
@@ -304,6 +305,7 @@ async def configure_openai_session(
     interrupt_response: Optional[bool] = None,
     create_response: Optional[bool] = None,
     noise_reduction: Optional[str] = None,
+    transcription_delay: Optional[str] = None,
 ):
     """
     Configure the OpenAI Realtime session with tools and settings.
@@ -358,6 +360,10 @@ async def configure_openai_session(
     # opts in via connect message / query param.
     if noise_reduction is None and session.session_id.startswith("phone-"):
         noise_reduction = "near_field"
+
+    if transcription_delay is not None and transcription_delay not in OPENAI_REALTIME_TRANSCRIPTION_DELAYS:
+        print(f"[REALTIME] WARNING: transcription_delay {transcription_delay!r} not in {OPENAI_REALTIME_TRANSCRIPTION_DELAYS}; ignoring")
+        transcription_delay = None
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -558,6 +564,8 @@ Do this BEFORE responding to the user - check what happened recently so you're c
         config_event["session"]["audio"]["input"]["noise_reduction"] = None
     elif noise_reduction is not None:
         config_event["session"]["audio"]["input"]["noise_reduction"] = {"type": noise_reduction}
+    if transcription_delay is not None:
+        config_event["session"]["audio"]["input"]["transcription"]["delay"] = transcription_delay
 
     await session.openai_ws.send(json.dumps(config_event))
     session.context_injected = True
