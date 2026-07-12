@@ -17,7 +17,7 @@ import asyncio
 import Orchestrator.routes.grok_live_routes as gk
 import Orchestrator.routes.realtime_routes as rt
 from Orchestrator.models import GrokLiveSession, RealtimeSession
-from Orchestrator.tests.voice_ws_fakes import FakeUpstreamWS
+from Orchestrator.tests.voice_ws_fakes import FakeUpstreamWS, FakeStreamWS, FakePortalWS
 
 
 async def _stuck_task(started):
@@ -179,3 +179,35 @@ def test_grok_reconnect_bails_during_reconfigure(monkeypatch):
     _bail_during_reconfigure_check(monkeypatch, gk, session, gk.grok_reconnect,
                                    "grok_listener", "connect_to_grok",
                                    "configure_grok_session", "grok_ws")
+
+
+# --- Final-review fix: reconnect_count resets on a PROVEN-HEALTHY server frame,
+#     not on dial-success (else a handshake-then-drop loop makes max_reconnects
+#     unreachable — the mute-reconnect class the Gemini setupComplete-reset fixed). ---
+
+def test_openai_listener_resets_reconnect_count_on_server_frame(monkeypatch):
+    async def _run():
+        session = RealtimeSession(session_id="rc-openai")
+        session.reconnect_count = 3
+        session.openai_ws = FakeStreamWS(['{"type":"session.updated"}'])
+        session.portal_ws = FakePortalWS()
+        monkeypatch.setattr(rt, "handle_openai_message", _noop_async)
+        await rt.openai_listener(session)
+        assert session.reconnect_count == 0, "a real server frame must reset the failure count"
+    asyncio.run(_run())
+
+
+def test_grok_listener_resets_reconnect_count_on_server_frame(monkeypatch):
+    async def _run():
+        session = GrokLiveSession(session_id="rc-grok")
+        session.reconnect_count = 3
+        session.grok_ws = FakeStreamWS(['{"type":"session.updated"}'])
+        session.portal_ws = FakePortalWS()
+        monkeypatch.setattr(gk, "handle_grok_message", _noop_async)
+        await gk.grok_listener(session)
+        assert session.reconnect_count == 0, "a real server frame must reset the failure count"
+    asyncio.run(_run())
+
+
+async def _noop_async(*args, **kwargs):
+    return None

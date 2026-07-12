@@ -1387,8 +1387,13 @@ async def openai_reconnect(session: RealtimeSession):
             # bridge always had its own respawn loop).
             session.listener_task = asyncio.create_task(openai_listener(session))
 
-            # Reset state
-            session.reconnect_count = 0
+            # Reset state. NOTE: reconnect_count is reset in openai_listener on
+            # the first real server frame (proven-healthy), NOT here on dial —
+            # connect_to_openai returns True at the WS handshake, before any
+            # server event, so a handshake that succeeds then immediately drops
+            # would otherwise reset the counter every cycle and make
+            # max_reconnects unreachable (infinite mute-reconnect loop). Matches
+            # the Gemini setupComplete-reset semantics.
             session.is_reconnecting = False
             session.last_ai_message_time = time.time()
             session.status = "connected"
@@ -1469,6 +1474,9 @@ async def openai_listener(session: RealtimeSession):
         async for message in session.openai_ws:
             try:
                 event = json.loads(message)
+                if session.reconnect_count:
+                    # Proven-healthy: a real server frame arrived on this socket.
+                    session.reconnect_count = 0
                 await handle_openai_message(session, event)
             except json.JSONDecodeError:
                 print(f"[REALTIME] Invalid JSON from OpenAI: {message[:100]}")

@@ -1392,8 +1392,12 @@ async def grok_reconnect(session: 'GrokLiveSession'):
             # bridge always had its own respawn loop).
             session.listener_task = asyncio.create_task(grok_listener(session))
 
-            # Reset state
-            session.reconnect_count = 0
+            # Reset state. NOTE: reconnect_count is reset in grok_listener on the
+            # first real server frame (proven-healthy), NOT here on dial —
+            # connect_to_grok returns True at the WS handshake, before any server
+            # event, so a handshake that succeeds then immediately drops would
+            # otherwise reset the counter every cycle and make max_reconnects
+            # unreachable (infinite mute-reconnect loop). Matches Gemini/OpenAI.
             session.is_reconnecting = False
             session.last_ai_message_time = time.time()
             session.status = "connected"
@@ -1479,6 +1483,9 @@ async def grok_listener(session: 'GrokLiveSession'):
         async for message in session.grok_ws:
             try:
                 event = json.loads(message)
+                if session.reconnect_count:
+                    # Proven-healthy: a real server frame arrived on this socket.
+                    session.reconnect_count = 0
                 await handle_grok_message(session, event)
             except json.JSONDecodeError:
                 print(f"[GROK-LIVE] Invalid JSON from Grok: {message[:100]}")

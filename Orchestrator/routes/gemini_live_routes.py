@@ -2049,7 +2049,7 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                         "data": {
                             "session_id": session_id,
                             "operator": operator,
-                            "model": model or GEMINI_LIVE_MODEL,
+                            "model": GEMINI_LIVE_TRANSLATE_MODEL if session.mode == "translate" else (model or GEMINI_LIVE_MODEL),
                             "voice": voice,
                             "affective_dialog": session.affective_dialog,
                             "proactive_audio": session.proactive_audio
