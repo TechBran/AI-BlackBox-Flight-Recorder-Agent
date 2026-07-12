@@ -541,6 +541,9 @@ OPENAI_REALTIME_DEFAULT_VOICE: str = "ash"
 # OpenAI Realtime allowlists for server-side validation of client-supplied params.
 OPENAI_REALTIME_VAD_TYPES = ("server_vad", "semantic_vad")
 OPENAI_REALTIME_VAD_EAGERNESS = ("low", "medium", "high", "auto")
+# GA session.audio.input.noise_reduction = {"type": near_field|far_field} | null.
+# "off" is our sentinel for an explicit null (disable provider default).
+OPENAI_REALTIME_NOISE_REDUCTION_TYPES = ("near_field", "far_field", "off")
 
 # Google Gemini Live API (Gemini 2.5 voice conversations)
 GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"

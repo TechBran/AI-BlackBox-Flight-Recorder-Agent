@@ -50,6 +50,7 @@ from Orchestrator.config import (
     OPENAI_REALTIME_DEFAULT_VOICE,
     OPENAI_REALTIME_VAD_TYPES,
     OPENAI_REALTIME_VAD_EAGERNESS,
+    OPENAI_REALTIME_NOISE_REDUCTION_TYPES,
     REALTIME_CONTEXT_MAX_CHARS,
     REALTIME_SNAPSHOT_CHARS_EACH,
     STT_OPENAI_STREAM,
@@ -302,6 +303,7 @@ async def configure_openai_session(
     idle_timeout_ms: Optional[int] = None,
     interrupt_response: Optional[bool] = None,
     create_response: Optional[bool] = None,
+    noise_reduction: Optional[str] = None,
 ):
     """
     Configure the OpenAI Realtime session with tools and settings.
@@ -345,6 +347,17 @@ async def configure_openai_session(
         if not isinstance(idle_timeout_ms, int) or not (5000 <= idle_timeout_ms <= 300000):
             print(f"[REALTIME] WARNING: idle_timeout_ms {idle_timeout_ms!r} out of range (5000-300000); ignoring")
             idle_timeout_ms = None
+
+    # noise_reduction (GA 2026 schema) — allowlist-validated, then phone default.
+    if noise_reduction is not None and noise_reduction not in OPENAI_REALTIME_NOISE_REDUCTION_TYPES:
+        print(f"[REALTIME] WARNING: noise_reduction {noise_reduction!r} not in {OPENAI_REALTIME_NOISE_REDUCTION_TYPES}; ignoring")
+        noise_reduction = None
+    # Phone-bridge sessions are keyed "phone-<sid>" (phone/bridge.py) and call
+    # this function positionally — telephony defaults to near_field (applied
+    # upstream before VAD + model). Portal/Android stay unset unless the client
+    # opts in via connect message / query param.
+    if noise_reduction is None and session.session_id.startswith("phone-"):
+        noise_reduction = "near_field"
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
@@ -539,6 +552,12 @@ Do this BEFORE responding to the user - check what happened recently so you're c
             "tool_choice": "auto",
         }
     }
+
+    # Additive GA field — omitted entirely when unset (provider default applies).
+    if noise_reduction == "off":
+        config_event["session"]["audio"]["input"]["noise_reduction"] = None
+    elif noise_reduction is not None:
+        config_event["session"]["audio"]["input"]["noise_reduction"] = {"type": noise_reduction}
 
     await session.openai_ws.send(json.dumps(config_event))
     session.context_injected = True
