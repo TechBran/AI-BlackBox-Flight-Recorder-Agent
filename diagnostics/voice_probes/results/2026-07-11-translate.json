@@ -1,0 +1,103 @@
+{
+  "generated": "2026-07-11T21:55:15-0400",
+  "name": "translate",
+  "results": [
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-translate",
+      "probe": "translate_handshake",
+      "ok": true,
+      "resolved_model": "gpt-realtime-translate",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:55:11-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "event_E0dhQMiofhOts89ibthsi",
+          "session": {
+            "type": "realtime",
+            "object": "realtime.session",
+            "id": "sess_E0dhQNYSlT8uY5NXztKOT",
+            "model": "gpt-realtime-translate",
+            "output_modalities": [
+              "audio"
+            ],
+            "instructions": "Your knowledge cutoff is 2023-10. You are a helpful, witty, and friendly AI. Act like a human, but remember that you aren't a human and that you can't do human things in the real world. Your voice and personality should be warm and engaging, with a lively and playful tone. If interacting in a non-En...<truncated 505 chars>",
+            "tools": [],
+            "tool_choice": "auto",
+            "max_output_tokens": "inf",
+            "tracing": null,
+            "truncation": "auto",
+            "prompt": null,
+            "expires_at": 1783824912,
+            "audio": {
+              "input": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "transcription": null,
+                "noise_reduction": null,
+                "turn_detection": {
+                  "type": "server_vad",
+                  "threshold": 0.5,
+                  "prefix_padding_ms": 300,
+                  "silence_duration_ms": 200,
+                  "idle_timeout_ms": null,
+                  "create_response": true,
+                  "interrupt_response": true
+                }
+              },
+              "output": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 24000
+                },
+                "voice": "alloy",
+                "speed": 1.0
+              }
+            },
+            "include": null
+          }
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.5-live-translate-preview",
+      "probe": "translate_minimal_audio",
+      "ok": true,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "",
+      "ts": "2026-07-11T21:55:14-0400",
+      "events": [
+        {
+          "setupComplete": {}
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.5-live-translate-preview",
+      "probe": "translate_no_modalities",
+      "ok": true,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "",
+      "ts": "2026-07-11T21:55:15-0400",
+      "events": [
+        {
+          "setupComplete": {}
+        }
+      ]
+    }
+  ]
+}
