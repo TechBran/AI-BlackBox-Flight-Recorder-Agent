@@ -20,7 +20,7 @@
       },
       "role": {
         "type": "string",
-        "description": "The PERSONA/CHARACTER for the AI voice agent — define WHO they are. This becomes the agent's system prompt before the call starts."
+        "description": "The PERSONA/CHARACTER for the AI voice agent — define WHO they are. This becomes the agent's system prompt before the call starts. OR pass 'preset:<id>' to use a saved voice-agent preset (see GET /voice-agents): the preset's instructions become the persona, its provider selects the backend, and its greeting is used when none is given."
       },
       "greeting": {
         "type": "string",

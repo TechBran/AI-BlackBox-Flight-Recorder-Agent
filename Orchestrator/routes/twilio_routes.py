@@ -875,6 +875,19 @@ async def initiate_outbound_call(call_request: OutboundCallRequest):
     Returns:
         Session info including session_id and call status
     """
+    # P4: role="preset:<id>" resolves server-side — preset instructions become
+    # the call persona, preset provider selects the backend, preset greeting
+    # fills an empty greeting. Unknown preset fails LOUDLY (never dial with
+    # the literal 'preset:...' string as persona).
+    if isinstance(call_request.role, str) and call_request.role.startswith("preset:"):
+        from Orchestrator.voice_agents.registry import resolve_phone_role
+        try:
+            call_request.role, call_request.backend, call_request.greeting = \
+                resolve_phone_role(call_request.role, call_request.backend,
+                                   call_request.greeting)
+        except KeyError as e:
+            return {"error": f"Voice agent preset not found: {e}"}
+
     if not PHONE_ENABLED:
         return {"error": "Phone service is not enabled"}
 
