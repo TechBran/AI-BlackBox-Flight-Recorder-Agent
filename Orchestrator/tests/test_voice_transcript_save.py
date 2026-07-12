@@ -42,3 +42,23 @@ def test_realtime_save_keeps_transcript_on_failure(monkeypatch):
     _run_save(monkeypatch, rt, rt.save_session_to_blackbox, session, ok=False)
     assert len(session.conversation) == 2, \
         "conversation must be KEPT after a failed save (retry on next teardown)"
+
+
+import Orchestrator.routes.grok_live_routes as gk
+from Orchestrator.models import GrokLiveSession
+
+
+def test_grok_save_clears_on_success(monkeypatch):
+    session = _session(GrokLiveSession, "t-gk-ok")
+    captured = _run_save(monkeypatch, gk, gk.save_grok_session_to_blackbox, session, ok=True)
+    assert session.conversation == []
+    assert "Grok Voice Agent Session" in captured["session_summary"]
+    assert "[AI (Grok)]: hello" in captured["session_summary"]
+    assert captured["model_label"] == "grok-live-voice"
+
+
+def test_grok_save_keeps_transcript_on_failure(monkeypatch):
+    session = _session(GrokLiveSession, "t-gk-fail")
+    _run_save(monkeypatch, gk, gk.save_grok_session_to_blackbox, session, ok=False)
+    assert len(session.conversation) == 2, \
+        "grok_live_routes previously cleared even after a FAILED save (line 161 bug)"
