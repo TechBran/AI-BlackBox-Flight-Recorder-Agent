@@ -69,6 +69,8 @@ import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.TranscriptEntry
+import com.aiblackbox.portal.data.voice.VoiceAgentPreset
+import com.aiblackbox.portal.data.voice.VoiceAgentPresets
 import com.aiblackbox.portal.data.voice.VoiceBackend
 import com.aiblackbox.portal.data.voice.VoiceCatalog
 import com.aiblackbox.portal.data.voice.modelsOrFallback
@@ -101,6 +103,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -122,6 +125,31 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _voice = MutableStateFlow(Constants.DEFAULT_GEMINI_LIVE_VOICE)
     val voice: StateFlow<String> = _voice.asStateFlow()
+
+    // ── P3.13: persisted voice-agent settings (DataStore write-through via
+    // BlackBoxStore.getString/setString; keys prefixed "va_"). null ↔ "".
+    private val _realtimeModel = MutableStateFlow(Constants.LIVE_MODEL_DEFAULTS["realtime"] ?: "")
+    val realtimeModel: StateFlow<String> = _realtimeModel.asStateFlow()
+    private val _realtimeVadType = MutableStateFlow("server_vad")
+    val realtimeVadType: StateFlow<String> = _realtimeVadType.asStateFlow()
+    private val _realtimeVadEagerness = MutableStateFlow("medium")
+    val realtimeVadEagerness: StateFlow<String> = _realtimeVadEagerness.asStateFlow()
+    private val _realtimeIdleTimeoutText = MutableStateFlow("")
+    val realtimeIdleTimeoutText: StateFlow<String> = _realtimeIdleTimeoutText.asStateFlow()
+    private val _geminiModel = MutableStateFlow(Constants.LIVE_MODEL_DEFAULTS["gemini-live"] ?: "")
+    val geminiModel: StateFlow<String> = _geminiModel.asStateFlow()
+    private val _geminiVadStart = MutableStateFlow<String?>(null)
+    val geminiVadStart: StateFlow<String?> = _geminiVadStart.asStateFlow()
+    private val _geminiVadEnd = MutableStateFlow<String?>(null)
+    val geminiVadEnd: StateFlow<String?> = _geminiVadEnd.asStateFlow()
+    private val _geminiThinkingLevel = MutableStateFlow<String?>(null)
+    val geminiThinkingLevel: StateFlow<String?> = _geminiThinkingLevel.asStateFlow()
+    private val _selectedPresetId = MutableStateFlow("")
+    val selectedPresetId: StateFlow<String> = _selectedPresetId.asStateFlow()
+    // P3.13: voice-agent preset roster from GET /voice-agents (P4 registry;
+    // 404-tolerant — empty list pre-P4, dropdown hides). P4.11 builds on this fetch.
+    private val _presets = MutableStateFlow<List<VoiceAgentPreset>>(emptyList())
+    val presets: StateFlow<List<VoiceAgentPreset>> = _presets.asStateFlow()
 
     private val _voiceState = MutableStateFlow(VoiceState.DISCONNECTED)
     val voiceState: StateFlow<VoiceState> = _voiceState.asStateFlow()
@@ -149,7 +177,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _waveSpeaker = MutableStateFlow(WaveSpeaker.IDLE)
     val waveSpeaker: StateFlow<WaveSpeaker> = _waveSpeaker.asStateFlow()
 
-    private var currentOperator = "Brandon"
+    private var currentOperator = ""  // empty-until-store-emits (never hard-code operator; fresh-box rule)
 
     // Audio I/O
     private var audioRecord: AudioRecord? = null
@@ -179,6 +207,22 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch { store.operator.collect { currentOperator = it } }
+        // P3.13: one-shot restore of persisted voice-agent settings.
+        viewModelScope.launch {
+            val savedBackend = store.getString("va_backend").first()
+            VoiceBackend.entries.firstOrNull { it.id == savedBackend }?.let { _backend.value = it }
+            val savedVoice = store.getString("va_voice_${_backend.value.id}").first()
+            _voice.value = savedVoice.ifBlank { defaultVoiceFor(_backend.value) }
+            store.getString("va_model_realtime").first().takeIf { it.isNotBlank() }?.let { _realtimeModel.value = it }
+            store.getString("va_vad_type").first().takeIf { it.isNotBlank() }?.let { _realtimeVadType.value = it }
+            store.getString("va_vad_eagerness").first().takeIf { it.isNotBlank() }?.let { _realtimeVadEagerness.value = it }
+            store.getString("va_idle_timeout").first().takeIf { it.isNotBlank() }?.let { _realtimeIdleTimeoutText.value = it }
+            store.getString("va_model_gemini-live").first().takeIf { it.isNotBlank() }?.let { _geminiModel.value = it }
+            store.getString("va_gem_vad_start").first().takeIf { it.isNotBlank() }?.let { _geminiVadStart.value = it }
+            store.getString("va_gem_vad_end").first().takeIf { it.isNotBlank() }?.let { _geminiVadEnd.value = it }
+            store.getString("va_gem_thinking").first().takeIf { it.isNotBlank() }?.let { _geminiThinkingLevel.value = it }
+            store.getString("va_preset").first().takeIf { it.isNotBlank() }?.let { _selectedPresetId.value = it }
+        }
     }
 
     fun initialize(origin: String) {
@@ -196,6 +240,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         VoiceCatalog.parse(api.get(b.statusPath))?.let { cat ->
                             _catalogs.value = _catalogs.value + (b to cat)
+                            cat.modelDefault?.let { def ->
+                                when (b) {
+                                    VoiceBackend.GPT_REALTIME ->
+                                        if (store.getString("va_model_realtime").first().isBlank()) _realtimeModel.value = def
+                                    VoiceBackend.GEMINI_LIVE ->
+                                        if (store.getString("va_model_gemini-live").first().isBlank()) _geminiModel.value = def
+                                    VoiceBackend.GROK_LIVE -> Unit // P3.19
+                                }
+                            }
                             android.util.Log.d("VoiceVM", "Catalog ${b.id}: " +
                                 "${cat.models.size} models, ${cat.voices.size} voices, " +
                                 "${cat.presets.size} presets, default=${cat.modelDefault}")
@@ -203,6 +256,17 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (e: Exception) {
                         android.util.Log.w("VoiceVM", "Catalog fetch ${b.id} failed: ${e.message}")
                     }
+                }
+            }
+
+            // P3.13: hydrate voice-agent presets from GET /voice-agents
+            // ({"agents":[{id,name,provider,...}]}). 404-tolerant pre-P4.
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    _presets.value = VoiceAgentPresets.parse(BlackBoxApi(origin).get("/voice-agents"))
+                    android.util.Log.d("VoiceVM", "Presets: ${_presets.value.size}")
+                } catch (e: Exception) {
+                    android.util.Log.w("VoiceVM", "voice-agents fetch failed (pre-P4 box?): ${e.message}")
                 }
             }
 
@@ -251,10 +315,69 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setBackend(backend: VoiceBackend) { _backend.value = backend }
-    fun setVoice(voice: String) { _voice.value = voice }
+    private fun persist(key: String, value: String) {
+        viewModelScope.launch { store.setString(key, value) }
+    }
 
-    fun connect(sessionConfig: VoiceSessionConfig? = null) {
+    private fun defaultVoiceFor(backend: VoiceBackend): String = when (backend) {
+        VoiceBackend.GPT_REALTIME -> Constants.DEFAULT_GPT_REALTIME_VOICE
+        VoiceBackend.GEMINI_LIVE -> Constants.DEFAULT_GEMINI_LIVE_VOICE
+        VoiceBackend.GROK_LIVE -> Constants.DEFAULT_GROK_LIVE_VOICE
+    }
+
+    fun setBackend(backend: VoiceBackend) {
+        _backend.value = backend
+        persist("va_backend", backend.id)
+        // Restore this backend's persisted voice, else its canonical default.
+        viewModelScope.launch {
+            val saved = store.getString("va_voice_${backend.id}").first()
+            _voice.value = saved.ifBlank { defaultVoiceFor(backend) }
+        }
+    }
+
+    fun setVoice(voice: String) {
+        _voice.value = voice
+        persist("va_voice_${_backend.value.id}", voice)
+    }
+
+    fun setRealtimeModel(v: String) { _realtimeModel.value = v; persist("va_model_realtime", v) }
+    fun setRealtimeVadType(v: String) { _realtimeVadType.value = v; persist("va_vad_type", v) }
+    fun setRealtimeVadEagerness(v: String) { _realtimeVadEagerness.value = v; persist("va_vad_eagerness", v) }
+    fun setRealtimeIdleTimeout(v: String) { _realtimeIdleTimeoutText.value = v; persist("va_idle_timeout", v) }
+    fun setGeminiModel(v: String) { _geminiModel.value = v; persist("va_model_gemini-live", v) }
+    fun setGeminiVadStart(v: String?) { _geminiVadStart.value = v; persist("va_gem_vad_start", v ?: "") }
+    fun setGeminiVadEnd(v: String?) { _geminiVadEnd.value = v; persist("va_gem_vad_end", v ?: "") }
+    fun setGeminiThinkingLevel(v: String?) { _geminiThinkingLevel.value = v; persist("va_gem_thinking", v ?: "") }
+    fun setPreset(id: String) { _selectedPresetId.value = id; persist("va_preset", id) }
+
+    /** P3.13: assemble the per-provider session config from persisted settings. */
+    fun buildSessionConfig(): VoiceSessionConfig? {
+        val preset = _selectedPresetId.value.takeIf { it.isNotBlank() }
+        return when (_backend.value) {
+            VoiceBackend.GPT_REALTIME -> VoiceSessionConfig(
+                model = _realtimeModel.value.takeIf { it.isNotBlank() },
+                vadType = _realtimeVadType.value.takeIf { it.isNotBlank() },
+                vadEagerness = if (_realtimeVadType.value == "semantic_vad") _realtimeVadEagerness.value else null,
+                idleTimeoutMs = if (_realtimeVadType.value == "server_vad")
+                    _realtimeIdleTimeoutText.value.trim().toIntOrNull() else null,
+                agentId = preset,
+            )
+            VoiceBackend.GEMINI_LIVE -> {
+                val thinkingAllowed = _geminiModel.value in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS
+                VoiceSessionConfig(
+                    model = _geminiModel.value.takeIf { it.isNotBlank() },
+                    vadStart = _geminiVadStart.value,
+                    vadEnd = _geminiVadEnd.value,
+                    thinkingLevel = if (thinkingAllowed) _geminiThinkingLevel.value else null,
+                    agentId = preset,
+                )
+            }
+            VoiceBackend.GROK_LIVE -> preset?.let { VoiceSessionConfig(agentId = it) } // model/effort: P3.19
+        }
+    }
+
+    fun connect() {
+        val sessionConfig = buildSessionConfig()
         _error.value = null
         stopMic()
         stopAudioPlayback()
@@ -724,61 +847,23 @@ fun VoiceScreen(
     LaunchedEffect(transcript.size) {
         if (transcript.isNotEmpty()) listState.animateScrollToItem(transcript.size - 1)
     }
-    // Reset voice when backend changes — pick the per-backend canonical default
-    // (Constants.DEFAULT_*_VOICE), falling back to first in the list.
-    LaunchedEffect(backend) {
-        val default = when (backend) {
-            VoiceBackend.GPT_REALTIME -> Constants.DEFAULT_GPT_REALTIME_VOICE
-            VoiceBackend.GEMINI_LIVE -> Constants.DEFAULT_GEMINI_LIVE_VOICE
-            VoiceBackend.GROK_LIVE -> Constants.DEFAULT_GROK_LIVE_VOICE
-        }
-        viewModel.setVoice(default)
-    }
-
     val isConnected = voiceState != VoiceState.DISCONNECTED && voiceState != VoiceState.ERROR
 
     // Task 8: collapsible settings pane — auto-collapses once a session connects.
     var settingsExpanded by remember { mutableStateOf(true) }
     LaunchedEffect(isConnected) { if (isConnected) settingsExpanded = false }
 
-    // ── Live-models config state (T13 plan 2026-05-19) ──
-    // OpenAI Realtime config
-    var realtimeModel by remember {
-        mutableStateOf(Constants.LIVE_MODEL_DEFAULTS["realtime"] ?: "")
-    }
-    var realtimeVadType by remember { mutableStateOf("server_vad") }
-    var realtimeVadEagerness by remember { mutableStateOf("medium") }
-    // Idle timeout as a text field so the user can clear it (null = backend default).
-    var realtimeIdleTimeoutText by remember { mutableStateOf("") }
-
-    // Gemini Live config — null entries map to backend default ("auto").
-    var geminiModel by remember {
-        mutableStateOf(Constants.LIVE_MODEL_DEFAULTS["gemini-live"] ?: "")
-    }
-    var geminiVadStart by remember { mutableStateOf<String?>(null) }
-    var geminiVadEnd by remember { mutableStateOf<String?>(null) }
-    var geminiThinkingLevel by remember { mutableStateOf<String?>(null) }
-
-    // Builder: assemble the optional config to pass to viewModel.connect().
-    fun buildSessionConfig(): VoiceSessionConfig? = when (backend) {
-        VoiceBackend.GPT_REALTIME -> VoiceSessionConfig(
-            model = realtimeModel.takeIf { it.isNotBlank() },
-            vadType = realtimeVadType.takeIf { it.isNotBlank() },
-            vadEagerness = if (realtimeVadType == "semantic_vad") realtimeVadEagerness else null,
-            idleTimeoutMs = if (realtimeVadType == "server_vad")
-                realtimeIdleTimeoutText.trim().toIntOrNull() else null,
-        )
-        VoiceBackend.GEMINI_LIVE -> {
-            val thinkingAllowed = geminiModel in Constants.GEMINI_LIVE_THINKING_CAPABLE_MODELS
-            VoiceSessionConfig(
-                model = geminiModel.takeIf { it.isNotBlank() },
-                vadStart = geminiVadStart,
-                vadEnd = geminiVadEnd,
-                thinkingLevel = if (thinkingAllowed) geminiThinkingLevel else null,
-            )
-        }
-        VoiceBackend.GROK_LIVE -> null
-    }
+    // ── Live-models config — hoisted to the ViewModel, DataStore-persisted (P3.13) ──
+    val realtimeModel by viewModel.realtimeModel.collectAsState()
+    val realtimeVadType by viewModel.realtimeVadType.collectAsState()
+    val realtimeVadEagerness by viewModel.realtimeVadEagerness.collectAsState()
+    val realtimeIdleTimeoutText by viewModel.realtimeIdleTimeoutText.collectAsState()
+    val geminiModel by viewModel.geminiModel.collectAsState()
+    val geminiVadStart by viewModel.geminiVadStart.collectAsState()
+    val geminiVadEnd by viewModel.geminiVadEnd.collectAsState()
+    val geminiThinkingLevel by viewModel.geminiThinkingLevel.collectAsState()
+    val selectedPresetId by viewModel.selectedPresetId.collectAsState()
+    val presets by viewModel.presets.collectAsState()
 
     // Pulse animation for mic recording + AI speaking
     val pulse = rememberInfiniteTransition(label = "pulse")
@@ -863,6 +948,21 @@ fun VoiceScreen(
                         onSelect = viewModel::setVoice,
                     )
 
+                    // P3.13: voice-agent preset — hydrated from GET /voice-agents,
+                    // filtered to this backend's provider alias; hidden when none
+                    // (fresh box / pre-P4 box). Selection rides the agentId connect
+                    // param established in P3.12.
+                    val presetOpts = presets.filter { it.provider == backend.id }
+                    if (presetOpts.isNotEmpty()) {
+                        LabeledDropdown(
+                            label = "Agent preset",
+                            options = listOf("" to "None") + presetOpts.map { it.id to it.name },
+                            selectedId = selectedPresetId,
+                            enabled = !isConnected,
+                            onSelect = viewModel::setPreset,
+                        )
+                    }
+
                     // ── Per-provider live-models config (T13 plan 2026-05-19) ──
                     // Model + vad_type dropdowns: disabled while CONNECTED (audit I4 — schema-binding
                     // at upstream WS connect time, switching requires Disconnect → change → Reconnect).
@@ -873,26 +973,26 @@ fun VoiceScreen(
                             modelOptions = catalogs[VoiceBackend.GPT_REALTIME]
                                 .modelsOrFallback(Constants.MODEL_CONFIG["realtime"].orEmpty()),
                             model = realtimeModel,
-                            onModelChange = { realtimeModel = it },
+                            onModelChange = viewModel::setRealtimeModel,
                             vadType = realtimeVadType,
-                            onVadTypeChange = { realtimeVadType = it },
+                            onVadTypeChange = viewModel::setRealtimeVadType,
                             vadEagerness = realtimeVadEagerness,
-                            onVadEagernessChange = { realtimeVadEagerness = it },
+                            onVadEagernessChange = viewModel::setRealtimeVadEagerness,
                             idleTimeoutText = realtimeIdleTimeoutText,
-                            onIdleTimeoutChange = { realtimeIdleTimeoutText = it },
+                            onIdleTimeoutChange = viewModel::setRealtimeIdleTimeout,
                         )
                         VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
                             connected = isConnected,
                             modelOptions = catalogs[VoiceBackend.GEMINI_LIVE]
                                 .modelsOrFallback(Constants.MODEL_CONFIG["gemini-live"].orEmpty()),
                             model = geminiModel,
-                            onModelChange = { geminiModel = it },
+                            onModelChange = viewModel::setGeminiModel,
                             vadStart = geminiVadStart,
-                            onVadStartChange = { geminiVadStart = it },
+                            onVadStartChange = viewModel::setGeminiVadStart,
                             vadEnd = geminiVadEnd,
-                            onVadEndChange = { geminiVadEnd = it },
+                            onVadEndChange = viewModel::setGeminiVadEnd,
                             thinkingLevel = geminiThinkingLevel,
-                            onThinkingLevelChange = { geminiThinkingLevel = it },
+                            onThinkingLevelChange = viewModel::setGeminiThinkingLevel,
                         )
                         VoiceBackend.GROK_LIVE -> Unit // out of scope
                     }
@@ -937,7 +1037,7 @@ fun VoiceScreen(
                         .clip(CircleShape)
                         .background(stateColor)
                         .clickFeedback {
-                            if (isConnected) viewModel.toggleMic() else viewModel.connect(buildSessionConfig())
+                            if (isConnected) viewModel.toggleMic() else viewModel.connect()
                         },
                     contentAlignment = Alignment.Center
                 ) {
