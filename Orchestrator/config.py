@@ -498,6 +498,12 @@ OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 # OpenAI Realtime API (gpt-realtime voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")  # Newest GA (2026-07-06), P0 WS-probe-verified 2026-07-11
+# P6a translation voice mode — dedicated realtime translation model
+# ($0.034/min, 16K ctx). Also listed in OPENAI_REALTIME_MODELS with
+# category="translate" (hidden from the chat dropdown); MUST stay in that
+# allowlist — connect_to_openai validates against it.
+OPENAI_REALTIME_TRANSLATE_MODEL = os.getenv(
+    "OPENAI_REALTIME_TRANSLATE_MODEL", "gpt-realtime-translate")
 REALTIME_CONTEXT_MAX_CHARS = 50000    # ~20K tokens budget for initial context
 REALTIME_SNAPSHOT_CHARS_EACH = 8000   # Max chars per snapshot in context
 REALTIME_AUDIO_SAMPLE_RATE = 24000    # PCM16 audio at 24kHz
@@ -551,6 +557,12 @@ OPENAI_REALTIME_TRANSCRIPTION_DELAYS = ("minimal", "low", "medium", "high", "xhi
 # Google Gemini Live API (Gemini 2.5 voice conversations)
 GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")  # THE recommended Live model (research 2026-07-11); deliberate GA-rule exception, matches Android default. Env override wins.
+# P6a translation voice mode — dedicated Gemini Live translation model.
+# Single-source recon (google-gemini/gemini-skills), P0-probe-gated
+# (diagnostics/voice_probes/results/). Deliberately NOT in GEMINI_LIVE_MODELS
+# (kept out of the chat dropdown); the translate branch binds it directly.
+GEMINI_LIVE_TRANSLATE_MODEL = os.getenv(
+    "GEMINI_LIVE_TRANSLATE_MODEL", "gemini-3.5-live-translate-preview")
 GEMINI_LIVE_INPUT_SAMPLE_RATE = 16000   # PCM16 audio at 16kHz (Gemini input standard)
 GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000  # PCM16 audio at 24kHz (Gemini output)
 
