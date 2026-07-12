@@ -47,6 +47,43 @@ import { refreshAllPresetDropdowns, initPresetManageUI, refreshManageUI } from '
 // Per-provider selector tables — must match index.html va* ids exactly
 // =============================================================================
 
+// P6a — translation target languages: hardcoded top-20 BCP-47 + free-text
+// "Other" (design doc workstream 5 — YAGNI, no backend catalog fetch).
+const TRANSLATE_LANGUAGES = [
+    ['en', 'English'], ['es', 'Spanish'], ['fr', 'French'], ['de', 'German'],
+    ['it', 'Italian'], ['pt-BR', 'Portuguese (Brazil)'], ['ja', 'Japanese'],
+    ['ko', 'Korean'], ['zh-CN', 'Chinese (Simplified)'], ['zh-TW', 'Chinese (Traditional)'],
+    ['ar', 'Arabic'], ['hi', 'Hindi'], ['ru', 'Russian'], ['nl', 'Dutch'],
+    ['pl', 'Polish'], ['tr', 'Turkish'], ['vi', 'Vietnamese'], ['th', 'Thai'],
+    ['id', 'Indonesian'], ['uk', 'Ukrainian'],
+];
+
+function setupTranslateRow(toggleId, rowId, selectId, otherId) {
+    const toggle = document.getElementById(toggleId);
+    const row = document.getElementById(rowId);
+    const select = document.getElementById(selectId);
+    const other = document.getElementById(otherId);
+    if (!toggle || !row || !select) return;
+    if (!select.options.length) {
+        for (const [tag, label] of TRANSLATE_LANGUAGES) {
+            const opt = document.createElement('option');
+            opt.value = tag;
+            opt.textContent = `${label} (${tag})`;
+            select.appendChild(opt);
+        }
+        const opt = document.createElement('option');
+        opt.value = '__other__';
+        opt.textContent = 'Other (type a BCP-47 tag)';
+        select.appendChild(opt);
+    }
+    toggle.addEventListener('change', () => {
+        row.style.display = toggle.checked ? '' : 'none';
+    });
+    select.addEventListener('change', () => {
+        if (other) other.style.display = (select.value === '__other__') ? '' : 'none';
+    });
+}
+
 const REALTIME_SELECTORS = {
     modelSelect: 'vaRealtimeModelSelect',
     presetSelect: 'vaRealtimePresetSelect',
@@ -56,6 +93,9 @@ const REALTIME_SELECTORS = {
     eagernessRow: 'vaRealtimeEagernessRow',
     idleTimeoutInput: 'vaRealtimeIdleTimeoutInput',
     idleRow: 'vaRealtimeIdleRow',
+    translateToggle: 'vaRealtimeTranslateToggle',
+    translateLangSelect: 'vaRealtimeTranslateLang',
+    translateLangOther: 'vaRealtimeTranslateLangOther',
     noiseSelect: 'vaRealtimeNoiseSelect',
     connectButton: 'vaRealtimeConnect',
     micButton: 'vaRealtimeMic',
@@ -78,6 +118,9 @@ const GEMINI_SELECTORS = {
     vadEndSelect: 'vaGeminiVadEndSelect',
     thinkingSelect: 'vaGeminiThinkingSelect',
     thinkingRow: 'vaGeminiThinkingRow',
+    translateToggle: 'vaGeminiTranslateToggle',
+    translateLangSelect: 'vaGeminiTranslateLang',
+    translateLangOther: 'vaGeminiTranslateLangOther',
     connectButton: 'vaGeminiConnect',
     micButton: 'vaGeminiMic',
     disconnectButton: 'vaGeminiDisconnect',
@@ -120,6 +163,10 @@ function ensureProvidersInit() {
     initGeminiLiveUI({ selectors: GEMINI_SELECTORS });
     initGrokLiveUI({ selectors: GROK_SELECTORS });
     initPresetManageUI();
+    setupTranslateRow('vaRealtimeTranslateToggle', 'vaRealtimeTranslateLangRow',
+        'vaRealtimeTranslateLang', 'vaRealtimeTranslateLangOther');
+    setupTranslateRow('vaGeminiTranslateToggle', 'vaGeminiTranslateLangRow',
+        'vaGeminiTranslateLang', 'vaGeminiTranslateLangOther');
     providersInitialized = true;
     console.log('[VOICE-AGENTS] Provider modules initialized');
 }

@@ -38,6 +38,9 @@ const SEL = {
     idleTimeoutInput: 'realtimeIdleTimeout',
     idleRow: null,             // optional row wrapper for idle timeout
     noiseSelect: 'realtimeNoiseSelect',
+    translateToggle: 'realtimeTranslateToggle',
+    translateLangSelect: 'realtimeTranslateLang',
+    translateLangOther: 'realtimeTranslateLangOther',
     connectButton: 'realtimeConnect',
     disconnectButton: 'realtimeDisconnect',
     micButton: 'realtimeMic',
@@ -74,6 +77,8 @@ let currentRealtimeVadEagerness = null;
 let currentRealtimeIdleTimeoutMs = null;
 let currentRealtimeNoiseReduction = null;
 let currentRealtimePresetId = null;
+let currentRealtimeTranslateMode = null;   // 'translate' | null (P6a)
+let currentRealtimeTargetLanguage = null;  // BCP-47 | null
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -1201,6 +1206,18 @@ export async function connect(operator) {
         ? parseInt(idleTimeoutInput.value, 10) : NaN;
     const idleTimeoutMs = Number.isFinite(idleTimeoutRaw) ? idleTimeoutRaw : undefined;
 
+    // Translation mode (P6a) — modal-only UI; selectors are null elsewhere.
+    const translateToggle = SEL.translateToggle ? $(SEL.translateToggle) : null;
+    const translateOn = !!(translateToggle && translateToggle.checked);
+    let targetLanguage;
+    if (translateOn) {
+        const langSel = SEL.translateLangSelect ? $(SEL.translateLangSelect) : null;
+        const otherInput = SEL.translateLangOther ? $(SEL.translateLangOther) : null;
+        targetLanguage = (langSel && langSel.value === '__other__')
+            ? ((otherInput && otherInput.value.trim()) || 'en')
+            : ((langSel && langSel.value) || 'en');
+    }
+
     // noise_reduction (near_field|far_field|off) — gpt-realtime-2.1 feature (P2)
     const noiseSelect = SEL.noiseSelect ? $(SEL.noiseSelect) : null;
     const noiseReduction = (noiseSelect && noiseSelect.value) ? noiseSelect.value : undefined;
@@ -1219,6 +1236,8 @@ export async function connect(operator) {
     currentRealtimeVadEagerness = vadEagerness || null;
     currentRealtimeIdleTimeoutMs = (idleTimeoutMs !== undefined) ? idleTimeoutMs : null;
     currentRealtimeNoiseReduction = noiseReduction || null;
+    currentRealtimeTranslateMode = translateOn ? 'translate' : null;   // P6a
+    currentRealtimeTargetLanguage = translateOn ? targetLanguage : null;
 
     sessionId = crypto.randomUUID();
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1247,6 +1266,10 @@ export async function connect(operator) {
         if (idleTimeoutMs !== undefined) connectMsg.idle_timeout_ms = idleTimeoutMs;
         if (noiseReduction) connectMsg.noise_reduction = noiseReduction;
         if (presetId) connectMsg.agent = presetId;
+        if (translateOn) {
+            connectMsg.mode = 'translate';
+            connectMsg.target_language = targetLanguage;
+        }
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1631,6 +1654,10 @@ function reconnectToExistingSession() {
         if (currentRealtimeIdleTimeoutMs !== null) reconnectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
         if (currentRealtimeNoiseReduction) reconnectMsg.noise_reduction = currentRealtimeNoiseReduction;
         if (currentRealtimePresetId) reconnectMsg.agent = currentRealtimePresetId;
+        if (currentRealtimeTranslateMode) {
+            reconnectMsg.mode = currentRealtimeTranslateMode;
+            reconnectMsg.target_language = currentRealtimeTargetLanguage;
+        }
         ws.send(JSON.stringify(reconnectMsg));
     };
 

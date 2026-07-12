@@ -37,6 +37,9 @@ const SEL = {
     vadEndSelect: 'geminiVadEndSelect',
     thinkingSelect: 'geminiThinkingSelect',
     thinkingRow: null,         // optional row wrapper for thinking
+    translateToggle: 'geminiTranslateToggle',
+    translateLangSelect: 'geminiTranslateLang',
+    translateLangOther: 'geminiTranslateLangOther',
     connectButton: 'geminiConnect',
     disconnectButton: 'geminiDisconnect',
     micButton: 'geminiMic',
@@ -72,6 +75,8 @@ let currentGeminiVadStart = null;
 let currentGeminiVadEnd = null;
 let currentGeminiThinkingLevel = null;
 let currentGeminiPresetId = null;
+let currentGeminiTranslateMode = null;   // 'translate' | null (P6a)
+let currentGeminiTargetLanguage = null;  // BCP-47 | null
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -840,6 +845,18 @@ export async function connect(operator) {
     const thinkingLevel = (selectedModel === 'gemini-3.1-flash-live-preview' && thinkingSelect && thinkingSelect.value)
         ? thinkingSelect.value : undefined;
 
+    // Translation mode (P6a) — modal-only UI; selectors are null elsewhere.
+    const translateToggle = SEL.translateToggle ? $(SEL.translateToggle) : null;
+    const translateOn = !!(translateToggle && translateToggle.checked);
+    let targetLanguage;
+    if (translateOn) {
+        const langSel = SEL.translateLangSelect ? $(SEL.translateLangSelect) : null;
+        const otherInput = SEL.translateLangOther ? $(SEL.translateLangOther) : null;
+        targetLanguage = (langSel && langSel.value === '__other__')
+            ? ((otherInput && otherInput.value.trim()) || 'en')
+            : ((langSel && langSel.value) || 'en');
+    }
+
     // Voice Agent preset (P4 registry) — sent as `agent`; backend precedence
     // is explicit params > preset > defaults, so sending both is safe.
     const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
@@ -853,6 +870,8 @@ export async function connect(operator) {
     currentGeminiVadEnd = vadSensitivityEnd || null;
     currentGeminiThinkingLevel = thinkingLevel || null;
     currentGeminiPresetId = presetId || null;
+    currentGeminiTranslateMode = translateOn ? 'translate' : null;   // P6a
+    currentGeminiTargetLanguage = translateOn ? targetLanguage : null;
 
     // Reset session state
     sessionConversation = [];
@@ -886,6 +905,10 @@ export async function connect(operator) {
         if (vadSensitivityEnd) connectMsg.vad_sensitivity_end = vadSensitivityEnd;
         if (thinkingLevel) connectMsg.thinking_level = thinkingLevel;
         if (presetId) connectMsg.agent = presetId;
+        if (translateOn) {
+            connectMsg.mode = 'translate';
+            connectMsg.target_language = targetLanguage;
+        }
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1279,6 +1302,10 @@ function reconnectToExistingSession() {
         if (currentGeminiVadEnd) reconnectMsg.vad_sensitivity_end = currentGeminiVadEnd;
         if (currentGeminiThinkingLevel) reconnectMsg.thinking_level = currentGeminiThinkingLevel;
         if (currentGeminiPresetId) reconnectMsg.agent = currentGeminiPresetId;
+        if (currentGeminiTranslateMode) {
+            reconnectMsg.mode = currentGeminiTranslateMode;
+            reconnectMsg.target_language = currentGeminiTargetLanguage;
+        }
         ws.send(JSON.stringify(reconnectMsg));
     };
 
