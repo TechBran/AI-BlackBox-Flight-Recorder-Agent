@@ -24,6 +24,9 @@ FILE_LITERALS = {
         "case 'speech_started':",
         "case 'speech_stopped':",
         "appendBubble",
+        "voice-presets.js",
+        "connectMsg.agent",
+        "reconnectMsg.agent",
     ],
     "modules/grok-live.js": [
         "populateGrokModelDropdown",
@@ -52,12 +55,14 @@ FILE_LITERALS = {
         "vaGrokReasoningSelect",
         "vaRealtimeNoiseSelect",
         "vaRealtimePresetSelect",
+        "vaGeminiPresetSelect",
     ],
     "modules/voice-agents-modal.js": [
         "vaGrokModelSelect",
         "vaGrokReasoningSelect",
         "vaRealtimeNoiseSelect",
         "vaRealtimePresetSelect",
+        "vaGeminiPresetSelect",
     ],
 }
 

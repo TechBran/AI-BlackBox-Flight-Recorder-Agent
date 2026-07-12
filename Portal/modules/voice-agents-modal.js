@@ -71,6 +71,7 @@ const REALTIME_SELECTORS = {
 
 const GEMINI_SELECTORS = {
     modelSelect: 'vaGeminiModelSelect',
+    presetSelect: 'vaGeminiPresetSelect',
     voiceSelect: 'vaGeminiVoiceSelect',
     vadStartSelect: 'vaGeminiVadStartSelect',
     vadEndSelect: 'vaGeminiVadEndSelect',

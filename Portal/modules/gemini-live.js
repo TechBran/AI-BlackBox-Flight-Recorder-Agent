@@ -19,6 +19,7 @@
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
+import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
 
 // =============================================================================
 // Selector configuration
@@ -31,6 +32,7 @@ import { addBubble, appendBubble } from './chat-bubbles.js';
 const SEL = {
     voiceSelect: 'geminiVoiceSelect',
     modelSelect: 'geminiModelSelect',
+    presetSelect: 'geminiPresetSelect',
     vadStartSelect: 'geminiVadStartSelect',
     vadEndSelect: 'geminiVadEndSelect',
     thinkingSelect: 'geminiThinkingSelect',
@@ -69,6 +71,7 @@ let currentGeminiModel = null;
 let currentGeminiVadStart = null;
 let currentGeminiVadEnd = null;
 let currentGeminiThinkingLevel = null;
+let currentGeminiPresetId = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -837,6 +840,11 @@ export async function connect(operator) {
     const thinkingLevel = (selectedModel === 'gemini-3.1-flash-live-preview' && thinkingSelect && thinkingSelect.value)
         ? thinkingSelect.value : undefined;
 
+    // Voice Agent preset (P4 registry) — sent as `agent`; backend precedence
+    // is explicit params > preset > defaults, so sending both is safe.
+    const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+    const presetId = (presetSelect && presetSelect.value) ? presetSelect.value : undefined;
+
     // Capture v2 config into module state so reconnect can replay it
     // (otherwise reconnect rebuilds with only {type, operator, voice} and
     // the backend silently falls back to env defaults — T14 F1).
@@ -844,6 +852,7 @@ export async function connect(operator) {
     currentGeminiVadStart = vadSensitivityStart || null;
     currentGeminiVadEnd = vadSensitivityEnd || null;
     currentGeminiThinkingLevel = thinkingLevel || null;
+    currentGeminiPresetId = presetId || null;
 
     // Reset session state
     sessionConversation = [];
@@ -876,6 +885,7 @@ export async function connect(operator) {
         if (vadSensitivityStart) connectMsg.vad_sensitivity_start = vadSensitivityStart;
         if (vadSensitivityEnd) connectMsg.vad_sensitivity_end = vadSensitivityEnd;
         if (thinkingLevel) connectMsg.thinking_level = thinkingLevel;
+        if (presetId) connectMsg.agent = presetId;
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1268,6 +1278,7 @@ function reconnectToExistingSession() {
         if (currentGeminiVadStart) reconnectMsg.vad_sensitivity_start = currentGeminiVadStart;
         if (currentGeminiVadEnd) reconnectMsg.vad_sensitivity_end = currentGeminiVadEnd;
         if (currentGeminiThinkingLevel) reconnectMsg.thinking_level = currentGeminiThinkingLevel;
+        if (currentGeminiPresetId) reconnectMsg.agent = currentGeminiPresetId;
         ws.send(JSON.stringify(reconnectMsg));
     };
 
@@ -1593,6 +1604,12 @@ export function initGeminiLiveUI(config) {
             populateGeminiVoiceDropdown(catalog);
             updateGeminiThinkingVisibility();  // gate thinking dropdown after dropdown populated
         }
+    });
+
+    // Preset dropdown from GET /voice-agents (P4 registry; row hidden pre-P4)
+    fetchVoicePresets().then(presets => {
+        const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+        populatePresetDropdown(presetSelect, filterPresetsByProvider(presets, ['gemini', 'gemini-live', 'google']));
     });
 
     // Wire model change → toggle thinking dropdown visibility
