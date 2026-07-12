@@ -16,6 +16,7 @@
 import { $, toast } from './core-utils.js';
 import { getOperator, saveHistory } from './state-management.js';
 import { addBubble, appendBubble } from './chat-bubbles.js';
+import { fetchVoicePresets, filterPresetsByProvider, populatePresetDropdown } from './voice-presets.js';
 
 // =============================================================================
 // Selector configuration
@@ -30,6 +31,7 @@ import { addBubble, appendBubble } from './chat-bubbles.js';
 const SEL = {
     voiceSelect: 'realtimeVoiceSelect',
     modelSelect: 'realtimeModelSelect',
+    presetSelect: 'realtimePresetSelect',
     vadSelect: 'realtimeVadSelect',
     eagernessSelect: 'realtimeEagernessSelect',
     eagernessRow: null,        // optional row wrapper for eagerness
@@ -71,6 +73,7 @@ let currentRealtimeVadType = null;
 let currentRealtimeVadEagerness = null;
 let currentRealtimeIdleTimeoutMs = null;
 let currentRealtimeNoiseReduction = null;
+let currentRealtimePresetId = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -1202,6 +1205,12 @@ export async function connect(operator) {
     const noiseSelect = SEL.noiseSelect ? $(SEL.noiseSelect) : null;
     const noiseReduction = (noiseSelect && noiseSelect.value) ? noiseSelect.value : undefined;
 
+    // Voice Agent preset (P4 registry) — sent as `agent`; backend precedence
+    // is explicit params > preset > defaults, so sending both is safe.
+    const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+    const presetId = (presetSelect && presetSelect.value) ? presetSelect.value : undefined;
+    currentRealtimePresetId = presetId || null;
+
     // Capture v2 config into module state so reconnect can replay it
     // (otherwise reconnect rebuilds with only {type, operator, voice} and
     // the backend silently falls back to env defaults — T14 F1).
@@ -1237,6 +1246,7 @@ export async function connect(operator) {
         if (vadEagerness) connectMsg.vad_eagerness = vadEagerness;
         if (idleTimeoutMs !== undefined) connectMsg.idle_timeout_ms = idleTimeoutMs;
         if (noiseReduction) connectMsg.noise_reduction = noiseReduction;
+        if (presetId) connectMsg.agent = presetId;
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1620,6 +1630,7 @@ function reconnectToExistingSession() {
         if (currentRealtimeVadEagerness) reconnectMsg.vad_eagerness = currentRealtimeVadEagerness;
         if (currentRealtimeIdleTimeoutMs !== null) reconnectMsg.idle_timeout_ms = currentRealtimeIdleTimeoutMs;
         if (currentRealtimeNoiseReduction) reconnectMsg.noise_reduction = currentRealtimeNoiseReduction;
+        if (currentRealtimePresetId) reconnectMsg.agent = currentRealtimePresetId;
         ws.send(JSON.stringify(reconnectMsg));
     };
 
@@ -1965,6 +1976,12 @@ export function initRealtimeUI(config) {
     // Populate model dropdown from /realtime/status (5min sessionStorage cache)
     fetchRealtimeCatalog().then(catalog => {
         if (catalog) populateRealtimeModelDropdown(catalog);
+    });
+
+    // Preset dropdown from GET /voice-agents (P4 registry; row hidden pre-P4)
+    fetchVoicePresets().then(presets => {
+        const presetSelect = SEL.presetSelect ? $(SEL.presetSelect) : null;
+        populatePresetDropdown(presetSelect, filterPresetsByProvider(presets, ['openai', 'realtime', 'gpt-realtime']));
     });
 
     // Wire VAD type change → show/hide eagerness vs idle_timeout

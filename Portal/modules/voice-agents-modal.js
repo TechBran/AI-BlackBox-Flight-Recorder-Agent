@@ -48,6 +48,7 @@ import {
 
 const REALTIME_SELECTORS = {
     modelSelect: 'vaRealtimeModelSelect',
+    presetSelect: 'vaRealtimePresetSelect',
     voiceSelect: 'vaRealtimeVoiceSelect',
     vadSelect: 'vaRealtimeVadSelect',
     eagernessSelect: 'vaRealtimeEagernessSelect',
