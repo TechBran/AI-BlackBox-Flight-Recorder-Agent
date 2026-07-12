@@ -165,6 +165,10 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    // P3.16: transient server status line ("Connecting to Gemini Live...", etc).
+    private val _statusText = MutableStateFlow("")
+    val statusText: StateFlow<String> = _statusText.asStateFlow()
+
     // Mic state
     private val _isMicActive = MutableStateFlow(false)
     val isMicActive: StateFlow<Boolean> = _isMicActive.asStateFlow()
@@ -275,6 +279,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 voiceClient?.state?.collect { state ->
                     _voiceState.value = state
+                    if (state == VoiceState.CONNECTED) _statusText.value = ""
                     // Auto-init audio when connected (matches OverlayService onOpen)
                     if (state == VoiceState.CONNECTED && audioTrack == null) {
                         try {
@@ -301,11 +306,13 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 voiceClient?.provenance?.collect { _provenance.value = it }
             }
-            // Collect error events
+            // Collect health/status events (P3.16)
             viewModelScope.launch {
                 voiceClient?.events?.collect { event ->
-                    if (event is VoiceEvent.Error) {
-                        _error.value = event.message
+                    when (event) {
+                        is VoiceEvent.Error -> _error.value = event.message
+                        is VoiceEvent.Status -> _statusText.value = event.message
+                        else -> Unit
                     }
                 }
             }
@@ -814,6 +821,7 @@ fun VoiceScreen(
     val transcript by viewModel.transcript.collectAsState()
     val provenance by viewModel.provenance.collectAsState()
     val error by viewModel.error.collectAsState()
+    val statusText by viewModel.statusText.collectAsState()
     val isMicActive by viewModel.isMicActive.collectAsState()
     val amplitude by viewModel.amplitude.collectAsState()
     val waveSpeaker by viewModel.waveSpeaker.collectAsState()
@@ -906,6 +914,51 @@ fun VoiceScreen(
         error?.let { err ->
             Text(err, style = MaterialTheme.typography.bodySmall, color = BbxAccent,
                 modifier = Modifier.padding(bottom = 8.dp))
+        }
+
+        // P3.16: session-health banner — driven by the P3a RECONNECTING state and
+        // the terminal disconnected handling (backend no longer fails silently).
+        if (voiceState == VoiceState.RECONNECTING) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Neutral200)
+                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text("⟳", color = BbxAccent)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Reconnecting to ${backend.displayName}…",
+                    style = MaterialTheme.typography.bodySmall, color = BbxWhite
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        // Terminal server disconnect / reconnect exhaustion land at ERROR (P3a
+        // preserves ERROR through the socket teardown); a user hangup lands at
+        // DISCONNECTED. Show the session-ended banner for BOTH terminal states,
+        // but only when a session actually happened (transcript non-empty).
+        if ((voiceState == VoiceState.ERROR || voiceState == VoiceState.DISCONNECTED) &&
+            transcript.isNotEmpty()
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Neutral200)
+                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    "Session ended — tap ▶ to reconnect",
+                    style = MaterialTheme.typography.bodySmall, color = BbxRed
+                )
+            }
+            Spacer(Modifier.height(8.dp))
         }
 
         // ── Collapsible settings pane (auto-collapses on connect) ──
@@ -1088,6 +1141,11 @@ fun VoiceScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = Neutral500
                 )
+                if (statusText.isNotBlank() &&
+                    (voiceState == VoiceState.CONNECTING || voiceState == VoiceState.RECONNECTING)
+                ) {
+                    Text(statusText, style = MaterialTheme.typography.labelSmall, color = BbxDim)
+                }
             }
 
             // Disconnect button
