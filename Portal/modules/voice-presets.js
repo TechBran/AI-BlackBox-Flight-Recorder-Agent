@@ -107,3 +107,84 @@ export async function refreshAllPresetDropdowns() {
     }
     return presets;
 }
+
+// ------------------------------------------------------------------ manage UI
+
+const $id = (i) => document.getElementById(i);
+let managePresets = [];
+
+function fillForm(p) {
+    $id('vaPresetName').value = p?.name || '';
+    $id('vaPresetProvider').value = p?.provider || 'realtime';
+    $id('vaPresetModel').value = p?.model || '';
+    $id('vaPresetVoice').value = p?.voice || '';
+    $id('vaPresetGreeting').value = p?.greeting || '';
+    $id('vaPresetInstructions').value = p?.instructions || '';
+    $id('vaPresetDelete').disabled = !p;
+}
+
+function renderManageList(presets) {
+    managePresets = presets;
+    const list = $id('vaPresetList');
+    if (!list) return;
+    const current = list.value;
+    list.innerHTML = '<option value="">— new preset —</option>';
+    presets.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = `${p.name} (${p.provider})`;
+        list.appendChild(opt);
+    });
+    if ([...list.options].some(o => o.value === current)) list.value = current;
+    const status = $id('vaPresetStatus');
+    if (status) status.textContent = presets.length
+        ? `${presets.length} preset(s)` : 'No presets yet — fill the form and Save.';
+}
+
+async function savePreset() {
+    const id = $id('vaPresetList').value;
+    const body = {
+        name: $id('vaPresetName').value.trim(),
+        provider: $id('vaPresetProvider').value,
+        model: $id('vaPresetModel').value.trim(),
+        voice: $id('vaPresetVoice').value.trim(),
+        greeting: $id('vaPresetGreeting').value,
+        instructions: $id('vaPresetInstructions').value,
+    };
+    const res = await fetch(id ? `/voice-agents/${id}` : '/voice-agents', {
+        method: id ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const status = $id('vaPresetStatus');
+    if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+        status.textContent = `Save failed: ${detail}`;   // fail LOUDLY, keep form
+        return;
+    }
+    status.textContent = id ? 'Updated.' : 'Created.';
+    renderManageList(await refreshAllPresetDropdowns());
+}
+
+async function deletePreset() {
+    const id = $id('vaPresetList').value;
+    if (!id) return;
+    const res = await fetch(`/voice-agents/${id}`, { method: 'DELETE' });
+    $id('vaPresetStatus').textContent = res.ok ? 'Deleted.' : `Delete failed: HTTP ${res.status}`;
+    $id('vaPresetList').value = '';
+    fillForm(null);
+    renderManageList(await refreshAllPresetDropdowns());
+}
+
+export function initPresetManageUI() {
+    if (!$id('vaPresetSave')) return;   // markup absent — degrade silently
+    $id('vaPresetSave').addEventListener('click', savePreset);
+    $id('vaPresetDelete').addEventListener('click', deletePreset);
+    $id('vaPresetList').addEventListener('change', () => {
+        fillForm(managePresets.find(p => p.id === $id('vaPresetList').value) || null);
+    });
+}
+
+export async function refreshManageUI() {
+    renderManageList(await refreshAllPresetDropdowns());
+}

@@ -41,7 +41,7 @@ import {
     connect as grokLiveConnect,
     disconnect as grokLiveDisconnect,
 } from './grok-live.js';
-import { refreshAllPresetDropdowns } from './voice-presets.js';
+import { refreshAllPresetDropdowns, initPresetManageUI, refreshManageUI } from './voice-presets.js';
 
 // =============================================================================
 // Per-provider selector tables — must match index.html va* ids exactly
@@ -119,6 +119,7 @@ function ensureProvidersInit() {
     initRealtimeUI({ selectors: REALTIME_SELECTORS });
     initGeminiLiveUI({ selectors: GEMINI_SELECTORS });
     initGrokLiveUI({ selectors: GROK_SELECTORS });
+    initPresetManageUI();
     providersInitialized = true;
     console.log('[VOICE-AGENTS] Provider modules initialized');
 }
@@ -151,7 +152,7 @@ function setupTabs() {
 
 function openModal() {
     ensureProvidersInit();
-    refreshAllPresetDropdowns();
+    refreshManageUI();
     const modal = document.getElementById('voiceAgentsModal');
     if (modal) modal.classList.remove('hide');
 }

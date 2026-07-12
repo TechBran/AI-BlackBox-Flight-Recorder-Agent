@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui311"/> <!-- v311: P3c Portal voice parity — Gemini event-set completion, Grok model+reasoning controls, GPT noise_reduction, voice-agent preset dropdowns -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui312"/> <!-- v312: P4 presets manage tab -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui311"></script> <!-- v311: P3c Portal voice parity — Gemini event-set completion, Grok model+reasoning controls, GPT noise_reduction, voice-agent preset dropdowns -->
+  <script type="module" src="/ui/app-modular.js?v=genui312"></script> <!-- v312: P4 presets manage tab -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -1834,6 +1834,7 @@
           <button class="va-tab active" data-provider="realtime" role="tab" type="button">GPT Realtime</button>
           <button class="va-tab" data-provider="gemini-live" role="tab" type="button">Gemini Live</button>
           <button class="va-tab" data-provider="grok-live" role="tab" type="button">Grok Live</button>
+          <button class="va-tab" data-provider="presets" role="tab" type="button">Presets</button>
         </div>
 
         <!-- GPT Realtime tab pane -->
@@ -1982,6 +1983,35 @@
             <button id="vaGrokDisconnect" class="btn btn-warn" type="button" disabled>Disconnect</button>
           </div>
           <div class="va-status" id="vaGrokStatus">Disconnected</div>
+        </div>
+
+        <!-- Presets manage pane (P4) -->
+        <div class="va-pane" data-pane="presets" style="display:none;">
+          <div class="va-row">
+            <label for="vaPresetList">Saved</label>
+            <select id="vaPresetList"><option value="">— new preset —</option></select>
+          </div>
+          <div class="va-row"><label for="vaPresetName">Name</label>
+            <input id="vaPresetName" type="text" maxlength="64" placeholder="Pizza Bot"></div>
+          <div class="va-row"><label for="vaPresetProvider">Provider</label>
+            <select id="vaPresetProvider">
+              <option value="realtime">GPT Realtime</option>
+              <option value="gemini-live">Gemini Live</option>
+              <option value="grok-live">Grok Live</option>
+            </select></div>
+          <div class="va-row"><label for="vaPresetModel">Model</label>
+            <input id="vaPresetModel" type="text" placeholder="(provider default)"></div>
+          <div class="va-row"><label for="vaPresetVoice">Voice</label>
+            <input id="vaPresetVoice" type="text" placeholder="(provider default)"></div>
+          <div class="va-row"><label for="vaPresetGreeting">Greeting</label>
+            <input id="vaPresetGreeting" type="text" maxlength="2000"></div>
+          <div class="va-row"><label for="vaPresetInstructions">Instructions</label>
+            <textarea id="vaPresetInstructions" rows="5" placeholder="Persona/system prompt — replaces the default persona"></textarea></div>
+          <div class="va-controls">
+            <button id="vaPresetSave" class="btn btn-primary" type="button">Save</button>
+            <button id="vaPresetDelete" class="btn btn-warn" type="button" disabled>Delete</button>
+          </div>
+          <div class="va-status" id="vaPresetStatus">No presets yet — fill the form and Save.</div>
         </div>
 
       </div>
