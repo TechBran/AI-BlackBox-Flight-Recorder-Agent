@@ -118,6 +118,8 @@ const GEMINI_SELECTORS = {
     vadEndSelect: 'vaGeminiVadEndSelect',
     thinkingSelect: 'vaGeminiThinkingSelect',
     thinkingRow: 'vaGeminiThinkingRow',
+    affectiveToggle: 'vaGeminiAffectiveToggle',
+    proactiveToggle: 'vaGeminiProactiveToggle',
     translateToggle: 'vaGeminiTranslateToggle',
     translateLangSelect: 'vaGeminiTranslateLang',
     translateLangOther: 'vaGeminiTranslateLangOther',

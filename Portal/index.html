@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <link rel="stylesheet" href="/ui/styles/main.css?v=genui313"/> <!-- v313: P6a translation voice mode -->
+  <link rel="stylesheet" href="/ui/styles/main.css?v=genui314"/> <!-- v314: Gemini affective dialog + proactive audio toggles -->
   <!-- Markdown and Syntax Highlighting -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-  <script type="module" src="/ui/app-modular.js?v=genui313"></script> <!-- v313: P6a translation voice mode -->
+  <script type="module" src="/ui/app-modular.js?v=genui314"></script> <!-- v314: Gemini affective dialog + proactive audio toggles -->
   <!-- ElevenLabs voice-library browse modal (Task 19). The trigger button in
        tts-stt.js dynamically imports openVoiceLibrary() from this module on
        first click; preloaded here (URL matches the relative dynamic import so
@@ -1949,6 +1949,14 @@
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+          </div>
+          <div class="va-row" id="vaGeminiAffectiveRow">
+            <label for="vaGeminiAffectiveToggle">Affective dialog — 2.5 only (deprecated line)</label>
+            <input type="checkbox" id="vaGeminiAffectiveToggle" disabled>
+          </div>
+          <div class="va-row" id="vaGeminiProactiveRow">
+            <label for="vaGeminiProactiveToggle">Proactive audio — 2.5 only (deprecated line)</label>
+            <input type="checkbox" id="vaGeminiProactiveToggle" disabled>
           </div>
           <div class="va-row">
             <label for="vaGeminiTranslateToggle">Translate mode</label>

@@ -37,6 +37,8 @@ const SEL = {
     vadEndSelect: 'geminiVadEndSelect',
     thinkingSelect: 'geminiThinkingSelect',
     thinkingRow: null,         // optional row wrapper for thinking
+    affectiveToggle: 'geminiAffectiveToggle',
+    proactiveToggle: 'geminiProactiveToggle',
     translateToggle: 'geminiTranslateToggle',
     translateLangSelect: 'geminiTranslateLang',
     translateLangOther: 'geminiTranslateLangOther',
@@ -74,6 +76,8 @@ let currentGeminiModel = null;
 let currentGeminiVadStart = null;
 let currentGeminiVadEnd = null;
 let currentGeminiThinkingLevel = null;
+let currentGeminiAffective = false;
+let currentGeminiProactive = false;
 let currentGeminiPresetId = null;
 let currentGeminiTranslateMode = null;   // 'translate' | null (P6a)
 let currentGeminiTargetLanguage = null;  // BCP-47 | null
@@ -845,6 +849,12 @@ export async function connect(operator) {
     const thinkingLevel = (selectedModel === 'gemini-3.1-flash-live-preview' && thinkingSelect && thinkingSelect.value)
         ? thinkingSelect.value : undefined;
 
+    // affective/proactive only valid on the 2.5-native-audio family (v1alpha)
+    const affectiveToggle = SEL.affectiveToggle ? $(SEL.affectiveToggle) : null;
+    const proactiveToggle = SEL.proactiveToggle ? $(SEL.proactiveToggle) : null;
+    const affective = !!(isAffectiveCapableModel(selectedModel) && affectiveToggle && affectiveToggle.checked);
+    const proactive = !!(isAffectiveCapableModel(selectedModel) && proactiveToggle && proactiveToggle.checked);
+
     // Translation mode (P6a) — modal-only UI; selectors are null elsewhere.
     const translateToggle = SEL.translateToggle ? $(SEL.translateToggle) : null;
     const translateOn = !!(translateToggle && translateToggle.checked);
@@ -869,6 +879,8 @@ export async function connect(operator) {
     currentGeminiVadStart = vadSensitivityStart || null;
     currentGeminiVadEnd = vadSensitivityEnd || null;
     currentGeminiThinkingLevel = thinkingLevel || null;
+    currentGeminiAffective = affective;
+    currentGeminiProactive = proactive;
     currentGeminiPresetId = presetId || null;
     currentGeminiTranslateMode = translateOn ? 'translate' : null;   // P6a
     currentGeminiTargetLanguage = translateOn ? targetLanguage : null;
@@ -904,6 +916,8 @@ export async function connect(operator) {
         if (vadSensitivityStart) connectMsg.vad_sensitivity_start = vadSensitivityStart;
         if (vadSensitivityEnd) connectMsg.vad_sensitivity_end = vadSensitivityEnd;
         if (thinkingLevel) connectMsg.thinking_level = thinkingLevel;
+        if (affective) connectMsg.affective = true;
+        if (proactive) connectMsg.proactive = true;
         if (presetId) connectMsg.agent = presetId;
         if (translateOn) {
             connectMsg.mode = 'translate';
@@ -1301,6 +1315,8 @@ function reconnectToExistingSession() {
         if (currentGeminiVadStart) reconnectMsg.vad_sensitivity_start = currentGeminiVadStart;
         if (currentGeminiVadEnd) reconnectMsg.vad_sensitivity_end = currentGeminiVadEnd;
         if (currentGeminiThinkingLevel) reconnectMsg.thinking_level = currentGeminiThinkingLevel;
+        if (currentGeminiAffective) reconnectMsg.affective = true;
+        if (currentGeminiProactive) reconnectMsg.proactive = true;
         if (currentGeminiPresetId) reconnectMsg.agent = currentGeminiPresetId;
         if (currentGeminiTranslateMode) {
             reconnectMsg.mode = currentGeminiTranslateMode;
@@ -1488,6 +1504,17 @@ function updateUI() {
     if (vadStartSelect) vadStartSelect.disabled = isConnected;
     if (vadEndSelect) vadEndSelect.disabled = isConnected;
 
+    // Affective/proactive are setup-binding (audit I4) AND URL-version-binding:
+    // locked while connected; re-derive 2.5-family availability when idle.
+    if (isConnected) {
+        [SEL.affectiveToggle, SEL.proactiveToggle].forEach(id => {
+            const t = id ? $(id) : null;
+            if (t) t.disabled = true;
+        });
+    } else {
+        updateGeminiAffectiveAvailability();
+    }
+
     if (micBtn) {
         micBtn.disabled = !isConnected;
         micBtn.classList.toggle('recording', isRecording);
@@ -1606,6 +1633,28 @@ function updateGeminiThinkingVisibility() {
     target.style.display = show ? '' : 'none';
 }
 
+/** 2.5-native-audio family gate for affective dialog + proactive audio (v1alpha only). */
+function isAffectiveCapableModel(model) {
+    return typeof model === 'string' && model.startsWith('gemini-2.5-flash-native-audio');
+}
+
+/**
+ * Enable the affective/proactive toggles only when a 2.5-native-audio model is
+ * selected (backend allowlist: GEMINI_LIVE_AFFECTIVE_CAPABLE_MODELS). A disabled
+ * toggle is also unchecked so switching to 3.1 can't smuggle stale flags.
+ */
+function updateGeminiAffectiveAvailability() {
+    const modelSelect = SEL.modelSelect ? $(SEL.modelSelect) : null;
+    if (!modelSelect) return;
+    const capable = isAffectiveCapableModel(modelSelect.value);
+    [SEL.affectiveToggle, SEL.proactiveToggle].forEach(id => {
+        const t = id ? $(id) : null;
+        if (!t) return;
+        t.disabled = !capable;
+        if (!capable) t.checked = false;
+    });
+}
+
 /**
  * Initialize Gemini Live UI and event handlers.
  *
@@ -1630,6 +1679,7 @@ export function initGeminiLiveUI(config) {
             populateGeminiModelDropdown(catalog);
             populateGeminiVoiceDropdown(catalog);
             updateGeminiThinkingVisibility();  // gate thinking dropdown after dropdown populated
+            updateGeminiAffectiveAvailability();
         }
     });
 
@@ -1642,6 +1692,7 @@ export function initGeminiLiveUI(config) {
     // Wire model change → toggle thinking dropdown visibility
     if (modelSelect) {
         modelSelect.addEventListener('change', updateGeminiThinkingVisibility);
+        modelSelect.addEventListener('change', updateGeminiAffectiveAvailability);
     }
 
     if (connectBtn) {
