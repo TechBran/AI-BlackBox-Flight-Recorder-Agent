@@ -92,6 +92,24 @@ async def _safe_ws_send(websocket, data: dict) -> bool:
     return False
 
 
+async def _close_portal_ws(session, reason: str = "gemini terminal disconnect"):
+    """Terminal disconnect: actually CLOSE the client WS.
+
+    Before P1.7 the portal WS stayed open answering pings while the Gemini
+    side was permanently dead, so Portal/Android showed "Connected — listening"
+    forever (silence layer 2 of the 2026-07-11 outage). Closing it kicks the
+    endpoint's receive loop into its finally-block cleanup. Safe on the phone
+    bridge's PhoneWebSocketAdapter too (any failure is swallowed).
+    """
+    ws = session.portal_ws
+    if ws is None:
+        return
+    try:
+        await ws.close(code=1011, reason=reason[:120])
+    except Exception:
+        pass
+
+
 # =============================================================================
 # Context Injection
 # =============================================================================
@@ -1425,6 +1443,9 @@ async def gemini_reconnect(session: GeminiLiveSession):
             except Exception:
                 pass
             session.gemini_ws = None
+        # Terminal (P1.7): close the client WS — a dead session must not sit
+        # there answering pings as if connected.
+        await _close_portal_ws(session, reason="max reconnects reached")
         return
 
     session.is_reconnecting = True
@@ -1612,19 +1633,44 @@ async def gemini_listener(session: GeminiLiveSession):
             except Exception as e:
                 print(f"[GEMINI-LIVE] Error handling Gemini message: {e}")
     except websockets.exceptions.ConnectionClosed as e:
-        print(f"[GEMINI-LIVE] Gemini connection closed: {e}")
+        rcvd = getattr(e, "rcvd", None)
+        close_code = getattr(rcvd, "code", None)
+        close_reason = getattr(rcvd, "reason", "") or ""
+        print(f"[GEMINI-LIVE] Gemini connection closed: code={close_code} reason={close_reason!r}")
         if not session.intentional_disconnect and not session.is_reconnecting:
+            # Forward the close to the client (P1.7). Setup rejections (e.g.
+            # the 1007 invalid-tool-schema that killed every session Jun 26 →
+            # Jul 11) arrive ONLY as WS close frames — swallowing them was
+            # silence layer 1. `data` stays a string (existing client
+            # contract); code/reason ride as additive top-level fields.
+            await _safe_ws_send(session.portal_ws, {
+                "type": "error",
+                "data": f"Gemini connection closed (code={close_code}): {close_reason or 'no reason given'}",
+                "code": close_code,
+                "reason": close_reason,
+            })
             print(f"[GEMINI-LIVE] Unexpected disconnect - triggering reconnect")
             asyncio.create_task(gemini_reconnect(session))
-        else:
+        elif session.intentional_disconnect:
             session.status = "disconnected"
             await _safe_ws_send(session.portal_ws, {
                 "type": "disconnected",
                 "data": "Gemini connection closed"
             })
+        # else: mid-reconnect close of the OLD socket — gemini_reconnect owns
+        # status + client notifications. The old code sent a contradictory
+        # "disconnected" here and started the reaper grace clock mid-recovery
+        # (recon finding #8).
     except Exception as e:
         print(f"[GEMINI-LIVE] Gemini listener error: {e}")
         session.status = "error"
+        # Terminal: nothing re-triggers a reconnect from this path — tell the
+        # client and CLOSE instead of leaving a zombie WS answering pings.
+        await _safe_ws_send(session.portal_ws, {
+            "type": "error",
+            "data": f"Gemini listener error: {e}",
+        })
+        await _close_portal_ws(session, reason="gemini listener error")
 
 # =============================================================================
 # WebSocket Endpoint
