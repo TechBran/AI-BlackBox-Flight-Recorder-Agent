@@ -113,3 +113,47 @@ def test_instructions_are_minimal_and_name_the_language():
     assert "fr" in text
     assert "translat" in text.lower()
     assert len(text) < 1000  # minimal by design — NOT the persona build
+
+
+# -----------------------------------------------------------------------------
+# P6.3 — OpenAI translate session branch
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_openai_translate_session_minimal(monkeypatch):
+    # If the translate branch runs BEFORE the persona/context build, this
+    # booby-trapped context builder is never reached.
+    monkeypatch.setattr(
+        "Orchestrator.routes.realtime_routes.build_fossil_context", _boom)
+    from Orchestrator.routes.realtime_routes import configure_openai_session
+
+    session = _make_openai_session()
+    await configure_openai_session(
+        session=session, operator="op", voice="marin",
+        mode="translate", target_language="es",
+    )
+    payload = _extract_payload(session.openai_ws.send)
+    assert payload["type"] == "session.update"
+    s = payload["session"]
+    # Tool-free by design (fast setup — no 56-tool ride-along)
+    assert "tools" not in s and "tool_choice" not in s
+    # Minimal instructions naming the target language, not the persona build
+    assert "es" in s["instructions"]
+    assert len(s["instructions"]) < 1000
+    # GA shape + user voice preserved
+    assert s["type"] == "realtime"
+    assert s["audio"]["output"]["voice"] == "marin"
+    assert s["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+
+
+@pytest.mark.asyncio
+async def test_openai_default_path_unchanged(stub_fossil_context):
+    """Regression pin: mode=None must still build the full persona session."""
+    from Orchestrator.routes.realtime_routes import configure_openai_session
+
+    session = _make_openai_session()
+    await configure_openai_session(session=session, operator="op", voice="ash")
+    payload = _extract_payload(session.openai_ws.send)
+    s = payload["session"]
+    assert "tools" in s               # full tool catalog still declared
+    assert len(s["instructions"]) > 1000  # persona/context build still runs

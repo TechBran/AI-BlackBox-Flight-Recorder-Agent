@@ -74,6 +74,10 @@ from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_translate import (
+    resolve_translate_params,
+    build_translate_instructions,
+)
 from Orchestrator.routes.voice_ws_shared import (
     save_voice_transcript,
     send_openai_style_tool_error,
@@ -307,6 +311,8 @@ async def configure_openai_session(
     noise_reduction: Optional[str] = None,
     transcription_delay: Optional[str] = None,
     tool_group_override: Optional[str] = None,
+    mode: Optional[str] = None,
+    target_language: Optional[str] = None,
 ):
     """
     Configure the OpenAI Realtime session with tools and settings.
@@ -327,6 +333,10 @@ async def configure_openai_session(
         interrupt_response: Optional bool — apply to BOTH server_vad and semantic_vad
             (audit I3 — both fields exist on both turn-detection shapes per SDK type stubs).
         create_response: Optional bool — apply to BOTH server_vad and semantic_vad.
+        mode: Optional session mode — "translate" builds a minimal tool-free
+            translation session (P6a); anything else = normal voice session.
+        target_language: BCP-47 target for translate mode; malformed/missing
+            values fall back to "en" with a logged warning.
 
         All new VAD-related kwargs default to None to preserve phone bridge
         positional-arg call sites (audit C2 — phone/bridge.py lines 744, 813, 848,
@@ -365,6 +375,48 @@ async def configure_openai_session(
     if transcription_delay is not None and transcription_delay not in OPENAI_REALTIME_TRANSCRIPTION_DELAYS:
         print(f"[REALTIME] WARNING: transcription_delay {transcription_delay!r} not in {OPENAI_REALTIME_TRANSCRIPTION_DELAYS}; ignoring")
         transcription_delay = None
+
+    # ── Translation mode (P6a): minimal session — NO persona/context/tools ──
+    # Branch BEFORE the persona/context build: fastest possible setup is the
+    # entire point (design doc workstream 5). Session shape = GA voice shape
+    # minus tools/tool_choice, confirmed by the P0 probe
+    # (diagnostics/voice_probes/results/*-translate.json — combined P0.5 file,
+    # openai gpt-realtime-translate entry).
+    is_translate, resolved_target_language = resolve_translate_params(
+        mode, target_language, log_prefix="[REALTIME]")
+    if is_translate:
+        session.provenance = {}  # no snapshot retrieval in translate mode
+        config_event = {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "output_modalities": ["audio"],
+                "instructions": build_translate_instructions(resolved_target_language),
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {"model": STT_OPENAI_STREAM},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.7,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 800,
+                        },
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "voice": voice,
+                        "speed": 1.0,
+                    },
+                },
+                # NO tools / tool_choice — translation sessions are tool-free.
+            },
+        }
+        await session.openai_ws.send(json.dumps(config_event))
+        session.context_injected = True
+        print(f"[REALTIME] TRANSLATE session configured "
+              f"(target={resolved_target_language}, voice={voice})")
+        return
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
