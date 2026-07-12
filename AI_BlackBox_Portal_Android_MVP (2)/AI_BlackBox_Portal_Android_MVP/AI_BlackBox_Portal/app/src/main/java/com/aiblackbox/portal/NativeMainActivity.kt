@@ -895,6 +895,11 @@ class NativeMainActivity : ComponentActivity() {
                                     }
                                 }
                             },
+                            // Live voice-agent launcher (soundwave button in the input
+                            // bubble) → the dedicated voice screen. Composer stays
+                            // nav-agnostic; the host owns navigation. launchSingleTop
+                            // mirrors the provider-select voice hand-off above.
+                            onVoiceAgent = { navController.navigate(Routes.VOICE) { launchSingleTop = true } },
                             // Allow sends during robotics ER missions (prompt injection)
                             isStreaming = (chatState == ChatState.STREAMING || chatState == ChatState.THINKING)
                                 && !(provider == "robotics" && erMissionActive),

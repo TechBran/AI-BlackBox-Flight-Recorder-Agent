@@ -189,6 +189,30 @@ fun RecordAudioIcon(
 }
 
 /**
+ * Voice-agent icon — a soundwave / equalizer (five vertical bars of differing
+ * heights, tall in the middle). Opens the LIVE voice-agent screen, so it is
+ * deliberately distinct from [MicIcon] (Whisper dictation into the text box).
+ * Mirrors the Portal ctlVoiceAgent SVG (bars at x = 4,8,12,16,20).
+ */
+@Composable
+fun VoiceAgentIcon(
+    modifier: Modifier = Modifier.size(18.dp),
+    color: Color = Neutral500,
+    strokeWidth: Float = 2f
+) {
+    Canvas(modifier = modifier) {
+        val s = size.width / 24f
+        val sw = strokeWidth * s
+        // Five vertical bars centered on y=12; heights grow toward the middle.
+        drawLine(color, Offset(4f * s, 10f * s), Offset(4f * s, 14f * s), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(color, Offset(8f * s, 7f * s), Offset(8f * s, 17f * s), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(color, Offset(12f * s, 4f * s), Offset(12f * s, 20f * s), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(color, Offset(16f * s, 7f * s), Offset(16f * s, 17f * s), strokeWidth = sw, cap = StrokeCap.Round)
+        drawLine(color, Offset(20f * s, 10f * s), Offset(20f * s, 14f * s), strokeWidth = sw, cap = StrokeCap.Round)
+    }
+}
+
+/**
  * Copy / clipboard icon for bubble action row.
  */
 @Composable

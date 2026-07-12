@@ -48,6 +48,7 @@ import com.aiblackbox.portal.ui.components.AttachIcon
 import com.aiblackbox.portal.ui.components.MicIcon
 import com.aiblackbox.portal.ui.components.RecordAudioIcon
 import com.aiblackbox.portal.ui.components.SendIcon
+import com.aiblackbox.portal.ui.components.VoiceAgentIcon
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
@@ -90,6 +91,11 @@ fun Composer(
     onAttach: () -> Unit = {},
     onWhisper: () -> Unit = {},
     onRecordAudio: () -> Unit = {},
+    // Opens the LIVE voice-agent screen (full spoken conversation). Distinct from
+    // [onWhisper], which only dictates into the text field. Defaulted so callers
+    // that don't wire it keep compiling. Composer stays nav-agnostic — the host
+    // (NativeMainActivity) navigates to Routes.VOICE.
+    onVoiceAgent: () -> Unit = {},
     isStreaming: Boolean = false,
     isRecording: Boolean = false,
     isRecordingAudio: Boolean = false,
@@ -256,6 +262,19 @@ fun Composer(
                     MicIcon(
                         modifier = Modifier.size(18.dp),
                         color = if (isRecording) BbxAccent else Neutral500
+                    )
+                }
+
+                // Live voice-agent button (inside bubble) — opens the full
+                // spoken-conversation screen. Soundwave icon keeps it visually
+                // distinct from the Whisper mic beside it (dictation only).
+                IconButton(
+                    onClick = { view.performPressFeedback(); onVoiceAgent() },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    VoiceAgentIcon(
+                        modifier = Modifier.size(18.dp),
+                        color = Neutral500
                     )
                 }
 
