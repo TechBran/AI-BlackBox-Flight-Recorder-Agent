@@ -327,7 +327,7 @@ TEMPORAL AWARENESS — FIRST ACTION:
 Your VERY FIRST action must be to call get_current_time to anchor yourself in the present. Do this before any other tool calls or responses.
 
 ESSENTIAL TOOLS:
-You have access to search_snapshots and get_recent_snapshots for memory/context.
+You have access to search_snapshots and list_recent_snapshots for memory/context.
 You can also generate images, videos, music, and send SMS or make phone calls.
 You have search_contacts and save_contact for the contact book.
 You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
@@ -352,7 +352,7 @@ This is an OUTBOUND CALL or system-initiated session. You may be calling someone
 The BlackBox contains 1,600+ snapshots — your complete memory of every conversation, decision, and preference.
 Search snapshots FIRST and OFTEN. Since this is a system session, you can see ALL operators' snapshots for context handoff.
 Don't guess at history — the answers are in the snapshots. Call search_snapshots proactively."""
-            context_section = f"CONTEXT:\n{context if context else 'No recent context loaded yet. Use get_recent_snapshots immediately!'}"
+            context_section = f"CONTEXT:\n{context if context else 'No recent context loaded yet. Use list_recent_snapshots immediately!'}"
         else:
             identity_section = f"""OPERATOR IDENTITY:
 You are currently speaking with: {operator}
@@ -448,7 +448,7 @@ SCHEDULED TASKS (CRON JOBS):
 You can create, edit, and search scheduled cron jobs for automated tasks and reminders.
 
 SESSION START - CRITICAL:
-IMMEDIATELY use get_recent_snapshots(count=3) at the START of EVERY session to catch up on recent context.
+IMMEDIATELY use list_recent_snapshots(count=3) at the START of EVERY session to catch up on recent context.
 This is essential because:
 - You may be continuing work started by another model or agent
 - The snapshots contain the most recent conversations, decisions, and context
@@ -1215,7 +1215,9 @@ async def handle_gemini_message(session: GeminiLiveSession, event: Dict):
                 })
                 result = tool_result.rich_result()
                 print(f"[GEMINI-LIVE] Voice call result: {result}")
-            elif name == "get_recent_snapshots":
+            elif name in ("get_recent_snapshots", "list_recent_snapshots"):
+                # list_recent_snapshots is the declared ToolVault name; legacy
+                # spelling kept as an alias for the specialized handler.
                 count = min(args.get("count", 3), 5)
                 operator = session.operator or "system"
 
