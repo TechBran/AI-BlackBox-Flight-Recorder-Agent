@@ -29,6 +29,10 @@ IMAGE_PROVIDER_SPECS = {
     "grok": {"label": "Grok image", "params": [
         {"name": "aspectRatio", "type": "enum", "options": ["1:1", "16:9", "9:16"], "default": "16:9"},
         {"name": "numberOfImages", "type": "int", "min": 1, "max": 4, "default": 1}]},
+    "local": {"label": "Local (free)", "params": [
+        {"name": "size", "type": "enum",
+         "options": ["1024x1024", "768x768", "1024x768", "768x1024"], "default": "1024x1024"},
+        {"name": "numberOfImages", "type": "int", "min": 1, "max": 4, "default": 1}]},
 }
 
 
@@ -38,7 +42,7 @@ def build_image_catalog() -> list:
     enabled = enabled_providers("image")
     default = (_read_env().get("IMAGE_DEFAULT") or "").strip()
     out = []
-    for prov in ["gemini", "openai", "grok"]:        # stable display order
+    for prov in ["gemini", "openai", "grok", "local"]:        # stable display order
         if prov not in enabled:
             continue
         spec = IMAGE_PROVIDER_SPECS[prov]

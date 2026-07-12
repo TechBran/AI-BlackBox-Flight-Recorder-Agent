@@ -25,6 +25,9 @@ def _patch_env(monkeypatch, env: dict):
     IMAGE_DEFAULT lookup) to return exactly `env`."""
     from Orchestrator.toolvault import availability
     monkeypatch.setattr(availability, "_read_env", lambda: dict(env))
+    # Registry-gated 'local' must not leak the real gemma-box/z-image into these
+    # exact-provider-list assertions; tests that WANT local patch it back to True.
+    monkeypatch.setattr(availability, "_local_image_available", lambda: False)
 
 
 def test_all_three_when_keys_present_and_enabled_unset(monkeypatch):
@@ -64,6 +67,15 @@ def test_no_default_when_image_default_unset(monkeypatch):
     _patch_env(monkeypatch, {"GOOGLE_API_KEY": "g"})
     cat = build_image_catalog()
     assert all(p["default"] is False for p in cat)
+
+
+def test_local_in_catalog_when_available(monkeypatch):
+    from Orchestrator.toolvault import availability
+    monkeypatch.setattr(availability, "_read_env", lambda: {})
+    monkeypatch.setattr(availability, "_local_image_available", lambda: True)
+    cat = {p["provider"]: p for p in build_image_catalog()}
+    assert "local" in cat and cat["local"]["label"] == "Local (free)"
+    assert {p["name"] for p in cat["local"]["params"]} == {"size", "numberOfImages"}
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +160,23 @@ def _capture_gemini(monkeypatch, options):
     return captured["json"]
 
 
+def _capture_local(monkeypatch, options):
+    """_local_images resolves the server via the custom registry; fake both that
+    and the HTTP post so the coherence check needs no real registry/network."""
+    captured = {}
+    from Orchestrator.onboarding import custom_servers
+
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
+        captured["json"] = json
+        return _FakeResp(json_data={"data": [{"b64_json": base64.b64encode(b"X").decode()}]})
+
+    monkeypatch.setattr(custom_servers, "resolve_image_server",
+                        lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "z-image"))
+    monkeypatch.setattr(image_providers.requests, "post", fake_post)
+    image_providers._local_images("a fox", options)
+    return captured["json"]
+
+
 # Per-provider: the option value we send for each advertised param, and a
 # predicate that confirms it landed in the outbound request body.
 _ADAPTER_PROBES = {
@@ -175,6 +204,13 @@ _ADAPTER_PROBES = {
             # numberOfImages controls the generation LOOP count, not a body field;
             # coverage for it lives in test_image_providers routing tests.
             "numberOfImages": (1, lambda b, v: True),
+        },
+    },
+    "local": {
+        "capture": _capture_local,
+        "checks": {
+            "size": ("768x768", lambda b, v: b.get("size") == v),
+            "numberOfImages": (2, lambda b, v: b.get("n") == v),
         },
     },
 }
