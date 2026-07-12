@@ -567,6 +567,75 @@ function rerenderCustom(container, state) {
 
 // Configured server — read-only row: alias, base_url · key preview,
 // validated-state pill, Re-validate / Edit / [×] Remove (inline confirm).
+// ── Detected model modalities ───────────────────────────────────────────
+// Auto-ingestion classifies each discovered model (chat / image / tts / stt /
+// embedding). We surface that seed so the customer can REVIEW and CORRECT it,
+// but the default is zero-effort: pre-filled, accept as-is.
+const MODALITY_OPTIONS = [
+    { value: "chat", label: "Chat" },
+    { value: "image", label: "Image" },
+    { value: "tts", label: "Text-to-speech" },
+    { value: "stt", label: "Speech-to-text" },
+    { value: "embedding", label: "Embedding" },
+    { value: "ignore", label: "Ignore" },
+];
+// Friendly nouns for the one-line summary (ignore omitted — not "set up").
+const MODALITY_SUMMARY_LABELS = {
+    chat: "chat", image: "image", tts: "speech-out", stt: "speech-in", embedding: "embedding",
+};
+const MODALITY_SUMMARY_ORDER = ["chat", "image", "tts", "stt", "embedding"];
+// Recognized <select> values; an unknown persisted value renders as "chat".
+const MODALITY_VALUES = new Set(MODALITY_OPTIONS.map(o => o.value));
+
+// Compact "Detected models" block — rendered only for a validated server with
+// ≥1 discovered model. One <select> per model, pre-filled from the seeded
+// modality map (unmapped / pre-feature servers default every model to "chat").
+// Returns "" when the server isn't validated or has no discovered models.
+function renderCustomModalitiesBlock(sv, disabled) {
+    const models = Array.isArray(sv.last_models) ? sv.last_models : [];
+    if (!sv.validated_at || models.length === 0) return "";
+    const map = sv.model_modalities || {};
+    const dis = disabled ? "disabled" : "";
+
+    // Summary counts, computed from the (possibly empty) modality map.
+    const counts = {};
+    for (const m of models) {
+        const cur = MODALITY_VALUES.has(map[String(m)]) ? map[String(m)] : "chat";
+        counts[cur] = (counts[cur] || 0) + 1;
+    }
+    const parts = MODALITY_SUMMARY_ORDER
+        .filter(k => counts[k])
+        .map(k => `${counts[k]} ${MODALITY_SUMMARY_LABELS[k]}`);
+    const summary = parts.length
+        ? `Detected: ${parts.join(" &middot; ")} &mdash; set up automatically. Adjust any that look wrong.`
+        : `Detected models &mdash; set up automatically. Adjust any that look wrong.`;
+
+    const rows = models.map(m => {
+        const mid = String(m);
+        const cur = MODALITY_VALUES.has(map[mid]) ? map[mid] : "chat";
+        const opts = MODALITY_OPTIONS.map(o =>
+            `<option value="${o.value}"${o.value === cur ? " selected" : ""}>${o.label}</option>`
+        ).join("");
+        return `
+            <div style="display:flex; align-items:center; justify-content:space-between; gap: var(--ob-space-3);">
+                <span title="${escapeHtml(mid)}" style="flex:1 1 auto; min-width:0; font-family: var(--ob-font-body); font-size: var(--ob-text-xs); color: var(--ob-text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(mid)}</span>
+                <select class="ob-provider-input" style="flex:0 0 auto; padding: var(--ob-space-1) var(--ob-space-2);"
+                    data-modality-server-id="${escapeHtml(sv.id)}" data-modality-model="${escapeHtml(mid)}" ${dis}>
+                    ${opts}
+                </select>
+            </div>`;
+    }).join("");
+
+    return `
+        <div class="ob-custom-modalities" style="margin: 0 0 var(--ob-space-3);">
+            <div class="ob-field-label" style="${CUSTOM_LABEL_GAP_STYLE}">Detected models</div>
+            <p class="ob-provider-desc" style="margin: var(--ob-space-1) 0 var(--ob-space-2);">${summary}</p>
+            <div style="display:grid; gap: var(--ob-space-2);">
+                ${rows}
+            </div>
+        </div>`;
+}
+
 function renderCustomViewCard(row) {
     const sv = row.server;
     const sid = escapeHtml(sv.id);
@@ -594,6 +663,7 @@ function renderCustomViewCard(row) {
                 ${pill}
             </div>
             <p class="ob-provider-desc">${escapeHtml(sv.base_url)} &middot; ${escapeHtml(keyPreview)}${ctxText}</p>
+            ${renderCustomModalitiesBlock(sv, row.busy)}
             <div class="ob-provider-configured-row">
                 <span style="${CUSTOM_BTN_GROUP_STYLE}">
                     <button type="button" class="ob-validate-btn" data-action="revalidate" data-server-id="${sid}" ${dis}>Re-validate</button>
@@ -776,6 +846,15 @@ function wireCustomRows(container, state) {
             }
         });
     });
+
+    // Detected-model modality selects → PATCH the full modality map on change.
+    rowsEl.querySelectorAll("select[data-modality-server-id]").forEach(sel => {
+        sel.addEventListener("change", () => {
+            const srow = customState.servers.find(r => r.server.id === sel.dataset.modalityServerId);
+            if (!srow) return;
+            updateCustomModality(srow, sel.dataset.modalityModel, sel.value, container, state);
+        });
+    });
 }
 
 function addCustomRow(container, state) {
@@ -827,6 +906,11 @@ function applyCustomValidateResult(row, result) {
         if (result.detail && Array.isArray(result.detail.models)) {
             row.server.last_models = result.detail.models;
         }
+        // Seed / refresh the detected per-model modality map so the "Detected
+        // models" block renders (and can be corrected) without a re-fetch.
+        // Prefer the fresh seed; otherwise keep whatever was persisted before.
+        row.server.model_modalities =
+            (result.detail && result.detail.model_modalities) || row.server.model_modalities || {};
         const detailText = formatCustomDetail(result.detail);
         setCustomStatus(row, "ok", `
             <span class="ob-status-pill ob-status-pill-ok">
@@ -945,6 +1029,47 @@ async function saveCustomEdit(row, container, state) {
             setCustomStatus(row, "error", customErrorPill(String(detail).slice(0, 160)));
         }
     } catch (e) {
+        setCustomStatus(row, "error", customErrorPill(`Network error: ${String(e.message || e).slice(0, 120)}`));
+    } finally {
+        row.busy = false;
+        rerenderCustom(container, state);
+    }
+}
+
+// Persist a corrected model modality. Optimistically applies the choice so the
+// <select> holds it through the "Saving" rerender, PATCHes the FULL merged map
+// (the backend replaces model_modalities wholesale), and reverts on failure.
+// Mirrors saveCustomEdit's PATCH/error idiom; guarded by the shared row.busy.
+async function updateCustomModality(row, modelId, value, container, state) {
+    if (row.busy) return;
+    const sv = row.server;
+    const prev = sv.model_modalities || {};
+    const updated = Object.assign({}, prev, { [String(modelId)]: value });
+
+    sv.model_modalities = updated;  // optimistic — survive the rerender below
+    row.busy = true;
+    setCustomStatus(row, "validating", customValidatingPill("Saving"));
+    rerenderCustom(container, state);
+    try {
+        const r = await fetch(`/onboarding/custom-servers/${encodeURIComponent(sv.id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model_modalities: updated }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) {
+            // Prefer the server's echoed map; fall back to the optimistic one.
+            // Only touch model_modalities so a trimmed PATCH response can't drop
+            // last_models / validated_at and make the block vanish.
+            row.server.model_modalities = (data.server && data.server.model_modalities) || updated;
+            setCustomStatus(row, "idle", "");
+        } else {
+            row.server.model_modalities = prev;  // persist rejected — revert
+            const detail = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
+            setCustomStatus(row, "error", customErrorPill(String(detail).slice(0, 160)));
+        }
+    } catch (e) {
+        row.server.model_modalities = prev;  // network error — revert
         setCustomStatus(row, "error", customErrorPill(`Network error: ${String(e.message || e).slice(0, 120)}`));
     } finally {
         row.busy = false;
