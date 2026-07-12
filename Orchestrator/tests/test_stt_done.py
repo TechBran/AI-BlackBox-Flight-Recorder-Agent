@@ -106,7 +106,7 @@ def _ws_client(monkeypatch, fake_bridge=None, provider="openai"):
     import Orchestrator.app  # noqa: F401 — registers routes onto the shared app
     if fake_bridge is not None:
         monkeypatch.setattr(stt_ws_routes, "run_stt_bridge", fake_bridge)
-    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None: provider)
+    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None, **kw: provider)
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app
     return TestClient(app)

@@ -5,7 +5,7 @@ def test_ws_stt_dispatches_and_relays(monkeypatch):
         await ws.send_json({"type":"stt_delta","text":"Hel","target":start.get("target")})
         await ws.send_json({"type":"stt_final","text":"Hello","target":start.get("target")})
     monkeypatch.setattr(stt_ws_routes, "run_stt_bridge", fake_bridge)
-    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None: "openai")
+    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None, **kw: "openai")
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app
     with TestClient(app).websocket_connect("/ws/stt") as ws:
@@ -16,7 +16,7 @@ def test_ws_stt_dispatches_and_relays(monkeypatch):
 def test_ws_stt_no_provider_errors(monkeypatch):
     import Orchestrator.app  # noqa: F401
     from Orchestrator.routes import stt_ws_routes
-    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None: None)
+    monkeypatch.setattr(stt_ws_routes, "resolve_stt_provider", lambda p=None, **kw: None)
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app
     with TestClient(app).websocket_connect("/ws/stt") as ws:
