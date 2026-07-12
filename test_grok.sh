@@ -12,7 +12,7 @@ timeout 15 curl -X POST http://localhost:9091/chat/stream \
       {"role": "user", "content": "Hello! What AI model are you? Please respond in one sentence."}
     ],
     "provider": "xai",
-    "model": "grok-4-1-fast-reasoning",
+    "model": "grok-4.3",
     "operator": "Brandon-DEV"
   }' 2>&1
 
