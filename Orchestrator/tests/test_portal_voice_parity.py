@@ -52,6 +52,7 @@ FILE_LITERALS = {
         "filterPresetsByProvider",
         "populatePresetDropdown",
         "None (manual config)",
+        "refreshAllPresetDropdowns",
     ],
     "index.html": [
         "vaGrokModelSelect",
@@ -68,6 +69,7 @@ FILE_LITERALS = {
         "vaRealtimePresetSelect",
         "vaGeminiPresetSelect",
         "vaGrokPresetSelect",
+        "refreshAllPresetDropdowns",
     ],
 }
 

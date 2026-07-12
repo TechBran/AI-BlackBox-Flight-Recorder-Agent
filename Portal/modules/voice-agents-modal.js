@@ -41,6 +41,7 @@ import {
     connect as grokLiveConnect,
     disconnect as grokLiveDisconnect,
 } from './grok-live.js';
+import { refreshAllPresetDropdowns } from './voice-presets.js';
 
 // =============================================================================
 // Per-provider selector tables — must match index.html va* ids exactly
@@ -150,6 +151,7 @@ function setupTabs() {
 
 function openModal() {
     ensureProvidersInit();
+    refreshAllPresetDropdowns();
     const modal = document.getElementById('voiceAgentsModal');
     if (modal) modal.classList.remove('hide');
 }

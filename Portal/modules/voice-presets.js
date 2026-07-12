@@ -74,3 +74,36 @@ export function populatePresetDropdown(selectEl, presets) {
     if (row) row.style.display = '';
     console.log(`[VOICE-PRESETS] Preset dropdown populated with ${presets.length} presets`);
 }
+
+/**
+ * Re-fetch the registry and repopulate every panel's preset dropdown.
+ * Called on every Voice Agents modal open (and after P4.10 manage-UI
+ * saves/deletes) so registry edits appear without a page reload.
+ * Empty (or emptied) registry: the select is cleared and its va-row
+ * re-hidden — the panel returns to the exact pre-P4 look.
+ * Alias arrays MUST stay identical to the per-panel init hooks
+ * (P3.25-27) — copy them from gpt-realtime.js / gemini-live.js /
+ * grok-live.js if they differ from the ones below.
+ * @returns {Promise<Array>} the fetched presets (P4.10 manage UI reuses them)
+ */
+export async function refreshAllPresetDropdowns() {
+    const presets = await fetchVoicePresets();
+    const panels = [
+        ['vaRealtimePresetSelect', ['openai', 'realtime', 'gpt-realtime']],
+        ['vaGeminiPresetSelect', ['google', 'gemini', 'gemini-live']],
+        ['vaGrokPresetSelect', ['grok', 'xai', 'grok-live']],
+    ];
+    for (const [id, aliases] of panels) {
+        const sel = document.getElementById(id);
+        if (!sel) continue;
+        const scoped = filterPresetsByProvider(presets, aliases);
+        if (scoped.length === 0) {
+            sel.innerHTML = '';
+            const row = sel.closest('.va-row');
+            if (row) row.style.display = 'none';
+        } else {
+            populatePresetDropdown(sel, scoped);
+        }
+    }
+    return presets;
+}
