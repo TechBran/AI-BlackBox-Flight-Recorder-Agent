@@ -802,8 +802,8 @@ def _fetch_custom_models() -> dict:
                 except Exception as e:  # e.g. deleted mid-probe — don't persist
                     print(f"[CUSTOM-MODELS] {alias} last_models persist skipped: {e}")
         for model_id, status in entries:
-            if custom_servers.is_image_model(model_id):
-                continue  # image models live on the generation screen, not the chat picker
+            if custom_servers.model_modality(srv, model_id) != "chat":
+                continue  # image/tts/stt/embedding models live in their own surfaces
             models.append({
                 "id": custom_servers.qualify(alias, model_id),
                 "name": f"{model_id} ({alias})",
