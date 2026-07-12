@@ -66,3 +66,51 @@ def test_realtime_normal_dispatch_still_answers():
             ["conversation.item.create", "response.create"]
         assert "Current date and time" in session.openai_ws.sent[0]["item"]["output"]
     asyncio.run(run())
+
+
+import Orchestrator.routes.grok_live_routes as gk
+from Orchestrator.models import GrokLiveSession
+
+
+def test_grok_malformed_args_returns_parse_error(monkeypatch):
+    async def boom(*a, **k):
+        raise AssertionError("tool must NOT execute on malformed args")
+    monkeypatch.setattr(gk, "execute_grok_search_snapshots", boom)
+
+    async def run():
+        session = GrokLiveSession(session_id="t-gk-badargs", operator="system")
+        session.grok_ws = FakeUpstreamWS()
+        event = {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call-8", "name": "search_snapshots",
+            "arguments": "{not valid json",
+        }
+        await gk.handle_grok_message(session, event)
+        assert [m["type"] for m in session.grok_ws.sent] == \
+            ["conversation.item.create", "response.create"]
+        item = session.grok_ws.sent[0]["item"]
+        assert item["call_id"] == "call-8"
+        assert "Malformed tool-call arguments" in item["output"]
+    asyncio.run(run())
+
+
+def test_grok_listener_answers_dangling_call_on_dispatch_crash(monkeypatch):
+    async def crash(session, event):
+        raise RuntimeError("executor exploded")
+    monkeypatch.setattr(gk, "handle_grok_message", crash)
+
+    async def run():
+        session = GrokLiveSession(session_id="t-gk-crash", operator="system")
+        fc_event = {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call-10", "name": "roll_dice", "arguments": "{}",
+        }
+        ws = FakeStreamWS([json.dumps(fc_event)])
+        session.grok_ws = ws
+        await gk.grok_listener(session)
+        assert [m["type"] for m in ws.sent] == \
+            ["conversation.item.create", "response.create"]
+        item = ws.sent[0]["item"]
+        assert item["call_id"] == "call-10"
+        assert "executor exploded" in item["output"]
+    asyncio.run(run())

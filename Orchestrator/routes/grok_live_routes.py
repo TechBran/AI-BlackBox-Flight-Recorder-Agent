@@ -68,7 +68,10 @@ from Orchestrator.whisper_filter import is_whisper_hallucination
 from Orchestrator.tools.tool_registry import get_openai_realtime_tools
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
-from Orchestrator.routes.voice_ws_shared import save_voice_transcript
+from Orchestrator.routes.voice_ws_shared import (
+    save_voice_transcript,
+    send_openai_style_tool_error,
+)
 
 
 async def _safe_ws_send(websocket, data: dict) -> bool:
@@ -608,9 +611,16 @@ async def handle_grok_message(session: 'GrokLiveSession', event: Dict):
 
         try:
             arguments = json.loads(arguments_str)
-        except json.JSONDecodeError:
-            print(f"[GROK-LIVE] ERROR: Failed to parse arguments JSON")
-            arguments = {}
+        except json.JSONDecodeError as parse_err:
+            # P1b: malformed arguments must NOT execute with {} — return a
+            # parse error to the model so it can retry with valid JSON.
+            print(f"[GROK-LIVE] Malformed tool arguments for {name}: {parse_err}")
+            await send_openai_style_tool_error(
+                session.grok_ws, session.portal_ws, event,
+                ValueError(f"Malformed tool-call arguments JSON: {parse_err}. "
+                           f"Raw arguments: {arguments_str[:200]}"),
+            )
+            return
 
         print(f"[GROK-LIVE] Tool call: {name} with args: {arguments}")
 
@@ -1240,6 +1250,10 @@ async def grok_listener(session: 'GrokLiveSession'):
                 print(f"[GROK-LIVE] Invalid JSON from Grok: {message[:100]}")
             except Exception as e:
                 print(f"[GROK-LIVE] Error handling Grok message: {e}")
+                # P1b: never dangle a tool call — answer function-call events
+                # with an error payload so Grok recovers instead of stalling.
+                await send_openai_style_tool_error(
+                    session.grok_ws, session.portal_ws, event, e)
     except websockets.exceptions.ConnectionClosed as e:
         print(f"[GROK-LIVE] Grok connection closed: {e}")
         if not session.intentional_disconnect and not session.is_reconnecting:
