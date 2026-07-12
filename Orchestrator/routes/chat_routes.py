@@ -110,6 +110,7 @@ _MEDIA_TOOL_KINDS = {
     "gemini_image": "image",
     "openai_image": "image",
     "grok_image": "image",
+    "local_image": "image",
     "generate_video": "video",
     "extend_video": "video",
     "lyria_music": "music",
