@@ -37,9 +37,11 @@ FEATURES = {
         "default_pref": "IMAGE_DEFAULT",
         "provider_env": {
             "gemini": "GOOGLE_API_KEY", "openai": "OPENAI_API_KEY", "grok": "XAI_API_KEY",
+            "local": None,   # registry-gated (no API-key env) -- see _local_image_available
         },
         "provider_tool": {
             "gemini": "gemini_image", "openai": "openai_image", "grok": "grok_image",
+            "local": "local_image",
         },
         "hint_noun": "image generation",
         "hint_prefix": "IMAGE GENERATION GUIDANCE: ",
@@ -88,6 +90,24 @@ def _read_env() -> dict:
     return env
 
 
+def _local_image_available() -> bool:
+    """True iff an enabled custom server hosts a name-matched image model.
+
+    Lazy import + fail-soft: a heavy/absent dep in the lean MCP venv must NOT
+    raise here (it would break enabled_providers for EVERY tool, per the
+    feedback-mcp-lean-venv lesson). Any failure -> False (local image simply off
+    in that context)."""
+    try:
+        from Orchestrator.onboarding.custom_servers import list_servers, is_image_model
+        for srv in list_servers(enabled_only=True):
+            for m in (srv.get("last_models") or []):
+                if isinstance(m, str) and is_image_model(m):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def enabled_providers(feature: str = "web_search") -> set:
     """Resolve the enabled provider set for ``feature``.
 
@@ -103,6 +123,10 @@ def enabled_providers(feature: str = "web_search") -> set:
     for prov, key in spec["provider_env"].items():
         if key and env.get(key):
             enabled.add(prov)
+    # Registry-gated providers (no env key): the local image server is enabled
+    # iff a registered+enabled custom server actually hosts an image model.
+    if feature == "image" and _local_image_available():
+        enabled.add("local")
     return enabled
 
 
