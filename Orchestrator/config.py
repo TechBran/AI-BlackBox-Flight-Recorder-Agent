@@ -537,15 +537,15 @@ OPENAI_REALTIME_VAD_EAGERNESS = ("low", "medium", "high", "auto")
 
 # Google Gemini Live API (Gemini 2.5 voice conversations)
 GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-latest")  # GA-track alias - bumped from -preview-12-2025
+GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")  # THE recommended Live model (research 2026-07-11); deliberate GA-rule exception, matches Android default. Env override wins.
 GEMINI_LIVE_INPUT_SAMPLE_RATE = 16000   # PCM16 audio at 16kHz (Gemini input standard)
 GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000  # PCM16 audio at 24kHz (Gemini output)
 
 # Gemini Live model catalog (verified via genai.list_models() 2026-05-19).
 GEMINI_LIVE_MODELS: List[Dict] = [
-    {"id": "gemini-2.5-flash-native-audio-latest", "name": "Gemini 2.5 Flash Live (Latest GA-track)", "default": True},
-    {"id": "gemini-3.1-flash-live-preview", "name": "Gemini 3.1 Flash Live (Preview, thinkingLevel)"},
-    {"id": "gemini-2.5-flash-native-audio-preview-12-2025", "name": "Gemini 2.5 Flash Live (Dec 2025 pin)"},
+    {"id": "gemini-3.1-flash-live-preview", "name": "Gemini 3.1 Flash Live (Preview, thinkingLevel)", "default": True},
+    {"id": "gemini-2.5-flash-native-audio-latest", "name": "Gemini 2.5 Flash Live (Latest — deprecated line)"},
+    {"id": "gemini-2.5-flash-native-audio-preview-12-2025", "name": "Gemini 2.5 Flash Live (Dec 2025 pin — deprecated)"},
 ]
 
 # Gemini Live voices - complete 30-entry catalog.
