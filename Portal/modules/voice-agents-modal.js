@@ -224,6 +224,10 @@ function closeModal() {
 export function initVoiceAgentsModal() {
     setupTabs();
     document.getElementById('btnVoiceAgents')?.addEventListener('click', openModal);
+    // Composer shortcut (ctlVoiceAgent) — the soundwave button in the chat
+    // input bubble opens the SAME live voice-agent modal. Distinct from ctlMic
+    // (Whisper dictation), which only transcribes into the text box.
+    document.getElementById('ctlVoiceAgent')?.addEventListener('click', openModal);
     // Close button uses the existing .modal-close pattern + a dedicated
     // listener so we can run our disconnect-on-close hook.
     const modal = document.getElementById('voiceAgentsModal');
