@@ -58,7 +58,12 @@ class VoiceClient(
     // loop (P3.8) also uses this to open a fresh socket per leg.
     private val wsFactory: (OkHttpClient) -> WebSocketClient = { WebSocketClient(it) },
 ) {
-    private var wsClient = wsFactory(client)
+    // Placeholder leg so early defensive calls (close/send before connect) are safe;
+    // connect()'s reconnect loop reassigns this to a wsFactory-produced socket per
+    // leg BEFORE any use, so this initial value is never actually connected. It must
+    // NOT consume the injected wsFactory — the reconnect unit test counts factory
+    // calls per leg (P3.8), and a construction-time call would orphan a fake.
+    private var wsClient: WebSocketClient = WebSocketClient(client)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val _state = MutableStateFlow(VoiceState.DISCONNECTED)
@@ -107,6 +112,11 @@ class VoiceClient(
     @Volatile
     private var serverTerminal = false
 
+    @Volatile
+    private var userDisconnected = false
+    @Volatile
+    private var reconnectAttempts = 0
+
     companion object {
         const val POST_SPEECH_DELAY_MS = 1200L  // 1.2s — generous for speaker echo to die down
         const val KEEPALIVE_INTERVAL_MS = 15_000L
@@ -115,6 +125,11 @@ class VoiceClient(
         // wait — a hung backend setup left the UI at "Connecting..." forever while
         // server pongs kept the keepalive happy.
         const val CONNECT_TIMEOUT_MS = 15_000L
+        // Reconnect-with-resume (ported from SttStreamClient.kt:166-235): bounded,
+        // linear backoff, attempts NEVER reset mid-session (design doc: reset-on-
+        // success is how the server-side loop defeated its own max_reconnects).
+        const val MAX_RECONNECTS = 10
+        const val RECONNECT_BASE_DELAY_MS = 1_000L
     }
 
     fun connect(
@@ -134,71 +149,92 @@ class VoiceClient(
         armConnectTimeout(scope)
 
         connectionJob = scope.launch {
-            val sessionId = UUID.randomUUID().toString()
-            // T12 (plan 2026-05-19): extend URL query with optional model/vad fields.
-            // Long-form Gemini naming (vad_sensitivity_start/_end) per Phase A backend.
-            val url = buildString {
-                append(baseWsUrl)
-                append(backend.wsPath)
-                append('/')
-                append(sessionId)
-                append("?operator=").append(operator)
-                append("&voice=").append(voice)
-                sessionConfig?.let { cfg ->
-                    cfg.model?.let { append("&model=").append(it) }
-                    cfg.vadType?.let { append("&vad_type=").append(it) }
-                    cfg.vadEagerness?.let { append("&vad_eagerness=").append(it) }
-                    cfg.idleTimeoutMs?.let { append("&idle_timeout_ms=").append(it) }
-                    cfg.vadStart?.let { append("&vad_sensitivity_start=").append(it) }
-                    cfg.vadEnd?.let { append("&vad_sensitivity_end=").append(it) }
-                    cfg.thinkingLevel?.let { append("&thinking_level=").append(it) }
-                }
-            }
-            android.util.Log.d("VoiceClient", "Connecting to: $url")
-            wsClient.connect(url).collect { msg ->
-                when (msg) {
-                    is WsMessage.Connected -> {
-                        // Stay at CONNECTING — don't set CONNECTED until server confirms
-                        // backend (OpenAI/Gemini/Grok) is actually ready.
-                        // This prevents mic from streaming before the backend accepts audio.
-                        lastPongTime = System.currentTimeMillis()
-                        // Send connect message — server will establish backend and reply "connected"
-                        val connectMsg = buildJsonObject {
-                            put("type", "connect")
-                            put("operator", currentOperator)
-                            put("voice", currentVoice)
+            // One logical voice session across transient WS drops (Tailscale
+            // idle-reap, network blips). Each iteration is one physical socket leg.
+            while (isActive && !userDisconnected && !serverTerminal &&
+                _state.value != VoiceState.ERROR
+            ) {
+                val legWs = wsFactory(client)
+                wsClient = legWs
+                val url = buildUrl(backend, sessionConfig)
+                android.util.Log.d("VoiceClient", "Connecting to: $url")
+                try {
+                    legWs.connect(url).collect { msg ->
+                        when (msg) {
+                            is WsMessage.Connected -> {
+                                // Stay at CONNECTING/RECONNECTING until the server
+                                // confirms the provider backend is actually ready.
+                                lastPongTime = System.currentTimeMillis()
+                                val connectMsg = buildJsonObject {
+                                    put("type", "connect")
+                                    put("operator", currentOperator)
+                                    put("voice", currentVoice)
+                                }
+                                legWs.send(connectMsg.toString())
+                                android.util.Log.d("VoiceClient", "WS leg open, sent connect, waiting for backend ready...")
+                                startKeepalive()
+                            }
+                            is WsMessage.Text -> parseMessage(msg.text)
+                            is WsMessage.Closing ->
+                                android.util.Log.w("VoiceClient", "Server closing: ${msg.code} ${msg.reason}")
+                            is WsMessage.Error ->
+                                android.util.Log.e("VoiceClient", "WS transport error: ${msg.error.message}")
+                            is WsMessage.Disconnected ->
+                                android.util.Log.d("VoiceClient", "WS leg disconnected")
                         }
-                        wsClient.send(connectMsg.toString())
-                        android.util.Log.d("VoiceClient", "WebSocket open, sent connect message, waiting for backend ready...")
-
-                        // Start keepalive loop (server handles ping/pong even during setup)
-                        startKeepalive()
                     }
-                    is WsMessage.Text -> parseMessage(msg.text)
-                    is WsMessage.Closing -> {
-                        android.util.Log.w("VoiceClient", "Server closing: ${msg.code} ${msg.reason}")
-                        _events.emit(VoiceEvent.Error("Session closed: ${msg.reason}"))
-                        _state.value = VoiceState.ERROR
-                    }
-                    is WsMessage.Error -> {
-                        _state.value = VoiceState.ERROR
-                        _events.emit(VoiceEvent.Error(msg.error.message ?: "Connection error"))
-                    }
-                    is WsMessage.Disconnected -> {
-                        // Preserve a terminal ERROR (server-declared disconnect or
-                        // connect timeout): the socket close that FOLLOWS the failure
-                        // must not repaint it as a clean disconnect.
-                        if (_state.value != VoiceState.ERROR) _state.value = VoiceState.DISCONNECTED
-                        _isAISpeaking.value = false
-                        _currentAiText.value = ""
-                        _events.emit(VoiceEvent.Disconnected)
-                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("VoiceClient", "Connection loop error: ${e.message}")
                 }
+                // This leg's socket is gone. Terminal exits: user hangup, server-
+                // declared dead session, or a state already forced to ERROR
+                // (connect timeout / max attempts).
+                if (!isActive || userDisconnected || serverTerminal ||
+                    _state.value == VoiceState.ERROR
+                ) break
+                reconnectAttempts++
+                if (reconnectAttempts > MAX_RECONNECTS) {
+                    _state.value = VoiceState.ERROR
+                    _events.emit(VoiceEvent.Error("Voice connection lost after $MAX_RECONNECTS reconnect attempts"))
+                    break
+                }
+                _isAISpeaking.value = false
+                _currentAiText.value = ""
+                _state.value = VoiceState.RECONNECTING
+                _events.emit(VoiceEvent.Reconnecting("Connection dropped — reconnecting (attempt $reconnectAttempts)"))
+                android.util.Log.w("VoiceClient", "Voice WS dropped — reconnecting (attempt $reconnectAttempts)")
+                delay(RECONNECT_BASE_DELAY_MS * reconnectAttempts)
+            }
+            if (userDisconnected && _state.value != VoiceState.ERROR) {
+                _state.value = VoiceState.DISCONNECTED
+                _isAISpeaking.value = false
+                _currentAiText.value = ""
+                _events.emit(VoiceEvent.Disconnected)
             }
         }
     }
 
+    /** One URL per leg — FRESH session id so the server builds a clean session. */
+    private fun buildUrl(backend: VoiceBackend, sessionConfig: VoiceSessionConfig?): String = buildString {
+        append(baseWsUrl)
+        append(backend.wsPath)
+        append('/')
+        append(UUID.randomUUID().toString())
+        append("?operator=").append(currentOperator)
+        append("&voice=").append(currentVoice)
+        sessionConfig?.let { cfg ->
+            cfg.model?.let { append("&model=").append(it) }
+            cfg.vadType?.let { append("&vad_type=").append(it) }
+            cfg.vadEagerness?.let { append("&vad_eagerness=").append(it) }
+            cfg.idleTimeoutMs?.let { append("&idle_timeout_ms=").append(it) }
+            cfg.vadStart?.let { append("&vad_sensitivity_start=").append(it) }
+            cfg.vadEnd?.let { append("&vad_sensitivity_end=").append(it) }
+            cfg.thinkingLevel?.let { append("&thinking_level=").append(it) }
+        }
+    }
+
     fun disconnect() {
+        userDisconnected = true
         connectTimeoutJob?.cancel()
         keepaliveJob?.cancel()
         keepaliveJob = null
@@ -307,7 +343,10 @@ class VoiceClient(
             when (type) {
                 "connected", "setup_complete" -> {
                     connectTimeoutJob?.cancel()
+                    val wasReconnecting = _state.value == VoiceState.RECONNECTING
+                    lastPongTime = System.currentTimeMillis()
                     _state.value = VoiceState.CONNECTED
+                    if (wasReconnecting) _events.emit(VoiceEvent.Reconnected)
                     android.util.Log.d("VoiceClient", "Server message: $type")
                 }
 
