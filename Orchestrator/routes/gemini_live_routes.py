@@ -1576,7 +1576,13 @@ async def gemini_reconnect(session: GeminiLiveSession):
             # Reconfigure — configure_gemini_session falls back to the session-
             # persisted model/VAD/thinking/custom_role/phone_mode (P1.4), so
             # this bare call no longer reverts the session to defaults.
-            await configure_gemini_session(session, session.operator, session.voice)
+            await configure_gemini_session(
+                session,
+                session.operator,
+                session.voice,
+                mode=session.mode or None,
+                target_language=session.target_language or None,
+            )
 
             # Re-emit provenance after reconfigure so client UI stays in sync with the
             # newly-rebuilt system context (see Task 3 code review).
@@ -1793,6 +1799,10 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
     url_vad_sensitivity_start = websocket.query_params.get("vad_sensitivity_start")
     url_vad_sensitivity_end = websocket.query_params.get("vad_sensitivity_end")
     url_thinking_level = websocket.query_params.get("thinking_level")
+    # P6a translation mode — same precedence as every other param
+    # (JSON connect message wins, URL query fills missing).
+    url_mode = websocket.query_params.get("mode")
+    url_target_language = websocket.query_params.get("target_language")
     url_agent = websocket.query_params.get("agent")
 
     # Check dependencies
@@ -1878,6 +1888,13 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                 vad_sensitivity_start = data.get("vad_sensitivity_start", url_vad_sensitivity_start)
                 vad_sensitivity_end = data.get("vad_sensitivity_end", url_vad_sensitivity_end)
                 thinking_level = data.get("thinking_level", url_thinking_level)
+                mode = data.get("mode", url_mode)
+                target_language = data.get("target_language", url_target_language)
+                is_translate, _ = resolve_translate_params(
+                    mode, target_language, log_prefix="[GEMINI-LIVE]")
+                # Persist for reconnect (P6a — see gemini_reconnect path)
+                session.mode = mode if is_translate else ""
+                session.target_language = target_language or "" if is_translate else ""
                 session.operator = operator
 
                 await _safe_ws_send(websocket, {
@@ -1898,6 +1915,8 @@ async def gemini_live_websocket(websocket: WebSocket, session_id: str):
                         vad_sensitivity_start=vad_sensitivity_start,
                         vad_sensitivity_end=vad_sensitivity_end,
                         thinking_level=thinking_level,
+                        mode=mode,
+                        target_language=target_language,
                         tool_group_override=tool_group_override,
                     )
 

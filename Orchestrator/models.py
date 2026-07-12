@@ -154,6 +154,10 @@ class GeminiLiveSession:
     custom_role: str = ""                        # Outbound-call persona override
     phone_mode: bool = False                     # Phone-tuned server VAD
     provenance: Dict[str, List[str]] = field(default_factory=dict)  # Snapshot retrieval provenance from build_fossil_context
+    # P6a translation mode — persisted so reconnects rebuild the SAME session
+    # type instead of degrading into a full persona/tool session.
+    mode: str = ""                       # "" = normal, "translate" = translation mode
+    target_language: str = ""            # BCP-47 target when mode == "translate"
 
 # Global storage for Gemini Live sessions
 GEMINI_LIVE_SESSIONS: Dict[str, GeminiLiveSession] = {}

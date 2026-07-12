@@ -211,3 +211,16 @@ async def test_gemini_default_path_unchanged(stub_fossil_context):
     setup = _extract_payload(session.gemini_ws.send)["setup"]
     assert "tools" in setup
     assert len(setup["systemInstruction"]["parts"][0]["text"]) > 1000
+
+
+# -----------------------------------------------------------------------------
+# P6.6 — GeminiLiveSession persists translate mode across reconnects
+# -----------------------------------------------------------------------------
+
+def test_gemini_session_persists_translate_fields():
+    from Orchestrator.models import GeminiLiveSession
+    s = GeminiLiveSession(session_id="t")
+    assert s.mode == "" and s.target_language == ""
+    s.mode = "translate"
+    s.target_language = "ja"
+    assert (s.mode, s.target_language) == ("translate", "ja")
