@@ -1,0 +1,57 @@
+{
+  "generated": "2026-07-11T21:57:46-0400",
+  "name": "gemini-tools",
+  "results": [
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-live-preview",
+      "probe": "bare",
+      "ok": true,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "",
+      "ts": "2026-07-11T21:57:45-0400",
+      "events": [
+        {
+          "setupComplete": {}
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-live-preview",
+      "probe": "full_tools",
+      "ok": true,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "56 functionDeclarations",
+      "ts": "2026-07-11T21:57:46-0400",
+      "events": [
+        {
+          "setupComplete": {}
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash-native-audio-latest",
+      "probe": "full_tools",
+      "ok": true,
+      "resolved_model": "",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "56 functionDeclarations",
+      "ts": "2026-07-11T21:57:46-0400",
+      "events": [
+        {
+          "setupComplete": {}
+        }
+      ]
+    }
+  ]
+}
