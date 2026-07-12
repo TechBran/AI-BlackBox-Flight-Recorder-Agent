@@ -31,6 +31,7 @@ import { addBubble, appendBubble } from './chat-bubbles.js';
 const SEL = {
     voiceSelect: 'grokVoiceSelect',
     modelSelect: 'grokModelSelect',
+    reasoningSelect: 'grokReasoningSelect',
     connectButton: 'grokConnectBtn',
     disconnectButton: 'grokDisconnectBtn',
     micButton: 'grokMicBtn',
@@ -63,6 +64,7 @@ let selectedVoice = 'Ara';
  * server-default downgrade on network blip (T14 F1 pattern, gpt-realtime.js).
  */
 let currentGrokModel = null;
+let currentGrokReasoningEffort = null;
 
 /** Audio context for playback (native rate for best quality) */
 let playbackContext = null;
@@ -783,6 +785,11 @@ export async function connect(operator) {
     const selectedModel = (modelSelect && modelSelect.value) ? modelSelect.value : undefined;
     currentGrokModel = selectedModel || null;
 
+    // reasoning.effort (high|none) — grok-voice-think-fast background reasoning
+    const reasoningSelect = SEL.reasoningSelect ? $(SEL.reasoningSelect) : null;
+    const reasoningEffort = (reasoningSelect && reasoningSelect.value) ? reasoningSelect.value : undefined;
+    currentGrokReasoningEffort = reasoningEffort || null;
+
     // Reset session state
     sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
@@ -811,6 +818,7 @@ export async function connect(operator) {
             voice: selectedVoice
         };
         if (selectedModel) connectMsg.model = selectedModel;
+        if (reasoningEffort) connectMsg.reasoning_effort = reasoningEffort;
         ws.send(JSON.stringify(connectMsg));
     };
 
@@ -1123,6 +1131,7 @@ function reconnectToExistingSession() {
             voice: selectedVoice
         };
         if (currentGrokModel) reconnectMsg.model = currentGrokModel;
+        if (currentGrokReasoningEffort) reconnectMsg.reasoning_effort = currentGrokReasoningEffort;
         ws.send(JSON.stringify(reconnectMsg));
     };
 

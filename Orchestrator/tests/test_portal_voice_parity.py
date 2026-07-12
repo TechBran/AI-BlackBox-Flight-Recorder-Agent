@@ -31,12 +31,16 @@ FILE_LITERALS = {
         "model_default",
         "connectMsg.model",
         "reconnectMsg.model",
+        "connectMsg.reasoning_effort",
+        "reconnectMsg.reasoning_effort",
     ],
     "index.html": [
         "vaGrokModelSelect",
+        "vaGrokReasoningSelect",
     ],
     "modules/voice-agents-modal.js": [
         "vaGrokModelSelect",
+        "vaGrokReasoningSelect",
     ],
 }
 
