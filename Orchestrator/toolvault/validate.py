@@ -81,6 +81,44 @@ def _cli_agent_mcp_group_errors(data) -> list:
     return []
 
 
+def _array_items_errors(data) -> list:
+    """Guard: every ``"type": "array"`` node anywhere in ``parameters`` MUST
+    carry an ``items`` schema (a dict).
+
+    Google's Gemini Live BidiGenerateContent setup validator rejects the ENTIRE
+    multi-tool setup with WS close 1007 (``...items: missing field``) when any
+    declared array lacks ``items`` — one bad tool kills every voice session for
+    every operator, silently (2026-07-11 root cause: update_sheet_values' 2D
+    ``values`` param, dead since 2026-06-20). This check walks the whole
+    parameters tree (properties, items, nested anything) so N-dimensional
+    arrays are covered.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict):
+        return []
+    params = data.get("parameters")
+    if not isinstance(params, dict):
+        return []
+    errors: list = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if node.get("type") == "array" and not isinstance(node.get("items"), dict):
+                errors.append(
+                    f"array at {path} lacks required 'items' schema — Gemini Live "
+                    f"rejects the whole tool setup with WS close 1007"
+                )
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+
+    walk(params, "parameters")
+    return errors
+
+
 def validate_all() -> dict:
     """Validate every module under ``registry.TOOLS_DIR`` and report.
 
@@ -136,6 +174,9 @@ def validate_all() -> dict:
             folder_errors.extend(_x_availability_feature_errors(data))
             # A cli_agent-category tool must never be in the public `mcp` group.
             folder_errors.extend(_cli_agent_mcp_group_errors(data))
+            # Every declared array MUST carry an `items` schema — Gemini Live's
+            # setup validator rejects the whole tool payload otherwise (P1.2).
+            folder_errors.extend(_array_items_errors(data))
 
         # Track the canonical name for embedding coverage (best effort —
         # even if other fields are invalid, a string name is what the store
