@@ -1425,9 +1425,14 @@ async def grok_keepalive_loop(session: 'GrokLiveSession'):
                     asyncio.create_task(grok_reconnect(session))
                 continue
 
-            # Send keepalive: 20ms of silence as PCM16@16kHz (input rate)
+            # Send keepalive: 20ms of PCM16 silence at the declared input
+            # rate (16kHz post-P2.15 — byte count below matches).
+            # SKIPPED for SIP-attached calls (session.call_id set): the call's
+            # audio flows xAI-side and injected buffer silence could corrupt it
+            # (uncertain per xAI docs — live-validated in P5.8). Stale detection
+            # above still applies.
             try:
-                if session.grok_ws:
+                if session.grok_ws and not session.call_id:
                     # 20ms at 16kHz (input rate) = 320 samples, PCM16 = 640 bytes of zeros
                     silence_bytes = b'\x00' * 640
                     silence_b64 = base64.b64encode(silence_bytes).decode('ascii')
