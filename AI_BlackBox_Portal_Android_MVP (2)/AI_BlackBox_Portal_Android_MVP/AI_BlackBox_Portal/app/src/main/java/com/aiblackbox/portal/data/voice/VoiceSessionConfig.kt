@@ -21,4 +21,6 @@ data class VoiceSessionConfig(
     val vadStart: String? = null,
     val vadEnd: String? = null,
     val thinkingLevel: String? = null,
+    /** P3.12: voice-agent preset id → ?agent= on the WS URL (workstream 3). */
+    val agentId: String? = null,
 )

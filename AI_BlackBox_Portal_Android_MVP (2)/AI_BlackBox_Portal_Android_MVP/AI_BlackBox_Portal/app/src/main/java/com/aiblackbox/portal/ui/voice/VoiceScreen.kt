@@ -70,6 +70,9 @@ import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.voice.TranscriptEntry
 import com.aiblackbox.portal.data.voice.VoiceBackend
+import com.aiblackbox.portal.data.voice.VoiceCatalog
+import com.aiblackbox.portal.data.voice.modelsOrFallback
+import com.aiblackbox.portal.data.voice.voicesOrFallback
 import com.aiblackbox.portal.data.voice.VoiceClient
 import com.aiblackbox.portal.data.voice.VoiceEvent
 import com.aiblackbox.portal.data.voice.VoiceSessionConfig
@@ -108,6 +111,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private val store = BlackBoxStore(application)
     private val audioManager = application.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
     private var voiceClient: VoiceClient? = null
+
+    // P3.12: per-provider catalogs hydrated from GET {statusPath} at screen open.
+    private val _catalogs = MutableStateFlow<Map<VoiceBackend, VoiceCatalog>>(emptyMap())
+    val catalogs: StateFlow<Map<VoiceBackend, VoiceCatalog>> = _catalogs.asStateFlow()
+    private var catalogFetchJob: Job? = null
 
     private val _backend = MutableStateFlow(VoiceBackend.GEMINI_LIVE)
     val backend: StateFlow<VoiceBackend> = _backend.asStateFlow()
@@ -178,6 +186,25 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val wsUrl = origin.replace("https://", "wss://").replace("http://", "ws://")
             voiceClient = VoiceClient(BlackBoxApi(origin).getClient(), wsUrl)
+
+            // P3.12: hydrate models/voices/model_default/presets from the /status
+            // endpoints (provider-API-as-SoT). Constants lists are fallbacks-only.
+            catalogFetchJob?.cancel()
+            catalogFetchJob = viewModelScope.launch(Dispatchers.IO) {
+                val api = BlackBoxApi(origin)
+                VoiceBackend.entries.forEach { b ->
+                    try {
+                        VoiceCatalog.parse(api.get(b.statusPath))?.let { cat ->
+                            _catalogs.value = _catalogs.value + (b to cat)
+                            android.util.Log.d("VoiceVM", "Catalog ${b.id}: " +
+                                "${cat.models.size} models, ${cat.voices.size} voices, " +
+                                "${cat.presets.size} presets, default=${cat.modelDefault}")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("VoiceVM", "Catalog fetch ${b.id} failed: ${e.message}")
+                    }
+                }
+            }
 
             // Collect state changes
             viewModelScope.launch {
@@ -618,17 +645,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
-// Provider-specific voice lists.
-// T13 (plan 2026-05-19): VOICES_GPT + VOICES_GEMINI now sourced from Constants.kt
-// (single source of truth). VOICES_GROK unchanged — Grok Live out of scope.
-private val VOICES_GPT = Constants.VOICES_GPT_REALTIME
-private val VOICES_GEMINI = Constants.VOICES_GEMINI_LIVE
-private val VOICES_GROK = listOf("Ara", "Rex", "Sal", "Eve", "Leo")
-
-private fun voicesForBackend(backend: VoiceBackend) = when (backend) {
-    VoiceBackend.GPT_REALTIME -> VOICES_GPT
-    VoiceBackend.GEMINI_LIVE -> VOICES_GEMINI
-    VoiceBackend.GROK_LIVE -> VOICES_GROK
+// Provider-specific voice lists — OFFLINE FALLBACKS (P3.12): the hydrated
+// catalog from GET {statusPath} wins when present.
+private fun voicesForBackend(backend: VoiceBackend, catalog: VoiceCatalog?): List<String> = when (backend) {
+    VoiceBackend.GPT_REALTIME -> catalog.voicesOrFallback(Constants.VOICES_GPT_REALTIME)
+    VoiceBackend.GEMINI_LIVE -> catalog.voicesOrFallback(Constants.VOICES_GEMINI_LIVE)
+    VoiceBackend.GROK_LIVE -> catalog.voicesOrFallback(Constants.VOICES_GROK_LIVE)
 }
 
 /** Format a voice name with character descriptor for Gemini Live. */
@@ -647,6 +669,7 @@ fun VoiceScreen(
     val view = LocalView.current
     val context = LocalContext.current
     val backend by viewModel.backend.collectAsState()
+    val catalogs by viewModel.catalogs.collectAsState()
     val voice by viewModel.voice.collectAsState()
     val voiceState by viewModel.voiceState.collectAsState()
     val transcript by viewModel.transcript.collectAsState()
@@ -707,7 +730,7 @@ fun VoiceScreen(
         val default = when (backend) {
             VoiceBackend.GPT_REALTIME -> Constants.DEFAULT_GPT_REALTIME_VOICE
             VoiceBackend.GEMINI_LIVE -> Constants.DEFAULT_GEMINI_LIVE_VOICE
-            VoiceBackend.GROK_LIVE -> voicesForBackend(backend).first()
+            VoiceBackend.GROK_LIVE -> Constants.DEFAULT_GROK_LIVE_VOICE
         }
         viewModel.setVoice(default)
     }
@@ -834,7 +857,7 @@ fun VoiceScreen(
                     // Treat voice the same as model/vad: bound at connect time, gated while CONNECTED.
                     LabeledDropdown(
                         label = "Voice",
-                        options = voicesForBackend(backend).map { it to voiceLabel(backend, it) },
+                        options = voicesForBackend(backend, catalogs[backend]).map { it to voiceLabel(backend, it) },
                         selectedId = voice,
                         enabled = !isConnected,
                         onSelect = viewModel::setVoice,
@@ -847,6 +870,8 @@ fun VoiceScreen(
                     when (backend) {
                         VoiceBackend.GPT_REALTIME -> RealtimeConfigBlock(
                             connected = isConnected,
+                            modelOptions = catalogs[VoiceBackend.GPT_REALTIME]
+                                .modelsOrFallback(Constants.MODEL_CONFIG["realtime"].orEmpty()),
                             model = realtimeModel,
                             onModelChange = { realtimeModel = it },
                             vadType = realtimeVadType,
@@ -858,6 +883,8 @@ fun VoiceScreen(
                         )
                         VoiceBackend.GEMINI_LIVE -> GeminiConfigBlock(
                             connected = isConnected,
+                            modelOptions = catalogs[VoiceBackend.GEMINI_LIVE]
+                                .modelsOrFallback(Constants.MODEL_CONFIG["gemini-live"].orEmpty()),
                             model = geminiModel,
                             onModelChange = { geminiModel = it },
                             vadStart = geminiVadStart,
@@ -1037,6 +1064,7 @@ fun VoiceScreen(
 @Composable
 private fun RealtimeConfigBlock(
     connected: Boolean,
+    modelOptions: List<Pair<String, String>>,
     model: String,
     onModelChange: (String) -> Unit,
     vadType: String,
@@ -1046,10 +1074,9 @@ private fun RealtimeConfigBlock(
     idleTimeoutText: String,
     onIdleTimeoutChange: (String) -> Unit,
 ) {
-    val modelOpts = Constants.MODEL_CONFIG["realtime"].orEmpty()
     LabeledDropdown(
         label = "Model",
-        options = modelOpts,
+        options = modelOptions,
         selectedId = model,
         enabled = !connected,  // audit I4: model bound at upstream WS connect time
         onSelect = onModelChange,
@@ -1097,6 +1124,7 @@ private fun RealtimeConfigBlock(
 @Composable
 private fun GeminiConfigBlock(
     connected: Boolean,
+    modelOptions: List<Pair<String, String>>,
     model: String,
     onModelChange: (String) -> Unit,
     vadStart: String?,
@@ -1106,10 +1134,9 @@ private fun GeminiConfigBlock(
     thinkingLevel: String?,
     onThinkingLevelChange: (String?) -> Unit,
 ) {
-    val modelOpts = Constants.MODEL_CONFIG["gemini-live"].orEmpty()
     LabeledDropdown(
         label = "Model",
-        options = modelOpts,
+        options = modelOptions,
         selectedId = model,
         enabled = !connected,  // audit I4: model bound at setup time
         onSelect = onModelChange,
