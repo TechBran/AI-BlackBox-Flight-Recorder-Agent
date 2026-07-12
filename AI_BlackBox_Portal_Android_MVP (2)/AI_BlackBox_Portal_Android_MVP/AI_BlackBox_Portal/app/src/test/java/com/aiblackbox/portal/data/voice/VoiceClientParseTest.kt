@@ -149,4 +149,23 @@ class VoiceClientParseTest {
         assertEquals(0, fake.closeCount)
         assertTrue(fake.sent.any { it.contains("\"type\":\"audio_input\"") })
     }
+
+    @Test
+    fun `tool and media-task frames emit VoiceEvent Tool without changing state`() = runTest {
+        startConnected()
+        serverSends("""{"type":"tool_call","data":{"name":"search_snapshots","arguments":{"query":"upload bug"}}}""")
+        serverSends("""{"type":"tool_result","data":{"name":"search_snapshots","result_length":2048}}""")
+        serverSends("""{"type":"image_task","data":{"task_id":"t-1","prompt":"sunset over water","count":2}}""")
+        serverSends("""{"type":"video_task","data":{"task_id":"t-2","prompt":"drone shot","duration":8,"resolution":"720p"}}""")
+        serverSends("""{"type":"music_task","data":{"task_id":"t-3","prompt":"epic orchestral","sample_count":1}}""")
+
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+        val tools = events.filterIsInstance<VoiceEvent.Tool>()
+        assertEquals(5, tools.size)
+        assertEquals(VoiceEvent.Tool("tool_call", "search_snapshots", """{"query":"upload bug"}"""), tools[0])
+        assertEquals(VoiceEvent.Tool("tool_result", "search_snapshots", "2048 chars"), tools[1])
+        assertEquals(VoiceEvent.Tool("image_task", "", "sunset over water"), tools[2])
+        assertEquals(VoiceEvent.Tool("video_task", "", "drone shot"), tools[3])
+        assertEquals(VoiceEvent.Tool("music_task", "", "epic orchestral"), tools[4])
+    }
 }

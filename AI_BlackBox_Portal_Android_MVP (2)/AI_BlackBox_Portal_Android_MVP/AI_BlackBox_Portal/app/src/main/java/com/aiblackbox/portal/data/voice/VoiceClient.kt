@@ -48,6 +48,14 @@ sealed class VoiceEvent {
 
     /** TERMINAL: backend gave up on its upstream connection. The session is dead. */
     data class ServerDisconnected(val reason: String) : VoiceEvent()
+
+    /**
+     * Tool/media-task activity surfaced by the backend bridge (gemini_live_routes.py).
+     * kind ∈ tool_call | tool_result | image_task | video_task | music_task;
+     * name = tool name (blank for media tasks); detail = compact human summary
+     * (args JSON / result size / prompt). Consumed by the Phase 3b transcript chips (P3.17).
+     */
+    data class Tool(val kind: String, val name: String, val detail: String) : VoiceEvent()
 }
 
 /** What the keepalive tick should do — pure decision, unit-tested directly. */
@@ -500,6 +508,28 @@ class VoiceClient(
                     _events.emit(VoiceEvent.Error(reason))
                     android.util.Log.e("VoiceClient", "Server terminal disconnect: $reason")
                     wsClient.close()
+                }
+
+                // ---- Tool/media-task activity (P3.9a — rendered as chips in 3b).
+                // data is an OBJECT for these frames; the string `data` above is "".
+                "tool_call", "tool_result", "image_task", "video_task", "music_task" -> {
+                    val d = try { obj["data"]?.jsonObject } catch (_: Exception) { null }
+                    val name = try {
+                        d?.get("name")?.jsonPrimitive?.content
+                    } catch (_: Exception) { null } ?: ""
+                    val detail = when (type) {
+                        "tool_call" -> try {
+                            d?.get("arguments")?.jsonObject?.takeIf { it.isNotEmpty() }?.toString()
+                        } catch (_: Exception) { null } ?: ""
+                        "tool_result" -> try {
+                            d?.get("result_length")?.jsonPrimitive?.content?.let { "$it chars" }
+                        } catch (_: Exception) { null } ?: ""
+                        else -> try {  // image_task / video_task / music_task
+                            d?.get("prompt")?.jsonPrimitive?.content
+                        } catch (_: Exception) { null } ?: ""
+                    }
+                    _events.emit(VoiceEvent.Tool(type, name, detail))
+                    android.util.Log.d("VoiceClient", "Tool frame $type: $name ${detail.take(80)}")
                 }
 
                 "error" -> {
