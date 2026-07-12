@@ -93,6 +93,7 @@ class VoiceClient(
 
     private var connectionJob: Job? = null
     private var keepaliveJob: Job? = null
+    private var connectTimeoutJob: Job? = null
     private var currentOperator = ""
     private var currentVoice = ""
     private var scope: CoroutineScope? = null
@@ -110,6 +111,10 @@ class VoiceClient(
         const val POST_SPEECH_DELAY_MS = 1200L  // 1.2s — generous for speaker echo to die down
         const val KEEPALIVE_INTERVAL_MS = 15_000L
         const val PONG_TIMEOUT_MS = 30_000L
+        // Recon 2026-07-11 silent-failure #2: no bound on the CONNECTING→CONNECTED
+        // wait — a hung backend setup left the UI at "Connecting..." forever while
+        // server pongs kept the keepalive happy.
+        const val CONNECT_TIMEOUT_MS = 15_000L
     }
 
     fun connect(
@@ -126,6 +131,7 @@ class VoiceClient(
         _state.value = VoiceState.CONNECTING
         connectionJob?.cancel()
         keepaliveJob?.cancel()
+        armConnectTimeout(scope)
 
         connectionJob = scope.launch {
             val sessionId = UUID.randomUUID().toString()
@@ -193,6 +199,7 @@ class VoiceClient(
     }
 
     fun disconnect() {
+        connectTimeoutJob?.cancel()
         keepaliveJob?.cancel()
         keepaliveJob = null
         connectionJob?.cancel()
@@ -254,6 +261,21 @@ class VoiceClient(
         }
     }
 
+    // Bounded wait for the backend-ready confirm ("connected"/"setup_complete").
+    // Guarded on state so a confirm/error that already arrived makes this a no-op.
+    private fun armConnectTimeout(scope: CoroutineScope) {
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = scope.launch {
+            delay(CONNECT_TIMEOUT_MS)
+            if (_state.value == VoiceState.CONNECTING) {
+                android.util.Log.w("VoiceClient", "Backend not ready after ${CONNECT_TIMEOUT_MS}ms — failing")
+                _state.value = VoiceState.ERROR
+                _events.emit(VoiceEvent.Error("Voice backend did not become ready within ${CONNECT_TIMEOUT_MS / 1000}s"))
+                wsClient.close()
+            }
+        }
+    }
+
     private suspend fun parseMessage(raw: String) {
         try {
             val obj = json.parseToJsonElement(raw).jsonObject
@@ -263,6 +285,7 @@ class VoiceClient(
 
             when (type) {
                 "connected", "setup_complete" -> {
+                    connectTimeoutJob?.cancel()
                     _state.value = VoiceState.CONNECTED
                     android.util.Log.d("VoiceClient", "Server message: $type")
                 }

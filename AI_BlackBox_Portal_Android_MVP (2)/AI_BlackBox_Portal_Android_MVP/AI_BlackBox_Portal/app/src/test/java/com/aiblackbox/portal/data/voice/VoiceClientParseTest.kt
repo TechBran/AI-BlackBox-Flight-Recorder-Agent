@@ -111,4 +111,23 @@ class VoiceClientParseTest {
         assertEquals(VoiceState.CONNECTED, voice.state.value)
         assertEquals(eventsBefore, events.size)
     }
+
+    @Test
+    fun `CONNECTING times out to ERROR when backend never becomes ready`() = runTest {
+        startConnected(confirm = false)
+        assertEquals(VoiceState.CONNECTING, voice.state.value)
+        advanceTimeBy(VoiceClient.CONNECT_TIMEOUT_MS + 1)
+        runCurrent()
+        assertEquals(VoiceState.ERROR, voice.state.value)
+        assertTrue(events.any { it is VoiceEvent.Error && it.message.contains("ready") })
+        assertTrue(fake.closeCount >= 1)
+    }
+
+    @Test
+    fun `connect timeout does not fire once backend confirmed`() = runTest {
+        startConnected()
+        advanceTimeBy(VoiceClient.CONNECT_TIMEOUT_MS + 1)
+        runCurrent()
+        assertEquals(VoiceState.CONNECTED, voice.state.value)
+    }
 }
