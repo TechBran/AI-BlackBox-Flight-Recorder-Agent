@@ -133,8 +133,8 @@ async def test_realtime_status_filters_non_chat_categories():
     models = resp["models"]
     model_ids = {m["id"] for m in models}
 
-    # Exactly the 5 chat-category models, no whisper/translate
-    assert len(models) == 5, f"expected 5 chat models, got {len(models)}: {model_ids}"
+    # Exactly the 8 chat-category models, no whisper/translate
+    assert len(models) == 8, f"expected 8 chat models, got {len(models)}: {model_ids}"
 
     # Every emitted model is category=="chat"
     assert all(m.get("category") == "chat" for m in models), (
@@ -145,12 +145,13 @@ async def test_realtime_status_filters_non_chat_categories():
     assert "gpt-realtime-whisper" not in model_ids, "STT-only model leaked into voice dropdown"
     assert "gpt-realtime-translate" not in model_ids, "translate-only model leaked into voice dropdown"
 
-    # gpt-realtime-2 (newest GA) present + flagged default after Beta->GA migration
-    # (2026-05-19 plan Track 1D). Was reverted to gpt-realtime alias during the
-    # T15 Beta-header diagnosis; restored once GA endpoint accepts gpt-realtime-2.
+    # gpt-realtime-2.1 (newest GA, 2026-07-06, P0 WS-probe-verified) present +
+    # flagged default. gpt-realtime-2 stays in the catalog (same price, superseded).
     default_models = [m for m in models if m.get("default") is True]
     assert len(default_models) == 1, f"expected exactly one default model, got {default_models}"
-    assert default_models[0]["id"] == "gpt-realtime-2"
+    assert default_models[0]["id"] == "gpt-realtime-2.1"
+    assert "gpt-realtime-2.1-mini" in model_ids
+    assert "gpt-realtime-2" in model_ids
 
 
 # -----------------------------------------------------------------------------
@@ -326,11 +327,20 @@ def test_allowlist_casing_precision():
     assert any(m["id"] == "gpt-realtime-2" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gpt-realtime" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gpt-realtime-1.5" for m in OPENAI_REALTIME_MODELS)
+    assert any(m["id"] == "gpt-realtime-2.1" for m in OPENAI_REALTIME_MODELS)
+    assert any(m["id"] == "gpt-realtime-2.1-mini" for m in OPENAI_REALTIME_MODELS)
     assert any(m["id"] == "gemini-3.1-flash-live-preview" for m in GEMINI_LIVE_MODELS)
-    # Guard: invalid ids that /v1/models lists but Realtime WS rejects (close 4000)
-    # gpt-realtime-2 was previously in this set when the Beta header was still
-    # being sent; restored to the catalog as of the GA migration.
-    rejected = {"gpt-realtime-2025-08-28"}
-    assert not any(m["id"] in rejected for m in OPENAI_REALTIME_MODELS), (
-        f"WS-rejected model id leaked into catalog: {rejected & {m['id'] for m in OPENAI_REALTIME_MODELS}}"
-    )
+    # gpt-realtime-2025-08-28 was REJECTED at the WS endpoint (close 4000) in May
+    # 2026, but the 2026-07-11 re-probe ACCEPTED it (close 4000 did not reproduce);
+    # now pinned into the catalog (diagnostics/voice_probes/results/).
+    assert any(m["id"] == "gpt-realtime-2025-08-28" for m in OPENAI_REALTIME_MODELS)
+
+
+@pytest.mark.asyncio
+async def test_realtime_status_serves_marin_and_cedar():
+    """marin/cedar are OpenAI's recommended premium voices — pin them in the
+    served catalog (config.py OPENAI_REALTIME_VOICES via /realtime/status)."""
+    resp = await realtime_status()
+    assert "marin" in resp["voices"]
+    assert "cedar" in resp["voices"]
+    assert resp["voice_default"] in resp["voices"]

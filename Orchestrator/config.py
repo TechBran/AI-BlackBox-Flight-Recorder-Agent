@@ -497,27 +497,34 @@ OPENAI_TTS_URL  = "https://api.openai.com/v1/audio/speech"
 
 # OpenAI Realtime API (GPT-4o voice conversations)
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")  # Newest GA, valid since Beta header dropped (2026-05-19)
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")  # Newest GA (2026-07-06), P0 WS-probe-verified 2026-07-11
 REALTIME_CONTEXT_MAX_CHARS = 50000    # ~20K tokens budget for initial context
 REALTIME_SNAPSHOT_CHARS_EACH = 8000   # Max chars per snapshot in context
 REALTIME_AUDIO_SAMPLE_RATE = 24000    # PCM16 audio at 24kHz
 
 # OpenAI Realtime model catalog — empirically WS-connection-tested 2026-05-19
-# against the GA endpoint (no OpenAI-Beta header). Post-migration findings:
-#   - gpt-realtime-2 is the newest GA, accepted on GA endpoint
-#   - gpt-realtime is the alias, also accepted on GA endpoint
-#   - gpt-realtime-mini and the dated pin both work on GA
-#   - gpt-realtime-2025-08-28 is STILL listed by /v1/models but REJECTED at the WS
-#     endpoint (close code 4000); keep out of the catalog.
+# (GA endpoint) and re-probed 2026-07-11 for the 2.1 generation
+# (see diagnostics/voice_probes/results/). Findings:
+#   - gpt-realtime-2.1 / gpt-realtime-2.1-mini (GA 2026-07-06) are the newest;
+#     same price as gen-2, better ASR/interruptions/noise, WS-probe-verified.
+#   - gpt-realtime-2 kept (superseded flagship, still GA).
+#   - gpt-realtime-mini-2025-12-15 pin kept — NOT affected by the 2026-07-23
+#     shutdown of the 2025-10-06 mini snapshots.
+#   - gpt-realtime-2025-08-28: was REJECTED at the WS endpoint (close 4000) in
+#     May 2026, but the 2026-07-11 re-probe ACCEPTED it (close 4000 did not
+#     reproduce) — restored to the catalog.
 # Routes filter category=="chat" when serving the dropdown; specialized variants
 # (translate, transcribe) are exposed via env-var override only.
 OPENAI_REALTIME_MODELS: List[Dict] = [
     # Conversational variants (UI dropdown) — all WS-connection-verified on GA endpoint
-    {"id": "gpt-realtime-2", "name": "GPT Realtime 2 (Newest GA)", "default": True, "category": "chat"},
+    {"id": "gpt-realtime-2.1", "name": "GPT Realtime 2.1 (Newest GA)", "default": True, "category": "chat"},
+    {"id": "gpt-realtime-2.1-mini", "name": "GPT Realtime 2.1 Mini (cheap, newest)", "category": "chat"},
+    {"id": "gpt-realtime-2", "name": "GPT Realtime 2", "category": "chat"},
     {"id": "gpt-realtime", "name": "GPT Realtime (GA alias)", "category": "chat"},
     {"id": "gpt-realtime-1.5", "name": "GPT Realtime 1.5 (pinned)", "category": "chat"},
     {"id": "gpt-realtime-mini", "name": "GPT Realtime Mini (cheap, alias)", "category": "chat"},
     {"id": "gpt-realtime-mini-2025-12-15", "name": "GPT Realtime Mini (Dec 2025 pin)", "category": "chat"},
+    {"id": "gpt-realtime-2025-08-28", "name": "GPT Realtime (Aug 2025 pin)", "category": "chat"},
     # Specialized variants (NOT in main dropdown; audit I4)
     {"id": "gpt-realtime-translate", "name": "GPT Realtime Translate", "category": "translate"},
     {"id": "gpt-realtime-whisper", "name": "GPT Realtime Whisper (STT-only)", "category": "transcribe"},
