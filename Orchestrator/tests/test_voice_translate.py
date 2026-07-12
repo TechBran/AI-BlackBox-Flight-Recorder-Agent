@@ -170,3 +170,44 @@ def test_realtime_session_persists_translate_fields():
     s.mode = "translate"
     s.target_language = "es"
     assert (s.mode, s.target_language) == ("translate", "es")
+
+
+# -----------------------------------------------------------------------------
+# P6.5 — Gemini translate setup branch
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_gemini_translate_setup_minimal(monkeypatch):
+    monkeypatch.setattr(
+        "Orchestrator.routes.gemini_live_routes.build_fossil_context", _boom)
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+    from Orchestrator.config import GEMINI_LIVE_TRANSLATE_MODEL
+
+    session = _make_gemini_session()
+    await configure_gemini_session(
+        session, "op", "Kore", mode="translate", target_language="de")
+    payload = _extract_payload(session.gemini_ws.send)
+    setup = payload["setup"]
+    # Dedicated translate model, regardless of any client model pick
+    assert setup["model"] == f"models/{GEMINI_LIVE_TRANSLATE_MODEL}"
+    # Tool-free, no thinking config, no compression — minimal pipe
+    assert "tools" not in setup
+    assert "thinkingConfig" not in setup.get("generationConfig", {})
+    # Minimal instructions naming the target language
+    text = setup["systemInstruction"]["parts"][0]["text"]
+    assert "de" in text and len(text) < 1000
+    # User voice preserved
+    assert (setup["generationConfig"]["speechConfig"]["voiceConfig"]
+            ["prebuiltVoiceConfig"]["voiceName"] == "Kore")
+
+
+@pytest.mark.asyncio
+async def test_gemini_default_path_unchanged(stub_fossil_context):
+    """Regression pin: mode=None must still build the full tool session."""
+    from Orchestrator.routes.gemini_live_routes import configure_gemini_session
+
+    session = _make_gemini_session()
+    await configure_gemini_session(session, "op", "Kore")
+    setup = _extract_payload(session.gemini_ws.send)["setup"]
+    assert "tools" in setup
+    assert len(setup["systemInstruction"]["parts"][0]["text"]) > 1000

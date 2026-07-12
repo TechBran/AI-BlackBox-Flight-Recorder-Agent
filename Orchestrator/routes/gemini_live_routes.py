@@ -49,6 +49,7 @@ from Orchestrator.config import (
     GEMINI_LIVE_URL,
     GEMINI_LIVE_MODEL,
     GEMINI_LIVE_MODELS,
+    GEMINI_LIVE_TRANSLATE_MODEL,
     GEMINI_LIVE_VOICES,
     GEMINI_LIVE_VOICE_DESCRIPTORS,
     GEMINI_LIVE_VAD_SENSITIVITIES,
@@ -79,6 +80,10 @@ from Orchestrator.tools.tool_registry import get_gemini_live_tools
 from Orchestrator.voice_agents.registry import resolve_preset, merge_connect_params
 from Orchestrator.behavioral_core import get_persona, VOICE_DELIVERY_NOTE
 from Orchestrator.routes.voice_prompts import CU_CONTROL_BLOCK
+from Orchestrator.routes.voice_translate import (
+    resolve_translate_params,
+    build_translate_instructions,
+)
 from Orchestrator.routes.voice_ws_shared import (
     save_voice_transcript,
     send_gemini_tool_error,
@@ -239,6 +244,8 @@ async def configure_gemini_session(
     vad_sensitivity_end: Optional[str] = None,
     thinking_level: Optional[str] = None,
     tool_group_override: Optional[str] = None,
+    mode: Optional[str] = None,
+    target_language: Optional[str] = None,
 ):
     """
     Configure the Gemini Live session with tools and settings.
@@ -265,6 +272,10 @@ async def configure_gemini_session(
             ThinkingConfig enum — do NOT uppercase). Only emitted when
             resolved_model is in GEMINI_LIVE_THINKING_CAPABLE_MODELS (config.py);
             ignored otherwise so non-thinking sessions don't trip server-side rejects.
+        mode: Optional session mode — "translate" builds a minimal tool-free
+            translation session on GEMINI_LIVE_TRANSLATE_MODEL (P6a).
+        target_language: BCP-47 target for translate mode; malformed/missing
+            values fall back to "en" with a logged warning.
 
         All new kwargs default to None to preserve phone bridge call sites at
         phone/bridge.py:1286, 1370 (audit C2 — those sites only pass positional
@@ -309,6 +320,41 @@ async def configure_gemini_session(
     if thinking_level is not None and thinking_level not in GEMINI_LIVE_THINKING_LEVELS:
         print(f"[GEMINI-LIVE] WARNING: thinking_level {thinking_level!r} not in {GEMINI_LIVE_THINKING_LEVELS} (lowercase); ignoring")
         thinking_level = None
+
+    # ── Translation mode (P6a): minimal setup — NO persona/context/tools ──
+    # Dedicated model, tool-free, tiny prompt (design doc workstream 5).
+    # Gated on the P0 probe (diagnostics/voice_probes/results/*-translate.json,
+    # combined P0.5 file — gemini entries).
+    # Ignores any client model pick — the translate model always wins.
+    is_translate, resolved_target_language = resolve_translate_params(
+        mode, target_language, log_prefix="[GEMINI-LIVE]")
+    if is_translate:
+        session.provenance = {}  # no snapshot retrieval in translate mode
+        setup_message = {
+            "setup": {
+                "model": f"models/{GEMINI_LIVE_TRANSLATE_MODEL}",
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {"voiceName": voice}
+                        }
+                    },
+                },
+                "systemInstruction": {
+                    "parts": [{"text": build_translate_instructions(resolved_target_language)}]
+                },
+                # NO tools / thinkingConfig / contextWindowCompression —
+                # translation sessions are short-lived tool-free pipes.
+            }
+        }
+        await session.gemini_ws.send(json.dumps(setup_message))
+        session.context_injected = True
+        session.voice = voice
+        print(f"[GEMINI-LIVE] TRANSLATE session configured "
+              f"(target={resolved_target_language}, "
+              f"model={GEMINI_LIVE_TRANSLATE_MODEL}, voice={voice})")
+        return
 
     # Build system instructions with operator-specific context.
     # `operator` is request-scoped — comes from the WS connect handshake
