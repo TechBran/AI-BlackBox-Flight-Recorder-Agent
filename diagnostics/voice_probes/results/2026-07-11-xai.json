@@ -1,0 +1,440 @@
+{
+  "generated": "2026-07-11T21:51:22-0400",
+  "name": "xai",
+  "results": [
+    {
+      "provider": "xai",
+      "model": "",
+      "probe": "default_model_resolution",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:51:05-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "a714b1cc-b23a-4184-b1fb-ebf4af761d92",
+          "session": {
+            "id": "d78b31da9f6649c19e53b5e561a325d5",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-latest",
+      "probe": "handshake",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:51:05-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "c71760bc-1d2a-481d-b280-445aba434281",
+          "session": {
+            "id": "b96a4da6ddf049de830a3323e79f824b",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-think-fast-1.0",
+      "probe": "handshake",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=session.created",
+      "ts": "2026-07-11T21:51:06-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "9c78f5d2-21d0-40c2-b0da-a51f726a805c",
+          "session": {
+            "id": "e7653889f22747faa6fd6723eb80a1e3",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-latest",
+      "probe": "server_vad_roundtrip",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=conversation.created,ping,session.created,session.updated",
+      "ts": "2026-07-11T21:51:06-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "6257443c-a5a2-46b9-9541-d80fb4a853b6",
+          "session": {
+            "id": "6c4db979ff884c4a9e1e81cd714abe2e",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        },
+        {
+          "type": "conversation.created",
+          "event_id": "34a54591-34ce-446b-9fab-d5805c045d01",
+          "conversation": {
+            "id": "cf68abb7-e03a-4520-a700-0453a13d0cd7",
+            "object": "realtime.conversation"
+          },
+          "previous_item_id": null
+        },
+        {
+          "type": "ping",
+          "event_id": "20870ec4-35c7-4d64-affe-fdec7291a450",
+          "timestamp": 1783821067085,
+          "previous_item_id": null
+        },
+        {
+          "session": {
+            "enable_noise_suppression": true,
+            "echo_detection_threshold_ms": 3000,
+            "turn_detection": {
+              "type": "server_vad",
+              "threshold": 0.7,
+              "silence_duration_ms": 900,
+              "prefix_padding_ms": 300
+            },
+            "response_patient_starter_config": {
+              "enable": false,
+              "wait_time": 5.0,
+              "use_default_system_prompt": false
+            },
+            "model": "grok-voice-latest",
+            "keep_context": false,
+            "enable_phonetic_spelling": false,
+            "modalities": [
+              "audio"
+            ],
+            "input_audio_format": "not specified",
+            "output_audio_format": "not specified",
+            "tool_choice": "auto",
+            "temperature": -1.0,
+            "max_response_output_tokens": "inf",
+            "input_audio_transcription": null
+          },
+          "type": "session.updated",
+          "event_id": "20eedc6e-3eaf-4d94-98f7-38b82349bc52",
+          "previous_item_id": null
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-latest",
+      "probe": "input_rate_16k",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=conversation.created,ping,session.created,session.updated",
+      "ts": "2026-07-11T21:51:07-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "57bf2556-5511-4e9a-9301-18f0f4f0c622",
+          "session": {
+            "id": "e17d40b06af0449eb205a74ff69a5c10",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        },
+        {
+          "type": "conversation.created",
+          "event_id": "549deb26-c296-4adf-bc07-8ae16f1b2ea6",
+          "conversation": {
+            "id": "cf5fe6d4-302c-45a6-a191-c35a34936106",
+            "object": "realtime.conversation"
+          },
+          "previous_item_id": null
+        },
+        {
+          "type": "ping",
+          "event_id": "fe2e1d22-0abc-45ae-b45d-ab43ef38b188",
+          "timestamp": 1783821067545,
+          "previous_item_id": null
+        },
+        {
+          "session": {
+            "enable_noise_suppression": true,
+            "echo_detection_threshold_ms": 3000,
+            "response_patient_starter_config": {
+              "enable": false,
+              "wait_time": 5.0,
+              "use_default_system_prompt": false
+            },
+            "model": "grok-voice-latest",
+            "keep_context": false,
+            "enable_phonetic_spelling": false,
+            "modalities": [
+              "audio"
+            ],
+            "input_audio_format": "not specified",
+            "output_audio_format": "not specified",
+            "tool_choice": "auto",
+            "temperature": -1.0,
+            "max_response_output_tokens": "inf",
+            "audio": {
+              "input": {
+                "format": {
+                  "type": "audio/pcm",
+                  "rate": 16000
+                },
+                "transport": "json"
+              },
+              "output": {
+                "transport": "json"
+              }
+            },
+            "input_audio_transcription": null
+          },
+          "type": "session.updated",
+          "event_id": "b278d505-ba9a-4507-a484-bf0c10710e12",
+          "previous_item_id": null
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-latest",
+      "probe": "transcription_shape",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=conversation.created,ping,session.created,session.updated",
+      "ts": "2026-07-11T21:51:07-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "d738f27a-8c85-4b7c-a9ae-66fabb0fe17d",
+          "session": {
+            "id": "4e0f1cfcfaf74d2680f45d8b023b1469",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        },
+        {
+          "type": "conversation.created",
+          "event_id": "726523d4-bbc2-4cac-a3ae-3747464a5e3e",
+          "conversation": {
+            "id": "69882a20-ef60-40bb-865f-360e90c7a194",
+            "object": "realtime.conversation"
+          },
+          "previous_item_id": null
+        },
+        {
+          "type": "ping",
+          "event_id": "99493b38-e4a3-4ef8-9264-1ee4bc332b84",
+          "timestamp": 1783821068110,
+          "previous_item_id": null
+        },
+        {
+          "session": {
+            "enable_noise_suppression": true,
+            "echo_detection_threshold_ms": 3000,
+            "response_patient_starter_config": {
+              "enable": false,
+              "wait_time": 5.0,
+              "use_default_system_prompt": false
+            },
+            "model": "grok-voice-latest",
+            "keep_context": false,
+            "enable_phonetic_spelling": false,
+            "input_audio_transcription": {},
+            "modalities": [
+              "audio"
+            ],
+            "input_audio_format": "not specified",
+            "output_audio_format": "not specified",
+            "tool_choice": "auto",
+            "temperature": -1.0,
+            "max_response_output_tokens": "inf",
+            "audio": {
+              "input": {
+                "transport": "json",
+                "transcription": {}
+              },
+              "output": {
+                "transport": "json"
+              }
+            }
+          },
+          "type": "session.updated",
+          "event_id": "d54eacac-7c40-48fc-8235-7a1955a6fccb",
+          "previous_item_id": null
+        }
+      ]
+    },
+    {
+      "provider": "xai",
+      "model": "grok-voice-latest",
+      "probe": "transcription_default",
+      "ok": true,
+      "resolved_model": "grok-voice-latest",
+      "close_code": null,
+      "close_reason": "",
+      "error": "",
+      "notes": "event_types=conversation.created,input_audio_buffer.speech_started,ping,session.created,session.updated",
+      "ts": "2026-07-11T21:51:08-0400",
+      "events": [
+        {
+          "type": "session.created",
+          "event_id": "6ffec615-b381-4f92-9d84-a16548542bcc",
+          "session": {
+            "id": "4d621f8b77af4caba223814f4532f067",
+            "object": "realtime.session",
+            "model": "grok-voice-latest",
+            "instructions": "",
+            "voice": "ara",
+            "modalities": [
+              "audio"
+            ],
+            "turn_detection": {
+              "type": null
+            },
+            "tools": []
+          }
+        },
+        {
+          "type": "conversation.created",
+          "event_id": "af1f5c70-358e-4319-83ce-e9d291821af3",
+          "conversation": {
+            "id": "47ce8777-28b1-4904-86d6-fafeef710401",
+            "object": "realtime.conversation"
+          },
+          "previous_item_id": null
+        },
+        {
+          "type": "ping",
+          "event_id": "0deb6b8f-e94b-4b8d-a0f0-d95252da2893",
+          "timestamp": 1783821068563,
+          "previous_item_id": null
+        },
+        {
+          "session": {
+            "enable_noise_suppression": true,
+            "echo_detection_threshold_ms": 3000,
+            "turn_detection": {
+              "type": "server_vad",
+              "threshold": 0.7,
+              "silence_duration_ms": 900,
+              "prefix_padding_ms": 300
+            },
+            "response_patient_starter_config": {
+              "enable": false,
+              "wait_time": 5.0,
+              "use_default_system_prompt": false
+            },
+            "model": "grok-voice-latest",
+            "keep_context": false,
+            "enable_phonetic_spelling": false,
+            "modalities": [
+              "audio"
+            ],
+            "input_audio_format": "not specified",
+            "output_audio_format": "not specified",
+            "tool_choice": "auto",
+            "temperature": -1.0,
+            "max_response_output_tokens": "inf",
+            "input_audio_transcription": null
+          },
+          "type": "session.updated",
+          "event_id": "9c2e6aa9-2024-4172-a53c-da69849c45c2",
+          "previous_item_id": null
+        },
+        {
+          "type": "input_audio_buffer.speech_started",
+          "event_id": "d5ec8e6d-37ba-4a22-90cd-9368d104eb8b",
+          "item_id": "a96718b5-5f0e-4c56-8ea8-4541cd12a112",
+          "audio_start_ms": 203,
+          "previous_item_id": null
+        },
+        {
+          "type": "ping",
+          "event_id": "0bb90069-a71e-4c3c-8843-e5e3b6a352ea",
+          "timestamp": 1783821078563,
+          "previous_item_id": null
+        }
+      ]
+    }
+  ]
+}

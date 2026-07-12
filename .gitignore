@@ -291,3 +291,4 @@ eval/ground_truth/_body_cache.json
 # /toolvault/reload + the model-switch cutover. A committed copy would ship one
 # box's model/dims to every clone and go stale on every description edit.
 ToolVault/embeddings.json
+diagnostics/voice_probes/assets/
