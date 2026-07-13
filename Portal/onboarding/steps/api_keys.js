@@ -587,6 +587,16 @@ const MODALITY_SUMMARY_ORDER = ["chat", "image", "tts", "stt", "embedding"];
 // Recognized <select> values; an unknown persisted value renders as "chat".
 const MODALITY_VALUES = new Set(MODALITY_OPTIONS.map(o => o.value));
 
+// ── Audio (STT/TTS) model ids ────────────────────────────────────────────
+// A custom server can host audio behind /v1/audio/* + /v1/realtime, but those
+// models are NOT in /v1/models — so their ids can't be auto-discovered. The
+// validate probe reports capability bools (stt/tts/streaming); the customer
+// CONFIRMS / EDITS the model ids (prefilled with the Speaches defaults) so the
+// BlackBox can route audio. Defaults track the Speaches project's recommended
+// small models.
+const SPEACHES_STT_DEFAULT = "deepdml/faster-whisper-large-v3-turbo-ct2";
+const SPEACHES_TTS_DEFAULT = "speaches-ai/Kokoro-82M-v1.0-ONNX";
+
 // Compact "Detected models" block — rendered only for a validated server with
 // ≥1 discovered model. One <select> per model, pre-filled from the seeded
 // modality map (unmapped / pre-feature servers default every model to "chat").
@@ -636,6 +646,53 @@ function renderCustomModalitiesBlock(sv, disabled) {
         </div>`;
 }
 
+// Compact "Audio" confirm block — rendered only for a validated server whose
+// probe reported STT and/or TTS capability. Those models live behind
+// /v1/audio/* + /v1/realtime and are NOT in /v1/models, so their ids can't be
+// auto-discovered — the customer CONFIRMS / EDITS them here (prefilled with the
+// Speaches defaults) so the BlackBox can route audio. Returns "" unless the
+// server is validated and the probe found audio. Mirrors the modalities block.
+function renderCustomAudioBlock(sv, disabled) {
+    if (!sv.validated_at || !sv.audio || !(sv.audio.stt || sv.audio.tts)) return "";
+    const a = sv.audio;
+    const sid = escapeHtml(sv.id);
+    const dis = disabled ? "disabled" : "";
+
+    // One-line capability summary (the "Audio:" lead echoes the header, like the
+    // modalities block's "Detected:" line echoes its "Detected models" header).
+    const parts = [];
+    if (a.stt) {
+        parts.push(`speech-to-text &check; ${a.streaming ? "(realtime + files)" : "(files only)"}`);
+    }
+    if (a.tts) {
+        parts.push(`text-to-speech &check; (~50 voices)`);
+    }
+    const summary = `Audio: ${parts.join(" &middot; ")}`;
+
+    const sttField = a.stt ? `
+                <label class="ob-field-label" for="ob-custom-stt-${sid}" style="${CUSTOM_LABEL_GAP_STYLE}">STT model id</label>
+                <input type="text" class="ob-provider-input" id="ob-custom-stt-${sid}"
+                    data-audio-server-id="${sid}" data-audio-field="stt_model"
+                    value="${escapeHtml(a.stt_model || SPEACHES_STT_DEFAULT)}"
+                    autocomplete="off" autocapitalize="off" spellcheck="false" ${dis} />` : "";
+    const ttsField = a.tts ? `
+                <label class="ob-field-label" for="ob-custom-tts-${sid}" style="${CUSTOM_LABEL_GAP_STYLE}">TTS model id</label>
+                <input type="text" class="ob-provider-input" id="ob-custom-tts-${sid}"
+                    data-audio-server-id="${sid}" data-audio-field="tts_model"
+                    value="${escapeHtml(a.tts_model || SPEACHES_TTS_DEFAULT)}"
+                    autocomplete="off" autocapitalize="off" spellcheck="false" ${dis} />` : "";
+
+    return `
+        <div class="ob-custom-audio" style="margin: 0 0 var(--ob-space-3);">
+            <div class="ob-field-label" style="${CUSTOM_LABEL_GAP_STYLE}">Audio</div>
+            <p class="ob-provider-desc" style="margin: var(--ob-space-1) 0 var(--ob-space-2);">${summary}</p>
+            <div style="display:grid; gap: var(--ob-space-1);">
+                ${sttField}
+                ${ttsField}
+            </div>
+        </div>`;
+}
+
 function renderCustomViewCard(row) {
     const sv = row.server;
     const sid = escapeHtml(sv.id);
@@ -664,6 +721,7 @@ function renderCustomViewCard(row) {
             </div>
             <p class="ob-provider-desc">${escapeHtml(sv.base_url)} &middot; ${escapeHtml(keyPreview)}${ctxText}</p>
             ${renderCustomModalitiesBlock(sv, row.busy)}
+            ${renderCustomAudioBlock(sv, row.busy)}
             <div class="ob-provider-configured-row">
                 <span style="${CUSTOM_BTN_GROUP_STYLE}">
                     <button type="button" class="ob-validate-btn" data-action="revalidate" data-server-id="${sid}" ${dis}>Re-validate</button>
@@ -855,6 +913,19 @@ function wireCustomRows(container, state) {
             updateCustomModality(srow, sel.dataset.modalityModel, sel.value, container, state);
         });
     });
+
+    // Audio model-id inputs → PATCH the audio config on change AND blur, so
+    // merely leaving a field confirms its prefilled Speaches default. The
+    // shared row.busy guard collapses the change+blur double-fire into one PATCH.
+    rowsEl.querySelectorAll("input[data-audio-server-id]").forEach(input => {
+        const commit = () => {
+            const srow = customState.servers.find(r => r.server.id === input.dataset.audioServerId);
+            if (!srow) return;
+            updateCustomAudio(srow, input.dataset.audioField, input.value.trim(), container, state);
+        };
+        input.addEventListener("change", commit);
+        input.addEventListener("blur", commit);
+    });
 }
 
 function addCustomRow(container, state) {
@@ -915,6 +986,19 @@ function applyCustomValidateResult(row, result) {
         row.server.model_modalities = Object.assign(
             {}, (result.detail && result.detail.model_modalities) || {},
             row.server.model_modalities || {});
+        // Merge the audio-capability probe: the fresh bools (stt/tts/streaming)
+        // win, but any confirmed model ids are preserved (the probe carries
+        // none). Then seed the ids with the Speaches defaults so the confirm
+        // inputs render with a working value the customer can accept as-is.
+        const pa = (result.detail && result.detail.audio) || {};
+        const ea = row.server.audio || {};
+        row.server.audio = Object.assign({}, ea, pa);
+        if (row.server.audio.stt && !row.server.audio.stt_model) {
+            row.server.audio.stt_model = SPEACHES_STT_DEFAULT;
+        }
+        if (row.server.audio.tts && !row.server.audio.tts_model) {
+            row.server.audio.tts_model = SPEACHES_TTS_DEFAULT;
+        }
         const detailText = formatCustomDetail(result.detail);
         setCustomStatus(row, "ok", `
             <span class="ob-status-pill ob-status-pill-ok">
@@ -1074,6 +1158,48 @@ async function updateCustomModality(row, modelId, value, container, state) {
         }
     } catch (e) {
         row.server.model_modalities = prev;  // network error — revert
+        setCustomStatus(row, "error", customErrorPill(`Network error: ${String(e.message || e).slice(0, 120)}`));
+    } finally {
+        row.busy = false;
+        rerenderCustom(container, state);
+    }
+}
+
+// Persist a confirmed / edited audio model id. Mirrors updateCustomModality:
+// optimistically applies the value so the input holds it through the "Saving"
+// rerender, PATCHes the FULL merged audio object (backend replaces `audio` with
+// what we send — the capability bools ride along), and reverts on failure.
+// Guarded by the shared row.busy; wired to both change and blur.
+async function updateCustomAudio(row, field, value, container, state) {
+    if (row.busy) return;
+    const sv = row.server;
+    const prev = sv.audio || {};
+    const updated = Object.assign({}, prev, { [field]: value });
+
+    sv.audio = updated;  // optimistic — survive the rerender below
+    row.busy = true;
+    setCustomStatus(row, "validating", customValidatingPill("Saving"));
+    rerenderCustom(container, state);
+    try {
+        const r = await fetch(`/onboarding/custom-servers/${encodeURIComponent(sv.id)}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ audio: updated }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) {
+            // Prefer the server's echoed audio; fall back to the optimistic one.
+            // Only touch `audio` so a trimmed PATCH response can't drop
+            // last_models / validated_at and make sibling blocks vanish.
+            row.server.audio = (data.server && data.server.audio) || updated;
+            setCustomStatus(row, "idle", "");
+        } else {
+            row.server.audio = prev;  // persist rejected — revert
+            const detail = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
+            setCustomStatus(row, "error", customErrorPill(String(detail).slice(0, 160)));
+        }
+    } catch (e) {
+        row.server.audio = prev;  // network error — revert
         setCustomStatus(row, "error", customErrorPill(`Network error: ${String(e.message || e).slice(0, 120)}`));
     } finally {
         row.busy = false;
