@@ -17,6 +17,17 @@ def cli():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _no_local_audio(monkeypatch):
+    """Isolate these ElevenLabs-merge tests from the box's real custom-server
+    registry. The /tts/catalog handler also appends a 'local' group when a
+    registered server hosts a TTS model; force it OFF so the exact group-list
+    assertions here stay hermetic regardless of what audio servers are
+    registered. Positive coverage for the local group lives in test_local_tts.py."""
+    monkeypatch.setattr("Orchestrator.onboarding.custom_servers.has_audio",
+                        lambda kind: False)
+
+
 def test_no_key_returns_exactly_three_static_groups(cli, monkeypatch):
     """get_voices None (no key) -> the original 3 groups only (regression guard)."""
     monkeypatch.setattr(el_catalog, "get_voices", lambda *a, **k: None)

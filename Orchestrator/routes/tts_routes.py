@@ -193,6 +193,43 @@ def tts_openai(body: dict = Body(...)):
             "size_bytes": size,
         }
 
+    # --- Local (custom server) branch: route to the registered Kokoro/Speaches
+    # /v1/audio/speech, checked BEFORE the OpenAI path (which rejects Kokoro voice
+    # ids with an OpenAI-voice-enum 400). Triggered by a 'local:' voice prefix or
+    # provider=='local'. Mirrors the /tts/batch local branch.
+    if (body.get("voice") or "").startswith("local:") or body.get("provider") == "local":
+        from Orchestrator.onboarding.custom_servers import resolve_audio
+        resolved = resolve_audio("tts")
+        if not resolved:
+            return {"status": "fallback", "message": "no local text-to-speech model available"}
+        _srv, _model = resolved
+        _text = (body.get("text") or "").strip()
+        if not _text:
+            raise HTTPException(400, "No text provided")
+        _voice = (body.get("voice") or "").strip()
+        _bare = _voice.split(":", 1)[1] if _voice.startswith("local:") else (_voice or "af_heart")
+        _fmt = (body.get("format") or "mp3").strip()
+        _req = {"model": _model, "input": _text, "voice": _bare, "response_format": _fmt}
+        _hdr = {"Content-Type": "application/json"}
+        if _srv.get("api_key"):
+            _hdr["Authorization"] = f"Bearer {_srv['api_key']}"
+        try:
+            _r = requests.post(f"{_srv['base_url']}/audio/speech", json=_req, headers=_hdr,
+                               timeout=TTS_TIMEOUT / 1000.0)
+        except Exception as e:
+            return {"status": "fallback", "detail": str(e)}
+        if _r.status_code != 200:
+            return {"status": "fallback", "api_status": _r.status_code, "api_body": _r.text[:400]}
+        _mime = {"mp3": "audio/mpeg", "opus": "audio/ogg", "wav": "audio/wav",
+                 "flac": "audio/flac", "pcm": "audio/wav"}.get(_fmt, "audio/mpeg")
+        if not body.get("return_json"):
+            return StreamingResponse(iter([_r.content]), media_type=_mime)
+        _ext = {"mp3": ".mp3", "opus": ".ogg", "wav": ".wav", "flac": ".flac", "pcm": ".wav"}.get(_fmt, ".mp3")
+        _filename = f"{uuid.uuid4()}_tts{_ext}"
+        (UPLOADS_DIR / _filename).write_bytes(_r.content)
+        return {"status": "success", "audio_url": f"/ui/uploads/{_filename}",
+                "voice": _bare, "model": _model, "format": _fmt, "size_bytes": len(_r.content)}
+
     if AUDIO_ENGINE == "browser": return {"status": "fallback"}
     api_key = OPENAI_API_KEY.strip()
     if not api_key: return {"status": "fallback", "message": "OPENAI_API_KEY not configured"}
