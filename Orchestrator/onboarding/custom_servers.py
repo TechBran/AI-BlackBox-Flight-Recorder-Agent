@@ -40,7 +40,7 @@ MSG_UNKNOWN_ALIAS = "Custom model '{model}' names an unknown or disabled server 
 _PATCHABLE_FIELDS = {
     "alias", "base_url", "api_key", "enabled",
     "context_tokens", "validated_at", "last_models", "model_context",
-    "model_modalities",
+    "model_modalities", "audio",
 }
 _EMPTY = {"version": 1, "servers": []}
 
@@ -179,6 +179,15 @@ def _validate_field_types(fields: dict) -> None:
             isinstance(k, str) and isinstance(val, str) for k, val in v.items()
         ):
             raise ValueError("model_modalities must be a dict of {model_id: modality}")
+    if "audio" in fields:
+        v = fields["audio"]
+        if not isinstance(v, dict):
+            raise ValueError("audio must be a dict")
+        for k, val in v.items():
+            if k in ("stt", "tts", "streaming") and not isinstance(val, bool):
+                raise ValueError("audio bool fields (stt/tts/streaming) must be bools")
+            if k in ("stt_model", "tts_model") and not isinstance(val, str):
+                raise ValueError("audio model fields (stt_model/tts_model) must be strings")
 
 
 # ------------------------------------------------------------------ read API
@@ -219,13 +228,16 @@ def list_servers_redacted() -> list[dict]:
 
 def add_server(alias: str, base_url: str, api_key: str = "",
                context_tokens: int = DEFAULT_CONTEXT_TOKENS,
-               model_modalities: dict | None = None) -> dict:
+               model_modalities: dict | None = None,
+               audio: dict | None = None) -> dict:
     """Register a new server. Returns the created record (a copy)."""
     if isinstance(alias, str):
         alias = alias.strip()
     fields = {"api_key": api_key, "context_tokens": context_tokens}
     if model_modalities is not None:
         fields["model_modalities"] = model_modalities
+    if audio is not None:
+        fields["audio"] = audio
     _validate_field_types(fields)
     with _LOCK:
         data = _read()
@@ -248,6 +260,11 @@ def add_server(alias: str, base_url: str, api_key: str = "",
             # Wizard-confirmed {model_id: modality} map (chat/image/tts/stt/...);
             # empty = fall back to name-pattern classify_model() at read time.
             "model_modalities": model_modalities or {},
+            # Per-server AUDIO config -- Speaches behind Caddy serves audio at
+            # /v1/audio/* + /v1/realtime but those models are NOT in /v1/models,
+            # so audio routing uses this (probe-detected + wizard-edited) config:
+            # {stt,tts,streaming: bool, stt_model,tts_model: str}.
+            "audio": audio or {},
         }
         data["servers"].append(srv)
         _write(data)
@@ -456,6 +473,36 @@ def list_image_models() -> list[str]:
             if isinstance(m, str) and model_modality(srv, m) == "image":
                 out.append(qualify(alias, m))
     return out
+
+
+SPEACHES_STT_DEFAULT = "deepdml/faster-whisper-large-v3-turbo-ct2"
+SPEACHES_TTS_DEFAULT = "speaches-ai/Kokoro-82M-v1.0-ONNX"
+
+
+def resolve_audio(kind: str) -> tuple[dict, str] | None:
+    """(server, model_id) for the first enabled server whose `audio` config
+    advertises `kind` in {'stt','tts','streaming'}, else None.
+
+    Audio models live behind /v1/audio/* + /v1/realtime and are NOT in
+    /v1/models (Speaches behind Caddy), so audio routing uses the per-server
+    `audio` config, NOT the /v1/models modality map. model_id falls back to the
+    Speaches default when unset. 'streaming' uses the stt_model."""
+    mkey = "tts_model" if kind == "tts" else "stt_model"
+    dflt = SPEACHES_TTS_DEFAULT if kind == "tts" else SPEACHES_STT_DEFAULT
+    for srv in list_servers(enabled_only=True):
+        au = srv.get("audio") or {}
+        if au.get(kind):
+            model = au.get(mkey)
+            return srv, (model if isinstance(model, str) and model else dflt)
+    return None
+
+
+def has_audio(kind: str) -> bool:
+    """True iff any enabled server advertises the audio capability `kind`."""
+    try:
+        return resolve_audio(kind) is not None
+    except Exception:
+        return False
 
 
 def resolve_tts_server(model: str | None = None) -> tuple[dict, str] | None:
