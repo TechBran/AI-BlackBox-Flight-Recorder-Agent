@@ -45,6 +45,11 @@ const PROVIDERS = [
         vendor: "ElevenLabs",
         needsHint: "Add your ElevenLabs API key in the Keys / Extras step.",
     },
+    {
+        id: "local",
+        vendor: "Custom server",
+        needsHint: "Register a custom model server hosting a speech-to-text model (e.g. whisper) in the Keys step.",
+    },
 ];
 
 // Inline highlight for the selected card. The shared stylesheet only ships
