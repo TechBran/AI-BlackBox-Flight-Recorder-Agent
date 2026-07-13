@@ -428,39 +428,50 @@ async def _local_bridge(websocket: WebSocket, *, target, lang, sample_rate):
                             "audio": base64.b64encode(raw).decode(),
                         }))
                 elif mtype == "stt_stop":
-                    await local_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    # Speaches server-VAD auto-commits on a pause; an explicit
+                    # input_audio_buffer.commit races it into an abrupt socket
+                    # close ("no close frame"). Feed ~0.7 s of trailing silence to
+                    # trigger the VAD cut for the final utterance instead.
+                    silence = base64.b64encode(b"\x00\x00" * int(24000 * 0.7)).decode()
+                    await local_ws.send(json.dumps({
+                        "type": "input_audio_buffer.append", "audio": silence}))
                     stop_ts["v"] = time.monotonic()
                     stop_evt.set()
                     return
 
         async def local_to_client():
-            async for raw in local_ws:
-                try:
-                    event = json.loads(raw)
-                except (ValueError, TypeError):
-                    continue
-                etype = event.get("type", "")
-                if "error" in etype:
-                    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
-                    print(f"[STT/WS] local ERROR event: {json.dumps(event)[:500]}")
+            try:
+                async for raw in local_ws:
                     try:
-                        await websocket.send_json({"type": "stt_error", "message": f"local: {detail}"})
-                    except Exception:
-                        pass
-                    continue
-                if etype != "conversation.item.input_audio_transcription.completed":
-                    continue  # lifecycle events -- ignore (server emits finals only)
-                text = (event.get("transcript") or "").strip()
-                if is_whisper_hallucination(text):
+                        event = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    etype = event.get("type", "")
+                    if "error" in etype:
+                        detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
+                        print(f"[STT/WS] local ERROR event: {json.dumps(event)[:500]}")
+                        try:
+                            await websocket.send_json({"type": "stt_error", "message": f"local: {detail}"})
+                        except Exception:
+                            pass
+                        continue
+                    if etype != "conversation.item.input_audio_transcription.completed":
+                        continue  # lifecycle events -- ignore (server emits finals only)
+                    text = (event.get("transcript") or "").strip()
+                    if is_whisper_hallucination(text):
+                        if stop_evt.is_set():
+                            await _send_final(websocket, "local",
+                                              {"type": "stt_final", "text": "", "target": target}, stop_ts)
+                            return
+                        continue
+                    await _send_final(websocket, "local",
+                                      {"type": "stt_final", "text": text, "target": target}, stop_ts)
                     if stop_evt.is_set():
-                        await _send_final(websocket, "local",
-                                          {"type": "stt_final", "text": "", "target": target}, stop_ts)
                         return
-                    continue
-                await _send_final(websocket, "local",
-                                  {"type": "stt_final", "text": text, "target": target}, stop_ts)
-                if stop_evt.is_set():
-                    return
+            except websockets.ConnectionClosed:
+                # Speaches closes the socket right after the last final on stop --
+                # a normal end-of-session, not an error to surface.
+                return
 
         pump = asyncio.ensure_future(client_to_local())
         relay = asyncio.ensure_future(local_to_client())

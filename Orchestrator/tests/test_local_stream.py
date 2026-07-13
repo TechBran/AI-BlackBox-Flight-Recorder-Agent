@@ -24,14 +24,17 @@ class _FakeLocalWS:
         self._t = transcript
         self.sent = []
         self._q = asyncio.Queue()
+        self._appends = 0
 
     async def send(self, data):
         d = json.loads(data)
         self.sent.append(d)
-        if d.get("type") == "input_audio_buffer.commit":
-            await self._q.put(json.dumps({
-                "type": "conversation.item.input_audio_transcription.completed",
-                "transcript": self._t}))
+        if d.get("type") == "input_audio_buffer.append":
+            self._appends += 1
+            if self._appends >= 2:  # the stop-silence append -> VAD finalizes
+                await self._q.put(json.dumps({
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": self._t}))
 
     def __aiter__(self):
         return self
@@ -75,9 +78,10 @@ def test_local_bridge_relays_final(monkeypatch):
     asyncio.run(ws._local_bridge(client, target="prompt", lang="en", sample_rate=24000))
     finals = [m for m in client.sent if m.get("type") == "stt_final"]
     assert finals and finals[0]["text"] == "Hello world" and finals[0]["target"] == "prompt"
-    # audio was appended (one chunk) + committed on stop
+    # audio chunk appended + trailing-silence appended on stop (no explicit commit)
     types = [d["type"] for d in fake_local.sent]
-    assert "input_audio_buffer.append" in types and "input_audio_buffer.commit" in types
+    assert types.count("input_audio_buffer.append") == 2
+    assert "input_audio_buffer.commit" not in types
 
 
 def test_local_bridge_no_server(monkeypatch):
