@@ -65,7 +65,7 @@ from Orchestrator import config
 from Orchestrator.elevenlabs.client import (
     resolve_api_key, WS_BASE_URL, auth_headers, map_error, classify_realtime_frame,
 )
-from Orchestrator.stt.resolve import resolve_stt_provider
+from Orchestrator.stt.resolve import resolve_stt_provider, local_streaming_stt_available
 from Orchestrator.stt.streaming import (
     map_openai_event, map_google_result, InterimAccumulator, join_transcript_segments,
 )
@@ -121,9 +121,11 @@ async def ws_stt(websocket: WebSocket):
         if start.get("type") != "stt_start":
             await websocket.send_json({"type": "stt_error", "message": "expected stt_start"})
             return
-        # Local STT is FILE-transcribe only (no OpenAI-realtime WS bridge on
-        # llama.cpp/whisper.cpp), so it must never win STREAMING resolution.
-        provider = resolve_stt_provider(start.get("provider"), local_ok=False)
+        # Local streaming resolves ONLY when a registered server advertises the
+        # realtime (/v1/realtime) capability; otherwise local stays file-only and
+        # must not win STREAMING resolution.
+        provider = resolve_stt_provider(start.get("provider"),
+                                        local_ok=local_streaming_stt_available())
         if not provider:
             await websocket.send_json({"type": "stt_error", "message": "no STT provider configured"})
             return
@@ -165,6 +167,8 @@ async def run_stt_bridge(websocket: WebSocket, provider: str, start: dict):
         await _elevenlabs_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     elif provider == "openai":
         await _openai_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
+    elif provider == "local":
+        await _local_bridge(websocket, target=target, lang=lang, sample_rate=sample_rate)
     else:
         # No silent OpenAI fallback: an unknown/local provider must fail loudly,
         # not get mis-routed to the OpenAI realtime bridge.
@@ -368,6 +372,133 @@ def _el_audio_msg(pcm_b64: str, sample_rate: int, commit: bool = False) -> str:
 # so the real ceiling on continuous dictation is ~30 x Scribe's per-session limit
 # (minutes each) — comfortably beyond any realistic single utterance. Tunable.
 _EL_MAX_ROTATIONS = 30
+
+
+def _resample_pcm16(pcm_bytes: bytes, src_rate: int, dst_rate: int = 24000) -> bytes:
+    """Resample raw PCM16 mono to dst_rate. Speaches /v1/realtime is fixed at
+    24 kHz; pass through when the rates already match. Lazy numpy import."""
+    if src_rate == dst_rate or not pcm_bytes:
+        return pcm_bytes
+    import numpy as np
+    a = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32)
+    n = max(1, round(len(a) * dst_rate / src_rate))
+    out = np.interp(np.linspace(0, 1, n, endpoint=False),
+                    np.linspace(0, 1, len(a), endpoint=False), a)
+    return np.clip(out, -32768, 32767).astype("<i2").tobytes()
+
+
+async def _local_bridge(websocket: WebSocket, *, target, lang, sample_rate):
+    """Bridge client PCM -> a registered local Speaches /v1/realtime transcription
+    session -> client stt_final events.
+
+    OpenAI realtime protocol, but Speaches-specific: NO session.update (input format
+    is fixed to pcm16@24k and setting it errors), server-VAD auto-segments (so we
+    only commit on a push-to-talk stt_stop), and it emits PER-UTTERANCE finals only
+    (no interim deltas). Client audio is resampled to 24 kHz."""
+    from Orchestrator.onboarding.custom_servers import resolve_audio
+    resolved = resolve_audio("streaming")
+    if not resolved:
+        await websocket.send_json({"type": "stt_error", "message": "no local streaming STT server available"})
+        return
+    srv, model = resolved
+    ws_url = (srv.get("base_url", "").replace("https://", "wss://").replace("http://", "ws://")
+              + f"/realtime?model={model}&intent=transcription")
+    headers = {}
+    if srv.get("api_key"):
+        headers["Authorization"] = f"Bearer {srv['api_key']}"
+    local_ws = await websockets.connect(
+        ws_url, additional_headers=headers,
+        open_timeout=10, ping_interval=20, ping_timeout=30, close_timeout=10, max_size=None,
+    )
+    try:
+        print(f"[STT/WS] local connected model={model} rate={sample_rate}->24000 url={ws_url}")
+        stop_evt = asyncio.Event()
+        stop_ts = {"v": None}
+
+        async def client_to_local():
+            while True:
+                msg = await websocket.receive_json()
+                mtype = msg.get("type")
+                if mtype == "stt_audio":
+                    pcm_b64 = msg.get("pcm", "")
+                    if pcm_b64:
+                        raw = _resample_pcm16(base64.b64decode(pcm_b64), sample_rate, 24000)
+                        await local_ws.send(json.dumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(raw).decode(),
+                        }))
+                elif mtype == "stt_stop":
+                    await local_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    stop_ts["v"] = time.monotonic()
+                    stop_evt.set()
+                    return
+
+        async def local_to_client():
+            async for raw in local_ws:
+                try:
+                    event = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                etype = event.get("type", "")
+                if "error" in etype:
+                    detail = (event.get("error") or {}).get("message") or json.dumps(event)[:300]
+                    print(f"[STT/WS] local ERROR event: {json.dumps(event)[:500]}")
+                    try:
+                        await websocket.send_json({"type": "stt_error", "message": f"local: {detail}"})
+                    except Exception:
+                        pass
+                    continue
+                if etype != "conversation.item.input_audio_transcription.completed":
+                    continue  # lifecycle events -- ignore (server emits finals only)
+                text = (event.get("transcript") or "").strip()
+                if is_whisper_hallucination(text):
+                    if stop_evt.is_set():
+                        await _send_final(websocket, "local",
+                                          {"type": "stt_final", "text": "", "target": target}, stop_ts)
+                        return
+                    continue
+                await _send_final(websocket, "local",
+                                  {"type": "stt_final", "text": text, "target": target}, stop_ts)
+                if stop_evt.is_set():
+                    return
+
+        pump = asyncio.ensure_future(client_to_local())
+        relay = asyncio.ensure_future(local_to_client())
+        try:
+            done, _pending = await asyncio.wait({pump, relay}, return_when=asyncio.FIRST_COMPLETED)
+            if pump in done and relay not in done:
+                try:
+                    await asyncio.wait_for(relay, timeout=5.0)
+                except asyncio.TimeoutError:
+                    relay.cancel()
+                    try:
+                        await relay
+                    except (asyncio.CancelledError, WebSocketDisconnect):
+                        pass
+                    except Exception:
+                        pass
+            elif relay in done:
+                pump.cancel()
+                try:
+                    await pump
+                except (asyncio.CancelledError, WebSocketDisconnect):
+                    pass
+                except Exception:
+                    pass
+            for t in (pump, relay):
+                if t.done() and not t.cancelled():
+                    exc = t.exception()
+                    if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                        raise exc
+        finally:
+            for t in (pump, relay):
+                if not t.done():
+                    t.cancel()
+    finally:
+        try:
+            await local_ws.close()
+        except Exception:
+            pass
 
 
 async def _elevenlabs_bridge(websocket: WebSocket, *, target, lang, sample_rate):
