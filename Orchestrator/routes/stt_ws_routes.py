@@ -380,6 +380,9 @@ def _resample_pcm16(pcm_bytes: bytes, src_rate: int, dst_rate: int = 24000) -> b
     if src_rate == dst_rate or not pcm_bytes:
         return pcm_bytes
     import numpy as np
+    pcm_bytes = pcm_bytes[: len(pcm_bytes) & ~1]  # drop a dangling odd byte: frombuffer needs a multiple of 2
+    if not pcm_bytes:
+        return b""
     a = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32)
     n = max(1, round(len(a) * dst_rate / src_rate))
     out = np.interp(np.linspace(0, 1, n, endpoint=False),
@@ -401,8 +404,9 @@ async def _local_bridge(websocket: WebSocket, *, target, lang, sample_rate):
         await websocket.send_json({"type": "stt_error", "message": "no local streaming STT server available"})
         return
     srv, model = resolved
+    from urllib.parse import quote
     ws_url = (srv.get("base_url", "").replace("https://", "wss://").replace("http://", "ws://")
-              + f"/realtime?model={model}&intent=transcription")
+              + f"/realtime?model={quote(model)}&intent=transcription")
     headers = {}
     if srv.get("api_key"):
         headers["Authorization"] = f"Bearer {srv['api_key']}"

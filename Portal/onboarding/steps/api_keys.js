@@ -1171,8 +1171,16 @@ async function updateCustomModality(row, modelId, value, container, state) {
 // what we send — the capability bools ride along), and reverts on failure.
 // Guarded by the shared row.busy; wired to both change and blur.
 async function updateCustomAudio(row, field, value, container, state) {
-    if (row.busy) return;
     const sv = row.server;
+    if (row.busy) {
+        // A PATCH is already in flight. Merge the latest value(s) into a pending
+        // batch and apply optimistically; the in-flight call flushes them on
+        // completion, so a fast cross-field edit (STT then TTS) isn't silently
+        // dropped by the busy guard.
+        row._audioPending = Object.assign({}, row._audioPending, { [field]: value });
+        sv.audio = Object.assign({}, sv.audio || {}, { [field]: value });
+        return;
+    }
     const prev = sv.audio || {};
     const updated = Object.assign({}, prev, { [field]: value });
 
@@ -1203,7 +1211,17 @@ async function updateCustomAudio(row, field, value, container, state) {
         setCustomStatus(row, "error", customErrorPill(`Network error: ${String(e.message || e).slice(0, 120)}`));
     } finally {
         row.busy = false;
+        const pending = row._audioPending;
+        row._audioPending = null;
         rerenderCustom(container, state);
+        if (pending) {
+            // Flush edit(s) made while this PATCH was in flight as one follow-up
+            // PATCH (sv.audio already holds the merged pending values, even if a
+            // successful echo above overwrote them).
+            Object.assign(sv.audio, pending);
+            const [f, v] = Object.entries(pending)[0];
+            updateCustomAudio(row, f, v, container, state);
+        }
     }
 }
 

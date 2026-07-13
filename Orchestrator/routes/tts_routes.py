@@ -303,6 +303,10 @@ async def tts_batch(body: dict = Body(...)):
 
     provider = (body.get("provider") or "openai").strip().lower()
     voice = (body.get("voice") or TTS_VOICE).strip()
+    # A local:-prefixed voice forces the local provider (parity with POST /tts), so a
+    # caller that passes the voice but omits provider still routes to Kokoro, not OpenAI.
+    if voice.startswith("local:"):
+        provider = "local"
     model = (body.get("model") or "").strip()
     audio_format = (body.get("format") or TTS_FORMAT).strip()
     operator = (body.get("operator") or "unknown").strip()

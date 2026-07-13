@@ -925,20 +925,25 @@ export async function generateTTSAudio(text) {
 export async function generateTTSAudioWithVoice(text, voiceConfig) {
     const operator = (localStorage.getItem("bbx_operator") || "").trim();
 
-    // OpenAI AND ElevenLabs are single-call /tts providers (MP3 stream). Gemini
-    // falls through to the task-queue path below.
-    if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs") {
+    // OpenAI, ElevenLabs, AND local (custom-server Kokoro) are single-call /tts
+    // providers (audio stream). Gemini falls through to the task-queue path below.
+    if (voiceConfig.provider === "openai" || voiceConfig.provider === "elevenlabs"
+        || voiceConfig.provider === "local") {
         const isEleven = voiceConfig.provider === "elevenlabs";
+        const isLocal = voiceConfig.provider === "local";
         const r = await fetch("/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 text: text,
-                // ElevenLabs: no OpenAI model; backend defaults to eleven_v3.
-                ...(isEleven ? {} : { model: TTS_MODEL }),
+                // ElevenLabs/local: no OpenAI model; backend resolves the model.
+                ...(isEleven || isLocal ? {} : { model: TTS_MODEL }),
                 provider: voiceConfig.provider,
-                // Preserve the elevenlabs: prefix so the backend detects the provider.
-                voice: isEleven ? `elevenlabs:${voiceConfig.voice}` : voiceConfig.voice,
+                // Preserve the provider prefix so the backend detects the provider
+                // (elevenlabs: / local: both trigger their branch before OpenAI).
+                voice: isEleven ? `elevenlabs:${voiceConfig.voice}`
+                     : isLocal ? `local:${voiceConfig.voice}`
+                     : voiceConfig.voice,
                 format: TTS_FMT
             })
         });
