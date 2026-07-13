@@ -12,15 +12,23 @@ def _fake_servers(monkeypatch, servers):
 def test_local_stt_available(monkeypatch):
     _fake_servers(monkeypatch, [
         {"alias": "box", "base_url": "http://h/v1", "enabled": True,
-         "last_models": ["gemma-31b", "whisper-1"]}])
+         "audio": {"stt": True, "stt_model": "whisper-turbo"}}])
     assert stt_resolve.local_stt_available() is True
-    assert cs.resolve_stt_server()[1] == "whisper-1"
+    assert cs.resolve_audio("stt")[1] == "whisper-turbo"
 
 
-def test_local_stt_unavailable_when_no_model(monkeypatch):
+def test_local_streaming_available(monkeypatch):
     _fake_servers(monkeypatch, [
-        {"alias": "box", "base_url": "http://h/v1", "enabled": True, "last_models": ["gemma-31b"]}])
+        {"alias": "box", "base_url": "http://h/v1", "enabled": True,
+         "audio": {"stt": True, "streaming": True}}])
+    assert stt_resolve.local_streaming_stt_available() is True
+
+
+def test_local_stt_unavailable_when_no_audio(monkeypatch):
+    _fake_servers(monkeypatch, [
+        {"alias": "box", "base_url": "http://h/v1", "enabled": True}])
     assert stt_resolve.local_stt_available() is False
+    assert stt_resolve.local_streaming_stt_available() is False
 
 
 def test_catalog_includes_local_when_available(monkeypatch):
@@ -50,8 +58,8 @@ def test_resolve_local_excluded_when_local_ok_false():
 
 
 def test_transcribe_bytes_local(monkeypatch):
-    monkeypatch.setattr(cs, "resolve_stt_server",
-                        lambda model=None: ({"base_url": "http://h/v1", "api_key": "k"}, "whisper-1"))
+    monkeypatch.setattr(cs, "resolve_audio",
+                        lambda kind: ({"base_url": "http://h/v1", "api_key": "k"}, "whisper-turbo"))
     captured = {}
 
     class _R:
@@ -68,5 +76,5 @@ def test_transcribe_bytes_local(monkeypatch):
     out = file_transcribe.transcribe_bytes(b"AUDIO", "audio/wav", provider="local", filename="a.wav")
     assert out == "hello world"
     assert captured["url"] == "http://h/v1/audio/transcriptions"
-    assert captured["data"] == {"model": "whisper-1"}
+    assert captured["data"] == {"model": "whisper-turbo"}
     assert captured["headers"]["Authorization"] == "Bearer k"

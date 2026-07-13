@@ -37,8 +37,17 @@ def local_stt_available() -> bool:
     """True iff a registered custom server hosts a speech-to-text model.
     Lazy + fail-soft so a registry hiccup never breaks STT resolution."""
     try:
-        from Orchestrator.onboarding.custom_servers import has_modality_model
-        return has_modality_model("stt")
+        from Orchestrator.onboarding.custom_servers import has_audio
+        return has_audio("stt")
+    except Exception:
+        return False
+
+
+def local_streaming_stt_available() -> bool:
+    """True iff a local server advertises realtime (/v1/realtime) streaming STT."""
+    try:
+        from Orchestrator.onboarding.custom_servers import has_audio
+        return has_audio("streaming")
     except Exception:
         return False
 

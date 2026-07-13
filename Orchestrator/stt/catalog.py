@@ -1,5 +1,5 @@
 from Orchestrator import config
-from Orchestrator.stt.resolve import stt_availability, local_stt_available
+from Orchestrator.stt.resolve import stt_availability, local_stt_available, local_streaming_stt_available
 
 
 def build_stt_catalog() -> list:
@@ -35,9 +35,12 @@ def build_stt_catalog() -> list:
     # STT model. File transcription only (live streaming needs the OpenAI realtime
     # WS protocol, which local whisper.cpp servers almost never speak).
     if local_stt_available():
+        streams = local_streaming_stt_available()
         providers.append({
             "id": "local", "label": "Local (free)", "available": True,
-            "blurb": "A local OpenAI-compatible speech-to-text model (e.g. whisper.cpp). File transcription only; free + private.",
-            "models": {"streaming": None, "file": "local"},
+            "blurb": ("A local OpenAI-compatible speech-to-text model (whisper / faster-whisper). "
+                      + ("Realtime streaming + files; free + private."
+                         if streams else "File transcription only; free + private.")),
+            "models": {"streaming": "realtime" if streams else None, "file": "local"},
         })
     return providers

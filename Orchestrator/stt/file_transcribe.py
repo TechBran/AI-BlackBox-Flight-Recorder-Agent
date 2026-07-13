@@ -82,8 +82,8 @@ def _openai_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> 
 
 def _local_transcribe(audio_bytes: bytes, content_type: str, filename: str) -> str:
     """Transcribe via a registered local /v1/audio/transcriptions model (OpenAI-shaped)."""
-    from Orchestrator.onboarding.custom_servers import resolve_stt_server
-    resolved = resolve_stt_server()
+    from Orchestrator.onboarding.custom_servers import resolve_audio
+    resolved = resolve_audio("stt")
     if not resolved:
         raise RuntimeError("no local speech-to-text model available")
     srv, model = resolved
