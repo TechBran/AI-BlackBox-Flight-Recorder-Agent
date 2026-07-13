@@ -329,6 +329,7 @@ class CustomServerCreate(BaseModel):
     api_key: str = ""          # default "" — custom_servers.add_server rejects None
     context_tokens: int = custom_servers.DEFAULT_CONTEXT_TOKENS
     model_modalities: dict | None = None   # wizard-confirmed {model_id: modality}
+    audio: dict | None = None              # per-server audio config {stt,tts,streaming,stt_model,tts_model}
 
 
 class CustomServerPatch(BaseModel):
@@ -340,6 +341,7 @@ class CustomServerPatch(BaseModel):
     enabled: bool | None = None
     context_tokens: int | None = None
     model_modalities: dict | None = None   # manage-screen modality corrections
+    audio: dict | None = None              # wizard-edited audio model ids
 
 
 @router.get("/custom-servers")
@@ -360,7 +362,7 @@ def add_custom_server(req: CustomServerCreate) -> dict:
         srv = custom_servers.add_server(
             alias=req.alias, base_url=req.base_url,
             api_key=req.api_key, context_tokens=req.context_tokens,
-            model_modalities=req.model_modalities,
+            model_modalities=req.model_modalities, audio=req.audio,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -525,6 +527,18 @@ def validate(req: ValidateRequest) -> ValidateResponse:
                     merged = {**seed, **(existing.get("model_modalities") or {})}
                     if merged:
                         stamp["model_modalities"] = merged
+                    # Audio: refresh the probed capability bools, PRESERVE the
+                    # user's wizard-set model ids, default the ids when a
+                    # capability exists but no id is set yet.
+                    probed_audio = (result.detail or {}).get("audio") or {}
+                    merged_audio = dict(existing.get("audio") or {})
+                    merged_audio.update(probed_audio)
+                    if merged_audio.get("stt") and not merged_audio.get("stt_model"):
+                        merged_audio["stt_model"] = custom_servers.SPEACHES_STT_DEFAULT
+                    if merged_audio.get("tts") and not merged_audio.get("tts_model"):
+                        merged_audio["tts_model"] = custom_servers.SPEACHES_TTS_DEFAULT
+                    if merged_audio:
+                        stamp["audio"] = merged_audio
                     custom_servers.update_server(server_id, stamp)
                     _state.record_validation(f"custom:{server_id}")
                 except (KeyError, ValueError):

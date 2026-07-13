@@ -162,9 +162,26 @@ def validate_custom(base_url: str, api_key: str = "") -> ValidationResult:
                 from Orchestrator.onboarding.custom_servers import classify_models
                 shown = ids[:50]
                 modalities = classify_models(shown)
+                # Audio capability probe -- Speaches behind Caddy serves audio at
+                # /v1/audio/* + /v1/realtime, but those models are NOT in /v1/models.
+                # A GET returns 405/307 when the path exists, 404 when it doesn't.
+                # Best-effort + fail-soft: a probe failure just means "not detected".
+                import httpx
+                _hdr = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                def _has(path):
+                    try:
+                        r = httpx.get(f"{base_url}{path}", headers=_hdr,
+                                      timeout=5.0, follow_redirects=False)
+                        return r.status_code != 404
+                    except Exception:
+                        return False
+                audio = {"stt": _has("/audio/transcriptions"),
+                         "tts": _has("/audio/speech"),
+                         "streaming": _has("/realtime")}
                 return {"model_count": len(ids), "models": shown,
                         "model_modalities": modalities,
-                        "capabilities": sorted(set(modalities.values()))}
+                        "capabilities": sorted(set(modalities.values())),
+                        "audio": audio}
         except AuthenticationError as e:
             raise RuntimeError(f"API key rejected (401) by {base_url}") from e
         except APIStatusError as e:
