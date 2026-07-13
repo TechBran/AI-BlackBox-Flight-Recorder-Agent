@@ -515,6 +515,18 @@ def resolve_stt_server(model: str | None = None) -> tuple[dict, str] | None:
     return resolve_modality_server("stt", model)
 
 
+# Kokoro (Speaches) voice roster -- the fallback voice list when a local TTS
+# server exposes no /audio/voices endpoint (see AUDIO-PIPELINE.md for the full ~50).
+KOKORO_VOICES = [
+    "af_heart", "af_bella", "af_nova", "af_sarah", "af_sky", "af_alloy", "af_aoede",
+    "af_jessica", "af_kore", "af_nicole", "af_river",
+    "am_michael", "am_onyx", "am_echo", "am_adam", "am_eric", "am_fenrir", "am_liam",
+    "am_puck", "am_santa",
+    "bf_emma", "bf_alice", "bf_isabella", "bf_lily",
+    "bm_george", "bm_daniel", "bm_fable", "bm_lewis",
+]
+
+
 def list_local_tts_voices(server: dict) -> list[str]:
     """Voice ids a local /v1/audio/speech server offers. Probe the (non-standard)
     GET {base_url}/audio/voices; fail-soft to ['default'] (OpenAI-compat TTS
@@ -522,7 +534,7 @@ def list_local_tts_voices(server: dict) -> list[str]:
     import keeps this module stdlib-only at import time (lean-venv-safe)."""
     base_url = (server or {}).get("base_url", "")
     if not base_url:
-        return ["default"]
+        return list(KOKORO_VOICES)
     import requests as _rq
     headers = {}
     if server.get("api_key"):
@@ -540,6 +552,6 @@ def list_local_tts_voices(server: dict) -> list[str]:
                 vid = it.get("id") or it.get("voice") or it.get("name")
                 if isinstance(vid, str):
                     out.append(vid)
-        return out or ["default"]
+        return out or list(KOKORO_VOICES)
     except Exception:
-        return ["default"]
+        return list(KOKORO_VOICES)

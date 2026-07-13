@@ -358,8 +358,8 @@ async def tts_batch(body: dict = Body(...)):
 
     # --- Local (custom server) provider: /v1/audio/speech, OpenAI-shaped ---
     elif provider == "local":
-        from Orchestrator.onboarding.custom_servers import resolve_tts_server
-        resolved = resolve_tts_server(model or None)
+        from Orchestrator.onboarding.custom_servers import resolve_audio
+        resolved = resolve_audio("tts")
         if not resolved:
             raise HTTPException(400, "No local text-to-speech model available (register an OpenAI-compatible server hosting a TTS model)")
         _srv, _model = resolved
@@ -1002,9 +1002,9 @@ async def tts_catalog():
     # text-to-speech model. Fail-open, same as ElevenLabs.
     try:
         from Orchestrator.onboarding.custom_servers import (
-            has_modality_model, resolve_tts_server, list_local_tts_voices)
-        if has_modality_model("tts"):
-            resolved = resolve_tts_server()
+            has_audio, resolve_audio, list_local_tts_voices)
+        if has_audio("tts"):
+            resolved = resolve_audio("tts")
             if resolved:
                 _srv, _m = resolved
                 voices = list_local_tts_voices(_srv)

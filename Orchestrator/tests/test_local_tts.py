@@ -35,7 +35,9 @@ def test_list_local_tts_voices_fallback(monkeypatch):
         raise RuntimeError("no /audio/voices endpoint")
 
     monkeypatch.setattr(requests, "get", _boom)
-    assert cs.list_local_tts_voices({"base_url": "http://h/v1"}) == ["default"]
+    # Fallback is the Kokoro roster (not a bare 'default'), so the picker is usable.
+    assert cs.list_local_tts_voices({"base_url": "http://h/v1"}) == list(cs.KOKORO_VOICES)
+    assert "af_heart" in cs.list_local_tts_voices({"base_url": "http://h/v1"})
 
 
 def test_tts_catalog_includes_local_group(monkeypatch):
@@ -43,9 +45,9 @@ def test_tts_catalog_includes_local_group(monkeypatch):
     from fastapi.testclient import TestClient
     from Orchestrator.checkpoint import app
     from Orchestrator.onboarding import custom_servers
-    monkeypatch.setattr(custom_servers, "has_modality_model", lambda mod: mod == "tts")
-    monkeypatch.setattr(custom_servers, "resolve_tts_server",
-                        lambda model=None: ({"base_url": "http://h/v1", "api_key": ""}, "kokoro-tts"))
+    monkeypatch.setattr(custom_servers, "has_audio", lambda kind: kind == "tts")
+    monkeypatch.setattr(custom_servers, "resolve_audio",
+                        lambda kind: ({"base_url": "http://h/v1", "api_key": ""}, "kokoro-tts"))
     monkeypatch.setattr(custom_servers, "list_local_tts_voices", lambda srv: ["af_bella"])
     r = TestClient(app).get("/tts/catalog")
     assert r.status_code == 200
