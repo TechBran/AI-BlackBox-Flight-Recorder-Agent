@@ -451,6 +451,9 @@ async def phone_audio_websocket(websocket: WebSocket, session_id: str):
 
     async def play_tts_prompt(text: str):
         """Play TTS prompt via WebSocket."""
+        # Scrub non-spoken symbols (markdown/emoji) before synthesis.
+        from Orchestrator.tts_sanitize import sanitize_for_speech
+        text = sanitize_for_speech(text)
         # Generate TTS audio
         try:
             from Orchestrator.config import OPENAI_API_KEY, OPENAI_TTS_URL

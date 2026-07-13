@@ -1611,7 +1611,8 @@ async def cli_speak_text(cli_session_id: str, speak_request: CLISpeakRequest):
     if not cli_session.is_active:
         return {"error": "Call is not active"}
 
-    text = speak_request.text.strip()
+    from Orchestrator.tts_sanitize import sanitize_for_speech
+    text = sanitize_for_speech(speak_request.text)
     if not text:
         return {"error": "No text provided"}
 
