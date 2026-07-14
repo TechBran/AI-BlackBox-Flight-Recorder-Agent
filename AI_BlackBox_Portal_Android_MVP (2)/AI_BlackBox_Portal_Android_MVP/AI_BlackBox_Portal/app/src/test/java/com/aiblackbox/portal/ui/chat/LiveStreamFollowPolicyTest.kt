@@ -102,15 +102,44 @@ class LiveStreamFollowPolicyTest {
         assertTrue(geometry.residenceTopPx <= geometry.residenceBottomPx)
     }
 
-    @Test fun `user input suspends immediately and resumes only after five idle seconds`() {
+    @Test fun `stream starts filling and ignores edge before boundary crossing`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+        assertNull(policy.onMeasuredOverflow(-24f))
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+    }
+
+    @Test fun `first positive overflow starts following and is consumed`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+
+        assertEquals(18f, policy.onMeasuredOverflow(18f))
+        assertEquals(LiveFollowMode.FOLLOWING, policy.mode)
+    }
+
+    @Test fun `thinking to answer handoff retains following mode`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onMeasuredOverflow(10f)
+
+        policy.onPhaseChanged()
+
+        assertEquals(LiveFollowMode.FOLLOWING, policy.mode)
+        assertEquals(6f, policy.onMeasuredOverflow(6f))
+    }
+
+    @Test fun `user input suspends immediately and idle expiry enters returning`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()
         policy.onUserScroll(1_000)
-        assertTrue(policy.isSuspended)
+        assertEquals(LiveFollowMode.SUSPENDED, policy.mode)
         assertTrue(policy.showReturnToLive)
         assertFalse(policy.tick(5_999))
         assertTrue(policy.tick(6_000))
-        assertFalse(policy.isSuspended)
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        assertTrue(policy.showReturnToLive)
     }
 
     @Test fun `continued interaction resets the five second deadline`() {
@@ -122,22 +151,53 @@ class LiveStreamFollowPolicyTest {
         assertTrue(policy.tick(9_000))
     }
 
-    @Test fun `down arrow resumes immediately`() {
+    @Test fun `down arrow enters returning without hiding arrow`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()
         policy.onUserScroll(1_000)
         assertTrue(policy.resumeNow())
-        assertFalse(policy.isSuspended)
-        assertFalse(policy.showReturnToLive)
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        assertTrue(policy.showReturnToLive)
     }
 
-    @Test fun `terminal stream disables delayed return`() {
+    @Test fun `measured arrival alone resumes following and hides arrow`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()
         policy.onUserScroll(1_000)
-        policy.stop()
-        assertFalse(policy.tick(20_000))
+        policy.resumeNow()
+
+        assertFalse(policy.onMeasuredArrival(2f, tolerancePx = 1f))
+        assertTrue(policy.showReturnToLive)
+        assertTrue(policy.onMeasuredArrival(.5f, tolerancePx = 1f))
+        assertEquals(LiveFollowMode.FOLLOWING, policy.mode)
+        assertFalse(policy.showReturnToLive)
+    }
+
+    @Test fun `user input interrupts return and restarts idle deadline`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onUserScroll(1_000)
+        policy.resumeNow()
+
+        policy.onUserScroll(2_000)
+
+        assertEquals(LiveFollowMode.SUSPENDED, policy.mode)
+        assertFalse(policy.tick(6_999))
+        assertTrue(policy.tick(7_000))
+    }
+
+    @Test fun `completion while suspended retains returnability`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onUserScroll(1_000)
+
+        policy.onStreamCompleted(hasReturnDestination = true)
+
         assertFalse(policy.isActive)
+        assertEquals(LiveFollowMode.SUSPENDED, policy.mode)
+        assertTrue(policy.showReturnToLive)
+        assertTrue(policy.resumeNow())
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
     }
 
     @Test fun `programmatic follow never enters suspended state`() {

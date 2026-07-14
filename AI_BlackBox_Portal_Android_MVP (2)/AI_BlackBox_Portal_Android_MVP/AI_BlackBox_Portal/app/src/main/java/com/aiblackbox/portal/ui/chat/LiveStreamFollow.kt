@@ -115,6 +115,7 @@ internal fun calculateBottomFocalGeometry(
 }
 
 internal enum class LiveStreamPhase { IDLE, THINKING, ANSWERING, TOOL }
+internal enum class LiveFollowMode { FILLING, FOLLOWING, SUSPENDED, RETURNING }
 
 internal data class LiveStreamSnapshot(
     val messageId: String?,
@@ -131,26 +132,31 @@ internal data class LiveStreamSnapshot(
 internal class LiveStreamFollowPolicy {
     var isActive: Boolean = false
         private set
-    var isSuspended: Boolean = false
+    var mode: LiveFollowMode = LiveFollowMode.FILLING
         private set
+    val isSuspended: Boolean get() = mode == LiveFollowMode.SUSPENDED
     var programmaticScroll: Boolean = false
         private set
     private var resumeAtMs: Long? = null
 
-    val showReturnToLive: Boolean get() = isActive && isSuspended
+    val showReturnToLive: Boolean
+        get() = mode == LiveFollowMode.SUSPENDED || mode == LiveFollowMode.RETURNING
 
-    fun start() { isActive = true }
+    fun start() {
+        if (!isActive && !showReturnToLive) mode = LiveFollowMode.FILLING
+        isActive = true
+    }
 
     fun stop() {
         isActive = false
-        isSuspended = false
+        mode = LiveFollowMode.FILLING
         programmaticScroll = false
         resumeAtMs = null
     }
 
     fun onUserScroll(nowMs: Long) {
-        if (!isActive || programmaticScroll) return
-        isSuspended = true
+        if ((!isActive && !showReturnToLive) || programmaticScroll) return
+        mode = LiveFollowMode.SUSPENDED
         resumeAtMs = nowMs + FOLLOW_RESUME_DELAY_MS
     }
 
@@ -163,17 +169,39 @@ internal class LiveStreamFollowPolicy {
 
     fun tick(nowMs: Long): Boolean {
         val deadline = resumeAtMs ?: return false
-        if (!isActive || !isSuspended || nowMs < deadline) return false
-        isSuspended = false
+        if (!isSuspended || nowMs < deadline) return false
+        mode = LiveFollowMode.RETURNING
         resumeAtMs = null
         return true
     }
 
     fun resumeNow(): Boolean {
-        if (!isActive || !isSuspended) return false
-        isSuspended = false
+        if (!isSuspended) return false
+        mode = LiveFollowMode.RETURNING
         resumeAtMs = null
         return true
+    }
+
+    fun onMeasuredOverflow(overflowPx: Float): Float? = when (mode) {
+        LiveFollowMode.FILLING -> if (overflowPx > 0f) {
+            mode = LiveFollowMode.FOLLOWING
+            overflowPx
+        } else null
+        LiveFollowMode.FOLLOWING -> overflowPx.takeIf { it > 0f }
+        LiveFollowMode.SUSPENDED, LiveFollowMode.RETURNING -> null
+    }
+
+    fun onPhaseChanged() = Unit
+
+    fun onMeasuredArrival(distancePx: Float, tolerancePx: Float): Boolean {
+        if (mode != LiveFollowMode.RETURNING || abs(distancePx) > tolerancePx) return false
+        mode = LiveFollowMode.FOLLOWING
+        return true
+    }
+
+    fun onStreamCompleted(hasReturnDestination: Boolean) {
+        isActive = false
+        if (!hasReturnDestination || !showReturnToLive) stop()
     }
 }
 
