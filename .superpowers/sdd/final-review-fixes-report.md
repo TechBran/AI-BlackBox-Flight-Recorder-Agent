@@ -198,3 +198,22 @@ GREEN:
 - `git diff --check` — exit 0.
 
 Concern: controlled-clock Compose tests are compile-verified but not executed because ADB/device/instrumentation use was prohibited.
+
+## Compose Test Validity Cleanup
+
+Date: 2026-07-14; base `c72d7403`.
+
+- Split controlled page-fill coverage into independent reasoning and answer `@Test` cases; each test calls `setContent` exactly once.
+- Split completion return into independent main, Claude-agent, and Gemini-agent cases; each calls `setContent` exactly once.
+- Removed the synthetic completion harness. Main completion now drives real `MainChatContent`; Claude and Gemini completion drive real `AgentLiveMessageContent`. All three use actual long `ChatBubble` answer anchors, real message-list suspension, terminal state transition, arrow action, and measurement-based arrival verification.
+- The deterministic external-edge harness remains only for precise page-fill boundary/burst offset assertions; it is paired with separate real-screen integration coverage already in the suite.
+
+Offline verification:
+
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+No production behavior changed. Compose tests remain compile-verified only because ADB/device execution was prohibited.
