@@ -5,6 +5,8 @@ import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.ui.chat.cliLiveStatusLabel
 import com.aiblackbox.portal.ui.chat.cliLiveStreamPhase
 import com.aiblackbox.portal.ui.chat.LiveStreamPhase
+import com.aiblackbox.portal.ui.chat.reduceActiveTool
+import com.aiblackbox.portal.ui.chat.ToolIndicatorData
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -32,6 +34,21 @@ class AgentEventProvenanceTest {
             LiveStreamPhase.ANSWERING,
             cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = null),
         )
+    }
+
+    @Test fun `content result error disconnect and completion clear active tool`() {
+        val active = ToolIndicatorData("Read", "", "file.kt")
+        val terminalOrProseEvents = listOf(
+            AgentEvent.Content("answer"),
+            AgentEvent.ToolResult("ok"),
+            AgentEvent.Error("failed"),
+            AgentEvent.Disconnected,
+            AgentEvent.Completed(1),
+        )
+        terminalOrProseEvents.forEach { event ->
+            assertNull("$event must clear the tool anchor", reduceActiveTool(active, event))
+        }
+        assertEquals(active, reduceActiveTool(active, AgentEvent.StatusUpdate()))
     }
 
     @Test fun `AgentEvent ProvenanceUpdate carries a typed Provenance`() {

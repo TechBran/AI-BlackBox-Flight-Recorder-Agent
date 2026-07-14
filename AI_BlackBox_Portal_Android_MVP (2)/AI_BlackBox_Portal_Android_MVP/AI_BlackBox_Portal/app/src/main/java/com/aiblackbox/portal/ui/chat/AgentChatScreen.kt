@@ -142,6 +142,23 @@ internal fun cliLiveStreamPhase(
     else -> LiveStreamPhase.ANSWERING
 }
 
+internal fun reduceActiveTool(
+    current: ToolIndicatorData?,
+    event: AgentEvent,
+): ToolIndicatorData? = when (event) {
+    is AgentEvent.Content,
+    is AgentEvent.ToolResult,
+    is AgentEvent.FileResult,
+    is AgentEvent.EditDiff,
+    is AgentEvent.Output,
+    is AgentEvent.Completed,
+    is AgentEvent.Error,
+    is AgentEvent.SessionEnded,
+    is AgentEvent.Disconnected -> null
+    is AgentEvent.Info -> null
+    else -> current
+}
+
 // =============================================================================
 // Permission Modes — mirrors Portal cyclePermissionMode()
 // =============================================================================
@@ -292,6 +309,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
      * Handle agent events — mirrors Portal handleMessage() switch cases.
      */
     private fun handleEvent(event: AgentEvent) {
+        _activeTool.value = reduceActiveTool(_activeTool.value, event)
         when (event) {
             // Content streaming — Portal: appendContent()
             is AgentEvent.Content -> {
@@ -783,7 +801,8 @@ internal fun AgentLiveMessageContent(
     val expectedSection = when (phase) {
         LiveStreamPhase.THINKING -> LiveTextSection.REASONING
         LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
-        else -> null
+        LiveStreamPhase.TOOL -> LiveTextSection.TOOL_FALLBACK
+        LiveStreamPhase.IDLE -> null
     }
 
     Box(modifier = modifier.testTag("agent-messages-$provider")) {
@@ -803,6 +822,7 @@ internal fun AgentLiveMessageContent(
                     onLiveEdgePositioned = if (isLiveTurn && expectedSection != null) {
                         { section, y -> if (section == expectedSection) followState.reportEdge(y) }
                     } else null,
+                    useToolFallbackAnchor = isLiveTurn && expectedSection == LiveTextSection.TOOL_FALLBACK,
                 )
             }
         }

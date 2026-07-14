@@ -1,0 +1,52 @@
+# Final Review Fixes Report
+
+Date: 2026-07-14
+Branch: `feat/android-live-stream-focal-follow`
+Base reviewed: `4d5a9e30`
+Execution mode: offline only; no ADB, device installation, instrumentation, or connected tests were used.
+
+## Changes
+
+- Added a reusable `TOOL_FALLBACK` live edge at the active assistant message bottom. CLI TOOL phase selects it only when thinking/answer prose is not active; existing thinking and answer precedence is unchanged.
+- Replaced loose edge-before-rail checks with density-aware assertions for `LIVE_EDGE_GAP` (12dp, 1dp tolerance), including main thinking/answer transition, long main output, Claude, Gemini, long agent output, and tool-only output.
+- Added compile-valid Compose coverage for accessibility `ScrollBy`, repeated interaction deadline reset, suspended rail-label updates, terminal transition during suspension, and reduced-motion immediate correction.
+- Added the smallest reduced-motion test seam (`reducedMotionOverride: Boolean? = null`); production still defaults to Android animator settings.
+- Added a pure `reduceActiveTool` seam and regression coverage for content, tool result, error, disconnect, and completion. `AgentViewModel` now applies it before event handling.
+- Added a semantic live label to the focal rail so status updates remain testable and accessible while suspended.
+
+## TDD Evidence
+
+RED 1:
+
+`./gradlew compileDebugAndroidTestKotlin --offline`
+
+Failed as expected because the new reduced-motion harness passed a missing third argument to `rememberLiveStreamFollowState` (`Too many arguments`).
+
+RED 2:
+
+`./gradlew testDebugUnitTest --tests com.aiblackbox.portal.AgentEventProvenanceTest --offline`
+
+Failed as expected because `reduceActiveTool` did not exist (`Unresolved reference 'reduceActiveTool'`).
+
+GREEN focused:
+
+`./gradlew testDebugUnitTest --tests com.aiblackbox.portal.AgentEventProvenanceTest --tests com.aiblackbox.portal.ui.chat.LiveStreamFollowPolicyTest --offline`
+
+Result: `BUILD SUCCESSFUL`.
+
+## Required Offline Verification
+
+- `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin assembleDebug --offline` — `BUILD SUCCESSFUL` (both requested tasks completed).
+- `git diff --check` — exit 0, no whitespace errors.
+
+The Android UI tests were compiled but deliberately not executed because the task prohibits connected/instrumented/device activity.
+
+## Preserved Workspace State
+
+Unrelated dirty and untracked files outside the scoped Android focal-follow implementation were not staged or modified by this work.
+
+## Concerns
+
+- Runtime geometry and input behavior remain device-gated. Compilation verifies the UI suite is structurally valid, but the new Compose assertions require later execution in an authorized connected-test environment.
+- Existing project warnings (deprecated Android APIs and Gradle compatibility notices) remain unchanged and are outside this review scope.

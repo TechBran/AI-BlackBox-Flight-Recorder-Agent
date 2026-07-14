@@ -84,7 +84,7 @@ import kotlinx.coroutines.delay
 // Assistant bubble: --bubble (#000000), asymmetric (sharp top-start), full width
 // =============================================================================
 
-enum class LiveTextSection { REASONING, ANSWER }
+enum class LiveTextSection { REASONING, ANSWER, TOOL_FALLBACK }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -100,6 +100,7 @@ fun ChatBubble(
     signalLabel: String? = null,
     modifier: Modifier = Modifier,
     onLiveEdgePositioned: ((LiveTextSection, Float) -> Unit)? = null,
+    useToolFallbackAnchor: Boolean = false,
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
@@ -140,10 +141,22 @@ fun ChatBubble(
         // UNDER the bubble. Pure layout — carries NO pointer handlers, so it can't
         // reintroduce the touch-blocking history noted on the content column below.
         Column(
-            modifier = Modifier.then(
+            modifier = Modifier
+                .then(
                 if (isUser) Modifier.widthIn(max = maxUserBubbleWidth)
                 else Modifier.fillMaxWidth()
-            ),
+                )
+                .then(
+                    if (useToolFallbackAnchor && !isUser) Modifier
+                        .testTag("live-stream-edge")
+                        .onGloballyPositioned { coordinates ->
+                            onLiveEdgePositioned?.invoke(
+                                LiveTextSection.TOOL_FALLBACK,
+                                coordinates.boundsInWindow().bottom,
+                            )
+                        }
+                    else Modifier
+                ),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
         Column(

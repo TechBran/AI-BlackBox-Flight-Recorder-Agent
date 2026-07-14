@@ -35,6 +35,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.ui.components.SignalLine
 import kotlinx.coroutines.CoroutineScope
@@ -247,10 +249,11 @@ internal class LiveStreamFollowState internal constructor(
 internal fun rememberLiveStreamFollowState(
     listState: LazyListState,
     snapshot: LiveStreamSnapshot,
+    reducedMotionOverride: Boolean? = null,
 ): LiveStreamFollowState {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val reducedMotion by rememberUpdatedState(newValue = try {
+    val reducedMotion by rememberUpdatedState(newValue = reducedMotionOverride ?: try {
         Settings.Global.getFloat(
             context.contentResolver,
             Settings.Global.ANIMATOR_DURATION_SCALE,
@@ -301,6 +304,7 @@ internal fun BoxScope.LiveStreamFocalRail(
             .align(Alignment.Center)
             .offset(y = FOCAL_RAIL_OFFSET)
             .testTag("live-stream-rail")
+            .semantics { contentDescription = label.orEmpty() }
             .onGloballyPositioned { coordinates ->
                 val gapPx = with(density) { LIVE_EDGE_GAP.toPx() }
                 followState.setTarget(coordinates.boundsInWindow().top - gapPx)

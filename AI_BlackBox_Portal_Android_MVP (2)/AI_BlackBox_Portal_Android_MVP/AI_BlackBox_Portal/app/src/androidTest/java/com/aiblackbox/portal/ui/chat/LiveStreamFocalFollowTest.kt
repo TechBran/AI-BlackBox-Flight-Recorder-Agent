@@ -17,10 +17,13 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.UiMessage
@@ -37,6 +40,7 @@ class LiveStreamFocalFollowTest {
 
     @Test
     fun mainChatFollowsGrowingReasoningAndAnswerAndKeepsSignalWhileSuspended() {
+        compose.mainClock.autoAdvance = false
         lateinit var update: (UiMessage, ChatState) -> Unit
         compose.setContent {
             var message by remember {
@@ -54,19 +58,19 @@ class LiveStreamFocalFollowTest {
             )
         }
 
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
             update(assistantMessage(reasoningLength = 200, answerLength = 0, thinking = true), ChatState.THINKING)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
             update(assistantMessage(reasoningLength = 200, answerLength = 20, thinking = false), ChatState.STREAMING)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
-            update(assistantMessage(reasoningLength = 200, answerLength = 200, thinking = false), ChatState.STREAMING)
+            update(assistantMessage(reasoningLength = 200, answerLength = 3_000, thinking = false), ChatState.STREAMING)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
 
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
@@ -135,6 +139,94 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
+    fun accessibilityScrollSuspendsFollow() {
+        compose.setContent { FollowHarness() }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag("messages").performSemanticsAction(SemanticsActions.ScrollBy) {
+            it(0f, 120f)
+        }
+
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+    }
+
+    @Test
+    fun repeatedInteractionResetsFiveSecondWindow() {
+        compose.mainClock.autoAdvance = false
+        compose.setContent { FollowHarness() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeBy(4_000)
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeBy(4_999)
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(1)
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+    }
+
+    @Test
+    fun railLabelUpdatesWhileFollowIsSuspended() {
+        lateinit var updateLabel: (String) -> Unit
+        compose.setContent {
+            var label by remember { mutableStateOf("Using Read") }
+            updateLabel = { label = it }
+            FollowHarness(label = label)
+        }
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.runOnIdle { updateLabel("Using Grep") }
+
+        compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.onNodeWithTag("live-stream-rail").assertContentDescriptionEquals("Using Grep")
+    }
+
+    @Test
+    fun terminalTransitionDuringSuspensionRemovesReturnControlAndLeavesListStable() {
+        lateinit var finish: () -> Unit
+        lateinit var listState: LazyListState
+        compose.setContent {
+            var active by remember { mutableStateOf(true) }
+            finish = { active = false }
+            FollowHarness(active = active, onListState = { listState = it })
+        }
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        compose.runOnIdle { finish() }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+        assertEquals(before, listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
+    }
+
+    @Test
+    fun reducedMotionCorrectsImmediately() {
+        compose.mainClock.autoAdvance = false
+        lateinit var listState: LazyListState
+        compose.setContent { FollowHarness(reducedMotion = true, onListState = { listState = it }) }
+        compose.mainClock.advanceTimeByFrame()
+        val before = listState.firstVisibleItemScrollOffset
+        compose.mainClock.advanceTimeByFrame()
+        assertTrue("immediate correction must not require animation time", listState.firstVisibleItemScrollOffset != before)
+        assertExactLiveEdgeGap()
+    }
+
+    @Test
+    fun toolOnlyPhaseUsesMessageBottomAsFallbackAnchor() {
+        compose.setContent {
+            AgentLiveMessageContent(
+                messages = listOf(assistantMessage(0, 0, false)),
+                provider = "claude-agents",
+                status = "Running",
+                activeTool = ToolIndicatorData("Read", "", "file.kt"),
+                isThinking = false,
+                isStreaming = true,
+            )
+        }
+        assertExactLiveEdgeGap()
+    }
+
+    @Test
     fun measuredEdgePerformsARealCorrectiveScrollWithoutShowingReturnArrow() {
         compose.mainClock.autoAdvance = false
         lateinit var observedListState: LazyListState
@@ -186,14 +278,21 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
-    private fun assertLiveEdgeAboveRail() {
+    private fun assertExactLiveEdgeGap() {
+        compose.mainClock.advanceTimeBy(500)
         compose.waitForIdle()
         val edge = compose.onNodeWithTag("live-stream-edge").fetchSemanticsNode().boundsInRoot.bottom
         val rail = compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
-        assertTrue("expected live edge ($edge) above rail ($rail)", edge < rail)
+        val expectedPx = with(compose.density) { LIVE_EDGE_GAP.toPx() }
+        val tolerancePx = with(compose.density) { 1.dp.toPx() }
+        assertTrue(
+            "expected gap ${expectedPx}px (+/-${tolerancePx}px), was ${rail - edge}px",
+            kotlin.math.abs((rail - edge) - expectedPx) <= tolerancePx,
+        )
     }
 
     private fun assertCliAgentFollowsGrowingReasoningAndAnswer(provider: String) {
+        compose.mainClock.autoAdvance = false
         lateinit var update: (UiMessage, Boolean, ToolIndicatorData?) -> Unit
         compose.setContent {
             var message by remember {
@@ -216,11 +315,11 @@ class LiveStreamFocalFollowTest {
             )
         }
 
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
             update(assistantMessage(200, 0, true), true, null)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
             update(
                 assistantMessage(200, 0, false),
@@ -232,11 +331,11 @@ class LiveStreamFocalFollowTest {
         compose.runOnIdle {
             update(assistantMessage(200, 20, false), false, null)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
         compose.runOnIdle {
-            update(assistantMessage(200, 200, false), false, null)
+            update(assistantMessage(200, 3_000, false), false, null)
         }
-        assertLiveEdgeAboveRail()
+        assertExactLiveEdgeGap()
     }
 }
 
@@ -252,6 +351,9 @@ private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: 
 @Composable
 private fun FollowHarness(
     initialItem: Int = 1,
+    active: Boolean = true,
+    label: String = "Thinking",
+    reducedMotion: Boolean? = null,
     onListState: (LazyListState) -> Unit = {},
 ) {
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialItem)
@@ -260,10 +362,10 @@ private fun FollowHarness(
         messageId = "live",
         reasoningLength = 12,
         answerLength = 0,
-        phase = LiveStreamPhase.THINKING,
-        statusLabel = "Thinking",
+        phase = if (active) LiveStreamPhase.THINKING else LiveStreamPhase.IDLE,
+        statusLabel = label,
     )
-    val followState = rememberLiveStreamFollowState(listState, snapshot)
+    val followState = rememberLiveStreamFollowState(listState, snapshot, reducedMotion)
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -285,6 +387,6 @@ private fun FollowHarness(
             }
             item { Spacer(Modifier.height(1_200.dp)) }
         }
-        LiveStreamFocalRail("Thinking", followState)
+        if (active) LiveStreamFocalRail(label, followState)
     }
 }
