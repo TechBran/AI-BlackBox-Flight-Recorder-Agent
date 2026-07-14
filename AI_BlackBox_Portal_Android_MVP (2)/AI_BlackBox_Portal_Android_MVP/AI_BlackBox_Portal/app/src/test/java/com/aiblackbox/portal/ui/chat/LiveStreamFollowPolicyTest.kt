@@ -5,22 +5,44 @@ import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
     @Test fun `production measurements conflate and stale generations cannot be consumed twice`() {
-        val pending = LatestLiveMeasurement()
-
-        val first = pending.offer(edgeY = 4f, targetY = 0f)
-        pending.offer(edgeY = 12f, targetY = 0f)
-        val latest = pending.offer(edgeY = 31f, targetY = 3f)
+        val pending = FrameLiveMeasurementConflater()
+        pending.stageEdge(4f); pending.stageTarget(0f)
+        val first = pending.commitFrame()!!
+        pending.stageEdge(12f); pending.stageEdge(31f); pending.stageTarget(3f)
+        val latest = pending.commitFrame()!!
 
         assertEquals(latest, pending.consumeAfter(first.generation))
         assertEquals(28f, latest.overflowPx)
         assertNull(pending.consumeAfter(latest.generation))
     }
 
-    @Test fun `measurement generations advance once per production report`() {
-        val pending = LatestLiveMeasurement()
-        val one = pending.offer(10f, 2f)
-        val two = pending.offer(10f, 2f)
+    @Test fun `measurement generations advance once per distinct frame`() {
+        val pending = FrameLiveMeasurementConflater()
+        pending.stageEdge(10f); pending.stageTarget(2f)
+        val one = pending.commitFrame()!!
+        pending.stageEdge(10f)
+        val two = pending.commitFrame()!!
         assertEquals(one.generation + 1, two.generation)
+    }
+
+    @Test fun `edge and target callbacks coalesce into one latest snapshot per rendered frame`() {
+        val pending = FrameLiveMeasurementConflater()
+        pending.stageEdge(10f)
+        pending.stageTarget(2f)
+        pending.stageEdge(31f)
+        pending.stageTarget(3f)
+
+        val firstFrame = pending.commitFrame()
+        assertEquals(1L, firstFrame?.generation)
+        assertEquals(31f, firstFrame?.edgeY)
+        assertEquals(3f, firstFrame?.targetY)
+        assertNull(pending.commitFrame())
+
+        pending.stageEdge(40f)
+        val secondFrame = pending.commitFrame()
+        assertEquals(2L, secondFrame?.generation)
+        assertEquals(40f, secondFrame?.edgeY)
+        assertEquals(3f, secondFrame?.targetY)
     }
 
     @Test fun `bottom inset is occupied once and clearance includes it`() {

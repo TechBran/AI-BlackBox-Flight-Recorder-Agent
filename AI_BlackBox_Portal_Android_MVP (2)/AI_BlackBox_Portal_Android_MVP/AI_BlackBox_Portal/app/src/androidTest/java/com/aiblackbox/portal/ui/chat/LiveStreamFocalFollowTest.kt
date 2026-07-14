@@ -50,6 +50,75 @@ class LiveStreamFocalFollowTest {
     val compose = createComposeRule()
 
     @Test
+    fun controlledReasoningAndAnswerEdgesFillThenFollowLatestBurstOncePerFrame() {
+        listOf(LiveStreamPhase.THINKING, LiveStreamPhase.ANSWERING).forEach { phase ->
+            lateinit var setOverflow: (Float) -> Unit
+            lateinit var listState: LazyListState
+            compose.mainClock.autoAdvance = false
+            compose.setContent {
+                var overflow by remember { mutableStateOf(-20f) }
+                setOverflow = { overflow = it }
+                ControlledEdgeHarness(phase, overflow) { listState = it }
+            }
+            compose.mainClock.advanceTimeByFrame()
+            val initial = listState.firstVisibleItemScrollOffset
+            compose.runOnIdle { setOverflow(0f) }
+            compose.mainClock.advanceTimeByFrame()
+            assertEquals("$phase must not move at zero overflow", initial, listState.firstVisibleItemScrollOffset)
+            compose.runOnIdle { setOverflow(8f) }
+            compose.mainClock.advanceTimeByFrame()
+            compose.mainClock.advanceTimeByFrame()
+            val crossed = listState.firstVisibleItemScrollOffset
+            assertTrue("$phase first crossing must cause first movement", crossed > initial)
+            compose.runOnIdle { setOverflow(12f); setOverflow(24f); setOverflow(40f) }
+            compose.mainClock.advanceTimeByFrame()
+            compose.mainClock.advanceTimeByFrame()
+            val burst = listState.firstVisibleItemScrollOffset
+            assertTrue("$phase burst must consume latest overflow without lag", burst - crossed >= 39)
+            compose.runOnIdle { setOverflow(6f) }
+            compose.mainClock.advanceTimeByFrame()
+            compose.mainClock.advanceTimeByFrame()
+            assertTrue("$phase must remain pinned on later measurements",
+                listState.firstVisibleItemScrollOffset > burst)
+            compose.mainClock.autoAdvance = true
+        }
+    }
+
+    @Test
+    fun completedMainClaudeAndGeminiRoutesReturnOnlyAfterMeasuredArrival() {
+        listOf("main", "claude-agents", "gemini-agents").forEach { route ->
+            compose.mainClock.autoAdvance = false
+            lateinit var suspendFollow: () -> Unit
+            lateinit var complete: () -> Unit
+            lateinit var resume: () -> Unit
+            lateinit var arrive: () -> Unit
+            compose.setContent {
+                var active by remember { mutableStateOf(true) }
+                ControlledCompletionHarness(route, active) { followState ->
+                    suspendFollow = { followState.suspendForUserInput(1_000) }
+                    complete = { active = false }
+                    resume = followState::resumeNow
+                    arrive = {
+                        followState.setTarget(500f)
+                        followState.reportEdge(500f)
+                    }
+                }
+            }
+            compose.mainClock.advanceTimeByFrame()
+            compose.runOnIdle { suspendFollow(); complete() }
+            compose.mainClock.advanceTimeByFrame()
+            compose.runOnIdle { resume() }
+            compose.mainClock.advanceTimeByFrame()
+            compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+            compose.runOnIdle { arrive() }
+            compose.mainClock.advanceTimeByFrame()
+            compose.mainClock.advanceTimeByFrame()
+            compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+            compose.mainClock.autoAdvance = true
+        }
+    }
+
+    @Test
     fun productionComposerAndSignalResidenceShareOneDynamicBottomInsetContract() {
         lateinit var update: (Int, Int) -> Unit
         compose.setContent {
@@ -556,6 +625,57 @@ private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: 
     isStreaming = true,
     isThinking = thinking,
 )
+
+@Composable
+private fun ControlledEdgeHarness(
+    phase: LiveStreamPhase,
+    overflowPx: Float,
+    onListState: (LazyListState) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    onListState(listState)
+    val followState = rememberLiveStreamFollowState(
+        listState,
+        LiveStreamSnapshot("live", 1, 1, phase, "live"),
+    )
+    androidx.compose.runtime.LaunchedEffect(overflowPx) {
+        followState.setTarget(500f)
+        followState.reportEdge(500f + overflowPx)
+    }
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+        items(30) { Spacer(Modifier.height(100.dp)) }
+    }
+}
+
+@Composable
+private fun ControlledCompletionHarness(
+    route: String,
+    active: Boolean,
+    expose: (LiveStreamFollowState) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val followState = rememberLiveStreamFollowState(
+        listState,
+        LiveStreamSnapshot(
+            messageId = "live",
+            reasoningLength = 0,
+            answerLength = 40,
+            phase = if (active) LiveStreamPhase.ANSWERING else LiveStreamPhase.IDLE,
+            statusLabel = route,
+        ),
+    )
+    expose(followState)
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        followState.setTarget(500f)
+        followState.reportEdge(700f)
+    }
+    Box(Modifier.fillMaxSize().testTag("completion-$route")) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            items(30) { Spacer(Modifier.height(100.dp)) }
+        }
+        LiveStreamFocalRail(route, followState)
+    }
+}
 
 @Composable
 private fun BottomResidenceShellHarness(

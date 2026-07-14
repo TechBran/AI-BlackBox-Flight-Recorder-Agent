@@ -31,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
@@ -213,12 +214,21 @@ internal data class LiveMeasurement(
     val overflowPx: Float get() = edgeY - targetY
 }
 
-internal class LatestLiveMeasurement {
+internal class FrameLiveMeasurementConflater {
     private var generation = 0L
+    private var edgeY = Float.NaN
+    private var targetY = Float.NaN
+    private var dirty = false
     private var latest: LiveMeasurement? = null
 
-    fun offer(edgeY: Float, targetY: Float): LiveMeasurement =
-        LiveMeasurement(++generation, edgeY, targetY).also { latest = it }
+    fun stageEdge(value: Float) { edgeY = value; dirty = true }
+    fun stageTarget(value: Float) { targetY = value; dirty = true }
+
+    fun commitFrame(): LiveMeasurement? {
+        if (!dirty || !edgeY.isFinite() || !targetY.isFinite()) return null
+        dirty = false
+        return LiveMeasurement(++generation, edgeY, targetY).also { latest = it }
+    }
 
     fun consumeAfter(consumedGeneration: Long): LiveMeasurement? =
         latest?.takeIf { it.generation > consumedGeneration }
@@ -242,7 +252,8 @@ internal class LiveStreamFollowState internal constructor(
 
     private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
     private val returnMeasurementRequests = Channel<Unit>(Channel.CONFLATED)
-    private val measurements = LatestLiveMeasurement()
+    private val measurements = FrameLiveMeasurementConflater()
+    private var measurementCommitJob: Job? = null
     private var correctionJob: Job? = null
     private var returnJob: Job? = null
     private var resumeJob: Job? = null
@@ -252,18 +263,25 @@ internal class LiveStreamFollowState internal constructor(
 
     fun reportEdge(yInWindow: Float) {
         edgeY = yInWindow
-        reportMeasurement()
+        measurements.stageEdge(yInWindow)
+        scheduleMeasurementCommit()
     }
 
     fun setTarget(yInWindow: Float) {
         targetY = yInWindow
-        reportMeasurement()
+        measurements.stageTarget(yInWindow)
+        scheduleMeasurementCommit()
     }
 
-    private fun reportMeasurement() {
-        measurements.offer(edgeY, targetY)
-        correctionRequests.trySend(Unit)
-        returnMeasurementRequests.trySend(Unit)
+    private fun scheduleMeasurementCommit() {
+        if (measurementCommitJob?.isActive == true) return
+        measurementCommitJob = scope.launch {
+            withFrameNanos { }
+            if (measurements.commitFrame() != null) {
+                correctionRequests.trySend(Unit)
+                returnMeasurementRequests.trySend(Unit)
+            }
+        }
     }
 
     fun setActive(active: Boolean) {
@@ -327,6 +345,7 @@ internal class LiveStreamFollowState internal constructor(
 
     private fun startReturn() {
         if (returnJob?.isActive == true) return
+        while (returnMeasurementRequests.tryReceive().isSuccess) Unit
         returnJob = scope.launch {
             var consumedGeneration = 0L
             while (policy.mode == LiveFollowMode.RETURNING) {

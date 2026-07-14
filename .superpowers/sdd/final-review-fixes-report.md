@@ -176,3 +176,25 @@ Result: compilation failed because the new production seam `LatestLiveMeasuremen
 - `git diff --check` — exit 0.
 
 Concern: controlled-clock Compose behavior is compile-verified only because device/instrumentation execution was prohibited. No ADB or connected command was used.
+
+## Atomic Frame Measurement Follow-up
+
+Date: 2026-07-14; base `9b9634c8`.
+
+- Replaced callback-level generation with production-used `FrameLiveMeasurementConflater`: edge/target callbacks stage values, one next-frame commit snapshots the latest pair, and a frame yields at most one generation/correction.
+- Return startup drains stale buffered measurement notifications before waiting for post-start frame commits.
+- Added unit proof that multiple edge/target callbacks within a frame yield one latest-pair generation, no second consume, and distinct later frames yield distinct generations.
+- Added a controlled-clock external-edge Compose harness for both reasoning and answer: negative/zero overflow causes zero movement, first positive crossing causes first movement, burst callbacks conflate to the latest displacement, and subsequent measurements remain pinned.
+- Added completed-response measured-arrival return coverage over main, `claude-agents`, and `gemini-agents` shared coordinator routes.
+
+RED: focused `LiveStreamFollowPolicyTest` compilation failed because `FrameLiveMeasurementConflater` did not exist.
+
+GREEN:
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: controlled-clock Compose tests are compile-verified but not executed because ADB/device/instrumentation use was prohibited.
