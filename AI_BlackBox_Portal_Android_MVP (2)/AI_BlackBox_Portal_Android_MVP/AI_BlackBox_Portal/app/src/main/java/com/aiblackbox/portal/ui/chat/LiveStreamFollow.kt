@@ -118,7 +118,7 @@ internal fun calculateBottomFocalGeometry(
 }
 
 internal enum class LiveStreamPhase { IDLE, THINKING, ANSWERING, TOOL }
-internal enum class LiveFollowMode { FILLING, FOLLOWING, SUSPENDED, RETURNING }
+internal enum class LiveFollowMode { FILLING, FOLLOWING, SUSPENDED, RETURNING, COMPLETED_HISTORY }
 
 internal data class LiveStreamSnapshot(
     val messageId: String?,
@@ -143,11 +143,15 @@ internal class LiveStreamFollowPolicy {
     private var resumeAtMs: Long? = null
 
     val showReturnToLive: Boolean
-        get() = mode == LiveFollowMode.SUSPENDED || mode == LiveFollowMode.RETURNING
+        get() = mode == LiveFollowMode.SUSPENDED ||
+            mode == LiveFollowMode.RETURNING ||
+            mode == LiveFollowMode.COMPLETED_HISTORY
     val requiresReturnDestination: Boolean get() = showReturnToLive
 
     fun start() {
-        if (!isActive && !showReturnToLive) mode = LiveFollowMode.FILLING
+        if (!isActive && (!showReturnToLive || mode == LiveFollowMode.COMPLETED_HISTORY)) {
+            mode = LiveFollowMode.FILLING
+        }
         isActive = true
     }
 
@@ -160,6 +164,11 @@ internal class LiveStreamFollowPolicy {
 
     fun onUserScroll(nowMs: Long) {
         if ((!isActive && !showReturnToLive) || programmaticScroll) return
+        if (!isActive) {
+            mode = LiveFollowMode.COMPLETED_HISTORY
+            resumeAtMs = null
+            return
+        }
         mode = LiveFollowMode.SUSPENDED
         resumeAtMs = nowMs + FOLLOW_RESUME_DELAY_MS
     }
@@ -180,7 +189,7 @@ internal class LiveStreamFollowPolicy {
     }
 
     fun resumeNow(): Boolean {
-        if (!isSuspended) return false
+        if (!isSuspended && mode != LiveFollowMode.COMPLETED_HISTORY) return false
         mode = LiveFollowMode.RETURNING
         resumeAtMs = null
         return true
@@ -192,18 +201,34 @@ internal class LiveStreamFollowPolicy {
             overflowPx
         } else null
         LiveFollowMode.FOLLOWING -> overflowPx.takeIf { it > 0f }
-        LiveFollowMode.SUSPENDED, LiveFollowMode.RETURNING -> null
+        LiveFollowMode.SUSPENDED, LiveFollowMode.RETURNING, LiveFollowMode.COMPLETED_HISTORY -> null
     }
 
     fun onMeasuredArrival(distancePx: Float, tolerancePx: Float): Boolean {
         if (mode != LiveFollowMode.RETURNING || abs(distancePx) > tolerancePx) return false
-        mode = LiveFollowMode.FOLLOWING
+        mode = if (isActive) LiveFollowMode.FOLLOWING else LiveFollowMode.FILLING
         return true
+    }
+
+    fun onCompletedHistoryPosition(canScrollForward: Boolean) {
+        if (isActive || mode == LiveFollowMode.RETURNING) return
+        if (canScrollForward) {
+            mode = LiveFollowMode.COMPLETED_HISTORY
+            resumeAtMs = null
+        } else if (mode == LiveFollowMode.COMPLETED_HISTORY) {
+            stop()
+        }
     }
 
     fun onStreamCompleted(hasReturnDestination: Boolean) {
         isActive = false
-        if (!hasReturnDestination || !showReturnToLive) stop()
+        when {
+            !hasReturnDestination || !showReturnToLive -> stop()
+            mode == LiveFollowMode.SUSPENDED -> {
+                mode = LiveFollowMode.COMPLETED_HISTORY
+                resumeAtMs = null
+            }
+        }
     }
 }
 
@@ -294,6 +319,7 @@ internal class LiveStreamFollowState internal constructor(
             correctionRequests.trySend(Unit)
         } else if (policy.showReturnToLive) {
             policy.onStreamCompleted(hasReturnDestination = edgeY.isFinite())
+            if (policy.mode == LiveFollowMode.COMPLETED_HISTORY) resumeJob?.cancel()
         } else {
             policy.stop()
             returnJob?.cancel()
@@ -314,6 +340,11 @@ internal class LiveStreamFollowState internal constructor(
     fun settleUserInput(now: Long = nowMs()) {
         policy.onUserScrollSettled(now)
         scheduleResume(now)
+    }
+
+    fun updateCompletedHistoryPosition(canScrollForward: Boolean) {
+        policy.onCompletedHistoryPosition(canScrollForward)
+        syncVisibility()
     }
 
     fun resumeNow() {
@@ -461,6 +492,13 @@ internal fun rememberLiveStreamFollowState(
             .collect { scrolling ->
                 state.onListScrollProgressChanged(scrolling)
             }
+    }
+    LaunchedEffect(state, listState, snapshot.isActive) {
+        if (!snapshot.isActive) {
+            snapshotFlow { listState.canScrollForward }
+                .distinctUntilChanged()
+                .collect(state::updateCompletedHistoryPosition)
+        }
     }
     return state
 }

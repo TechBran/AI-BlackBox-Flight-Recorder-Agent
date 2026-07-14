@@ -29,6 +29,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -69,6 +70,18 @@ class LiveStreamFocalFollowTest {
     @Test
     fun completedGeminiAgentContentReturnsOnlyAfterMeasuredArrival() =
         assertProductionCompletionReturn("gemini-agents")
+
+    @Test
+    fun completedMainHistoryShortcutIsTapOnlyAndClearsAtManualBottom() =
+        assertCompletedHistoryShortcut("main")
+
+    @Test
+    fun completedClaudeHistoryShortcutIsTapOnlyAndClearsAtManualBottom() =
+        assertCompletedHistoryShortcut("claude-agents")
+
+    @Test
+    fun completedGeminiHistoryShortcutIsTapOnlyAndClearsAtManualBottom() =
+        assertCompletedHistoryShortcut("gemini-agents")
 
     @Test
     fun productionComposerAndSignalResidenceShareOneDynamicBottomInsetContract() {
@@ -529,6 +542,72 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
         advanceUntilMeasuredArrival(COMPLETED_RETURN_EDGE_TAG)
         compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertDoesNotExist()
+    }
+
+    private fun assertCompletedHistoryShortcut(route: String) {
+        lateinit var complete: () -> Unit
+        lateinit var listState: LazyListState
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            var streaming by remember { mutableStateOf(true) }
+            complete = { streaming = false }
+            listState = rememberLazyListState()
+            val message = assistantMessage(0, 3_000, false).copy(isStreaming = streaming)
+            if (route == "main") {
+                MainChatContent(
+                    messages = listOf(message),
+                    chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
+                    signalLabel = "Responding",
+                    listState = listState,
+                )
+            } else {
+                AgentLiveMessageContent(
+                    messages = listOf(message),
+                    provider = route,
+                    status = "Responding",
+                    activeTool = null,
+                    isThinking = false,
+                    isStreaming = streaming,
+                    listState = listState,
+                )
+            }
+        }
+
+        compose.mainClock.advanceTimeBy(500)
+        compose.runOnIdle { complete() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertIsDisplayed()
+
+        val positionBeforeIdle = compose.runOnIdle {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }
+        compose.mainClock.advanceTimeBy(FOLLOW_RESUME_DELAY_MS + 1_000)
+        val positionAfterIdle = compose.runOnIdle {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }
+        assertEquals("completed history must not auto-return", positionBeforeIdle, positionAfterIdle)
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+
+        compose.onNodeWithTag("return-to-live").performClick()
+        advanceUntilMeasuredArrival(COMPLETED_RETURN_EDGE_TAG)
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        repeat(8) {
+            if (compose.runOnIdle { listState.canScrollForward }) {
+                compose.onNodeWithTag("messages").performTouchInput { swipeUp() }
+                compose.mainClock.advanceTimeByFrame()
+            }
+        }
+        assertTrue("manual scrolling must reach the true bottom", compose.runOnIdle {
+            !listState.canScrollForward
+        })
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
     private fun advanceUntilMeasuredArrival(edgeTag: String = LIVE_ANSWER_EDGE_TAG) {

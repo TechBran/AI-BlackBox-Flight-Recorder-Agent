@@ -226,7 +226,7 @@ class LiveStreamFollowPolicyTest {
         assertTrue(policy.tick(7_000))
     }
 
-    @Test fun `completion while suspended retains returnability`() {
+    @Test fun `completion while suspended becomes tap only completed history`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()
         policy.onUserScroll(1_000)
@@ -234,8 +234,9 @@ class LiveStreamFollowPolicyTest {
         policy.onStreamCompleted(hasReturnDestination = true)
 
         assertFalse(policy.isActive)
-        assertEquals(LiveFollowMode.SUSPENDED, policy.mode)
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
         assertTrue(policy.showReturnToLive)
+        assertFalse(policy.tick(6_000))
         assertTrue(policy.resumeNow())
         assertEquals(LiveFollowMode.RETURNING, policy.mode)
     }
@@ -259,5 +260,55 @@ class LiveStreamFollowPolicyTest {
         policy.onProgrammaticScrollStarted()
         policy.onProgrammaticScrollFinished()
         assertFalse(policy.isSuspended)
+    }
+
+    @Test fun `inactive completed history shows tap only return when newer content remains`() {
+        val policy = LiveStreamFollowPolicy()
+
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+
+        assertFalse(policy.isActive)
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
+        assertTrue(policy.showReturnToLive)
+        assertTrue(policy.requiresReturnDestination)
+    }
+
+    @Test fun `completed history never schedules five second automatic return`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+
+        assertFalse(policy.tick(FOLLOW_RESUME_DELAY_MS * 2))
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
+    }
+
+    @Test fun `completed history enters returning only when arrow is tapped`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+
+        assertTrue(policy.resumeNow())
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        assertTrue(policy.showReturnToLive)
+    }
+
+    @Test fun `completed history clears shortcut when true bottom is reached manually`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+
+        policy.onCompletedHistoryPosition(canScrollForward = false)
+
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+        assertFalse(policy.showReturnToLive)
+        assertFalse(policy.requiresReturnDestination)
+    }
+
+    @Test fun `new live stream leaves completed history shortcut and starts page fill`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+
+        policy.start()
+
+        assertTrue(policy.isActive)
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+        assertFalse(policy.showReturnToLive)
     }
 }
