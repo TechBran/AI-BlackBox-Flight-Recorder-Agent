@@ -131,114 +131,184 @@ function pot(x, y, t) {
 let embers = [];
 function spawnEmber(n) {
     for (let i = 0; i < n; i++) {
-        const spark = Math.random() < 0.12, ml = 0.8 + Math.random() * 0.7;
+        const spark = Math.random() < 0.08, ml = 2.6 + Math.random() * 3.6; // long life → floats across
         embers.push({
-            x: width * (0.08 + Math.random() * 0.84), y: height + 10 + Math.random() * 20,
-            vx: (Math.random() - 0.5) * 60, vy: -(60 + Math.random() * 130),
-            life: 1, decay: 1 / ml, r: spark ? (1.6 + Math.random() * 1.4) : (6 + Math.random() * 11), spark
+            x: Math.random() * width, y: Math.random() * height,            // ANYWHERE on screen (not just the bottom)
+            vx: (Math.random() - 0.5) * 16, vy: -(4 + Math.random() * 14),   // gentle float, not a bottom jet
+            life: 1, decay: 1 / ml, r: spark ? (1.2 + Math.random() * 1.3) : (2.5 + Math.random() * 6),
+            spark, fade: Math.random() * 6.28, hue0: Math.floor(Math.random() * 3) // 0..2 varied warm heat
         });
     }
 }
 function drawEmbers(now, dt, isActive) {
     const ts = now * 0.001;
-    // heat-persistence smear: translucent dark fill instead of a hard clear
+    // heat-persistence smear (soft glowing trails). NO bottom ground-glow — real
+    // embers float across the WHOLE screen, not a fireball at the base.
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(8,6,10,0.15)';
+    ctx.fillStyle = 'rgba(8,6,10,0.20)';
     ctx.fillRect(0, 0, width, height);
-    // ground heat-glow (subtle; grows a touch with surge)
-    const gh = height * (0.32 + 0.1 * Math.min(surge, 1)), a = (0.13 + 0.14 * Math.min(surge, 1.2)) * FIELD.intensity;
-    const g = ctx.createLinearGradient(0, height, 0, height - gh);
-    g.addColorStop(0, `rgba(226,60,10,${a})`);
-    g.addColorStop(0.5, `rgba(170,28,6,${a * 0.5})`);
-    g.addColorStop(1, 'rgba(120,20,5,0)');
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = g;
-    ctx.fillRect(0, height - gh, width, gh);
-    // spawn (only while generating; during drain we stop feeding so it thins out)
+    // keep a full-screen population while generating (seeded full via initField)
     if (isActive) {
-        const perSec = (240 + surge * 840) * emberScale();
-        let acc = (drawEmbers._a || 0) + perSec * dt;
-        while (acc >= 1) { spawnEmber(1); acc--; }
+        const target = Math.round((150 + surge * 160) * emberScale());
+        let acc = (drawEmbers._a || 0) + (30 + surge * 90) * emberScale() * dt;
+        while (acc >= 1 && embers.length < target * 1.3) { spawnEmber(1); acc--; }
         drawEmbers._a = acc;
     }
+    ctx.globalCompositeOperation = 'lighter';
     const eps = 3;
     for (let i = embers.length - 1; i >= 0; i--) {
         const p = embers[i];
         p.life -= p.decay * dt;
         if (p.life <= 0) { embers[i] = embers[embers.length - 1]; embers.pop(); continue; }
-        // curl-noise swirl: v = curl(ψ) via central differences
+        // curl-noise swirl (gentle) + slow float — drifts everywhere, doesn't jet up
         const cvx = (pot(p.x, p.y + eps, ts) - pot(p.x, p.y - eps, ts));
         const cvy = -(pot(p.x + eps, p.y, ts) - pot(p.x - eps, p.y, ts));
-        p.vx += cvx * 7200 * dt; p.vy += cvy * 7200 * dt;
-        p.vy -= 52 * p.life * dt;                 // buoyancy ∝ heat
-        if (p.spark) p.vy += 120 * dt;            // sparks arc under gravity
-        p.vx *= (1 - 1.3 * dt); p.vy *= (1 - 0.9 * dt); // drag
+        p.vx += cvx * 5200 * dt; p.vy += cvy * 5200 * dt;
+        p.vy -= 9 * p.life * dt;                   // gentle buoyancy (slow float up)
+        if (p.spark) p.vy += 60 * dt;              // sparks drift down a touch
+        p.vx *= (1 - 0.9 * dt); p.vy *= (1 - 0.9 * dt); // drag
         p.x += p.vx * dt; p.y += p.vy * dt;
-        const idx = Math.max(0, Math.min(RAMP.length - 1, Math.round((1 - p.life) * (RAMP.length - 1))));
-        const spr = p.spark ? EMBER_SPR[0] : EMBER_SPR[idx];
-        const al = (p.spark ? 0.75 : 0.4) * p.life * FIELD.intensity;
+        // wrap horizontally so the field stays full across the whole width
+        if (p.x < -20) p.x = width + 20; else if (p.x > width + 20) p.x = -20;
+        const breathe = 0.6 + 0.4 * Math.sin(ts * 1.3 + p.fade);          // soft per-ember flicker
+        const idx = p.spark ? 0 : Math.max(0, Math.min(RAMP.length - 1, p.hue0 + Math.round((1 - p.life) * 3)));
+        const spr = EMBER_SPR[idx];                                       // varied warm heat, cooling as it ages
+        const al = (p.spark ? 0.85 : 0.55) * Math.min(1, p.life * 1.4) * breathe * FIELD.intensity;
         // faint big glow + bright core (cheap bloom)
-        const grr = p.r * (p.spark ? 4 : 4.2); ctx.globalAlpha = al * 0.22; ctx.drawImage(spr, p.x - grr, p.y - grr, grr * 2, grr * 2);
-        const cr = p.r * (p.spark ? 1.6 : 1.9); ctx.globalAlpha = al; ctx.drawImage(spr, p.x - cr, p.y - cr, cr * 2, cr * 2);
+        const grr = p.r * (p.spark ? 3.5 : 4.2); ctx.globalAlpha = al * 0.22; ctx.drawImage(spr, p.x - grr, p.y - grr, grr * 2, grr * 2);
+        const cr = p.r * (p.spark ? 1.5 : 1.9); ctx.globalAlpha = al; ctx.drawImage(spr, p.x - cr, p.y - cr, cr * 2, cr * 2);
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
-    if (embers.length > 2600) embers.splice(0, embers.length - 2600);
+    if (embers.length > 3000) embers.splice(0, embers.length - 3000);
 }
 
 // =============================================================================
-// Field: RISING STARS (parallax + de-synced twinkle) — DEFAULT
+// Field: RISING STARS — the ORIGINAL warm ember-rising field, restored verbatim
+// from the pre-3-mode engine (d125f05^). This is the look Brandon confirmed he
+// wants for "Rising Stars" ("I liked the way it looked before, it was perfect").
+// UI-free StarField of StarParticles, rendered via soft radial-gradient glow.
 // =============================================================================
-let stars = [];
-const LAYERS = [
-    { p: 0.6, s: [0.5, 1.0], vy: 0.4, a: [0.4, 0.6], glow: false }, // far / tiny
-    { p: 0.3, s: [1.0, 1.8], vy: 0.7, a: [0.6, 0.8], glow: false }, // mid / small
-    { p: 0.1, s: [1.8, 2.6], vy: 1.0, a: [0.8, 1.0], glow: true }   // fore / hero (glow)
-];
-function makeStar() {
-    const roll = Math.random(); let L = LAYERS[0];
-    if (roll > 0.9) L = LAYERS[2]; else if (roll > 0.6) L = LAYERS[1];
-    const sk = Math.pow(Math.random(), 2.2); // power-skewed: mostly tiny, few bright
-    return {
-        x: Math.random() * width, y: Math.random() * height,
-        size: L.s[0] + (L.s[1] - L.s[0]) * sk, vy: -(8 + Math.random() * 17) * L.vy, vx: (Math.random() - 0.5) * 4,
-        base: L.a[0] + (L.a[1] - L.a[0]) * Math.random(), amp: 0.25 + Math.random() * 0.2,
-        tw: 0.8 + Math.random() * 1.7, seed: Math.random() * 6.28,
-        hue: Math.random() < 0.7 ? 255 : (Math.random() < 0.5 ? 250 : 34), glow: L.glow
-    };
+const STAR_CONFIG = {
+    layers: [
+        { count: 40, speed: 0.3, size: [0.5, 1], opacity: 0.25 }, // far / tiny
+        { count: 50, speed: 0.5, size: [1, 2],   opacity: 0.4  }, // mid / small
+        { count: 30, speed: 0.8, size: [1.5, 3], opacity: 0.7  }  // fore / medium
+    ],
+    colors: [
+        { r: 255, g: 74, b: 74 }, { r: 255, g: 120, b: 50 }, { r: 255, g: 180, b: 50 },
+        { r: 255, g: 220, b: 100 }, { r: 255, g: 250, b: 200 }
+    ],
+    colorWeights: [0.3, 0.3, 0.2, 0.15, 0.05],
+    glowIntensity: 10, turbulence: 0.6, riseSpeed: 0.8, flickerSpeed: 0.015, trailLength: 2
+};
+function starPickColor() {
+    const rand = Math.random(); let cumulative = 0;
+    for (let i = 0; i < STAR_CONFIG.colorWeights.length; i++) {
+        cumulative += STAR_CONFIG.colorWeights[i];
+        if (rand < cumulative) return STAR_CONFIG.colors[i];
+    }
+    return STAR_CONFIG.colors[0];
 }
+class StarParticle {
+    constructor(layer) { this.layer = layer; this.reset(true); }
+    reset(initial) {
+        const w = this.layer._w, h = this.layer._h;
+        this.x = Math.random() * w;
+        this.y = h + Math.random() * 100;
+        this.size = this.layer.size[0] + Math.random() * (this.layer.size[1] - this.layer.size[0]);
+        this.baseSize = this.size;
+        this.color = starPickColor();
+        this.vx = (Math.random() - 0.5) * 2 * this.layer.speed;
+        this.vy = -(0.5 + Math.random() * 0.5) * STAR_CONFIG.riseSpeed * this.layer.speed;
+        this.baseVy = this.vy;
+        this.oscillationOffset = Math.random() * Math.PI * 2;
+        this.oscillationSpeed = 0.005 + Math.random() * 0.008;
+        this.oscillationAmplitude = 5 + Math.random() * 10;
+        this.flickerOffset = Math.random() * Math.PI * 2;
+        this.flickerSpeed = STAR_CONFIG.flickerSpeed * (0.8 + Math.random() * 0.4);
+        this.opacity = this.layer.opacity; this.baseOpacity = this.layer.opacity;
+        this.trail = []; this.life = 1; this.dead = false;
+        if (initial) this.y = Math.random() * h * 1.5; // stagger the first fill
+    }
+    update(time, active) {
+        const w = this.layer._w, h = this.layer._h;
+        const turbX = Math.sin(time * 0.0003 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.3;
+        const turbY = Math.cos(time * 0.0004 + this.oscillationOffset) * STAR_CONFIG.turbulence * 0.15;
+        const oscillation = Math.sin(time * this.oscillationSpeed + this.oscillationOffset) * this.oscillationAmplitude * 0.002;
+        this.vx += (turbX * 0.005 + oscillation - this.vx * 0.02);
+        this.vy = this.baseVy + turbY * 0.005;
+        this.x += this.vx; this.y += this.vy;
+        if (STAR_CONFIG.trailLength > 0) {
+            this.trail.unshift({ x: this.x, y: this.y, size: this.size, opacity: this.opacity });
+            if (this.trail.length > STAR_CONFIG.trailLength) this.trail.pop();
+        }
+        const f1 = Math.sin(time * this.flickerSpeed + this.flickerOffset);
+        const f2 = Math.sin(time * this.flickerSpeed * 0.7 + this.flickerOffset * 1.3);
+        const flicker = (f1 + f2 * 0.5) / 1.5;
+        this.opacity += (this.baseOpacity * (0.7 + flicker * 0.3) - this.opacity) * 0.05;
+        this.size += (this.baseSize * (0.9 + flicker * 0.1) - this.size) * 0.05;
+        if (this.y < h * 0.2) { this.life = this.y / (h * 0.2); this.opacity *= this.life; }
+        if (this.y < -50 || this.x < -50 || this.x > w + 50) {
+            if (active) this.reset(false); else this.dead = true;
+        }
+    }
+}
+class StarField {
+    constructor() { this.width = 0; this.height = 0; this.particles = []; this._spawned = false; }
+    resize(w, h) { this.width = w; this.height = h; this.particles.forEach(p => { p.layer._w = w; p.layer._h = h; }); }
+    spawn() {
+        this.particles = [];
+        STAR_CONFIG.layers.forEach(base => {
+            const layer = Object.assign({}, base, { _w: this.width, _h: this.height });
+            for (let i = 0; i < base.count; i++) this.particles.push(new StarParticle(layer));
+        });
+        this._spawned = true;
+    }
+    update(time, active) {
+        if (!this._spawned) this.spawn();
+        for (let i = 0; i < this.particles.length; i++) if (!this.particles[i].dead) this.particles[i].update(time, active);
+    }
+    rearm() { this.particles.forEach(p => { if (p.dead) p.reset(false); p.dead = false; }); }
+}
+function drawStarParticle(c, p) {
+    if (STAR_CONFIG.trailLength > 0) {
+        for (let i = 0; i < p.trail.length; i++) {
+            const t = p.trail[i];
+            const trailOpacity = t.opacity * (1 - i / STAR_CONFIG.trailLength) * 0.5;
+            const trailSize = t.size * (1 - i / STAR_CONFIG.trailLength);
+            c.beginPath(); c.arc(t.x, t.y, trailSize, 0, Math.PI * 2);
+            c.fillStyle = `rgba(${p.color.r},${p.color.g},${p.color.b},${trailOpacity})`; c.fill();
+        }
+    }
+    const g = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * STAR_CONFIG.glowIntensity);
+    g.addColorStop(0, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.8})`);
+    g.addColorStop(0.1, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.4})`);
+    g.addColorStop(0.4, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity * 0.1})`);
+    g.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
+    c.beginPath(); c.arc(p.x, p.y, p.size * STAR_CONFIG.glowIntensity, 0, Math.PI * 2); c.fillStyle = g; c.fill();
+    const cg = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+    cg.addColorStop(0, `rgba(255,255,255,${p.opacity})`);
+    cg.addColorStop(0.3, `rgba(${p.color.r},${p.color.g},${p.color.b},${p.opacity})`);
+    cg.addColorStop(1, `rgba(${p.color.r},${p.color.g},${p.color.b},0)`);
+    c.beginPath(); c.arc(p.x, p.y, p.size, 0, Math.PI * 2); c.fillStyle = cg; c.fill();
+}
+let starSim = null;
 function initStars() {
-    stars = [];
-    const N = Math.round(baseCount() * FIELD.density);
-    for (let i = 0; i < N; i++) stars.push(makeStar());
+    if (!starSim) starSim = new StarField();
+    starSim.resize(width, height);
+    starSim.spawn();
 }
-// Grow/trim the star array IN PLACE toward `want` so existing stars keep their
-// positions — a full initStars() re-scatter on a resize count-drift causes a
-// visible "pop" as every star jumps.
-function resizeStars(want) {
-    while (stars.length < want) stars.push(makeStar());
-    if (stars.length > want) stars.length = want;
-}
-function drawStars(now, dt) {
-    // Crisp points: CLEAR to transparent each frame (no smear) and draw additively
-    // over the black .chat — the exact compositing model of the field this replaces.
+function drawStars(now, dt, isActive) {
+    // Original compositing: full clear each frame + soft radial-gradient particles
+    // (source-over); trails are drawn explicitly by drawStarParticle. Motion is the
+    // original per-frame integration (not dt-scaled) to match the exact prior feel.
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, width, height);
-    const want = Math.round(baseCount() * FIELD.density);
-    if (Math.abs(want - stars.length) > 40) resizeStars(want);
-    ctx.globalCompositeOperation = 'lighter';
-    const ts = now * 0.001;
-    for (const s of stars) {
-        s.y += s.vy * dt; s.x += s.vx * dt;
-        if (s.y < -6) { s.y = height + 6; s.x = Math.random() * width; }
-        const al = Math.max(0, Math.min(1, (s.base + Math.sin(ts * s.tw + s.seed) * s.amp))) * FIELD.intensity;
-        const col = s.hue === 34 ? '255,205,110' : (s.hue === 250 ? '200,215,255' : '248,247,255');
-        if (s.glow) { const gr = s.size * 7; ctx.globalAlpha = al * 0.5; ctx.drawImage(STAR_SPR, s.x - gr, s.y - gr, gr * 2, gr * 2); }
-        ctx.globalAlpha = al; ctx.fillStyle = `rgb(${col})`;
-        ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, 6.2832); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
+    if (!starSim) initStars();
+    starSim.update(now, isActive !== false);
+    const ps = starSim.particles;
+    for (let i = 0; i < ps.length; i++) if (!ps[i].dead) drawStarParticle(ctx, ps[i]);
 }
 
 // =============================================================================
@@ -289,13 +359,13 @@ const DRAW = { stars: drawStars, embers: drawEmbers, matrix: drawMatrix };
 function initField(m) {
     if (m === 'stars') initStars();
     else if (m === 'matrix') initMatrix();
-    else if (m === 'embers') { embers = []; drawEmbers._a = 0; }
+    else if (m === 'embers') { embers = []; drawEmbers._a = 0; spawnEmber(Math.round(140 * emberScale())); }
 }
 // ensure the active field has state to draw (lazy — never resets a live field)
 function ensureFieldReady(m) {
-    if (m === 'stars' && stars.length === 0) initStars();
+    if (m === 'stars') { if (!starSim || !starSim._spawned) initStars(); else starSim.rearm(); }
     else if (m === 'matrix' && mCols.length === 0) initMatrix();
-    // embers self-fills from an empty array
+    else if (m === 'embers' && embers.length === 0) spawnEmber(Math.round(140 * emberScale())); // seed full so it doesn't drip in
 }
 
 // =============================================================================
@@ -330,6 +400,7 @@ function resize() {
     // embers self-fill from an empty array. Switching TO matrix re-inits via
     // setParticleMode → initField (and ensureFieldReady on activation).
     if (particleMode === 'matrix') initMatrix();
+    else if (particleMode === 'stars' && starSim) starSim.resize(width, height);
 }
 function clearCanvas() {
     if (!ctx) return;
