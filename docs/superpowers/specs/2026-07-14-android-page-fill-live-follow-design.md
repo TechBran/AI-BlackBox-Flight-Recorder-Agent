@@ -37,7 +37,9 @@ Thinking-to-answer handoff retains the current mode and boundary. It must not re
 
 Any user-originated scroll immediately enters suspended mode, cancels continuous correction, shows the existing down arrow, and starts the five-second idle timer. Further user interaction resets the timer.
 
-The arrow is right-aligned with its bottom edge directly adjacent to the measured top edge of the prompt window. It occupies the next line above the prompt, not the center of the message viewport. Its placement updates with prompt growth, attachments, keyboard visibility, system insets, rotation, and window-size changes.
+The arrow is right-aligned in a dedicated row north of the prompt window, not in the center of the message viewport. Its complete 48 dp touch target sits above the measured prompt top with an 8 dp clear gap, so it never overlaps the prompt or its controls. Its placement updates with prompt growth, attachments, keyboard visibility, system insets, rotation, and window-size changes.
+
+The arrow is hosted by the activity as the highest visual layer above navigation content, task panels, and the composer. The active main or agent chat publishes visibility, click behavior, and return state to this host; it does not render a competing screen-local arrow. The host remains mounted independently of Signal or stream activity, allowing older completed conversations to show the shortcut immediately when their list can scroll forward.
 
 Tapping the arrow starts one quick smooth glide to the newest live edge. Five seconds of uninterrupted idle starts the same glide automatically. The arrow remains visible and follow remains in a returning state until the measured live edge has reached the boundary within a small pixel tolerance. Only then does the arrow disappear and continuous line-follow resume.
 
@@ -51,7 +53,7 @@ After streaming completes, the arrow becomes a general scroll-to-bottom shortcut
 
 Completed-history reading never triggers the five-second automatic return. The viewport remains where the user placed it until the arrow is tapped. Tapping uses the same quick smooth, measurement-verified glide; the arrow disappears only after the completed-response bottom reaches its destination. If the list is already at the true bottom, the arrow is absent.
 
-The shortcut retains the same right-aligned position directly above the prompt window in main provider chat, Claude Code, and Gemini CLI.
+The shortcut retains the same right-aligned, dedicated 48 dp row with an 8 dp prompt gap in main provider chat, Claude Code, and Gemini CLI.
 
 ## Architecture
 
@@ -118,7 +120,7 @@ Run focused unit tests, the full JVM suite, Android test compilation, debug APK 
 3. Rapid token bursts do not queue or restart per-token animations.
 4. Thinking-to-answer handoff remains in the same focal region.
 5. Manual scrolling pauses follow immediately and shows the arrow.
-6. The arrow sits on the immediately adjacent line above the prompt window and never obstructs the middle reading area.
+6. The arrow's complete 48 dp touch target sits in a dedicated highest-layer row north of the prompt, separated from its measured top by 8 dp, and never intersects the prompt or middle reading area.
 7. Arrow tap and five-second idle return use a quick smooth glide and keep the arrow visible until measured arrival.
 8. User input can interrupt return at any time.
 9. Main provider chat, Claude Code, and Gemini CLI satisfy the same behavior.
