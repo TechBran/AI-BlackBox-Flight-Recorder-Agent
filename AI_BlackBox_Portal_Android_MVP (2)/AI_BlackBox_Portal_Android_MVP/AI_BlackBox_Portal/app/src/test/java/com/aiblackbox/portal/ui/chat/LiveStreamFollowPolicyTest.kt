@@ -47,6 +47,22 @@ class LiveStreamFollowPolicyTest {
         assertEquals(728f, geometry.liveTargetYPx)
     }
 
+    @Test fun `unmeasured window never emits invalid geometry`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = Float.NaN,
+            composerTopPx = Float.NaN,
+            composerBottomPx = Float.NaN,
+            residenceHeightPx = 60f,
+            breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+
+        assertTrue(geometry.residenceTopPx.isFinite())
+        assertTrue(geometry.residenceBottomPx.isFinite())
+        assertTrue(geometry.composerTopPx.isFinite())
+        assertTrue(geometry.liveTargetYPx.isFinite())
+    }
+
     @Test fun `user input suspends immediately and resumes only after five idle seconds`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()

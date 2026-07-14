@@ -52,6 +52,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -660,6 +661,7 @@ fun AgentChatScreen(
     provider: String = "agents",
     onSend: (String) -> Unit = {},
     chatViewModel: ChatViewModel? = null,
+    bottomFocalGeometry: BottomFocalGeometry? = null,
     modifier: Modifier = Modifier,
     viewModel: AgentViewModel = viewModel()
 ) {
@@ -752,6 +754,7 @@ fun AgentChatScreen(
             listState = listState,
             modifier = Modifier.fillMaxWidth().weight(1f),
             onSnapshotClick = { peekSnapId = it },
+            bottomFocalGeometry = bottomFocalGeometry,
         )
     }
 
@@ -791,6 +794,7 @@ internal fun AgentLiveMessageContent(
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
     onSnapshotClick: (String) -> Unit = {},
+    bottomFocalGeometry: BottomFocalGeometry? = null,
 ) {
     // AgentViewModel creates and mutates real `assistant` placeholders. Selecting
     // by that model value also remains correct if a user message follows history.
@@ -806,15 +810,26 @@ internal fun AgentLiveMessageContent(
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot)
     val expectedSection = cliLiveEdgeSection(phase)
+    val density = LocalDensity.current
+    val bottomClearance = bottomFocalGeometry?.let {
+        with(density) { (it.residenceBottomPx - it.composerTopPx).coerceAtLeast(0f).toDp() }
+    } ?: (FALLBACK_COMPOSER_HEIGHT + SIGNAL_RESIDENCE_HEIGHT)
 
     Box(modifier = modifier.testTag("agent-messages-$provider")) {
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
+                .then(
+                    if (bottomFocalGeometry != null) Modifier.padding(bottom = bottomClearance)
+                    else Modifier,
+                )
                 .liveStreamUserInput(followState)
                 .testTag("messages"),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 180.dp),
+            contentPadding = PaddingValues(
+                top = 8.dp,
+                bottom = if (bottomFocalGeometry == null) bottomClearance else 8.dp,
+            ),
         ) {
             items(items = messages, key = { it.id }) { message ->
                 val isLiveTurn = message.id == snapshot.messageId
@@ -828,9 +843,12 @@ internal fun AgentLiveMessageContent(
                 )
             }
         }
-        if (snapshot.isActive) {
-            LiveStreamFocalRail(label, followState)
-        }
+        LiveStreamFocalRail(
+            label = if (snapshot.isActive) label else null,
+            followState = followState,
+            liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
+            returnControlBottomPadding = bottomClearance,
+        )
     }
 }
 

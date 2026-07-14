@@ -3,6 +3,7 @@ package com.aiblackbox.portal.ui.chat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -129,9 +130,16 @@ internal fun MainChatContent(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
+                .then(
+                    if (bottomFocalGeometry != null) Modifier.padding(bottom = bottomClearance)
+                    else Modifier,
+                )
                 .liveStreamUserInput(followState)
                 .testTag("messages"),
-            contentPadding = PaddingValues(top = 8.dp, bottom = bottomClearance),
+            contentPadding = PaddingValues(
+                top = 8.dp,
+                bottom = if (bottomFocalGeometry == null) bottomClearance else 8.dp,
+            ),
         ) {
             items(items = messages, key = { it.id }) { message ->
                 val isLiveTurn = message.id == liveSnapshot.messageId
@@ -157,6 +165,7 @@ internal fun MainChatContent(
             signalLabel,
             followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
+            returnControlBottomPadding = bottomClearance,
         )
     }
 }

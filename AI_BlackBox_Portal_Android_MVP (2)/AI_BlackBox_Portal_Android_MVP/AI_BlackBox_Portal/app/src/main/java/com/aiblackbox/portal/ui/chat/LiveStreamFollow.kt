@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import com.aiblackbox.portal.ui.components.SignalLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -51,7 +52,6 @@ import kotlinx.coroutines.yield
 import kotlin.math.abs
 
 internal const val FOLLOW_RESUME_DELAY_MS = 5_000L
-internal val FOCAL_RAIL_OFFSET = 36.dp
 internal val LIVE_EDGE_GAP = 12.dp
 internal val SIGNAL_RESIDENCE_HEIGHT = 40.dp
 internal val FALLBACK_COMPOSER_HEIGHT = 180.dp
@@ -73,7 +73,13 @@ internal fun calculateBottomFocalGeometry(
     fallbackComposerHeightPx: Float,
 ): BottomFocalGeometry {
     val safeResidenceHeight = residenceHeightPx.coerceAtLeast(0f)
-    val residenceTop = windowBottomPx - safeResidenceHeight
+    val safeFallbackComposerHeight = fallbackComposerHeightPx.coerceAtLeast(0f)
+    val resolvedWindowBottom = if (windowBottomPx.isFinite()) {
+        windowBottomPx
+    } else {
+        safeResidenceHeight + safeFallbackComposerHeight
+    }
+    val residenceTop = resolvedWindowBottom - safeResidenceHeight
     val hasUsableComposerBounds = composerTopPx.isFinite() &&
         composerBottomPx.isFinite() &&
         composerTopPx <= composerBottomPx &&
@@ -82,11 +88,11 @@ internal fun calculateBottomFocalGeometry(
     val resolvedComposerTop = if (hasUsableComposerBounds) {
         composerTopPx
     } else {
-        resolvedComposerBottom - fallbackComposerHeightPx.coerceAtLeast(0f)
+        resolvedComposerBottom - safeFallbackComposerHeight
     }
     return BottomFocalGeometry(
         residenceTopPx = residenceTop,
-        residenceBottomPx = windowBottomPx,
+        residenceBottomPx = resolvedWindowBottom,
         composerTopPx = resolvedComposerTop,
         composerBottomPx = resolvedComposerBottom,
         liveTargetYPx = resolvedComposerTop - breathingGapPx.coerceAtLeast(0f),
@@ -340,6 +346,7 @@ internal fun BoxScope.LiveStreamFocalRail(
     followState: LiveStreamFollowState,
     modifier: Modifier = Modifier,
     liveTargetYPx: Float? = null,
+    returnControlBottomPadding: Dp = SIGNAL_RESIDENCE_HEIGHT,
 ) {
     val density = LocalDensity.current
     Box(
@@ -363,7 +370,11 @@ internal fun BoxScope.LiveStreamFocalRail(
     if (followState.showReturnToLive) {
         IconButton(
             onClick = followState::resumeNow,
-            modifier = Modifier.align(Alignment.BottomEnd).testTag("return-to-live"),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(bottom = returnControlBottomPadding)
+                .testTag("return-to-live"),
         ) {
             Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Return to live")
         }

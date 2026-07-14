@@ -101,6 +101,8 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
         compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
+        val arrowBottom = compose.onNodeWithTag("return-to-live").fetchSemanticsNode().boundsInRoot.bottom
+        assertTrue("return arrow must stay above the Signal residence", arrowBottom <= railTop())
     }
 
     @Test
@@ -111,6 +113,16 @@ class LiveStreamFocalFollowTest {
     @Test
     fun geminiAgentFollowsGrowingReasoningAndAnswer() {
         assertCliAgentFollowsGrowingReasoningAndAnswer("gemini-agents")
+    }
+
+    @Test
+    fun claudeAgentReservesEmptyBottomSignalResidence() {
+        assertAgentReservesEmptyBottomSignalResidence("agents")
+    }
+
+    @Test
+    fun geminiAgentReservesEmptyBottomSignalResidence() {
+        assertAgentReservesEmptyBottomSignalResidence("gemini-agents")
     }
 
     @Test
@@ -413,6 +425,30 @@ class LiveStreamFocalFollowTest {
             update(assistantMessage(200, 3_000, false), false, null)
         }
         assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
+    }
+
+    private fun assertAgentReservesEmptyBottomSignalResidence(provider: String) {
+        compose.setContent {
+            AgentLiveMessageContent(
+                messages = listOf(assistantMessage(0, 20, false)),
+                provider = provider,
+                status = "",
+                activeTool = null,
+                isThinking = false,
+                isStreaming = false,
+                bottomFocalGeometry = BottomFocalGeometry(
+                    residenceTopPx = 940f,
+                    residenceBottomPx = 1_000f,
+                    composerTopPx = 700f,
+                    composerBottomPx = 940f,
+                    liveTargetYPx = 688f,
+                ),
+            )
+        }
+
+        compose.onNodeWithTag("live-stream-rail")
+            .assertHeightIsEqualTo(SIGNAL_RESIDENCE_HEIGHT)
+            .assertContentDescriptionEquals("")
     }
 }
 

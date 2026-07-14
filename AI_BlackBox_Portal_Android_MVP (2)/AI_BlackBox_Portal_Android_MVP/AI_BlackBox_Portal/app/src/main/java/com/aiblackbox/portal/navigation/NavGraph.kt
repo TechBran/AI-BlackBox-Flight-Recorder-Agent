@@ -140,7 +140,8 @@ fun BlackBoxNavGraph(
                 origin = origin,
                 operator = operator,
                 provider = "agents",
-                chatViewModel = chatViewModel
+                chatViewModel = chatViewModel,
+                bottomFocalGeometry = bottomFocalGeometry,
             )
         }
         composable(Routes.GEMINI_AGENT) {
@@ -148,7 +149,8 @@ fun BlackBoxNavGraph(
                 origin = origin,
                 operator = operator,
                 provider = "gemini-agents",
-                chatViewModel = chatViewModel
+                chatViewModel = chatViewModel,
+                bottomFocalGeometry = bottomFocalGeometry,
             )
         }
         composable(Routes.SETTINGS) { PlaceholderScreen("Settings") }
