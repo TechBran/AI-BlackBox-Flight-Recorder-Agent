@@ -75,3 +75,27 @@ Result: expected compilation failure with unresolved references for `LIVE_REASON
 - `git diff --check` — exit 0, no whitespace errors.
 
 No ADB, phone, installation, instrumentation execution, or connected test command was used. The frame-by-frame Compose test is compile-verified offline and remains runtime device-gated.
+
+## Final Cursor/Callback Correction
+
+Date: 2026-07-14
+
+- Corrected the TOOL-only UI expectation: the blank answer cursor remains visually composed and tagged, while the exact 12dp assertion continues to target the tool-fallback edge.
+- Added and production-wired `cliLiveEdgeSection`, a pure selector proving callback precedence: THINKING to REASONING, ANSWERING to ANSWER, TOOL to TOOL_FALLBACK, and IDLE to null.
+- Named the frame handoff limits (`handoffMaxFrameStep` and `handoffMonotonicTolerancePx`).
+
+TDD RED:
+
+`./gradlew testDebugUnitTest --tests com.aiblackbox.portal.AgentEventProvenanceTest --offline`
+
+Result: expected compilation failure because `cliLiveEdgeSection` did not exist.
+
+Offline GREEN:
+
+- Focused JVM command including `AgentEventProvenanceTest` and `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+No connected or device command was used.

@@ -5,8 +5,10 @@ import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.ui.chat.cliLiveStatusLabel
 import com.aiblackbox.portal.ui.chat.cliLiveStreamPhase
 import com.aiblackbox.portal.ui.chat.LiveStreamPhase
+import com.aiblackbox.portal.ui.chat.cliLiveEdgeSection
 import com.aiblackbox.portal.ui.chat.reduceActiveTool
 import com.aiblackbox.portal.ui.chat.ToolIndicatorData
+import com.aiblackbox.portal.ui.components.LiveTextSection
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -34,6 +36,13 @@ class AgentEventProvenanceTest {
             LiveStreamPhase.ANSWERING,
             cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = null),
         )
+    }
+
+    @Test fun `CLI phase selects exactly one callback anchor with tool fallback precedence`() {
+        assertEquals(LiveTextSection.REASONING, cliLiveEdgeSection(LiveStreamPhase.THINKING))
+        assertEquals(LiveTextSection.ANSWER, cliLiveEdgeSection(LiveStreamPhase.ANSWERING))
+        assertEquals(LiveTextSection.TOOL_FALLBACK, cliLiveEdgeSection(LiveStreamPhase.TOOL))
+        assertNull(cliLiveEdgeSection(LiveStreamPhase.IDLE))
     }
 
     @Test fun `content result error disconnect and completion clear active tool`() {

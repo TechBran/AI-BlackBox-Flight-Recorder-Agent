@@ -38,6 +38,8 @@ import org.junit.Rule
 import org.junit.Test
 
 class LiveStreamFocalFollowTest {
+    private val handoffMaxFrameStep = 64.dp
+    private val handoffMonotonicTolerancePx = 1f
     @get:Rule
     val compose = createComposeRule()
 
@@ -227,7 +229,9 @@ class LiveStreamFocalFollowTest {
             )
         }
         compose.onNodeWithTag(LIVE_REASONING_EDGE_TAG).assertDoesNotExist()
-        compose.onNodeWithTag(LIVE_ANSWER_EDGE_TAG).assertDoesNotExist()
+        // The blank streaming cursor is still visually composed; TOOL callback
+        // precedence is proven separately by the pure phase selector test.
+        compose.onNodeWithTag(LIVE_ANSWER_EDGE_TAG).assertIsDisplayed()
         assertExactLiveEdgeGap(LIVE_TOOL_FALLBACK_EDGE_TAG)
     }
 
@@ -254,7 +258,7 @@ class LiveStreamFocalFollowTest {
             compose.mainClock.advanceTimeByFrame()
             positions += edgeBottom(LIVE_ANSWER_EDGE_TAG)
         }
-        val maxFrameStep = with(compose.density) { 64.dp.toPx() }
+        val maxFrameStep = with(compose.density) { handoffMaxFrameStep.toPx() }
         assertTrue("phase handoff jumped from $reasoningEdge to ${positions.first()}",
             kotlin.math.abs(positions.first() - reasoningEdge) <= maxFrameStep)
         positions.zipWithNext().forEach { (before, after) ->
@@ -264,7 +268,10 @@ class LiveStreamFocalFollowTest {
         val target = railTop() - with(compose.density) { LIVE_EDGE_GAP.toPx() }
         val errors = positions.map { kotlin.math.abs(it - target) }
         errors.zipWithNext().forEach { (before, after) ->
-            assertTrue("handoff must progress monotonically: $before -> $after", after <= before + 1f)
+            assertTrue(
+                "handoff must progress monotonically: $before -> $after",
+                after <= before + handoffMonotonicTolerancePx,
+            )
         }
         assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
     }

@@ -142,6 +142,13 @@ internal fun cliLiveStreamPhase(
     else -> LiveStreamPhase.ANSWERING
 }
 
+internal fun cliLiveEdgeSection(phase: LiveStreamPhase): LiveTextSection? = when (phase) {
+    LiveStreamPhase.THINKING -> LiveTextSection.REASONING
+    LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
+    LiveStreamPhase.TOOL -> LiveTextSection.TOOL_FALLBACK
+    LiveStreamPhase.IDLE -> null
+}
+
 internal fun reduceActiveTool(
     current: ToolIndicatorData?,
     event: AgentEvent,
@@ -798,12 +805,7 @@ internal fun AgentLiveMessageContent(
         statusLabel = label,
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot)
-    val expectedSection = when (phase) {
-        LiveStreamPhase.THINKING -> LiveTextSection.REASONING
-        LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
-        LiveStreamPhase.TOOL -> LiveTextSection.TOOL_FALLBACK
-        LiveStreamPhase.IDLE -> null
-    }
+    val expectedSection = cliLiveEdgeSection(phase)
 
     Box(modifier = modifier.testTag("agent-messages-$provider")) {
         LazyColumn(
