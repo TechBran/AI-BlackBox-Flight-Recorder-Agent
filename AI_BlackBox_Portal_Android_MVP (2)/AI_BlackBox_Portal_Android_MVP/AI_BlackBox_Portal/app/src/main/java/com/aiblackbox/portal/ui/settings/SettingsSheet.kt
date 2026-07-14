@@ -135,6 +135,7 @@ fun SettingsSheet(
     val operator by viewModel.store.operator.collectAsState(initial = "Brandon")
     val streaming by viewModel.store.streamingEnabled.collectAsState(initial = true)
     val emberMode by viewModel.store.emberMode.collectAsState(initial = "always")
+    val particleMode by viewModel.store.particleMode.collectAsState(initial = "stars")
 
     val perProviderModel by viewModel.store.getString("model_$provider", "")
         .collectAsState(initial = "")
@@ -849,7 +850,43 @@ fun SettingsSheet(
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "Warm ember particles in the background.",
+                "Show a moving particle field in the background.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // Particle style — Rising Stars (default) / Embers / Matrix.
+            // Orthogonal to the Ember Backdrop visibility setting above: this
+            // picks the FIELD look; that decides WHEN it shows. Live-switches.
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Particle style", BbxAccent)
+            val particleOptions = com.aiblackbox.portal.ui.components.ParticleMode.ALL.map { mode ->
+                mode to com.aiblackbox.portal.ui.components.ParticleMode.label(mode)
+            }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                particleOptions.forEachIndexed { index, (value, label) ->
+                    SegmentedButton(
+                        selected = particleMode == value,
+                        onClick = { viewModel.setParticleMode(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = particleOptions.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = BbxAccent.copy(alpha = 0.15f),
+                            activeContentColor = BbxAccent,
+                            activeBorderColor = BbxAccent.copy(alpha = 0.4f),
+                            inactiveContainerColor = Neutral100,
+                            inactiveContentColor = Neutral700,
+                            inactiveBorderColor = Neutral300,
+                        ),
+                        label = { Text(label, style = MaterialTheme.typography.bodyMedium) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Rising Stars drift, Embers glow, Matrix rains.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )

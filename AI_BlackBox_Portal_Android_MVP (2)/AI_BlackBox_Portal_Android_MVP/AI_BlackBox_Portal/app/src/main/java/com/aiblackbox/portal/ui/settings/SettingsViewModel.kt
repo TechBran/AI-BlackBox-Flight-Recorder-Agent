@@ -187,6 +187,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setEmberMode(value: String) { viewModelScope.launch { store.setEmberMode(value) } }
 
+    fun setParticleMode(value: String) { viewModelScope.launch { store.setParticleMode(value) } }
+
     fun setOperatorVoice(operator: String, voiceValue: String) {
         viewModelScope.launch { store.setOperatorVoice(operator, voiceValue) }
     }

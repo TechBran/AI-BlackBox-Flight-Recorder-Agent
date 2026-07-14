@@ -184,6 +184,9 @@ class NativeMainActivity : ComponentActivity() {
                 // Ember Backdrop mode (off / generating / always) — provided to the
                 // tree below via LocalEmberMode so EmberOverlay can honor it.
                 val emberMode by store.emberMode.collectAsState(initial = "always")
+                // Particle FIELD style (stars / embers / matrix) — provided to the
+                // tree below via LocalParticleMode so EmberOverlay picks the look.
+                val particleMode by store.particleMode.collectAsState(initial = "stars")
 
                 // Legacy audio recorder — still used by onRecordAudio (Gemini) and
                 // the CLI CliMicButton. onWhisper no longer drives it.
@@ -430,7 +433,8 @@ class NativeMainActivity : ComponentActivity() {
                 // Ember backdrop mode provided once here from the persisted setting;
                 // read by EmberOverlay deep in the tree (call sites still pass "is generating").
                 androidx.compose.runtime.CompositionLocalProvider(
-                    com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode
+                    com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
+                    com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode
                 ) {
                 Box(
                     modifier = Modifier

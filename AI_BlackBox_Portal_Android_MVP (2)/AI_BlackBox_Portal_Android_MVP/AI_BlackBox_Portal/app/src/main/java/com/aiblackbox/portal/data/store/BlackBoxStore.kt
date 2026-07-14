@@ -24,6 +24,7 @@ class BlackBoxStore(private val context: Context) {
         val KEY_TTS_VOICE = stringPreferencesKey("tts_voice")
         val KEY_ORIGIN = stringPreferencesKey("origin")
         val KEY_EMBER_MODE = stringPreferencesKey("ember_mode")
+        val KEY_PARTICLE_MODE = stringPreferencesKey("particle_mode")
     }
 
     // Origin (server URL)
@@ -38,9 +39,14 @@ class BlackBoxStore(private val context: Context) {
     val provider: Flow<String> = context.dataStore.data.map { it[KEY_PROVIDER] ?: "gemini" }
     suspend fun setProvider(value: String) { context.dataStore.edit { it[KEY_PROVIDER] = value } }
 
-    // Ember Backdrop mode — "off" / "generating" / "always" (default "always")
+    // Ember Backdrop VISIBILITY mode — "off" / "generating" / "always" (default "always")
     val emberMode: Flow<String> = context.dataStore.data.map { it[KEY_EMBER_MODE] ?: "always" }
     suspend fun setEmberMode(value: String) { context.dataStore.edit { it[KEY_EMBER_MODE] = value } }
+
+    // Particle FIELD style — "stars" / "embers" / "matrix" (default "stars").
+    // Orthogonal to emberMode (which governs OFF/GENERATING/ALWAYS visibility).
+    val particleMode: Flow<String> = context.dataStore.data.map { it[KEY_PARTICLE_MODE] ?: "stars" }
+    suspend fun setParticleMode(value: String) { context.dataStore.edit { it[KEY_PARTICLE_MODE] = value } }
 
     // CLI Agent Provider
     val cliAgentProviderFlow: Flow<String> =
