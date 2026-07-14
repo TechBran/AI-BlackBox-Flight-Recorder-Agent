@@ -140,6 +140,8 @@ internal class LiveStreamFollowPolicy {
     val isSuspended: Boolean get() = mode == LiveFollowMode.SUSPENDED
     var programmaticScroll: Boolean = false
         private set
+    var returningToCompletedBottom: Boolean = false
+        private set
     private var resumeAtMs: Long? = null
 
     val showReturnToLive: Boolean
@@ -149,8 +151,9 @@ internal class LiveStreamFollowPolicy {
     val requiresReturnDestination: Boolean get() = showReturnToLive
 
     fun start() {
-        if (!isActive && (!showReturnToLive || mode == LiveFollowMode.COMPLETED_HISTORY)) {
+        if (!isActive) {
             mode = LiveFollowMode.FILLING
+            returningToCompletedBottom = false
         }
         isActive = true
     }
@@ -160,6 +163,7 @@ internal class LiveStreamFollowPolicy {
         mode = LiveFollowMode.FILLING
         programmaticScroll = false
         resumeAtMs = null
+        returningToCompletedBottom = false
     }
 
     fun onUserScroll(nowMs: Long) {
@@ -167,6 +171,7 @@ internal class LiveStreamFollowPolicy {
         if (!isActive) {
             mode = LiveFollowMode.COMPLETED_HISTORY
             resumeAtMs = null
+            returningToCompletedBottom = false
             return
         }
         mode = LiveFollowMode.SUSPENDED
@@ -190,6 +195,7 @@ internal class LiveStreamFollowPolicy {
 
     fun resumeNow(): Boolean {
         if (!isSuspended && mode != LiveFollowMode.COMPLETED_HISTORY) return false
+        returningToCompletedBottom = mode == LiveFollowMode.COMPLETED_HISTORY
         mode = LiveFollowMode.RETURNING
         resumeAtMs = null
         return true
@@ -205,16 +211,21 @@ internal class LiveStreamFollowPolicy {
     }
 
     fun onMeasuredArrival(distancePx: Float, tolerancePx: Float): Boolean {
-        if (mode != LiveFollowMode.RETURNING || abs(distancePx) > tolerancePx) return false
+        if (mode != LiveFollowMode.RETURNING || returningToCompletedBottom || abs(distancePx) > tolerancePx) return false
         mode = if (isActive) LiveFollowMode.FOLLOWING else LiveFollowMode.FILLING
         return true
     }
 
     fun onCompletedHistoryPosition(canScrollForward: Boolean) {
-        if (isActive || mode == LiveFollowMode.RETURNING) return
+        if (isActive) return
+        if (mode == LiveFollowMode.RETURNING && returningToCompletedBottom) {
+            if (!canScrollForward) stop()
+            return
+        }
         if (canScrollForward) {
             mode = LiveFollowMode.COMPLETED_HISTORY
             resumeAtMs = null
+            returningToCompletedBottom = false
         } else if (mode == LiveFollowMode.COMPLETED_HISTORY) {
             stop()
         }
@@ -227,6 +238,7 @@ internal class LiveStreamFollowPolicy {
             mode == LiveFollowMode.SUSPENDED -> {
                 mode = LiveFollowMode.COMPLETED_HISTORY
                 resumeAtMs = null
+                returningToCompletedBottom = false
             }
         }
     }
@@ -314,6 +326,8 @@ internal class LiveStreamFollowState internal constructor(
 
     fun setActive(active: Boolean) {
         if (active) {
+            returnJob?.cancel()
+            policy.onProgrammaticScrollFinished()
             policy.start()
             ensureCorrectionLoop()
             correctionRequests.trySend(Unit)
@@ -381,6 +395,18 @@ internal class LiveStreamFollowState internal constructor(
         if (returnJob?.isActive == true) return
         while (returnMeasurementRequests.tryReceive().isSuccess) Unit
         returnJob = scope.launch {
+            if (policy.returningToCompletedBottom) {
+                val lastIndex = listState.layoutInfo.totalItemsCount - 1
+                if (lastIndex >= 0) {
+                    performProgrammaticScroll {
+                        if (reducedMotion()) listState.scrollToItem(lastIndex)
+                        else listState.animateScrollToItem(lastIndex)
+                    }
+                }
+                policy.onCompletedHistoryPosition(listState.canScrollForward)
+                syncVisibility()
+                return@launch
+            }
             var consumedGeneration = 0L
             while (policy.mode == LiveFollowMode.RETURNING) {
                 val measurement = measurements.consumeAfter(consumedGeneration)

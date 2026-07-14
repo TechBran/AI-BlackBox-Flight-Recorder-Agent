@@ -250,7 +250,7 @@ class LiveStreamFollowPolicyTest {
         assertTrue(policy.requiresReturnDestination)
         policy.resumeNow()
         assertTrue(policy.requiresReturnDestination)
-        policy.onMeasuredArrival(0f, tolerancePx = 1f)
+        policy.onCompletedHistoryPosition(canScrollForward = false)
         assertFalse(policy.requiresReturnDestination)
     }
 
@@ -310,5 +310,34 @@ class LiveStreamFollowPolicyTest {
         assertTrue(policy.isActive)
         assertEquals(LiveFollowMode.FILLING, policy.mode)
         assertFalse(policy.showReturnToLive)
+    }
+
+    @Test fun `completed return hides only at observed true list bottom`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(true)
+        policy.resumeNow()
+        assertTrue(policy.returningToCompletedBottom)
+        policy.onCompletedHistoryPosition(true)
+        assertTrue(policy.showReturnToLive)
+        policy.onCompletedHistoryPosition(false)
+        assertFalse(policy.showReturnToLive)
+    }
+
+    @Test fun `user interruption during completed return restores tap only history without timer`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(true)
+        policy.resumeNow()
+        policy.onUserScroll(2_000)
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
+        assertFalse(policy.tick(20_000))
+    }
+
+    @Test fun `new stream cancels completed return and starts filling`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(true)
+        policy.resumeNow()
+        policy.start()
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+        assertFalse(policy.returningToCompletedBottom)
     }
 }

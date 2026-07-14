@@ -241,3 +241,25 @@ Offline GREEN:
 - `git diff --check` — exit 0.
 
 Concern: completion Compose cases are compile-verified only because device/instrumentation execution was prohibited. No ADB command was used.
+
+## Completed-History True-Bottom Return
+
+Date: 2026-07-14; base `6e058ca1`.
+
+- Split completed-history return from live focal return with `returningToCompletedBottom` policy state.
+- Completed arrow taps now smoothly `animateScrollToItem` the stable final LazyColumn item (immediate `scrollToItem` under reduced motion), while live streaming returns retain focal-edge measurement behavior.
+- Arrow dismissal for completed history is driven only by observed `canScrollForward == false`; the policy now consumes this transition even during `RETURNING`, avoiding the previously lost distinct value after mode transition.
+- User input cancels a completed return back to tap-only `COMPLETED_HISTORY` with no five-second timer. A new stream cancels any completed-return job and starts `FILLING` with completed UI/anchor cleared.
+- Main, Claude, and Gemini completion tests now use bounded frame loops to prove true list-bottom arrival, stable `!canScrollForward` on the following frame, and arrow absence. Manual-bottom coverage uses a bounded loop rather than a fixed swipe count.
+
+TDD RED: focused policy compilation failed because `returningToCompletedBottom` did not exist; new tests cover true-bottom-only dismissal, interruption semantics, and new-stream cancellation.
+
+Offline GREEN:
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL` (29 tests).
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: real-screen completed-history Compose tests are compile-verified only because device/instrumentation execution was prohibited. No ADB command was used.

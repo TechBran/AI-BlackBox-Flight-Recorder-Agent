@@ -509,16 +509,19 @@ class LiveStreamFocalFollowTest {
 
     private fun assertProductionCompletionReturn(route: String) {
         lateinit var complete: () -> Unit
+        lateinit var listState: LazyListState
         compose.mainClock.autoAdvance = false
         compose.setContent {
             var streaming by remember { mutableStateOf(true) }
             complete = { streaming = false }
+            listState = rememberLazyListState()
             val message = assistantMessage(0, 3_000, false).copy(isStreaming = streaming)
             if (route == "main") {
                 MainChatContent(
                     messages = listOf(message),
                     chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
                     signalLabel = "Responding",
+                    listState = listState,
                 )
             } else {
                 AgentLiveMessageContent(
@@ -528,6 +531,7 @@ class LiveStreamFocalFollowTest {
                     activeTool = null,
                     isThinking = false,
                     isStreaming = streaming,
+                    listState = listState,
                 )
             }
         }
@@ -540,7 +544,7 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").performClick()
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        advanceUntilMeasuredArrival(COMPLETED_RETURN_EDGE_TAG)
+        advanceUntilTrueListBottom(listState)
         compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertDoesNotExist()
     }
 
@@ -592,13 +596,13 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
 
         compose.onNodeWithTag("return-to-live").performClick()
-        advanceUntilMeasuredArrival(COMPLETED_RETURN_EDGE_TAG)
+        advanceUntilTrueListBottom(listState)
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
 
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        repeat(8) {
+        repeat(30) {
             if (compose.runOnIdle { listState.canScrollForward }) {
                 compose.onNodeWithTag("messages").performTouchInput { swipeUp() }
                 compose.mainClock.advanceTimeByFrame()
@@ -608,6 +612,21 @@ class LiveStreamFocalFollowTest {
             !listState.canScrollForward
         })
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+    }
+
+    private fun advanceUntilTrueListBottom(listState: LazyListState) {
+        repeat(30) {
+            compose.mainClock.advanceTimeByFrame()
+            if (!compose.runOnIdle { listState.canScrollForward }) {
+                compose.mainClock.advanceTimeByFrame()
+                assertTrue("completed return must remain at true list bottom",
+                    compose.runOnIdle { !listState.canScrollForward })
+                compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+                return
+            }
+            compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        }
+        throw AssertionError("completed return did not reach true list bottom")
     }
 
     private fun advanceUntilMeasuredArrival(edgeTag: String = LIVE_ANSWER_EDGE_TAG) {
