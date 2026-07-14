@@ -276,13 +276,14 @@ private fun FollowHarness(
             item {
                 Spacer(
                     Modifier
-                        .height(1_200.dp)
+                        .height(600.dp)
                         .testTag("live-stream-edge")
                         .onGloballyPositioned { coordinates ->
                             followState.reportEdge(coordinates.boundsInWindow().bottom)
                         },
                 )
             }
+            item { Spacer(Modifier.height(1_200.dp)) }
         }
         LiveStreamFocalRail("Thinking", followState)
     }

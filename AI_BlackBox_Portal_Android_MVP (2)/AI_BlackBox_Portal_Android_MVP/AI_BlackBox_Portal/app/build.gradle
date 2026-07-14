@@ -19,6 +19,7 @@ android {
         // without uninstalling.
         versionCode 4
         versionName "1.2.0-tts-voice-catalog"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders.cleartext="true"
     }
 
