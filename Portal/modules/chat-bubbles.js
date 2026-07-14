@@ -19,34 +19,8 @@ import { scrollToBottomIfNeeded } from './ui-setup.js';
 // Constants
 // =============================================================================
 
-/** Thinking animation messages */
-const THINKING_MESSAGES = [
-    "Thinking",
-    "Making magic happen",
-    "Consulting the AI oracle",
-    "Brewing some intelligence",
-    "Contemplating the cosmos",
-    "Channeling digital wisdom",
-    "Computing brilliance",
-    "Summoning insights",
-    "Crafting your answer",
-    "Pondering deeply",
-    "Analyzing patterns",
-    "Generating brilliance"
-];
-
 /** Maximum history items to keep */
 const MAX_HISTORY_ITEMS = 100;
-
-// =============================================================================
-// State
-// =============================================================================
-
-/** Interval ID for thinking animation */
-let thinkingInterval = null;
-
-/** Current thinking message index */
-let currentThinkingIndex = 0;
 
 // =============================================================================
 // Utility Functions
@@ -128,7 +102,7 @@ export function createAnimatedThinkingBubble() {
 
     const textSpan = document.createElement("span");
     textSpan.className = "thinking-message";
-    textSpan.textContent = THINKING_MESSAGES[0];
+    textSpan.textContent = "Thinking";
 
     const dots = document.createElement("span");
     dots.className = "thinking-dots";
@@ -139,38 +113,6 @@ export function createAnimatedThinkingBubble() {
     wrap.appendChild(span);
 
     return wrap;
-}
-
-/**
- * Start the thinking animation
- * @param {HTMLElement} bubble - Thinking bubble element
- */
-export function startThinkingAnimation(bubble) {
-    if (!bubble) return;
-
-    currentThinkingIndex = 0;
-    const textSpan = bubble.querySelector(".thinking-message");
-
-    thinkingInterval = setInterval(() => {
-        currentThinkingIndex = (currentThinkingIndex + 1) % THINKING_MESSAGES.length;
-        if (textSpan) {
-            textSpan.style.opacity = '0';
-            setTimeout(() => {
-                textSpan.textContent = THINKING_MESSAGES[currentThinkingIndex];
-                textSpan.style.opacity = '1';
-            }, 150);
-        }
-    }, 2500);
-}
-
-/**
- * Stop the thinking animation
- */
-export function stopThinkingAnimation() {
-    if (thinkingInterval) {
-        clearInterval(thinkingInterval);
-        thinkingInterval = null;
-    }
 }
 
 // =============================================================================
@@ -487,7 +429,6 @@ export function removeLastAssistantBubble() {
 export function updateThinkingBubble(thinkingBubble, newContent) {
     if (!thinkingBubble) return;
 
-    stopThinkingAnimation();
     thinkingBubble.classList.remove("thinking");
 
     const newContentString = String(newContent ?? "");

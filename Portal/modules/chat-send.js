@@ -11,7 +11,7 @@ import { $, toast } from './core-utils.js';
 import { getHistoryData, setHistoryData, saveHistory, loadHistory, getOperator } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { addBubble, attachRetryChip, createAnimatedThinkingBubble, startThinkingAnimation, stopThinkingAnimation, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
+import { addBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
 import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
 import { openVideoExtensionModal } from './generation-modals.js';
@@ -122,65 +122,6 @@ function stripSnapshotFormat(text) {
 // Streaming Bubble Functions
 // =============================================================================
 
-// Reasoning cycling phrases for streaming chat
-const STREAMING_REASONING_PHRASES = [
-    "Reasoning",
-    "Thinking deeply",
-    "Analyzing",
-    "Processing",
-    "Contemplating",
-    "Evaluating options",
-    "Connecting ideas",
-    "Synthesizing",
-    "Deliberating",
-    "Exploring paths",
-    "Weighing factors",
-    "Forming insights",
-    "Building context",
-    "Mapping patterns",
-    "Refining thoughts",
-    "Considering angles",
-    "Crafting logic",
-    "Structuring response",
-    "Neural processing",
-    "Deep analysis"
-];
-
-let streamingReasoningInterval = null;
-let streamingReasoningIndex = 0;
-
-/**
- * Start the reasoning label cycling animation for streaming bubbles
- * @param {HTMLElement} panel - The reasoning panel element (floating or inline)
- */
-function startStreamingReasoningCycle(panel) {
-    if (streamingReasoningInterval) return;
-
-    const label = panel?.querySelector('.reasoning-label');
-    if (!label) return;
-
-    streamingReasoningIndex = 0;
-
-    streamingReasoningInterval = setInterval(() => {
-        streamingReasoningIndex = (streamingReasoningIndex + 1) % STREAMING_REASONING_PHRASES.length;
-        label.style.opacity = '0';
-        setTimeout(() => {
-            label.textContent = STREAMING_REASONING_PHRASES[streamingReasoningIndex];
-            label.style.opacity = '1';
-        }, 150);
-    }, 2000);
-}
-
-/**
- * Stop the reasoning label cycling animation
- */
-function stopStreamingReasoningCycle() {
-    if (streamingReasoningInterval) {
-        clearInterval(streamingReasoningInterval);
-        streamingReasoningInterval = null;
-    }
-}
-
 /**
  * Create a streaming thinking bubble
  * @returns {HTMLElement} Bubble element
@@ -262,9 +203,6 @@ export function createStreamingThinkingBubble() {
         </button>
     `;
     bubble.appendChild(controls);
-
-    // Start the cycling animation on floating panel
-    startStreamingReasoningCycle(floatingPanel);
 
     return bubble;
 }
@@ -805,9 +743,6 @@ export function appendResponseContent(bubble, text, fullResponse = null) {
  * @param {HTMLElement} bubble - Bubble element
  */
 export function markThinkingComplete(bubble) {
-    // Stop the cycling animation
-    stopStreamingReasoningCycle();
-
     // Get floating panel and copy its content to inline panel
     const floatingPanel = document.getElementById('floatingReasoningPanel');
     const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
@@ -1021,7 +956,6 @@ export async function sendStreamingChat(messages, provider, model, operator) {
             if (placeholder) placeholder.style.display = 'none';
             const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
             if (inlinePanel) inlinePanel.style.display = 'none';
-            stopStreamingReasoningCycle();
             // Initialize TodoTracker for CU session
             todoTracker.init('todoPanel', 'cu-' + Date.now());
         }
@@ -2430,7 +2364,6 @@ export async function send() {
             hist.appendChild(thinking);
             scrollToBottomIfNeeded();
         }
-        startThinkingAnimation(thinking);
 
         localStorage.setItem("bb_pending_response", JSON.stringify({
             timestamp: Date.now(),
@@ -2575,7 +2508,6 @@ export async function send() {
 
     } catch(e) {
         console.error("Chat error:", e);
-        stopThinkingAnimation();
         if (thinking) {
             updateThinkingBubble(thinking, "Chat error: " + (e?.message || String(e)));
         } else {

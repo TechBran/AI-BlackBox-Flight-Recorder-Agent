@@ -71,7 +71,6 @@ import {
     addBubble,
     attachRetryChip,
     createAnimatedThinkingBubble,
-    startThinkingAnimation,
     renderHistory
 } from './chat-bubbles.js';
 import {
@@ -313,7 +312,6 @@ function initHistory() {
             if (b.pendingTimestamp && pendingAge < fiveMinutes) {
                 const thinkingBubble = createAnimatedThinkingBubble();
                 hist.appendChild(thinkingBubble);
-                startThinkingAnimation(thinkingBubble);
                 console.log('[History] Restored recent pending message as thinking bubble');
                 continue;
             } else {
