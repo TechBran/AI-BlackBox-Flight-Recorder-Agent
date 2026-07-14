@@ -147,3 +147,32 @@ GREEN:
 - `git diff --check` — exit 0.
 
 `BottomFocalGeometry` remains public because it is exposed by existing public chat/navigation composable signatures; narrowing it would require a broader API-visibility refactor. No device or connected command was used.
+
+## Page-fill Measurement Generation Review
+
+Date: 2026-07-14; base `d3952d34`.
+
+### Fixes
+
+- Removed the unused `LatestLiveOverflow` test helper and replaced it with production-used generation-stamped `LatestLiveMeasurement` conflation.
+- Normal follow consumes only a strictly newer measurement generation. Repeated requests against unchanged edge/target layout are suppressed.
+- Return now uses one non-restarted loop. After every animated or reduced-motion correction it blocks for a newer layout measurement before checking arrival or scrolling again, preventing stale-distance spin and overscroll.
+- Removed the no-op `onPhaseChanged`; mode continuity is the honest default behavior.
+- Arrival tolerance is density-aware (1dp).
+- Controlled-clock return tests no longer use a fixed 500ms disappearance as proof: they advance frame by frame and only accept arrow disappearance when the measured edge has reached the target. Added active-return interruption coverage.
+
+### TDD RED
+
+`./gradlew testDebugUnitTest --tests com.aiblackbox.portal.ui.chat.LiveStreamFollowPolicyTest --offline`
+
+Result: compilation failed because the new production seam `LatestLiveMeasurement` did not exist. Tests specify latest-generation conflation, latest edge/target consumption, and stale-generation suppression.
+
+### Offline GREEN
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: controlled-clock Compose behavior is compile-verified only because device/instrumentation execution was prohibited. No ADB or connected command was used.

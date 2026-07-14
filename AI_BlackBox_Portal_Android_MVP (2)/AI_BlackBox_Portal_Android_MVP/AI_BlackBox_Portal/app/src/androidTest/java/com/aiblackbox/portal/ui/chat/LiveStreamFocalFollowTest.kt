@@ -24,6 +24,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
@@ -412,8 +413,7 @@ class LiveStreamFocalFollowTest {
         compose.mainClock.advanceTimeBy(1)
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        compose.mainClock.advanceTimeBy(500)
-        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+        advanceUntilMeasuredArrival()
     }
 
     @Test
@@ -425,8 +425,36 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed().performClick()
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        compose.mainClock.advanceTimeBy(500)
-        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+        advanceUntilMeasuredArrival()
+    }
+
+    @Test
+    fun userInputInterruptsActiveReturnAndKeepsArrowVisible() {
+        compose.mainClock.autoAdvance = false
+        compose.setContent { FollowHarness() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.onNodeWithTag("return-to-live").performClick()
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+    }
+
+    private fun advanceUntilMeasuredArrival() {
+        repeat(30) {
+            compose.mainClock.advanceTimeByFrame()
+            if (compose.onAllNodesWithTag("return-to-live").fetchSemanticsNodes().isEmpty()) {
+                val edge = edgeBottom(LIVE_ANSWER_EDGE_TAG)
+                val target = railTop() - with(compose.density) { LIVE_EDGE_GAP.toPx() }
+                val tolerance = with(compose.density) { 1.dp.toPx() }
+                assertTrue("arrow hid before measured arrival: edge=$edge target=$target",
+                    kotlin.math.abs(edge - target) <= tolerance)
+                return
+            }
+        }
+        throw AssertionError("return arrow did not hide after measured arrival")
     }
 
     private fun edgeBottom(tag: String): Float =

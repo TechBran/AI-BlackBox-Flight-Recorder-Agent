@@ -4,15 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
-    @Test fun `rapid edge updates conflate to newest overflow`() {
-        val pending = LatestLiveOverflow()
+    @Test fun `production measurements conflate and stale generations cannot be consumed twice`() {
+        val pending = LatestLiveMeasurement()
 
-        pending.offer(4f)
-        pending.offer(12f)
-        pending.offer(31f)
+        val first = pending.offer(edgeY = 4f, targetY = 0f)
+        pending.offer(edgeY = 12f, targetY = 0f)
+        val latest = pending.offer(edgeY = 31f, targetY = 3f)
 
-        assertEquals(31f, pending.consume())
-        assertNull(pending.consume())
+        assertEquals(latest, pending.consumeAfter(first.generation))
+        assertEquals(28f, latest.overflowPx)
+        assertNull(pending.consumeAfter(latest.generation))
+    }
+
+    @Test fun `measurement generations advance once per production report`() {
+        val pending = LatestLiveMeasurement()
+        val one = pending.offer(10f, 2f)
+        val two = pending.offer(10f, 2f)
+        assertEquals(one.generation + 1, two.generation)
     }
 
     @Test fun `bottom inset is occupied once and clearance includes it`() {
@@ -135,8 +143,6 @@ class LiveStreamFollowPolicyTest {
         val policy = LiveStreamFollowPolicy()
         policy.start()
         policy.onMeasuredOverflow(10f)
-
-        policy.onPhaseChanged()
 
         assertEquals(LiveFollowMode.FOLLOWING, policy.mode)
         assertEquals(6f, policy.onMeasuredOverflow(6f))

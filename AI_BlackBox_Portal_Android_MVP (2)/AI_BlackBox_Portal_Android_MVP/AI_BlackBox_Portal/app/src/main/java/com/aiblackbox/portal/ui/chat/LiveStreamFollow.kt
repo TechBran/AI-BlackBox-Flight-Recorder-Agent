@@ -49,7 +49,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.yield
 import kotlin.math.abs
 
 internal const val FOLLOW_RESUME_DELAY_MS = 5_000L
@@ -194,8 +193,6 @@ internal class LiveStreamFollowPolicy {
         LiveFollowMode.SUSPENDED, LiveFollowMode.RETURNING -> null
     }
 
-    fun onPhaseChanged() = Unit
-
     fun onMeasuredArrival(distancePx: Float, tolerancePx: Float): Boolean {
         if (mode != LiveFollowMode.RETURNING || abs(distancePx) > tolerancePx) return false
         mode = LiveFollowMode.FOLLOWING
@@ -208,14 +205,23 @@ internal class LiveStreamFollowPolicy {
     }
 }
 
-internal class LatestLiveOverflow {
-    private var latest: Float? = null
+internal data class LiveMeasurement(
+    val generation: Long,
+    val edgeY: Float,
+    val targetY: Float,
+) {
+    val overflowPx: Float get() = edgeY - targetY
+}
 
-    fun offer(overflowPx: Float) {
-        latest = overflowPx
-    }
+internal class LatestLiveMeasurement {
+    private var generation = 0L
+    private var latest: LiveMeasurement? = null
 
-    fun consume(): Float? = latest.also { latest = null }
+    fun offer(edgeY: Float, targetY: Float): LiveMeasurement =
+        LiveMeasurement(++generation, edgeY, targetY).also { latest = it }
+
+    fun consumeAfter(consumedGeneration: Long): LiveMeasurement? =
+        latest?.takeIf { it.generation > consumedGeneration }
 }
 
 @Stable
@@ -224,6 +230,7 @@ internal class LiveStreamFollowState internal constructor(
     private val scope: CoroutineScope,
     private val reducedMotion: () -> Boolean,
     private val nowMs: () -> Long = SystemClock::uptimeMillis,
+    private val arrivalTolerancePx: () -> Float = { 1f },
 ) {
     private val policy = LiveStreamFollowPolicy()
     var edgeY by mutableFloatStateOf(Float.NaN)
@@ -234,6 +241,8 @@ internal class LiveStreamFollowState internal constructor(
         private set
 
     private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
+    private val returnMeasurementRequests = Channel<Unit>(Channel.CONFLATED)
+    private val measurements = LatestLiveMeasurement()
     private var correctionJob: Job? = null
     private var returnJob: Job? = null
     private var resumeJob: Job? = null
@@ -243,12 +252,18 @@ internal class LiveStreamFollowState internal constructor(
 
     fun reportEdge(yInWindow: Float) {
         edgeY = yInWindow
-        correctionRequests.trySend(Unit)
+        reportMeasurement()
     }
 
     fun setTarget(yInWindow: Float) {
         targetY = yInWindow
+        reportMeasurement()
+    }
+
+    private fun reportMeasurement() {
+        measurements.offer(edgeY, targetY)
         correctionRequests.trySend(Unit)
+        returnMeasurementRequests.trySend(Unit)
     }
 
     fun setActive(active: Boolean) {
@@ -299,21 +314,31 @@ internal class LiveStreamFollowState internal constructor(
     private fun ensureCorrectionLoop() {
         if (correctionJob?.isActive == true) return
         correctionJob = scope.launch {
+            var consumedGeneration = 0L
             for (ignored in correctionRequests) {
                 if (!policy.isActive || edgeY.isNaN() || targetY.isNaN()) continue
-                val overflow = policy.onMeasuredOverflow(edgeY - targetY) ?: continue
+                val measurement = measurements.consumeAfter(consumedGeneration) ?: continue
+                consumedGeneration = measurement.generation
+                val overflow = policy.onMeasuredOverflow(measurement.overflowPx) ?: continue
                 performProgrammaticScroll { listState.scrollBy(overflow) }
             }
         }
     }
 
     private fun startReturn() {
-        returnJob?.cancel()
+        if (returnJob?.isActive == true) return
         returnJob = scope.launch {
+            var consumedGeneration = 0L
             while (policy.mode == LiveFollowMode.RETURNING) {
-                val distance = edgeY - targetY
+                val measurement = measurements.consumeAfter(consumedGeneration)
+                if (measurement == null) {
+                    returnMeasurementRequests.receive()
+                    continue
+                }
+                consumedGeneration = measurement.generation
+                val distance = measurement.overflowPx
                 if (!distance.isFinite()) return@launch
-                if (policy.onMeasuredArrival(distance, tolerancePx = 1f)) {
+                if (policy.onMeasuredArrival(distance, tolerancePx = arrivalTolerancePx())) {
                     syncVisibility()
                     correctionRequests.trySend(Unit)
                     return@launch
@@ -322,7 +347,6 @@ internal class LiveStreamFollowState internal constructor(
                     if (reducedMotion()) listState.scrollBy(distance)
                     else listState.animateScrollBy(distance, tween(durationMillis = 180))
                 }
-                yield()
             }
         }
         syncVisibility()
@@ -382,6 +406,7 @@ internal fun rememberLiveStreamFollowState(
     reducedMotionOverride: Boolean? = null,
 ): LiveStreamFollowState {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val reducedMotion by rememberUpdatedState(newValue = reducedMotionOverride ?: try {
         Settings.Global.getFloat(
@@ -393,7 +418,12 @@ internal fun rememberLiveStreamFollowState(
         false
     })
     val state = remember(listState, scope) {
-        LiveStreamFollowState(listState, scope, reducedMotion = { reducedMotion })
+        LiveStreamFollowState(
+            listState,
+            scope,
+            reducedMotion = { reducedMotion },
+            arrivalTolerancePx = { with(density) { 1.dp.toPx() } },
+        )
     }
 
     LaunchedEffect(state, snapshot.isActive) {
