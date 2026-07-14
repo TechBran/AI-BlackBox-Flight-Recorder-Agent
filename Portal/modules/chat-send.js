@@ -970,7 +970,10 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         let signalLastTool = "";
         // Push "generating · <model>" exactly once when the answer starts streaming.
         let signalGenerating = false;
-        const signalModelLabel = model || provider || 'model';
+        // Honest generating label = the REAL resolved model id. The `model` arg is
+        // often "" (window.__model unset), so this is refined from the stream_start
+        // frame's `model` field below; provider is only a last-ditch fallback.
+        let signalModelLabel = model || provider || 'model';
 
         let fullThinking = "";
         let fullResponse = "";
@@ -1110,6 +1113,9 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                                 console.log('[STREAM] Started:', data);
                                 setStreamingState(true); // Enable smooth scrolling
                                 if (provider === 'computer-use') _cuStreamActive = true;
+                                // The server resolves the real model id here — use it for
+                                // the honest "generating · <model>" line (not the provider).
+                                if (data.model) signalModelLabel = data.model;
                                 if (data.provenance) {
                                     provenance = data.provenance;
                                     console.log('[STREAM] Provenance:', provenance);
@@ -2300,14 +2306,19 @@ export async function send() {
                         console.log('[STREAM] Snapshot minted:', saveResult.snap_id);
                     }
 
-                    // The Signal: narrate the mint on the turn's HUD line, then
-                    // dissolve. Degrades gracefully — snap_id only until the
-                    // backend adds embedding dims (Task 1.4). Presentation-only.
+                    // The Signal: narrate the mint on the turn's HUD line as a brief
+                    // final flourish, then dissolve. The .signal-host survives
+                    // finalizeStreamingBubble, so the line is still mountable here.
+                    // Degrades gracefully — dims omitted if the save response lacks it.
+                    // Presentation-only: reads saveResult, never writes the payload.
                     const _sig = result.bubbleEl && result.bubbleEl._signalLine;
                     if (_sig && saveResult && saveResult.snap_id) {
                         const _dims = saveResult.dims || saveResult.embedding_dims;
                         _sig.push('mint · ' + saveResult.snap_id + (_dims ? ' · ' + _dims + 'd' : ''));
-                        _sig.dissolve();
+                        // Let the mint line fully morph in and linger before dissolving.
+                        // Dissolving synchronously would call push("") on the same tick
+                        // and cancel the just-scheduled mint-in animation (never visible).
+                        setTimeout(() => _sig.dissolve(), 1600);
                     }
 
                     if (saveResult.modified_response) {
