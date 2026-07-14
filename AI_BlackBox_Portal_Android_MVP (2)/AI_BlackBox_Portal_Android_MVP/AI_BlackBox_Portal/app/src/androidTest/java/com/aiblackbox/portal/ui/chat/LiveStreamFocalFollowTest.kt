@@ -8,6 +8,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -30,6 +34,44 @@ import org.junit.Test
 class LiveStreamFocalFollowTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun mainChatFollowsGrowingReasoningAndAnswerAndKeepsSignalWhileSuspended() {
+        lateinit var update: (UiMessage, ChatState) -> Unit
+        compose.setContent {
+            var message by remember {
+                mutableStateOf(assistantMessage(reasoningLength = 20, answerLength = 0, thinking = true))
+            }
+            var state by remember { mutableStateOf(ChatState.THINKING) }
+            update = { nextMessage, nextState ->
+                message = nextMessage
+                state = nextState
+            }
+            MainChatContent(
+                messages = listOf(message),
+                chatState = state,
+                signalLabel = "Thinking",
+            )
+        }
+
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(assistantMessage(reasoningLength = 200, answerLength = 0, thinking = true), ChatState.THINKING)
+        }
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(assistantMessage(reasoningLength = 200, answerLength = 20, thinking = false), ChatState.STREAMING)
+        }
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(assistantMessage(reasoningLength = 200, answerLength = 200, thinking = false), ChatState.STREAMING)
+        }
+        assertLiveEdgeAboveRail()
+
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
+    }
 
     @Test
     fun thinkingReportsReasoningEdgeAndAnswerStreamingReportsAnswerEdge() {
@@ -128,7 +170,23 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed().performClick()
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
+
+    private fun assertLiveEdgeAboveRail() {
+        compose.waitForIdle()
+        val edge = compose.onNodeWithTag("live-stream-edge").fetchSemanticsNode().boundsInRoot.bottom
+        val rail = compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
+        assertTrue("expected live edge ($edge) above rail ($rail)", edge < rail)
+    }
 }
+
+private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: Boolean) = UiMessage(
+    id = "live",
+    role = "assistant",
+    content = "a".repeat(answerLength),
+    reasoning = "r".repeat(reasoningLength),
+    isStreaming = true,
+    isThinking = thinking,
+)
 
 @Composable
 private fun FollowHarness(
