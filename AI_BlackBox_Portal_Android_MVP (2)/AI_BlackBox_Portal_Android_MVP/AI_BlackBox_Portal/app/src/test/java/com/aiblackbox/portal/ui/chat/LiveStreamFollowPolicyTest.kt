@@ -4,6 +4,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
+    @Test fun `bottom inset is occupied once and clearance includes it`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = 1_000f, effectiveBottomInsetPx = 300f,
+            composerTopPx = 400f, composerBottomPx = 640f,
+            residenceHeightPx = 60f, breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+        assertTrue(geometry.isReady)
+        assertEquals(640f, geometry.residenceTopPx)
+        assertEquals(700f, geometry.residenceBottomPx)
+        assertEquals(600f, geometry.bottomClearancePx)
+    }
+
+    @Test fun `unmeasured startup has no global live target until geometry is visible`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = Float.NaN, effectiveBottomInsetPx = 300f,
+            composerTopPx = Float.NaN, composerBottomPx = Float.NaN,
+            residenceHeightPx = 60f, breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+        assertFalse(geometry.isReady)
+        assertNull(geometry.liveTargetYPx)
+        assertTrue(geometry.residenceTopPx >= 0f)
+    }
     @Test fun `bottom residence stays below composer controls`() {
         val geometry = calculateBottomFocalGeometry(
             windowBottomPx = 1_000f,
@@ -47,7 +71,7 @@ class LiveStreamFollowPolicyTest {
         assertEquals(728f, geometry.liveTargetYPx)
     }
 
-    @Test fun `unmeasured window never emits invalid geometry`() {
+    @Test fun `unmeasured window keeps local rail fallback active`() {
         val geometry = calculateBottomFocalGeometry(
             windowBottomPx = Float.NaN,
             composerTopPx = Float.NaN,
@@ -57,10 +81,9 @@ class LiveStreamFollowPolicyTest {
             fallbackComposerHeightPx = 200f,
         )
 
-        assertTrue(geometry.residenceTopPx.isFinite())
-        assertTrue(geometry.residenceBottomPx.isFinite())
-        assertTrue(geometry.composerTopPx.isFinite())
-        assertTrue(geometry.liveTargetYPx.isFinite())
+        assertFalse(geometry.isReady)
+        assertNull(geometry.liveTargetYPx)
+        assertTrue(geometry.residenceTopPx <= geometry.residenceBottomPx)
     }
 
     @Test fun `user input suspends immediately and resumes only after five idle seconds`() {

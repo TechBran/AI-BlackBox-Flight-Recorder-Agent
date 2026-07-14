@@ -16,6 +16,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.padding
@@ -447,6 +451,10 @@ class NativeMainActivity : ComponentActivity() {
                 var windowBottomPx by remember { mutableStateOf(Float.NaN) }
                 var composerTopPx by remember { mutableStateOf(Float.NaN) }
                 var composerBottomPx by remember { mutableStateOf(Float.NaN) }
+                val effectiveBottomInsetPx = WindowInsets.ime
+                    .union(WindowInsets.navigationBars)
+                    .getBottom(density)
+                    .toFloat()
                 val bottomFocalGeometry = calculateBottomFocalGeometry(
                     windowBottomPx = windowBottomPx,
                     composerTopPx = composerTopPx,
@@ -454,6 +462,7 @@ class NativeMainActivity : ComponentActivity() {
                     residenceHeightPx = with(density) { SIGNAL_RESIDENCE_HEIGHT.toPx() },
                     breathingGapPx = with(density) { LIVE_EDGE_GAP.toPx() },
                     fallbackComposerHeightPx = with(density) { FALLBACK_COMPOSER_HEIGHT.toPx() },
+                    effectiveBottomInsetPx = effectiveBottomInsetPx,
                 )
                 Box(
                     modifier = Modifier
@@ -764,11 +773,15 @@ class NativeMainActivity : ComponentActivity() {
                         // Without this, the Box measured to fill available height, creating
                         // an invisible touch-consuming overlay above the visible Composer.
                         .wrapContentHeight(Alignment.Bottom)
-                        .padding(bottom = SIGNAL_RESIDENCE_HEIGHT)
+                        .padding(
+                            bottom = SIGNAL_RESIDENCE_HEIGHT +
+                                with(density) { effectiveBottomInsetPx.toDp() },
+                        )
                     ) {
                         Composer(
                             value = inputText,
                             onValueChange = { chatViewModel.onInputChange(it) },
+                            applySystemBottomInsets = false,
                             onSend = {
                                 // Send while the mic is live → stop it and send in one
                                 // tap. Kill the stream, arm the trailing-final discard so

@@ -61,8 +61,15 @@ data class BottomFocalGeometry(
     val residenceBottomPx: Float,
     val composerTopPx: Float,
     val composerBottomPx: Float,
-    val liveTargetYPx: Float,
-)
+    val liveTargetYPx: Float?,
+    val occupiedBottomInsetPx: Float = 0f,
+    val isReady: Boolean = true,
+) {
+    val appOwnedBottomClearancePx: Float
+        get() = (residenceBottomPx - composerTopPx).coerceAtLeast(0f)
+    val bottomClearancePx: Float
+        get() = occupiedBottomInsetPx + appOwnedBottomClearancePx
+}
 
 internal fun calculateBottomFocalGeometry(
     windowBottomPx: Float,
@@ -71,15 +78,14 @@ internal fun calculateBottomFocalGeometry(
     residenceHeightPx: Float,
     breathingGapPx: Float,
     fallbackComposerHeightPx: Float,
+    effectiveBottomInsetPx: Float = 0f,
 ): BottomFocalGeometry {
     val safeResidenceHeight = residenceHeightPx.coerceAtLeast(0f)
     val safeFallbackComposerHeight = fallbackComposerHeightPx.coerceAtLeast(0f)
-    val resolvedWindowBottom = if (windowBottomPx.isFinite()) {
-        windowBottomPx
-    } else {
-        safeResidenceHeight + safeFallbackComposerHeight
-    }
-    val residenceTop = resolvedWindowBottom - safeResidenceHeight
+    val safeInset = effectiveBottomInsetPx.takeIf { it.isFinite() }?.coerceAtLeast(0f) ?: 0f
+    val isReady = windowBottomPx.isFinite() && windowBottomPx > safeInset
+    val resolvedWindowBottom = if (isReady) windowBottomPx - safeInset else 0f
+    val residenceTop = (resolvedWindowBottom - safeResidenceHeight).coerceAtLeast(0f)
     val hasUsableComposerBounds = composerTopPx.isFinite() &&
         composerBottomPx.isFinite() &&
         composerTopPx <= composerBottomPx &&
@@ -88,14 +94,18 @@ internal fun calculateBottomFocalGeometry(
     val resolvedComposerTop = if (hasUsableComposerBounds) {
         composerTopPx
     } else {
-        resolvedComposerBottom - safeFallbackComposerHeight
+        (resolvedComposerBottom - safeFallbackComposerHeight).coerceAtLeast(0f)
     }
     return BottomFocalGeometry(
         residenceTopPx = residenceTop,
         residenceBottomPx = resolvedWindowBottom,
         composerTopPx = resolvedComposerTop,
         composerBottomPx = resolvedComposerBottom,
-        liveTargetYPx = resolvedComposerTop - breathingGapPx.coerceAtLeast(0f),
+        liveTargetYPx = if (isReady) {
+            (resolvedComposerTop - breathingGapPx.coerceAtLeast(0f)).coerceAtLeast(0f)
+        } else null,
+        occupiedBottomInsetPx = safeInset,
+        isReady = isReady,
     )
 }
 
@@ -347,12 +357,16 @@ internal fun BoxScope.LiveStreamFocalRail(
     modifier: Modifier = Modifier,
     liveTargetYPx: Float? = null,
     returnControlBottomPadding: Dp = SIGNAL_RESIDENCE_HEIGHT,
+    effectiveBottomInset: Dp? = null,
 ) {
     val density = LocalDensity.current
     Box(
         modifier = modifier
             .align(Alignment.BottomCenter)
-            .navigationBarsPadding()
+            .then(
+                if (effectiveBottomInset == null) Modifier.navigationBarsPadding()
+                else Modifier.padding(bottom = effectiveBottomInset),
+            )
             .fillMaxWidth()
             .height(SIGNAL_RESIDENCE_HEIGHT)
             .testTag("live-stream-rail")
@@ -372,7 +386,10 @@ internal fun BoxScope.LiveStreamFocalRail(
             onClick = followState::resumeNow,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .navigationBarsPadding()
+                .then(
+                    if (effectiveBottomInset == null) Modifier.navigationBarsPadding()
+                    else Modifier.padding(bottom = effectiveBottomInset),
+                )
                 .padding(bottom = returnControlBottomPadding)
                 .testTag("return-to-live"),
         ) {

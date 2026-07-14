@@ -99,3 +99,33 @@ Offline GREEN:
 - `git diff --check` — exit 0.
 
 No connected or device command was used.
+
+## Bottom Signal Residence Review
+
+Date: 2026-07-14; base `eadba48d`.
+
+### Changes
+
+- Native shell now computes one effective bottom inset from `IME union navigationBars`. The host applies it once: Composer opts out of its legacy internal system padding, while both Composer and the Signal residence consume the same inset contract.
+- Signal residence is the lowest app-owned row above the occupied inset; Composer and its provider/model/Auto-TTS controls sit directly above it.
+- `BottomFocalGeometry` now exposes centralized app-owned/total clearance, occupied inset, readiness, and a nullable target. Unmeasured startup emits no global target and uses the locally measured rail fallback; fallback geometry is visibly clamped at zero.
+- Main and agent message viewports consume total bottom clearance, while return controls consume app-owned clearance plus the shared inset exactly once.
+- Added a production-faithful Compose shell harness using the real `Composer`, real main chat residence/content, controllable inset, and controllable composer height. It asserts ordering, controls clearance, viewport exclusion, occupied inset, and dynamic recomputation.
+
+### TDD Evidence
+
+RED command:
+
+`./gradlew testDebugUnitTest --tests com.aiblackbox.portal.ui.chat.LiveStreamFollowPolicyTest --offline`
+
+Expected failure: missing `effectiveBottomInsetPx`, `isReady`, and `bottomClearancePx` contracts. After the first implementation, the visibility assertion also failed because startup residence top was `-60`; production was then clamped to the visible range before GREEN.
+
+### Offline Verification
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL` (11 tests, zero failures).
+- `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: the production-faithful Compose shell test is compile-verified only because connected/instrumentation execution was explicitly prohibited. No ADB, phone, install, or connected-test command was used.

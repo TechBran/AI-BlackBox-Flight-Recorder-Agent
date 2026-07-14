@@ -1,9 +1,11 @@
 package com.aiblackbox.portal.ui.chat
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -13,6 +15,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
@@ -43,6 +47,38 @@ class LiveStreamFocalFollowTest {
     private val handoffMonotonicTolerancePx = 1f
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun productionComposerAndSignalResidenceShareOneDynamicBottomInsetContract() {
+        lateinit var update: (Int, Int) -> Unit
+        compose.setContent {
+            var insetDp by remember { mutableStateOf(120) }
+            var extraComposerDp by remember { mutableStateOf(0) }
+            update = { inset, extra -> insetDp = inset; extraComposerDp = extra }
+            BottomResidenceShellHarness(insetDp.dp, extraComposerDp.dp)
+        }
+
+        fun assertShell() {
+            compose.waitForIdle()
+            val root = compose.onNodeWithTag("bottom-shell").fetchSemanticsNode().boundsInRoot
+            val composer = compose.onNodeWithTag("real-composer").fetchSemanticsNode().boundsInRoot
+            val controls = compose.onNodeWithTag("composer-controls").fetchSemanticsNode().boundsInRoot
+            val autoTts = compose.onNodeWithTag("composer-auto-tts").fetchSemanticsNode().boundsInRoot
+            val rail = compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot
+            val messages = compose.onNodeWithTag("messages").fetchSemanticsNode().boundsInRoot
+            assertTrue("composer controls must sit directly above residence", composer.bottom <= rail.top)
+            assertTrue("provider/model controls must clear residence", controls.bottom <= rail.top)
+            assertTrue("Auto-TTS must clear residence", autoTts.bottom <= rail.top)
+            assertTrue("messages must exclude composer and residence", messages.bottom <= composer.top)
+            assertTrue("residence must remain above occupied inset", rail.bottom < root.bottom)
+        }
+
+        assertShell()
+        val firstRailTop = railTop()
+        compose.runOnIdle { update(240, 48) }
+        assertShell()
+        assertTrue("rail must recompute when effective inset changes", railTop() < firstRailTop)
+    }
 
     @Test
     fun mainSignalResidenceKeepsItsHeightWhenLabelDisappears() {
@@ -460,6 +496,56 @@ private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: 
     isStreaming = true,
     isThinking = thinking,
 )
+
+@Composable
+private fun BottomResidenceShellHarness(effectiveInset: androidx.compose.ui.unit.Dp, extraComposerHeight: androidx.compose.ui.unit.Dp) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var windowBottom by remember { mutableStateOf(Float.NaN) }
+    var composerTop by remember { mutableStateOf(Float.NaN) }
+    var composerBottom by remember { mutableStateOf(Float.NaN) }
+    val geometry = calculateBottomFocalGeometry(
+        windowBottomPx = windowBottom,
+        effectiveBottomInsetPx = with(density) { effectiveInset.toPx() },
+        composerTopPx = composerTop,
+        composerBottomPx = composerBottom,
+        residenceHeightPx = with(density) { SIGNAL_RESIDENCE_HEIGHT.toPx() },
+        breathingGapPx = with(density) { LIVE_EDGE_GAP.toPx() },
+        fallbackComposerHeightPx = with(density) { FALLBACK_COMPOSER_HEIGHT.toPx() },
+    )
+    Box(
+        Modifier.fillMaxSize().testTag("bottom-shell").onGloballyPositioned {
+            windowBottom = it.boundsInWindow().bottom
+        },
+    ) {
+        MainChatContent(
+            messages = listOf(assistantMessage(0, 40, false)),
+            chatState = ChatState.IDLE,
+            signalLabel = "Ready",
+            bottomFocalGeometry = geometry,
+        )
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = SIGNAL_RESIDENCE_HEIGHT + effectiveInset)
+                .testTag("real-composer")
+                .onGloballyPositioned {
+                    val bounds = it.boundsInWindow()
+                    composerTop = bounds.top
+                    composerBottom = bounds.bottom
+                },
+        ) {
+            Spacer(Modifier.height(extraComposerHeight))
+            Composer(
+                value = TextFieldValue(""),
+                onValueChange = {},
+                onSend = {},
+                provider = "gemini",
+                model = "",
+                applySystemBottomInsets = false,
+            )
+        }
+    }
+}
 
 @Composable
 private fun FollowHarness(
