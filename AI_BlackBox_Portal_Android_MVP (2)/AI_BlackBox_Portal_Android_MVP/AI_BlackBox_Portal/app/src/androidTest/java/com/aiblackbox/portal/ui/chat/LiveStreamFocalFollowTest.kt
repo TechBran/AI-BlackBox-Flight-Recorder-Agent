@@ -126,12 +126,14 @@ class LiveStreamFocalFollowTest {
             var streaming by remember { mutableStateOf(true) }
             complete = { streaming = false }
             listState = rememberLazyListState()
-            MainChatContent(
-                messages = listOf(assistantMessage(0, 12_000, false).copy(isStreaming = streaming)),
-                chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
-                signalLabel = "Responding",
-                listState = listState,
-            )
+            ProductionReturnHostHarness {
+                MainChatContent(
+                    messages = listOf(assistantMessage(0, 12_000, false).copy(isStreaming = streaming)),
+                    chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
+                    signalLabel = "Responding",
+                    listState = listState,
+                )
+            }
         }
 
         compose.mainClock.advanceTimeBy(500)
@@ -140,6 +142,7 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.mainClock.advanceTimeByFrame()
         assertTrue(compose.runOnIdle { listState.canScrollForward })
+        assertSingleReturnArrowDisplayed()
         compose.onNodeWithTag("return-to-live").performClick()
 
         advanceUntilTrueListBottom(listState, maxFrames = 180)
@@ -237,11 +240,13 @@ class LiveStreamFocalFollowTest {
                 message = nextMessage
                 state = nextState
             }
-            MainChatContent(
-                messages = listOf(message),
-                chatState = state,
-                signalLabel = "Thinking",
-            )
+            ProductionReturnHostHarness {
+                MainChatContent(
+                    messages = listOf(message),
+                    chatState = state,
+                    signalLabel = "Thinking",
+                )
+            }
         }
 
         assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
@@ -259,7 +264,7 @@ class LiveStreamFocalFollowTest {
         assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
 
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertSingleReturnArrowDisplayed()
         compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
         val arrowBottom = compose.onNodeWithTag("return-to-live").fetchSemanticsNode().boundsInRoot.bottom
         assertTrue("return arrow must stay above the Signal residence", arrowBottom <= railTop())
@@ -534,10 +539,10 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("return-to-live").performClick()
         compose.mainClock.advanceTimeByFrame()
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertSingleReturnArrowDisplayed()
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.mainClock.advanceTimeByFrame()
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertSingleReturnArrowDisplayed()
     }
 
     private fun assertControlledPageFill(phase: LiveStreamPhase) {
@@ -580,28 +585,30 @@ class LiveStreamFocalFollowTest {
             complete = { streaming = false }
             listState = rememberLazyListState()
             val message = assistantMessage(0, 3_000, false).copy(isStreaming = streaming)
-            if (route == "main") {
-                MainChatContent(
-                    messages = listOf(message),
-                    chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
-                    signalLabel = "Responding",
-                    listState = listState,
-                )
-            } else {
-                AgentLiveMessageContent(
-                    messages = listOf(message),
-                    provider = route,
-                    status = "Responding",
-                    activeTool = null,
-                    isThinking = false,
-                    isStreaming = streaming,
-                    listState = listState,
-                )
+            ProductionReturnHostHarness {
+                if (route == "main") {
+                    MainChatContent(
+                        messages = listOf(message),
+                        chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
+                        signalLabel = "Responding",
+                        listState = listState,
+                    )
+                } else {
+                    AgentLiveMessageContent(
+                        messages = listOf(message),
+                        provider = route,
+                        status = "Responding",
+                        activeTool = null,
+                        isThinking = false,
+                        isStreaming = streaming,
+                        listState = listState,
+                    )
+                }
             }
         }
         compose.mainClock.advanceTimeBy(500)
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertSingleReturnArrowDisplayed()
         compose.runOnIdle { complete() }
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertIsDisplayed()
@@ -621,23 +628,25 @@ class LiveStreamFocalFollowTest {
             complete = { streaming = false }
             listState = rememberLazyListState()
             val message = assistantMessage(0, 3_000, false).copy(isStreaming = streaming)
-            if (route == "main") {
-                MainChatContent(
-                    messages = listOf(message),
-                    chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
-                    signalLabel = "Responding",
-                    listState = listState,
-                )
-            } else {
-                AgentLiveMessageContent(
-                    messages = listOf(message),
-                    provider = route,
-                    status = "Responding",
-                    activeTool = null,
-                    isThinking = false,
-                    isStreaming = streaming,
-                    listState = listState,
-                )
+            ProductionReturnHostHarness {
+                if (route == "main") {
+                    MainChatContent(
+                        messages = listOf(message),
+                        chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
+                        signalLabel = "Responding",
+                        listState = listState,
+                    )
+                } else {
+                    AgentLiveMessageContent(
+                        messages = listOf(message),
+                        provider = route,
+                        status = "Responding",
+                        activeTool = null,
+                        isThinking = false,
+                        isStreaming = streaming,
+                        listState = listState,
+                    )
+                }
             }
         }
 
@@ -646,7 +655,7 @@ class LiveStreamFocalFollowTest {
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.mainClock.advanceTimeByFrame()
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertSingleReturnArrowDisplayed()
         compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertIsDisplayed()
 
         val positionBeforeIdle = compose.runOnIdle {
@@ -719,6 +728,11 @@ class LiveStreamFocalFollowTest {
 
     private fun railTop(): Float =
         compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
+
+    private fun assertSingleReturnArrowDisplayed() {
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        assertEquals(1, compose.onAllNodesWithTag("return-to-live").fetchSemanticsNodes().size)
+    }
 
     private fun assertExactLiveEdgeGap(edgeTag: String) {
         compose.mainClock.advanceTimeBy(500)
@@ -813,6 +827,21 @@ private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: 
     isStreaming = true,
     isThinking = thinking,
 )
+
+@Composable
+private fun ProductionReturnHostHarness(
+    composerTop: androidx.compose.ui.unit.Dp = 700.dp,
+    content: @Composable () -> Unit,
+) {
+    val host = remember { ReturnToLiveHostState() }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    Box(Modifier.fillMaxSize()) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalReturnToLiveHost provides host) {
+            content()
+        }
+        ReturnToLiveHost(host, composerTopPx = with(density) { composerTop.toPx() })
+    }
+}
 
 @Composable
 private fun ControlledEdgeHarness(

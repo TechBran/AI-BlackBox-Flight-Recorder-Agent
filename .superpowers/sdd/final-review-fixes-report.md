@@ -289,3 +289,24 @@ Offline GREEN:
 - `git diff --check` — exit 0.
 
 Concern: real-screen Compose regressions are compile-verified only because ADB/device/instrumentation execution was prohibited. No ADB command was used.
+
+## Production Return-Host Test Integration
+
+Date: 2026-07-14; base `2b3dca10`.
+
+- Added a production-faithful Compose test harness that owns a real `ReturnToLiveHostState`, provides it through `LocalReturnToLiveHost`, and renders `ReturnToLiveHost` in the same composition at controllable composer-top geometry.
+- Updated direct `MainChatContent` and `AgentLiveMessageContent` return-control cases: completed main/Claude/Gemini transit, completed-history shortcuts, oversized final history, and live main suspension.
+- These cases now exercise screen-owned registration and immediate publication, assert exactly one visible hosted arrow, and click through the host action back to the screen follow coordinator. Every test retains one `setContent`; synthetic follow harnesses were not substituted for production screens.
+- No production code changed.
+
+TDD RED: `compileDebugAndroidTestKotlin` failed first because `ProductionReturnHostHarness` did not exist.
+
+Offline GREEN:
+
+- Focused `ReturnToLiveHostTest` and `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: production-screen Compose cases are compile-verified only because ADB/device/instrumentation execution was prohibited. No ADB command was used.
