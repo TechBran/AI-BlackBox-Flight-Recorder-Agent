@@ -428,7 +428,7 @@ internal fun BoxScope.LiveStreamFocalRail(
     followState: LiveStreamFollowState,
     modifier: Modifier = Modifier,
     liveTargetYPx: Float? = null,
-    returnControlBottomPadding: Dp = SIGNAL_RESIDENCE_HEIGHT,
+    returnControlBottomClearance: Dp? = null,
     effectiveBottomInset: Dp? = null,
 ) {
     val density = LocalDensity.current
@@ -459,10 +459,10 @@ internal fun BoxScope.LiveStreamFocalRail(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .then(
-                    if (effectiveBottomInset == null) Modifier.navigationBarsPadding()
-                    else Modifier.padding(bottom = effectiveBottomInset),
+                    if (returnControlBottomClearance == null) Modifier.navigationBarsPadding()
+                    else Modifier,
                 )
-                .padding(bottom = returnControlBottomPadding)
+                .padding(bottom = returnControlBottomClearance ?: SIGNAL_RESIDENCE_HEIGHT)
                 .testTag("return-to-live"),
         ) {
             Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Return to live")

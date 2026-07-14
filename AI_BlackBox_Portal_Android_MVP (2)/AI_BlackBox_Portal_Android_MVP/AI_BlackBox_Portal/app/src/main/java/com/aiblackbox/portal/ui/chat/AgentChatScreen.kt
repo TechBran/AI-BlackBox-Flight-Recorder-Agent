@@ -814,9 +814,6 @@ internal fun AgentLiveMessageContent(
     val bottomClearance = bottomFocalGeometry?.let {
         with(density) { it.bottomClearancePx.toDp() }
     } ?: (FALLBACK_COMPOSER_HEIGHT + SIGNAL_RESIDENCE_HEIGHT)
-    val appOwnedBottomClearance = bottomFocalGeometry?.let {
-        with(density) { it.appOwnedBottomClearancePx.toDp() }
-    } ?: bottomClearance
 
     Box(modifier = modifier.testTag("agent-messages-$provider")) {
         LazyColumn(
@@ -850,7 +847,9 @@ internal fun AgentLiveMessageContent(
             label = if (snapshot.isActive) label else null,
             followState = followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
-            returnControlBottomPadding = appOwnedBottomClearance,
+            returnControlBottomClearance = bottomFocalGeometry?.let {
+                with(density) { it.returnControlBottomClearancePx.toDp() }
+            },
             effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
         )
     }

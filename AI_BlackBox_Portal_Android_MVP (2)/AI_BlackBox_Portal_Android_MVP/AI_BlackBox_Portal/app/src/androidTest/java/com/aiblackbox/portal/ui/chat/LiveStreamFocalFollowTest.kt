@@ -81,6 +81,31 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
+    fun returnArrowBottomTracksMeasuredPromptTopAcrossLayoutChanges() {
+        lateinit var update: (Int, Int) -> Unit
+        compose.setContent {
+            var insetDp by remember { mutableStateOf(120) }
+            var extraComposerDp by remember { mutableStateOf(0) }
+            update = { inset, extra -> insetDp = inset; extraComposerDp = extra }
+            BottomResidenceShellHarness(insetDp.dp, extraComposerDp.dp, active = true)
+        }
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+
+        fun assertAnchored() {
+            compose.waitForIdle()
+            val arrow = compose.onNodeWithTag("return-to-live").fetchSemanticsNode().boundsInRoot
+            val composer = compose.onNodeWithTag("real-composer").fetchSemanticsNode().boundsInRoot
+            val tolerance = with(compose.density) { 1.dp.toPx() }
+            assertTrue("arrow bottom ${arrow.bottom} must equal prompt top ${composer.top}",
+                kotlin.math.abs(arrow.bottom - composer.top) <= tolerance)
+        }
+
+        assertAnchored()
+        compose.runOnIdle { update(240, 72) }
+        assertAnchored()
+    }
+
+    @Test
     fun mainSignalResidenceKeepsItsHeightWhenLabelDisappears() {
         lateinit var clearLabel: () -> Unit
         compose.setContent {
@@ -256,7 +281,7 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
-    fun terminalTransitionDuringSuspensionRemovesReturnControlAndLeavesListStable() {
+    fun terminalTransitionDuringSuspensionRetainsReturnControlAndLeavesListStable() {
         lateinit var finish: () -> Unit
         lateinit var listState: LazyListState
         compose.setContent {
@@ -269,7 +294,7 @@ class LiveStreamFocalFollowTest {
         compose.runOnIdle { finish() }
         compose.waitForIdle()
 
-        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
         assertEquals(before, listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
     }
 
@@ -386,14 +411,21 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
         compose.mainClock.advanceTimeBy(1)
         compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(500)
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
     @Test
     fun returnToLiveClickResumesImmediately() {
+        compose.mainClock.autoAdvance = false
         compose.setContent { FollowHarness() }
+        compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("return-to-live").assertIsDisplayed().performClick()
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        compose.mainClock.advanceTimeBy(500)
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
@@ -498,7 +530,11 @@ private fun assistantMessage(reasoningLength: Int, answerLength: Int, thinking: 
 )
 
 @Composable
-private fun BottomResidenceShellHarness(effectiveInset: androidx.compose.ui.unit.Dp, extraComposerHeight: androidx.compose.ui.unit.Dp) {
+private fun BottomResidenceShellHarness(
+    effectiveInset: androidx.compose.ui.unit.Dp,
+    extraComposerHeight: androidx.compose.ui.unit.Dp,
+    active: Boolean = false,
+) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     var windowBottom by remember { mutableStateOf(Float.NaN) }
     var composerTop by remember { mutableStateOf(Float.NaN) }
@@ -519,7 +555,7 @@ private fun BottomResidenceShellHarness(effectiveInset: androidx.compose.ui.unit
     ) {
         MainChatContent(
             messages = listOf(assistantMessage(0, 40, false)),
-            chatState = ChatState.IDLE,
+            chatState = if (active) ChatState.STREAMING else ChatState.IDLE,
             signalLabel = "Ready",
             bottomFocalGeometry = geometry,
         )

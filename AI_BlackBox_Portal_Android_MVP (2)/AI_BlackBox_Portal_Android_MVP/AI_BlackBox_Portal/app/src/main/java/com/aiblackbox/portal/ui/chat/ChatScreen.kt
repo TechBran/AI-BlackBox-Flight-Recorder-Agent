@@ -124,9 +124,6 @@ internal fun MainChatContent(
     val bottomClearance = bottomFocalGeometry?.let {
         with(density) { it.bottomClearancePx.toDp() }
     } ?: (FALLBACK_COMPOSER_HEIGHT + SIGNAL_RESIDENCE_HEIGHT)
-    val appOwnedBottomClearance = bottomFocalGeometry?.let {
-        with(density) { it.appOwnedBottomClearancePx.toDp() }
-    } ?: bottomClearance
 
     Box(modifier.fillMaxSize()) {
         LazyColumn(
@@ -168,7 +165,9 @@ internal fun MainChatContent(
             signalLabel,
             followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
-            returnControlBottomPadding = appOwnedBottomClearance,
+            returnControlBottomClearance = bottomFocalGeometry?.let {
+                with(density) { it.returnControlBottomClearancePx.toDp() }
+            },
             effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
         )
     }
