@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -219,7 +220,9 @@ fun ChatBubble(
                 AnimatedVisibility(visible = showThinking) {
                     Text(
                         text = message.reasoning!!,
-                        modifier = Modifier.onGloballyPositioned { coordinates ->
+                        modifier = Modifier
+                            .then(if (message.isThinking) Modifier.testTag("live-stream-edge") else Modifier)
+                            .onGloballyPositioned { coordinates ->
                             if (message.isThinking) {
                                 onLiveEdgePositioned?.invoke(
                                     LiveTextSection.REASONING,
@@ -368,6 +371,13 @@ fun ChatBubble(
                             content = cleanContent,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .then(
+                                    if (message.isStreaming && !message.isThinking) {
+                                        Modifier.testTag("live-stream-edge")
+                                    } else {
+                                        Modifier
+                                    },
+                                )
                                 .onGloballyPositioned { coordinates ->
                                     if (message.isStreaming && !message.isThinking) {
                                         onLiveEdgePositioned?.invoke(
@@ -382,7 +392,9 @@ fun ChatBubble(
                         }
                     } else if (message.isStreaming) {
                         Box(
-                            modifier = Modifier.onGloballyPositioned { coordinates ->
+                            modifier = Modifier
+                                .testTag("live-stream-edge")
+                                .onGloballyPositioned { coordinates ->
                                 if (!message.isThinking) {
                                     onLiveEdgePositioned?.invoke(
                                         LiveTextSection.ANSWER,
@@ -398,7 +410,9 @@ fun ChatBubble(
             }
             if (!isUser && message.content.isBlank() && message.isStreaming && !message.isThinking) {
                 Box(
-                    modifier = Modifier.onGloballyPositioned { coordinates ->
+                    modifier = Modifier
+                        .testTag("live-stream-edge")
+                        .onGloballyPositioned { coordinates ->
                         onLiveEdgePositioned?.invoke(
                             LiveTextSection.ANSWER,
                             coordinates.boundsInWindow().bottom,

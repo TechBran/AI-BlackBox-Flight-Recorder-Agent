@@ -9,6 +9,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.Icons
@@ -32,13 +36,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.aiblackbox.portal.ui.components.LiveTextSection
 import com.aiblackbox.portal.ui.components.SignalLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlin.math.abs
 
 internal const val FOLLOW_RESUME_DELAY_MS = 5_000L
@@ -125,16 +129,9 @@ internal class LiveStreamFollowState internal constructor(
 
     private var correctionJob: Job? = null
     private var resumeJob: Job? = null
-
-    internal val isProgrammaticScroll: Boolean
-        get() = policy.programmaticScroll
-
-    fun reportEdge(
-        @Suppress("UNUSED_PARAMETER") section: LiveTextSection,
-        yInWindow: Float,
-    ) {
-        edgeY = yInWindow
-    }
+    private var programmaticLifecycle = 0L
+    private var programmaticScrollObserved = false
+    private var programmaticScrollFinished = false
 
     fun reportEdge(yInWindow: Float) {
         edgeY = yInWindow
@@ -155,6 +152,8 @@ internal class LiveStreamFollowState internal constructor(
 
     fun suspendForUserInput(now: Long = nowMs()) {
         correctionJob?.cancel()
+        programmaticLifecycle++
+        policy.onProgrammaticScrollFinished()
         policy.onUserScroll(now)
         scheduleResume(now)
         syncVisibility()
@@ -187,14 +186,46 @@ internal class LiveStreamFollowState internal constructor(
             if (!policy.isActive || policy.isSuspended) return@launch
             val latestDelta = edgeY - targetY
             if (latestDelta.isNaN() || abs(latestDelta) < 1f) return@launch
+            val lifecycle = ++programmaticLifecycle
+            programmaticScrollObserved = false
+            programmaticScrollFinished = false
             policy.onProgrammaticScrollStarted()
             try {
                 if (reducedMotion()) listState.scrollBy(latestDelta)
                 else listState.animateScrollBy(latestDelta, tween(durationMillis = 180))
             } finally {
-                policy.onProgrammaticScrollFinished()
+                programmaticScrollFinished = true
+                scope.launch {
+                    yield()
+                    if (
+                        lifecycle == programmaticLifecycle &&
+                        !programmaticScrollObserved &&
+                        !listState.isScrollInProgress
+                    ) {
+                        finishProgrammaticScroll(lifecycle)
+                    }
+                }
             }
         }
+    }
+
+    internal fun onListScrollProgressChanged(scrolling: Boolean) {
+        if (policy.programmaticScroll) {
+            if (scrolling) {
+                programmaticScrollObserved = true
+            } else if (programmaticScrollFinished) {
+                finishProgrammaticScroll(programmaticLifecycle)
+            }
+            return
+        }
+        if (scrolling) suspendForUserInput() else if (showReturnToLive) settleUserInput()
+    }
+
+    private fun finishProgrammaticScroll(lifecycle: Long) {
+        if (lifecycle != programmaticLifecycle) return
+        policy.onProgrammaticScrollFinished()
+        programmaticScrollObserved = false
+        programmaticScrollFinished = false
     }
 
     private fun scheduleResume(fromMs: Long) {
@@ -242,15 +273,21 @@ internal fun rememberLiveStreamFollowState(
         snapshotFlow { listState.isScrollInProgress }
             .distinctUntilChanged()
             .collect { scrolling ->
-                if (scrolling) {
-                    if (!state.isProgrammaticScroll) state.suspendForUserInput()
-                } else if (state.showReturnToLive) {
-                    state.settleUserInput()
-                }
+                state.onListScrollProgressChanged(scrolling)
             }
     }
     return state
 }
+
+internal fun Modifier.liveStreamUserInput(followState: LiveStreamFollowState): Modifier =
+    nestedScroll(
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput) followState.suspendForUserInput()
+                return Offset.Zero
+            }
+        },
+    )
 
 @Composable
 internal fun BoxScope.LiveStreamFocalRail(
