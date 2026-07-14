@@ -22,6 +22,7 @@ import { GeminiAgentHandler, getGeminiAgentHandler, setGeminiAgentHandler } from
 import { todoTracker } from './todo-tracker.js';
 import { open as openCUInteract, updateScreenshot as updateCUInteractScreenshot, isInteractOpen, saveCUState, clearCUState, restoreCUButton } from './cu-interact.js';
 import { getCUSessionId, setCUSessionId, getCUDeviceId } from './cu-drawer.js';
+import { SignalLine } from './signal-feed.js';
 
 // =============================================================================
 // Constants
@@ -130,10 +131,13 @@ export function createStreamingThinkingBubble() {
     const bubble = document.createElement("div");
     bubble.className = "bubble assistant streaming-bubble";
 
-    // Create placeholder for where the panel will return
-    const placeholder = document.createElement("div");
-    placeholder.className = "reasoning-placeholder";
-    placeholder.innerHTML = `<span class="placeholder-icon">🧠</span><span class="placeholder-text">Reasoning in progress...</span>`;
+    // "The Signal": one red, morphing telemetry line hosted where the old fake
+    // "Reasoning in progress" placeholder used to sit. It is a persistent HUD for
+    // the whole turn (retrieval → generate → tool → mint) and is driven ONLY by
+    // the streaming events below (system_activity / tool_start / tool_result) plus
+    // the post-save mint line — presentation-only, never persisted.
+    const signalHost = document.createElement("div");
+    signalHost.className = "signal-host";
 
     // Create the floating panel (collapsed by default)
     const panel = document.createElement("div");
@@ -161,8 +165,10 @@ export function createStreamingThinkingBubble() {
         <div class="thinking-content"></div>
     `;
 
-    // Add placeholder to bubble
-    bubble.appendChild(placeholder);
+    // Add the Signal line to the bubble (top) and mount its controller
+    bubble.appendChild(signalHost);
+    const signalLine = new SignalLine();
+    signalLine.mount(signalHost);
 
     // Add inline panel (hidden during streaming, shown when complete)
     bubble.appendChild(panel);
@@ -174,7 +180,8 @@ export function createStreamingThinkingBubble() {
 
     // Keep reference to original panel for syncing
     bubble._floatingPanel = floatingPanel;
-    bubble._placeholder = placeholder;
+    // The Signal controller — the SSE loop and the post-save mint push reach it here.
+    bubble._signalLine = signalLine;
 
     // Hide the inline panel (we're using the floating one during streaming)
     panel.style.display = 'none';
@@ -769,12 +776,9 @@ export function markThinkingComplete(bubble) {
         }, 300);
     }
 
-    // Hide placeholder, show inline panel
-    const placeholder = bubble.querySelector('.reasoning-placeholder');
-    if (placeholder) {
-        placeholder.style.display = 'none';
-    }
-
+    // Show the inline (collapsed) reasoning panel. Note: The Signal line is left
+    // running here — thinking_end is mid-turn, and the line keeps narrating
+    // generation / tools / mint until stream_end dissolves it.
     if (inlinePanel) {
         inlinePanel.style.display = '';
         inlinePanel.classList.remove('reasoning-active', 'floating');
@@ -948,17 +952,25 @@ export async function sendStreamingChat(messages, provider, model, operator) {
             scrollToBottomIfNeeded();
         }
 
-        // CU doesn't need reasoning panel — tool indicator + todo are more useful
+        // CU doesn't need the reasoning panel or The Signal — the tool indicator,
+        // todo panel, and Live View carry the activity narrative instead.
         if (provider === 'computer-use') {
             const floatingPanel = document.getElementById('floatingReasoningPanel');
             if (floatingPanel) floatingPanel.remove();
-            const placeholder = bubble.querySelector('.reasoning-placeholder');
-            if (placeholder) placeholder.style.display = 'none';
+            if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; }
             const inlinePanel = bubble.querySelector('.streaming-thinking-panel');
             if (inlinePanel) inlinePanel.style.display = 'none';
             // Initialize TodoTracker for CU session
             todoTracker.init('todoPanel', 'cu-' + Date.now());
         }
+
+        // The Signal controller for this turn (null for CU, destroyed above).
+        const signal = bubble._signalLine;
+        // Tracks the most recent tool_start name so tool_result can echo it as done.
+        let signalLastTool = "";
+        // Push "generating · <model>" exactly once when the answer starts streaming.
+        let signalGenerating = false;
+        const signalModelLabel = model || provider || 'model';
 
         let fullThinking = "";
         let fullResponse = "";
@@ -1120,11 +1132,58 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                                 markThinkingComplete(bubble);
                                 break;
 
+                            // ─── The Signal — presentation-only telemetry HUD ───
+                            // These three cases drive the morphing red line ONLY.
+                            // HARD RULE: they must NEVER append to fullThinking /
+                            // fullResponse or feed the /chat/save payload — this
+                            // telemetry is display-only and is never persisted.
+                            case 'system_activity':
+                                // data = { stage, label, detail, seq } (see
+                                // Orchestrator/telemetry_events.py). We render only the label.
+                                if (signal && data && typeof data.label === 'string') {
+                                    signal.push(data.label);
+                                }
+                                break;
+
+                            case 'tool_start': {
+                                // data = tool name (string) per chat_routes.py stream.
+                                const toolName = (typeof data === 'string')
+                                    ? data
+                                    : (data && (data.name || data.tool)) || '';
+                                signalLastTool = toolName;
+                                if (signal && toolName) signal.push('tool · ' + toolName);
+                                break;
+                            }
+
+                            case 'tool_result': {
+                                // data = a result-description string. Echo the last
+                                // tool name as done; fall back to a trimmed description.
+                                if (signal) {
+                                    if (signalLastTool) {
+                                        signal.push('tool · ' + signalLastTool + ' · ok');
+                                    } else if (typeof data === 'string' && data) {
+                                        signal.push('tool · ' + (data.length > 40 ? data.slice(0, 40) : data));
+                                    }
+                                }
+                                break;
+                            }
+
                             case 'content_start':
+                                if (signal && !signalGenerating) {
+                                    signal.push('generating · ' + signalModelLabel);
+                                    signalGenerating = true;
+                                }
                                 break;
 
                             case 'content':
                                 if (typeof data === 'string') {
+                                    // First answer bytes → narrate generation once. On a
+                                    // silent turn (no system_activity) this is the only
+                                    // honest line the HUD shows before it dissolves.
+                                    if (signal && !signalGenerating) {
+                                        signal.push('generating · ' + signalModelLabel);
+                                        signalGenerating = true;
+                                    }
                                     fullResponse += data;
                                     appendResponseContent(bubble, data, fullResponse);
                                     // Note: Auto-TTS is now triggered after complete response
@@ -1422,6 +1481,11 @@ export async function sendStreamingChat(messages, provider, model, operator) {
 
                             case 'stream_end':
                                 console.log('[STREAM] Stream ended');
+                                // The answer is finalized — dissolve The Signal. If a
+                                // mint follows (after /chat/save resolves), the caller
+                                // re-animates this same line with the mint id, then
+                                // dissolves again.
+                                if (signal) signal.dissolve();
                                 // Don't kill streaming state if another CU stream is still active
                                 // (the queued request's short SSE stream ends before the original)
                                 if (!_cuQueueAppendMode) {
@@ -1445,6 +1509,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
             // ember backdrop on (the outer fetch .catch below only runs for pre-stream errors).
             function onStreamError(err) {
                 if (stallTimer) clearTimeout(stallTimer); // watchdog dies with the stream
+                if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; } // no leaked rAF
                 bubble.classList.remove('streaming-bubble');
                 reject(err);
             }
@@ -1454,6 +1519,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
 
         }).catch(error => {
             console.error('[STREAM] Fetch error:', error);
+            if (bubble._signalLine) { bubble._signalLine.destroy(); bubble._signalLine = null; } // no leaked rAF
             if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
             reject(error);
         });
@@ -2183,8 +2249,11 @@ export async function send() {
             // chip. Convert it into the standard failure outcome. Guarded on
             // !result.response so partial/CU-queue flows keep today's behavior.
             if (!result.queued && !result.response && result.errorText) {
-                if (result.bubbleEl && result.bubbleEl.parentNode) {
-                    result.bubbleEl.remove(); // drop the empty streaming bubble (not in historyData)
+                if (result.bubbleEl) {
+                    if (result.bubbleEl._signalLine) result.bubbleEl._signalLine.destroy(); // no leaked rAF
+                    if (result.bubbleEl.parentNode) {
+                        result.bubbleEl.remove(); // drop the empty streaming bubble (not in historyData)
+                    }
                 }
                 addBubble("assistant", "Chat error: " + result.errorText);
                 markSendFailed(userTurnBubble, txt);
@@ -2229,6 +2298,16 @@ export async function send() {
                     const saveResult = await saveResponse.json();
                     if (saveResult.minted) {
                         console.log('[STREAM] Snapshot minted:', saveResult.snap_id);
+                    }
+
+                    // The Signal: narrate the mint on the turn's HUD line, then
+                    // dissolve. Degrades gracefully — snap_id only until the
+                    // backend adds embedding dims (Task 1.4). Presentation-only.
+                    const _sig = result.bubbleEl && result.bubbleEl._signalLine;
+                    if (_sig && saveResult && saveResult.snap_id) {
+                        const _dims = saveResult.dims || saveResult.embedding_dims;
+                        _sig.push('mint · ' + saveResult.snap_id + (_dims ? ' · ' + _dims + 'd' : ''));
+                        _sig.dissolve();
                     }
 
                     if (saveResult.modified_response) {
