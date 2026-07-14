@@ -3078,41 +3078,6 @@ label[for="operatorSelect"]{ color:var(--muted); font-weight: normal; font-size:
     position: relative;
 }
 
-/* =====================================================================
-   Streaming Thinking Panel - Floating bubble design
-   Floats at top during streaming, returns to placeholder when complete
-   ===================================================================== */
-
-/* Placeholder shown in chat while panel floats */
-.reasoning-placeholder {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: rgba(255, 74, 74, 0.08);
-    border: 1px dashed rgba(255, 74, 74, 0.3);
-    border-radius: var(--radius-lg);
-    margin-bottom: 12px;
-    color: var(--neutral-700);
-    font-size: 13px;
-}
-
-.reasoning-placeholder .placeholder-icon {
-    font-size: 16px;
-    opacity: 0.6;
-    animation: placeholder-pulse 2s ease-in-out infinite;
-}
-
-.reasoning-placeholder .placeholder-text {
-    color: #ff8a8a;
-    font-weight: 500;
-}
-
-@keyframes placeholder-pulse {
-    0%, 100% { opacity: 0.4; }
-    50% { opacity: 0.8; }
-}
-
 /* =============================================================================
    COMPACT STATUS PILL - Minimal reasoning indicator
    ============================================================================= */

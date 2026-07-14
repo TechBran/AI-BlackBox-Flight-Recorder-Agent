@@ -136,7 +136,14 @@ export class SignalLine {
         for (let i = 0; i < L; i++) {
             const target = text[i] !== undefined ? text[i] : "";
             const from = this.curText[i] !== undefined ? this.curText[i] : "";
-            if (target === from) continue; // shared char holds — no animation
+            if (target === from) {
+                // Shared char holds — no animation. But clear any leftover
+                // swap/hot from a prior morph: this push already cleared the
+                // pending timers that would have removed them, so a coincidentally
+                // shared char could otherwise stay stuck invisible (opacity:0).
+                this.cells[i].g.classList.remove('swap', 'hot');
+                continue;
+            }
             const g = this.cells[i].g;
             const d = i * stagger;
             this.pending.push(setTimeout(() => {
