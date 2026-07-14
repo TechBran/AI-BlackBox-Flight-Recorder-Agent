@@ -28,6 +28,22 @@ class LiveStreamFollowPolicyTest {
         assertNull(geometry.liveTargetYPx)
         assertTrue(geometry.residenceTopPx >= 0f)
     }
+
+    @Test fun `unready geometry reserves fallback composer residence and occupied inset exactly`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = Float.NaN,
+            effectiveBottomInsetPx = 300f,
+            composerTopPx = Float.NaN,
+            composerBottomPx = Float.NaN,
+            residenceHeightPx = 60f,
+            breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+
+        assertNull(geometry.liveTargetYPx)
+        assertEquals(260f, geometry.appOwnedBottomClearancePx)
+        assertEquals(560f, geometry.bottomClearancePx)
+    }
     @Test fun `bottom residence stays below composer controls`() {
         val geometry = calculateBottomFocalGeometry(
             windowBottomPx = 1_000f,

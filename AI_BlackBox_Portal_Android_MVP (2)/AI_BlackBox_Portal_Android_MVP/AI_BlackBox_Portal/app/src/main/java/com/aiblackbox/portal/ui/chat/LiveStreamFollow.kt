@@ -64,9 +64,13 @@ data class BottomFocalGeometry(
     val liveTargetYPx: Float?,
     val occupiedBottomInsetPx: Float = 0f,
     val isReady: Boolean = true,
+    private val fallbackAppOwnedBottomClearancePx: Float = 0f,
 ) {
     val appOwnedBottomClearancePx: Float
-        get() = (residenceBottomPx - composerTopPx).coerceAtLeast(0f)
+        get() {
+            val measured = (residenceBottomPx - composerTopPx).coerceAtLeast(0f)
+            return if (isReady) measured else maxOf(measured, fallbackAppOwnedBottomClearancePx)
+        }
     val bottomClearancePx: Float
         get() = occupiedBottomInsetPx + appOwnedBottomClearancePx
 }
@@ -106,6 +110,7 @@ internal fun calculateBottomFocalGeometry(
         } else null,
         occupiedBottomInsetPx = safeInset,
         isReady = isReady,
+        fallbackAppOwnedBottomClearancePx = safeFallbackComposerHeight + safeResidenceHeight,
     )
 }
 

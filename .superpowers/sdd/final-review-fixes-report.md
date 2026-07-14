@@ -129,3 +129,21 @@ Expected failure: missing `effectiveBottomInsetPx`, `isReady`, and `bottomCleara
 - `git diff --check` — exit 0.
 
 Concern: the production-faithful Compose shell test is compile-verified only because connected/instrumentation execution was explicitly prohibited. No ADB, phone, install, or connected-test command was used.
+
+## Unready Bottom-Clearance Follow-up
+
+Date: 2026-07-14; base `3bbc162e`.
+
+Added an exact regression and implementation ensuring unready geometry reserves the full fallback Composer (200px in the fixture), permanent Signal residence (60px), and occupied inset (300px): app-owned clearance is 260px, total clearance is 560px, and `liveTargetYPx` remains null.
+
+RED: `./gradlew testDebugUnitTest --tests com.aiblackbox.portal.ui.chat.LiveStreamFollowPolicyTest --offline` ran 12 tests and failed the new exact clearance assertion.
+
+GREEN:
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL` (12 tests).
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+`BottomFocalGeometry` remains public because it is exposed by existing public chat/navigation composable signatures; narrowing it would require a broader API-visibility refactor. No device or connected command was used.
