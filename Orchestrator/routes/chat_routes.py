@@ -7546,6 +7546,7 @@ async def chat_save(request: Request):
         # Check and trigger auto-mint
         minted = False
         snap_id = None
+        dims = None  # Task 1.4: embedding dimension of the minted snapshot (for the mint telemetry line)
         if AUTO_ENABLE:
             now_ms = int(time.time() * 1000)
             should_mint, reason = False, None
@@ -7560,6 +7561,7 @@ async def chat_save(request: Request):
                 s.last_mint_ms = int(time.time() * 1000)
                 minted = True
                 snap_id = result.get("snap_id")
+                dims = result.get("dims")  # None when no vector was generated (fresh box / soft failure)
                 print(f"[CHAT/SAVE] Auto-mint triggered for {operator}: {reason} -> {snap_id}")
 
         # Check and trigger auto-checkpoint (same logic as regular /chat endpoint)
@@ -7577,7 +7579,7 @@ async def chat_save(request: Request):
 
         save_operator_state()
 
-        return {
+        response = {
             "success": True,
             "operator": operator,
             "total_turns": s.total_turns,
@@ -7589,6 +7591,12 @@ async def chat_save(request: Request):
             "artifacts": artifacts_meta,  # Structured artifacts[] for native clients (Phase 6a); [] when none
             "checkpoint_triggered": checkpoint_triggered
         }
+        # Task 1.4: the embedding dimension of the just-minted snapshot, so the
+        # frontend's mint telemetry line can show "Nd". Present only when a
+        # vector was actually generated (omitted on a vector-less / no-mint turn).
+        if dims is not None:
+            response["dims"] = dims
+        return response
 
     except Exception as e:
         import traceback

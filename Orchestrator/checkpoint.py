@@ -302,6 +302,17 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         print(f"[EMBEDDING] Generating embedding for snapshot {snap_id}...")
         embed_payload = _embed_for_index(snap_id, body)
 
+        # Task 1.4: surface the embedding dimension (the SAME value
+        # _embed_for_index logged above) so /chat/save can feed the mint
+        # telemetry line. Vector-less mints (fresh box / soft failure) leave
+        # this None and the key is omitted from the result below.
+        if embed_payload.get("embedding"):
+            embed_dims = len(embed_payload["embedding"])
+        elif embed_payload.get("chunk_vectors"):
+            embed_dims = len(embed_payload["chunk_vectors"][0])
+        else:
+            embed_dims = None
+
         # Collect media artifacts from recent tasks for this operator
         # Lazy import to avoid circular dependency
         from Orchestrator.tasks import collect_pending_media_artifacts
@@ -323,7 +334,10 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         # Save operator state after mint
         save_operator_state()
 
-        return {"snap_id": snap_id, "assert_sha256": digest, "archived": Path(arc_path).name}
+        result = {"snap_id": snap_id, "assert_sha256": digest, "archived": Path(arc_path).name}
+        if embed_dims is not None:
+            result["dims"] = embed_dims
+        return result
 
 
 def mint_with_content(operator: str, content: str, reason: str = "DIRECT", snap_type: str = "normal") -> Dict[str, Any]:
