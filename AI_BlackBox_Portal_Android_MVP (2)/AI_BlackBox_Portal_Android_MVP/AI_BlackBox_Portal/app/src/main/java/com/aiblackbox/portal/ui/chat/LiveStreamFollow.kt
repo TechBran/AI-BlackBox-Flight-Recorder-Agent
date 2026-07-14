@@ -144,6 +144,7 @@ internal class LiveStreamFollowPolicy {
 
     val showReturnToLive: Boolean
         get() = mode == LiveFollowMode.SUSPENDED || mode == LiveFollowMode.RETURNING
+    val requiresReturnDestination: Boolean get() = showReturnToLive
 
     fun start() {
         if (!isActive && !showReturnToLive) mode = LiveFollowMode.FILLING
@@ -248,6 +249,8 @@ internal class LiveStreamFollowState internal constructor(
     var targetY by mutableFloatStateOf(Float.NaN)
         private set
     var showReturnToLive by mutableStateOf(false)
+        private set
+    var requiresReturnDestination by mutableStateOf(false)
         private set
 
     private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
@@ -415,6 +418,7 @@ internal class LiveStreamFollowState internal constructor(
 
     private fun syncVisibility() {
         showReturnToLive = policy.showReturnToLive
+        requiresReturnDestination = policy.requiresReturnDestination
     }
 }
 

@@ -217,3 +217,27 @@ Offline verification:
 - `git diff --check` — exit 0.
 
 No production behavior changed. Compose tests remain compile-verified only because ADB/device execution was prohibited.
+
+## Stable Completed-Response Return Anchor
+
+Date: 2026-07-14; base `2ea87f13`.
+
+- Added policy/state `requiresReturnDestination`, true only while `SUSPENDED` or `RETURNING`; normal completion while following does not enable extra tracking.
+- Added distinct nonvisual `COMPLETED_RETURN_EDGE_TAG` / `LiveTextSection.COMPLETED_RETURN` at the completed assistant bubble bottom.
+- Main and agent production screens select this anchor only after phase becomes IDLE while return remains pending. It continues reporting through layout/scroll changes and is removed with the arrow after measured arrival.
+- Main, Claude, and Gemini completion tests now assert the completed anchor exists through transit, measure arrival against that stable tag, and assert it disappears only after arrow dismissal.
+
+TDD RED:
+
+- Focused JVM compilation failed because `requiresReturnDestination` did not exist.
+- Android test contract referenced the absent `COMPLETED_RETURN_EDGE_TAG` before production implementation.
+
+Offline GREEN:
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: completion Compose cases are compile-verified only because device/instrumentation execution was prohibited. No ADB command was used.

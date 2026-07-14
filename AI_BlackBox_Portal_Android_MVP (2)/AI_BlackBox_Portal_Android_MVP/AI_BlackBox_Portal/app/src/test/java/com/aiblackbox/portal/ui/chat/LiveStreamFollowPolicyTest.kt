@@ -240,6 +240,19 @@ class LiveStreamFollowPolicyTest {
         assertEquals(LiveFollowMode.RETURNING, policy.mode)
     }
 
+    @Test fun `completed destination is required only through suspended and returning transit`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        assertFalse(policy.requiresReturnDestination)
+        policy.onUserScroll(1_000)
+        policy.onStreamCompleted(hasReturnDestination = true)
+        assertTrue(policy.requiresReturnDestination)
+        policy.resumeNow()
+        assertTrue(policy.requiresReturnDestination)
+        policy.onMeasuredArrival(0f, tolerancePx = 1f)
+        assertFalse(policy.requiresReturnDestination)
+    }
+
     @Test fun `programmatic follow never enters suspended state`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()

@@ -809,7 +809,9 @@ internal fun AgentLiveMessageContent(
         statusLabel = label,
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot)
-    val expectedSection = cliLiveEdgeSection(phase)
+    val expectedSection = cliLiveEdgeSection(phase) ?: if (followState.requiresReturnDestination) {
+        LiveTextSection.COMPLETED_RETURN
+    } else null
     val density = LocalDensity.current
     val bottomClearance = bottomFocalGeometry?.let {
         with(density) { it.bottomClearancePx.toDp() }
@@ -840,6 +842,8 @@ internal fun AgentLiveMessageContent(
                         { section, y -> if (section == expectedSection) followState.reportEdge(y) }
                     } else null,
                     useToolFallbackAnchor = isLiveTurn && expectedSection == LiveTextSection.TOOL_FALLBACK,
+                    useCompletedReturnAnchor = isLiveTurn &&
+                        expectedSection == LiveTextSection.COMPLETED_RETURN,
                 )
             }
         }

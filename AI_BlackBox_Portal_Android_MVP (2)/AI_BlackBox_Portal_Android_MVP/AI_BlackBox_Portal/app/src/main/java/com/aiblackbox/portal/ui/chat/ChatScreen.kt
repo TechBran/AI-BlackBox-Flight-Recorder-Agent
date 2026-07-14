@@ -146,7 +146,10 @@ internal fun MainChatContent(
                 val expectedSection = when (liveSnapshot.phase) {
                     LiveStreamPhase.THINKING -> LiveTextSection.REASONING
                     LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
-                    else -> null
+                    LiveStreamPhase.IDLE -> if (followState.requiresReturnDestination) {
+                        LiveTextSection.COMPLETED_RETURN
+                    } else null
+                    LiveStreamPhase.TOOL -> null
                 }
                 ChatBubble(
                     message = message,
@@ -158,6 +161,8 @@ internal fun MainChatContent(
                     onLiveEdgePositioned = if (isLiveTurn && expectedSection != null) {
                         { section, y -> if (section == expectedSection) followState.reportEdge(y) }
                     } else null,
+                    useCompletedReturnAnchor = isLiveTurn &&
+                        expectedSection == LiveTextSection.COMPLETED_RETURN,
                 )
             }
         }

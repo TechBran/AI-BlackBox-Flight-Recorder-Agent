@@ -38,6 +38,7 @@ import com.aiblackbox.portal.ui.components.LiveTextSection
 import com.aiblackbox.portal.ui.components.LIVE_ANSWER_EDGE_TAG
 import com.aiblackbox.portal.ui.components.LIVE_REASONING_EDGE_TAG
 import com.aiblackbox.portal.ui.components.LIVE_TOOL_FALLBACK_EDGE_TAG
+import com.aiblackbox.portal.ui.components.COMPLETED_RETURN_EDGE_TAG
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -522,21 +523,29 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
         compose.runOnIdle { complete() }
         compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertIsDisplayed()
         compose.onNodeWithTag("return-to-live").performClick()
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        advanceUntilMeasuredArrival()
+        advanceUntilMeasuredArrival(COMPLETED_RETURN_EDGE_TAG)
+        compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertDoesNotExist()
     }
 
-    private fun advanceUntilMeasuredArrival() {
+    private fun advanceUntilMeasuredArrival(edgeTag: String = LIVE_ANSWER_EDGE_TAG) {
+        var lastMeasuredGap = Float.POSITIVE_INFINITY
         repeat(30) {
             compose.mainClock.advanceTimeByFrame()
+            val edgeNodes = compose.onAllNodesWithTag(edgeTag).fetchSemanticsNodes()
+            if (edgeNodes.isNotEmpty()) {
+                lastMeasuredGap = kotlin.math.abs(
+                    edgeNodes.single().boundsInRoot.bottom -
+                        (railTop() - with(compose.density) { LIVE_EDGE_GAP.toPx() }),
+                )
+            }
             if (compose.onAllNodesWithTag("return-to-live").fetchSemanticsNodes().isEmpty()) {
-                val edge = edgeBottom(LIVE_ANSWER_EDGE_TAG)
-                val target = railTop() - with(compose.density) { LIVE_EDGE_GAP.toPx() }
                 val tolerance = with(compose.density) { 1.dp.toPx() }
-                assertTrue("arrow hid before measured arrival: edge=$edge target=$target",
-                    kotlin.math.abs(edge - target) <= tolerance)
+                assertTrue("arrow hid before measured arrival: gap=$lastMeasuredGap",
+                    lastMeasuredGap <= tolerance)
                 return
             }
         }

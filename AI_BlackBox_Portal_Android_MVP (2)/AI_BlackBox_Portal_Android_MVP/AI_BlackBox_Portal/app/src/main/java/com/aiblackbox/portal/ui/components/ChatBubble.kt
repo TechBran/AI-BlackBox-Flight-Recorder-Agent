@@ -84,10 +84,11 @@ import kotlinx.coroutines.delay
 // Assistant bubble: --bubble (#000000), asymmetric (sharp top-start), full width
 // =============================================================================
 
-enum class LiveTextSection { REASONING, ANSWER, TOOL_FALLBACK }
+enum class LiveTextSection { REASONING, ANSWER, TOOL_FALLBACK, COMPLETED_RETURN }
 internal const val LIVE_REASONING_EDGE_TAG = "live-stream-edge-reasoning"
 internal const val LIVE_ANSWER_EDGE_TAG = "live-stream-edge-answer"
 internal const val LIVE_TOOL_FALLBACK_EDGE_TAG = "live-stream-edge-tool-fallback"
+internal const val COMPLETED_RETURN_EDGE_TAG = "live-stream-edge-completed-return"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -104,6 +105,7 @@ fun ChatBubble(
     modifier: Modifier = Modifier,
     onLiveEdgePositioned: ((LiveTextSection, Float) -> Unit)? = null,
     useToolFallbackAnchor: Boolean = false,
+    useCompletedReturnAnchor: Boolean = false,
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
@@ -155,6 +157,17 @@ fun ChatBubble(
                         .onGloballyPositioned { coordinates ->
                             onLiveEdgePositioned?.invoke(
                                 LiveTextSection.TOOL_FALLBACK,
+                                coordinates.boundsInWindow().bottom,
+                            )
+                        }
+                    else Modifier
+                )
+                .then(
+                    if (useCompletedReturnAnchor && !isUser) Modifier
+                        .testTag(COMPLETED_RETURN_EDGE_TAG)
+                        .onGloballyPositioned { coordinates ->
+                            onLiveEdgePositioned?.invoke(
+                                LiveTextSection.COMPLETED_RETURN,
                                 coordinates.boundsInWindow().bottom,
                             )
                         }
