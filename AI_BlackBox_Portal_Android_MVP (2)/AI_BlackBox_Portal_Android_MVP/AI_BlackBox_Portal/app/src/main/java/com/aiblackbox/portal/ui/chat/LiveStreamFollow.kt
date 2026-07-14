@@ -47,7 +47,9 @@ import com.aiblackbox.portal.ui.components.SignalLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -119,6 +121,11 @@ internal fun calculateBottomFocalGeometry(
 
 internal enum class LiveStreamPhase { IDLE, THINKING, ANSWERING, TOOL }
 internal enum class LiveFollowMode { FILLING, FOLLOWING, SUSPENDED, RETURNING, COMPLETED_HISTORY }
+
+internal fun completedHistoryObservation(
+    canScrollForward: Boolean,
+    mode: LiveFollowMode,
+): Pair<Boolean, LiveFollowMode> = canScrollForward to mode
 
 internal data class LiveStreamSnapshot(
     val messageId: String?,
@@ -231,6 +238,16 @@ internal class LiveStreamFollowPolicy {
         }
     }
 
+    fun onCompletedReturnStopped(canScrollForward: Boolean) {
+        if (isActive || mode != LiveFollowMode.RETURNING || !returningToCompletedBottom) return
+        if (!canScrollForward) {
+            stop()
+        } else {
+            mode = LiveFollowMode.COMPLETED_HISTORY
+            returningToCompletedBottom = false
+        }
+    }
+
     fun onStreamCompleted(hasReturnDestination: Boolean) {
         isActive = false
         when {
@@ -250,6 +267,21 @@ internal data class LiveMeasurement(
     val targetY: Float,
 ) {
     val overflowPx: Float get() = edgeY - targetY
+}
+
+internal class CompletedBottomAdvanceGuard(
+    private val maxSteps: Int = 64,
+    private val minimumProgressPx: Float = .5f,
+) {
+    private var steps = 0
+    private var stopped = false
+
+    fun recordProgress(consumedPx: Float): Boolean {
+        if (stopped) return false
+        steps++
+        stopped = !consumedPx.isFinite() || abs(consumedPx) <= minimumProgressPx || steps >= maxSteps
+        return !stopped
+    }
 }
 
 internal class FrameLiveMeasurementConflater {
@@ -288,6 +320,8 @@ internal class LiveStreamFollowState internal constructor(
     var showReturnToLive by mutableStateOf(false)
         private set
     var requiresReturnDestination by mutableStateOf(false)
+        private set
+    var completedHistoryObservationMode by mutableStateOf(policy.mode)
         private set
 
     private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
@@ -396,14 +430,19 @@ internal class LiveStreamFollowState internal constructor(
         while (returnMeasurementRequests.tryReceive().isSuccess) Unit
         returnJob = scope.launch {
             if (policy.returningToCompletedBottom) {
-                val lastIndex = listState.layoutInfo.totalItemsCount - 1
-                if (lastIndex >= 0) {
+                val guard = CompletedBottomAdvanceGuard()
+                while (policy.mode == LiveFollowMode.RETURNING && listState.canScrollForward) {
+                    currentCoroutineContext().ensureActive()
+                    val viewportPx = (listState.layoutInfo.viewportEndOffset -
+                        listState.layoutInfo.viewportStartOffset).coerceAtLeast(1).toFloat()
+                    var consumedPx = 0f
                     performProgrammaticScroll {
-                        if (reducedMotion()) listState.scrollToItem(lastIndex)
-                        else listState.animateScrollToItem(lastIndex)
+                        consumedPx = if (reducedMotion()) listState.scrollBy(viewportPx)
+                        else listState.animateScrollBy(viewportPx, tween(durationMillis = 120))
                     }
+                    if (!guard.recordProgress(consumedPx)) break
                 }
-                policy.onCompletedHistoryPosition(listState.canScrollForward)
+                policy.onCompletedReturnStopped(listState.canScrollForward)
                 syncVisibility()
                 return@launch
             }
@@ -476,6 +515,7 @@ internal class LiveStreamFollowState internal constructor(
     private fun syncVisibility() {
         showReturnToLive = policy.showReturnToLive
         requiresReturnDestination = policy.requiresReturnDestination
+        completedHistoryObservationMode = policy.mode
     }
 }
 
@@ -521,9 +561,16 @@ internal fun rememberLiveStreamFollowState(
     }
     LaunchedEffect(state, listState, snapshot.isActive) {
         if (!snapshot.isActive) {
-            snapshotFlow { listState.canScrollForward }
+            snapshotFlow {
+                completedHistoryObservation(
+                    listState.canScrollForward,
+                    state.completedHistoryObservationMode,
+                )
+            }
                 .distinctUntilChanged()
-                .collect(state::updateCompletedHistoryPosition)
+                .collect { (canScrollForward, _) ->
+                    state.updateCompletedHistoryPosition(canScrollForward)
+                }
         }
     }
     return state

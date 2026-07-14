@@ -84,6 +84,35 @@ class LiveStreamFocalFollowTest {
         assertCompletedHistoryShortcut("gemini-agents")
 
     @Test
+    fun completedHistoryReturnReachesBottomOfSingleItemTallerThanViewport() {
+        lateinit var complete: () -> Unit
+        lateinit var listState: LazyListState
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            var streaming by remember { mutableStateOf(true) }
+            complete = { streaming = false }
+            listState = rememberLazyListState()
+            MainChatContent(
+                messages = listOf(assistantMessage(0, 12_000, false).copy(isStreaming = streaming)),
+                chatState = if (streaming) ChatState.STREAMING else ChatState.IDLE,
+                signalLabel = "Responding",
+                listState = listState,
+            )
+        }
+
+        compose.mainClock.advanceTimeBy(500)
+        compose.runOnIdle { complete() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
+        compose.mainClock.advanceTimeByFrame()
+        assertTrue(compose.runOnIdle { listState.canScrollForward })
+        compose.onNodeWithTag("return-to-live").performClick()
+
+        advanceUntilTrueListBottom(listState, maxFrames = 180)
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
+    }
+
+    @Test
     fun productionComposerAndSignalResidenceShareOneDynamicBottomInsetContract() {
         lateinit var update: (Int, Int) -> Unit
         compose.setContent {
@@ -614,8 +643,8 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
-    private fun advanceUntilTrueListBottom(listState: LazyListState) {
-        repeat(30) {
+    private fun advanceUntilTrueListBottom(listState: LazyListState, maxFrames: Int = 30) {
+        repeat(maxFrames) {
             compose.mainClock.advanceTimeByFrame()
             if (!compose.runOnIdle { listState.canScrollForward }) {
                 compose.mainClock.advanceTimeByFrame()

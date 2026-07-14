@@ -4,6 +4,46 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
+    @Test fun `completed bottom advancement stops after bounded no progress`() {
+        val guard = CompletedBottomAdvanceGuard(maxSteps = 8)
+
+        assertTrue(guard.recordProgress(200f))
+        assertFalse(guard.recordProgress(0f))
+        assertFalse(guard.recordProgress(200f))
+    }
+
+    @Test fun `completed bottom advancement is bounded even while making progress`() {
+        val guard = CompletedBottomAdvanceGuard(maxSteps = 3)
+
+        assertTrue(guard.recordProgress(1f))
+        assertTrue(guard.recordProgress(1f))
+        assertFalse(guard.recordProgress(1f))
+    }
+
+    @Test fun `completed observer identity changes when position does not`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(canScrollForward = true)
+        val historyObservation = completedHistoryObservation(true, policy.mode)
+
+        policy.resumeNow()
+        val returningObservation = completedHistoryObservation(true, policy.mode)
+
+        assertNotEquals(historyObservation, returningObservation)
+        assertEquals(LiveFollowMode.RETURNING, returningObservation.second)
+    }
+
+    @Test fun `blocked completed return remains safely retryable`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.onCompletedHistoryPosition(true)
+        policy.resumeNow()
+
+        policy.onCompletedReturnStopped(canScrollForward = true)
+
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
+        assertTrue(policy.showReturnToLive)
+        assertTrue(policy.resumeNow())
+    }
+
     @Test fun `production measurements conflate and stale generations cannot be consumed twice`() {
         val pending = FrameLiveMeasurementConflater()
         pending.stageEdge(4f); pending.stageTarget(0f)

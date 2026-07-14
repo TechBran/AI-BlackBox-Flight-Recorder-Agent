@@ -263,3 +263,29 @@ Offline GREEN:
 - `git diff --check` — exit 0.
 
 Concern: real-screen completed-history Compose tests are compile-verified only because device/instrumentation execution was prohibited. No ADB command was used.
+
+## Oversized Completed-History True-Bottom Return
+
+Date: 2026-07-14; base `2e9481bf`.
+
+- Replaced the one-shot final-item positioning with cancellable viewport-sized advancement that continues only while completed history is `RETURNING`, the coroutine is active, and `canScrollForward` remains true.
+- Smooth mode uses bounded 120 ms `animateScrollBy` chunks; reduced motion uses bounded immediate `scrollBy` chunks. Both stop on no progress or after 64 chunks, and an incomplete bounded exit returns to retryable `COMPLETED_HISTORY` rather than spinning or hiding the arrow.
+- Arrival and arrow dismissal occur only after observing `canScrollForward == false`. Existing user-input and new-stream paths cancel the return job immediately.
+- The inactive position observer now keys on both `canScrollForward` and follow mode, so transitions at an unchanged list position are reevaluated.
+- Added JVM coverage for bounded/no-progress behavior, retry safety, cancellation policy, and unchanged-position mode identity. Added a real main-screen Compose case with one final assistant item taller than the viewport; existing real main, Claude, and Gemini cases retain normal multi-item coverage.
+
+TDD RED:
+
+- Focused JVM compilation failed first for the absent `CompletedBottomAdvanceGuard`.
+- A second focused red failed for the absent mode-aware `completedHistoryObservation` key.
+- A third focused red failed for the absent retry-safe `onCompletedReturnStopped` transition.
+
+Offline GREEN:
+
+- Focused `LiveStreamFollowPolicyTest` — `BUILD SUCCESSFUL`.
+- Full `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0.
+
+Concern: real-screen Compose regressions are compile-verified only because ADB/device/instrumentation execution was prohibited. No ADB command was used.
