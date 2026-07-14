@@ -3,6 +3,8 @@ package com.aiblackbox.portal
 import com.aiblackbox.portal.data.agent.AgentEvent
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.ui.chat.cliLiveStatusLabel
+import com.aiblackbox.portal.ui.chat.cliLiveStreamPhase
+import com.aiblackbox.portal.ui.chat.LiveStreamPhase
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -19,6 +21,17 @@ class AgentEventProvenanceTest {
         assertEquals("Using · Read", cliLiveStatusLabel(false, "Read", "Running"))
         assertEquals("Running", cliLiveStatusLabel(false, null, "Running"))
         assertNull(cliLiveStatusLabel(false, null, ""))
+    }
+
+    @Test fun `CLI live phase switches from tool activity to answer tracking`() {
+        assertEquals(
+            LiveStreamPhase.TOOL,
+            cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = "Read"),
+        )
+        assertEquals(
+            LiveStreamPhase.ANSWERING,
+            cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = null),
+        )
     }
 
     @Test fun `AgentEvent ProvenanceUpdate carries a typed Provenance`() {

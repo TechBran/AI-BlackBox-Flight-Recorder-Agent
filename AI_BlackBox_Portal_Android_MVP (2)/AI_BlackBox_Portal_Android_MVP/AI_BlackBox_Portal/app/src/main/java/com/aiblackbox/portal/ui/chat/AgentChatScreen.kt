@@ -131,6 +131,17 @@ internal fun cliLiveStatusLabel(
     else -> null
 }
 
+internal fun cliLiveStreamPhase(
+    isStreaming: Boolean,
+    isThinking: Boolean,
+    activeTool: String?,
+): LiveStreamPhase = when {
+    !isStreaming -> LiveStreamPhase.IDLE
+    isThinking -> LiveStreamPhase.THINKING
+    !activeTool.isNullOrBlank() -> LiveStreamPhase.TOOL
+    else -> LiveStreamPhase.ANSWERING
+}
+
 // =============================================================================
 // Permission Modes — mirrors Portal cyclePermissionMode()
 // =============================================================================
@@ -286,6 +297,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             is AgentEvent.Content -> {
                 _isThinking.value = false
                 _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Responding..."
                 outputBuffer.append(event.text)
                 updateLastAssistant(outputBuffer.toString())
@@ -302,6 +314,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Tool use — Portal: appendToolUse(), updateToolIndicator()
             is AgentEvent.ToolUse -> {
+                _isThinking.value = false
                 _isStreaming.value = true
                 _status.value = "Using tools..."
                 val icon = TOOL_ICONS[event.name] ?: "\uD83D\uDD27" // Wrench default
@@ -318,6 +331,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Tool result — Portal: appendToolResult()
             is AgentEvent.ToolResult -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Processing..."
                 if (event.text.isNotBlank()) {
                     val lines = event.text.count { it == '\n' } + 1
@@ -329,6 +345,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // File result — Portal: appendFileResult()
             is AgentEvent.FileResult -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "File operation..."
                 val fileName = event.filePath.substringAfterLast('/')
                 outputBuffer.append("\n[Read: $fileName, lines ${event.startLine}-${event.startLine + event.numLines - 1}]\n")
@@ -337,6 +356,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Edit diff — Portal: appendEditDiff()
             is AgentEvent.EditDiff -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Edit complete"
                 val fileName = event.filePath.substringAfterLast('/')
                 outputBuffer.append("\n[Edited: $fileName]\n")
@@ -348,7 +370,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Raw output — Portal: appendRawOutput()
             is AgentEvent.Output -> {
+                _isThinking.value = false
                 _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Streaming..."
                 outputBuffer.append(event.text)
                 updateLastAssistant(outputBuffer.toString())
@@ -389,6 +413,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             is AgentEvent.Info -> {
                 // Show as inline content if streaming, otherwise update status
                 if (_isStreaming.value) {
+                    _isThinking.value = false
+                    _activeTool.value = null
                     outputBuffer.append("\n\u2139\uFE0F ${event.message}")
                     updateLastAssistant(outputBuffer.toString())
                 } else {
@@ -744,12 +770,7 @@ internal fun AgentLiveMessageContent(
     // AgentViewModel creates and mutates real `assistant` placeholders. Selecting
     // by that model value also remains correct if a user message follows history.
     val liveMessage = messages.lastOrNull { it.role == "assistant" }
-    val phase = when {
-        !isStreaming -> LiveStreamPhase.IDLE
-        isThinking -> LiveStreamPhase.THINKING
-        activeTool != null -> LiveStreamPhase.TOOL
-        else -> LiveStreamPhase.ANSWERING
-    }
+    val phase = cliLiveStreamPhase(isStreaming, isThinking, activeTool?.name)
     val label = cliLiveStatusLabel(isThinking, activeTool?.name, status)
     val snapshot = LiveStreamSnapshot(
         messageId = liveMessage?.id,

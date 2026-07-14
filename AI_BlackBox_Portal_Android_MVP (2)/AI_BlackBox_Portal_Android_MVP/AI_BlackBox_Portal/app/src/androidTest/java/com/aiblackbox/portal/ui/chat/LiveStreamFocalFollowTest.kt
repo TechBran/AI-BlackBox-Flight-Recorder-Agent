@@ -74,46 +74,17 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
-    fun cliAgentsFollowGrowingReasoningAndAnswerForBothProviders() {
-        listOf("claude-agents", "gemini-agents").forEach { provider ->
-            lateinit var update: (UiMessage, Boolean) -> Unit
-            compose.setContent {
-                var message by remember {
-                    mutableStateOf(assistantMessage(reasoningLength = 20, answerLength = 0, thinking = true))
-                }
-                var thinking by remember { mutableStateOf(true) }
-                update = { nextMessage, nextThinking ->
-                    message = nextMessage
-                    thinking = nextThinking
-                }
-                AgentLiveMessageContent(
-                    messages = listOf(message),
-                    provider = provider,
-                    status = "Running",
-                    activeTool = null,
-                    isThinking = thinking,
-                    isStreaming = true,
-                )
-            }
-
-            assertLiveEdgeAboveRail()
-            compose.runOnIdle {
-                update(assistantMessage(reasoningLength = 200, answerLength = 0, thinking = true), true)
-            }
-            assertLiveEdgeAboveRail()
-            compose.runOnIdle {
-                update(assistantMessage(reasoningLength = 200, answerLength = 20, thinking = false), false)
-            }
-            assertLiveEdgeAboveRail()
-            compose.runOnIdle {
-                update(assistantMessage(reasoningLength = 200, answerLength = 200, thinking = false), false)
-            }
-            assertLiveEdgeAboveRail()
-        }
+    fun claudeAgentFollowsGrowingReasoningAndAnswer() {
+        assertCliAgentFollowsGrowingReasoningAndAnswer("claude-agents")
     }
 
     @Test
-    fun thinkingReportsReasoningEdgeAndAnswerStreamingReportsAnswerEdge() {
+    fun geminiAgentFollowsGrowingReasoningAndAnswer() {
+        assertCliAgentFollowsGrowingReasoningAndAnswer("gemini-agents")
+    }
+
+    @Test
+    fun thinkingReportsReasoningEdge() {
         var section: LiveTextSection? = null
         compose.setContent {
             ChatBubble(
@@ -132,6 +103,11 @@ class LiveStreamFocalFollowTest {
         assertEquals(LiveTextSection.REASONING, section)
         compose.onNodeWithTag("live-stream-edge").assertIsDisplayed()
 
+    }
+
+    @Test
+    fun answerStreamingReportsAnswerEdge() {
+        var section: LiveTextSection? = null
         compose.setContent {
             ChatBubble(
                 message = UiMessage(
@@ -215,6 +191,52 @@ class LiveStreamFocalFollowTest {
         val edge = compose.onNodeWithTag("live-stream-edge").fetchSemanticsNode().boundsInRoot.bottom
         val rail = compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
         assertTrue("expected live edge ($edge) above rail ($rail)", edge < rail)
+    }
+
+    private fun assertCliAgentFollowsGrowingReasoningAndAnswer(provider: String) {
+        lateinit var update: (UiMessage, Boolean, ToolIndicatorData?) -> Unit
+        compose.setContent {
+            var message by remember {
+                mutableStateOf(assistantMessage(reasoningLength = 20, answerLength = 0, thinking = true))
+            }
+            var thinking by remember { mutableStateOf(true) }
+            var activeTool by remember { mutableStateOf<ToolIndicatorData?>(null) }
+            update = { nextMessage, nextThinking, nextTool ->
+                message = nextMessage
+                thinking = nextThinking
+                activeTool = nextTool
+            }
+            AgentLiveMessageContent(
+                messages = listOf(message),
+                provider = provider,
+                status = "Running",
+                activeTool = activeTool,
+                isThinking = thinking,
+                isStreaming = true,
+            )
+        }
+
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(assistantMessage(200, 0, true), true, null)
+        }
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(
+                assistantMessage(200, 0, false),
+                false,
+                ToolIndicatorData(name = "Read", icon = "", detail = "file.kt"),
+            )
+        }
+        compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
+        compose.runOnIdle {
+            update(assistantMessage(200, 20, false), false, null)
+        }
+        assertLiveEdgeAboveRail()
+        compose.runOnIdle {
+            update(assistantMessage(200, 200, false), false, null)
+        }
+        assertLiveEdgeAboveRail()
     }
 }
 
