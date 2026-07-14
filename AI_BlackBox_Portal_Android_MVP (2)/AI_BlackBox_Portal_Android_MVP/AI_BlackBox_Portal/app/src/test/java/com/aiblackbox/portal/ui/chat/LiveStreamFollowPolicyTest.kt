@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
+    @Test fun `rapid edge updates conflate to newest overflow`() {
+        val pending = LatestLiveOverflow()
+
+        pending.offer(4f)
+        pending.offer(12f)
+        pending.offer(31f)
+
+        assertEquals(31f, pending.consume())
+        assertNull(pending.consume())
+    }
+
     @Test fun `bottom inset is occupied once and clearance includes it`() {
         val geometry = calculateBottomFocalGeometry(
             windowBottomPx = 1_000f, effectiveBottomInsetPx = 300f,
@@ -15,6 +26,7 @@ class LiveStreamFollowPolicyTest {
         assertEquals(640f, geometry.residenceTopPx)
         assertEquals(700f, geometry.residenceBottomPx)
         assertEquals(600f, geometry.bottomClearancePx)
+        assertEquals(600f, geometry.returnControlBottomClearancePx)
     }
 
     @Test fun `unmeasured startup has no global live target until geometry is visible`() {

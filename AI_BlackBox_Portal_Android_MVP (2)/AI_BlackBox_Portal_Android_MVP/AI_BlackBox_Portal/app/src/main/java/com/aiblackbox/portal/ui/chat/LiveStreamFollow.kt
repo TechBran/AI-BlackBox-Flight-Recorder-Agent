@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.Dp
 import com.aiblackbox.portal.ui.components.SignalLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -73,6 +74,8 @@ data class BottomFocalGeometry(
         }
     val bottomClearancePx: Float
         get() = occupiedBottomInsetPx + appOwnedBottomClearancePx
+    val returnControlBottomClearancePx: Float
+        get() = bottomClearancePx
 }
 
 internal fun calculateBottomFocalGeometry(
@@ -205,6 +208,16 @@ internal class LiveStreamFollowPolicy {
     }
 }
 
+internal class LatestLiveOverflow {
+    private var latest: Float? = null
+
+    fun offer(overflowPx: Float) {
+        latest = overflowPx
+    }
+
+    fun consume(): Float? = latest.also { latest = null }
+}
+
 @Stable
 internal class LiveStreamFollowState internal constructor(
     val listState: LazyListState,
@@ -220,7 +233,9 @@ internal class LiveStreamFollowState internal constructor(
     var showReturnToLive by mutableStateOf(false)
         private set
 
+    private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
     private var correctionJob: Job? = null
+    private var returnJob: Job? = null
     private var resumeJob: Job? = null
     private var programmaticLifecycle = 0L
     private var programmaticScrollObserved = false
@@ -228,23 +243,31 @@ internal class LiveStreamFollowState internal constructor(
 
     fun reportEdge(yInWindow: Float) {
         edgeY = yInWindow
+        correctionRequests.trySend(Unit)
     }
 
     fun setTarget(yInWindow: Float) {
         targetY = yInWindow
+        correctionRequests.trySend(Unit)
     }
 
     fun setActive(active: Boolean) {
-        if (active) policy.start() else {
+        if (active) {
+            policy.start()
+            ensureCorrectionLoop()
+            correctionRequests.trySend(Unit)
+        } else if (policy.showReturnToLive) {
+            policy.onStreamCompleted(hasReturnDestination = edgeY.isFinite())
+        } else {
             policy.stop()
-            correctionJob?.cancel()
+            returnJob?.cancel()
             resumeJob?.cancel()
         }
         syncVisibility()
     }
 
     fun suspendForUserInput(now: Long = nowMs()) {
-        correctionJob?.cancel()
+        returnJob?.cancel()
         programmaticLifecycle++
         policy.onProgrammaticScrollFinished()
         policy.onUserScroll(now)
@@ -259,46 +282,62 @@ internal class LiveStreamFollowState internal constructor(
 
     fun resumeNow() {
         resumeJob?.cancel()
-        if (policy.resumeNow()) correctToTarget()
+        if (policy.resumeNow()) startReturn()
         syncVisibility()
     }
 
     fun tick(now: Long = nowMs()) {
-        if (policy.tick(now)) correctToTarget()
+        if (policy.tick(now)) startReturn()
         syncVisibility()
     }
 
     fun correctToTarget() {
-        if (!policy.isActive || policy.isSuspended || edgeY.isNaN() || targetY.isNaN()) return
-        if (abs(edgeY - targetY) < 1f) return
+        ensureCorrectionLoop()
+        correctionRequests.trySend(Unit)
+    }
 
-        val previous = correctionJob
-        previous?.cancel()
+    private fun ensureCorrectionLoop() {
+        if (correctionJob?.isActive == true) return
         correctionJob = scope.launch {
-            previous?.join()
-            if (!policy.isActive || policy.isSuspended) return@launch
-            val latestDelta = edgeY - targetY
-            if (latestDelta.isNaN() || abs(latestDelta) < 1f) return@launch
-            val lifecycle = ++programmaticLifecycle
-            programmaticScrollObserved = false
-            programmaticScrollFinished = false
-            policy.onProgrammaticScrollStarted()
-            try {
-                if (reducedMotion()) listState.scrollBy(latestDelta)
-                else listState.animateScrollBy(latestDelta, tween(durationMillis = 180))
-            } finally {
-                programmaticScrollFinished = true
-                scope.launch {
-                    yield()
-                    if (
-                        lifecycle == programmaticLifecycle &&
-                        !programmaticScrollObserved &&
-                        !listState.isScrollInProgress
-                    ) {
-                        finishProgrammaticScroll(lifecycle)
-                    }
-                }
+            for (ignored in correctionRequests) {
+                if (!policy.isActive || edgeY.isNaN() || targetY.isNaN()) continue
+                val overflow = policy.onMeasuredOverflow(edgeY - targetY) ?: continue
+                performProgrammaticScroll { listState.scrollBy(overflow) }
             }
+        }
+    }
+
+    private fun startReturn() {
+        returnJob?.cancel()
+        returnJob = scope.launch {
+            while (policy.mode == LiveFollowMode.RETURNING) {
+                val distance = edgeY - targetY
+                if (!distance.isFinite()) return@launch
+                if (policy.onMeasuredArrival(distance, tolerancePx = 1f)) {
+                    syncVisibility()
+                    correctionRequests.trySend(Unit)
+                    return@launch
+                }
+                performProgrammaticScroll {
+                    if (reducedMotion()) listState.scrollBy(distance)
+                    else listState.animateScrollBy(distance, tween(durationMillis = 180))
+                }
+                yield()
+            }
+        }
+        syncVisibility()
+    }
+
+    private suspend fun performProgrammaticScroll(block: suspend () -> Unit) {
+        val lifecycle = ++programmaticLifecycle
+        programmaticScrollObserved = false
+        programmaticScrollFinished = false
+        policy.onProgrammaticScrollStarted()
+        try {
+            block()
+        } finally {
+            programmaticScrollFinished = true
+            if (!listState.isScrollInProgress) finishProgrammaticScroll(lifecycle)
         }
     }
 
