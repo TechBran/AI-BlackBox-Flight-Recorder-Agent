@@ -38,7 +38,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
@@ -81,6 +83,8 @@ import kotlinx.coroutines.delay
 // Assistant bubble: --bubble (#000000), asymmetric (sharp top-start), full width
 // =============================================================================
 
+enum class LiveTextSection { REASONING, ANSWER }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatBubble(
@@ -93,7 +97,8 @@ fun ChatBubble(
     // (ChatViewModel._signalLabel). EPHEMERAL: it is never part of [message] and
     // never persisted; only the SignalLine HUD (top of the column) reads it.
     signalLabel: String? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onLiveEdgePositioned: ((LiveTextSection, Float) -> Unit)? = null,
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
@@ -214,6 +219,14 @@ fun ChatBubble(
                 AnimatedVisibility(visible = showThinking) {
                     Text(
                         text = message.reasoning!!,
+                        modifier = Modifier.onGloballyPositioned { coordinates ->
+                            if (message.isThinking) {
+                                onLiveEdgePositioned?.invoke(
+                                    LiveTextSection.REASONING,
+                                    coordinates.boundsInWindow().bottom,
+                                )
+                            }
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = BbxDim
                     )
@@ -353,14 +366,46 @@ fun ChatBubble(
                     if (cleanContent.isNotBlank()) {
                         MarkdownText(
                             content = cleanContent,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { coordinates ->
+                                    if (message.isStreaming && !message.isThinking) {
+                                        onLiveEdgePositioned?.invoke(
+                                            LiveTextSection.ANSWER,
+                                            coordinates.boundsInWindow().bottom,
+                                        )
+                                    }
+                                },
                         )
                         if (message.isStreaming) {
                             StreamingCursor(modifier = Modifier.padding(top = 2.dp))
                         }
                     } else if (message.isStreaming) {
-                        StreamingCursor()
+                        Box(
+                            modifier = Modifier.onGloballyPositioned { coordinates ->
+                                if (!message.isThinking) {
+                                    onLiveEdgePositioned?.invoke(
+                                        LiveTextSection.ANSWER,
+                                        coordinates.boundsInWindow().bottom,
+                                    )
+                                }
+                            },
+                        ) {
+                            StreamingCursor()
+                        }
                     }
+                }
+            }
+            if (!isUser && message.content.isBlank() && message.isStreaming && !message.isThinking) {
+                Box(
+                    modifier = Modifier.onGloballyPositioned { coordinates ->
+                        onLiveEdgePositioned?.invoke(
+                            LiveTextSection.ANSWER,
+                            coordinates.boundsInWindow().bottom,
+                        )
+                    },
+                ) {
+                    StreamingCursor()
                 }
             }
             // NOTE: the pre-content "thinking" indicator is now "The Signal" line
