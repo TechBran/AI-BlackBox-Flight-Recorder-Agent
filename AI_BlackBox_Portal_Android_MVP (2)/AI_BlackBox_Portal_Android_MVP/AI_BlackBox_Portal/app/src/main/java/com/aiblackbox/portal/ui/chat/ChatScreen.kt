@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -120,6 +122,20 @@ internal fun MainChatContent(
         statusLabel = signalLabel,
     )
     val followState = rememberLiveStreamFollowState(listState, liveSnapshot)
+    val returnHost = LocalReturnToLiveHost.current
+    val returnRegistration = remember(returnHost) {
+        returnHost?.register("main", followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    }
+    SideEffect {
+        returnRegistration?.publish(
+            followState.showReturnToLive,
+            followState.returningToLive,
+            followState::resumeNow,
+        )
+    }
+    DisposableEffect(returnRegistration) {
+        onDispose { returnRegistration?.dispose() }
+    }
     val density = LocalDensity.current
     val bottomClearance = bottomFocalGeometry?.let {
         with(density) { it.bottomClearancePx.toDp() }
@@ -170,9 +186,6 @@ internal fun MainChatContent(
             signalLabel,
             followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
-            returnControlBottomClearance = bottomFocalGeometry?.let {
-                with(density) { it.returnControlBottomClearancePx.toDp() }
-            },
             effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
         )
     }

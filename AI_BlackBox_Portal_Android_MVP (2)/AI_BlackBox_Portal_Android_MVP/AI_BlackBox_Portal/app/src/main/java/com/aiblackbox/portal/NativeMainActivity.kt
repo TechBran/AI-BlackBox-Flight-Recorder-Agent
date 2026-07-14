@@ -66,6 +66,7 @@ import com.aiblackbox.portal.ui.chat.LIVE_EDGE_GAP
 import com.aiblackbox.portal.ui.chat.SIGNAL_RESIDENCE_HEIGHT
 import com.aiblackbox.portal.ui.chat.calculateBottomFocalGeometry
 import com.aiblackbox.portal.ui.chat.rememberFilePicker
+import com.aiblackbox.portal.ui.chat.ReturnToLiveHost
 import com.aiblackbox.portal.ui.theme.BlackBoxTheme
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -443,9 +444,11 @@ class NativeMainActivity : ComponentActivity() {
                 // TopBar and Composer float over content with transparent backgrounds
                 // Ember backdrop mode provided once here from the persisted setting;
                 // read by EmberOverlay deep in the tree (call sites still pass "is generating").
+                val returnToLiveHost = remember { com.aiblackbox.portal.ui.chat.ReturnToLiveHostState() }
                 androidx.compose.runtime.CompositionLocalProvider(
                     com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
-                    com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode
+                    com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode,
+                    com.aiblackbox.portal.ui.chat.LocalReturnToLiveHost provides returnToLiveHost,
                 ) {
                 val density = LocalDensity.current
                 var windowBottomPx by remember { mutableStateOf(Float.NaN) }
@@ -1002,6 +1005,12 @@ class NativeMainActivity : ComponentActivity() {
                             },
                         )
                     }
+
+                    // Layer 5: highest activity-owned chrome, permanently mounted.
+                    ReturnToLiveHost(
+                        state = returnToLiveHost,
+                        composerTopPx = composerTopPx,
+                    )
 
                 }
                 } // end CompositionLocalProvider(LocalEmberMode)

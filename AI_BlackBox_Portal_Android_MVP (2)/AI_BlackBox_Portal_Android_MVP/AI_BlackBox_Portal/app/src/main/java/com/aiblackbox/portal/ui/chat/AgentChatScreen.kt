@@ -40,6 +40,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -809,6 +811,20 @@ internal fun AgentLiveMessageContent(
         statusLabel = label,
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot)
+    val returnHost = LocalReturnToLiveHost.current
+    val returnRegistration = remember(returnHost, provider) {
+        returnHost?.register(provider, followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    }
+    SideEffect {
+        returnRegistration?.publish(
+            followState.showReturnToLive,
+            followState.returningToLive,
+            followState::resumeNow,
+        )
+    }
+    DisposableEffect(returnRegistration) {
+        onDispose { returnRegistration?.dispose() }
+    }
     val expectedSection = cliLiveEdgeSection(phase) ?: if (followState.requiresReturnDestination) {
         LiveTextSection.COMPLETED_RETURN
     } else null
@@ -851,9 +867,6 @@ internal fun AgentLiveMessageContent(
             label = if (snapshot.isActive) label else null,
             followState = followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
-            returnControlBottomClearance = bottomFocalGeometry?.let {
-                with(density) { it.returnControlBottomClearancePx.toDp() }
-            },
             effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
         )
     }

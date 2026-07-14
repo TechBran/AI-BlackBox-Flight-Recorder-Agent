@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHeightIsEqualTo
+import androidx.compose.ui.test.assertWidthIsEqualTo
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.performClick
@@ -82,6 +83,39 @@ class LiveStreamFocalFollowTest {
     @Test
     fun completedGeminiHistoryShortcutIsTapOnlyAndClearsAtManualBottom() =
         assertCompletedHistoryShortcut("gemini-agents")
+
+    @Test
+    fun activityHostUsesOneFullTargetEightDpAboveMeasuredComposer() {
+        val host = ReturnToLiveHostState().also {
+            it.register("main", visible = true, returning = false) {}
+            it.register("gemini-agents", visible = true, returning = true) {}
+        }
+        compose.setContent {
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            Box(Modifier.fillMaxSize()) {
+                Spacer(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .height(180.dp)
+                        .fillMaxSize()
+                        .testTag("measured-composer"),
+                )
+                ReturnToLiveHost(
+                    state = host,
+                    composerTopPx = with(density) { 500.dp.toPx() },
+                )
+            }
+        }
+
+        compose.onNodeWithTag("return-to-live")
+            .assertIsDisplayed()
+            .assertHeightIsEqualTo(48.dp)
+            .assertWidthIsEqualTo(48.dp)
+        assertEquals(1, compose.onAllNodesWithTag("return-to-live").fetchSemanticsNodes().size)
+        val arrow = compose.onNodeWithTag("return-to-live").fetchSemanticsNode().boundsInRoot
+        val expectedBottom = with(compose.density) { 500.dp.toPx() - 8.dp.toPx() }
+        assertTrue("arrow bottom ${arrow.bottom} must be 8dp north of composer", kotlin.math.abs(arrow.bottom - expectedBottom) <= 1f)
+    }
 
     @Test
     fun completedHistoryReturnReachesBottomOfSingleItemTallerThanViewport() {
@@ -160,8 +194,9 @@ class LiveStreamFocalFollowTest {
             val arrow = compose.onNodeWithTag("return-to-live").fetchSemanticsNode().boundsInRoot
             val composer = compose.onNodeWithTag("real-composer").fetchSemanticsNode().boundsInRoot
             val tolerance = with(compose.density) { 1.dp.toPx() }
-            assertTrue("arrow bottom ${arrow.bottom} must equal prompt top ${composer.top}",
-                kotlin.math.abs(arrow.bottom - composer.top) <= tolerance)
+            val expectedBottom = composer.top - with(compose.density) { 8.dp.toPx() }
+            assertTrue("arrow bottom ${arrow.bottom} must stay 8dp above prompt top ${composer.top}",
+                kotlin.math.abs(arrow.bottom - expectedBottom) <= tolerance)
         }
 
         assertAnchored()
@@ -810,6 +845,7 @@ private fun BottomResidenceShellHarness(
     var windowBottom by remember { mutableStateOf(Float.NaN) }
     var composerTop by remember { mutableStateOf(Float.NaN) }
     var composerBottom by remember { mutableStateOf(Float.NaN) }
+    val returnHost = remember { ReturnToLiveHostState() }
     val geometry = calculateBottomFocalGeometry(
         windowBottomPx = windowBottom,
         effectiveBottomInsetPx = with(density) { effectiveInset.toPx() },
@@ -824,12 +860,14 @@ private fun BottomResidenceShellHarness(
             windowBottom = it.boundsInWindow().bottom
         },
     ) {
-        MainChatContent(
-            messages = listOf(assistantMessage(0, 40, false)),
-            chatState = if (active) ChatState.STREAMING else ChatState.IDLE,
-            signalLabel = "Ready",
-            bottomFocalGeometry = geometry,
-        )
+        androidx.compose.runtime.CompositionLocalProvider(LocalReturnToLiveHost provides returnHost) {
+            MainChatContent(
+                messages = listOf(assistantMessage(0, 40, false)),
+                chatState = if (active) ChatState.STREAMING else ChatState.IDLE,
+                signalLabel = "Ready",
+                bottomFocalGeometry = geometry,
+            )
+        }
         Column(
             Modifier
                 .align(Alignment.BottomCenter)
@@ -851,6 +889,7 @@ private fun BottomResidenceShellHarness(
                 applySystemBottomInsets = false,
             )
         }
+        ReturnToLiveHost(returnHost, composerTop)
     }
 }
 
@@ -872,6 +911,16 @@ private fun FollowHarness(
         statusLabel = label,
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot, reducedMotion)
+    val returnHost = remember { ReturnToLiveHostState() }
+    val registration = remember(returnHost) {
+        returnHost.register("harness", followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    }
+    androidx.compose.runtime.SideEffect {
+        registration.publish(followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    }
+    androidx.compose.runtime.DisposableEffect(registration) {
+        onDispose { registration.dispose() }
+    }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -894,5 +943,6 @@ private fun FollowHarness(
             item { Spacer(Modifier.height(1_200.dp)) }
         }
         if (active) LiveStreamFocalRail(label, followState)
+        ReturnToLiveHost(returnHost, composerTopPx = 700f)
     }
 }

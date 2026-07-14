@@ -17,9 +17,6 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -323,6 +320,7 @@ internal class LiveStreamFollowState internal constructor(
         private set
     var completedHistoryObservationMode by mutableStateOf(policy.mode)
         private set
+    val returningToLive: Boolean get() = completedHistoryObservationMode == LiveFollowMode.RETURNING
 
     private val correctionRequests = Channel<Unit>(Channel.CONFLATED)
     private val returnMeasurementRequests = Channel<Unit>(Channel.CONFLATED)
@@ -592,7 +590,6 @@ internal fun BoxScope.LiveStreamFocalRail(
     followState: LiveStreamFollowState,
     modifier: Modifier = Modifier,
     liveTargetYPx: Float? = null,
-    returnControlBottomClearance: Dp? = null,
     effectiveBottomInset: Dp? = null,
 ) {
     val density = LocalDensity.current
@@ -616,20 +613,5 @@ internal fun BoxScope.LiveStreamFocalRail(
         contentAlignment = Alignment.Center,
     ) {
         SignalLine(label)
-    }
-    if (followState.showReturnToLive) {
-        IconButton(
-            onClick = followState::resumeNow,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .then(
-                    if (returnControlBottomClearance == null) Modifier.navigationBarsPadding()
-                    else Modifier,
-                )
-                .padding(bottom = returnControlBottomClearance ?: SIGNAL_RESIDENCE_HEIGHT)
-                .testTag("return-to-live"),
-        ) {
-            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Return to live")
-        }
     }
 }
