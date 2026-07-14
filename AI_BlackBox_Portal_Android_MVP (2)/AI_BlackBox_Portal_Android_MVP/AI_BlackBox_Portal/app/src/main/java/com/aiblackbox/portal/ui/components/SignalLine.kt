@@ -59,6 +59,23 @@ private val SIGNAL_SCRAMBLE = "ABCDEF0123456789·→λ#@%$".toCharArray()
 
 private const val SIGNAL_WAVE_SPEED = 1.1f
 
+// Readability fix (mirrors web signal-feed.js @ 6e5102a): the wave is NOT a
+// continuous ripple — it is a per-line ENTRANCE that eases out to FLAT and holds.
+// On each new line it decays over WAVE_DECAY_MS then sits perfectly still so the
+// line is readable until the next label morphs in.
+private const val WAVE_DECAY_MS = 700.0
+
+/**
+ * Per-line wave amplitude envelope at [elapsedMs] since the line arrived: an
+ * ease-out (k²) from [peakPx] to 0 over [WAVE_DECAY_MS], then flat 0 forever.
+ * Pure — pinned by SignalWaveEnvelopeTest. Reduced motion passes peak 0 → always 0.
+ */
+internal fun signalWaveEnvelope(elapsedMs: Double, peakPx: Float): Float {
+    if (peakPx == 0f) return 0f
+    val k = (1.0 - elapsedMs / WAVE_DECAY_MS).coerceIn(0.0, 1.0)
+    return (peakPx * k * k).toFloat()
+}
+
 // =============================================================================
 // SignalMorph — UI-free per-character morph state machine. Plain Kotlin (no
 // Compose), so the diff/timing logic is deterministic and JVM-testable. Ported
@@ -77,7 +94,16 @@ private class SignalMorph(private val reduceMotion: Boolean) {
     }
 
     private var curText = ""
-    private var morphStartMs = 0.0
+    /** Frame time (ms) this line began — the shared origin for the morph AND the
+     *  wave-decay envelope (the wave and the scramble both start here). */
+    var morphStartMs = 0.0
+        private set
+    /** ms after [morphStartMs] by which every changed cell has fully settled
+     *  (last changed-cell stagger + its 420ms hot fade). 0 when nothing animates.
+     *  The frame loop must run at least this long so stopping never freezes a
+     *  half-scrambled glyph. */
+    var morphSettleMs = 0.0
+        private set
     private val cells = ArrayList<Cell>()
 
     val size: Int get() = cells.size
@@ -106,6 +132,10 @@ private class SignalMorph(private val reduceMotion: Boolean) {
                 c.scramble = SIGNAL_SCRAMBLE[(Math.random() * SIGNAL_SCRAMBLE.size).toInt()]
             }
         }
+        // Longest changed-cell animation = its stagger delay + the 420ms hot fade.
+        var maxChangedDelay = -1.0
+        for (i in 0 until l) if (cells[i].changed) maxChangedDelay = maxOf(maxChangedDelay, cells[i].delayMs)
+        morphSettleMs = if (maxChangedDelay < 0.0) 0.0 else maxChangedDelay + 420.0
         curText = label
         morphStartMs = nowMs
     }
@@ -157,11 +187,11 @@ private class SignalMorph(private val reduceMotion: Boolean) {
     }
 }
 
-/** Continuous per-character sine wave offset (px). 0 under reduced motion. */
-private fun signalWaveOffsetPx(i: Int, nowMs: Double, ampPx: Float): Float {
-    if (ampPx == 0f) return 0f
+/** Per-character sine wave offset (px) at the already-decayed [amp]. 0 → flat. */
+private fun signalWaveOffsetPx(i: Int, nowMs: Double, amp: Float): Float {
+    if (amp == 0f) return 0f
     val ph = nowMs * 0.001 * SIGNAL_WAVE_SPEED * PI
-    return (ampPx * sin(ph - i * 0.30)).toFloat()
+    return (amp * sin(ph - i * 0.30)).toFloat()
 }
 
 /** True when the OS "remove animations" / animator-scale-0 accessibility path is on. */
@@ -193,7 +223,9 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
     val currentLabel by rememberUpdatedState(label)
 
     val fontSizePx = with(density) { 13.sp.toPx() }
-    val waveAmpPx = if (reduceMotion) 0f else with(density) { 4.dp.toPx() }
+    // Peak wave amplitude HALVED (was 4dp) → a subtle entrance, not a busy ripple.
+    // 0 under reduced motion (always flat).
+    val peakAmpPx = if (reduceMotion) 0f else with(density) { 2.dp.toPx() }
     val glowPx = with(density) { 7.dp.toPx() }
 
     // One reusable text paint (monospace, soft red glow). Built once per size.
@@ -210,28 +242,40 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
     val descent = remember(paint) { paint.fontMetrics.descent }
 
     // Single frame loop drives BOTH the morph consume and the wave. A new [label]
-    // restarts the effect → morph.push diffs it against the previous line. Reduced
-    // motion sets the row once and idles until the next label (no 60fps loop).
+    // restarts the effect → morph.push diffs it against the previous line and stamps
+    // a fresh wave origin. The loop STOPS once the wave has decayed to flat AND the
+    // morph has fully settled — then the line HOLDS motionless and readable until the
+    // next label re-arms it (LaunchedEffect(label) restarts). Reduced motion sets the
+    // row once and idles immediately (no 60fps loop, always flat).
     LaunchedEffect(label) {
         val startNs = withFrameNanos { it }
         morph.push(currentLabel ?: "", startNs / 1_000_000.0)
         frame.longValue = startNs
         if (reduceMotion) return@LaunchedEffect
+        // Run until the wave is flat (WAVE_DECAY_MS) AND every scramble has settled,
+        // so going idle never freezes a half-morphed glyph.
+        val holdDeadlineMs = maxOf(WAVE_DECAY_MS, morph.morphSettleMs)
         while (true) {
-            withFrameNanos { t -> frame.longValue = t }
+            val t = withFrameNanos { it }
+            frame.longValue = t
+            if ((t - startNs) / 1_000_000.0 >= holdDeadlineMs) break // → flat, still hold
         }
     }
 
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(with(density) { (fontSizePx * 1.8f + waveAmpPx * 2f).toDp() }),
+            .height(with(density) { (fontSizePx * 1.8f + peakAmpPx * 2f).toDp() }),
     ) {
         // Reading the frame clock HERE invalidates only the DRAW phase each frame
         // (never recomposition) — the enclosing bubble does not recompose per frame.
         val nowMs = frame.longValue / 1_000_000.0
         val n = morph.size
         if (n > 0) {
+            // Per-line wave-decay envelope: eases from peak to flat over
+            // WAVE_DECAY_MS, then 0 forever (readable hold). Shared origin with the
+            // morph so a stray recomposition after the loop stops still draws flat.
+            val amp = signalWaveEnvelope(nowMs - morph.morphStartMs, peakAmpPx)
             val canvas = drawContext.canvas.nativeCanvas
             val baseY = size.height / 2f - (ascent + descent) / 2f
             val buf = CharArray(1)
@@ -242,7 +286,7 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
                 val col = lerp(SignalRed, Color.White, hot).copy(alpha = morph.alphaAt(i, nowMs))
                 paint.color = col.toArgb()
                 val y = baseY +
-                    signalWaveOffsetPx(i, nowMs, waveAmpPx) +
+                    signalWaveOffsetPx(i, nowMs, amp) +
                     morph.liftEmAt(i, nowMs) * fontSizePx
                 buf[0] = ch
                 canvas.drawText(buf, 0, 1, i * charWidth, y, paint)
