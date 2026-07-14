@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,6 +57,10 @@ import com.aiblackbox.portal.ui.chat.ChatState
 import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.Composer
 import com.aiblackbox.portal.ui.chat.MAX_UPLOAD_SIZE
+import com.aiblackbox.portal.ui.chat.FALLBACK_COMPOSER_HEIGHT
+import com.aiblackbox.portal.ui.chat.LIVE_EDGE_GAP
+import com.aiblackbox.portal.ui.chat.SIGNAL_RESIDENCE_HEIGHT
+import com.aiblackbox.portal.ui.chat.calculateBottomFocalGeometry
 import com.aiblackbox.portal.ui.chat.rememberFilePicker
 import com.aiblackbox.portal.ui.theme.BlackBoxTheme
 import com.aiblackbox.portal.ui.theme.BbxBlack
@@ -436,10 +443,25 @@ class NativeMainActivity : ComponentActivity() {
                     com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
                     com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode
                 ) {
+                val density = LocalDensity.current
+                var windowBottomPx by remember { mutableStateOf(Float.NaN) }
+                var composerTopPx by remember { mutableStateOf(Float.NaN) }
+                var composerBottomPx by remember { mutableStateOf(Float.NaN) }
+                val bottomFocalGeometry = calculateBottomFocalGeometry(
+                    windowBottomPx = windowBottomPx,
+                    composerTopPx = composerTopPx,
+                    composerBottomPx = composerBottomPx,
+                    residenceHeightPx = with(density) { SIGNAL_RESIDENCE_HEIGHT.toPx() },
+                    breathingGapPx = with(density) { LIVE_EDGE_GAP.toPx() },
+                    fallbackComposerHeightPx = with(density) { FALLBACK_COMPOSER_HEIGHT.toPx() },
+                )
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(BbxBlack)
+                        .onGloballyPositioned {
+                            windowBottomPx = it.boundsInWindow().bottom
+                        }
                 ) {
                     // Layer 1: Content (full screen, edge to edge)
                     BlackBoxNavGraph(
@@ -450,6 +472,7 @@ class NativeMainActivity : ComponentActivity() {
                         chatViewModel = chatViewModel,
                         updatesVm = updatesVm,
                         onModelChange = { scope.launch { store.setModel(it) } },
+                        bottomFocalGeometry = bottomFocalGeometry,
                         onSpeak = { text ->
                             scope.launch {
                                 try {
@@ -741,6 +764,7 @@ class NativeMainActivity : ComponentActivity() {
                         // Without this, the Box measured to fill available height, creating
                         // an invisible touch-consuming overlay above the visible Composer.
                         .wrapContentHeight(Alignment.Bottom)
+                        .padding(bottom = SIGNAL_RESIDENCE_HEIGHT)
                     ) {
                         Composer(
                             value = inputText,
@@ -956,7 +980,13 @@ class NativeMainActivity : ComponentActivity() {
                             attachments = attachments,
                             onRemoveAttachment = { index ->
                                 if (index in attachments.indices) attachments.removeAt(index)
-                            }
+                            },
+                            modifier = Modifier.onGloballyPositioned { coordinates ->
+                                coordinates.boundsInWindow().let { bounds ->
+                                    composerTopPx = bounds.top
+                                    composerBottomPx = bounds.bottom
+                                }
+                            },
                         )
                     }
 

@@ -16,6 +16,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.ui.components.ChatBubble
@@ -37,6 +38,7 @@ fun ChatScreen(
     viewModel: ChatViewModel,
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
+    bottomFocalGeometry: BottomFocalGeometry? = null,
     modifier: Modifier = Modifier
 ) {
     val messages by viewModel.messages.collectAsState()
@@ -77,6 +79,7 @@ fun ChatScreen(
                 onSpeakWithId = onSpeakWithId,
                 onSnapshotClick = { peekSnapId = it },
                 onRetry = viewModel::retryMessage,
+                bottomFocalGeometry = bottomFocalGeometry,
             )
         }
     }
@@ -101,6 +104,7 @@ internal fun MainChatContent(
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onSnapshotClick: (String) -> Unit = {},
     onRetry: (String) -> Unit = {},
+    bottomFocalGeometry: BottomFocalGeometry? = null,
 ) {
     val liveMessage = messages.lastOrNull { it.role == "assistant" }
     val liveSnapshot = LiveStreamSnapshot(
@@ -115,6 +119,10 @@ internal fun MainChatContent(
         statusLabel = signalLabel,
     )
     val followState = rememberLiveStreamFollowState(listState, liveSnapshot)
+    val density = LocalDensity.current
+    val bottomClearance = bottomFocalGeometry?.let {
+        with(density) { (it.residenceBottomPx - it.composerTopPx).coerceAtLeast(0f).toDp() }
+    } ?: (FALLBACK_COMPOSER_HEIGHT + SIGNAL_RESIDENCE_HEIGHT)
 
     Box(modifier.fillMaxSize()) {
         LazyColumn(
@@ -123,7 +131,7 @@ internal fun MainChatContent(
                 .fillMaxSize()
                 .liveStreamUserInput(followState)
                 .testTag("messages"),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 200.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = bottomClearance),
         ) {
             items(items = messages, key = { it.id }) { message ->
                 val isLiveTurn = message.id == liveSnapshot.messageId
@@ -145,8 +153,10 @@ internal fun MainChatContent(
                 )
             }
         }
-        if (liveSnapshot.isActive || signalLabel != null) {
-            LiveStreamFocalRail(signalLabel, followState)
-        }
+        LiveStreamFocalRail(
+            signalLabel,
+            followState,
+            liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
+        )
     }
 }

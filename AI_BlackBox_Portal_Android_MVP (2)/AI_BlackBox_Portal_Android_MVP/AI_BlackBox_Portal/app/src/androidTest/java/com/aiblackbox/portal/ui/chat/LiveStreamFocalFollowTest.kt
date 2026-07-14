@@ -18,6 +18,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
@@ -42,6 +43,26 @@ class LiveStreamFocalFollowTest {
     private val handoffMonotonicTolerancePx = 1f
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun mainSignalResidenceKeepsItsHeightWhenLabelDisappears() {
+        lateinit var clearLabel: () -> Unit
+        compose.setContent {
+            var label: String? by remember { mutableStateOf("Thinking") }
+            clearLabel = { label = null }
+            MainChatContent(
+                messages = listOf(assistantMessage(0, 20, false)),
+                chatState = ChatState.IDLE,
+                signalLabel = label,
+            )
+        }
+
+        compose.onNodeWithTag("live-stream-rail").assertHeightIsEqualTo(SIGNAL_RESIDENCE_HEIGHT)
+        compose.runOnIdle { clearLabel() }
+        compose.onNodeWithTag("live-stream-rail")
+            .assertHeightIsEqualTo(SIGNAL_RESIDENCE_HEIGHT)
+            .assertContentDescriptionEquals("")
+    }
 
     @Test
     fun mainChatFollowsGrowingReasoningAndAnswerAndKeepsSignalWhileSuspended() {

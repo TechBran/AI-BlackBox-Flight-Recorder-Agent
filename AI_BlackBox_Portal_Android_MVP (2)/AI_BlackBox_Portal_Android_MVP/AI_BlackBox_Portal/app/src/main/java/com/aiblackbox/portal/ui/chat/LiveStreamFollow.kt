@@ -5,6 +5,9 @@ import android.os.SystemClock
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -50,8 +53,10 @@ import kotlin.math.abs
 internal const val FOLLOW_RESUME_DELAY_MS = 5_000L
 internal val FOCAL_RAIL_OFFSET = 36.dp
 internal val LIVE_EDGE_GAP = 12.dp
+internal val SIGNAL_RESIDENCE_HEIGHT = 40.dp
+internal val FALLBACK_COMPOSER_HEIGHT = 180.dp
 
-internal data class BottomFocalGeometry(
+data class BottomFocalGeometry(
     val residenceTopPx: Float,
     val residenceBottomPx: Float,
     val composerTopPx: Float,
@@ -334,18 +339,24 @@ internal fun BoxScope.LiveStreamFocalRail(
     label: String?,
     followState: LiveStreamFollowState,
     modifier: Modifier = Modifier,
+    liveTargetYPx: Float? = null,
 ) {
     val density = LocalDensity.current
     Box(
         modifier = modifier
-            .align(Alignment.Center)
-            .offset(y = FOCAL_RAIL_OFFSET)
+            .align(Alignment.BottomCenter)
+            .navigationBarsPadding()
+            .fillMaxWidth()
+            .height(SIGNAL_RESIDENCE_HEIGHT)
             .testTag("live-stream-rail")
             .semantics { contentDescription = label.orEmpty() }
             .onGloballyPositioned { coordinates ->
                 val gapPx = with(density) { LIVE_EDGE_GAP.toPx() }
-                followState.setTarget(coordinates.boundsInWindow().top - gapPx)
+                followState.setTarget(
+                    liveTargetYPx ?: (coordinates.boundsInWindow().top - gapPx),
+                )
             },
+        contentAlignment = Alignment.Center,
     ) {
         SignalLine(label)
     }

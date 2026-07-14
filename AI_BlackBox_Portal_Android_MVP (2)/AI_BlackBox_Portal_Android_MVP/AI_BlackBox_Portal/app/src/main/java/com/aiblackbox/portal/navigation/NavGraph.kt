@@ -19,6 +19,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aiblackbox.portal.ui.chat.AgentChatScreen
 import com.aiblackbox.portal.ui.chat.ChatScreen
 import com.aiblackbox.portal.ui.chat.ChatViewModel
+import com.aiblackbox.portal.ui.chat.BottomFocalGeometry
 import com.aiblackbox.portal.ui.generation.ImageGenScreen
 import com.aiblackbox.portal.ui.generation.VideoGenScreen
 import com.aiblackbox.portal.ui.generation.MusicGenScreen
@@ -94,6 +95,7 @@ fun BlackBoxNavGraph(
     onSpeak: (String) -> Unit = {},
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onModelChange: (String) -> Unit = {},
+    bottomFocalGeometry: BottomFocalGeometry? = null,
     /**
      * Open the global SettingsSheet (the app's hamburger menu).
      *
@@ -127,10 +129,10 @@ fun BlackBoxNavGraph(
     ) {
         composable(Routes.CHAT) {
             if (chatViewModel != null) {
-                ChatScreen(origin = origin, operator = operator, viewModel = chatViewModel, onSpeak = onSpeak, onSpeakWithId = onSpeakWithId)
+                ChatScreen(origin = origin, operator = operator, viewModel = chatViewModel, onSpeak = onSpeak, onSpeakWithId = onSpeakWithId, bottomFocalGeometry = bottomFocalGeometry)
             } else {
                 // Fallback: should not happen in normal flow
-                ChatScreen(origin = origin, operator = operator, viewModel = viewModel(), onSpeak = onSpeak, onSpeakWithId = onSpeakWithId)
+                ChatScreen(origin = origin, operator = operator, viewModel = viewModel(), onSpeak = onSpeak, onSpeakWithId = onSpeakWithId, bottomFocalGeometry = bottomFocalGeometry)
             }
         }
         composable(Routes.AGENT) {
