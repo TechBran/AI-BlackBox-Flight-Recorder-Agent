@@ -305,6 +305,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _chatState = MutableStateFlow(ChatState.IDLE)
     val chatState: StateFlow<ChatState> = _chatState.asStateFlow()
 
+    // ── "The Signal" — presentation-only telemetry HUD (Phase 2) ──
+    // A single transient RED line that morphs through the REAL system telemetry
+    // of the in-flight turn (embed / search / rank / context / tool / generating).
+    // HARD RULE (load-bearing): this is UI-ONLY / EPHEMERAL. It is NEVER written
+    // onto a persisted UiMessage/ChatMessage (no data-model field), NEVER into the
+    // prompt/context, and NEVER minted. It lives here in transient ViewModel state
+    // only, reset at the start of each turn and cleared to null when the turn ends.
+    private val _signalLabel = MutableStateFlow<String?>(null)
+    val signalLabel: StateFlow<String?> = _signalLabel.asStateFlow()
+
+    // Per-turn Signal tracking (reset in [sendViaSSE], read across the many
+    // processSSEEvent calls of one turn). Never persisted.
+    private var signalLastTool: String = ""       // last tool_start name, for the "· ok" echo
+    private var signalGenerating: Boolean = false // one-shot latch for the "generating ·" line
+    private var signalModelLabel: String = "model" // real model id (from stream_start)
+
     private val _inputText = MutableStateFlow(TextFieldValue())
     val inputText: StateFlow<TextFieldValue> = _inputText.asStateFlow()
 
@@ -1959,6 +1975,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _chatState.value = ChatState.STREAMING
         startBackgroundService("Generating response...")
 
+        // Reset "The Signal" HUD state for this turn (presentation-only, never
+        // persisted). The real model id arrives in stream_start; until then fall
+        // back to the selected model/provider so a silent-turn "generating ·" line
+        // still names something honest.
+        signalLastTool = ""
+        signalGenerating = false
+        signalModelLabel = currentModel.ifBlank { currentProvider }.ifBlank { "model" }
+        // Seed an immediate honest "resolve brain" line so the HUD never shows a
+        // blank gap before the backend's system_activity burst arrives (which
+        // morphs over it). Ephemeral: this seeds only the transient flow.
+        _signalLabel.value = "brain · $signalModelLabel"
+
         val history = buildApiHistory()
 
         // CU: set status to running when sending a computer-use request
@@ -2044,6 +2072,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         _cuStatus.value = "complete"
                     }
                 }
+                // Turn done — dissolve "The Signal" (presentation-only; nothing to persist).
+                _signalLabel.value = null
                 stopBackgroundService()
                 updateLastMessage(
                     content = display,
@@ -2092,6 +2122,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 Log.e(TAG, "SSE error: ${e.message}", e)
                 _chatState.value = ChatState.ERROR
+                // Turn aborted — clear the ephemeral Signal HUD (never persisted).
+                _signalLabel.value = null
                 stopBackgroundService()
                 updateLastMessage(
                     content = combineContentAndErrors(content.toString(), errors.toString())
@@ -2134,6 +2166,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     val obj = json.parseToJsonElement(event.data).jsonObject
                     val model = obj["model"]?.jsonPrimitive?.content
+                    // The Signal: remember the REAL model id for the "generating ·" line
+                    // (presentation-only; never touches content/reasoning or the save payload).
+                    if (!model.isNullOrBlank()) signalModelLabel = model
                     // Provenance is embedded in stream_start.data.provenance — backend
                     // does NOT send a standalone "provenance" SSE event for /chat/stream
                     // (the dead branch below is a defensive fallback for WS-bridged paths).
@@ -2153,8 +2188,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (_chatState.value == ChatState.THINKING) {
                     _chatState.value = ChatState.STREAMING
                 }
+                signalOnGenerating()
             }
             "content" -> {
+                signalOnGenerating() // first answer bytes → narrate generation (once)
                 content.append(event.data)
                 if (_chatState.value == ChatState.THINKING) {
                     _chatState.value = ChatState.STREAMING
@@ -2162,6 +2199,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             "stream_end" -> {
                 _chatState.value = ChatState.IDLE
+                _signalLabel.value = null // dissolve The Signal (ephemeral)
             }
             "done" -> {
                 // "done" carries the full accumulated response as fallback.
@@ -2186,6 +2224,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // done data might be a plain string — ignore parse failure
                 }
                 _chatState.value = ChatState.IDLE
+                _signalLabel.value = null // dissolve The Signal (ephemeral)
                 // Clear ER mission state when stream completes
                 if (currentProvider == "robotics") {
                     _erMissionActive.value = false
@@ -2426,10 +2465,55 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _chatState.value = ChatState.ERROR
             }
 
+            // ── "The Signal" — presentation-only telemetry HUD (Phase 2) ──
+            // These three branches drive the morphing red line ONLY. HARD RULE:
+            // they must NEVER append to content/reasoning, feed the /chat/save
+            // payload, or reach the ledger — this telemetry is display-only and
+            // is held solely in the transient _signalLabel flow.
+            "system_activity" -> {
+                // data = { stage, label, detail, seq } (JSON OBJECT — see
+                // Orchestrator/telemetry_events.py). SSEClient.decodeJsonData returns
+                // objects verbatim; we parse and render ONLY the label.
+                parseSignalLabel(event.data)?.let { _signalLabel.value = it }
+            }
+            "tool_start" -> {
+                // data = the tool name (a JSON-encoded string → decodeJsonData already
+                // stripped the outer quotes). Remember it for the "· ok" echo.
+                val toolName = event.data.trim()
+                if (toolName.isNotBlank()) {
+                    signalLastTool = toolName
+                    _signalLabel.value = "tool · $toolName"
+                }
+            }
+            "tool_result" -> {
+                // Echo the last tool name as done; else fall back to a trimmed blurb.
+                if (signalLastTool.isNotBlank()) {
+                    _signalLabel.value = "tool · $signalLastTool · ok"
+                } else {
+                    val d = event.data.trim()
+                    if (d.isNotBlank()) {
+                        _signalLabel.value = "tool · " + (if (d.length > 40) d.substring(0, 40) else d)
+                    }
+                }
+            }
+
             // ── Unknown events — log but don't crash ──
             else -> {
                 Log.d(TAG, "Unhandled SSE event: ${event.event}")
             }
+        }
+    }
+
+    /**
+     * Push the "generating · <model>" line onto The Signal exactly once per turn
+     * (on content_start or the first content byte). Presentation-only: the model
+     * label is the real id captured from stream_start; this never touches content,
+     * reasoning, or any persisted/saved payload.
+     */
+    private fun signalOnGenerating() {
+        if (!signalGenerating) {
+            signalGenerating = true
+            _signalLabel.value = "generating · $signalModelLabel"
         }
     }
 
@@ -2509,6 +2593,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     attachArtifactsToMessage(assistantMessageId, artifacts)
                     // Persist so the chips survive a history reload.
                     persistHistory()
+                }
+                // Task 2.3 — mint line (MATCHES WEB, keep it): narrate the mint on
+                // the turn's HUD as a brief final flourish AFTER /chat/save returns,
+                // then deferred-dissolve. Runs after artifacts so the dwell delay
+                // never stalls chip attachment. Presentation-only: reads ONLY
+                // snap_id/dims from the save RESPONSE — never writes the payload, the
+                // message, or the ledger. The SignalLine survives the turn end because
+                // ChatBubble gates it on the live label (not isStreaming), so this
+                // post-answer push re-mounts it on the newest turn. Guarded clear so a
+                // brand-new turn started within the dwell isn't stomped.
+                parseMintLabel(body)?.let { mintLine ->
+                    _signalLabel.value = mintLine
+                    delay(1600) // let it morph in + linger (mirrors web's 1600ms)
+                    if (_signalLabel.value == mintLine) _signalLabel.value = null
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "saveConversation failed (non-critical): ${e.message}")
@@ -3123,6 +3221,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          */
         fun streamOutcomeIsFailure(realContent: String, errorText: String): Boolean =
             realContent.isBlank() && errorText.isNotBlank()
+
+        // Lenient parser used ONLY for the presentation-only Signal HUD label.
+        private val signalJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        /**
+         * Extract the display **label** from a `system_activity` SSE event's data
+         * (a JSON OBJECT `{stage, label, detail, seq}` — see telemetry_events.py).
+         *
+         * HARD RULE: the returned string feeds "The Signal" HUD ONLY. It is NEVER
+         * written onto a UiMessage/ChatMessage, the context, or a save/mint payload.
+         * By construction this reads *only* the top-level `label` — any body-like
+         * `detail` fields (content/reasoning/etc.) are unreachable, so the parser
+         * cannot smuggle conversation content into the ephemeral HUD.
+         *
+         * Pure (companion) + kotlinx.serialization — unit-testable without the
+         * ViewModel and without org.json (which is unmocked in local JVM tests).
+         * Returns null on a blank/missing label or unparseable data.
+         */
+        @VisibleForTesting
+        internal fun parseSignalLabel(data: String): String? = try {
+            signalJson.parseToJsonElement(data).jsonObject["label"]
+                ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+
+        /**
+         * Build the presentation-only "mint · <snap_id>[ · <dims>d]" HUD line from a
+         * `/chat/save` JSON RESPONSE body (Task 2.3 — mirrors the web's post-save
+         * flourish). Reads ONLY `snap_id` + `dims` (fallback `embedding_dims`) from
+         * the RESPONSE — never the request/payload/ledger. Returns null when the body
+         * carries no snap_id (e.g. an un-minted turn) or is unparseable.
+         *
+         * Pure (companion) + kotlinx.serialization — unit-testable without the
+         * ViewModel. The HARD RULE holds: the output is a display string that only
+         * ever reaches the transient _signalLabel flow.
+         */
+        @VisibleForTesting
+        internal fun parseMintLabel(body: String): String? = try {
+            val obj = signalJson.parseToJsonElement(body).jsonObject
+            val snap = obj["snap_id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+            if (snap == null) {
+                null
+            } else {
+                val dims = (obj["dims"] ?: obj["embedding_dims"])
+                    ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                "mint · $snap" + if (dims != null) " · ${dims}d" else ""
+            }
+        } catch (_: Exception) {
+            null
+        }
 
         /**
          * The display string for a bubble that may carry both real streamed
