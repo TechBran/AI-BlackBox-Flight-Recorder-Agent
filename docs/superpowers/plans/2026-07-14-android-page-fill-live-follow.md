@@ -90,3 +90,24 @@
 - [ ] **Step 3: Fix all Critical or Important findings test-first** and repeat review and verification.
 - [ ] **Step 4: If exactly one authorized phone is connected, perform exactly one** `adb install -r app/build/outputs/apk/debug/app-debug.apk`; do not uninstall or retry automatically.
 - [ ] **Step 5: Launch once, verify process health, and hand live thinking/answer acceptance testing to the user.**
+
+### Task 5: Completed-history scroll-to-bottom shortcut
+
+**Files:**
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/LiveStreamFollow.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/ChatScreen.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/AgentChatScreen.kt`
+- Test: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/test/java/com/aiblackbox/portal/ui/chat/LiveStreamFollowPolicyTest.kt`
+- Test: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/androidTest/java/com/aiblackbox/portal/ui/chat/LiveStreamFocalFollowTest.kt`
+
+**Interfaces:**
+- Consumes: `LazyListState.canScrollForward`, completed-response destination anchor, prompt-edge arrow, and measurement-verified return.
+- Produces: tap-only completed-history shortcut independent of active-stream state.
+
+- [ ] **Step 1: Write failing policy tests** proving inactive completed history can show a return control, does not schedule five-second return, enters returning only on tap, and clears when the true bottom is reached.
+- [ ] **Step 2: Write failing Compose tests** for main, Claude, and Gemini: finish a long response, scroll up one page, assert the prompt-anchored arrow appears, advance beyond five seconds with no movement, tap, verify measured arrival, and assert arrow plus completed anchor disappear. Also verify manually reaching bottom clears the arrow.
+- [ ] **Step 3: Run focused tests/compilation** and retain RED evidence caused by inactive user scroll being ignored.
+- [ ] **Step 4: Add an explicit completed-history mode/input** driven by `canScrollForward`, distinct from active-stream suspension. Keep its timer disabled and reuse the existing completed destination plus return glide on tap.
+- [ ] **Step 5: Wire main and agent screens** so list position changes update idle shortcut visibility after completion without affecting live five-second behavior.
+- [ ] **Step 6: Run focused tests, full JVM tests, `compileDebugAndroidTestKotlin`, `assembleDebug`, and `git diff --check`.**
+- [ ] **Step 7: Request independent review**, fix all blocking findings test-first, then perform exactly one in-place install and one launch-health check.
