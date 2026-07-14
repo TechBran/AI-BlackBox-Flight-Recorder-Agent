@@ -74,6 +74,10 @@ let surge = 0;               // load-reactivity (0 = calm baseline; no driver in
 
 const prefersReduced = typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Coarse-pointer (touch) halves particle counts. Evaluated ONCE at module load —
+// baseCount() runs every frame, so never create an MQL ~60×/s in the hot path.
+const coarsePointer = typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer:coarse)').matches;
 
 // =============================================================================
 // Pre-rendered sprite atlas — drawImage() instead of per-particle gradients
@@ -110,7 +114,7 @@ function ensureSprites() {
 // coarse pointers (Appendix A: ~1 particle / 8,000 px², floor 60, ceiling 1200)
 function baseCount() {
     let n = (width * height) / 8000;
-    if (typeof window.matchMedia === 'function' && window.matchMedia('(pointer:coarse)').matches) n *= 0.5;
+    if (coarsePointer) n *= 0.5;
     return Math.max(60, Math.min(n, 1200));
 }
 const emberScale = () => Math.max(0.4, Math.min(2.4, (width * height) / (1440 * 900))) * FIELD.density;
@@ -191,21 +195,29 @@ const LAYERS = [
     { p: 0.3, s: [1.0, 1.8], vy: 0.7, a: [0.6, 0.8], glow: false }, // mid / small
     { p: 0.1, s: [1.8, 2.6], vy: 1.0, a: [0.8, 1.0], glow: true }   // fore / hero (glow)
 ];
+function makeStar() {
+    const roll = Math.random(); let L = LAYERS[0];
+    if (roll > 0.9) L = LAYERS[2]; else if (roll > 0.6) L = LAYERS[1];
+    const sk = Math.pow(Math.random(), 2.2); // power-skewed: mostly tiny, few bright
+    return {
+        x: Math.random() * width, y: Math.random() * height,
+        size: L.s[0] + (L.s[1] - L.s[0]) * sk, vy: -(8 + Math.random() * 17) * L.vy, vx: (Math.random() - 0.5) * 4,
+        base: L.a[0] + (L.a[1] - L.a[0]) * Math.random(), amp: 0.25 + Math.random() * 0.2,
+        tw: 0.8 + Math.random() * 1.7, seed: Math.random() * 6.28,
+        hue: Math.random() < 0.7 ? 255 : (Math.random() < 0.5 ? 250 : 34), glow: L.glow
+    };
+}
 function initStars() {
     stars = [];
     const N = Math.round(baseCount() * FIELD.density);
-    for (let i = 0; i < N; i++) {
-        const roll = Math.random(); let L = LAYERS[0];
-        if (roll > 0.9) L = LAYERS[2]; else if (roll > 0.6) L = LAYERS[1];
-        const sk = Math.pow(Math.random(), 2.2); // power-skewed: mostly tiny, few bright
-        stars.push({
-            x: Math.random() * width, y: Math.random() * height,
-            size: L.s[0] + (L.s[1] - L.s[0]) * sk, vy: -(8 + Math.random() * 17) * L.vy, vx: (Math.random() - 0.5) * 4,
-            base: L.a[0] + (L.a[1] - L.a[0]) * Math.random(), amp: 0.25 + Math.random() * 0.2,
-            tw: 0.8 + Math.random() * 1.7, seed: Math.random() * 6.28,
-            hue: Math.random() < 0.7 ? 255 : (Math.random() < 0.5 ? 250 : 34), glow: L.glow
-        });
-    }
+    for (let i = 0; i < N; i++) stars.push(makeStar());
+}
+// Grow/trim the star array IN PLACE toward `want` so existing stars keep their
+// positions — a full initStars() re-scatter on a resize count-drift causes a
+// visible "pop" as every star jumps.
+function resizeStars(want) {
+    while (stars.length < want) stars.push(makeStar());
+    if (stars.length > want) stars.length = want;
 }
 function drawStars(now, dt) {
     // Crisp points: CLEAR to transparent each frame (no smear) and draw additively
@@ -213,7 +225,7 @@ function drawStars(now, dt) {
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, width, height);
     const want = Math.round(baseCount() * FIELD.density);
-    if (Math.abs(want - stars.length) > 40) initStars();
+    if (Math.abs(want - stars.length) > 40) resizeStars(want);
     ctx.globalCompositeOperation = 'lighter';
     const ts = now * 0.001;
     for (const s of stars) {
@@ -251,12 +263,15 @@ function drawMatrix(now, dt) {
     ctx.font = `${mSize}px ui-monospace,monospace`;
     ctx.textBaseline = 'top';
     const k = (1 + surge * 0.8) * (0.6 + 0.6 * Math.min(emberScale(), 2));
+    // intensity is constant per frame → build both fillStyles ONCE, not per column.
+    const leadStyle = `rgba(200,255,210,${0.9 * FIELD.intensity})`;   // bright leading glyph
+    const trailStyle = `hsla(135,90%,55%,${0.5 * FIELD.intensity})`;  // dim green trail glyph
     for (let i = 0; i < mCols.length; i++) {
         const c = mCols[i], x = i * mSize;
         if (now - c.last > 36) { c.glyph = mChars[(Math.random() * mChars.length) | 0]; c.last = now; }
-        ctx.fillStyle = `rgba(200,255,210,${0.9 * FIELD.intensity})`;                       // bright leading glyph
+        ctx.fillStyle = leadStyle;
         ctx.fillText(c.glyph || mChars[0], x, c.y);
-        ctx.fillStyle = `hsla(135,90%,55%,${0.5 * FIELD.intensity})`;                        // dim green trail glyph
+        ctx.fillStyle = trailStyle;
         ctx.fillText(mChars[(i * 7 + ((now / 90) | 0)) % mChars.length], x, c.y - mSize);
         c.y += c.sp * k * dt;
         if (c.y > height + Math.random() * height * 0.3) { c.y = Math.random() * -40; c.sp = mSize * (3 + Math.random() * 6); }
@@ -310,8 +325,11 @@ function resize() {
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // column count is width-derived; stars self-heal in drawStars via the count check
-    initMatrix();
+    // Matrix column count is width-derived, so re-init it on resize — but ONLY when
+    // matrix is the live field. Stars self-heal in drawStars via the count check;
+    // embers self-fill from an empty array. Switching TO matrix re-inits via
+    // setParticleMode → initField (and ensureFieldReady on activation).
+    if (particleMode === 'matrix') initMatrix();
 }
 function clearCanvas() {
     if (!ctx) return;
