@@ -37,3 +37,32 @@ def test_rerank_shown_only_when_enabled():
          "candidates": 20, "mmr_topk": 8, "memories": 8, "rerank_enabled": True, "rerank_model": "cohere-rerank-4"}
     stages = [e["data"]["stage"] for e in build_retrieval_activity(m)]
     assert "rerank" in stages
+
+
+def test_fresh_box_zero_corpus_still_narrates_search():
+    # PORTABILITY: an empty-corpus box must HONESTLY show "0 snapshots" rather
+    # than silently drop the stage. Guards against a truthiness regression
+    # (`if corpus and candidates:` would wrongly hide the fresh-box truth).
+    m = {"provider": "gpt-5.1", "model": "gpt-5.1", "embed_model": "gemini-embedding-2",
+         "embed_dims": 3072, "corpus_count": 0, "candidates": 0, "mmr_topk": 0,
+         "memories": 0, "context_tokens": 0}
+    ev = build_retrieval_activity(m)
+    search = next((e for e in ev if e["data"]["stage"] == "search"), None)
+    assert search is not None, "fresh box must still narrate the search stage"
+    assert "0 snapshots" in search["data"]["label"]
+    assert [e["data"]["seq"] for e in ev] == list(range(len(ev)))  # seq still contiguous
+
+
+def test_none_and_empty_input():
+    assert build_retrieval_activity(None) == []
+    assert build_retrieval_activity({}) == []
+
+
+def test_partial_search_metrics_omits_search_when_incomplete():
+    # Honest degradation: corpus present but candidates missing -> omit search
+    # (never fabricate a "cleared floor" count we don't have); embed still shows.
+    m = {"provider": "anthropic", "model": "x", "embed_model": "e", "embed_dims": 10,
+         "corpus_count": 100}
+    stages = [e["data"]["stage"] for e in build_retrieval_activity(m)]
+    assert "embed" in stages
+    assert "search" not in stages
