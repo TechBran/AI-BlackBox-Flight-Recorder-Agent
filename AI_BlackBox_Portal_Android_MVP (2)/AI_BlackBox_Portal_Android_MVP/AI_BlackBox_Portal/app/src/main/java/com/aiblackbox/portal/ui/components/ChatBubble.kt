@@ -38,10 +38,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -81,6 +84,12 @@ import kotlinx.coroutines.delay
 // Assistant bubble: --bubble (#000000), asymmetric (sharp top-start), full width
 // =============================================================================
 
+enum class LiveTextSection { REASONING, ANSWER, TOOL_FALLBACK, COMPLETED_RETURN }
+internal const val LIVE_REASONING_EDGE_TAG = "live-stream-edge-reasoning"
+internal const val LIVE_ANSWER_EDGE_TAG = "live-stream-edge-answer"
+internal const val LIVE_TOOL_FALLBACK_EDGE_TAG = "live-stream-edge-tool-fallback"
+internal const val COMPLETED_RETURN_EDGE_TAG = "live-stream-edge-completed-return"
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChatBubble(
@@ -93,7 +102,10 @@ fun ChatBubble(
     // (ChatViewModel._signalLabel). EPHEMERAL: it is never part of [message] and
     // never persisted; only the SignalLine HUD (top of the column) reads it.
     signalLabel: String? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onLiveEdgePositioned: ((LiveTextSection, Float) -> Unit)? = null,
+    useToolFallbackAnchor: Boolean = false,
+    useCompletedReturnAnchor: Boolean = false,
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
@@ -134,10 +146,33 @@ fun ChatBubble(
         // UNDER the bubble. Pure layout — carries NO pointer handlers, so it can't
         // reintroduce the touch-blocking history noted on the content column below.
         Column(
-            modifier = Modifier.then(
+            modifier = Modifier
+                .then(
                 if (isUser) Modifier.widthIn(max = maxUserBubbleWidth)
                 else Modifier.fillMaxWidth()
-            ),
+                )
+                .then(
+                    if (useToolFallbackAnchor && !isUser) Modifier
+                        .testTag(LIVE_TOOL_FALLBACK_EDGE_TAG)
+                        .onGloballyPositioned { coordinates ->
+                            onLiveEdgePositioned?.invoke(
+                                LiveTextSection.TOOL_FALLBACK,
+                                coordinates.boundsInWindow().bottom,
+                            )
+                        }
+                    else Modifier
+                )
+                .then(
+                    if (useCompletedReturnAnchor && !isUser) Modifier
+                        .testTag(COMPLETED_RETURN_EDGE_TAG)
+                        .onGloballyPositioned { coordinates ->
+                            onLiveEdgePositioned?.invoke(
+                                LiveTextSection.COMPLETED_RETURN,
+                                coordinates.boundsInWindow().bottom,
+                            )
+                        }
+                    else Modifier
+                ),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
         Column(
@@ -214,6 +249,16 @@ fun ChatBubble(
                 AnimatedVisibility(visible = showThinking) {
                     Text(
                         text = message.reasoning!!,
+                        modifier = Modifier
+                            .then(if (message.isThinking) Modifier.testTag(LIVE_REASONING_EDGE_TAG) else Modifier)
+                            .onGloballyPositioned { coordinates ->
+                            if (message.isThinking) {
+                                onLiveEdgePositioned?.invoke(
+                                    LiveTextSection.REASONING,
+                                    coordinates.boundsInWindow().bottom,
+                                )
+                            }
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = BbxDim
                     )
@@ -353,14 +398,57 @@ fun ChatBubble(
                     if (cleanContent.isNotBlank()) {
                         MarkdownText(
                             content = cleanContent,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (message.isStreaming && !message.isThinking) {
+                                        Modifier.testTag(LIVE_ANSWER_EDGE_TAG)
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .onGloballyPositioned { coordinates ->
+                                    if (message.isStreaming && !message.isThinking) {
+                                        onLiveEdgePositioned?.invoke(
+                                            LiveTextSection.ANSWER,
+                                            coordinates.boundsInWindow().bottom,
+                                        )
+                                    }
+                                },
                         )
                         if (message.isStreaming) {
                             StreamingCursor(modifier = Modifier.padding(top = 2.dp))
                         }
                     } else if (message.isStreaming) {
-                        StreamingCursor()
+                        Box(
+                            modifier = Modifier
+                                .testTag(LIVE_ANSWER_EDGE_TAG)
+                                .onGloballyPositioned { coordinates ->
+                                if (!message.isThinking) {
+                                    onLiveEdgePositioned?.invoke(
+                                        LiveTextSection.ANSWER,
+                                        coordinates.boundsInWindow().bottom,
+                                    )
+                                }
+                            },
+                        ) {
+                            StreamingCursor()
+                        }
                     }
+                }
+            }
+            if (!isUser && message.content.isBlank() && message.isStreaming && !message.isThinking) {
+                Box(
+                    modifier = Modifier
+                        .testTag(LIVE_ANSWER_EDGE_TAG)
+                        .onGloballyPositioned { coordinates ->
+                        onLiveEdgePositioned?.invoke(
+                            LiveTextSection.ANSWER,
+                            coordinates.boundsInWindow().bottom,
+                        )
+                    },
+                ) {
+                    StreamingCursor()
                 }
             }
             // NOTE: the pre-content "thinking" indicator is now "The Signal" line

@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +40,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -51,6 +54,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,6 +76,7 @@ import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.ClaudeAccent
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.components.GeminiAccent
+import com.aiblackbox.portal.ui.components.LiveTextSection
 import com.aiblackbox.portal.ui.components.ProviderBanner
 import com.aiblackbox.portal.ui.components.StatusLine
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -116,6 +122,52 @@ private val REASONING_PHRASES = listOf(
     "Neural processing",
     "Deep analysis"
 )
+
+internal fun cliLiveStatusLabel(
+    isThinking: Boolean,
+    activeTool: String?,
+    status: String,
+): String? = when {
+    isThinking -> "Thinking deeply"
+    !activeTool.isNullOrBlank() -> "Using · $activeTool"
+    status.isNotBlank() -> status
+    else -> null
+}
+
+internal fun cliLiveStreamPhase(
+    isStreaming: Boolean,
+    isThinking: Boolean,
+    activeTool: String?,
+): LiveStreamPhase = when {
+    !isStreaming -> LiveStreamPhase.IDLE
+    isThinking -> LiveStreamPhase.THINKING
+    !activeTool.isNullOrBlank() -> LiveStreamPhase.TOOL
+    else -> LiveStreamPhase.ANSWERING
+}
+
+internal fun cliLiveEdgeSection(phase: LiveStreamPhase): LiveTextSection? = when (phase) {
+    LiveStreamPhase.THINKING -> LiveTextSection.REASONING
+    LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
+    LiveStreamPhase.TOOL -> LiveTextSection.TOOL_FALLBACK
+    LiveStreamPhase.IDLE -> null
+}
+
+internal fun reduceActiveTool(
+    current: ToolIndicatorData?,
+    event: AgentEvent,
+): ToolIndicatorData? = when (event) {
+    is AgentEvent.Content,
+    is AgentEvent.ToolResult,
+    is AgentEvent.FileResult,
+    is AgentEvent.EditDiff,
+    is AgentEvent.Output,
+    is AgentEvent.Completed,
+    is AgentEvent.Error,
+    is AgentEvent.SessionEnded,
+    is AgentEvent.Disconnected -> null
+    is AgentEvent.Info -> null
+    else -> current
+}
 
 // =============================================================================
 // Permission Modes — mirrors Portal cyclePermissionMode()
@@ -267,11 +319,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
      * Handle agent events — mirrors Portal handleMessage() switch cases.
      */
     private fun handleEvent(event: AgentEvent) {
+        _activeTool.value = reduceActiveTool(_activeTool.value, event)
         when (event) {
             // Content streaming — Portal: appendContent()
             is AgentEvent.Content -> {
                 _isThinking.value = false
                 _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Responding..."
                 outputBuffer.append(event.text)
                 updateLastAssistant(outputBuffer.toString())
@@ -288,6 +342,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Tool use — Portal: appendToolUse(), updateToolIndicator()
             is AgentEvent.ToolUse -> {
+                _isThinking.value = false
                 _isStreaming.value = true
                 _status.value = "Using tools..."
                 val icon = TOOL_ICONS[event.name] ?: "\uD83D\uDD27" // Wrench default
@@ -304,6 +359,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Tool result — Portal: appendToolResult()
             is AgentEvent.ToolResult -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Processing..."
                 if (event.text.isNotBlank()) {
                     val lines = event.text.count { it == '\n' } + 1
@@ -315,6 +373,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // File result — Portal: appendFileResult()
             is AgentEvent.FileResult -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "File operation..."
                 val fileName = event.filePath.substringAfterLast('/')
                 outputBuffer.append("\n[Read: $fileName, lines ${event.startLine}-${event.startLine + event.numLines - 1}]\n")
@@ -323,6 +384,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Edit diff — Portal: appendEditDiff()
             is AgentEvent.EditDiff -> {
+                _isThinking.value = false
+                _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Edit complete"
                 val fileName = event.filePath.substringAfterLast('/')
                 outputBuffer.append("\n[Edited: $fileName]\n")
@@ -334,7 +398,9 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
             // Raw output — Portal: appendRawOutput()
             is AgentEvent.Output -> {
+                _isThinking.value = false
                 _isStreaming.value = true
+                _activeTool.value = null
                 _status.value = "Streaming..."
                 outputBuffer.append(event.text)
                 updateLastAssistant(outputBuffer.toString())
@@ -375,6 +441,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             is AgentEvent.Info -> {
                 // Show as inline content if streaming, otherwise update status
                 if (_isStreaming.value) {
+                    _isThinking.value = false
+                    _activeTool.value = null
                     outputBuffer.append("\n\u2139\uFE0F ${event.message}")
                     updateLastAssistant(outputBuffer.toString())
                 } else {
@@ -595,6 +663,7 @@ fun AgentChatScreen(
     provider: String = "agents",
     onSend: (String) -> Unit = {},
     chatViewModel: ChatViewModel? = null,
+    bottomFocalGeometry: BottomFocalGeometry? = null,
     modifier: Modifier = Modifier,
     viewModel: AgentViewModel = viewModel()
 ) {
@@ -625,13 +694,6 @@ fun AgentChatScreen(
     LaunchedEffect(chatViewModel) {
         chatViewModel?.agentPromptEvent?.collect { prompt ->
             viewModel.sendPrompt(prompt)
-        }
-    }
-
-    // Auto-scroll on new content
-    LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
         }
     }
 
@@ -682,48 +744,20 @@ fun AgentChatScreen(
         )
 
         // ====================================================================
-        // 2. Tool Indicator Bar (when agent is using a tool)
-        // Mirrors Portal .tool-indicator sticky at bottom of bubble
+        // 2. Chat messages and the single fixed live-status rail
         // ====================================================================
-        AnimatedVisibility(
-            visible = activeTool != null && isStreaming,
-            enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut()
-        ) {
-            activeTool?.let { tool ->
-                ToolIndicatorBar(tool = tool)
-            }
-        }
-
-        // ====================================================================
-        // 3. Thinking Indicator (floating, when agent is in extended thinking)
-        // Mirrors Portal .thinking-indicator with cycling phrases
-        // ====================================================================
-        AnimatedVisibility(
-            visible = isThinking && isStreaming,
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            ThinkingBar()
-        }
-
-        // ====================================================================
-        // 4. Chat Messages
-        // ====================================================================
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 180.dp)
-        ) {
-            items(items = messages, key = { it.id }) { message ->
-                ChatBubble(
-                    message = message,
-                    onSnapshotClick = { peekSnapId = it }
-                )
-            }
-        }
+        AgentLiveMessageContent(
+            messages = messages,
+            provider = provider,
+            status = status,
+            activeTool = activeTool,
+            isThinking = isThinking,
+            isStreaming = isStreaming,
+            listState = listState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            onSnapshotClick = { peekSnapId = it },
+            bottomFocalGeometry = bottomFocalGeometry,
+        )
     }
 
     // ========================================================================
@@ -747,6 +781,93 @@ fun AgentChatScreen(
             snapId = snapId,
             origin = origin,
             onDismiss = { peekSnapId = null }
+        )
+    }
+}
+
+@Composable
+internal fun AgentLiveMessageContent(
+    messages: List<UiMessage>,
+    provider: String,
+    status: String,
+    activeTool: ToolIndicatorData?,
+    isThinking: Boolean,
+    isStreaming: Boolean,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    onSnapshotClick: (String) -> Unit = {},
+    bottomFocalGeometry: BottomFocalGeometry? = null,
+) {
+    // AgentViewModel creates and mutates real `assistant` placeholders. Selecting
+    // by that model value also remains correct if a user message follows history.
+    val liveMessage = messages.lastOrNull { it.role == "assistant" }
+    val phase = cliLiveStreamPhase(isStreaming, isThinking, activeTool?.name)
+    val label = cliLiveStatusLabel(isThinking, activeTool?.name, status)
+    val snapshot = LiveStreamSnapshot(
+        messageId = liveMessage?.id,
+        reasoningLength = liveMessage?.reasoning?.length ?: 0,
+        answerLength = liveMessage?.content?.length ?: 0,
+        phase = phase,
+        statusLabel = label,
+    )
+    val followState = rememberLiveStreamFollowState(listState, snapshot)
+    val returnHost = LocalReturnToLiveHost.current
+    val returnRegistration = remember(returnHost, provider) {
+        returnHost?.register(provider, followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    }
+    SideEffect {
+        returnRegistration?.publish(
+            followState.showReturnToLive,
+            followState.returningToLive,
+            followState::resumeNow,
+        )
+    }
+    DisposableEffect(returnRegistration) {
+        onDispose { returnRegistration?.dispose() }
+    }
+    val expectedSection = cliLiveEdgeSection(phase) ?: if (followState.requiresReturnDestination) {
+        LiveTextSection.COMPLETED_RETURN
+    } else null
+    val density = LocalDensity.current
+    val bottomClearance = bottomFocalGeometry?.let {
+        with(density) { it.bottomClearancePx.toDp() }
+    } ?: (FALLBACK_COMPOSER_HEIGHT + SIGNAL_RESIDENCE_HEIGHT)
+
+    Box(modifier = modifier.testTag("agent-messages-$provider")) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (bottomFocalGeometry != null) Modifier.padding(bottom = bottomClearance)
+                    else Modifier,
+                )
+                .liveStreamUserInput(followState)
+                .testTag("messages"),
+            contentPadding = PaddingValues(
+                top = 8.dp,
+                bottom = if (bottomFocalGeometry == null) bottomClearance else 8.dp,
+            ),
+        ) {
+            items(items = messages, key = { it.id }) { message ->
+                val isLiveTurn = message.id == snapshot.messageId
+                ChatBubble(
+                    message = message,
+                    onSnapshotClick = onSnapshotClick,
+                    onLiveEdgePositioned = if (isLiveTurn && expectedSection != null) {
+                        { section, y -> if (section == expectedSection) followState.reportEdge(y) }
+                    } else null,
+                    useToolFallbackAnchor = isLiveTurn && expectedSection == LiveTextSection.TOOL_FALLBACK,
+                    useCompletedReturnAnchor = isLiveTurn &&
+                        expectedSection == LiveTextSection.COMPLETED_RETURN,
+                )
+            }
+        }
+        LiveStreamFocalRail(
+            label = if (snapshot.isActive) label else null,
+            followState = followState,
+            liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
+            effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
         )
     }
 }

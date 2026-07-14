@@ -16,12 +16,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import com.aiblackbox.portal.ui.feedback.clickFeedback
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,7 +61,12 @@ import com.aiblackbox.portal.ui.chat.ChatState
 import com.aiblackbox.portal.ui.chat.ChatViewModel
 import com.aiblackbox.portal.ui.chat.Composer
 import com.aiblackbox.portal.ui.chat.MAX_UPLOAD_SIZE
+import com.aiblackbox.portal.ui.chat.FALLBACK_COMPOSER_HEIGHT
+import com.aiblackbox.portal.ui.chat.LIVE_EDGE_GAP
+import com.aiblackbox.portal.ui.chat.SIGNAL_RESIDENCE_HEIGHT
+import com.aiblackbox.portal.ui.chat.calculateBottomFocalGeometry
 import com.aiblackbox.portal.ui.chat.rememberFilePicker
+import com.aiblackbox.portal.ui.chat.ReturnToLiveHost
 import com.aiblackbox.portal.ui.theme.BlackBoxTheme
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -432,14 +444,36 @@ class NativeMainActivity : ComponentActivity() {
                 // TopBar and Composer float over content with transparent backgrounds
                 // Ember backdrop mode provided once here from the persisted setting;
                 // read by EmberOverlay deep in the tree (call sites still pass "is generating").
+                val returnToLiveHost = remember { com.aiblackbox.portal.ui.chat.ReturnToLiveHostState() }
                 androidx.compose.runtime.CompositionLocalProvider(
                     com.aiblackbox.portal.ui.components.LocalEmberMode provides emberMode,
-                    com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode
+                    com.aiblackbox.portal.ui.components.LocalParticleMode provides particleMode,
+                    com.aiblackbox.portal.ui.chat.LocalReturnToLiveHost provides returnToLiveHost,
                 ) {
+                val density = LocalDensity.current
+                var windowBottomPx by remember { mutableStateOf(Float.NaN) }
+                var composerTopPx by remember { mutableStateOf(Float.NaN) }
+                var composerBottomPx by remember { mutableStateOf(Float.NaN) }
+                val effectiveBottomInsetPx = WindowInsets.ime
+                    .union(WindowInsets.navigationBars)
+                    .getBottom(density)
+                    .toFloat()
+                val bottomFocalGeometry = calculateBottomFocalGeometry(
+                    windowBottomPx = windowBottomPx,
+                    composerTopPx = composerTopPx,
+                    composerBottomPx = composerBottomPx,
+                    residenceHeightPx = with(density) { SIGNAL_RESIDENCE_HEIGHT.toPx() },
+                    breathingGapPx = with(density) { LIVE_EDGE_GAP.toPx() },
+                    fallbackComposerHeightPx = with(density) { FALLBACK_COMPOSER_HEIGHT.toPx() },
+                    effectiveBottomInsetPx = effectiveBottomInsetPx,
+                )
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(BbxBlack)
+                        .onGloballyPositioned {
+                            windowBottomPx = it.boundsInWindow().bottom
+                        }
                 ) {
                     // Layer 1: Content (full screen, edge to edge)
                     BlackBoxNavGraph(
@@ -450,6 +484,7 @@ class NativeMainActivity : ComponentActivity() {
                         chatViewModel = chatViewModel,
                         updatesVm = updatesVm,
                         onModelChange = { scope.launch { store.setModel(it) } },
+                        bottomFocalGeometry = bottomFocalGeometry,
                         onSpeak = { text ->
                             scope.launch {
                                 try {
@@ -741,10 +776,15 @@ class NativeMainActivity : ComponentActivity() {
                         // Without this, the Box measured to fill available height, creating
                         // an invisible touch-consuming overlay above the visible Composer.
                         .wrapContentHeight(Alignment.Bottom)
+                        .padding(
+                            bottom = SIGNAL_RESIDENCE_HEIGHT +
+                                with(density) { effectiveBottomInsetPx.toDp() },
+                        )
                     ) {
                         Composer(
                             value = inputText,
                             onValueChange = { chatViewModel.onInputChange(it) },
+                            applySystemBottomInsets = false,
                             onSend = {
                                 // Send while the mic is live → stop it and send in one
                                 // tap. Kill the stream, arm the trailing-final discard so
@@ -956,9 +996,21 @@ class NativeMainActivity : ComponentActivity() {
                             attachments = attachments,
                             onRemoveAttachment = { index ->
                                 if (index in attachments.indices) attachments.removeAt(index)
-                            }
+                            },
+                            modifier = Modifier.onGloballyPositioned { coordinates ->
+                                coordinates.boundsInWindow().let { bounds ->
+                                    composerTopPx = bounds.top
+                                    composerBottomPx = bounds.bottom
+                                }
+                            },
                         )
                     }
+
+                    // Layer 5: highest activity-owned chrome, permanently mounted.
+                    ReturnToLiveHost(
+                        state = returnToLiveHost,
+                        composerTopPx = composerTopPx,
+                    )
 
                 }
                 } // end CompositionLocalProvider(LocalEmberMode)

@@ -2,6 +2,13 @@ package com.aiblackbox.portal
 
 import com.aiblackbox.portal.data.agent.AgentEvent
 import com.aiblackbox.portal.data.model.Provenance
+import com.aiblackbox.portal.ui.chat.cliLiveStatusLabel
+import com.aiblackbox.portal.ui.chat.cliLiveStreamPhase
+import com.aiblackbox.portal.ui.chat.LiveStreamPhase
+import com.aiblackbox.portal.ui.chat.cliLiveEdgeSection
+import com.aiblackbox.portal.ui.chat.reduceActiveTool
+import com.aiblackbox.portal.ui.chat.ToolIndicatorData
+import com.aiblackbox.portal.ui.components.LiveTextSection
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -12,6 +19,46 @@ import org.junit.Test
  * UiMessage.provenance directly without re-parsing.
  */
 class AgentEventProvenanceTest {
+
+    @Test fun `CLI live status maps thinking tool and status to one label`() {
+        assertEquals("Thinking deeply", cliLiveStatusLabel(true, null, "Thinking..."))
+        assertEquals("Using · Read", cliLiveStatusLabel(false, "Read", "Running"))
+        assertEquals("Running", cliLiveStatusLabel(false, null, "Running"))
+        assertNull(cliLiveStatusLabel(false, null, ""))
+    }
+
+    @Test fun `CLI live phase switches from tool activity to answer tracking`() {
+        assertEquals(
+            LiveStreamPhase.TOOL,
+            cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = "Read"),
+        )
+        assertEquals(
+            LiveStreamPhase.ANSWERING,
+            cliLiveStreamPhase(isStreaming = true, isThinking = false, activeTool = null),
+        )
+    }
+
+    @Test fun `CLI phase selects exactly one callback anchor with tool fallback precedence`() {
+        assertEquals(LiveTextSection.REASONING, cliLiveEdgeSection(LiveStreamPhase.THINKING))
+        assertEquals(LiveTextSection.ANSWER, cliLiveEdgeSection(LiveStreamPhase.ANSWERING))
+        assertEquals(LiveTextSection.TOOL_FALLBACK, cliLiveEdgeSection(LiveStreamPhase.TOOL))
+        assertNull(cliLiveEdgeSection(LiveStreamPhase.IDLE))
+    }
+
+    @Test fun `content result error disconnect and completion clear active tool`() {
+        val active = ToolIndicatorData("Read", "", "file.kt")
+        val terminalOrProseEvents = listOf(
+            AgentEvent.Content("answer"),
+            AgentEvent.ToolResult("ok"),
+            AgentEvent.Error("failed"),
+            AgentEvent.Disconnected,
+            AgentEvent.Completed(1),
+        )
+        terminalOrProseEvents.forEach { event ->
+            assertNull("$event must clear the tool anchor", reduceActiveTool(active, event))
+        }
+        assertEquals(active, reduceActiveTool(active, AgentEvent.StatusUpdate()))
+    }
 
     @Test fun `AgentEvent ProvenanceUpdate carries a typed Provenance`() {
         val prov = Provenance(

@@ -53,6 +53,7 @@ import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import com.aiblackbox.portal.ui.components.SpeakerIcon
 import com.aiblackbox.portal.ui.voice.VoiceWaveform
 import com.aiblackbox.portal.ui.voice.WaveSpeaker
@@ -125,6 +126,7 @@ fun Composer(
     customModelStatus: Map<String, String> = emptyMap(),
     attachments: List<AttachmentItem> = emptyList(),
     onRemoveAttachment: (Int) -> Unit = {},
+    applySystemBottomInsets: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
@@ -146,8 +148,10 @@ fun Composer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
-            .imePadding()
+            .then(
+                if (applySystemBottomInsets) Modifier.navigationBarsPadding().imePadding()
+                else Modifier,
+            )
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         // ── Attachment preview strip (above input bubble) ──
@@ -303,6 +307,7 @@ fun Composer(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .testTag("composer-controls")
                 .padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -439,7 +444,7 @@ fun Composer(
                               else "Auto-TTS OFF"
                     Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
                 },
-                modifier = Modifier.size(42.dp)
+                modifier = Modifier.size(42.dp).testTag("composer-auto-tts")
             ) {
                 Box(
                     modifier = Modifier
