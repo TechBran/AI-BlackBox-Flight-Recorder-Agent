@@ -40,9 +40,10 @@ function _injectStyles() {
     style.id = 'signal-line-styles';
     // Self-contained so the module drops straight in — red monospace, no chrome.
     style.textContent = `
-.signal-line{display:flex;white-space:pre;pointer-events:none;
+.signal-line{position:fixed;left:0;right:0;bottom:80px;z-index:60;
+  display:flex;justify-content:center;white-space:pre;pointer-events:none;
   font-family:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono",monospace;
-  font-weight:500;font-size:13px;letter-spacing:.01em;line-height:1.6;min-height:1.6em;
+  font-weight:500;font-size:14px;letter-spacing:.02em;line-height:1.6;
   color:hsl(2 100% 62%);text-shadow:0 0 12px hsl(2 100% 55% / .55)}
 .signal-line .cell{display:inline-block;will-change:transform}
 .signal-line .cell .g{display:inline-block;transition:opacity .16s ease, transform .16s ease, color .16s ease, text-shadow .16s ease;will-change:opacity,transform}
@@ -62,13 +63,13 @@ export class SignalLine {
         this._raf = null;         // wave rAF handle
         this._idleStop = null;    // dissolve teardown timeout
         this._alive = false;
-        // Per-line envelope: on each push the wave starts at _wavePeak and decays
-        // to 0 over _waveDur, then HOLDS flat (still + readable) until the next
-        // push. Peak is intentionally subtle (a gentle entrance, not a busy ripple).
-        this._wavePeak = REDUCE_MOTION ? 0 : 2;  // px (halved from the old 4)
-        this._waveDur = 700;      // ms — decay-to-flat window (≈ morph settle time)
-        this._waveStart = 0;      // timestamp (perf.now) of the current line's push
-        this._waveSpeed = 1.1;
+        // A CONTINUOUS horizontal highlight SWEEP travels across the characters so
+        // the line reads as live/streaming (Brandon: the flat-hold looked stagnant).
+        // A bright crest scans left→right, lifting + brightening each char as it
+        // passes; the text stays in place and readable. Off for reduced-motion.
+        this._sweepEnabled = !REDUCE_MOTION;
+        this._sweepSpeed = 0.85;      // cycles/sec the highlight crest travels
+        this._sweepWavelength = 13;   // characters between crests
     }
 
     /**
@@ -166,35 +167,35 @@ export class SignalLine {
             }, d));
         }
         this.curText = text;
-        // Restart the per-line envelope from full (reduced) peak for THIS line.
-        this._waveStart = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-        this._startWave();
+        this._startWave(); // ensure the continuous highlight sweep is running
     }
 
-    // Per-character sine wave on translateY, gated by a per-line decay envelope:
-    //   amp = peak * clamp(1 - (now - waveStart)/dur, 0, 1)
-    // so the line waves briefly as it arrives, then settles to amp 0 (flat) and
-    // holds still until the next push. Returns true while still animating; once
-    // settled it flattens every cell once and returns false so the loop can stop
-    // (a perfectly motionless, readable hold — no perpetual rAF).
+    // Continuous highlight SWEEP: a bright crest travels across the line, lifting +
+    // brightening each character as it passes (a "scanning" streaming feel). The
+    // text stays in place; only brightness + a tiny lift move. Runs continuously
+    // while the line has content; returns false only when empty so the loop stops.
     _waveFrame(now) {
-        let k = 1 - (now - this._waveStart) / this._waveDur;
-        if (k < 0) k = 0;
-        const amp = this._wavePeak * (k * k); // ease-out: gentle entrance, quick settle
         const cells = this.cells;
-        if (amp <= 0.02) {
-            for (let i = 0; i < cells.length; i++) cells[i].cell.style.transform = 'none';
-            return false; // settled — hold flat, stop the loop
-        }
-        const ph = now * 0.001 * this._waveSpeed * Math.PI;
+        if (cells.length === 0) return false;
+        const t = now * 0.001 * this._sweepSpeed;
+        const wl = this._sweepWavelength;
         for (let i = 0; i < cells.length; i++) {
-            cells[i].cell.style.transform = `translateY(${(amp * Math.sin(ph - i * 0.30)).toFixed(2)}px)`;
+            const s = Math.sin((i / wl - t) * Math.PI * 2);
+            const h = s > 0 ? s * s : 0;   // 0..1 sharp crest (only the leading half lights)
+            const st = cells[i].cell.style;
+            if (h > 0.02) {
+                st.transform = `translateY(${(-h * 2.2).toFixed(2)}px)`;
+                st.filter = `brightness(${(1 + h * 1.7).toFixed(2)}) saturate(${(1 - h * 0.55).toFixed(2)})`;
+            } else {
+                st.transform = 'none';
+                st.filter = '';
+            }
         }
         return true;
     }
 
     _startWave() {
-        if (this._raf != null || !this._alive || this._wavePeak === 0) return;
+        if (this._raf != null || !this._alive || !this._sweepEnabled) return;
         const loop = (now) => {
             // Only reschedule while the envelope is still above ~0; once flat we
             // stop entirely so the line holds perfectly still until the next push.
