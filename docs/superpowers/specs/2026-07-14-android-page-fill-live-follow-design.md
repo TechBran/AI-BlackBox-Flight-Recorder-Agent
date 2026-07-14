@@ -45,6 +45,14 @@ If the stream completes while suspended, return targets the actual bottom/live e
 
 Reduced-motion mode replaces the glide with an immediate correction while preserving the same arrival verification and state transition.
 
+### Completed-history bottom shortcut
+
+After streaming completes, the arrow becomes a general scroll-to-bottom shortcut. It is visible whenever the message list can still scroll forward toward newer content, independent of active-stream state. The completed response keeps its nonvisual measurable bottom anchor while this shortcut or its return glide is active.
+
+Completed-history reading never triggers the five-second automatic return. The viewport remains where the user placed it until the arrow is tapped. Tapping uses the same quick smooth, measurement-verified glide; the arrow disappears only after the completed-response bottom reaches its destination. If the list is already at the true bottom, the arrow is absent.
+
+The shortcut retains the same right-aligned position directly above the prompt window in main provider chat, Claude Code, and Gemini CLI.
+
 ## Architecture
 
 ### Follow policy
@@ -84,6 +92,8 @@ The bottom focal geometry exposes the measured prompt/composer top as the arrow 
 - Arrow tap and idle expiry enter `RETURNING` without hiding the arrow.
 - Only measured arrival transitions from `RETURNING` to `FOLLOWING` and hides the arrow.
 - Completion while suspended or returning retains a valid return destination.
+- Completed-history scrolling shows a tap-only shortcut whenever the list is away from its true bottom.
+- Completed-history reading does not auto-return after five seconds.
 
 ### Compose tests
 
@@ -113,3 +123,5 @@ Run focused unit tests, the full JVM suite, Android test compilation, debug APK 
 8. User input can interrupt return at any time.
 9. Main provider chat, Claude Code, and Gemini CLI satisfy the same behavior.
 10. The permanent bottom Signal residence and its keyboard/inset behavior remain unchanged.
+11. Scrolling upward after completion shows the arrow; it remains until tapped or the user manually reaches the true bottom.
+12. Completed-history mode never moves automatically after the five-second live-stream idle interval.
