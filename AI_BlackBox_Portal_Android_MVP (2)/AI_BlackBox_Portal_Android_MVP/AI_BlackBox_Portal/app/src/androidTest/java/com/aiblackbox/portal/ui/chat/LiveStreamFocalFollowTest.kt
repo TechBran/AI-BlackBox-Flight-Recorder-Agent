@@ -29,6 +29,9 @@ import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.UiMessage
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.LiveTextSection
+import com.aiblackbox.portal.ui.components.LIVE_ANSWER_EDGE_TAG
+import com.aiblackbox.portal.ui.components.LIVE_REASONING_EDGE_TAG
+import com.aiblackbox.portal.ui.components.LIVE_TOOL_FALLBACK_EDGE_TAG
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -58,19 +61,19 @@ class LiveStreamFocalFollowTest {
             )
         }
 
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
         compose.runOnIdle {
             update(assistantMessage(reasoningLength = 200, answerLength = 0, thinking = true), ChatState.THINKING)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
         compose.runOnIdle {
             update(assistantMessage(reasoningLength = 200, answerLength = 20, thinking = false), ChatState.STREAMING)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
         compose.runOnIdle {
             update(assistantMessage(reasoningLength = 200, answerLength = 3_000, thinking = false), ChatState.STREAMING)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
 
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         compose.onNodeWithTag("return-to-live").assertIsDisplayed()
@@ -105,7 +108,7 @@ class LiveStreamFocalFollowTest {
         }
         compose.waitForIdle()
         assertEquals(LiveTextSection.REASONING, section)
-        compose.onNodeWithTag("live-stream-edge").assertIsDisplayed()
+        compose.onNodeWithTag(LIVE_REASONING_EDGE_TAG).assertIsDisplayed()
 
     }
 
@@ -208,7 +211,7 @@ class LiveStreamFocalFollowTest {
         val before = listState.firstVisibleItemScrollOffset
         compose.mainClock.advanceTimeByFrame()
         assertTrue("immediate correction must not require animation time", listState.firstVisibleItemScrollOffset != before)
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
     }
 
     @Test
@@ -223,7 +226,47 @@ class LiveStreamFocalFollowTest {
                 isStreaming = true,
             )
         }
-        assertExactLiveEdgeGap()
+        compose.onNodeWithTag(LIVE_REASONING_EDGE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(LIVE_ANSWER_EDGE_TAG).assertDoesNotExist()
+        assertExactLiveEdgeGap(LIVE_TOOL_FALLBACK_EDGE_TAG)
+    }
+
+    @Test
+    fun thinkingToAnswerHandoffMovesSmoothlyFrameByFrameToExactGap() {
+        compose.mainClock.autoAdvance = false
+        lateinit var answer: () -> Unit
+        compose.setContent {
+            var message by remember { mutableStateOf(assistantMessage(240, 0, true)) }
+            var state by remember { mutableStateOf(ChatState.THINKING) }
+            answer = {
+                message = assistantMessage(240, 40, false)
+                state = ChatState.STREAMING
+            }
+            MainChatContent(listOf(message), state, "Responding")
+        }
+        assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
+        val reasoningEdge = edgeBottom(LIVE_REASONING_EDGE_TAG)
+        compose.runOnIdle { answer() }
+        compose.mainClock.advanceTimeByFrame()
+
+        val positions = mutableListOf(edgeBottom(LIVE_ANSWER_EDGE_TAG))
+        repeat(14) {
+            compose.mainClock.advanceTimeByFrame()
+            positions += edgeBottom(LIVE_ANSWER_EDGE_TAG)
+        }
+        val maxFrameStep = with(compose.density) { 64.dp.toPx() }
+        assertTrue("phase handoff jumped from $reasoningEdge to ${positions.first()}",
+            kotlin.math.abs(positions.first() - reasoningEdge) <= maxFrameStep)
+        positions.zipWithNext().forEach { (before, after) ->
+            assertTrue("correction must not jump more than $maxFrameStep px per frame",
+                kotlin.math.abs(after - before) <= maxFrameStep)
+        }
+        val target = railTop() - with(compose.density) { LIVE_EDGE_GAP.toPx() }
+        val errors = positions.map { kotlin.math.abs(it - target) }
+        errors.zipWithNext().forEach { (before, after) ->
+            assertTrue("handoff must progress monotonically: $before -> $after", after <= before + 1f)
+        }
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
     }
 
     @Test
@@ -257,7 +300,7 @@ class LiveStreamFocalFollowTest {
         compose.setContent { FollowHarness() }
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithTag("live-stream-rail").assertIsDisplayed()
-        compose.onNodeWithTag("live-stream-edge").assertIsDisplayed()
+        compose.onNodeWithTag(LIVE_ANSWER_EDGE_TAG).assertIsDisplayed()
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
 
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
@@ -278,11 +321,17 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
-    private fun assertExactLiveEdgeGap() {
+    private fun edgeBottom(tag: String): Float =
+        compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.bottom
+
+    private fun railTop(): Float =
+        compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
+
+    private fun assertExactLiveEdgeGap(edgeTag: String) {
         compose.mainClock.advanceTimeBy(500)
         compose.waitForIdle()
-        val edge = compose.onNodeWithTag("live-stream-edge").fetchSemanticsNode().boundsInRoot.bottom
-        val rail = compose.onNodeWithTag("live-stream-rail").fetchSemanticsNode().boundsInRoot.top
+        val edge = edgeBottom(edgeTag)
+        val rail = railTop()
         val expectedPx = with(compose.density) { LIVE_EDGE_GAP.toPx() }
         val tolerancePx = with(compose.density) { 1.dp.toPx() }
         assertTrue(
@@ -315,11 +364,11 @@ class LiveStreamFocalFollowTest {
             )
         }
 
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
         compose.runOnIdle {
             update(assistantMessage(200, 0, true), true, null)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_REASONING_EDGE_TAG)
         compose.runOnIdle {
             update(
                 assistantMessage(200, 0, false),
@@ -331,11 +380,11 @@ class LiveStreamFocalFollowTest {
         compose.runOnIdle {
             update(assistantMessage(200, 20, false), false, null)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
         compose.runOnIdle {
             update(assistantMessage(200, 3_000, false), false, null)
         }
-        assertExactLiveEdgeGap()
+        assertExactLiveEdgeGap(LIVE_ANSWER_EDGE_TAG)
     }
 }
 
@@ -379,7 +428,7 @@ private fun FollowHarness(
                 Spacer(
                     Modifier
                         .height(600.dp)
-                        .testTag("live-stream-edge")
+                        .testTag(LIVE_ANSWER_EDGE_TAG)
                         .onGloballyPositioned { coordinates ->
                             followState.reportEdge(coordinates.boundsInWindow().bottom)
                         },

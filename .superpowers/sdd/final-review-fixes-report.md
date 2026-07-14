@@ -50,3 +50,28 @@ Unrelated dirty and untracked files outside the scoped Android focal-follow impl
 
 - Runtime geometry and input behavior remain device-gated. Compilation verifies the UI suite is structurally valid, but the new Compose assertions require later execution in an authorized connected-test environment.
 - Existing project warnings (deprecated Android APIs and Gradle compatibility notices) remain unchanged and are outside this review scope.
+
+## Final Re-review Follow-up
+
+Date: 2026-07-14
+
+### Changes
+
+- Replaced the shared generic edge tag with production constants for reasoning, answer, and tool-fallback anchors. TOOL-only coverage now selects the fallback unambiguously, verifies the exact 12dp gap, and asserts reasoning/answer anchors are absent.
+- Added a controlled-clock thinking-to-answer handoff test that samples each animation frame, bounds the phase-change/frame displacement, requires monotonic convergence, and still requires the settled 12dp gap.
+
+### TDD RED
+
+`./gradlew compileDebugAndroidTestKotlin --offline`
+
+Result: expected compilation failure with unresolved references for `LIVE_REASONING_EDGE_TAG`, `LIVE_ANSWER_EDGE_TAG`, and `LIVE_TOOL_FALLBACK_EDGE_TAG`. This demonstrated the distinct production anchor-tag contract did not yet exist.
+
+### Offline GREEN Verification
+
+- `./gradlew testDebugUnitTest --tests com.aiblackbox.portal.AgentEventProvenanceTest --tests com.aiblackbox.portal.ui.chat.LiveStreamFollowPolicyTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew testDebugUnitTest --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew compileDebugAndroidTestKotlin --offline` — `BUILD SUCCESSFUL`.
+- `./gradlew assembleDebug --offline` — `BUILD SUCCESSFUL`.
+- `git diff --check` — exit 0, no whitespace errors.
+
+No ADB, phone, installation, instrumentation execution, or connected test command was used. The frame-by-frame Compose test is compile-verified offline and remains runtime device-gated.

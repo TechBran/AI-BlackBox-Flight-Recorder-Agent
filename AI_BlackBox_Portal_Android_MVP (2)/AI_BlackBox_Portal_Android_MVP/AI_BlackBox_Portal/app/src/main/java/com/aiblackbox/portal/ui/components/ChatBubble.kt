@@ -85,6 +85,9 @@ import kotlinx.coroutines.delay
 // =============================================================================
 
 enum class LiveTextSection { REASONING, ANSWER, TOOL_FALLBACK }
+internal const val LIVE_REASONING_EDGE_TAG = "live-stream-edge-reasoning"
+internal const val LIVE_ANSWER_EDGE_TAG = "live-stream-edge-answer"
+internal const val LIVE_TOOL_FALLBACK_EDGE_TAG = "live-stream-edge-tool-fallback"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -148,7 +151,7 @@ fun ChatBubble(
                 )
                 .then(
                     if (useToolFallbackAnchor && !isUser) Modifier
-                        .testTag("live-stream-edge")
+                        .testTag(LIVE_TOOL_FALLBACK_EDGE_TAG)
                         .onGloballyPositioned { coordinates ->
                             onLiveEdgePositioned?.invoke(
                                 LiveTextSection.TOOL_FALLBACK,
@@ -234,7 +237,7 @@ fun ChatBubble(
                     Text(
                         text = message.reasoning!!,
                         modifier = Modifier
-                            .then(if (message.isThinking) Modifier.testTag("live-stream-edge") else Modifier)
+                            .then(if (message.isThinking) Modifier.testTag(LIVE_REASONING_EDGE_TAG) else Modifier)
                             .onGloballyPositioned { coordinates ->
                             if (message.isThinking) {
                                 onLiveEdgePositioned?.invoke(
@@ -386,7 +389,7 @@ fun ChatBubble(
                                 .fillMaxWidth()
                                 .then(
                                     if (message.isStreaming && !message.isThinking) {
-                                        Modifier.testTag("live-stream-edge")
+                                        Modifier.testTag(LIVE_ANSWER_EDGE_TAG)
                                     } else {
                                         Modifier
                                     },
@@ -406,7 +409,7 @@ fun ChatBubble(
                     } else if (message.isStreaming) {
                         Box(
                             modifier = Modifier
-                                .testTag("live-stream-edge")
+                                .testTag(LIVE_ANSWER_EDGE_TAG)
                                 .onGloballyPositioned { coordinates ->
                                 if (!message.isThinking) {
                                     onLiveEdgePositioned?.invoke(
@@ -424,7 +427,7 @@ fun ChatBubble(
             if (!isUser && message.content.isBlank() && message.isStreaming && !message.isThinking) {
                 Box(
                     modifier = Modifier
-                        .testTag("live-stream-edge")
+                        .testTag(LIVE_ANSWER_EDGE_TAG)
                         .onGloballyPositioned { coordinates ->
                         onLiveEdgePositioned?.invoke(
                             LiveTextSection.ANSWER,
