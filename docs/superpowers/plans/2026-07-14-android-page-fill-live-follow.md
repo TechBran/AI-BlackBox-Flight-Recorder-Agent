@@ -111,3 +111,26 @@
 - [ ] **Step 5: Wire main and agent screens** so list position changes update idle shortcut visibility after completion without affecting live five-second behavior.
 - [ ] **Step 6: Run focused tests, full JVM tests, `compileDebugAndroidTestKotlin`, `assembleDebug`, and `git diff --check`.**
 - [ ] **Step 7: Request independent review**, fix all blocking findings test-first, then perform exactly one in-place install and one launch-health check.
+
+### Task 6: Highest-layer dedicated arrow row
+
+**Files:**
+- Create or modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/ReturnToLiveHost.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/NativeMainActivity.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/LiveStreamFollow.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/ChatScreen.kt`
+- Modify: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/main/java/com/aiblackbox/portal/ui/chat/AgentChatScreen.kt`
+- Test: `AI_BlackBox_Portal_Android_MVP (2)/AI_BlackBox_Portal_Android_MVP/AI_BlackBox_Portal/app/src/androidTest/java/com/aiblackbox/portal/ui/chat/LiveStreamFocalFollowTest.kt`
+
+**Interfaces:**
+- Produces: activity-owned return host receiving active screen visibility, return action, and transit state.
+- Consumes: measured composer top, active route ownership, and existing `LiveStreamFollowState` return behavior.
+
+- [ ] **Step 1: Write failing host tests** proving a completed, already-loaded scrollable list publishes visible state without active streaming; main/Claude/Gemini ownership switches cleanly; leaving chat clears stale controls; and only one arrow is rendered.
+- [ ] **Step 2: Write failing geometry/z-order tests** proving the full 48 dp touch target ends 8 dp above measured prompt top, moves with expanded composer/IME changes, never intersects prompt bounds, and is composed after Layers 1–4.
+- [ ] **Step 3: Verify RED** through focused Android-test compilation or a pure host-state seam plus compilation.
+- [ ] **Step 4: Implement the activity-level host** with explicit registration/disposal from the active chat screen. Keep it permanently mounted in a new Layer 5 and make route changes unable to retain stale callbacks.
+- [ ] **Step 5: Remove the screen-local arrow** from `LiveStreamFocalRail` while retaining the Signal residence there. Publish `showReturnToLive`, return transit, and `resumeNow` through the host from main and agent screens.
+- [ ] **Step 6: Position the complete 48 dp target** using measured composer top minus an 8 dp gap, right-align it, and apply activity-highest visual ordering without intercepting unrelated content outside its bounds.
+- [ ] **Step 7: Run focused/full JVM tests, `compileDebugAndroidTestKotlin`, `assembleDebug`, and `git diff --check`; request independent review and fix all blocking findings test-first.**
+- [ ] **Step 8: With exactly one authorized device, perform one in-place install and one launch-health check.**
