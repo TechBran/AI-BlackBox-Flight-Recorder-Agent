@@ -14,6 +14,7 @@ empty ledger narrates "embedded, empty corpus" honestly rather than nothing.
 import numpy as np
 
 from Orchestrator.retrieval import retrieve
+from Orchestrator.telemetry_events import build_retrieval_activity
 
 
 class _FakeStore:
@@ -63,8 +64,10 @@ def test_retrieve_populates_telemetry_sink():
 
 
 def test_retrieve_empty_corpus_still_records_corpus_count():
-    """PORTABILITY: an empty corpus returns [] but STILL records corpus_count=0
-    and the embed identity so a fresh box degrades honestly, not silently."""
+    """PORTABILITY: an empty corpus returns [] but STILL records corpus_count=0,
+    candidates=0, and the embed identity so a fresh box degrades honestly, not
+    silently. candidates=0 is what lets build_retrieval_activity narrate the
+    search stage (it gates on `candidates is not None`)."""
     tel: dict = {}
     fake = _FakeStore(slug="fake-embed-v1", dims=4, count=0)
     results = retrieve(
@@ -73,5 +76,31 @@ def test_retrieve_empty_corpus_still_records_corpus_count():
     )
     assert results == []
     assert tel["corpus_count"] == 0
+    assert tel["candidates"] == 0          # honest "0 cleared floor" on empty box
     assert tel["embed_model"] == "fake-embed-v1"
     assert tel["embed_dims"] == 4
+    # No ranking happened on an empty corpus — mmr_topk must NOT be recorded, so
+    # build_retrieval_activity never renders a misleading "MMR · top-0" line.
+    assert "mmr_topk" not in tel
+
+
+def test_empty_corpus_renders_search_zero_snapshots_end_to_end():
+    """INTEGRATION (fresh-box contract, end-to-end): drive the REAL retrieve()
+    with an empty store and push the telemetry it produces THROUGH the REAL
+    build_retrieval_activity — the rendered labels must include
+    'search · 0 snapshots' (not a hand-built dict the live path never emits).
+    This is the test that pins the fresh-box narration contract; without the
+    candidates=0 record it silently regresses to embed-only."""
+    tel: dict = {}
+    fake = _FakeStore(slug="fake-embed-v1", dims=4, count=0)
+    assert retrieve(
+        query="x", query_vector=[0.1, 0.2, 0.3, 0.4], store=fake,
+        include_keyword=False, telemetry=tel,
+    ) == []
+
+    labels = [ev["data"]["label"] for ev in build_retrieval_activity(tel)]
+    # embed narrates (embed_model is set) AND the search line renders 0/0.
+    assert any(lbl.startswith("embed · fake-embed-v1") for lbl in labels), labels
+    assert any(lbl.startswith("search · 0 snapshots") for lbl in labels), labels
+    # No ranking occurred on an empty corpus → no misleading MMR line.
+    assert not any(lbl.startswith("MMR") for lbl in labels), labels

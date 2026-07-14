@@ -485,6 +485,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
         telemetry["embed_dims"] = len(qv)
         telemetry["corpus_count"] = store.count
     if store.count == 0:
+        # Fresh/empty box: no candidate search runs, but the search stage must
+        # still narrate honestly. build_retrieval_activity gates its search line
+        # on `candidates is not None`, so record 0 here → "search · 0 snapshots →
+        # 0 cleared floor". NOT mmr_topk: no ranking happened, and "MMR · top-0"
+        # would imply a selection that never occurred.
+        if telemetry is not None:
+            telemetry["candidates"] = 0
         return []
 
     # Junk floor resolves per-STORE (WI-3/M9): the store's registry noise
