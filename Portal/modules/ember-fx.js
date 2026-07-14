@@ -523,6 +523,27 @@ export function initEmberModeControl() {
     sync(); // reflect the initial selection (works even without :has() support)
 }
 
+// Reflect the persisted PARTICLE style into the settings radio group + drive
+// setParticleMode on change. Sibling of initEmberModeControl (same markup/idiom):
+// the ember-mode control governs VISIBILITY, this one governs the FIELD look.
+export function initParticleModeControl() {
+    const radios = document.querySelectorAll('input[name="particleMode"]');
+    if (!radios.length) return;
+    const cur = (window.EmberFX && window.EmberFX.getParticleMode) ? window.EmberFX.getParticleMode() : particleMode;
+    const sync = () => radios.forEach((r) => {
+        const label = r.closest('.ember-mode-opt');
+        if (label) label.classList.toggle('selected', r.checked);
+    });
+    radios.forEach((r) => {
+        r.checked = (r.value === cur);
+        r.addEventListener('change', () => {
+            sync();
+            if (r.checked && window.EmberFX && window.EmberFX.setParticleMode) window.EmberFX.setParticleMode(r.value);
+        });
+    });
+    sync(); // reflect the initial selection (works even without :has() support)
+}
+
 // Exposed for a later settings UI / external drivers.
 export { setParticleMode, getParticleMode };
-export default { initEmberFX, initEmberModeControl, setParticleMode, getParticleMode };
+export default { initEmberFX, initEmberModeControl, initParticleModeControl, setParticleMode, getParticleMode };

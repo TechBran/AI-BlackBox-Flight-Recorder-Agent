@@ -98,3 +98,10 @@
     color: var(--muted);
     line-height: 1.4;
 }
+/* Sub-label above the particle-style picker (shares .ember-mode-row/.ember-mode-opt) */
+.particle-style-label {
+    margin: 14px 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+}
