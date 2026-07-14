@@ -1,5 +1,11 @@
 # Android Live-Stream Focal Follow Design
 
+## Approved Bottom-Residence Revision
+
+This revision supersedes references below to a rail near vertical center. The one-line Signal/status stream instead occupies a permanent app-owned residence at the very bottom of the usable screen, directly above Android system navigation. Its reserved height remains present when the label is absent, so the composer never jumps; black space and particles may remain visible there, but message words and controls may not render behind it.
+
+The prompt window, provider/model selector, and Auto-TTS controls move above that residence. Their bounds and the system navigation/keyboard insets are measured dynamically. While following, the newest thinking or answer edge is held above the composer stack by slightly more than the prompt-window height, keeping live prose, controls, and Signal simultaneously readable. Main provider chat and Claude Code/Gemini CLI-agent chat use the same geometry contract. Existing immediate manual-scroll suspension, down-arrow behavior, five-second idle resume, status lifecycle, and reduced-motion behavior remain unchanged.
+
 ## Goal
 
 Keep the live edge of model thinking or answer text near the center of the Android screen, with the one-line Signal/status stream fixed directly beneath it. Apply the behavior consistently to the main provider chat and the Claude Code/Gemini CLI-agent chat while preserving normal message history and user-controlled scrolling.
