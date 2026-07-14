@@ -51,6 +51,43 @@ internal const val FOLLOW_RESUME_DELAY_MS = 5_000L
 internal val FOCAL_RAIL_OFFSET = 36.dp
 internal val LIVE_EDGE_GAP = 12.dp
 
+internal data class BottomFocalGeometry(
+    val residenceTopPx: Float,
+    val residenceBottomPx: Float,
+    val composerTopPx: Float,
+    val composerBottomPx: Float,
+    val liveTargetYPx: Float,
+)
+
+internal fun calculateBottomFocalGeometry(
+    windowBottomPx: Float,
+    composerTopPx: Float,
+    composerBottomPx: Float,
+    residenceHeightPx: Float,
+    breathingGapPx: Float,
+    fallbackComposerHeightPx: Float,
+): BottomFocalGeometry {
+    val safeResidenceHeight = residenceHeightPx.coerceAtLeast(0f)
+    val residenceTop = windowBottomPx - safeResidenceHeight
+    val hasUsableComposerBounds = composerTopPx.isFinite() &&
+        composerBottomPx.isFinite() &&
+        composerTopPx <= composerBottomPx &&
+        composerBottomPx <= residenceTop
+    val resolvedComposerBottom = if (hasUsableComposerBounds) composerBottomPx else residenceTop
+    val resolvedComposerTop = if (hasUsableComposerBounds) {
+        composerTopPx
+    } else {
+        resolvedComposerBottom - fallbackComposerHeightPx.coerceAtLeast(0f)
+    }
+    return BottomFocalGeometry(
+        residenceTopPx = residenceTop,
+        residenceBottomPx = windowBottomPx,
+        composerTopPx = resolvedComposerTop,
+        composerBottomPx = resolvedComposerBottom,
+        liveTargetYPx = resolvedComposerTop - breathingGapPx.coerceAtLeast(0f),
+    )
+}
+
 internal enum class LiveStreamPhase { IDLE, THINKING, ANSWERING, TOOL }
 
 internal data class LiveStreamSnapshot(

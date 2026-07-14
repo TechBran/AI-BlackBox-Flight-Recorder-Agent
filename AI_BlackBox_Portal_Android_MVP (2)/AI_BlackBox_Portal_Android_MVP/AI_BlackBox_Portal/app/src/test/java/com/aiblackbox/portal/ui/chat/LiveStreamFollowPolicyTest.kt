@@ -4,6 +4,49 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveStreamFollowPolicyTest {
+    @Test fun `bottom residence stays below composer controls`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = 1_000f,
+            composerTopPx = 700f,
+            composerBottomPx = 940f,
+            residenceHeightPx = 60f,
+            breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+
+        assertEquals(940f, geometry.residenceTopPx)
+        assertEquals(1_000f, geometry.residenceBottomPx)
+        assertTrue(geometry.composerBottomPx <= geometry.residenceTopPx)
+    }
+
+    @Test fun `live target sits above composer by breathing gap`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = 1_000f,
+            composerTopPx = 700f,
+            composerBottomPx = 940f,
+            residenceHeightPx = 60f,
+            breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+
+        assertEquals(688f, geometry.liveTargetYPx)
+    }
+
+    @Test fun `unmeasured composer uses safe fallback above reserved residence`() {
+        val geometry = calculateBottomFocalGeometry(
+            windowBottomPx = 1_000f,
+            composerTopPx = Float.NaN,
+            composerBottomPx = Float.NaN,
+            residenceHeightPx = 60f,
+            breathingGapPx = 12f,
+            fallbackComposerHeightPx = 200f,
+        )
+
+        assertEquals(740f, geometry.composerTopPx)
+        assertEquals(940f, geometry.composerBottomPx)
+        assertEquals(728f, geometry.liveTargetYPx)
+    }
+
     @Test fun `user input suspends immediately and resumes only after five idle seconds`() {
         val policy = LiveStreamFollowPolicy()
         policy.start()
