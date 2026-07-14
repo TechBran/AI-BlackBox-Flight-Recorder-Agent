@@ -42,6 +42,7 @@ from Orchestrator.tasks import create_task, generate_prompt_slug, STREAM_EXCERPT
 from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.behavioral_core import PERSONA_PREF_KEY
+from Orchestrator.telemetry_events import build_retrieval_activity
 from Orchestrator.volume import now_utc_iso, read_text_safe
 from Orchestrator.web_tools import perform_web_fetch
 from Orchestrator.browser.driver_anthropic import run_anthropic_cu_loop as _cu_agent_loop
@@ -7253,6 +7254,16 @@ async def chat_stream(request: Request):
             """Generate SSE events from provider stream."""
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
 
+            # The Signal (Task 1.3): burst the honest retrieval telemetry as
+            # UI-only `system_activity` SSE frames, immediately after stream_start
+            # and before the provider's first token. `telemetry` is captured from
+            # the enclosing route scope (model already recorded there). These are
+            # PRESENTATION-ONLY — serialized straight to the wire, never added to
+            # the prompt/context/messages or any snapshot. Honest degradation: a
+            # non-retrieval / empty-corpus turn yields [] and nothing is emitted.
+            for _sa in build_retrieval_activity(telemetry):
+                yield f"event: {_sa['type']}\ndata: {json.dumps(_sa['data'])}\n\n"
+
             # Select provider stream
             if provider == "openai":
                 stream = stream_openai_with_reasoning(context_messages, model, operator=operator)
@@ -7367,6 +7378,16 @@ async def chat_stream_post(request: Request):
 
         async def generate_sse():
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"
+
+            # The Signal (Task 1.3): burst the honest retrieval telemetry as
+            # UI-only `system_activity` SSE frames, immediately after stream_start
+            # and before the provider's first token. `telemetry` is captured from
+            # the enclosing route scope (model already recorded there). These are
+            # PRESENTATION-ONLY — serialized straight to the wire, never added to
+            # the prompt/context/messages or any snapshot. Honest degradation: a
+            # non-retrieval / empty-corpus turn yields [] and nothing is emitted.
+            for _sa in build_retrieval_activity(telemetry):
+                yield f"event: {_sa['type']}\ndata: {json.dumps(_sa['data'])}\n\n"
 
             if provider == "openai":
                 stream = stream_openai_with_reasoning(context_messages, model, operator=operator)
