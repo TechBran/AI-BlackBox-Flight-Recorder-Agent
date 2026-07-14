@@ -320,6 +320,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var signalLastTool: String = ""       // last tool_start name, for the "· ok" echo
     private var signalGenerating: Boolean = false // one-shot latch for the "generating ·" line
     private var signalModelLabel: String = "model" // real model id (from stream_start)
+    // Computer-use turns keep The Signal DARK (match web, which destroys the line for
+    // provider === 'computer-use'): the CU tool indicator / todo panel / Live View
+    // carry the activity narrative. Set per turn; all non-null pushes go through
+    // pushSignal(), which no-ops while suppressed so _signalLabel stays null.
+    private var signalSuppressed: Boolean = false
 
     private val _inputText = MutableStateFlow(TextFieldValue())
     val inputText: StateFlow<TextFieldValue> = _inputText.asStateFlow()
@@ -1979,13 +1984,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // persisted). The real model id arrives in stream_start; until then fall
         // back to the selected model/provider so a silent-turn "generating ·" line
         // still names something honest.
+        //
+        // NO synthetic first line (mirror web): the backend DELIBERATELY suppresses
+        // the brain/resolve_model stage on non-retrieval / fresh-box turns
+        // (telemetry_events.py returns [] "not even a bare brain line, which would
+        // imply retrieval that never happened"). So we start BLANK and let the first
+        // line come from the backend's system_activity burst (retrieval turns) or
+        // from content_start → "generating · <model>" (non-retrieval turns). A brief
+        // blank before the first backend frame is exactly how web already behaves.
+        _signalLabel.value = null
         signalLastTool = ""
         signalGenerating = false
         signalModelLabel = currentModel.ifBlank { currentProvider }.ifBlank { "model" }
-        // Seed an immediate honest "resolve brain" line so the HUD never shows a
-        // blank gap before the backend's system_activity burst arrives (which
-        // morphs over it). Ephemeral: this seeds only the transient flow.
-        _signalLabel.value = "brain · $signalModelLabel"
+        // Computer-use turns keep The Signal dark for the whole turn (match web).
+        signalSuppressed = signalSuppressedForProvider(currentProvider)
 
         val history = buildApiHistory()
 
@@ -2473,8 +2485,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "system_activity" -> {
                 // data = { stage, label, detail, seq } (JSON OBJECT — see
                 // Orchestrator/telemetry_events.py). SSEClient.decodeJsonData returns
-                // objects verbatim; we parse and render ONLY the label.
-                parseSignalLabel(event.data)?.let { _signalLabel.value = it }
+                // objects verbatim; we parse and render ONLY the label. pushSignal
+                // no-ops on computer-use turns (kept dark, matching web).
+                parseSignalLabel(event.data)?.let { pushSignal(it) }
             }
             "tool_start" -> {
                 // data = the tool name (a JSON-encoded string → decodeJsonData already
@@ -2482,17 +2495,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val toolName = event.data.trim()
                 if (toolName.isNotBlank()) {
                     signalLastTool = toolName
-                    _signalLabel.value = "tool · $toolName"
+                    pushSignal("tool · $toolName")
                 }
             }
             "tool_result" -> {
                 // Echo the last tool name as done; else fall back to a trimmed blurb.
                 if (signalLastTool.isNotBlank()) {
-                    _signalLabel.value = "tool · $signalLastTool · ok"
+                    pushSignal("tool · $signalLastTool · ok")
                 } else {
                     val d = event.data.trim()
                     if (d.isNotBlank()) {
-                        _signalLabel.value = "tool · " + (if (d.length > 40) d.substring(0, 40) else d)
+                        pushSignal("tool · " + (if (d.length > 40) d.substring(0, 40) else d))
                     }
                 }
             }
@@ -2513,8 +2526,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun signalOnGenerating() {
         if (!signalGenerating) {
             signalGenerating = true
-            _signalLabel.value = "generating · $signalModelLabel"
+            pushSignal("generating · $signalModelLabel")
         }
+    }
+
+    /**
+     * The ONLY path that sets a non-null Signal label. No-ops while [signalSuppressed]
+     * (computer-use turns) so _signalLabel stays null for the whole CU turn and
+     * SignalLine renders nothing — matching web's destroy of the line for CU. The
+     * null-clears (turn end / dissolve) stay direct: null is the desired CU state.
+     */
+    private fun pushSignal(label: String) {
+        if (!signalSuppressed) _signalLabel.value = label
     }
 
     // =========================================================================
@@ -2604,7 +2627,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // post-answer push re-mounts it on the newest turn. Guarded clear so a
                 // brand-new turn started within the dwell isn't stomped.
                 parseMintLabel(body)?.let { mintLine ->
-                    _signalLabel.value = mintLine
+                    pushSignal(mintLine) // no-op on CU turns (kept dark, matching web)
                     delay(1600) // let it morph in + linger (mirrors web's 1600ms)
                     if (_signalLabel.value == mintLine) _signalLabel.value = null
                 }
@@ -3258,6 +3281,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          * ViewModel. The HARD RULE holds: the output is a display string that only
          * ever reaches the transient _signalLabel flow.
          */
+        /**
+         * Whether "The Signal" HUD is suppressed for [provider]. Computer-use turns
+         * keep it DARK — their activity narrative lives on the CU surfaces (tool
+         * indicator / todo panel / Live View) — mirroring web, which destroys the
+         * Signal line for provider === 'computer-use'. Pure for unit tests.
+         */
+        @VisibleForTesting
+        internal fun signalSuppressedForProvider(provider: String): Boolean =
+            provider == "computer-use"
+
         @VisibleForTesting
         internal fun parseMintLabel(body: String): String? = try {
             val obj = signalJson.parseToJsonElement(body).jsonObject

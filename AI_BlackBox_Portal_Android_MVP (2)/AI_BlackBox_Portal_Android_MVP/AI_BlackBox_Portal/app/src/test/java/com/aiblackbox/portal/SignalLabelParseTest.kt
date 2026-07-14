@@ -113,4 +113,19 @@ class SignalLabelParseTest {
         assertNull(ChatViewModel.parseMintLabel("""{"artifacts":[]}"""))
         assertNull(ChatViewModel.parseMintLabel("garbage"))
     }
+
+    // ── CU carve-out — The Signal stays DARK on computer-use turns (match web) ──
+    // The gate feeds signalSuppressed, which makes pushSignal a no-op so _signalLabel
+    // stays null for the whole CU turn (SignalLine then renders nothing).
+
+    @Test fun `signal is suppressed for the computer-use provider`() {
+        assertTrue(ChatViewModel.signalSuppressedForProvider("computer-use"))
+    }
+
+    @Test fun `signal is NOT suppressed for chat providers`() {
+        for (p in listOf("anthropic", "openai", "gemini", "xai", "custom", "local", "robotics", "")) {
+            assertFalse("provider '$p' must not suppress The Signal",
+                ChatViewModel.signalSuppressedForProvider(p))
+        }
+    }
 }
