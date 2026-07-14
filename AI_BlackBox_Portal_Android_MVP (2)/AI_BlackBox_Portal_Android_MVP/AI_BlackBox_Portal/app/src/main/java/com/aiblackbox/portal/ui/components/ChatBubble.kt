@@ -89,6 +89,10 @@ fun ChatBubble(
     onSpeakWithId: (String, String) -> Unit = { _, _ -> },
     onSnapshotClick: ((String) -> Unit)? = null,
     onRetry: (String) -> Unit = {},
+    // "The Signal" — presentation-only telemetry label for the live turn
+    // (ChatViewModel._signalLabel). EPHEMERAL: it is never part of [message] and
+    // never persisted; only the SignalLine HUD (top of the column) reads it.
+    signalLabel: String? = null,
     modifier: Modifier = Modifier
 ) {
     val isUser = message.role == "user"
@@ -214,6 +218,18 @@ fun ChatBubble(
                         color = BbxDim
                     )
                 }
+            }
+
+            // ── "The Signal" — presentation-only telemetry HUD ──
+            // One morphing red line above the answer (replaces the old
+            // ThinkingIndicator). Rendered ONLY while a live label exists: the
+            // retrieval burst / "generating" line during the turn, and the brief
+            // post-answer "mint · SNAP-…" flourish pushed after /chat/save (this
+            // survives the turn end precisely because it is gated on the label, not
+            // on isStreaming — matching the web HUD). null label → nothing renders,
+            // so completed answers show no line. EPHEMERAL: never from [message].
+            if (signalLabel != null) {
+                SignalLine(label = signalLabel)
             }
 
             // ── Image attachments ──
@@ -353,9 +369,10 @@ fun ChatBubble(
                         StreamingCursor()
                     }
                 }
-            } else if (message.isStreaming) {
-                ThinkingIndicator(isThinking = true)
             }
+            // NOTE: the pre-content "thinking" indicator is now "The Signal" line
+            // rendered at the TOP of this column (above), gated on a live label —
+            // so nothing more is needed here when content is still blank.
 
             // ── Artifact download chips (Phase 6b) ──
             // Native chips for files returned by /chat/save (artifacts[]); tapping

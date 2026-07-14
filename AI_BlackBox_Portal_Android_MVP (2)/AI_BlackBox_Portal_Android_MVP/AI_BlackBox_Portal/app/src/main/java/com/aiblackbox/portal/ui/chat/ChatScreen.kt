@@ -61,6 +61,9 @@ fun ChatScreen(
 ) {
     val messages by viewModel.messages.collectAsState()
     val chatState by viewModel.chatState.collectAsState()
+    // "The Signal" — transient, presentation-only telemetry label for the live
+    // turn. Passed ONLY to the streaming bubble below; never persisted on a message.
+    val signalLabel by viewModel.signalLabel.collectAsState()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val view = LocalView.current
@@ -126,10 +129,19 @@ fun ChatScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(top = 8.dp, bottom = 200.dp)
             ) {
+                // The newest assistant message is the live turn that owns The Signal
+                // (during streaming AND for the brief post-answer mint flourish).
+                val liveSignalTurnId = messages.lastOrNull()?.takeIf { it.role == "assistant" }?.id
                 items(
                     items = messages,
                     key = { it.id }
                 ) { message ->
+                    // Only the NEWEST assistant turn shows The Signal (its live
+                    // telemetry during the turn + the brief post-answer mint line);
+                    // every other bubble gets null so a label change never recomposes
+                    // them. Keyed on the newest message so the mint line — pushed
+                    // AFTER the turn ends — still lands on the right bubble.
+                    val isLiveTurn = message.id == liveSignalTurnId
                     ChatBubble(
                         message = message,
                         onSpeak = onSpeak,
@@ -137,7 +149,8 @@ fun ChatScreen(
                         onSnapshotClick = { peekSnapId = it },
                         // Retry a failed send: REPLACES the failed turn (removes the
                         // error bubble + failed user msg, re-fires same text+images).
-                        onRetry = viewModel::retryMessage
+                        onRetry = viewModel::retryMessage,
+                        signalLabel = if (isLiveTurn) signalLabel else null,
                     )
                 }
             }
