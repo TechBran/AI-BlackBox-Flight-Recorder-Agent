@@ -74,6 +74,45 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
+    fun cliAgentsFollowGrowingReasoningAndAnswerForBothProviders() {
+        listOf("claude-agents", "gemini-agents").forEach { provider ->
+            lateinit var update: (UiMessage, Boolean) -> Unit
+            compose.setContent {
+                var message by remember {
+                    mutableStateOf(assistantMessage(reasoningLength = 20, answerLength = 0, thinking = true))
+                }
+                var thinking by remember { mutableStateOf(true) }
+                update = { nextMessage, nextThinking ->
+                    message = nextMessage
+                    thinking = nextThinking
+                }
+                AgentLiveMessageContent(
+                    messages = listOf(message),
+                    provider = provider,
+                    status = "Running",
+                    activeTool = null,
+                    isThinking = thinking,
+                    isStreaming = true,
+                )
+            }
+
+            assertLiveEdgeAboveRail()
+            compose.runOnIdle {
+                update(assistantMessage(reasoningLength = 200, answerLength = 0, thinking = true), true)
+            }
+            assertLiveEdgeAboveRail()
+            compose.runOnIdle {
+                update(assistantMessage(reasoningLength = 200, answerLength = 20, thinking = false), false)
+            }
+            assertLiveEdgeAboveRail()
+            compose.runOnIdle {
+                update(assistantMessage(reasoningLength = 200, answerLength = 200, thinking = false), false)
+            }
+            assertLiveEdgeAboveRail()
+        }
+    }
+
+    @Test
     fun thinkingReportsReasoningEdgeAndAnswerStreamingReportsAnswerEdge() {
         var section: LiveTextSection? = null
         compose.setContent {

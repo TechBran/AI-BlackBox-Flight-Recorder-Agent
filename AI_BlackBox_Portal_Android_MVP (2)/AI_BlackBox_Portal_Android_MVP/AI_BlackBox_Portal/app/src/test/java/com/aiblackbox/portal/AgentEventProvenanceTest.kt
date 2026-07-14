@@ -2,6 +2,7 @@ package com.aiblackbox.portal
 
 import com.aiblackbox.portal.data.agent.AgentEvent
 import com.aiblackbox.portal.data.model.Provenance
+import com.aiblackbox.portal.ui.chat.cliLiveStatusLabel
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -12,6 +13,13 @@ import org.junit.Test
  * UiMessage.provenance directly without re-parsing.
  */
 class AgentEventProvenanceTest {
+
+    @Test fun `CLI live status maps thinking tool and status to one label`() {
+        assertEquals("Thinking deeply", cliLiveStatusLabel(true, null, "Thinking..."))
+        assertEquals("Using · Read", cliLiveStatusLabel(false, "Read", "Running"))
+        assertEquals("Running", cliLiveStatusLabel(false, null, "Running"))
+        assertNull(cliLiveStatusLabel(false, null, ""))
+    }
 
     @Test fun `AgentEvent ProvenanceUpdate carries a typed Provenance`() {
         val prov = Provenance(

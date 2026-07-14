@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -51,6 +52,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,6 +73,7 @@ import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.ClaudeAccent
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.components.GeminiAccent
+import com.aiblackbox.portal.ui.components.LiveTextSection
 import com.aiblackbox.portal.ui.components.ProviderBanner
 import com.aiblackbox.portal.ui.components.StatusLine
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -116,6 +119,17 @@ private val REASONING_PHRASES = listOf(
     "Neural processing",
     "Deep analysis"
 )
+
+internal fun cliLiveStatusLabel(
+    isThinking: Boolean,
+    activeTool: String?,
+    status: String,
+): String? = when {
+    isThinking -> "Thinking deeply"
+    !activeTool.isNullOrBlank() -> "Using · $activeTool"
+    status.isNotBlank() -> status
+    else -> null
+}
 
 // =============================================================================
 // Permission Modes — mirrors Portal cyclePermissionMode()
@@ -628,13 +642,6 @@ fun AgentChatScreen(
         }
     }
 
-    // Auto-scroll on new content
-    LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
-    }
-
     val isGeminiAgent = provider == "gemini-agents"
     val bannerName = if (isGeminiAgent) "Gemini CLI" else "Claude Code"
     val bannerAccent = if (isGeminiAgent) GeminiAccent else ClaudeAccent
@@ -682,48 +689,19 @@ fun AgentChatScreen(
         )
 
         // ====================================================================
-        // 2. Tool Indicator Bar (when agent is using a tool)
-        // Mirrors Portal .tool-indicator sticky at bottom of bubble
+        // 2. Chat messages and the single fixed live-status rail
         // ====================================================================
-        AnimatedVisibility(
-            visible = activeTool != null && isStreaming,
-            enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut()
-        ) {
-            activeTool?.let { tool ->
-                ToolIndicatorBar(tool = tool)
-            }
-        }
-
-        // ====================================================================
-        // 3. Thinking Indicator (floating, when agent is in extended thinking)
-        // Mirrors Portal .thinking-indicator with cycling phrases
-        // ====================================================================
-        AnimatedVisibility(
-            visible = isThinking && isStreaming,
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            ThinkingBar()
-        }
-
-        // ====================================================================
-        // 4. Chat Messages
-        // ====================================================================
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 180.dp)
-        ) {
-            items(items = messages, key = { it.id }) { message ->
-                ChatBubble(
-                    message = message,
-                    onSnapshotClick = { peekSnapId = it }
-                )
-            }
-        }
+        AgentLiveMessageContent(
+            messages = messages,
+            provider = provider,
+            status = status,
+            activeTool = activeTool,
+            isThinking = isThinking,
+            isStreaming = isStreaming,
+            listState = listState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            onSnapshotClick = { peekSnapId = it },
+        )
     }
 
     // ========================================================================
@@ -748,6 +726,68 @@ fun AgentChatScreen(
             origin = origin,
             onDismiss = { peekSnapId = null }
         )
+    }
+}
+
+@Composable
+internal fun AgentLiveMessageContent(
+    messages: List<UiMessage>,
+    provider: String,
+    status: String,
+    activeTool: ToolIndicatorData?,
+    isThinking: Boolean,
+    isStreaming: Boolean,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    onSnapshotClick: (String) -> Unit = {},
+) {
+    // AgentViewModel creates and mutates real `assistant` placeholders. Selecting
+    // by that model value also remains correct if a user message follows history.
+    val liveMessage = messages.lastOrNull { it.role == "assistant" }
+    val phase = when {
+        !isStreaming -> LiveStreamPhase.IDLE
+        isThinking -> LiveStreamPhase.THINKING
+        activeTool != null -> LiveStreamPhase.TOOL
+        else -> LiveStreamPhase.ANSWERING
+    }
+    val label = cliLiveStatusLabel(isThinking, activeTool?.name, status)
+    val snapshot = LiveStreamSnapshot(
+        messageId = liveMessage?.id,
+        reasoningLength = liveMessage?.reasoning?.length ?: 0,
+        answerLength = liveMessage?.content?.length ?: 0,
+        phase = phase,
+        statusLabel = label,
+    )
+    val followState = rememberLiveStreamFollowState(listState, snapshot)
+    val expectedSection = when (phase) {
+        LiveStreamPhase.THINKING -> LiveTextSection.REASONING
+        LiveStreamPhase.ANSWERING -> LiveTextSection.ANSWER
+        else -> null
+    }
+
+    Box(modifier = modifier.testTag("agent-messages-$provider")) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .liveStreamUserInput(followState)
+                .testTag("messages"),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 180.dp),
+        ) {
+            items(items = messages, key = { it.id }) { message ->
+                val isLiveTurn = message.id == snapshot.messageId
+                ChatBubble(
+                    message = message,
+                    onSnapshotClick = onSnapshotClick,
+                    onLiveEdgePositioned = if (isLiveTurn && expectedSection != null) {
+                        { section, y -> if (section == expectedSection) followState.reportEdge(y) }
+                    } else null,
+                )
+            }
+        }
+        if (snapshot.isActive) {
+            LiveStreamFocalRail(label, followState)
+        }
     }
 }
 
