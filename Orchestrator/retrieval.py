@@ -378,7 +378,8 @@ def _apply_rerank(query, ranked, index, rrf_c,
 
 
 def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bool = True,
-             store=None, query_vector=None, return_provenance: bool = False):
+             store=None, query_vector=None, return_provenance: bool = False,
+             telemetry: "dict | None" = None):
     """Canonical ranked retrieval -> [(snap_id, score), ...] top-k.
 
     operator ""/"system" = all operators; any other operator restricts to its own
@@ -407,6 +408,16 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     byte-identical to the historical 2-tuple contract (pinned by tests).
     Requires the store to support `search_with_vectors(..., with_ordinals=
     True)` (the live VectorStore does; bare eval fakes may not).
+
+    telemetry ("The Signal", opt-in, PRESENTATION-ONLY): when a dict is passed,
+    the retrieval-stage metrics build_retrieval_activity consumes are filled IN
+    PLACE from the locals this function already computes — never recomputed and
+    NEVER injected into any prompt/context/snapshot. Keys populated (where the
+    value is known before an early return): embed_model (store.slug), embed_dims
+    (len(qv)), corpus_count (store.count), candidates (survivors of the junk
+    floor), rerank_enabled + rerank_model (when the reranker is on), mmr_topk
+    (final selected count). Ranking is byte-identical whether or not it is
+    passed; default None is a pure no-op.
     """
     if not query or not query.strip():
         return []
@@ -434,6 +445,17 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     from Orchestrator import rerank as _rerank
     rerank_enabled = _rerank.is_enabled()
 
+    # The Signal (opt-in, presentation-only): rerank is a config/sidecar fact,
+    # known before embedding — record it now. rerank_model resolves only when
+    # the stage is on (get_settings never raises; guarded regardless).
+    if telemetry is not None:
+        telemetry["rerank_enabled"] = rerank_enabled
+        if rerank_enabled:
+            try:
+                telemetry["rerank_model"] = _rerank.get_settings().get("model")
+            except Exception:  # noqa: BLE001 - telemetry must never break retrieval
+                pass
+
     # 2. embed the query (purpose="query" — the retrieval_query fix), unless the
     #    eval seam supplied a pre-embedded vector for a non-active arm's model.
     if query_vector is not None:
@@ -455,6 +477,13 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
                 f"query_vector has {len(qv)} dims but store "
                 f"{getattr(store, 'slug', '?')} expects {store_dims} (eval seam misuse)"
             )
+    # The Signal: record the embed identity + corpus size the instant the store
+    # is resolved — BEFORE the empty-corpus early return, so a fresh box
+    # (count == 0) still narrates "embedded, empty corpus" honestly.
+    if telemetry is not None:
+        telemetry["embed_model"] = getattr(store, "slug", None)
+        telemetry["embed_dims"] = len(qv)
+        telemetry["corpus_count"] = store.count
     if store.count == 0:
         return []
 
@@ -505,6 +534,10 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     sem_ids = [sid for sid, _cos, _vec in sem]
     vec_by_id = {sid: vec for sid, _cos, vec in sem}
     cos_by_id = {sid: cos for sid, cos, _vec in sem}  # for the output cosine floor
+
+    # The Signal: candidates = semantic survivors of the >= junk_floor filter.
+    if telemetry is not None:
+        telemetry["candidates"] = len(sem)
 
     # 5. keyword candidates (skipped for lean/semantic-only profiles).
     #    keyword_mode (precision fix) decides the lane's ROLE:
@@ -628,6 +661,10 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     ]
     effective_protect = mmr_protect if len(rankings) > 1 else 0
     picked = mmr_select(mmr_cands, k, mmr_lambda, protect=effective_protect)
+
+    # The Signal: mmr_topk = the final MMR-selected (delivered) count.
+    if telemetry is not None:
+        telemetry["mmr_topk"] = len(picked)
     if return_provenance:
         # Same top-k, annotated with best-chunk identity: ordinal from the
         # semantic channel's collapse; None for keyword-only candidates

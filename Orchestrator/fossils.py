@@ -440,7 +440,8 @@ def hybrid_retrieve(vol_txt: str, query: str, k: int = 3, operator: str = "",
 
 
 def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: float = 0.60,
-                      *, window_budget_chars: Optional[int] = None) -> List[str]:
+                      *, window_budget_chars: Optional[int] = None,
+                      telemetry: Optional[dict] = None) -> List[str]:
     """Pure-semantic retrieval — a THIN SHIM over the canonical retrieve() (Phase 3b-2).
 
     This is the shared semantic entry for the per-turn context (cloud chat/voice AND
@@ -475,6 +476,10 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
             CAP): each over-budget text is delivered as a window centered on
             its best-matched chunk instead of blind head truncation (see
             window_snapshot_text). Ranking is untouched either way.
+        telemetry: keyword-only ("The Signal", opt-in, presentation-only). A
+            dict passed straight through to retrieve(), which fills the
+            retrieval-stage metrics in place. None (default) is a pure no-op;
+            it is NEVER injected into any prompt/context/snapshot.
 
     Returns:
         List of decoded snapshot texts (SAME return type as before), highest-ranked
@@ -487,6 +492,7 @@ def semantic_retrieve(query: str, operator: str = "", k: int = 15, threshold: fl
     scored = retrieve(
         query, operator=operator, k=k, include_keyword=False,
         return_provenance=window_budget_chars is not None,
+        telemetry=telemetry,
     )
 
     # Decode ONLY the result snapshots' bytes (same operator filter + byte-offset

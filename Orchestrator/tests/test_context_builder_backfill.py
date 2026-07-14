@@ -85,7 +85,7 @@ def _patch_builder(monkeypatch, recent, keyword_ranked, semantic_ranked,
                         lambda vol, q, k, op: [_blk(s) for s in keyword_ranked][:k])
     monkeypatch.setattr(cb, "semantic_retrieve",
                         lambda q, operator="", k=15, threshold=0.60,
-                        window_budget_chars=None:
+                        window_budget_chars=None, telemetry=None:
                         [_blk(s) for s in semantic_ranked][:k])
     monkeypatch.setattr(cb, "get_recent_checkpoints_for_operator",
                         lambda vol, op, count=1: [_blk(s) for s in checkpoints][:count])

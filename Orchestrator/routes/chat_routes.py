@@ -7032,7 +7032,7 @@ def build_cu_context(user_text: str, operator: str) -> Tuple[str, dict]:
 
 
 def build_streaming_context(messages: list, operator: str, provider: str = "openai",
-                            window_guard_tokens: int | None = None) -> Tuple[list, dict]:
+                            window_guard_tokens: int | None = None) -> Tuple[list, dict, dict]:
     """Build context-enriched messages for streaming chat with fossil retrieval.
 
     Delegates fossil retrieval to `Orchestrator.context_builder.build_fossil_context`
@@ -7042,9 +7042,16 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
     final message list.
 
     Returns:
-        Tuple of (context_messages, provenance_dict)
+        Tuple of (context_messages, provenance_dict, telemetry_dict)
         - context_messages: Messages with system prompt and fossils
         - provenance_dict: Info about retrieved fossils for snapshot
+        - telemetry_dict: "The Signal" retrieval-stage metrics (opt-in,
+          PRESENTATION-ONLY — never injected into any prompt/context/snapshot).
+          Populated by build_fossil_context -> retrieve() with the embed/search/
+          rerank/MMR/context metrics; this layer additionally records `provider`
+          and `window_tokens` (the resolved window-guard budget). The caller
+          adds `model` (resolved route-side). Task 1.3 emits it over SSE; today
+          it is collected but unused, so the two callers may ignore it.
     """
     from Orchestrator.context_builder import build_fossil_context
 
@@ -7059,6 +7066,10 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
                 user_text = str(content)
             break
 
+    # The Signal (opt-in, presentation-only): a metrics sink filled in place by
+    # the retrieval pipeline. NEVER injected into the prompt/context/snapshot.
+    telemetry: dict = {}
+
     # Shared retrieval builder — same output as the old inline pipeline.
     # Pass provider so context_builder sizes the WI-10 window safety guard
     # (whole-snapshot drops against the verified provider window; the old
@@ -7071,6 +7082,18 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
         # None = today's behavior (provider window table). provider="custom"
         # callers thread the resolved server's context_tokens here (Task 4.3).
         window_guard_tokens=window_guard_tokens,
+        telemetry=telemetry,
+    )
+
+    # Brain + window metrics for The Signal: provider is a param; the window
+    # budget is the SAME value build_fossil_context handed the cloud guard
+    # (the explicit override, else the provider window table). `model` is added
+    # route-side (it is resolved there, after this call). Presentation-only.
+    telemetry["provider"] = provider
+    from Orchestrator.context_builder import window_guard_budget_tokens
+    telemetry["window_tokens"] = (
+        window_guard_tokens if window_guard_tokens is not None
+        else window_guard_budget_tokens(provider)
     )
 
     # Add device registry context (transport/route-specific: only chat_stream uses this)
@@ -7103,7 +7126,7 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
         context_messages.append({"role": "system", "content": fossil_context})
     context_messages.extend(messages)
 
-    return context_messages, provenance
+    return context_messages, provenance, telemetry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7219,9 +7242,12 @@ async def chat_stream(request: Request):
             else:
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
-        # Build context-enriched messages with fossil retrieval
-        context_messages, provenance = build_streaming_context(messages, operator, provider,
+        # Build context-enriched messages with fossil retrieval. telemetry is
+        # The Signal's presentation-only metrics sink (Task 1.3 will emit it);
+        # the route resolves `model`, so it is recorded here. Never prompt-bound.
+        context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
                                                                window_guard_tokens=guard)
+        telemetry["model"] = model
 
         async def generate_sse():
             """Generate SSE events from provider stream."""
@@ -7332,9 +7358,12 @@ async def chat_stream_post(request: Request):
             else:
                 model = "gemini-3.1-pro-preview-customtools"  # Gemini 3.1 Pro Custom Tools
 
-        # Build context-enriched messages with fossil retrieval
-        context_messages, provenance = build_streaming_context(messages, operator, provider,
+        # Build context-enriched messages with fossil retrieval. telemetry is
+        # The Signal's presentation-only metrics sink (Task 1.3 will emit it);
+        # the route resolves `model`, so it is recorded here. Never prompt-bound.
+        context_messages, provenance, telemetry = build_streaming_context(messages, operator, provider,
                                                                window_guard_tokens=guard)
+        telemetry["model"] = model
 
         async def generate_sse():
             yield f"event: stream_start\ndata: {json.dumps({'provider': provider, 'model': model, 'provenance': provenance})}\n\n"

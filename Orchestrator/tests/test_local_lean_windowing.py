@@ -290,7 +290,8 @@ def test_semantic_retrieve_windows_only_when_budget_passed(monkeypatch):
     captured = {}
 
     def _fake_retrieve(query, operator="", k=10, *, include_keyword=True,
-                       store=None, query_vector=None, return_provenance=False):
+                       store=None, query_vector=None, return_provenance=False,
+                       telemetry=None):
         captured["return_provenance"] = return_provenance
         if return_provenance:
             return [("SNAP-20260703-0001", 0.9, ordinal)]
@@ -327,7 +328,8 @@ def test_hybrid_retrieve_requests_provenance_only_with_budget(monkeypatch):
     calls = []
 
     def _fake_retrieve(query, operator="", k=10, *, include_keyword=True,
-                       store=None, query_vector=None, return_provenance=False):
+                       store=None, query_vector=None, return_provenance=False,
+                       telemetry=None):
         calls.append(return_provenance)
         return []
 

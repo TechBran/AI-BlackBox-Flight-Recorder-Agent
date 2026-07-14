@@ -95,7 +95,7 @@ def _patch_builder(monkeypatch, recent_blocks):
                         lambda vol, q, k, op: [])
     monkeypatch.setattr(cb, "semantic_retrieve",
                         lambda q, operator="", k=15, threshold=0.60,
-                        window_budget_chars=None: [])
+                        window_budget_chars=None, telemetry=None: [])
     monkeypatch.setattr(cb, "get_recent_checkpoints_for_operator",
                         lambda vol, op, count=1: [])
 
@@ -239,7 +239,9 @@ def route_fakes(monkeypatch):
 
     def fake_bsc(messages, operator, provider="openai", window_guard_tokens=None):
         recorded["window_guard_tokens"] = window_guard_tokens
-        return list(messages), {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}
+        # 3-tuple: build_streaming_context now also returns The Signal's
+        # presentation-only telemetry sink (the route sets telemetry["model"]).
+        return list(messages), {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}, {}
 
     async def fake_custom_stream(messages, model, operator):
         recorded["dispatch_model"] = model

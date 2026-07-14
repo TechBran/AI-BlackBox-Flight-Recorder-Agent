@@ -203,6 +203,7 @@ def build_fossil_context(
     include_keyword: bool = True,
     include_media: bool = True,
     window_guard_tokens: int | None = None,
+    telemetry: dict | None = None,
 ) -> Tuple[str, dict]:
     """Retrieve fossils for `operator` and build the fossil-context string.
 
@@ -221,6 +222,17 @@ def build_fossil_context(
             callers to thread the resolved server's actual context_tokens
             (windows vary per registered server; the static table entry is
             only the no-override floor).
+        telemetry: Optional "The Signal" metrics sink (opt-in, PRESENTATION-
+            ONLY). When a dict is passed it is (a) threaded into semantic_retrieve
+            -> retrieve() to collect the embed/search/rerank/MMR stage metrics,
+            and (b) filled here with the context-assembly metrics: `memories`
+            (total DELIVERED snapshot count POST any window-guard drop = sum of
+            the four provenance list lengths), `context_tokens` (the final
+            delivered-context token estimate, cloud path), and `dropped` (whole
+            snapshots the window guard removed; 0 if it never fired). The return
+            signature is UNCHANGED — the dict is filled in place, so existing
+            callers are unaffected. NEVER injected into any prompt/context/
+            snapshot; default None is a pure no-op.
 
     Returns:
         (fossil_context_str, provenance_dict)
@@ -284,7 +296,7 @@ def build_fossil_context(
     seen_ids = recent_ids | set(extract_snap_ids(keyword_snaps))
     semantic_snaps_raw = (
         semantic_retrieve(user_text, operator=operator, k=SF + len(seen_ids), threshold=ST,
-                          window_budget_chars=CAP)
+                          window_budget_chars=CAP, telemetry=telemetry)
         if user_text else []
     )
     semantic_snaps = fill_unseen(semantic_snaps_raw, SF, seen_ids)
@@ -485,5 +497,17 @@ def build_fossil_context(
             f"(window-guard budget {budget:,} tokens, provider={provider!r}); "
             f"largest snapshot {largest:,} chars, delivered WHOLE"
         )
+        # The Signal: context-level metrics from the SAME post-drop locals the
+        # guard already computed — est is the final delivered-context estimate,
+        # dropped is the whole-snapshot drop list (len 0 when the guard slept).
+        if telemetry is not None:
+            telemetry["context_tokens"] = est
+            telemetry["dropped"] = len(dropped)
+
+    # The Signal: memories = total DELIVERED snapshot count. provenance already
+    # reflects the delivered set (recomputed above whenever the guard dropped
+    # anything), so summing its four list lengths POST-DROP is the honest count.
+    if telemetry is not None:
+        telemetry["memories"] = sum(len(v) for v in provenance.values())
 
     return fossil_context, provenance
