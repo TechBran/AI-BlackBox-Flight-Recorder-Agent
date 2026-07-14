@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.EmberOverlay
+import com.aiblackbox.portal.ui.components.SignalLine
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -186,6 +187,18 @@ fun ChatScreen(
                     )
                 }
             }
+        }
+
+        // The Signal — pinned to the BOTTOM of the screen (above the composer),
+        // shown during the live turn + the brief post-answer mint flourish, then
+        // gone. A fixed strip, out of the message flow (Brandon's bottom-pin request).
+        if (signalLabel != null) {
+            SignalLine(
+                label = signalLabel,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 196.dp, start = 16.dp, end = 16.dp),
+            )
         }
     }
 

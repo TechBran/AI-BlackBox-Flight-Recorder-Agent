@@ -188,113 +188,135 @@ fun buildFieldSprites(density: Density): FieldSprites = FieldSprites(
 )
 
 // =============================================================================
-// Field: RISING STARS (parallax + de-synced twinkle) — DEFAULT
+// Field: RISING STARS — the ORIGINAL warm rising-ember field, restored from the
+// pre-3-mode engine (721a045^ EmberParticles.kt). This is the look Brandon
+// confirmed he wants for "Rising Stars" ("I liked the way it looked before").
+// UI-free StarParticle/StarSim physics; drawn with the warm ember sprites.
 // =============================================================================
-// Per-layer size / rise-speed / alpha ranges (web LAYERS, sizes bumped ~1.6× for
-// high-DPI phone visibility). Layer 2 (foreground/hero) gets the glow sprite.
-private val STAR_SIZE = arrayOf(
-    floatArrayOf(0.8f, 1.6f),   // far / tiny
-    floatArrayOf(1.6f, 2.9f),   // mid / small
-    floatArrayOf(2.9f, 4.2f),   // fore / hero
-)
-private val STAR_VY = floatArrayOf(0.4f, 0.7f, 1.0f)
-private val STAR_ALPHA = arrayOf(
-    floatArrayOf(0.4f, 0.6f),
-    floatArrayOf(0.6f, 0.8f),
-    floatArrayOf(0.8f, 1.0f),
-)
+private val STAR_LAYER_COUNT = intArrayOf(80, 100, 60)        // far, mid, foreground
+private val STAR_LAYER_SPEED = floatArrayOf(0.3f, 0.5f, 0.8f)
+private val STAR_SMIN = floatArrayOf(0.8f, 1.5f, 2.2f)
+private val STAR_SMAX = floatArrayOf(1.6f, 3f, 4.5f)
+private val STAR_LAYER_OPACITY = floatArrayOf(0.25f, 0.4f, 0.7f)
+private val STAR_COLOR_WEIGHTS = doubleArrayOf(0.3, 0.3, 0.2, 0.15, 0.05)
+private const val STAR_TURBULENCE = 0.6
+private const val STAR_RISE_SPEED = 0.8
+private const val STAR_FLICKER_SPEED = 0.015
+private const val STAR_TRAIL_LEN = 2
+private const val STAR_GLOW = 14f
 
-class Star {
-    var x = 0f; var y = 0f; var size = 0f; var vy = 0f; var vx = 0f
-    var base = 0f; var amp = 0f; var tw = 0f; var seed = 0f
-    var hue = 0; var glow = false
+class StarParticle(val layerIndex: Int) {
+    var x = 0f; var y = 0f; var size = 0f; var baseSize = 0f; var colorIndex = 0
+    var vx = 0f; var vy = 0f; var baseVy = 0f
+    var opacity = 0f; var baseOpacity = 0f; var dead = false
+    private var oscOffset = 0.0; private var oscSpeed = 0.0; private var oscAmp = 0.0
+    private var flickOffset = 0.0; private var flickJitter = 0.0
+    val trailX = FloatArray(STAR_TRAIL_LEN); val trailY = FloatArray(STAR_TRAIL_LEN)
+    val trailSize = FloatArray(STAR_TRAIL_LEN); val trailOpacity = FloatArray(STAR_TRAIL_LEN)
+    var trailLen = 0; private set
 
-    fun init(width: Float, height: Float, scale: Float) {
-        val roll = Math.random()
-        val layer = if (roll > 0.9) 2 else if (roll > 0.6) 1 else 0
-        val sk = Math.pow(Math.random(), 2.2) // power-skewed: mostly tiny, few bright
-        val sMin = STAR_SIZE[layer][0]; val sMax = STAR_SIZE[layer][1]
+    fun reset(width: Float, height: Float, scale: Float) {
         x = (Math.random() * width).toFloat()
-        y = (Math.random() * height).toFloat()
-        size = ((sMin + (sMax - sMin) * sk) * scale).toFloat()
-        vy = (-(8 + Math.random() * 17) * STAR_VY[layer] * scale).toFloat()
-        vx = ((Math.random() - 0.5) * 4 * scale).toFloat()
-        base = (STAR_ALPHA[layer][0] + (STAR_ALPHA[layer][1] - STAR_ALPHA[layer][0]) * Math.random()).toFloat()
-        amp = (0.25 + Math.random() * 0.2).toFloat()
-        tw = (0.8 + Math.random() * 1.7).toFloat()
-        seed = (Math.random() * 6.28).toFloat()
-        hue = if (Math.random() < 0.7) 255 else if (Math.random() < 0.5) 250 else 34
-        glow = layer == 2
+        y = (height + Math.random() * 100 * scale).toFloat()
+        val sMin = STAR_SMIN[layerIndex]; val sMax = STAR_SMAX[layerIndex]
+        size = ((sMin + Math.random() * (sMax - sMin)) * scale).toFloat(); baseSize = size
+        colorIndex = pickColorIndex()
+        val speed = STAR_LAYER_SPEED[layerIndex]
+        vx = ((Math.random() - 0.5) * 2.0 * speed * scale).toFloat()
+        vy = (-(0.5 + Math.random() * 0.5) * STAR_RISE_SPEED * speed * scale).toFloat(); baseVy = vy
+        oscOffset = Math.random() * Math.PI * 2
+        oscSpeed = 0.005 + Math.random() * 0.008
+        oscAmp = (5 + Math.random() * 10) * scale
+        flickOffset = Math.random() * Math.PI * 2
+        flickJitter = STAR_FLICKER_SPEED * (0.8 + Math.random() * 0.4)
+        opacity = STAR_LAYER_OPACITY[layerIndex]; baseOpacity = opacity
+        trailLen = 0; dead = false
+    }
+
+    fun update(timeMs: Double, width: Float, height: Float, active: Boolean, scale: Float) {
+        if (dead) { if (active) reset(width, height, scale) else return }
+        val turbX = (sin(timeMs * 0.0003 + oscOffset) * STAR_TURBULENCE * 0.3 * scale).toFloat()
+        val turbY = (cos(timeMs * 0.0004 + oscOffset) * STAR_TURBULENCE * 0.15 * scale).toFloat()
+        val oscillation = (sin(timeMs * oscSpeed + oscOffset) * oscAmp * 0.002).toFloat()
+        vx += turbX * 0.005f + oscillation - vx * 0.02f
+        vy = baseVy + turbY * 0.005f
+        x += vx; y += vy
+        pushTrail(x, y, size, opacity)
+        val f1 = sin(timeMs * flickJitter + flickOffset)
+        val f2 = sin(timeMs * flickJitter * 0.7 + flickOffset * 1.3)
+        val flicker = ((f1 + f2 * 0.5) / 1.5).toFloat()
+        opacity += (baseOpacity * (0.7f + flicker * 0.3f) - opacity) * 0.05f
+        size += (baseSize * (0.9f + flicker * 0.1f) - size) * 0.05f
+        if (y < height * 0.2f) opacity *= (y / (height * 0.2f))
+        if (y < -50f * scale || x < -50f * scale || x > width + 50f * scale) {
+            if (active) reset(width, height, scale) else dead = true
+        }
+    }
+
+    private fun pushTrail(px: Float, py: Float, ps: Float, po: Float) {
+        var i = minOf(trailLen, STAR_TRAIL_LEN - 1)
+        while (i > 0) { trailX[i] = trailX[i-1]; trailY[i] = trailY[i-1]; trailSize[i] = trailSize[i-1]; trailOpacity[i] = trailOpacity[i-1]; i-- }
+        trailX[0] = px; trailY[0] = py; trailSize[0] = ps; trailOpacity[0] = po
+        if (trailLen < STAR_TRAIL_LEN) trailLen++
+    }
+
+    private fun pickColorIndex(): Int {
+        val r = Math.random(); var c = 0.0
+        for (i in STAR_COLOR_WEIGHTS.indices) { c += STAR_COLOR_WEIGHTS[i]; if (r < c) return i }
+        return 0
     }
 }
 
 class StarSim : FieldSim {
-    var width = 0f; private set
-    var height = 0f; private set
-    private var scale = 1f
-    private val _stars = ArrayList<Star>()
-    val stars: List<Star> get() = _stars
-
-    /** Responsive count from logical (dp) area, clamped to the Stars 400–800 cap. */
-    private fun targetCount(): Int {
-        val areaDp = (width / scaledDensity) * (height / scaledDensity)
-        return (areaDp / 480f).roundToInt().coerceIn(400, 800)
-    }
-    private var scaledDensity = FIELD_REFERENCE_DENSITY
+    private var width = 0f; private var height = 0f; private var scale = 1f
+    private val parts = ArrayList<StarParticle>(240)
+    val particles: List<StarParticle> get() = parts
 
     override fun resize(width: Float, height: Float, scale: Float, density: Float) {
         if (width <= 0f || height <= 0f) return
-        val sameSize = width == this.width && height == this.height && _stars.isNotEmpty()
-        this.width = width; this.height = height; this.scale = scale; this.scaledDensity = density
-        if (sameSize) return
-        val want = targetCount()
-        // Grow/trim IN PLACE so existing stars keep positions (no resize "pop").
-        while (_stars.size < want) _stars.add(Star().apply { init(width, height, scale) })
-        if (_stars.size > want) while (_stars.size > want) _stars.removeAt(_stars.size - 1)
+        if (width == this.width && height == this.height && parts.isNotEmpty()) return
+        this.width = width; this.height = height; this.scale = scale
+        if (parts.isEmpty()) spawnAll()
     }
-
+    private fun spawnAll() {
+        parts.clear()
+        for (layer in STAR_LAYER_COUNT.indices) repeat(STAR_LAYER_COUNT[layer]) {
+            val p = StarParticle(layer); p.reset(width, height, scale)
+            p.y = (Math.random() * height * 1.5).toFloat(); parts.add(p)
+        }
+    }
     override fun update(nowMs: Double, dtSec: Float, active: Boolean) {
-        // Stars drift continuously (active only affects whether the loop keeps
-        // running; during the drain they keep rising until the deadline).
-        for (s in _stars) {
-            s.y += s.vy * dtSec
-            s.x += s.vx * dtSec
-            if (s.y < -6f * scale) { s.y = height + 6f * scale; s.x = (Math.random() * width).toFloat() }
-        }
+        if (width <= 0f || height <= 0f) return
+        for (p in parts) p.update(nowMs, width, height, active, scale)
     }
-
-    override fun rearm() { /* stars self-heal; nothing to reset */ }
+    override fun rearm() {
+        if (width <= 0f || height <= 0f || parts.isEmpty()) return
+        for (p in parts) if (!p.dead) return   // only re-stagger once fully drained
+        for (p in parts) { p.reset(width, height, scale); p.y = (Math.random() * height * 1.5).toFloat() }
+    }
 }
 
-private fun starColor(hue: Int): Color = when (hue) {
-    34 -> Color(255 / 255f, 205 / 255f, 110 / 255f)   // warm amber
-    250 -> Color(200 / 255f, 215 / 255f, 255 / 255f)  // cool blue-white
-    else -> Color(248 / 255f, 247 / 255f, 255 / 255f) // near-white
+private fun DrawScope.drawStarSprite(spr: ImageBitmap, cx: Float, cy: Float, rad: Float, a: Float) {
+    if (a <= 0.003f || rad <= 0.1f) return
+    val d = (rad * 2f).roundToInt().coerceAtLeast(1)
+    drawImage(
+        image = spr, srcOffset = IntOffset.Zero, srcSize = IntSize(SPRITE_PX, SPRITE_PX),
+        dstOffset = IntOffset((cx - rad).roundToInt(), (cy - rad).roundToInt()),
+        dstSize = IntSize(d, d), alpha = a.coerceIn(0f, 1f), blendMode = FIELD_BLEND,
+    )
 }
-
-private fun DrawScope.drawStars(sim: StarSim, starSprite: ImageBitmap, nowMs: Double) {
-    val ts = nowMs * 0.001
-    for (s in sim.stars) {
-        val al = (s.base + sin(ts * s.tw + s.seed) * s.amp).coerceIn(0.0, 1.0).toFloat()
-        if (al <= 0f) continue
-        if (s.glow) {
-            val gr = s.size * 7f
-            drawImage(
-                image = starSprite,
-                srcOffset = IntOffset.Zero,
-                srcSize = IntSize(SPRITE_PX, SPRITE_PX),
-                dstOffset = IntOffset((s.x - gr).roundToInt(), (s.y - gr).roundToInt()),
-                dstSize = IntSize((gr * 2f).roundToInt(), (gr * 2f).roundToInt()),
-                alpha = al * 0.5f,
-                blendMode = FIELD_BLEND,
-            )
+private fun DrawScope.drawStars(sim: StarSim, sprites: FieldSprites, nowMs: Double) {
+    val emberN = sprites.ember.size
+    for (p in sim.particles) {
+        if (p.dead || p.opacity <= 0.003f) continue
+        val spr = sprites.ember[(4 - p.colorIndex).coerceIn(0, emberN - 1)] // warm: red↔deep-ember
+        for (i in 0 until p.trailLen) {
+            val fade = 1f - i / STAR_TRAIL_LEN.toFloat()
+            drawStarSprite(spr, p.trailX[i], p.trailY[i], p.trailSize[i] * fade, p.trailOpacity[i] * fade * 0.5f)
         }
-        drawCircle(
-            color = starColor(s.hue).copy(alpha = al),
-            radius = s.size,
-            center = Offset(s.x, s.y),
-            blendMode = FIELD_BLEND,
-        )
+        drawStarSprite(spr, p.x, p.y, p.size * STAR_GLOW, p.opacity * 0.45f)    // soft glow
+        drawStarSprite(spr, p.x, p.y, p.size * 1.7f, p.opacity)                 // bright core
+        drawStarSprite(sprites.star, p.x, p.y, p.size * 0.9f, p.opacity * 0.9f) // white-hot center
     }
 }
 
@@ -305,6 +327,7 @@ private fun DrawScope.drawStars(sim: StarSim, starSprite: ImageBitmap, nowMs: Do
 class Emb {
     var x = 0f; var y = 0f; var vx = 0f; var vy = 0f
     var life = 0f; var decay = 0f; var r = 0f; var spark = false; var alive = false
+    var hue0 = 0; var fade = 0f
 }
 
 class EmberSim : FieldSim {
@@ -326,24 +349,27 @@ class EmberSim : FieldSim {
         if (width <= 0f || height <= 0f) return
         this.width = width; this.height = height; this.scale = scale
         val want = targetMax(density)
-        if (pool.size != want) pool = Array(want) { Emb() }
+        if (pool.size != want) { pool = Array(want) { Emb() }; seedFull() } // seed full → whole screen at rest
     }
 
-    /** Spawn one ember into the first dead slot; pool-full → skip (self-limits). */
+    /** Spawn one ember ANYWHERE on screen (full-screen floating), gentle drift. */
     private fun spawnOne() {
         val p = pool.firstOrNull { !it.alive } ?: return
-        val spark = Math.random() < 0.12
-        val ml = 0.8 + Math.random() * 0.7
-        p.x = (width * (0.08 + Math.random() * 0.84)).toFloat()
-        p.y = (height + (10 + Math.random() * 20) * scale).toFloat()
-        p.vx = ((Math.random() - 0.5) * 60 * scale).toFloat()
-        p.vy = (-(60 + Math.random() * 130) * scale).toFloat()
+        val spark = Math.random() < 0.08
+        val ml = 2.6 + Math.random() * 3.6                       // long life → floats across
+        p.x = (Math.random() * width).toFloat()
+        p.y = (Math.random() * height).toFloat()                 // anywhere, not just the bottom
+        p.vx = ((Math.random() - 0.5) * 16 * scale).toFloat()
+        p.vy = (-(4 + Math.random() * 14) * scale).toFloat()     // gentle float, not a bottom jet
         p.life = 1f
         p.decay = (1.0 / ml).toFloat()
-        p.r = ((if (spark) 1.6 + Math.random() * 1.4 else 6 + Math.random() * 11) * scale).toFloat()
+        p.r = ((if (spark) 1.2 + Math.random() * 1.3 else 2.5 + Math.random() * 6) * scale).toFloat()
         p.spark = spark
+        p.hue0 = (Math.random() * 3).toInt()                     // 0..2 varied warm heat
+        p.fade = (Math.random() * 6.28).toFloat()
         p.alive = true
     }
+    private fun seedFull() { for (i in pool.indices) spawnOne() }
 
     // 2-octave sine curl-noise potential ψ, sampled in LOGICAL space (÷scale) so
     // the web spatial frequencies hold across DPIs → divergence-free swirl.
@@ -370,48 +396,38 @@ class EmberSim : FieldSim {
             // curl(ψ) via central differences → swirl velocity (px, so ×scale).
             val cvx = pot(p.x, p.y + eps, ts) - pot(p.x, p.y - eps, ts)
             val cvy = -(pot(p.x + eps, p.y, ts) - pot(p.x - eps, p.y, ts))
-            p.vx += (cvx * 7200 * dtSec * scale).toFloat()
-            p.vy += (cvy * 7200 * dtSec * scale).toFloat()
-            p.vy -= 52f * p.life * dtSec * scale          // buoyancy ∝ heat
-            if (p.spark) p.vy += 120f * dtSec * scale      // sparks arc under gravity
-            p.vx *= (1f - 1.3f * dtSec); p.vy *= (1f - 0.9f * dtSec) // drag
+            p.vx += (cvx * 5200 * dtSec * scale).toFloat()
+            p.vy += (cvy * 5200 * dtSec * scale).toFloat()
+            p.vy -= 9f * p.life * dtSec * scale            // gentle buoyancy (slow float up)
+            if (p.spark) p.vy += 60f * dtSec * scale        // sparks drift down a touch
+            p.vx *= (1f - 0.9f * dtSec); p.vy *= (1f - 0.9f * dtSec) // drag
             p.x += p.vx * dtSec; p.y += p.vy * dtSec
-            if (p.x < -50f * scale || p.x > width + 50f * scale || p.y < -50f * scale) p.alive = false
+            // wrap horizontally so the field stays full across the whole width
+            if (p.x < -20f * scale) p.x = width + 20f * scale
+            else if (p.x > width + 20f * scale) p.x = -20f * scale
+            if (p.y < -30f * scale) p.alive = false         // floated off the top → recycle
         }
     }
 
     override fun rearm() {
-        for (p in pool) p.alive = false
         spawnAcc = 0f
+        seedFull()   // refill the whole screen on re-activation
     }
 }
 
-private fun DrawScope.drawEmbers(sim: EmberSim, sprites: List<ImageBitmap>, @Suppress("UNUSED_PARAMETER") nowMs: Double) {
+private fun DrawScope.drawEmbers(sim: EmberSim, sprites: List<ImageBitmap>, nowMs: Double) {
     val w = sim.width; val h = sim.height
     if (w <= 0f || h <= 0f) return
-    // Ground heat-glow (single per-frame Brush, mirrors the web — additive).
-    val gh = h * 0.32f
-    val a = 0.14f
-    drawRect(
-        brush = Brush.verticalGradient(
-            colorStops = arrayOf(
-                0.0f to Color(120 / 255f, 20 / 255f, 5 / 255f, 0f),
-                0.5f to Color(170 / 255f, 28 / 255f, 6 / 255f, a * 0.5f),
-                1.0f to Color(226 / 255f, 60 / 255f, 10 / 255f, a),
-            ),
-            startY = h - gh,
-            endY = h,
-        ),
-        topLeft = Offset(0f, h - gh),
-        size = Size(w, gh),
-        blendMode = FIELD_BLEND,
-    )
+    // NO ground heat-glow — real embers float across the WHOLE screen, not a
+    // fireball at the base.
+    val ts = nowMs * 0.001
     val last = RAMP.size - 1
     for (p in sim.alivePool) {
         if (!p.alive) continue
-        val idx = ((1f - p.life) * last).roundToInt().coerceIn(0, last)
-        val spr = if (p.spark) sprites[0] else sprites[idx]
-        val al = ((if (p.spark) 0.75f else 0.4f) * p.life).coerceIn(0f, 1f)
+        val idx = if (p.spark) 0 else (p.hue0 + ((1f - p.life) * 3f).roundToInt()).coerceIn(0, last)
+        val spr = sprites[idx]
+        val breathe = (0.6 + 0.4 * sin(ts + p.fade)).toFloat()   // soft per-ember flicker
+        val al = ((if (p.spark) 0.85f else 0.55f) * minOf(1f, p.life * 1.4f) * breathe).coerceIn(0f, 1f)
         // Faint big glow (cheap bloom) …
         val grr = p.r * (if (p.spark) 4f else 4.2f)
         if (grr > 0f) {
@@ -536,7 +552,7 @@ internal fun DrawScope.drawParticleField(
     nowMs: Double,
 ) {
     when (sim) {
-        is StarSim -> drawStars(sim, sprites.star, nowMs)
+        is StarSim -> drawStars(sim, sprites, nowMs)
         is EmberSim -> drawEmbers(sim, sprites.ember, nowMs)
         is MatrixSim -> drawMatrix(sim, matrixPaint, nowMs)
     }

@@ -221,16 +221,9 @@ fun ChatBubble(
             }
 
             // ── "The Signal" — presentation-only telemetry HUD ──
-            // One morphing red line above the answer (replaces the old
-            // ThinkingIndicator). Rendered ONLY while a live label exists: the
-            // retrieval burst / "generating" line during the turn, and the brief
-            // post-answer "mint · SNAP-…" flourish pushed after /chat/save (this
-            // survives the turn end precisely because it is gated on the label, not
-            // on isStreaming — matching the web HUD). null label → nothing renders,
-            // so completed answers show no line. EPHEMERAL: never from [message].
-            if (signalLabel != null) {
-                SignalLine(label = signalLabel)
-            }
+            // The Signal line is no longer rendered here — per Brandon's feedback it
+            // is now pinned to the BOTTOM of the screen (a fixed strip above the
+            // composer) in ChatScreen. [signalLabel] is retained for compatibility.
 
             // ── Image attachments ──
             if (message.images.isNotEmpty()) {

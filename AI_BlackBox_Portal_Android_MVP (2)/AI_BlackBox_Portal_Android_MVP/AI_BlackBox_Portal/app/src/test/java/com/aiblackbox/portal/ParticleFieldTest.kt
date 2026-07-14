@@ -43,61 +43,58 @@ class ParticleFieldTest {
         assertEquals("Matrix", ParticleMode.label(ParticleMode.MATRIX))
     }
 
-    // ── Rising Stars ──
-    @Test fun `stars spawn within the 400-800 cap and drift`() {
+    // ── Rising Stars (restored ORIGINAL warm rising-ember field) ──
+    @Test fun `stars spawn the 240 warm particles and rise`() {
         val sim = StarSim()
         sim.resize(width, height, scale, density)
-        assertTrue("count in cap, was ${sim.stars.size}", sim.stars.size in 400..800)
-        val s = sim.stars.first()
-        val y0 = s.y
-        sim.update(nowMs = 16.0, dtSec = 0.016f, active = true)
-        assertTrue("stars rise (y decreases), $y0 -> ${s.y}", s.y < y0)
+        assertEquals(240, sim.particles.size) // 80 + 100 + 60 (the original 3 layers)
+        val p = sim.particles.first()
+        val y0 = p.y
+        repeat(5) { sim.update(nowMs = 16.0, dtSec = 0.016f, active = true) }
+        assertTrue("stars rise (y decreases), $y0 -> ${p.y}", p.y < y0)
     }
 
-    @Test fun `a star pushed above the top wraps back to the bottom`() {
+    @Test fun `an off-screen star respawns at the bottom while active`() {
         val sim = StarSim()
         sim.resize(width, height, scale, density)
-        val s = sim.stars.first()
-        s.y = -1000f
-        sim.update(nowMs = 16.0, dtSec = 0.016f, active = false)
-        assertTrue("wrapped to bottom, y was ${s.y}", s.y >= height)
+        val p = sim.particles.first()
+        p.y = -10000f
+        sim.update(nowMs = 16.0, dtSec = 0.016f, active = true)
+        assertTrue("respawned near the bottom, y was ${p.y}", p.y > height)
     }
 
     @Test fun `resize is a no-op at the same size (no re-scatter)`() {
         val sim = StarSim()
         sim.resize(width, height, scale, density)
-        val count = sim.stars.size
-        val firstX = sim.stars.first().x
+        val count = sim.particles.size
+        val firstX = sim.particles.first().x
         sim.resize(width, height, scale, density) // same size → must not rebuild
-        assertEquals(count, sim.stars.size)
-        assertEquals(firstX, sim.stars.first().x, 0f)
+        assertEquals(count, sim.particles.size)
+        assertEquals(firstX, sim.particles.first().x, 0f)
     }
 
-    // ── Embers ──
-    @Test fun `embers spawn while active and drain when inactive`() {
+    // ── Embers (full-screen floating) ──
+    @Test fun `embers seed full on resize and drain when inactive`() {
         val sim = EmberSim()
         sim.resize(width, height, scale, density)
-        // Pool sized but empty until spawned.
-        assertTrue("pool empty before spawning", sim.alivePool.none { it.alive })
-        // A few active frames spawn embers (pool cap 200..400).
+        // resize seeds the field full → embers across the WHOLE screen at rest.
+        val seeded = sim.alivePool.count { it.alive }
+        assertTrue("seeded full on resize, was $seeded", seeded > 0)
+        assertTrue("respects the 200-400 cap, was $seeded", seeded <= 400)
+        // Inactive: no new spawns; existing embers die off (life decays to 0).
         var t = 0.0
-        repeat(60) { t += 16.0; sim.update(t, 0.016f, active = true) }
-        val liveWhileActive = sim.alivePool.count { it.alive }
-        assertTrue("some embers alive while active, was $liveWhileActive", liveWhileActive > 0)
-        assertTrue("respects the 200-400 cap, was $liveWhileActive", liveWhileActive <= 400)
-        // Inactive: no new spawns, existing embers die off (life decays to 0).
-        repeat(400) { t += 16.0; sim.update(t, 0.05f, active = false) }
+        repeat(700) { t += 16.0; sim.update(t, 0.05f, active = false) }
         assertTrue("field drains when inactive", sim.alivePool.none { it.alive })
     }
 
-    @Test fun `rearm clears the ember pool for a fresh rise`() {
+    @Test fun `rearm refills the ember pool for a full screen`() {
         val sim = EmberSim()
         sim.resize(width, height, scale, density)
         var t = 0.0
-        repeat(30) { t += 16.0; sim.update(t, 0.016f, active = true) }
-        assertTrue("precondition: some alive", sim.alivePool.any { it.alive })
+        repeat(700) { t += 16.0; sim.update(t, 0.05f, active = false) } // drain it
+        assertTrue("precondition: drained", sim.alivePool.none { it.alive })
         sim.rearm()
-        assertTrue("rearm empties the pool", sim.alivePool.none { it.alive })
+        assertTrue("rearm refills the pool", sim.alivePool.any { it.alive })
     }
 
     // ── Matrix ──

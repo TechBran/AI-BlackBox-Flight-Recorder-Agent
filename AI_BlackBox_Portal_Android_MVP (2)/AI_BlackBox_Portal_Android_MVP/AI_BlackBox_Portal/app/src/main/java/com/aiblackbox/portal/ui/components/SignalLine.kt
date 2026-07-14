@@ -194,6 +194,18 @@ private fun signalWaveOffsetPx(i: Int, nowMs: Double, amp: Float): Float {
     return (amp * sin(ph - i * 0.30)).toFloat()
 }
 
+private const val SIGNAL_SWEEP_SPEED = 0.85
+private const val SIGNAL_SWEEP_WL = 13.0
+
+/** Continuous highlight SWEEP crest (0..1) for cell [i] at [nowMs]: a bright band
+ *  travels left→right so the line reads as live/streaming (mirrors web ea06cbf).
+ *  Only the leading half of the sine lights (s²) → a sharp crest. */
+internal fun signalSweep(i: Int, nowMs: Double): Float {
+    val t = nowMs * 0.001 * SIGNAL_SWEEP_SPEED
+    val s = sin((i / SIGNAL_SWEEP_WL - t) * 2.0 * PI)
+    return (if (s > 0.0) s * s else 0.0).toFloat()
+}
+
 /** True when the OS "remove animations" / animator-scale-0 accessibility path is on. */
 private fun signalReduceMotion(context: Context): Boolean = try {
     Settings.Global.getFloat(
@@ -252,13 +264,13 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
         morph.push(currentLabel ?: "", startNs / 1_000_000.0)
         frame.longValue = startNs
         if (reduceMotion) return@LaunchedEffect
-        // Run until the wave is flat (WAVE_DECAY_MS) AND every scramble has settled,
-        // so going idle never freezes a half-morphed glyph.
-        val holdDeadlineMs = maxOf(WAVE_DECAY_MS, morph.morphSettleMs)
+        // Run CONTINUOUSLY while this line is shown so the highlight sweep keeps
+        // scanning (Brandon: the flat-hold looked stagnant). The loop is cancelled
+        // automatically when the label changes (LaunchedEffect restarts) or the line
+        // is removed from composition.
         while (true) {
             val t = withFrameNanos { it }
             frame.longValue = t
-            if ((t - startNs) / 1_000_000.0 >= holdDeadlineMs) break // → flat, still hold
         }
     }
 
@@ -272,22 +284,23 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
         val nowMs = frame.longValue / 1_000_000.0
         val n = morph.size
         if (n > 0) {
-            // Per-line wave-decay envelope: eases from peak to flat over
-            // WAVE_DECAY_MS, then 0 forever (readable hold). Shared origin with the
-            // morph so a stray recomposition after the loop stops still draws flat.
-            val amp = signalWaveEnvelope(nowMs - morph.morphStartMs, peakAmpPx)
+            // Continuous highlight SWEEP: a bright crest scans across the line,
+            // brightening (toward white) + lifting each char as it passes, so the
+            // line reads as live/streaming while the text stays put and readable.
             val canvas = drawContext.canvas.nativeCanvas
             val baseY = size.height / 2f - (ascent + descent) / 2f
+            val liftPx = peakAmpPx * 1.1f   // small upward lift at the crest
             val buf = CharArray(1)
             for (i in 0 until n) {
                 val ch = morph.glyphAt(i, nowMs)
                 if (ch == ' ') continue
                 val hot = morph.hotAt(i, nowMs)
-                val col = lerp(SignalRed, Color.White, hot).copy(alpha = morph.alphaAt(i, nowMs))
+                val sweep = if (reduceMotion) 0f else signalSweep(i, nowMs)
+                // brighten toward white by the morph hot-glow AND the sweep crest.
+                val bright = (hot + sweep * 0.7f).coerceIn(0f, 1f)
+                val col = lerp(SignalRed, Color.White, bright).copy(alpha = morph.alphaAt(i, nowMs))
                 paint.color = col.toArgb()
-                val y = baseY +
-                    signalWaveOffsetPx(i, nowMs, amp) +
-                    morph.liftEmAt(i, nowMs) * fontSizePx
+                val y = baseY - sweep * liftPx + morph.liftEmAt(i, nowMs) * fontSizePx
                 buf[0] = ch
                 canvas.drawText(buf, 0, 1, i * charWidth, y, paint)
             }
