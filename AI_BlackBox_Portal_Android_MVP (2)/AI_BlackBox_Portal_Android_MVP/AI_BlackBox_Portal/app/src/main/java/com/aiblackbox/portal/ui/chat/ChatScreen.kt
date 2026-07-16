@@ -11,8 +11,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.aiblackbox.portal.data.model.UiMessage
+import kotlinx.coroutines.flow.first
 import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.EmberOverlay
 import com.aiblackbox.portal.ui.components.LiveTextSection
@@ -46,6 +47,7 @@ fun ChatScreen(
 ) {
     val messages by viewModel.messages.collectAsState()
     val chatState by viewModel.chatState.collectAsState()
+    val streamCancelled by viewModel.streamCancelled.collectAsState()
     // "The Signal" — transient, presentation-only telemetry label for the live
     // turn. Passed ONLY to the streaming bubble below; never persisted on a message.
     val signalLabel by viewModel.signalLabel.collectAsState()
@@ -76,6 +78,7 @@ fun ChatScreen(
             MainChatContent(
                 messages = messages,
                 chatState = chatState,
+                streamCancelled = streamCancelled,
                 signalLabel = signalLabel,
                 listState = listState,
                 onSpeak = onSpeak,
@@ -101,6 +104,7 @@ internal fun MainChatContent(
     messages: List<UiMessage>,
     chatState: ChatState,
     signalLabel: String?,
+    streamCancelled: Boolean = false,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
     onSpeak: (String) -> Unit = {},
@@ -109,7 +113,10 @@ internal fun MainChatContent(
     onRetry: (String) -> Unit = {},
     bottomFocalGeometry: BottomFocalGeometry? = null,
 ) {
-    val liveMessage = messages.lastOrNull { it.role == "assistant" }
+    // Live turn = the assistant message only while it is the FINAL element.
+    // (lastOrNull { assistant } kept the PREVIOUS turn's bubble selected as
+    // "live" on paths that append a user message without a placeholder.)
+    val liveMessage = messages.lastOrNull()?.takeIf { it.role == "assistant" }
     val liveSnapshot = LiveStreamSnapshot(
         messageId = liveMessage?.id,
         reasoningLength = liveMessage?.reasoning?.length ?: 0,
@@ -120,21 +127,33 @@ internal fun MainChatContent(
             else -> LiveStreamPhase.IDLE
         },
         statusLabel = signalLabel,
+        // ERROR ends and user STOPs keep the viewport in place ("stop cleanly");
+        // only a genuine completion runs the glide-to-bottom.
+        endedAbnormally = chatState == ChatState.ERROR || streamCancelled,
     )
     val followState = rememberLiveStreamFollowState(listState, liveSnapshot)
     val returnHost = LocalReturnToLiveHost.current
     val returnRegistration = remember(returnHost) {
         returnHost?.register("main", followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
     }
-    SideEffect {
-        returnRegistration?.publish(
-            followState.showReturnToLive,
-            followState.returningToLive,
-            followState::resumeNow,
-        )
+    // Publish arrow visibility REACTIVELY (snapshotFlow), not via SideEffect:
+    // a SideEffect only re-runs when this body scope recomposes, and at idle a
+    // COMPLETED_HISTORY flip (user scrolls up in finished history) recomposes
+    // nothing here — the flip silently never reached the activity host.
+    LaunchedEffect(returnRegistration, followState) {
+        snapshotFlow { followState.showReturnToLive to followState.returningToLive }
+            .collect { (visible, returning) ->
+                returnRegistration?.publish(visible, returning, followState::resumeNow)
+            }
     }
     DisposableEffect(returnRegistration) {
         onDispose { returnRegistration?.dispose() }
+    }
+    // Entry snap: a restored conversation opens at the true bottom (the focal
+    // follow only issues relative corrections and never scrolls to an index).
+    LaunchedEffect(followState, listState) {
+        snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+        followState.snapToBottomInstant()
     }
     val density = LocalDensity.current
     val bottomClearance = bottomFocalGeometry?.let {
@@ -146,16 +165,14 @@ internal fun MainChatContent(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (bottomFocalGeometry != null) Modifier.padding(bottom = bottomClearance)
-                    else Modifier,
-                )
                 .liveStreamUserInput(followState)
                 .testTag("messages"),
-            contentPadding = PaddingValues(
-                top = 8.dp,
-                bottom = if (bottomFocalGeometry == null) bottomClearance else 8.dp,
-            ),
+            // Bottom clearance lives in contentPadding — NOT an outer Modifier.padding.
+            // contentPadding keeps the list's draw bounds at the window bottom, so chat
+            // text visibly scrolls BEHIND the transparent composer (the pre-batch
+            // scroll-under-glass look); an outer padding hard-clipped the text at the
+            // composer's top edge, which read as an opaque composer background.
+            contentPadding = PaddingValues(top = 8.dp, bottom = bottomClearance + 8.dp),
         ) {
             items(items = messages, key = { it.id }) { message ->
                 val isLiveTurn = message.id == liveSnapshot.messageId

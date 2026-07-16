@@ -264,7 +264,21 @@ fun SignalLine(label: String?, modifier: Modifier = Modifier) {
         morph.push(currentLabel ?: "", startNs / 1_000_000.0)
         frame.longValue = startNs
         if (reduceMotion) return@LaunchedEffect
-        // Run CONTINUOUSLY while this line is shown so the highlight sweep keeps
+        if (currentLabel.isNullOrBlank()) {
+            // Dissolve: nothing to sweep once the old glyphs fade out. Run only
+            // until the dissolve morph settles, then STOP — the rail is now
+            // permanently composed at the screen bottom on every chat surface,
+            // and an unconditional loop here meant a 60/120fps frame clock
+            // burning at idle forever.
+            val deadlineNs = startNs + ((morph.morphSettleMs + WAVE_DECAY_MS) * 1_000_000).toLong()
+            while (true) {
+                val t = withFrameNanos { it }
+                frame.longValue = t
+                if (t >= deadlineNs) break
+            }
+            return@LaunchedEffect
+        }
+        // Run CONTINUOUSLY while a label is SHOWING so the highlight sweep keeps
         // scanning (Brandon: the flat-hold looked stagnant). The loop is cancelled
         // automatically when the label changes (LaunchedEffect restarts) or the line
         // is removed from composition.

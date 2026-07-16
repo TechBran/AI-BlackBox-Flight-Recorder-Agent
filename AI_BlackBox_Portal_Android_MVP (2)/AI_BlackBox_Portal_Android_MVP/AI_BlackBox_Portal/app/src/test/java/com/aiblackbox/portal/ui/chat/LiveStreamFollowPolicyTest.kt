@@ -380,4 +380,71 @@ class LiveStreamFollowPolicyTest {
         assertEquals(LiveFollowMode.FILLING, policy.mode)
         assertFalse(policy.returningToCompletedBottom)
     }
+
+    // ── Completion snap (2026-07-15): a finished turn glides to the TRUE bottom ──
+
+    @Test fun `completeToBottom enters the index free completed bottom return`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.completeToBottom()
+        assertFalse(policy.isActive)
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        assertTrue(policy.returningToCompletedBottom)
+        assertTrue(policy.showReturnToLive)
+    }
+
+    @Test fun `completeToBottom overrides a suspended park from mid stream scrolling`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onUserScroll(1_000)
+        assertEquals(LiveFollowMode.SUSPENDED, policy.mode)
+        policy.completeToBottom()
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        assertTrue(policy.returningToCompletedBottom)
+        // No stale 5s deadline survives the completion snap.
+        assertFalse(policy.tick(100_000))
+    }
+
+    @Test fun `completed bottom return stops at true bottom and clears the arrow`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.completeToBottom()
+        policy.onCompletedReturnStopped(canScrollForward = false)
+        assertEquals(LiveFollowMode.FILLING, policy.mode)
+        assertFalse(policy.showReturnToLive)
+    }
+
+    @Test fun `forceCompletedBottomReturn only converts an in flight return`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onUserScroll(1_000)
+        assertFalse(policy.returningToCompletedBottom)
+        policy.forceCompletedBottomReturn()   // SUSPENDED — must not convert
+        assertFalse(policy.returningToCompletedBottom)
+        policy.resumeNow()
+        assertEquals(LiveFollowMode.RETURNING, policy.mode)
+        policy.forceCompletedBottomReturn()   // RETURNING — converts
+        assertTrue(policy.returningToCompletedBottom)
+    }
+
+    @Test fun `starvation recovery hands an active stream back to following`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.onUserScroll(1_000)
+        policy.resumeNow()
+        policy.forceCompletedBottomReturn()
+        policy.resumeFollowingAfterBottomReturn()
+        assertTrue(policy.isActive)
+        assertEquals(LiveFollowMode.FOLLOWING, policy.mode)
+        assertFalse(policy.returningToCompletedBottom)
+    }
+
+    @Test fun `user input still cancels the completion glide into tap only history`() {
+        val policy = LiveStreamFollowPolicy()
+        policy.start()
+        policy.completeToBottom()
+        policy.onUserScroll(2_000)
+        assertEquals(LiveFollowMode.COMPLETED_HISTORY, policy.mode)
+        assertFalse(policy.tick(100_000))   // tap-only: no automatic 5s return
+    }
 }

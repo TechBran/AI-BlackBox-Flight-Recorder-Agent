@@ -28,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +53,7 @@ import com.aiblackbox.portal.ui.components.VoiceAgentIcon
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import com.aiblackbox.portal.ui.components.SpeakerIcon
@@ -131,6 +133,16 @@ fun Composer(
 ) {
     val view = LocalView.current
     val ctx = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    // Release focus when a turn starts streaming. The field goes readOnly during
+    // the stream (below); if it KEPT focus, Compose foundation would restart the
+    // IME session the instant readOnly flips back at stream end — popping the
+    // keyboard uncommanded on every completed generation (b/237308379 behavior).
+    // Dropping focus here means the keyboard returns only when the user taps the
+    // field again — and makes the stream-start keyboard hide deterministic too.
+    LaunchedEffect(isStreaming) {
+        if (isStreaming) focusManager.clearFocus()
+    }
     val hasText = value.text.isNotBlank() || attachments.isNotEmpty()
     val sendScale by animateFloatAsState(
         targetValue = if (hasText && !isStreaming) 1f else 0.85f,

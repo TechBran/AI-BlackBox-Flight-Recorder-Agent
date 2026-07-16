@@ -21,8 +21,11 @@ import org.junit.Test
 class AgentEventProvenanceTest {
 
     @Test fun `CLI live status maps thinking tool and status to one label`() {
-        assertEquals("Thinking deeply", cliLiveStatusLabel(true, null, "Thinking..."))
-        assertEquals("Using · Read", cliLiveStatusLabel(false, "Read", "Running"))
+        // Signal vocabulary: honest STATE words ("thinking"), and the same
+        // "tool · <name>" shape the main-chat Signal renders — never a canned
+        // phrase from the old fake REASONING_PHRASES roster.
+        assertEquals("thinking", cliLiveStatusLabel(true, null, "Thinking..."))
+        assertEquals("tool · Read", cliLiveStatusLabel(false, "Read", "Running"))
         assertEquals("Running", cliLiveStatusLabel(false, null, "Running"))
         assertNull(cliLiveStatusLabel(false, null, ""))
     }

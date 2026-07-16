@@ -315,6 +315,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _signalLabel = MutableStateFlow<String?>(null)
     val signalLabel: StateFlow<String?> = _signalLabel.asStateFlow()
 
+    // True when the LAST turn ended via the user's STOP (cancelStream), false the
+    // moment a new turn starts. The focal follow reads it to keep the viewport in
+    // place on a user stop instead of running the completion glide-to-bottom
+    // (chatState alone can't tell a cancel from a completion — both land IDLE).
+    private val _streamCancelled = MutableStateFlow(false)
+    val streamCancelled: StateFlow<Boolean> = _streamCancelled.asStateFlow()
+
     // Per-turn Signal tracking (reset in [sendViaSSE], read across the many
     // processSSEEvent calls of one turn). Never persisted.
     private var signalLastTool: String = ""       // last tool_start name, for the "· ok" echo
@@ -1008,6 +1015,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         //    conversation still lives in _messages (UI) and is minted to the ledger.
         val history = budgetHistory(toFcHistory(_messages.value), LOCAL_HISTORY_BUDGET_CHARS)
 
+        _streamCancelled.value = false
         _chatState.value = ChatState.STREAMING
         startBackgroundService("Generating on-device response...")
 
@@ -1305,6 +1313,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             _messages.value = (_messages.value + userMsg + assistantMsg).takeLast(MAX_CHAT_MESSAGES)
             _inputText.value = TextFieldValue()
+            _streamCancelled.value = false
             _chatState.value = ChatState.STREAMING
             startBackgroundService("Looking at your screen...")
 
@@ -1977,6 +1986,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _messages.value = _messages.value.takeLast(MAX_CHAT_MESSAGES)
         }
 
+        _streamCancelled.value = false
         _chatState.value = ChatState.STREAMING
         startBackgroundService("Generating response...")
 
@@ -2492,7 +2502,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "tool_start" -> {
                 // data = the tool name (a JSON-encoded string → decodeJsonData already
                 // stripped the outer quotes). Remember it for the "· ok" echo.
-                val toolName = event.data.trim()
+                // Web-parity tolerance: if the payload ever becomes an OBJECT
+                // ({name}/{tool} — the planned structured tool events), read the
+                // name field instead of splashing raw JSON onto the HUD.
+                val raw = event.data.trim()
+                val toolName = if (raw.startsWith("{")) {
+                    try {
+                        val obj = org.json.JSONObject(raw)
+                        obj.optString("name").ifBlank { obj.optString("tool") }
+                    } catch (_: Exception) { "" }
+                } else raw
                 if (toolName.isNotBlank()) {
                     signalLastTool = toolName
                     pushSignal("tool · $toolName")
@@ -2702,6 +2721,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelStream() {
+        // Set BEFORE flipping chatState so no frame observes IDLE + cancelled=false.
+        _streamCancelled.value = true
         streamJob?.cancel()
         // I1 (final-pass review): see clearHistory -- a mid-turn model switch
         // (localReWarmAction -> DEFER) is applied at turn completion, which a

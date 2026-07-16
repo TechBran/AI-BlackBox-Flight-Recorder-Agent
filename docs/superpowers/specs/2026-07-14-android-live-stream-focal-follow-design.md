@@ -93,7 +93,7 @@ The fixed Signal/status rail remains visible and continues updating while list f
 - **Thinking:** Track the reasoning edge above the status rail.
 - **Thinking to answer:** Switch to answer content while retaining the same target position.
 - **Tool activity:** Keep the single-line status rail live and follow the latest applicable message edge without creating another status banner.
-- **Completion:** Stop automatic tracking and keep the viewport at its last followed position. Allow the existing completion/mint flourish to finish, then remove the rail according to its current lifecycle.
+- **Completion (revised 2026-07-15, user-reported):** Glide to the TRUE bottom of the finished reply — that is where the eyes go, and where the TTS bar appears. The glide is the index-free completed-bottom pager; an actively dragging finger at completion is never fought (tap-only arrow instead), and any user input cancels the glide instantly. Post-completion growth (action row, provenance, async TTS bar) re-triggers the glide within an 8s grace window unless the user has scrolled since. Allow the existing completion/mint flourish to finish, then remove the rail according to its current lifecycle.
 - **Cancellation, error, or disconnect:** Stop automatic tracking cleanly and leave ordinary manual scrolling available.
 
 ## Accessibility and Motion

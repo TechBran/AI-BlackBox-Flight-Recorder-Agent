@@ -42,6 +42,7 @@ import com.aiblackbox.portal.ui.components.LIVE_REASONING_EDGE_TAG
 import com.aiblackbox.portal.ui.components.LIVE_TOOL_FALLBACK_EDGE_TAG
 import com.aiblackbox.portal.ui.components.COMPLETED_RETURN_EDGE_TAG
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -170,7 +171,10 @@ class LiveStreamFocalFollowTest {
             assertTrue("composer controls must sit directly above residence", composer.bottom <= rail.top)
             assertTrue("provider/model controls must clear residence", controls.bottom <= rail.top)
             assertTrue("Auto-TTS must clear residence", autoTts.bottom <= rail.top)
-            assertTrue("messages must exclude composer and residence", messages.bottom <= composer.top)
+            // Scroll-behind contract (revised 2026-07-15): the list's draw bounds
+            // reach the window bottom so chat text visibly scrolls BEHIND the
+            // transparent composer; clearance lives in contentPadding, not bounds.
+            assertTrue("messages must extend behind the composer glass", messages.bottom >= composer.top)
             assertTrue("residence must remain above occupied inset", rail.bottom < root.bottom)
         }
 
@@ -385,7 +389,7 @@ class LiveStreamFocalFollowTest {
     }
 
     @Test
-    fun terminalTransitionDuringSuspensionRetainsReturnControlAndLeavesListStable() {
+    fun terminalTransitionFromSettledParkGlidesToTrueBottomAndClearsArrow() {
         lateinit var finish: () -> Unit
         lateinit var listState: LazyListState
         compose.setContent {
@@ -394,12 +398,17 @@ class LiveStreamFocalFollowTest {
             FollowHarness(active = active, onListState = { listState = it })
         }
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
-        val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         compose.runOnIdle { finish() }
         compose.waitForIdle()
 
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
-        assertEquals(before, listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
+        // Revised contract (2026-07-15): completion from a SETTLED park auto-glides
+        // to the TRUE bottom (the fresh reply is where the eyes go); the arrow
+        // clears on landing. Only an actively-dragging finger retains the park.
+        assertFalse(
+            "completion must land at the true bottom",
+            compose.runOnIdle { listState.canScrollForward },
+        )
+        compose.onNodeWithTag("return-to-live").assertDoesNotExist()
     }
 
     @Test
@@ -610,11 +619,10 @@ class LiveStreamFocalFollowTest {
         compose.onNodeWithTag("messages").performTouchInput { swipeDown() }
         assertSingleReturnArrowDisplayed()
         compose.runOnIdle { complete() }
-        compose.mainClock.advanceTimeByFrame()
-        compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertIsDisplayed()
-        compose.onNodeWithTag("return-to-live").performClick()
-        compose.mainClock.advanceTimeByFrame()
-        compose.onNodeWithTag("return-to-live").assertIsDisplayed()
+        // Revised contract (2026-07-15): completion AUTO-glides to the true bottom
+        // without an arrow tap; the completed-return anchor and the arrow clear on
+        // landing (device-independent: instant under reduced motion, paged tweens
+        // otherwise — advanceUntilTrueListBottom handles both).
         advanceUntilTrueListBottom(listState)
         compose.onNodeWithTag(COMPLETED_RETURN_EDGE_TAG).assertDoesNotExist()
     }
@@ -944,8 +952,14 @@ private fun FollowHarness(
     val registration = remember(returnHost) {
         returnHost.register("harness", followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
     }
-    androidx.compose.runtime.SideEffect {
-        registration.publish(followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
+    // Reactive publish — mirrors the production screens; a SideEffect only runs on
+    // recomposition and misses idle-time visibility flips (the production bug).
+    androidx.compose.runtime.LaunchedEffect(registration, followState) {
+        androidx.compose.runtime.snapshotFlow {
+            followState.showReturnToLive to followState.returningToLive
+        }.collect { (visible, returning) ->
+            registration.publish(visible, returning, followState::resumeNow)
+        }
     }
     androidx.compose.runtime.DisposableEffect(registration) {
         onDispose { registration.dispose() }

@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import com.aiblackbox.portal.ui.theme.BbxRed
+import com.aiblackbox.portal.ui.theme.BbxWhite
 import kotlin.math.roundToInt
 
 internal const val RETURN_TO_LIVE_GAP_DP = 8
@@ -91,6 +94,15 @@ internal fun BoxScope.ReturnToLiveHost(
     val targetBottomPx = composerTopPx - with(density) { RETURN_TO_LIVE_GAP_DP.dp.toPx() }
     IconButton(
         onClick = state::resume,
+        // EXPLICIT colors — web-parity solid red circle + white glyph. A bare
+        // IconButton here resolves its content color from LocalContentColor,
+        // which defaults to Color.Black at this Surface-less activity layer:
+        // a black arrow on a transparent button over the BbxBlack root, i.e.
+        // composed and clickable but pixel-invisible in every state.
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = BbxRed,
+            contentColor = BbxWhite,
+        ),
         modifier = Modifier
             .align(Alignment.TopEnd)
             .padding(end = 12.dp)

@@ -768,6 +768,11 @@ class NativeMainActivity : ComponentActivity() {
                     // Hide on screens that have their own compose UI (SMS, Contacts, CLI Agent,
                     // Voice — the provider/model composer is irrelevant in voice-agent mode).
                     val hideComposerRoutes = setOf(Routes.SMS_INBOX, Routes.CONTACTS, Routes.CLI_AGENT, Routes.VOICE)
+                    // Only the chat surfaces render the bottom Signal residence
+                    // (MainChatContent / AgentLiveMessageContent). Reserving the
+                    // 40dp band on every other route floated the composer over a
+                    // dead black strip (image gen, timeline, ...).
+                    val signalResidenceRoutes = setOf(Routes.CHAT, Routes.AGENT, Routes.GEMINI_AGENT)
                     if (currentRoute !in hideComposerRoutes)
                     Box(modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -777,7 +782,7 @@ class NativeMainActivity : ComponentActivity() {
                         // an invisible touch-consuming overlay above the visible Composer.
                         .wrapContentHeight(Alignment.Bottom)
                         .padding(
-                            bottom = SIGNAL_RESIDENCE_HEIGHT +
+                            bottom = (if (currentRoute in signalResidenceRoutes) SIGNAL_RESIDENCE_HEIGHT else 0.dp) +
                                 with(density) { effectiveBottomInsetPx.toDp() },
                         )
                     ) {

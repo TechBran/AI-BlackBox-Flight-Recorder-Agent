@@ -51,7 +51,7 @@ Reduced-motion mode replaces the glide with an immediate correction while preser
 
 After streaming completes, the arrow becomes a general scroll-to-bottom shortcut. It is visible whenever the message list can still scroll forward toward newer content, independent of active-stream state. The completed response keeps its nonvisual measurable bottom anchor while this shortcut or its return glide is active.
 
-Completed-history reading never triggers the five-second automatic return. The viewport remains where the user placed it until the arrow is tapped. Tapping uses the same quick smooth, measurement-verified glide; the arrow disappears only after the completed-response bottom reaches its destination. If the list is already at the true bottom, the arrow is absent.
+Completed-history reading (entered by scrolling up AFTER a turn already completed) never triggers the five-second automatic return; the viewport remains where the user placed it until the arrow is tapped. Stream COMPLETION itself is different (revised 2026-07-15): it always glides to the true bottom — even from a mid-stream park — unless the user's finger is actively on the list at that instant. Tapping uses the same quick smooth, measurement-verified glide; the arrow disappears only after the completed-response bottom reaches its destination. If the list is already at the true bottom, the arrow is absent.
 
 The shortcut retains the same right-aligned, dedicated 48 dp row with an 8 dp prompt gap in main provider chat, Claude Code, and Gemini CLI.
 

@@ -41,13 +41,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -93,43 +92,21 @@ import com.aiblackbox.portal.ui.theme.SolidGreen
 // Glass tokens from worktree Color.kt (no Glass.kt in worktree)
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-
-// =============================================================================
-// Reasoning Phrases — mirrors Portal REASONING_PHRASES array
-// =============================================================================
-private val REASONING_PHRASES = listOf(
-    "Reasoning",
-    "Thinking deeply",
-    "Analyzing",
-    "Processing",
-    "Contemplating",
-    "Evaluating options",
-    "Connecting ideas",
-    "Synthesizing",
-    "Deliberating",
-    "Exploring paths",
-    "Weighing factors",
-    "Forming insights",
-    "Building context",
-    "Mapping patterns",
-    "Refining thoughts",
-    "Considering angles",
-    "Crafting logic",
-    "Structuring response",
-    "Neural processing",
-    "Deep analysis"
-)
 
 internal fun cliLiveStatusLabel(
     isThinking: Boolean,
     activeTool: String?,
     status: String,
 ): String? = when {
-    isThinking -> "Thinking deeply"
-    !activeTool.isNullOrBlank() -> "Using · $activeTool"
+    // Signal vocabulary — honest STATE words, never a canned phrase ("Thinking
+    // deeply" was literally one of the fake REASONING_PHRASES The Signal replaced),
+    // and the same "tool · <name>" shape the main-chat Signal uses.
+    isThinking -> "thinking"
+    !activeTool.isNullOrBlank() -> "tool · $activeTool"
     status.isNotBlank() -> status
     else -> null
 }
@@ -809,21 +786,30 @@ internal fun AgentLiveMessageContent(
         answerLength = liveMessage?.content?.length ?: 0,
         phase = phase,
         statusLabel = label,
+        // A WS error end (or a mid-run parse-error flip) keeps the viewport in
+        // place — only a genuine agent completion runs the glide-to-bottom.
+        endedAbnormally = status == "Error",
     )
     val followState = rememberLiveStreamFollowState(listState, snapshot)
     val returnHost = LocalReturnToLiveHost.current
     val returnRegistration = remember(returnHost, provider) {
         returnHost?.register(provider, followState.showReturnToLive, followState.returningToLive, followState::resumeNow)
     }
-    SideEffect {
-        returnRegistration?.publish(
-            followState.showReturnToLive,
-            followState.returningToLive,
-            followState::resumeNow,
-        )
+    // Reactive publish (see MainChatContent): at idle a COMPLETED_HISTORY flip
+    // recomposes nothing here, so a SideEffect never delivered it to the host.
+    LaunchedEffect(returnRegistration, followState) {
+        snapshotFlow { followState.showReturnToLive to followState.returningToLive }
+            .collect { (visible, returning) ->
+                returnRegistration?.publish(visible, returning, followState::resumeNow)
+            }
     }
     DisposableEffect(returnRegistration) {
         onDispose { returnRegistration?.dispose() }
+    }
+    // Entry snap: a restored agent conversation opens at the true bottom.
+    LaunchedEffect(followState, listState) {
+        snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+        followState.snapToBottomInstant()
     }
     val expectedSection = cliLiveEdgeSection(phase) ?: if (followState.requiresReturnDestination) {
         LiveTextSection.COMPLETED_RETURN
@@ -838,16 +824,11 @@ internal fun AgentLiveMessageContent(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (bottomFocalGeometry != null) Modifier.padding(bottom = bottomClearance)
-                    else Modifier,
-                )
                 .liveStreamUserInput(followState)
                 .testTag("messages"),
-            contentPadding = PaddingValues(
-                top = 8.dp,
-                bottom = if (bottomFocalGeometry == null) bottomClearance else 8.dp,
-            ),
+            // Clearance in contentPadding (not outer padding) — scroll-behind-the-
+            // transparent-composer, matching MainChatContent. See ChatScreen.kt.
+            contentPadding = PaddingValues(top = 8.dp, bottom = bottomClearance + 8.dp),
         ) {
             items(items = messages, key = { it.id }) { message ->
                 val isLiveTurn = message.id == snapshot.messageId
@@ -868,133 +849,6 @@ internal fun AgentLiveMessageContent(
             followState = followState,
             liveTargetYPx = bottomFocalGeometry?.liveTargetYPx,
             effectiveBottomInset = bottomFocalGeometry?.let { with(density) { it.occupiedBottomInsetPx.toDp() } },
-        )
-    }
-}
-
-// =============================================================================
-// ToolIndicatorBar — mirrors Portal .tool-indicator
-//
-// Portal: sticky at bottom of bubble, shows icon + tool name + detail
-// Android: compact bar below banner, glass surface
-// =============================================================================
-
-@Composable
-private fun ToolIndicatorBar(tool: ToolIndicatorData) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Neutral100)
-            .border(
-                width = 1.dp,
-                color = GlassBorder,
-                shape = RoundedCornerShape(0.dp)
-            )
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        // Spinning indicator
-        val infiniteTransition = rememberInfiniteTransition(label = "toolSpin")
-        val alpha by infiniteTransition.animateFloat(
-            initialValue = 0.4f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(800),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "toolAlpha"
-        )
-
-        // Tool icon
-        Text(
-            text = tool.icon,
-            fontSize = 14.sp,
-            modifier = Modifier.alpha(alpha)
-        )
-
-        // Tool name
-        Text(
-            text = tool.name,
-            style = MaterialTheme.typography.labelMedium.copy(
-                fontWeight = FontWeight.SemiBold
-            ),
-            color = ClaudeAccent
-        )
-
-        // Detail (file name, command, pattern)
-        if (tool.detail.isNotBlank()) {
-            Text(
-                text = tool.detail,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.Monospace
-                ),
-                color = Neutral500,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-        }
-    }
-}
-
-// =============================================================================
-// ThinkingBar — mirrors Portal .thinking-indicator with cycling phrases
-//
-// Portal: fixed position, purple accent, cycling labels every 2s
-// Android: inline bar above chat, purple theme
-// =============================================================================
-
-@Composable
-private fun ThinkingBar() {
-    var phraseIndex by remember { mutableIntStateOf(0) }
-
-    // Cycle through phrases — mirrors Portal startReasoningCycle()
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(2000)
-            phraseIndex = (phraseIndex + 1) % REASONING_PHRASES.size
-        }
-    }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "thinkPulse")
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "thinkAlpha"
-    )
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0x339370DB)) // rgba(147, 112, 219, 0.2)
-            .border(
-                width = 1.dp,
-                color = Color(0x669370DB), // rgba(147, 112, 219, 0.4)
-                shape = RoundedCornerShape(0.dp)
-            )
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // Brain icon with pulse — mirrors Portal .thinking-icon
-        Text(
-            text = "\uD83E\uDDE0",
-            fontSize = 16.sp,
-            modifier = Modifier.alpha(pulseAlpha)
-        )
-
-        // Cycling label — mirrors Portal .thinking-label
-        Text(
-            text = REASONING_PHRASES[phraseIndex],
-            style = MaterialTheme.typography.labelMedium.copy(
-                fontWeight = FontWeight.SemiBold
-            ),
-            color = Color(0xFFB19CD9) // Portal: #b19cd9
         )
     }
 }

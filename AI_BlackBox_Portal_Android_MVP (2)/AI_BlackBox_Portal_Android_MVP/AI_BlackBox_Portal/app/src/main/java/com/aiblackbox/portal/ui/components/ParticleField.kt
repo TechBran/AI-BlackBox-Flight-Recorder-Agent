@@ -233,20 +233,24 @@ class StarParticle(val layerIndex: Int) {
         trailLen = 0; dead = false
     }
 
-    fun update(timeMs: Double, width: Float, height: Float, active: Boolean, scale: Float) {
+    fun update(timeMs: Double, width: Float, height: Float, active: Boolean, scale: Float, dtSec: Float = 1f / 60f) {
         if (dead) { if (active) reset(width, height, scale) else return }
+        // dt-normalize to the 60fps reference tick the physics constants were tuned
+        // at: velocities are px-per-60Hz-tick, so without this the field runs ~2x
+        // fast on a 120Hz display (the Fold) vs the approved 60Hz look.
+        val dt = (dtSec * 60f).coerceIn(0.25f, 4f)
         val turbX = (sin(timeMs * 0.0003 + oscOffset) * STAR_TURBULENCE * 0.3 * scale).toFloat()
         val turbY = (cos(timeMs * 0.0004 + oscOffset) * STAR_TURBULENCE * 0.15 * scale).toFloat()
         val oscillation = (sin(timeMs * oscSpeed + oscOffset) * oscAmp * 0.002).toFloat()
-        vx += turbX * 0.005f + oscillation - vx * 0.02f
+        vx += (turbX * 0.005f + oscillation) * dt - vx * (0.02f * dt)
         vy = baseVy + turbY * 0.005f
-        x += vx; y += vy
+        x += vx * dt; y += vy * dt
         pushTrail(x, y, size, opacity)
         val f1 = sin(timeMs * flickJitter + flickOffset)
         val f2 = sin(timeMs * flickJitter * 0.7 + flickOffset * 1.3)
         val flicker = ((f1 + f2 * 0.5) / 1.5).toFloat()
-        opacity += (baseOpacity * (0.7f + flicker * 0.3f) - opacity) * 0.05f
-        size += (baseSize * (0.9f + flicker * 0.1f) - size) * 0.05f
+        opacity += (baseOpacity * (0.7f + flicker * 0.3f) - opacity) * (0.05f * dt).coerceAtMost(1f)
+        size += (baseSize * (0.9f + flicker * 0.1f) - size) * (0.05f * dt).coerceAtMost(1f)
         if (y < height * 0.2f) opacity *= (y / (height * 0.2f))
         if (y < -50f * scale || x < -50f * scale || x > width + 50f * scale) {
             if (active) reset(width, height, scale) else dead = true
@@ -287,7 +291,7 @@ class StarSim : FieldSim {
     }
     override fun update(nowMs: Double, dtSec: Float, active: Boolean) {
         if (width <= 0f || height <= 0f) return
-        for (p in parts) p.update(nowMs, width, height, active, scale)
+        for (p in parts) p.update(nowMs, width, height, active, scale, dtSec)
     }
     override fun rearm() {
         if (width <= 0f || height <= 0f || parts.isEmpty()) return
