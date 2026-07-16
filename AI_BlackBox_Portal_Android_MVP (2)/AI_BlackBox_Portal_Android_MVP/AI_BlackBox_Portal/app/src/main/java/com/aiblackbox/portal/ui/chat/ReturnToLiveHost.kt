@@ -18,7 +18,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import com.aiblackbox.portal.ui.theme.BbxRed
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -103,9 +102,10 @@ internal fun BoxScope.ReturnToLiveHost(
             containerColor = BbxRed,
             contentColor = BbxWhite,
         ),
+        // Horizontally CENTERED above the composer — web parity (.scroll-to-bottom:
+        // left 50% / translateX(-50%)); it was anchored to the right edge.
         modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(end = 12.dp)
+            .align(Alignment.TopCenter)
             .offset {
                 IntOffset(0, (targetBottomPx - with(density) { RETURN_TO_LIVE_TARGET_DP.dp.toPx() }).roundToInt())
             }
