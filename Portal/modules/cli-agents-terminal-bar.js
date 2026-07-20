@@ -1,7 +1,8 @@
 /**
  * cli-agents-terminal-bar.js
  * Toolbar row above the Zellij terminal iframe: rail-collapse toggle (☰),
- * active-session label, file attach (📎), and modal maximize (⛶).
+ * active-session label, extra-keys toggle (⌨), file attach (📎), and modal
+ * maximize (⛶).
  *
  * Per docs/plans/2026-07-20 terminal-file-attach plan Task 9 (web parity
  * with the Android terminal toolbar).
@@ -12,6 +13,10 @@
  *   - We do NOT own the collapse/maximize CLASSES — the modal (T12 owner of
  *     the shell + card DOM) flips those in the onToggleRail/onToggleMaximize
  *     callbacks and persists rail state. We only track button glyph/state.
+ *   - Same division for the ⌨ extra-keys toggle (plan Task 12): the MODAL
+ *     owns visibility state + localStorage persistence and applies it to the
+ *     extra-keys module; we only report toggles via onToggleKeys and track
+ *     aria-pressed.
  *   - Toasts are module-local overlays anchored to the iframe host: the
  *     Portal's global #toast sits at z-index 100, the modal at 5000, so
  *     core-utils toasts are invisible while the modal is open — and the
@@ -44,6 +49,7 @@ let currentOpts = {};
 let currentSessionName = null;
 let maximized = false;
 let railCollapsed = false;
+let keysVisible = false;
 // Upload machinery — sequential drain so per-file progress/toasts stay
 // unambiguous (parallel uploads would fight over the single chip).
 let uploadQueue = [];
@@ -359,11 +365,13 @@ export function mountTerminalBar(containerEl, options = {}) {
         getSessionName: options.getSessionName,
         onToggleRail: options.onToggleRail,
         onToggleMaximize: options.onToggleMaximize,
+        onToggleKeys: options.onToggleKeys,
         onError: options.onError,
     };
     currentSessionName = null;
     maximized = false; // always fresh — maximize never survives a remount
     railCollapsed = !!options.railCollapsed; // caller passes persisted state
+    keysVisible = !!options.keysVisible;     // caller passes persisted state
 
     const bar = document.createElement('div');
     bar.className = 'zellij-terminal-bar';
@@ -381,6 +389,19 @@ export function mountTerminalBar(containerEl, options = {}) {
     label.className = 'zellij-terminal-bar-label zellij-terminal-bar-label-empty';
     label.textContent = NO_SESSION_LABEL;
     label.title = 'No terminal session loaded';
+
+    // ⌨ extra-keys toggle (plan Task 12): stateless reporter, same division
+    // as the rail toggle — the modal flips extra-keys visibility + persists.
+    const keysBtn = makeBarButton('zellij-terminal-bar-keys', '⌨',
+        keysVisible ? 'Hide terminal quick keys' : 'Show terminal quick keys');
+    keysBtn.setAttribute('aria-pressed', String(keysVisible));
+    keysBtn.addEventListener('click', () => {
+        keysVisible = !keysVisible;
+        keysBtn.title = keysVisible ? 'Hide terminal quick keys' : 'Show terminal quick keys';
+        keysBtn.setAttribute('aria-label', keysBtn.title);
+        keysBtn.setAttribute('aria-pressed', String(keysVisible));
+        fireCb(currentOpts.onToggleKeys, { visible: keysVisible }, 'onToggleKeys');
+    });
 
     const attachBtn = makeBarButton('zellij-terminal-bar-attach', '📎', 'Launch a terminal first');
     attachBtn.disabled = true;
@@ -413,6 +434,7 @@ export function mountTerminalBar(containerEl, options = {}) {
 
     bar.appendChild(railBtn);
     bar.appendChild(label);
+    bar.appendChild(keysBtn);
     bar.appendChild(attachBtn);
     bar.appendChild(maxBtn);
     bar.appendChild(input);
@@ -473,6 +495,7 @@ export function unmountTerminalBar() {
     currentSessionName = null;
     maximized = false;
     railCollapsed = false;
+    keysVisible = false;
     // Bump serial so in-flight XHR callbacks drop their UI work on
     // resolution (mountSerial mismatch = orphan).
     mountSerial += 1;

@@ -54,6 +54,10 @@ import {
     setActiveSession as setTerminalBarSession,
     attachFiles,
 } from './cli-agents-terminal-bar.js';
+import {
+    mountExtraKeys, unmountExtraKeys, setExtraKeysVisible,
+    setActiveSession as setExtraKeysSession,
+} from './cli-agents-extra-keys.js';
 
 // Rail-collapse persistence — survives the modal's unmount/remount cycle
 // (Task 9). The MODAL re-applies the stored state during enterZellijMode
@@ -66,6 +70,25 @@ function readRailCollapsed() {
 
 function writeRailCollapsed(collapsed) {
     try { localStorage.setItem(RAIL_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch { /* private mode */ }
+}
+
+// Extra-keys visibility persistence (plan Task 12) — same modal-owns-state
+// division as rail collapse. Default: visible on touch-primary devices
+// (pointer: coarse — the bar exists for browsers with a soft keyboard),
+// hidden on desktop; a stored '1'/'0' overrides the default either way.
+const KEYS_VISIBLE_KEY = 'cliAgentsKeysVisible';
+
+function readKeysVisible() {
+    try {
+        const stored = localStorage.getItem(KEYS_VISIBLE_KEY);
+        if (stored === '1') return true;
+        if (stored === '0') return false;
+    } catch { /* private mode */ }
+    try { return window.matchMedia('(pointer: coarse)').matches; } catch { return false; }
+}
+
+function writeKeysVisible(visible) {
+    try { localStorage.setItem(KEYS_VISIBLE_KEY, visible ? '1' : '0'); } catch { /* private mode */ }
 }
 
 function getCliAgentsCard() {
@@ -635,6 +658,7 @@ function enterZellijMode() {
     unmountSwitcher();
     unmountIframe();
     unmountTerminalBar();
+    unmountExtraKeys();
     teardownZellijDropZone();
     if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
     zellijShellEl = null;
@@ -690,8 +714,13 @@ function enterZellijMode() {
     toolbarHost.className = 'cli-agents-zellij-toolbar-host';
     const iframeHost = document.createElement('div');
     iframeHost.className = 'cli-agents-zellij-iframe-host';
+    // Extra-keys host (Task 12): BELOW the iframe host at the bottom of the
+    // terminal column — thumb-reach position, Android ExtraKeysBar parity.
+    const extraKeysHost = document.createElement('div');
+    extraKeysHost.className = 'cli-agents-zellij-extra-keys-host';
     terminalCol.appendChild(toolbarHost);
     terminalCol.appendChild(iframeHost);
+    terminalCol.appendChild(extraKeysHost);
     mainRow.appendChild(switcherHost);
     mainRow.appendChild(terminalCol);
     zellijShellEl.appendChild(launcherHost);
@@ -716,12 +745,18 @@ function enterZellijMode() {
             markSessionActive(sessionName);
             setLauncherActiveSession(sessionName);
             setTerminalBarSession(sessionName);
+            setExtraKeysSession(sessionName);
         },
     });
+
+    // Extra-keys visibility: modal-owned, persisted, applied to the module
+    // below and toggled from the toolbar's ⌨ button.
+    const keysVisible = readKeysVisible();
 
     mountTerminalBar(toolbarHost, {
         operator: op,
         railCollapsed,
+        keysVisible,
         // Re-read at upload time (drift safety) — the iframe module tracks
         // in-terminal session switches, so this is always the LIVE session.
         getSessionName: getCurrentSessionName,
@@ -732,6 +767,10 @@ function enterZellijMode() {
         onToggleMaximize: ({ maximized }) => {
             getCliAgentsCard()?.classList.toggle('cli-agents-maximized', maximized);
         },
+        onToggleKeys: ({ visible }) => {
+            setExtraKeysVisible(visible);
+            writeKeysVisible(visible);
+        },
         onError: ({ stage, status, message }) => {
             // The toolbar module already toasts every outcome itself (its
             // toasts live INSIDE the modal; the global toast renders under
@@ -740,6 +779,19 @@ function enterZellijMode() {
         },
     });
 
+    mountExtraKeys(extraKeysHost, {
+        operator: op,
+        // Re-read at send time (drift safety) — the iframe module tracks
+        // in-terminal session switches, so this is always the LIVE session.
+        getSessionName: getCurrentSessionName,
+        onError: ({ stage, status, message }) => {
+            // The extra-keys module owns its own (debounced) user-facing
+            // feedback — this hook is log-only, same as the terminal bar's.
+            console.error(`[CLI-AGENTS-MODAL] extra keys ${stage} failed (${status}): ${message || ''}`);
+        },
+    });
+    setExtraKeysVisible(keysVisible);
+
     mountLauncher(launcherHost, {
         operator: op,
         onLaunched: ({ sessionName, sessionUrl }) => {
@@ -747,6 +799,7 @@ function enterZellijMode() {
             markSessionActive(sessionName);
             setLauncherActiveSession(sessionName);
             setTerminalBarSession(sessionName);
+            setExtraKeysSession(sessionName);
             refreshSwitcher();
         },
         onError: ({ provider, stage, status, message }) => {
@@ -765,6 +818,7 @@ function enterZellijMode() {
             markSessionActive(name);
             setLauncherActiveSession(name);
             setTerminalBarSession(name);
+            setExtraKeysSession(name);
         },
         onDelete: ({ name }) => {
             if (getCurrentSessionName() === name) {
@@ -772,6 +826,7 @@ function enterZellijMode() {
                 markSessionActive(null);
                 setLauncherActiveSession(null);
                 setTerminalBarSession(null);
+                setExtraKeysSession(null);
             }
         },
         onError: ({ stage, status, message }) => {
@@ -792,6 +847,7 @@ function enterTmuxMode() {
     if (setup) setup.style.display = '';
     if (term) term.style.display = '';
     teardownZellijDropZone(); // drop attach is zellij-only
+    unmountExtraKeys();       // extra keys are zellij-only (safe pre-mount)
     if (zellijShellEl?.parentNode) {
         zellijShellEl.parentNode.removeChild(zellijShellEl);
         zellijShellEl = null;
@@ -836,6 +892,7 @@ function closeModal() {
         unmountSwitcher();
         unmountIframe();
         unmountTerminalBar();
+        unmountExtraKeys();
         teardownZellijDropZone();
         if (zellijShellEl?.parentNode) {
             zellijShellEl.parentNode.removeChild(zellijShellEl);

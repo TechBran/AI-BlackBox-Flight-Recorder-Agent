@@ -821,3 +821,134 @@
     text-align: center;
     padding: 0 24px;
 }
+
+/* ════════════════════════════════════════════════════════════════════
+ * Mobile extra-keys bar (plan Task 12 — Android ExtraKeysBar parity)
+ * Sits BELOW the iframe host at the bottom of the terminal column.
+ * [Esc | divider | scrollable strip] — Esc pinned outside the strip so
+ * scroll-gesture arbitration can never eat its taps (the Android
+ * "dead Esc" lesson).
+ * ════════════════════════════════════════════════════════════════════ */
+
+.cli-agents-zellij-extra-keys-host {
+    flex: 0 0 auto;
+}
+
+.zellij-extra-keys {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding-top: 6px;
+    border-top: 1px solid var(--neutral-300, #333);
+}
+
+/* display:flex above beats the UA's [hidden]{display:none} — restore it
+   (same trap as .zellij-iframe-loading[hidden]). */
+.zellij-extra-keys[hidden] {
+    display: none;
+}
+
+.zellij-extra-keys-btn {
+    flex: 0 0 auto;
+    min-width: 40px;   /* ≥36px touch target + breathing room */
+    height: 36px;
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--neutral-200, #222);
+    color: var(--neutral-1000, #e0e0e0);
+    border: 1px solid var(--neutral-300, #333);
+    border-radius: var(--radius-md, 8px);
+    font-family: var(--font-mono, 'SF Mono', Menlo, monospace);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation; /* kill the double-tap-zoom delay on key taps */
+    transition: border-color var(--transition-fast, 0.15s ease),
+                background var(--transition-fast, 0.15s ease);
+}
+
+.zellij-extra-keys-btn:hover:not(:disabled) {
+    background: var(--neutral-300, #2a2a2a);
+    border-color: #4a9eff;
+}
+
+.zellij-extra-keys-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* Esc — pinned left, separated from the strip by the divider. */
+.zellij-extra-keys-esc {
+    flex: 0 0 auto;
+}
+
+.zellij-extra-keys-divider {
+    flex: 0 0 auto;
+    width: 1px;
+    align-self: stretch;
+    background: var(--neutral-300, #333);
+}
+
+/* Scrollable key strip — momentum scroll, scrollbar hidden (consistent
+   with the modal's chrome; the strip's clipped edge signals scrollability
+   and the keys themselves make lousy scrollbar real estate). */
+.zellij-extra-keys-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch; /* iOS momentum scroll */
+    scrollbar-width: none;             /* Firefox */
+}
+
+.zellij-extra-keys-strip::-webkit-scrollbar {
+    display: none;                     /* Chrome/Safari */
+}
+
+/* Sticky Shift states (off is the plain button look):
+   armed  = one-shot → accent outline;
+   locked = until tapped again → filled accent + bold. */
+.zellij-extra-keys-shift[data-shift-state="armed"] {
+    border-color: #4a9eff;
+    box-shadow: inset 0 0 0 1px #4a9eff;
+    color: #4a9eff;
+}
+
+.zellij-extra-keys-shift[data-shift-state="locked"] {
+    background: #4a9eff;
+    border-color: #4a9eff;
+    color: #0a0a0a;
+    font-weight: 700;
+}
+
+/* Debounced send-failure toast — anchors to the iframe host's
+   position:relative, bottom-center (clear of the top-anchored attach
+   toasts + chip). */
+.zellij-extra-keys-error-toast {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+    max-width: 90%;
+    padding: 6px 14px;
+    background: rgba(20, 20, 20, 0.94);
+    border: 1px solid var(--neutral-300, #333);
+    border-left: 3px solid #ff6b6b;
+    border-radius: var(--radius-md, 8px);
+    color: var(--neutral-900, #ccc);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none; /* never steal taps from the terminal */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    animation: cli-agents-fade-in 200ms ease;
+}
