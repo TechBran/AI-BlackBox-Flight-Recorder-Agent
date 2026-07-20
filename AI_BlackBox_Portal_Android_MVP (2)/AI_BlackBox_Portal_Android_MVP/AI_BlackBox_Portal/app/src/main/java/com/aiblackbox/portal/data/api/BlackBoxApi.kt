@@ -3,8 +3,9 @@ package com.aiblackbox.portal.data.api
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -98,8 +99,10 @@ class BlackBoxApi(private val baseUrl: String) {
      * backend raises HTTPException(detail="…") for validation errors (e.g.
      * "delivery_target (E.164) is required for sms delivery") — surfacing that
      * string lets the cron create/edit dialog show a real reason instead of a
-     * generic "HTTP 400: Bad Request". Best-effort: any read/parse failure or a
-     * missing `detail` falls back to "HTTP <code>: <reason>".
+     * generic "HTTP 400: Bad Request". Non-string `detail` (e.g. FastAPI 422
+     * validation-error arrays) is stringified as raw JSON rather than dropped.
+     * Best-effort: any read/parse failure or a missing `detail` falls back to
+     * "HTTP <code>: <reason>".
      *
      * NOTE: consumes the response body, so call this only on the error path.
      *
@@ -112,7 +115,13 @@ class BlackBoxApi(private val baseUrl: String) {
         val detail = try {
             val raw = response.body?.string()
             if (raw.isNullOrBlank()) null
-            else json.parseToJsonElement(raw).jsonObject["detail"]?.jsonPrimitive?.content
+            else when (val d = json.parseToJsonElement(raw).jsonObject["detail"]) {
+                null, is JsonNull -> null
+                is JsonPrimitive -> d.content
+                // FastAPI 422 validation errors ship `detail` as an ARRAY of
+                // {loc, msg, type} objects — stringify so the reason survives.
+                else -> d.toString()
+            }
         } catch (_: Exception) {
             null
         }
@@ -155,20 +164,33 @@ class BlackBoxApi(private val baseUrl: String) {
         }
     }
 
-    suspend fun uploadFile(path: String, file: File, fieldName: String = "file"): String {
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                fieldName,
-                file.name,
-                file.asRequestBody("application/octet-stream".toMediaType())
-            )
-            .build()
+    /**
+     * Multipart file upload. [fields] entries become plain-text form parts
+     * (e.g. `session_name` for `/cli-agent/zellij/attach-file`), added BEFORE
+     * the file part so stream-parsing servers see the metadata first; the
+     * default (empty) leaves the single-file wire format unchanged for
+     * existing call sites. Non-2xx responses throw [ApiHttpException] via
+     * [errorFor], surfacing FastAPI's JSON `detail` (stringified when
+     * non-string) instead of a bare "HTTP <code>" status line.
+     */
+    suspend fun uploadFile(
+        path: String,
+        file: File,
+        fieldName: String = "file",
+        fields: Map<String, String> = emptyMap(),
+    ): String {
+        val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+        fields.forEach { (key, value) -> builder.addFormDataPart(key, value) }
+        builder.addFormDataPart(
+            fieldName,
+            file.name,
+            file.asRequestBody("application/octet-stream".toMediaType())
+        )
         val request = buildRequest(path)
-            .post(body)
+            .post(builder.build())
             .build()
         return client.newCall(request).await().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: ${response.message}")
+            if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }
