@@ -31,7 +31,7 @@
 | D2 | Routing precedence | **On-box is the wizard-time default recommendation** — installing the stack seeds persisted per-capability enable/precedence flags so STT/TTS/embeddings/rerank resolve on-box wholesale by default; an **explicit credentialed user pick (e.g. Brandon's ElevenLabs) is never overridden at runtime**. Custom API servers are for LLMs; cloud is the customer's explicit fallback choice |
 | D3 | Qwen3-TTS variants | **All three 1.7B variants** (Base + CustomVoice + VoiceDesign), MS02 benchmark decides streaming size (G3) |
 | D4 | GPU orchestrator | **llama-swap front door** — supervises all model servers, native drain/swap/TTL semantics |
-| D5 | Embedding model | **Qwen3-Embedding-8B @ Q8_0** default on GPU boxes (4096-dim), eval-gated vs 4B-FP16 on MS02 (G1) |
+| D5 | Embedding model | **Qwen3-Embedding-8B @ Q8_0** default on GPU boxes (4096-dim), eval-gated on MS02 (G1). *Amended 2026-07-20 (Brandon-ratified): G1 gates against the **gemini-embedding-2 incumbent** — the no-regression bar — not a 4B arm (unbuildable in-plan; adding 4B is the remediation step only if 8B fails the bar)* |
 | D6 | CU display | **Own virtual screen per session** (Xvfb at model-native resolution); live view in Portal + Android; agent opens apps in its own display |
 | D7 | GPU residency policy | **Two co-resident groups** — `audio` (whisper + Qwen TTS) and `retrieval` (embeddings + reranker); groups are mutually exclusive; 10-min idle TTL |
 | D8 | MS02 Step-0 reset scope *(answers Q11)* | **Snapshots only** — wipe `Volume/`, `Fossils/`, `Manifest/` index + embedding stores. Everything else (operators, `config.ini`, `.env`, `devices.json`, custom servers, onboarding state) stays |
@@ -348,7 +348,7 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 
 | Gate | Question | Pass criterion |
 |---|---|---|
-| **G1** | 8B-Q8_0 vs 4B-FP16 vs current gemini-embedding-2 on the chunk-gate harness; **AND measure real Q8_0 VRAM** (steady-state + peak during a heavy re-embed batch, incl. the ub=8192 non-causal compute buffer) and the reranker separately on the RTX 2000 Ada | 8B-Q8 ≥ 4B and within agreed delta of gemini before cutover; thresholds recalibrated; measured Q8_0 footprint fits the §4 budget with headroom |
+| **G1** | 8B-Q8_0 vs the current gemini-embedding-2 incumbent on the chunk-gate harness (4B arm dropped — Brandon-ratified 2026-07-20, see D5); **AND measure real Q8_0 VRAM** (steady-state + peak during a heavy re-embed batch, incl. the ub=8192 non-causal compute buffer) and the reranker separately on the RTX 2000 Ada | 8B-Q8 within agreed delta of gemini before cutover; thresholds recalibrated; measured Q8_0 footprint fits the §4 budget with headroom |
 | **G2** | Reranker GGUF validity + latency | Scores match HF reference on golden pairs (no cls.output.weight breakage); 40-passage rerank inside ceiling |
 | **G3** | Qwen3-TTS 1.7B RTF + first-packet latency, streaming, on the 2000 Ada | RTF < ~0.9 → 1.7B streams; else 0.6B streaming / 1.7B batch split |
 | **G4** | On-box whisper streaming parity vs today's gemma-box path | Latency/quality parity in the Portal + Android mic flows |
