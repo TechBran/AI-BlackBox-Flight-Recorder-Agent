@@ -1,7 +1,8 @@
 /**
  * cli-agents-extra-keys.js
- * Mobile extra-keys bar below the Zellij terminal iframe — key-for-key
- * parity with Android's ExtraKeysBar (ui/cli_agent/ExtraKeysBar.kt).
+ * Mobile extra-keys bar below the Zellij terminal iframe — parity with
+ * Android's ExtraKeysBar (ui/cli_agent/ExtraKeysBar.kt) for the plan's
+ * key set (Ctrl/Alt/mic intentionally omitted on web).
  *
  * Per docs/plans/2026-07-20 terminal-file-attach plan Task 12.
  *
@@ -196,7 +197,11 @@ function sendBytes(bytes) {
     }).catch((err) => {
         if (serial !== mountSerial) return;
         reportSendFailure(0, err?.message || 'network error');
-    }));
+    })).catch(() => {
+        // Defensive tail: the handlers above are written to never throw,
+        // but if one ever does the rejection must not poison sendChain —
+        // every subsequent tap would silently skip its send.
+    });
 }
 
 /** Resolve + send a key's bytes, applying (and consuming) the Shift arm. */
@@ -311,6 +316,10 @@ export function mountExtraKeys(containerEl, options = {}) {
     bar.className = 'zellij-extra-keys';
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', 'Terminal quick keys');
+    // The bar mounts with no session (currentSessionName null, every key
+    // disabled) — start with the disabled class so the dimmed styling
+    // matches from the first paint; setActiveSession toggles it from here.
+    bar.classList.add('zellij-extra-keys-disabled');
 
     // Esc — pinned OUTSIDE the scroll strip (see module header).
     const escBtn = makeKeyBtn('Esc', 'Escape');

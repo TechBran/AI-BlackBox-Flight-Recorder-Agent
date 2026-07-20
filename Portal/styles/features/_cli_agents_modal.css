@@ -774,6 +774,47 @@
     min-height: 0;
 }
 
+/* ── Soft-keyboard pinning (Task 13) ────────────────────────
+   cli-agents-modal.js adds .kb-open + an INLINE height (= the visual
+   viewport height) to the card while the soft keyboard overlaps by >80px.
+   Why the host resizes: on Android Chrome the keyboard shrinks only the
+   VISUAL viewport (Portal's meta has no interactive-widget=resizes-content),
+   so the layout viewport — and this card — never resizes on its own; and
+   the IFRAME's inner visualViewport tracks the iframe ELEMENT, not the
+   phone viewport, so only the host page can shrink the iframe's box. Once
+   it does, zellij-web's own resize listener chain-refits the terminal and
+   pushes new dimensions to the server (live-verified 2026-07-20).
+   Same specificity (0,2,0) as the maximized rules above — kept AFTER them
+   so kb-open wins shared properties while both classes are set; the height
+   itself is inline (style.height), which beats maximized's 100dvh
+   regardless. Top-anchored so toolbar + iframe + extra-keys stack fits
+   above the keyboard. */
+
+.cli-agents-card.kb-open {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    width: auto;      /* left/right anchors span the viewport (beats the :has() width) */
+    max-width: none;
+    margin: 0;
+    max-height: none; /* lift the base .modal-card 100dvh-40px cap */
+    /* height comes from the inline style = visualViewport.height */
+}
+
+.cli-agents-card.kb-open .cli-agents-body {
+    max-height: none;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.cli-agents-card.kb-open .cli-agents-zellij-shell {
+    height: auto;
+    flex: 1 1 auto;
+    max-height: none;
+    min-height: 0;
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * Drag-and-drop attach overlay (Task 10)
  * Full-card drop target shown while a file drag hovers the modal card.
@@ -882,6 +923,19 @@
     cursor: default;
 }
 
+/* Disabled bar (no session loaded — setActiveSession(null), and the
+   initial mount state). Dim the WHOLE bar — divider and top rule
+   included — so it reads inert as a unit, not just per-key. The
+   per-button :disabled dim is reset underneath to avoid double-dimming
+   (keys are only ever disabled as a full set). */
+.zellij-extra-keys.zellij-extra-keys-disabled {
+    opacity: 0.5;
+}
+
+.zellij-extra-keys.zellij-extra-keys-disabled .zellij-extra-keys-btn:disabled {
+    opacity: 1;
+}
+
 /* Esc — pinned left, separated from the strip by the divider. */
 .zellij-extra-keys-esc {
     flex: 0 0 auto;
@@ -951,4 +1005,80 @@
     pointer-events: none; /* never steal taps from the terminal */
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     animation: cli-agents-fade-in 200ms ease;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * Phone-width layout (Task 13) — ≤600px
+ * Full-bleed card (the app-preview treatment from _buttons.css) and the
+ * switcher rail becomes an overlay DRAWER over the terminal column
+ * instead of squeezing its 220px basis into a ~400px row. Default state
+ * at this width is collapsed (modal JS; a stored preference overrides).
+ * The toolbar's ☰ toggle drives .rail-collapsed unchanged — the (0,3,0)
+ * collapse rule above still out-specifies the (0,1,0) drawer width here,
+ * so collapsed = width 0 in both layouts.
+ * ════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 600px) {
+    /* Full-bleed only in zellij mode (same :has() scoping as the desktop
+       widening) — the tmux setup pane keeps the standard modal chrome. */
+    #cliAgentsModal:has(.cli-agents-zellij-shell) {
+        padding: 0; /* .modal's gutter would force the 100vw card to scroll */
+    }
+
+    .cli-agents-card:has(.cli-agents-zellij-shell) {
+        width: 100vw;
+        max-width: 100vw;
+        height: 100dvh;
+        max-height: 100dvh; /* ≥ any kb-open inline height — never caps it */
+        border-radius: 0;
+        margin: 0;
+    }
+
+    .cli-agents-card:has(.cli-agents-zellij-shell) .cli-agents-body {
+        max-height: none;
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+
+    .cli-agents-card:has(.cli-agents-zellij-shell) .cli-agents-zellij-shell {
+        height: auto;
+        flex: 1 1 auto;
+        max-height: none;
+        min-height: 0;
+        /* Toolbar + extra-keys rows stay full-width; nothing may scroll
+           the shell sideways (the key strip scrolls internally). */
+        overflow-x: hidden;
+    }
+
+    /* Rail = overlay drawer anchored to the shell: left edge, full shell
+       height, OVER the terminal column — opening the session list never
+       crushes the terminal's columns (absolute = out of flow, so the
+       terminal column keeps its width and zellij never refits). */
+    .cli-agents-zellij-shell {
+        position: relative;
+    }
+
+    .cli-agents-zellij-switcher-host {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: min(75vw, 280px);
+        /* Over the iframe host and its loading/error overlays (z auto);
+           under the upload chip (5) and toast stack (6). */
+        z-index: 4;
+        /* Opaque drawer surface — the inner rail's rounded corners would
+           otherwise show terminal pixels through the gaps. */
+        background: var(--neutral-100, #141414);
+        box-shadow: 8px 0 24px rgba(0, 0, 0, 0.55);
+        /* flex-basis is out of play for an absolute box — animate width
+           instead so ☰ keeps its slide feel. */
+        transition: width var(--transition-base, 0.2s ease);
+    }
+
+    /* Collapsed drawer: the (0,3,0) rule above already zeroes width, but
+       a 0×H box still paints its box-shadow — kill it while closed. */
+    .cli-agents-zellij-shell.rail-collapsed .cli-agents-zellij-switcher-host {
+        box-shadow: none;
+    }
 }

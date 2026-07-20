@@ -68,6 +68,12 @@ function readRailCollapsed() {
     try { return localStorage.getItem(RAIL_COLLAPSED_KEY) === '1'; } catch { return false; }
 }
 
+// Distinguishes "user never toggled the rail" from "user chose expanded" —
+// the phone-width default in enterZellijMode only applies to the former.
+function hasStoredRailPref() {
+    try { return localStorage.getItem(RAIL_COLLAPSED_KEY) !== null; } catch { return false; }
+}
+
 function writeRailCollapsed(collapsed) {
     try { localStorage.setItem(RAIL_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch { /* private mode */ }
 }
@@ -640,6 +646,78 @@ function teardownZellijDropZone() {
     zellijDropDepth = 0;
 }
 
+// ── Soft-keyboard viewport pinning (plan Task 13) ────────────────────────
+// On Android Chrome the soft keyboard shrinks only the VISUAL viewport
+// (Portal's meta has no interactive-widget=resizes-content), so the layout
+// viewport — and this modal card — never resizes on its own: the terminal's
+// bottom rows and the extra-keys bar end up hidden behind the keyboard.
+// The fix must live on the HOST page: the iframe's inner visualViewport
+// tracks the iframe ELEMENT, not the phone viewport, so only the host can
+// shrink the iframe's box. Once it does, zellij-web's own resize listener
+// chain-refits the terminal and pushes new dimensions to the server — no
+// extra plumbing (live-verified 2026-07-20).
+//
+// Pattern follows cu-interact.js _attachKeyboardOffset (attach/detach
+// symmetry with the surrounding lifecycle); the application differs — we
+// RESIZE the card to the visual viewport instead of translating a bar.
+// While the keyboard overlaps by more than the threshold, the card gets
+// .kb-open (position:fixed top-anchored, see _cli_agents_modal.css) plus
+// an INLINE height = visualViewport.height. The inline height is also what
+// makes this compose with .cli-agents-maximized: maximized's 100dvh comes
+// from CSS, and the inline style always wins.
+
+const KB_OVERLAP_THRESHOLD_PX = 80; // below this = browser-chrome jitter, not a keyboard
+const KB_DEBOUNCE_MS = 100;         // collapse keyboard-animation frames — each apply
+                                    // resizes the iframe and triggers a zellij refit,
+                                    // so intermediate states are worth suppressing
+
+let kbViewportListener = null;      // attached listener (null when detached)
+let kbDebounceTimer = null;
+
+function applyKeyboardViewport() {
+    const card = getCliAgentsCard();
+    const vv = window.visualViewport;
+    if (!card || !vv) return;
+    const kb = window.innerHeight - vv.height - vv.offsetTop;
+    if (kb > KB_OVERLAP_THRESHOLD_PX) {
+        card.classList.add('kb-open');
+        card.style.height = `${vv.height}px`;
+    } else {
+        card.classList.remove('kb-open');
+        card.style.height = '';
+    }
+}
+
+function attachKeyboardViewport() {
+    if (!window.visualViewport || kbViewportListener) return;
+    kbViewportListener = () => {
+        if (kbDebounceTimer) clearTimeout(kbDebounceTimer);
+        kbDebounceTimer = setTimeout(() => {
+            kbDebounceTimer = null;
+            applyKeyboardViewport();
+        }, KB_DEBOUNCE_MS);
+    };
+    // scroll too: offsetTop changes when the visual viewport pans while
+    // zoomed/keyboard-open — same overlap math, same handler.
+    window.visualViewport.addEventListener('resize', kbViewportListener);
+    window.visualViewport.addEventListener('scroll', kbViewportListener);
+    applyKeyboardViewport(); // settle initial state (undebounced; no thrash at attach)
+}
+
+function detachKeyboardViewport() {
+    if (kbDebounceTimer) { clearTimeout(kbDebounceTimer); kbDebounceTimer = null; }
+    if (kbViewportListener && window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', kbViewportListener);
+        window.visualViewport.removeEventListener('scroll', kbViewportListener);
+    }
+    kbViewportListener = null;
+    const card = getCliAgentsCard();
+    if (card) {
+        card.classList.remove('kb-open');
+        card.style.height = '';
+    }
+}
+
 // Build the three-region Zellij shell inside .cli-agents-body and compose
 // the launcher + switcher + iframe modules with cross-wired callbacks.
 function enterZellijMode() {
@@ -660,6 +738,7 @@ function enterZellijMode() {
     unmountTerminalBar();
     unmountExtraKeys();
     teardownZellijDropZone();
+    detachKeyboardViewport();
     if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
     zellijShellEl = null;
     // Maximize never survives a close/reopen — fresh open is always windowed.
@@ -729,7 +808,17 @@ function enterZellijMode() {
 
     // Re-apply persisted rail-collapse state before mounting so the rail
     // never flashes open on a remount when the user had collapsed it.
-    const railCollapsed = readRailCollapsed();
+    // Phone-width default (Task 13): with NO stored preference, ≤600px
+    // starts collapsed — at that width the rail is an overlay drawer
+    // (see _cli_agents_modal.css) and auto-opening it on arrival would
+    // cover the terminal. A user toggle (persisted by onToggleRail below)
+    // overrides this default either way; we never write the default.
+    let railCollapsed = readRailCollapsed();
+    if (!hasStoredRailPref()) {
+        try {
+            railCollapsed = window.matchMedia('(max-width: 600px)').matches;
+        } catch { /* matchMedia unavailable — keep the expanded default */ }
+    }
     zellijShellEl.classList.toggle('rail-collapsed', railCollapsed);
 
     mountIframe(iframeHost, {
@@ -837,6 +926,12 @@ function enterZellijMode() {
     // Drag-and-drop attach — created with the shell, torn down with it
     // (closeModal + the idempotent preamble above).
     setupZellijDropZone(getCliAgentsCard());
+
+    // Soft-keyboard pinning — attached with the shell, detached in
+    // closeModal / enterTmuxMode / the idempotent preamble above (full
+    // lifecycle symmetry with the drop zone). Skipped on the operator-
+    // error path above: no terminal, no keyboard to dodge.
+    attachKeyboardViewport();
 }
 
 // Restore the tmux-mode DOM in case a prior open was Zellij.
@@ -846,8 +941,9 @@ function enterTmuxMode() {
     const term = document.getElementById('cliAgentsTerminalPane');
     if (setup) setup.style.display = '';
     if (term) term.style.display = '';
-    teardownZellijDropZone(); // drop attach is zellij-only
-    unmountExtraKeys();       // extra keys are zellij-only (safe pre-mount)
+    teardownZellijDropZone();  // drop attach is zellij-only
+    unmountExtraKeys();        // extra keys are zellij-only (safe pre-mount)
+    detachKeyboardViewport();  // keyboard pinning is zellij-only (safe pre-attach)
     if (zellijShellEl?.parentNode) {
         zellijShellEl.parentNode.removeChild(zellijShellEl);
         zellijShellEl = null;
@@ -894,6 +990,7 @@ function closeModal() {
         unmountTerminalBar();
         unmountExtraKeys();
         teardownZellijDropZone();
+        detachKeyboardViewport(); // also strips .kb-open + the inline height
         if (zellijShellEl?.parentNode) {
             zellijShellEl.parentNode.removeChild(zellijShellEl);
         }
