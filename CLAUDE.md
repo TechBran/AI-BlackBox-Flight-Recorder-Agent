@@ -196,7 +196,7 @@ You can read, analyze, or manipulate these files using your tools.
 - **PDFs/Documents**: Use `Read` tool
 - **Code files**: Use `Read` tool
 
-**Cleanup**: Session folders older than 3 days are automatically cleaned up.
+**Cleanup**: Session folders are swept ONLY by the manual `POST /upload/cleanup` endpoint (3-day cutoff) — nothing schedules it, so folders persist until someone calls it. (Terminal-attach uploads under `Portal/uploads/terminal/{session}` are different: they're deleted automatically when their zellij session is deleted or reaped.)
 
 ### Task Management
 
