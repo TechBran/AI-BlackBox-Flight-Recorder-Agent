@@ -971,3 +971,129 @@ def test_attach_text_claude_sentence_no_newline():
     out = _build_attach_text("claude", "/a/b.png")
     assert out == 'Read this file: "/a/b.png" '
     assert "\n" not in out
+
+
+# --- POST /zellij/attach-file --------------------------------------------
+
+
+def _attach_setup(monkeypatch, tmp_path):
+    """Common stubs for attach-file tests: zellij backend selected + the
+    terminal uploads dir redirected to tmp_path. Returns the routes module
+    so tests can reach its globals."""
+    monkeypatch.setenv("CLI_AGENT_BACKEND", "zellij")
+    from Orchestrator.routes import cli_agent_routes
+    monkeypatch.setattr(cli_agent_routes, "_TERMINAL_UPLOADS_DIR", tmp_path)
+    return cli_agent_routes
+
+
+def test_attach_file_stores_and_injects(monkeypatch, tmp_path):
+    """Happy path: file lands under {uploads}/{session_name}/, the
+    provider-aware text (claude -> sentence) is pasted into the pane, and
+    the response carries the absolute path + percent-encoded url."""
+    _attach_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client
+
+    pasted = {}
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "paste_into_pane",
+                      side_effect=lambda s, t: pasted.update(session=s, text=t)):
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("my shot.png", b"\x89PNG fake", "image/png")},
+            data={"session_name": "Brandon__claude__root"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["injected"] is True
+    assert body["filename"] == "my shot.png"
+    assert body["provider"] == "claude"
+    saved = tmp_path / "Brandon__claude__root" / "my shot.png"
+    assert saved.read_bytes() == b"\x89PNG fake"
+    assert body["path"] == str(saved.resolve())
+    # URL path segments are percent-encoded (space in the filename).
+    assert body["url"] == "/ui/uploads/terminal/Brandon__claude__root/my%20shot.png"
+    assert pasted["session"] == "Brandon__claude__root"
+    assert pasted["text"] == f'Read this file: "{saved.resolve()}" '
+
+
+def test_attach_file_cross_operator_403(monkeypatch, tmp_path):
+    """Operator-prefix gate (audit I10, same boundary as /zellij/inject):
+    Anna must not attach into Brandon's session — and NOTHING may be
+    written to disk on the rejected path."""
+    _attach_setup(monkeypatch, tmp_path)
+    c = _client()
+    r = c.post(
+        "/cli-agent/zellij/attach-file?op=Anna",
+        files={"file": ("x.png", b"fake", "image/png")},
+        data={"session_name": "Brandon__claude__root"},
+    )
+    assert r.status_code == 403, r.text
+    assert "another operator" in r.json()["detail"].lower()
+    assert not any(tmp_path.iterdir())
+
+
+def test_attach_file_bad_session_name_400(monkeypatch, tmp_path):
+    """Charset gate: a shell-metachar session name is rejected before any
+    disk write (storage is keyed by the session name)."""
+    _attach_setup(monkeypatch, tmp_path)
+    c = _client()
+    r = c.post(
+        "/cli-agent/zellij/attach-file?op=Brandon",
+        files={"file": ("x.png", b"fake", "image/png")},
+        data={"session_name": "Brandon__claude__root; rm -rf /"},
+    )
+    assert r.status_code == 400, r.text
+    assert not any(tmp_path.iterdir())
+
+
+def test_attach_file_upload_survives_inject_failure(monkeypatch, tmp_path):
+    """Paste failing (pane gone, zellij hiccup) must NOT fail the upload:
+    HTTP 200, injected=False, file still on disk — degrade honestly."""
+    _attach_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "paste_into_pane",
+                      side_effect=RuntimeError("pane gone")):
+        c = _client()
+        r = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("notes.txt", b"hello", "text/plain")},
+            data={"session_name": "Brandon__terminal__root"},
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["injected"] is False
+    saved = tmp_path / "Brandon__terminal__root" / "notes.txt"
+    assert saved.read_bytes() == b"hello"
+
+
+def test_attach_file_collision_suffix(monkeypatch, tmp_path):
+    """Same filename twice: the second upload is saved as
+    {stem}_{ts}{ext} — both files survive, nothing is overwritten."""
+    _attach_setup(monkeypatch, tmp_path)
+    from Orchestrator.cli_agent import zellij_client
+
+    with patch.object(zellij_client, "web_server_healthy", return_value=True), \
+         patch.object(zellij_client, "paste_into_pane", return_value=None):
+        c = _client()
+        r1 = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("shot.png", b"first", "image/png")},
+            data={"session_name": "Brandon__claude__root"},
+        )
+        r2 = c.post(
+            "/cli-agent/zellij/attach-file?op=Brandon",
+            files={"file": ("shot.png", b"second", "image/png")},
+            data={"session_name": "Brandon__claude__root"},
+        )
+
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["filename"] == "shot.png"
+    name2 = r2.json()["filename"]
+    assert re.fullmatch(r"shot_\d+\.png", name2), name2
+    folder = tmp_path / "Brandon__claude__root"
+    assert (folder / "shot.png").read_bytes() == b"first"
+    assert (folder / name2).read_bytes() == b"second"

@@ -9,11 +9,13 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
-from fastapi import APIRouter, Body, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from Orchestrator.cli_agent import get_backend
+from Orchestrator.config import UPLOADS_DIR
 from Orchestrator.cli_agent import zellij_client, zellij_state
 from Orchestrator.cli_agent.operator_config import OperatorConfig
 from Orchestrator.cli_agent.path_validator import PathValidator, WorkspaceViolation
@@ -1200,6 +1202,114 @@ async def zellij_inject(req: ZellijInjectRequest, op: str = Query(...)):
         len(req.text),
     )
     return Response(status_code=204)
+
+
+# ── POST /zellij/attach-file — upload + paste path into a terminal ──────
+_TERMINAL_UPLOADS_DIR = UPLOADS_DIR / "terminal"  # Portal/uploads/terminal/{session_name}/
+
+# Size limits mirror the global /upload endpoint — admin_routes.py holds
+# the canonical values (MAX_UPLOAD_SIZE / UPLOAD_CHUNK_SIZE). Defined
+# locally because admin_routes pulls the whole app object graph
+# (Orchestrator.checkpoint imports the FastAPI app) at import time.
+_MAX_UPLOAD_SIZE = 500 * 1024 * 1024   # 500MB max upload
+_UPLOAD_CHUNK_SIZE = 1024 * 1024       # 1MB chunks for streaming write
+
+
+@router.post("/zellij/attach-file")
+async def zellij_attach_file(
+    file: UploadFile = File(...),
+    session_name: str = Form(...),
+    inject: bool = Form(True),
+    op: str = Query(...),
+):
+    """Upload a file for a terminal session and bracketed-paste its absolute
+    path into the pane — the server-side twin of dragging a file onto a
+    real terminal. One implementation shared by Portal web and Android.
+    The path is pasted WITHOUT a trailing newline: the user reviews and
+    presses Enter themselves (never auto-submit).
+
+    Security boundary mirrors /zellij/inject (audit I10): operator
+    allowlist + '{op}__' prefix gate + session-name charset; storage is
+    keyed by the (validated) session name so there is no client-chosen
+    path component at all.
+    """
+    _check_operator_allowed(op)
+    if not _validate_operator_prefix(session_name, op):
+        logger.warning(
+            "zellij_attach_file: operator-prefix gate VIOLATION — "
+            "operator=%s attempted to attach into session=%s",
+            op,
+            session_name,
+        )
+        raise HTTPException(
+            403,
+            "Cannot attach to a session belonging to another operator",
+        )
+    if not zellij_client.is_valid_session_name(session_name):
+        raise HTTPException(400, f"Invalid session name: {session_name!r}")
+    _require_zellij_backend()
+
+    folder = _TERMINAL_UPLOADS_DIR / session_name
+    folder.mkdir(parents=True, exist_ok=True)
+    original_name = Path(file.filename or "attachment").name or "attachment"
+    save_path = folder / original_name
+    if save_path.exists():
+        # Collision: keep both — suffix a ms timestamp (same uniqueness
+        # idiom as _zellij_fork_name).
+        save_path = folder / (
+            f"{Path(original_name).stem}_{int(time.time() * 1000)}"
+            f"{Path(original_name).suffix}"
+        )
+
+    total = 0
+    with open(save_path, "wb") as f:
+        while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
+            total += len(chunk)
+            if total > _MAX_UPLOAD_SIZE:
+                f.close()
+                save_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    413,
+                    f"File too large (max {_MAX_UPLOAD_SIZE // (1024 * 1024)}MB)",
+                )
+            f.write(chunk)
+
+    abs_path = str(save_path.resolve())
+    provider = _provider_from_session_name(session_name, op)
+    text = _build_attach_text(provider, abs_path)
+
+    injected = False
+    if inject:
+        try:
+            # subprocess is blocking — keep it off the event loop.
+            await asyncio.to_thread(zellij_client.paste_into_pane, session_name, text)
+            injected = True
+        except Exception as exc:  # noqa: BLE001 — upload already succeeded; degrade honestly
+            logger.error(
+                "zellij_attach_file: paste into %s failed: %s",
+                session_name,
+                exc,
+                exc_info=True,
+            )
+
+    logger.info(
+        "zellij_attach_file: operator=%s session=%s file=%s bytes=%d injected=%s",
+        op,
+        session_name,
+        save_path.name,
+        total,
+        injected,
+    )
+    # Percent-encode the url's path segments — session names and filenames
+    # may legitimately contain spaces (charset allows them).
+    return {
+        "url": f"/ui/uploads/terminal/{quote(session_name)}/{quote(save_path.name)}",
+        "path": abs_path,
+        "filename": save_path.name,
+        "session_folder": str(folder.resolve()),
+        "provider": provider,
+        "injected": injected,
+    }
 
 
 @router.post("/zellij/spawn", status_code=204)
