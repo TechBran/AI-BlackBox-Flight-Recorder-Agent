@@ -222,11 +222,16 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 
 - **MS02 is already a full customer-shaped BlackBox install, tier HIGH:** `blackbox.service` active on :9091, repo at `/home/bbx/Desktop/blackbox-poc-main./blackbox-poc-main` — currently `main @ b8167dd` (~12 days behind origin; stray `config.ini.bak-pre-rerank` + modified `ToolVault/embeddings.json` to reconcile before Phase 2).
 - **Live today on MS02:** active embeddings = `qwen3-embedding-8b` served by Ollama (kept warm, llama-server resident ~6,994 MiB) **and** `vllm-reranker.service` running Qwen/Qwen3-Reranker-0.6B on :8091 (~3,284 MiB) → **≈10.5GB VRAM pinned at idle. M11 rerank is LIVE on MS02, not dark.**
+- **MS02's snapshot Volume is a transplant and does not belong there.** The dev box's corpus was copied over purely to stress-test the embeddings layer — Brandon ran a giant-corpus re-embed through the GPU-served 8B and **it worked great** (a strong G1 throughput/feasibility signal). But the operators, settings, and ledger are the *dev box's* identity, not MS02's. **Phase 2 begins with a fresh-start reset (below).** This transplant pain is also the motivation for the parked export/import workstream (§12).
 - **Migration implication:** enabling the new stack on MS02 must first retire the always-resident pair — disable `vllm-reranker.service` and take embeddings duty off Ollama — because the audio group (~7–9.5GB) cannot fit beside the pinned 10.5GB. The grouped llama-swap stack *replaces* both (embeddings/rerank move into the `retrieval` group; keep-warm becomes `ttl: 0` per §6). Phase 2 runs as an **update-in-place through the production update path** (exercises the real customer journey: `install.sh` re-run picks up Step 2f), with a from-scratch fresh-box validation pass after.
 
 **Phase 1 — build on this box (no GPU):** all code paths, CPU-tier behavior, install.sh idempotency, wizard flow, catalog/routing, CU virtual displays (CPU-only feature anyway), unit/integration tests. The fresh-box portable gate applies: no hardcoded hosts/operators; empty-store behavior verified.
 
-**Phase 2 — MS02 Ultra:** update the existing install in place through the production update path (see topology above), walk the wizard's new `local_models` step end-to-end, retire the pinned Ollama-embeddings + vllm-reranker pair, then run the benchmark gates. A from-scratch fresh-box validation pass (separate `BLACKBOX_ROOT` or reinstall) follows once gates pass.
+**Phase 2 — MS02 Ultra:**
+
+*Step 0 — fresh-start reset (destructive; run only when Phase 2 begins, checklist confirmed with Brandon first — Q11):* stop `blackbox.service`; remove the transplanted data layer — `Volume/`, `Manifest/` (snapshot index + all embedding stores/sidecars), `Fossils/`, operator registry/personas/preferences, `.onboarding_state.json` + `.onboarding_complete`, `Portal/uploads/*` — and retire the pinned pair (`systemctl disable --now vllm-reranker.service`, drop Ollama's embeddings duty). **Keep** the system layer: OS, Tailscale, SSH, Ollama binaries, repo, venvs. Proposed-keep-but-confirm: `.env` (API keys), `devices.json`, `credentials/custom_models.json`.
+
+*Then:* update the repo to main, re-run `Scripts/install.sh` (picks up Step 2f), and walk the **entire wizard from scratch** — because of the reset, MS02 now exercises the true fresh-customer path first-class (fresh operators, fresh config, new `local_models` step, one-click downloads, re-embed of an empty-then-growing corpus). Run the benchmark gates. Subsequent update cycles from that state exercise the production update-in-place journey.
 
 ### Benchmark gates (all measured on MS02, results into `eval/results/`)
 
@@ -262,10 +267,23 @@ Config: new `[local_models]` section in config.ini — `enabled`, `base_url` (de
 8. **Q8 — Naming bikeshed:** `localstack` provider key, `qwen` catalog group id, `blackbox-models.service`, `[local_models]` — confirm or rename.
 9. **Q9 — Qwen3-ASR:** evaluate as a whisper alternative/addition later (52 languages, aligner)? Parked, not planned.
 10. **Q10 — MS02 dual role:** ~~after testing, does MS02 stay a customer-shaped reference box?~~ **Answered by recon 2026-07-20:** MS02 *is* already a full customer-shaped BlackBox install (tier HIGH, local embeddings + reranker live) — it is the permanent local-inference reference box; the dev box stays cloud (§10 topology).
+11. **Q11 — MS02 reset scope:** confirm the Step-0 keep/wipe split before running it — in particular whether `.env` (API keys), `devices.json`, and `credentials/custom_models.json` survive the reset or the wizard re-enters everything from zero.
 
 ---
 
-## 12. Key References
+## 12. Parked Adjacent Workstream — BlackBox Export/Import (Portability)
+
+**Not in this implementation's scope — gets its own brainstorm + design doc.** Recorded here because the MS02 situation is the motivating case: the only way to move a BlackBox today is a manual transplant (copy the Volume over), which drags one box's *identity* (operators, settings, ledger) onto another box with no clean separation — hence the Phase-2 reset.
+
+What a first-class **export → bundle → import** would need to cover (sketch, for the future brainstorm):
+
+- **Identity & config:** operators + personas + per-operator preferences; `config.ini` (non-secret); `.env` secrets (explicit opt-in, separately encrypted or re-entered on import); `credentials/custom_models.json`; `devices.json` pairings; voice profiles (`Manifest/voices/`); registered apps.
+- **The ledger:** `Volume/` (append-only, immutable) + `Fossils/` + `Manifest/` snapshot index — export as a sealed archive with an integrity manifest (hashes), honoring the flight-recorder guarantee end-to-end.
+- **Embedding stores:** portable **only when the target runs the same model slug**; otherwise import keeps the ledger and triggers a re-embed through the existing `/embeddings/reembed` machinery (the giant-corpus run on MS02 proves this is practical on GPU boxes).
+- **The flip side — factory reset:** a documented/scripted `blackbox-reset` (the Phase-2 Step-0 checklist, productized) so "start this box fresh" stops being hand-run `rm` commands. Import and reset are the two halves of the same portability story.
+- **Open questions for that brainstorm:** operator consent/ownership when a ledger changes machines; partial export (one operator's slice?); version skew between boxes; whether export doubles as the backup story.
+
+## 13. Key References
 
 - Recon digest (full agent findings + sources): workflow `wf_e282c331-27c`, 2026-07-20 session.
 - Qwen3-TTS: github.com/QwenLM/Qwen3-TTS · HF collection `Qwen/qwen3-tts` · arXiv:2601.15621 · vLLM-Omni speech API docs · community servers: groxaxo/Qwen3-TTS-Openai-Fastapi, cornball-ai/qwen3-tts-api · GGUF: Serveurperso/Qwen3-TTS-GGUF (qwentts.cpp)
