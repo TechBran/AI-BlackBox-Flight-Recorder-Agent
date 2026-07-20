@@ -28,6 +28,8 @@
  * Exports (singleton, mirrors the launcher/switcher module shape):
  *   - mountTerminalBar(containerEl, options)
  *   - setActiveSession(sessionName | null)
+ *   - attachFiles(files) — public entry into the upload pipeline (📎 input
+ *     change AND the modal's drag-and-drop path both route through it)
  *   - unmountTerminalBar()
  */
 
@@ -176,6 +178,34 @@ function showToast(kind, message, { copyText } = {}) {
 function enqueueUploads(files) {
     for (const f of files) uploadQueue.push(f);
     if (!uploadRunning) drainUploads();
+}
+
+/**
+ * Public entry into the upload pipeline — the ONE path every attach source
+ * uses (📎 file-input change, modal drag-and-drop, future callers). Accepts
+ * a FileList or File array. Validates mount + active session up front so
+ * gesture-driven callers (drop) get one loud toast instead of a per-file
+ * spray; uploadOne still re-checks the session per file (it can die
+ * mid-queue). Returns true when files were queued.
+ */
+export function attachFiles(files) {
+    if (!currentBarEl) {
+        console.warn('[ZELLIJ-TERMINAL-BAR] attachFiles called before mountTerminalBar — ignored');
+        return false;
+    }
+    const list = Array.from(files || []).filter((f) => f instanceof File);
+    if (!list.length) return false;
+    const sessionName = typeof currentOpts.getSessionName === 'function'
+        ? (currentOpts.getSessionName() || null)
+        : null;
+    if (!sessionName) {
+        showToast('error', '📎 No active terminal session — launch or select a terminal first');
+        fireCb(currentOpts.onError,
+            { stage: 'attach', status: 0, message: 'no active session' }, 'onError');
+        return false;
+    }
+    enqueueUploads(list);
+    return true;
 }
 
 async function drainUploads() {
@@ -374,7 +404,7 @@ export function mountTerminalBar(containerEl, options = {}) {
     input.addEventListener('change', () => {
         const files = Array.from(input.files || []);
         input.value = ''; // allow re-attaching the same file later
-        if (files.length) enqueueUploads(files);
+        if (files.length) attachFiles(files); // one pipeline with drag-and-drop
     });
 
     bar.appendChild(railBtn);

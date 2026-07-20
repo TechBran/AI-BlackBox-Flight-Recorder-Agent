@@ -52,6 +52,7 @@ import {
 import {
     mountTerminalBar, unmountTerminalBar,
     setActiveSession as setTerminalBarSession,
+    attachFiles,
 } from './cli-agents-terminal-bar.js';
 
 // Rail-collapse persistence — survives the modal's unmount/remount cycle
@@ -78,6 +79,15 @@ const APPS_ROOT_SLUG = '_root';
 // Zellij-mode singleton state (only populated when backend is Zellij).
 let zellijMode = false;
 let zellijShellEl = null;
+// Drag-and-drop attach (plan Task 10) — overlay + card listeners live only
+// while the zellij shell is mounted (setup/teardown symmetric with it).
+let zellijDropOverlayEl = null;
+let zellijDropCardEl = null;
+let zellijDropHandlers = null;
+// dragenter/dragleave fire per element crossed; the classic depth counter is
+// the only reliable "has the drag actually left the card?" signal (naive
+// dragleave flickers, especially around iframes).
+let zellijDropDepth = 0;
 // Monotonic open-counter used to drop stale post-await work. Every openModal
 // increments it; every closeModal also increments it. Any async branch that
 // captured the value at entry must compare to confirm "still my open" before
@@ -493,6 +503,104 @@ async function openModal() {
     }
 }
 
+// ── Drag-and-drop attach (plan Task 10) ──────────────────────────────────
+// The zellij iframe swallows pointer/drag events, so the drop target must
+// live at the host-page layer: card-level listeners show a full-card overlay
+// the moment a file drag enters, and the overlay (pointer-events: auto while
+// visible) then receives dragover/drop even over the iframe region — its
+// events bubble straight back to these card listeners.
+
+function dragHasFiles(e) {
+    const types = e.dataTransfer?.types;
+    if (!types) return false;
+    // DOMStringList in some engines, array in others — normalize.
+    return Array.from(types).includes('Files');
+}
+
+function showZellijDropOverlay() {
+    if (zellijDropOverlayEl) zellijDropOverlayEl.hidden = false;
+}
+
+function hideZellijDropOverlay() {
+    if (zellijDropOverlayEl) zellijDropOverlayEl.hidden = true;
+}
+
+function setupZellijDropZone(card) {
+    if (!card) return;
+    zellijDropDepth = 0;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cli-agents-drop-overlay';
+    overlay.hidden = true;
+    const glyph = document.createElement('div');
+    glyph.className = 'cli-agents-drop-overlay-glyph';
+    glyph.textContent = '📎';
+    glyph.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('div');
+    label.className = 'cli-agents-drop-overlay-label';
+    label.textContent = 'Drop files to attach to this terminal';
+    overlay.appendChild(glyph);
+    overlay.appendChild(label);
+    // .modal-card is position:relative + overflow:hidden — the overlay
+    // anchors to it and inherits the card's radius clipping. Also holds
+    // when maximized (card flips to position:fixed; still an anchor).
+    card.appendChild(overlay);
+    zellijDropOverlayEl = overlay;
+    zellijDropCardEl = card;
+
+    zellijDropHandlers = {
+        dragenter: (e) => {
+            if (!dragHasFiles(e)) return; // text/link drags: never flash the overlay
+            // Always claim file drags over the card — without preventDefault
+            // the drop would never fire and the browser would navigate to
+            // the dropped file. No-session drops still land in attachFiles,
+            // which toasts loudly.
+            e.preventDefault();
+            zellijDropDepth += 1;
+            // Overlay only when a drop can actually succeed (active session).
+            if (getCurrentSessionName()) showZellijDropOverlay();
+        },
+        dragover: (e) => {
+            if (!dragHasFiles(e)) return;
+            e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        },
+        dragleave: (e) => {
+            if (!dragHasFiles(e)) return;
+            zellijDropDepth = Math.max(0, zellijDropDepth - 1);
+            if (zellijDropDepth === 0) hideZellijDropOverlay();
+        },
+        drop: (e) => {
+            if (!dragHasFiles(e)) return;
+            e.preventDefault();
+            zellijDropDepth = 0;
+            hideZellijDropOverlay();
+            // attachFiles guards mount + active session itself (loud toast
+            // on no-session) and routes into the same sequential upload
+            // queue as the 📎 button — one pipeline, same chips/toasts.
+            attachFiles(e.dataTransfer?.files || []);
+        },
+    };
+    for (const [type, fn] of Object.entries(zellijDropHandlers)) {
+        card.addEventListener(type, fn);
+    }
+}
+
+function teardownZellijDropZone() {
+    if (zellijDropCardEl && zellijDropHandlers) {
+        for (const [type, fn] of Object.entries(zellijDropHandlers)) {
+            zellijDropCardEl.removeEventListener(type, fn);
+        }
+    }
+    zellijDropHandlers = null;
+    zellijDropCardEl = null;
+    if (zellijDropOverlayEl?.parentNode) {
+        zellijDropOverlayEl.parentNode.removeChild(zellijDropOverlayEl);
+    }
+    zellijDropOverlayEl = null;
+    zellijDropDepth = 0;
+}
+
 // Build the three-region Zellij shell inside .cli-agents-body and compose
 // the launcher + switcher + iframe modules with cross-wired callbacks.
 function enterZellijMode() {
@@ -511,6 +619,7 @@ function enterZellijMode() {
     unmountSwitcher();
     unmountIframe();
     unmountTerminalBar();
+    teardownZellijDropZone();
     if (zellijShellEl?.parentNode) zellijShellEl.parentNode.removeChild(zellijShellEl);
     zellijShellEl = null;
     // Maximize never survives a close/reopen — fresh open is always windowed.
@@ -634,6 +743,10 @@ function enterZellijMode() {
             toastError(`Switcher ${stage} failed (${status}): ${message || ''}`);
         },
     });
+
+    // Drag-and-drop attach — created with the shell, torn down with it
+    // (closeModal + the idempotent preamble above).
+    setupZellijDropZone(getCliAgentsCard());
 }
 
 // Restore the tmux-mode DOM in case a prior open was Zellij.
@@ -643,6 +756,7 @@ function enterTmuxMode() {
     const term = document.getElementById('cliAgentsTerminalPane');
     if (setup) setup.style.display = '';
     if (term) term.style.display = '';
+    teardownZellijDropZone(); // drop attach is zellij-only
     if (zellijShellEl?.parentNode) {
         zellijShellEl.parentNode.removeChild(zellijShellEl);
         zellijShellEl = null;
@@ -687,6 +801,7 @@ function closeModal() {
         unmountSwitcher();
         unmountIframe();
         unmountTerminalBar();
+        teardownZellijDropZone();
         if (zellijShellEl?.parentNode) {
             zellijShellEl.parentNode.removeChild(zellijShellEl);
         }
