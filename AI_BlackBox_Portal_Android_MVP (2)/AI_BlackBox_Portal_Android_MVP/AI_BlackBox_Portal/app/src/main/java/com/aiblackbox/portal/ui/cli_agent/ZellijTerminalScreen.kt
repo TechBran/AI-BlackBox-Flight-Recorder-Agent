@@ -819,6 +819,17 @@ fun ZellijTerminalScreen(
                     operator = operator,
                 )
             },
+            attachSlot = {
+                CliAttachButton(
+                    operator = operator,
+                    // DRIFT-TRACKED name, read per upload: zellij's
+                    // SwitchedSession flips the client's effective session
+                    // away from session.name (the static launch name) —
+                    // capturing the latter would attach into the WRONG pane.
+                    getSessionName = { client.effectiveSessionName() },
+                    api = api,
+                )
+            },
             modifier = Modifier.fillMaxWidth(),
         )
     }

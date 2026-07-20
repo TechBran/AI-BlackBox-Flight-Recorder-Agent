@@ -13,8 +13,12 @@ package com.aiblackbox.portal.ui.cli_agent
 //   ExtraKeysBar(
 //     onKeyBytes: (ByteArray) -> Unit,           // forwarded to ws.sendBytes(...)
 //     micSlot: @Composable () -> Unit = {},      // CliMicButton (Task 6.2)
+//     attachSlot: (@Composable () -> Unit)? = null, // CliAttachButton (zellij only)
 //     modifier: Modifier = Modifier,
 //   )
+// attachSlot is NULLABLE (not an empty-lambda default like micSlot) so call
+// sites without an attach control — the legacy tmux TerminalScreen — render
+// NO slot at all instead of a blank 44dp min-size gap in the bar.
 
 import android.content.res.Configuration
 import androidx.compose.foundation.clickable
@@ -114,6 +118,7 @@ fun ExtraKeysBar(
     onKeyBytes: (ByteArray) -> Unit,
     onScrollLines: (Int) -> Unit = {},  // -ve = into history; +ve = toward live
     micSlot: @Composable () -> Unit = {},
+    attachSlot: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     // Bluetooth / USB hardware keyboard attached → no soft-key bar needed.
@@ -353,6 +358,18 @@ fun ExtraKeysBar(
             item {
                 ExtraKey(label = "@") {
                     fireKey(KeySpec("@", byteArrayOf('@'.code.toByte())))
+                }
+            }
+            // --- Attach slot (CliAttachButton) — adjacent to the mic ---
+            if (attachSlot != null) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 44.dp, minHeight = 36.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        attachSlot()
+                    }
                 }
             }
             // --- Mic slot (CliMicButton from Task 6.2) ---
